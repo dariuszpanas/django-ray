@@ -1,0 +1,494 @@
+"""Django management command for running the django-ray worker."""
+
+from __future__ import annotations
+
+import json
+import signal
+import time
+from datetime import datetime, timezone
+from types import FrameType
+from typing import Any
+
+from django.core.management.base import BaseCommand, CommandParser
+from django.db import transaction
+
+from django_ray.conf.settings import get_settings
+from django_ray.models import RayTaskExecution, TaskState
+from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
+
+
+class Command(BaseCommand):
+    """Run a django-ray worker process."""
+
+    help = "Run a django-ray worker that claims and executes tasks on Ray"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.shutdown_requested = False
+        self.worker_id = generate_worker_id()
+        self.active_tasks: dict[int, str] = {}  # task_pk -> ray_job_id
+
+    def add_arguments(self, parser: CommandParser) -> None:
+        """Add command arguments."""
+        parser.add_argument(
+            "--queue",
+            type=str,
+            default="default",
+            help="Queue name to process (default: default)",
+        )
+        parser.add_argument(
+            "--concurrency",
+            type=int,
+            default=None,
+            help="Maximum concurrent tasks (default: from settings)",
+        )
+        parser.add_argument(
+            "--sync",
+            action="store_true",
+            help="Run tasks synchronously (without Ray, for testing)",
+        )
+        parser.add_argument(
+            "--local",
+            action="store_true",
+            help="Run with local Ray instance (starts Ray automatically)",
+        )
+
+    def handle(self, *args: Any, **options: Any) -> None:
+        """Run the worker loop."""
+        queue = options["queue"]
+        concurrency = options.get("concurrency")
+        self.sync_mode = options.get("sync", False)
+        self.local_mode = options.get("local", False)
+
+        # Determine execution mode
+        if self.sync_mode:
+            self.execution_mode = "sync"
+        elif self.local_mode:
+            self.execution_mode = "local"
+            self._init_local_ray()
+        else:
+            self.execution_mode = "ray"
+
+        settings = get_settings()
+        if concurrency is None:
+            concurrency = settings.get("DEFAULT_CONCURRENCY", 10)
+
+        self.setup_signal_handlers()
+
+        self.stdout.write(
+            self.style.SUCCESS(f"Starting django-ray worker {self.worker_id}")
+        )
+        self.stdout.write(f"  Queue: {queue}")
+        self.stdout.write(f"  Concurrency: {concurrency}")
+        self.stdout.write(f"  Mode: {self.execution_mode}")
+
+        heartbeat_interval = get_heartbeat_interval().total_seconds()
+
+        try:
+            self.run_loop(
+                queue=queue,
+                concurrency=concurrency,
+                heartbeat_interval=heartbeat_interval,
+            )
+        except KeyboardInterrupt:
+            self.stdout.write("\nShutdown requested via keyboard interrupt")
+        finally:
+            self.shutdown()
+
+    def _init_local_ray(self) -> None:
+        """Initialize a local Ray instance."""
+        import os
+        import sys
+
+        import ray
+
+        # Clear RAY_ADDRESS to ensure we start a fresh local instance
+        if "RAY_ADDRESS" in os.environ:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"Clearing RAY_ADDRESS={os.environ['RAY_ADDRESS']} for local mode"
+                )
+            )
+            del os.environ["RAY_ADDRESS"]
+
+        # Disable Ray's uv runtime env hook - it causes issues on Windows
+        # when Ray tries to spawn workers with 'uv run' which may not be in PATH
+        if "RAY_RUNTIME_ENV_HOOK" in os.environ:
+            del os.environ["RAY_RUNTIME_ENV_HOOK"]
+
+        if not ray.is_initialized():
+            self.stdout.write("Initializing local Ray instance...")
+            ray.init(
+                ignore_reinit_error=True,
+                # Enable dashboard with task visibility
+                dashboard_host="127.0.0.1",
+                dashboard_port=8265,
+                include_dashboard=True,
+                # Use the current Python executable for workers
+                runtime_env={"env_vars": {"PYTHONPATH": os.pathsep.join(sys.path)}},
+                # Enable task/actor events for dashboard
+                _system_config={
+                    "enable_timeline": True,
+                    "task_events_report_interval_ms": 100,
+                },
+            )
+            self.stdout.write(self.style.SUCCESS("Ray initialized"))
+            self.stdout.write(self.style.SUCCESS("  Dashboard: http://127.0.0.1:8265"))
+
+    def setup_signal_handlers(self) -> None:
+        """Setup signal handlers for graceful shutdown."""
+        signal.signal(signal.SIGTERM, self.handle_shutdown_signal)
+        signal.signal(signal.SIGINT, self.handle_shutdown_signal)
+
+    def handle_shutdown_signal(self, signum: int, frame: FrameType | None) -> None:
+        """Handle shutdown signals."""
+        self.stdout.write(
+            self.style.WARNING(f"\nReceived signal {signum}, shutting down...")
+        )
+        self.shutdown_requested = True
+
+    def run_loop(
+        self,
+        queue: str,
+        concurrency: int,
+        heartbeat_interval: float,
+    ) -> None:
+        """Run the main worker loop."""
+        last_heartbeat = 0.0
+
+        while not self.shutdown_requested:
+            current_time = time.time()
+
+            # Heartbeat
+            if current_time - last_heartbeat >= heartbeat_interval:
+                self.send_heartbeat()
+                last_heartbeat = current_time
+
+            # Claim and process tasks
+            self.claim_and_process_tasks(queue, concurrency)
+
+            # Reconcile stuck tasks
+            self.reconcile_tasks()
+
+            # Sleep briefly to avoid busy-waiting
+            time.sleep(0.1)
+
+    def send_heartbeat(self) -> None:
+        """Send worker heartbeat."""
+        self.stdout.write(".", ending="")
+        self.stdout.flush()
+
+    def claim_and_process_tasks(self, queue: str, concurrency: int) -> None:
+        """Claim and submit tasks for execution."""
+        # Check how many slots are available
+        available_slots = concurrency - len(self.active_tasks)
+        if available_slots <= 0:
+            return
+
+        # Claim tasks
+        now = datetime.now(timezone.utc)
+        with transaction.atomic():
+            # Find queued tasks that are ready to run
+            tasks = list(
+                RayTaskExecution.objects.select_for_update(skip_locked=True)
+                .filter(
+                    state=TaskState.QUEUED,
+                    queue_name=queue,
+                )
+                .filter(
+                    # run_after is null OR run_after <= now
+                    run_after__isnull=True,
+                )[:available_slots]
+            )
+
+            # Also get tasks with run_after <= now
+            if len(tasks) < available_slots:
+                more_tasks = list(
+                    RayTaskExecution.objects.select_for_update(skip_locked=True).filter(
+                        state=TaskState.QUEUED,
+                        queue_name=queue,
+                        run_after__lte=now,
+                    )[: available_slots - len(tasks)]
+                )
+                tasks.extend(more_tasks)
+
+            for task in tasks:
+                task.state = TaskState.RUNNING
+                task.started_at = now
+                task.claimed_by_worker = self.worker_id
+                task.save(update_fields=["state", "started_at", "claimed_by_worker"])
+
+        # Process each claimed task
+        for task in tasks:
+            self.process_task(task)
+
+    def process_task(self, task: RayTaskExecution) -> None:
+        """Process a single task."""
+        self.stdout.write(
+            self.style.NOTICE(f"\nProcessing task {task.pk}: {task.callable_path}")
+        )
+
+        if self.execution_mode == "sync":
+            self.execute_task_sync(task)
+        elif self.execution_mode == "local":
+            self.execute_task_local_ray(task)
+        else:
+            self.submit_task_to_ray(task)
+
+    def execute_task_sync(self, task: RayTaskExecution) -> None:
+        """Execute a task synchronously (without Ray)."""
+        from django_ray.runtime.entrypoint import execute_task
+
+        try:
+            result_json = execute_task(
+                callable_path=task.callable_path,
+                serialized_args=task.args_json,
+                serialized_kwargs=task.kwargs_json,
+            )
+            result = json.loads(result_json)
+
+            now = datetime.now(timezone.utc)
+            if result["success"]:
+                task.state = TaskState.SUCCEEDED
+                task.result_data = json.dumps(result["result"])
+                task.finished_at = now
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"  Task {task.pk} succeeded: {result['result']}"
+                    )
+                )
+            else:
+                task.state = TaskState.FAILED
+                task.error_message = result["error"]
+                task.error_traceback = result["traceback"]
+                task.finished_at = now
+                self.stdout.write(
+                    self.style.ERROR(f"  Task {task.pk} failed: {result['error']}")
+                )
+
+            task.save(
+                update_fields=[
+                    "state",
+                    "result_data",
+                    "error_message",
+                    "error_traceback",
+                    "finished_at",
+                ]
+            )
+
+        except Exception as e:
+            task.state = TaskState.FAILED
+            task.error_message = str(e)
+            task.finished_at = datetime.now(timezone.utc)
+            task.save(update_fields=["state", "error_message", "finished_at"])
+            self.stdout.write(
+                self.style.ERROR(f"  Task {task.pk} failed with exception: {e}")
+            )
+
+    def execute_task_local_ray(self, task: RayTaskExecution) -> None:
+        """Execute a task using local Ray (ray.remote)."""
+        import ray
+
+        # Extract short name from callable path for dashboard visibility
+        task_name = task.callable_path.split(".")[-1] if task.callable_path else "task"
+
+        @ray.remote(name=f"django_ray:{task_name}")
+        def run_task(
+            callable_path: str, args_json: str, kwargs_json: str, task_id: int
+        ) -> str:
+            import json
+            import sys
+
+            print(f"[Task {task_id}] Starting: {callable_path}", flush=True)
+
+            from django_ray.runtime.entrypoint import execute_task
+
+            result = execute_task(callable_path, args_json, kwargs_json)
+
+            # Print the result so it's visible in Ray dashboard stdout
+            parsed = json.loads(result)
+            if parsed.get("success"):
+                print(f"[Task {task_id}] SUCCESS: {parsed.get('result')}", flush=True)
+            else:
+                print(
+                    f"[Task {task_id}] FAILED: {parsed.get('error')}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+            return result
+
+        try:
+            self.stdout.write(f"  Submitting to Ray as 'django_ray:{task_name}'...")
+            # Submit to Ray and wait for result
+            result_ref = run_task.remote(
+                task.callable_path,
+                task.args_json,
+                task.kwargs_json,
+                task.pk,
+            )
+            result_json = ray.get(result_ref)
+            result = json.loads(result_json)
+
+            now = datetime.now(timezone.utc)
+            if result["success"]:
+                task.state = TaskState.SUCCEEDED
+                task.result_data = json.dumps(result["result"])
+                task.finished_at = now
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"  Task {task.pk} succeeded (Ray): {result['result']}"
+                    )
+                )
+            else:
+                task.state = TaskState.FAILED
+                task.error_message = result["error"]
+                task.error_traceback = result["traceback"]
+                task.finished_at = now
+                self.stdout.write(
+                    self.style.ERROR(
+                        f"  Task {task.pk} failed (Ray): {result['error']}"
+                    )
+                )
+
+            task.save(
+                update_fields=[
+                    "state",
+                    "result_data",
+                    "error_message",
+                    "error_traceback",
+                    "finished_at",
+                ]
+            )
+
+        except Exception as e:
+            task.state = TaskState.FAILED
+            task.error_message = str(e)
+            task.finished_at = datetime.now(timezone.utc)
+            task.save(update_fields=["state", "error_message", "finished_at"])
+            self.stdout.write(
+                self.style.ERROR(f"  Task {task.pk} failed with exception: {e}")
+            )
+
+    def submit_task_to_ray(self, task: RayTaskExecution) -> None:
+        """Submit a task to Ray for execution."""
+        from django_ray.runtime.serialization import deserialize_args
+        from django_ray.runner.ray_job import RayJobRunner
+
+        try:
+            runner = RayJobRunner()
+            args = deserialize_args(task.args_json)
+            kwargs = deserialize_args(task.kwargs_json)
+
+            handle = runner.submit(
+                task_execution=task,
+                callable_path=task.callable_path,
+                args=tuple(args),
+                kwargs=kwargs,
+            )
+
+            # Update task with Ray job info
+            task.ray_job_id = handle.ray_job_id
+            task.ray_address = handle.ray_address
+            task.save(update_fields=["ray_job_id", "ray_address"])
+
+            # Track active task
+            self.active_tasks[task.pk] = handle.ray_job_id
+
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"  Task {task.pk} submitted as Ray job {handle.ray_job_id}"
+                )
+            )
+
+        except Exception as e:
+            task.state = TaskState.FAILED
+            task.error_message = f"Failed to submit to Ray: {e}"
+            task.finished_at = datetime.now(timezone.utc)
+            task.save(update_fields=["state", "error_message", "finished_at"])
+            self.stdout.write(
+                self.style.ERROR(f"  Task {task.pk} failed to submit: {e}")
+            )
+
+    def reconcile_tasks(self) -> None:
+        """Reconcile task states with Ray."""
+        if self.sync_mode or not self.active_tasks:
+            return
+
+        from django_ray.runner.base import JobStatus, SubmissionHandle
+        from django_ray.runner.ray_job import RayJobRunner
+
+        runner = RayJobRunner()
+        completed_tasks: list[int] = []
+
+        for task_pk, ray_job_id in self.active_tasks.items():
+            try:
+                task = RayTaskExecution.objects.get(pk=task_pk)
+                handle = SubmissionHandle(
+                    ray_job_id=ray_job_id,
+                    ray_address=task.ray_address or "",
+                    submitted_at=task.started_at or datetime.now(timezone.utc),
+                )
+
+                job_info = runner.get_status(handle)
+
+                if job_info.status == JobStatus.SUCCEEDED:
+                    # Get logs which contain the result
+                    logs = runner.get_logs(handle)
+                    task.state = TaskState.SUCCEEDED
+                    task.finished_at = datetime.now(timezone.utc)
+                    if logs:
+                        # Parse result from logs (last line is JSON result)
+                        try:
+                            lines = logs.strip().split("\n")
+                            result = json.loads(lines[-1])
+                            if result.get("success"):
+                                task.result_data = json.dumps(result.get("result"))
+                            else:
+                                task.error_message = result.get("error")
+                                task.error_traceback = result.get("traceback")
+                                task.state = TaskState.FAILED
+                        except (json.JSONDecodeError, IndexError):
+                            task.result_data = logs
+                    task.save()
+                    completed_tasks.append(task_pk)
+                    self.stdout.write(self.style.SUCCESS(f"\nTask {task_pk} completed"))
+
+                elif job_info.status == JobStatus.FAILED:
+                    logs = runner.get_logs(handle)
+                    task.state = TaskState.FAILED
+                    task.finished_at = datetime.now(timezone.utc)
+                    task.error_message = job_info.message or "Ray job failed"
+                    if logs:
+                        task.error_traceback = logs
+                    task.save()
+                    completed_tasks.append(task_pk)
+                    self.stdout.write(
+                        self.style.ERROR(f"\nTask {task_pk} failed: {job_info.message}")
+                    )
+
+                elif job_info.status == JobStatus.STOPPED:
+                    task.state = TaskState.CANCELLED
+                    task.finished_at = datetime.now(timezone.utc)
+                    task.save()
+                    completed_tasks.append(task_pk)
+                    self.stdout.write(
+                        self.style.WARNING(f"\nTask {task_pk} was stopped")
+                    )
+
+            except RayTaskExecution.DoesNotExist:
+                completed_tasks.append(task_pk)
+            except Exception as e:
+                self.stdout.write(
+                    self.style.ERROR(f"\nError reconciling task {task_pk}: {e}")
+                )
+
+        # Remove completed tasks from active list
+        for task_pk in completed_tasks:
+            self.active_tasks.pop(task_pk, None)
+
+    def shutdown(self) -> None:
+        """Perform graceful shutdown."""
+        self.stdout.write(
+            self.style.SUCCESS(f"\nWorker {self.worker_id} shut down cleanly")
+        )
