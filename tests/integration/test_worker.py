@@ -78,6 +78,7 @@ class TestWorkerSync:
             state=TaskState.QUEUED,
             args_json="[]",
             kwargs_json="{}",
+            attempt_number=3,  # Start at max attempts so it fails permanently
         )
 
         from django_ray.management.commands.django_ray_worker import Command
@@ -92,12 +93,80 @@ class TestWorkerSync:
         # Process the task
         cmd.claim_and_process_tasks(queue="default", concurrency=10)
 
-        # Verify task failed
+        # Verify task failed permanently (no more retries)
         task.refresh_from_db()
         assert task.state == TaskState.FAILED
         assert "This task is designed to fail" in task.error_message
         assert task.error_traceback is not None
         assert task.finished_at is not None
+
+    def test_worker_retries_failing_task(self, setup_django_env):
+        """Test that the worker schedules retry for a failing task."""
+        task = RayTaskExecution.objects.create(
+            task_id="test-retry-001",
+            callable_path="testproject.tasks.failing_task",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[]",
+            kwargs_json="{}",
+            attempt_number=1,  # First attempt
+        )
+
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.style = cmd.style
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+
+        # Process the task
+        cmd.claim_and_process_tasks(queue="default", concurrency=10)
+
+        # Verify task is queued for retry
+        task.refresh_from_db()
+        assert task.state == TaskState.QUEUED
+        assert task.attempt_number == 2  # Incremented
+        assert task.run_after is not None  # Scheduled for future
+        assert "This task is designed to fail" in task.error_message
+
+    def test_worker_detects_timed_out_task(self, setup_django_env):
+        """Test that the worker detects and fails timed-out tasks."""
+        from datetime import datetime, timedelta, timezone
+
+        # Create a task that started 10 seconds ago with 5 second timeout
+        started_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        task = RayTaskExecution.objects.create(
+            task_id="test-timeout-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 60}',
+            timeout_seconds=5,  # 5 second timeout
+            started_at=started_at,
+            claimed_by_worker="test-worker",
+        )
+
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.style = cmd.style
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+        cmd.local_ray_tasks = {}
+        cmd.last_reconciliation = 0
+
+        # Run stuck task detection (which also checks timeouts)
+        cmd.detect_stuck_tasks()
+
+        # Verify task is marked as FAILED due to timeout
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert "timed out" in task.error_message.lower()
 
     def test_worker_respects_queue_filter(self, setup_django_env):
         """Test that the worker only processes tasks from the specified queue."""

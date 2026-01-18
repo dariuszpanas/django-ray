@@ -23,6 +23,7 @@ class TaskResult:
     result: Any | None = None
     error: str | None = None
     traceback: str | None = None
+    exception_type: str | None = None
 
 
 def bootstrap_django() -> None:
@@ -68,6 +69,7 @@ def execute_task(
                 "result": result,
                 "error": None,
                 "traceback": None,
+                "exception_type": None,
             }
         )
 
@@ -78,5 +80,6 @@ def execute_task(
                 "result": None,
                 "error": str(e),
                 "traceback": traceback.format_exc(),
+                "exception_type": type(e).__module__ + "." + type(e).__name__,
             }
         )

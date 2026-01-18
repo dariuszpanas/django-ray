@@ -119,6 +119,62 @@ def health_check(request):
     }
 
 
+@api.get("/metrics", tags=["Health"])
+def prometheus_metrics(request):
+    """Prometheus metrics endpoint.
+
+    Returns metrics in Prometheus text format for scraping.
+    """
+    from django.http import HttpResponse
+
+    from django_ray.models import RayTaskExecution, TaskState
+
+    # Build metrics from database state
+    lines = [
+        "# HELP django_ray_tasks_total Total tasks by state",
+        "# TYPE django_ray_tasks_total gauge",
+    ]
+
+    # Count tasks by state
+    for state in TaskState:
+        count = RayTaskExecution.objects.filter(state=state).count()
+        lines.append(f'django_ray_tasks_total{{state="{state}"}} {count}')
+
+    lines.extend([
+        "",
+        "# HELP django_ray_tasks_queued Current queued tasks",
+        "# TYPE django_ray_tasks_queued gauge",
+        f"django_ray_tasks_queued {RayTaskExecution.objects.filter(state=TaskState.QUEUED).count()}",
+        "",
+        "# HELP django_ray_tasks_running Current running tasks",
+        "# TYPE django_ray_tasks_running gauge",
+        f"django_ray_tasks_running {RayTaskExecution.objects.filter(state=TaskState.RUNNING).count()}",
+    ])
+
+    # Queue depths
+    queues = RayTaskExecution.objects.filter(
+        state=TaskState.QUEUED
+    ).values_list('queue_name', flat=True).distinct()
+
+    if queues:
+        lines.extend([
+            "",
+            "# HELP django_ray_queue_depth Tasks queued per queue",
+            "# TYPE django_ray_queue_depth gauge",
+        ])
+        for queue in queues:
+            depth = RayTaskExecution.objects.filter(
+                state=TaskState.QUEUED,
+                queue_name=queue,
+            ).count()
+            lines.append(f'django_ray_queue_depth{{queue="{queue}"}} {depth}')
+
+    return HttpResponse(
+        "\n".join(lines) + "\n",
+        content_type="text/plain; charset=utf-8",
+    )
+
+
 # ============================================================================
 # Task Enqueueing Endpoints (Django 6 Native)
 # ============================================================================

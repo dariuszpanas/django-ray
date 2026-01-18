@@ -91,6 +91,11 @@ class RayTaskExecution(models.Model):
         db_index=True,
         help_text="Don't run before this time (for delayed/retry)",
     )
+    timeout_seconds = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Maximum execution time in seconds (None = no timeout)",
+    )
 
     # Worker tracking
     claimed_by_worker = models.CharField(

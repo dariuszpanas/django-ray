@@ -29,6 +29,45 @@ class TestHealthAPI:
         assert data["database"] == "ok"
         assert data["version"] == "0.2.0"
 
+    def test_prometheus_metrics(self, client):
+        """Test the Prometheus metrics endpoint."""
+        # Create some tasks to have metrics data
+        RayTaskExecution.objects.create(
+            task_id="metrics-test-1",
+            callable_path="test.task",
+            queue_name="default",
+            state=TaskState.QUEUED,
+        )
+        RayTaskExecution.objects.create(
+            task_id="metrics-test-2",
+            callable_path="test.task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+        )
+        RayTaskExecution.objects.create(
+            task_id="metrics-test-3",
+            callable_path="test.task",
+            queue_name="high-priority",
+            state=TaskState.QUEUED,
+        )
+
+        response = client.get("/api/metrics")
+        assert response.status_code == 200
+        assert response["Content-Type"] == "text/plain; charset=utf-8"
+
+        content = response.content.decode("utf-8")
+        # Check for expected metric names
+        assert "django_ray_tasks_total" in content
+        assert "django_ray_tasks_queued" in content
+        assert "django_ray_tasks_running" in content
+        assert "django_ray_queue_depth" in content
+        # Check for state labels
+        assert 'state="QUEUED"' in content
+        assert 'state="RUNNING"' in content
+        # Check for queue labels
+        assert 'queue="default"' in content
+        assert 'queue="high-priority"' in content
+
 
 @pytest.mark.django_db
 class TestEnqueueAPI:

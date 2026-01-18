@@ -37,11 +37,15 @@ from django.tasks import TaskResult, TaskResultStatus
 from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.exceptions import TaskResultDoesNotExist
 
+from django_ray.logging import get_backend_logger
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.runtime.serialization import serialize_args
 
 if TYPE_CHECKING:
     from django.tasks.base import Task
+
+# Module-level logger
+logger = get_backend_logger()
 
 
 # Map our internal TaskState to Django's TaskResultStatus
@@ -135,6 +139,16 @@ class RayTaskBackend(BaseTaskBackend):
             run_after=task.run_after,
             ray_address=self.ray_address,
             created_at=now,
+        )
+
+        logger.info(
+            "Task enqueued",
+            extra={
+                "task_id": task_id,
+                "callable_path": callable_path,
+                "queue_name": task.queue_name,
+                "run_after": str(task.run_after) if task.run_after else None,
+            },
         )
 
         # Return a TaskResult object

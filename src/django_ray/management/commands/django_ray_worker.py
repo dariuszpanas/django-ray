@@ -13,8 +13,17 @@ from django.core.management.base import BaseCommand, CommandParser
 from django.db import transaction
 
 from django_ray.conf.settings import get_settings
+from django_ray.logging import get_worker_logger
 from django_ray.models import RayTaskExecution, TaskState
+from django_ray.runner.cancellation import finalize_cancellation
 from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
+from django_ray.runner.reconciliation import (
+    is_task_stuck,
+    is_task_timed_out,
+    mark_task_lost,
+    mark_task_timed_out,
+)
+from django_ray.runner.retry import should_retry
 
 
 class Command(BaseCommand):
@@ -26,8 +35,11 @@ class Command(BaseCommand):
         super().__init__(*args, **kwargs)
         self.shutdown_requested = False
         self.worker_id = generate_worker_id()
+        self.logger = get_worker_logger(self.worker_id)
         self.active_tasks: dict[int, str] = {}  # task_pk -> ray_job_id
         self.local_ray_tasks: dict[int, Any] = {}  # task_pk -> ray ObjectRef
+        self.last_reconciliation = 0.0  # Last time we ran stuck task detection
+        self.reconciliation_interval = 30.0  # Check for stuck tasks every 30 seconds
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add command arguments."""
@@ -203,8 +215,12 @@ class Command(BaseCommand):
             # Claim and process tasks
             self.claim_and_process_tasks(queue, concurrency)
 
-            # Reconcile stuck tasks
-            self.reconcile_tasks()
+            # Reconcile stuck tasks (periodically)
+            if current_time - self.last_reconciliation >= self.reconciliation_interval:
+                self.reconcile_tasks()
+                self.detect_stuck_tasks()
+                self.process_cancellations()
+                self.last_reconciliation = current_time
 
             # Sleep briefly to avoid busy-waiting
             time.sleep(0.1)
@@ -294,32 +310,94 @@ class Command(BaseCommand):
                         f"  Task {task.pk} succeeded: {result['result']}"
                     )
                 )
+                task.save(
+                    update_fields=[
+                        "state",
+                        "result_data",
+                        "finished_at",
+                    ]
+                )
             else:
-                task.state = TaskState.FAILED
-                task.error_message = result["error"]
-                task.error_traceback = result["traceback"]
-                task.finished_at = now
-                self.stdout.write(
-                    self.style.ERROR(f"  Task {task.pk} failed: {result['error']}")
+                # Task failed - check if we should retry
+                self._handle_task_failure(
+                    task,
+                    error_message=result["error"],
+                    error_traceback=result.get("traceback"),
+                    exception_type=result.get("exception_type"),
                 )
 
+        except Exception as e:
+            self._handle_task_failure(
+                task,
+                error_message=str(e),
+                exception_type=type(e).__name__,
+            )
+
+    def _handle_task_failure(
+        self,
+        task: RayTaskExecution,
+        error_message: str,
+        error_traceback: str | None = None,
+        exception_type: str | None = None,
+    ) -> None:
+        """Handle a failed task, potentially scheduling a retry.
+
+        Args:
+            task: The failed task.
+            error_message: The error message.
+            error_traceback: The full traceback (optional).
+            exception_type: The exception class name (optional).
+        """
+        # Check if we should retry
+        retry_decision = should_retry(task, exception_type)
+
+        if retry_decision.should_retry:
+            # Schedule retry
+            task.state = TaskState.QUEUED
+            task.attempt_number += 1
+            task.run_after = retry_decision.next_attempt_at
+            task.error_message = error_message
+            task.error_traceback = error_traceback
+            task.started_at = None
+            task.finished_at = None
+            task.claimed_by_worker = None
             task.save(
                 update_fields=[
                     "state",
-                    "result_data",
+                    "attempt_number",
+                    "run_after",
+                    "error_message",
+                    "error_traceback",
+                    "started_at",
+                    "finished_at",
+                    "claimed_by_worker",
+                ]
+            )
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  Task {task.pk} failed, scheduling retry #{task.attempt_number} "
+                    f"at {retry_decision.next_attempt_at}: {error_message}"
+                )
+            )
+        else:
+            # Final failure
+            task.state = TaskState.FAILED
+            task.error_message = error_message
+            task.error_traceback = error_traceback
+            task.finished_at = datetime.now(timezone.utc)
+            task.save(
+                update_fields=[
+                    "state",
                     "error_message",
                     "error_traceback",
                     "finished_at",
                 ]
             )
-
-        except Exception as e:
-            task.state = TaskState.FAILED
-            task.error_message = str(e)
-            task.finished_at = datetime.now(timezone.utc)
-            task.save(update_fields=["state", "error_message", "finished_at"])
+            reason = retry_decision.reason or "No retry configured"
             self.stdout.write(
-                self.style.ERROR(f"  Task {task.pk} failed with exception: {e}")
+                self.style.ERROR(
+                    f"  Task {task.pk} failed permanently ({reason}): {error_message}"
+                )
             )
 
     def execute_task_local_ray(self, task: RayTaskExecution) -> None:
@@ -431,34 +509,27 @@ class Command(BaseCommand):
                             f"\nTask {task.pk} succeeded (Ray): {result['result']}"
                         )
                     )
+                    task.save(
+                        update_fields=[
+                            "state",
+                            "result_data",
+                            "finished_at",
+                        ]
+                    )
                 else:
-                    task.state = TaskState.FAILED
-                    task.error_message = result["error"]
-                    task.error_traceback = result["traceback"]
-                    task.finished_at = now
-                    self.stdout.write(
-                        self.style.ERROR(
-                            f"\nTask {task.pk} failed (Ray): {result['error']}"
-                        )
+                    # Task failed - use retry logic
+                    self._handle_task_failure(
+                        task,
+                        error_message=result["error"],
+                        error_traceback=result.get("traceback"),
+                        exception_type=result.get("exception_type"),
                     )
 
-                task.save(
-                    update_fields=[
-                        "state",
-                        "result_data",
-                        "error_message",
-                        "error_traceback",
-                        "finished_at",
-                    ]
-                )
-
             except Exception as e:
-                task.state = TaskState.FAILED
-                task.error_message = str(e)
-                task.finished_at = datetime.now(timezone.utc)
-                task.save(update_fields=["state", "error_message", "finished_at"])
-                self.stdout.write(
-                    self.style.ERROR(f"\nTask {task.pk} failed with exception: {e}")
+                self._handle_task_failure(
+                    task,
+                    error_message=str(e),
+                    exception_type=type(e).__name__,
                 )
 
     def submit_task_to_ray(self, task: RayTaskExecution) -> None:
@@ -577,6 +648,126 @@ class Command(BaseCommand):
         # Remove completed tasks from active list
         for task_pk in completed_tasks:
             self.active_tasks.pop(task_pk, None)
+
+    def detect_stuck_tasks(self) -> None:
+        """Detect and mark stuck tasks as LOST.
+
+        This checks for tasks that have been RUNNING for too long without
+        heartbeats, which indicates the worker processing them may have crashed.
+        """
+        # Only check tasks claimed by this worker
+        running_tasks = RayTaskExecution.objects.filter(
+            state=TaskState.RUNNING,
+            claimed_by_worker=self.worker_id,
+        )
+
+        stuck_count = 0
+        timeout_count = 0
+        for task in running_tasks:
+            # Check for timeout first (applies to all tasks)
+            if is_task_timed_out(task):
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"\nTask {task.pk} timed out after {task.timeout_seconds}s"
+                    )
+                )
+                # Cancel the running task if we're tracking it
+                if task.pk in self.local_ray_tasks:
+                    import ray
+                    try:
+                        ray.cancel(self.local_ray_tasks[task.pk], force=True)
+                    except Exception:
+                        pass
+                    del self.local_ray_tasks[task.pk]
+                if task.pk in self.active_tasks:
+                    del self.active_tasks[task.pk]
+
+                mark_task_timed_out(task)
+                timeout_count += 1
+                continue
+
+            # Skip tasks we're actively tracking for stuck check (they're still running)
+            if task.pk in self.local_ray_tasks or task.pk in self.active_tasks:
+                continue
+
+            # Check if task is stuck using the reconciliation logic
+            if is_task_stuck(task):
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"\nTask {task.pk} appears stuck, marking as LOST"
+                    )
+                )
+                mark_task_lost(task)
+
+                # Check if we should retry the lost task
+                retry_decision = should_retry(task, exception_type="TaskLost")
+                if retry_decision.should_retry:
+                    task.state = TaskState.QUEUED
+                    task.attempt_number += 1
+                    task.run_after = retry_decision.next_attempt_at
+                    task.started_at = None
+                    task.claimed_by_worker = None
+                    task.save(
+                        update_fields=[
+                            "state",
+                            "attempt_number",
+                            "run_after",
+                            "started_at",
+                            "claimed_by_worker",
+                        ]
+                    )
+                    self.stdout.write(
+                        self.style.NOTICE(
+                            f"  Scheduling retry #{task.attempt_number} "
+                            f"at {retry_decision.next_attempt_at}"
+                        )
+                    )
+
+                stuck_count += 1
+
+        if stuck_count > 0:
+            self.stdout.write(
+                self.style.WARNING(f"Detected {stuck_count} stuck task(s)")
+            )
+        if timeout_count > 0:
+            self.stdout.write(
+                self.style.WARNING(f"Detected {timeout_count} timed out task(s)")
+            )
+
+    def process_cancellations(self) -> None:
+        """Process tasks that have been requested for cancellation.
+
+        This checks for tasks in CANCELLING state and finalizes their cancellation.
+        """
+        cancelling_tasks = RayTaskExecution.objects.filter(
+            state=TaskState.CANCELLING,
+            claimed_by_worker=self.worker_id,
+        )
+
+        for task in cancelling_tasks:
+            self.stdout.write(
+                self.style.WARNING(f"\nFinalizing cancellation for task {task.pk}")
+            )
+
+            # Remove from our tracking if present
+            if task.pk in self.local_ray_tasks:
+                # Try to cancel the Ray task
+                import ray
+
+                try:
+                    ray.cancel(self.local_ray_tasks[task.pk], force=True)
+                except Exception:
+                    pass  # Best effort
+                del self.local_ray_tasks[task.pk]
+
+            if task.pk in self.active_tasks:
+                del self.active_tasks[task.pk]
+
+            # Finalize the cancellation
+            finalize_cancellation(task)
+            self.stdout.write(
+                self.style.SUCCESS(f"  Task {task.pk} cancelled")
+            )
 
     def shutdown(self) -> None:
         """Perform graceful shutdown."""
