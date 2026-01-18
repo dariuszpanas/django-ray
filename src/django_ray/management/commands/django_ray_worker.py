@@ -14,7 +14,7 @@ from django.db import transaction
 
 from django_ray.conf.settings import get_settings
 from django_ray.logging import get_worker_logger
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import RayTaskExecution, RayWorkerLease, TaskState
 from django_ray.runner.cancellation import finalize_cancellation
 from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
 from django_ray.runner.reconciliation import (
@@ -40,6 +40,7 @@ class Command(BaseCommand):
         self.local_ray_tasks: dict[int, Any] = {}  # task_pk -> ray ObjectRef
         self.last_reconciliation = 0.0  # Last time we ran stuck task detection
         self.reconciliation_interval = 30.0  # Check for stuck tasks every 30 seconds
+        self.lease: RayWorkerLease | None = None  # Worker lease for coordination
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add command arguments."""
@@ -106,6 +107,9 @@ class Command(BaseCommand):
         self.stdout.write(f"  Mode: {self.execution_mode}")
 
         heartbeat_interval = get_heartbeat_interval().total_seconds()
+
+        # Create worker lease for distributed coordination
+        self._create_lease(queue)
 
         try:
             self.run_loop(
@@ -179,6 +183,34 @@ class Command(BaseCommand):
                 )
                 raise
 
+    def _create_lease(self, queue: str) -> None:
+        """Create a worker lease for distributed coordination.
+
+        The lease tracks active workers and enables detection of
+        crashed workers through heartbeat expiration.
+
+        Args:
+            queue: The queue this worker is processing.
+        """
+        import os
+        import socket
+
+        try:
+            self.lease = RayWorkerLease.objects.create(
+                worker_id=self.worker_id,
+                hostname=socket.gethostname(),
+                pid=os.getpid(),
+                queue_name=queue,
+            )
+            self.stdout.write(
+                self.style.SUCCESS(f"  Lease created: {self.worker_id}")
+            )
+        except Exception as e:
+            self.stdout.write(
+                self.style.WARNING(f"  Failed to create lease: {e}")
+            )
+            # Continue without lease - worker will still function
+
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
         signal.signal(signal.SIGTERM, self.handle_shutdown_signal)
@@ -226,7 +258,17 @@ class Command(BaseCommand):
             time.sleep(0.1)
 
     def send_heartbeat(self) -> None:
-        """Send worker heartbeat."""
+        """Send worker heartbeat and update lease."""
+        from django.utils import timezone
+
+        # Update worker lease if we have one
+        if self.lease is not None:
+            try:
+                self.lease.last_heartbeat_at = timezone.now()
+                self.lease.save(update_fields=["last_heartbeat_at"])
+            except Exception:
+                pass  # Best effort - don't fail on heartbeat issues
+
         self.stdout.write(".", ending="")
         self.stdout.flush()
 
@@ -771,6 +813,14 @@ class Command(BaseCommand):
 
     def shutdown(self) -> None:
         """Perform graceful shutdown."""
+        # Delete worker lease to signal we're gone
+        if self.lease is not None:
+            try:
+                self.lease.delete()
+                self.stdout.write("  Lease released")
+            except Exception as e:
+                self.stdout.write(f"  Failed to release lease: {e}")
+
         self.stdout.write(
             self.style.SUCCESS(f"\nWorker {self.worker_id} shut down cleanly")
         )

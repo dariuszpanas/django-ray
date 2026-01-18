@@ -26,6 +26,8 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     # django-ray
     "django_ray",
+    # Example apps demonstrating different execution modes
+    # (These are in testproject/apps/ for demonstration purposes)
 ]
 
 MIDDLEWARE = [
@@ -131,7 +133,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 TASKS = {
     "default": {
         "BACKEND": "django_ray.backends.RayTaskBackend",
-        "QUEUES": ["default", "high-priority", "low-priority"],
+        "QUEUES": ["default", "high-priority", "low-priority", "sync", "ml"],
         "OPTIONS": {
             "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
             "RAY_RUNTIME_ENV": {},

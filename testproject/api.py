@@ -438,3 +438,244 @@ def retry_execution(request, execution_id: int):
 
     return task
 
+
+# ============================================================================
+# Example App Endpoints - Sync Tasks (--sync mode)
+# ============================================================================
+
+from testproject.apps.sync_tasks import tasks as sync_tasks
+
+
+@api.post("/sync/calculate", response=TaskResultSchema, tags=["Sync Tasks"])
+def sync_calculate(
+    request,
+    a: int,
+    b: int,
+    operation: str = "add",
+):
+    """Enqueue a simple calculation (sync queue).
+
+    Run with: python manage.py django_ray_worker --sync --queue=sync
+    """
+    result = sync_tasks.simple_calculation.enqueue(a, b, operation=operation)
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post("/sync/validate-email", response=TaskResultSchema, tags=["Sync Tasks"])
+def sync_validate_email(request, email: str):
+    """Validate an email address (sync queue)."""
+    result = sync_tasks.validate_email.enqueue(email)
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+# ============================================================================
+# Example App Endpoints - Local Ray (--local mode)
+# ============================================================================
+
+from testproject.apps.local_ray import tasks as local_tasks
+
+
+@api.post("/local/fibonacci/{n}", response=TaskResultSchema, tags=["Local Ray"])
+def local_fibonacci(request, n: int):
+    """Calculate fibonacci number (default queue).
+
+    Run with: python manage.py django_ray_worker --local
+    """
+    result = local_tasks.fibonacci.enqueue(n)
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post("/local/workload", response=TaskResultSchema, tags=["Local Ray"])
+def local_workload(request, iterations: int = 1000000, sleep_ms: int = 0):
+    """Simulate CPU workload (default queue)."""
+    result = local_tasks.simulate_workload.enqueue(iterations=iterations, sleep_ms=sleep_ms)
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post("/local/urgent", response=TaskResultSchema, tags=["Local Ray"])
+def local_urgent(request, message: str):
+    """High-priority urgent task (high-priority queue)."""
+    result = local_tasks.urgent_task.enqueue(message)
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+# ============================================================================
+# Example App Endpoints - Cluster Tasks (--cluster mode)
+# ============================================================================
+
+from testproject.apps.cluster_tasks import tasks as cluster_tasks
+
+
+class ChunkDataSchema(Schema):
+    """Schema for chunk data input."""
+    data: list
+    chunk_id: int = 0
+
+
+@api.post("/cluster/process-chunk", response=TaskResultSchema, tags=["Cluster Tasks"])
+def cluster_process_chunk(request, payload: ChunkDataSchema):
+    """Process a data chunk (default queue).
+
+    Run with: python manage.py django_ray_worker --cluster ray://head:10001
+    """
+    result = cluster_tasks.process_chunk.enqueue(data=payload.data, chunk_id=payload.chunk_id)
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+class BatchUrlsSchema(Schema):
+    """Schema for batch URL requests."""
+    urls: list[str]
+    timeout_seconds: int = 30
+
+
+@api.post("/cluster/batch-http", response=TaskResultSchema, tags=["Cluster Tasks"])
+def cluster_batch_http(request, payload: BatchUrlsSchema):
+    """Simulate batch HTTP requests (default queue)."""
+    result = cluster_tasks.batch_http_requests.enqueue(
+        urls=payload.urls,
+        timeout_seconds=payload.timeout_seconds,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+# ============================================================================
+# Example App Endpoints - ML Pipeline
+# ============================================================================
+
+from testproject.apps.ml_pipeline import tasks as ml_tasks
+
+
+class TrainModelSchema(Schema):
+    """Schema for model training request."""
+    dataset_id: str
+    hyperparams: dict | None = None
+    epochs: int = 10
+
+
+@api.post("/ml/train", response=TaskResultSchema, tags=["ML Pipeline"])
+def ml_train_model(request, payload: TrainModelSchema):
+    """Train a model (ml queue).
+
+    Run with: python manage.py django_ray_worker --local --queue=ml
+    """
+    result = ml_tasks.train_model.enqueue(
+        dataset_id=payload.dataset_id,
+        hyperparams=payload.hyperparams,
+        epochs=payload.epochs,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+class BatchInferenceSchema(Schema):
+    """Schema for batch inference request."""
+    model_id: str
+    samples: list[dict]
+
+
+@api.post("/ml/inference", response=TaskResultSchema, tags=["ML Pipeline"])
+def ml_batch_inference(request, payload: BatchInferenceSchema):
+    """Run batch inference (ml queue)."""
+    result = ml_tasks.batch_inference.enqueue(
+        model_id=payload.model_id,
+        samples=payload.samples,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+class HyperparamSearchSchema(Schema):
+    """Schema for hyperparameter search request."""
+    dataset_id: str
+    param_grid: dict[str, list]
+    metric: str = "accuracy"
+
+
+@api.post("/ml/hyperparam-search", response=TaskResultSchema, tags=["ML Pipeline"])
+def ml_hyperparam_search(request, payload: HyperparamSearchSchema):
+    """Run hyperparameter grid search (ml queue)."""
+    result = ml_tasks.hyperparameter_search.enqueue(
+        dataset_id=payload.dataset_id,
+        param_grid=payload.param_grid,
+        metric=payload.metric,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
