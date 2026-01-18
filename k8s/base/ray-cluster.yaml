@@ -1,0 +1,153 @@
+# Ray Cluster deployment using native Kubernetes
+# For production, consider using KubeRay operator instead
+#
+# Optimized for: 16 CPUs, 64GB RAM, GPU available
+# Adjust resources based on your Docker Desktop K8s resource allocation
+---
+# Ray Head Node
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ray-head
+  namespace: django-ray
+  labels:
+    app: ray
+    component: head
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ray
+      component: head
+  template:
+    metadata:
+      labels:
+        app: ray
+        component: head
+    spec:
+      containers:
+        - name: ray-head
+          # Custom image with django-ray installed (built from Dockerfile.ray)
+          image: django-ray-worker:dev
+          ports:
+            - containerPort: 6379  # GCS server
+              name: gcs
+            - containerPort: 8265  # Dashboard
+              name: dashboard
+            - containerPort: 10001 # Client server
+              name: client
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              ray start --head \
+                --port=6379 \
+                --dashboard-host=0.0.0.0 \
+                --dashboard-port=8265 \
+                --num-cpus=4 \
+                --memory=8000000000 \
+                --object-store-memory=2000000000 \
+                --disable-usage-stats \
+                --block
+          env:
+            - name: RAY_DASHBOARD_HOST
+              value: "0.0.0.0"
+          resources:
+            requests:
+              memory: "8Gi"
+              cpu: "2"
+            limits:
+              memory: "12Gi"
+              cpu: "4"
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+# Ray Head Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: ray-head-svc
+  namespace: django-ray
+  labels:
+    app: ray
+    component: head
+spec:
+  selector:
+    app: ray
+    component: head
+  ports:
+    - name: gcs
+      port: 6379
+      targetPort: 6379
+    - name: dashboard
+      port: 8265
+      targetPort: 8265
+      nodePort: 30265  # Access via http://localhost:30265
+    - name: client
+      port: 10001
+      targetPort: 10001
+  type: NodePort
+---
+# Ray Worker Nodes
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ray-worker
+  namespace: django-ray
+  labels:
+    app: ray
+    component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ray
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: ray
+        component: worker
+    spec:
+      initContainers:
+        - name: wait-for-head
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z ray-head-svc 6379; do echo waiting for ray-head; sleep 2; done;']
+      containers:
+        - name: ray-worker
+          # Custom image with django-ray installed (built from Dockerfile.ray)
+          image: django-ray-worker:dev
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              ray start \
+                --address=ray-head-svc:6379 \
+                --num-cpus=4 \
+                --memory=8000000000 \
+                --object-store-memory=2000000000 \
+                --block
+          resources:
+            requests:
+              memory: "8Gi"
+              cpu: "2"
+              # Uncomment below to request GPU (requires nvidia device plugin)
+              # nvidia.com/gpu: "1"
+            limits:
+              memory: "12Gi"
+              cpu: "4"
+              # nvidia.com/gpu: "1"
+          readinessProbe:
+            exec:
+              command:
+                - ray
+                - status
+            initialDelaySeconds: 10
+            periodSeconds: 10
+

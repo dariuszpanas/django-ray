@@ -205,16 +205,86 @@ This project uses GitHub Actions for continuous integration. The workflow runs o
 - **Type Check**: Runs ty for static type analysis
 - **Test**: Runs the test suite with coverage
 - **Build**: Builds the package and uploads artifacts
+- **Docker**: Builds and pushes Docker images to GitHub Container Registry
+- **K3d Integration**: Runs Kubernetes-based integration tests
+
+## Docker
+
+Build and run the Docker image:
+
+```bash
+# Build production image
+make docker-build
+
+# Run modes:
+docker run -p 8000:8000 django-ray:latest web          # Production (gunicorn)
+docker run -p 8000:8000 django-ray:latest web-dev      # Development server
+docker run django-ray:latest worker                     # Task worker (local Ray)
+docker run django-ray:latest worker-cluster             # Worker (Ray cluster)
+docker run django-ray:latest migrate                    # Run migrations
+docker run django-ray:latest shell                      # Django shell
+```
+
+The production image is a multi-stage build optimized for size (~170MB) and uses gunicorn for serving.
+
+## Kubernetes Deployment
+
+Deploy to a Kubernetes cluster using the included Kustomize manifests.
+
+### Quick Start with k3d (Local Kubernetes)
+
+```bash
+# Create local k3d cluster
+make k3d-create
+
+# Build image and deploy
+make k3d-deploy
+
+# Check status
+make k3d-status
+
+# Access the application
+# Django Web/API: http://localhost:8080
+# Swagger UI: http://localhost:8080/api/docs
+# Ray Dashboard: http://localhost:8265
+
+# View logs
+make k3d-logs-web      # Django web logs
+make k3d-logs-worker   # Django-Ray worker logs
+make k3d-logs-ray      # Ray cluster logs
+
+# Cleanup
+make k3d-delete
+```
+
+### Components
+
+| Component | Description |
+|-----------|-------------|
+| PostgreSQL | Database for Django and task metadata |
+| Ray Head | Ray cluster coordinator with dashboard |
+| Ray Workers | Ray execution nodes |
+| Django Web | Web application and API |
+| Django-Ray Worker | Task processor |
+
+See [k8s/README.md](k8s/README.md) for detailed deployment documentation.
 
 ## Project Structure
 
 ```
 ├── Makefile             # Development task automation
 ├── pyproject.toml       # Project configuration
+├── Dockerfile           # Production Docker image
+├── Dockerfile.dev       # Development Docker image
 ├── testproject/         # Django test project
 │   ├── settings.py
 │   ├── urls.py
+│   ├── api.py           # REST API (Django Ninja)
+│   ├── tasks.py         # Sample tasks
 │   └── manage.py
+├── k8s/                 # Kubernetes manifests
+│   ├── base/            # Base Kustomize config
+│   └── overlays/dev/    # Dev overlay for k3d
 ├── src/django_ray/      # Main package
 ├── __init__.py
 ├── apps.py              # Django app configuration

@@ -1,0 +1,90 @@
+# Development overlay for k3d / Docker Desktop local testing
+# Conservative settings that work on most machines
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: django-ray
+
+resources:
+  - ../../base
+
+# Development-specific patches
+patches:
+  # Enable Django DEBUG mode
+  - patch: |-
+      - op: replace
+        path: /data/DJANGO_DEBUG
+        value: "True"
+    target:
+      kind: ConfigMap
+      name: django-ray-config
+
+  # Scale down Ray workers for local development (1 instead of 2)
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: ray-worker
+
+  # Use smaller resources for dev (override base which is optimized for production)
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - |
+            ray start --head \
+              --port=6379 \
+              --dashboard-host=0.0.0.0 \
+              --dashboard-port=8265 \
+              --num-cpus=2 \
+              --memory=2000000000 \
+              --object-store-memory=500000000 \
+              --disable-usage-stats \
+              --block
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+    target:
+      kind: Deployment
+      name: ray-head
+
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - |
+            ray start \
+              --address=ray-head-svc:6379 \
+              --num-cpus=2 \
+              --memory=2000000000 \
+              --object-store-memory=500000000 \
+              --block
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+    target:
+      kind: Deployment
+      name: ray-worker
+
+images:
+  - name: django-ray
+    newName: django-ray
+    newTag: dev
+  - name: django-ray-worker
+    newName: django-ray-worker
+    newTag: dev
+

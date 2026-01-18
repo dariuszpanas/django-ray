@@ -12,6 +12,12 @@ dependencies = [
     "django>=6.0",
     "django-ninja>=1.5.1",
     "ray[default]>=2.53.0",
+    "whitenoise>=6.6",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "psycopg[binary]>=3.1",
 ]
 
 [dependency-groups]
@@ -21,6 +27,7 @@ dev = [
     "pytest>=7.0",
     "pytest-django>=4.7",
     "pytest-cov>=4.0",
+    "locust>=2.20",
 ]
 
 [tool.ruff]

@@ -27,6 +27,7 @@ class Command(BaseCommand):
         self.shutdown_requested = False
         self.worker_id = generate_worker_id()
         self.active_tasks: dict[int, str] = {}  # task_pk -> ray_job_id
+        self.local_ray_tasks: dict[int, Any] = {}  # task_pk -> ray ObjectRef
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add command arguments."""
@@ -52,6 +53,12 @@ class Command(BaseCommand):
             action="store_true",
             help="Run with local Ray instance (starts Ray automatically)",
         )
+        parser.add_argument(
+            "--cluster",
+            type=str,
+            default=None,
+            help="Connect to a Ray cluster at the specified address (e.g., ray://localhost:10001)",
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         """Run the worker loop."""
@@ -59,6 +66,7 @@ class Command(BaseCommand):
         concurrency = options.get("concurrency")
         self.sync_mode = options.get("sync", False)
         self.local_mode = options.get("local", False)
+        self.cluster_address = options.get("cluster")
 
         # Determine execution mode
         if self.sync_mode:
@@ -66,6 +74,9 @@ class Command(BaseCommand):
         elif self.local_mode:
             self.execution_mode = "local"
             self._init_local_ray()
+        elif self.cluster_address:
+            self.execution_mode = "cluster"
+            self._init_cluster_ray(self.cluster_address)
         else:
             self.execution_mode = "ray"
 
@@ -135,6 +146,27 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS("Ray initialized"))
             self.stdout.write(self.style.SUCCESS("  Dashboard: http://127.0.0.1:8265"))
 
+    def _init_cluster_ray(self, address: str) -> None:
+        """Connect to a remote Ray cluster."""
+        import ray
+
+        if not ray.is_initialized():
+            self.stdout.write(f"Connecting to Ray cluster at {address}...")
+            try:
+                ray.init(
+                    address=address,
+                    ignore_reinit_error=True,
+                )
+                self.stdout.write(self.style.SUCCESS("Connected to Ray cluster"))
+                # Show cluster resources
+                resources = ray.cluster_resources()
+                self.stdout.write(f"  Cluster resources: {resources}")
+            except Exception as e:
+                self.stdout.write(
+                    self.style.ERROR(f"Failed to connect to Ray cluster: {e}")
+                )
+                raise
+
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
         signal.signal(signal.SIGTERM, self.handle_shutdown_signal)
@@ -164,6 +196,10 @@ class Command(BaseCommand):
                 self.send_heartbeat()
                 last_heartbeat = current_time
 
+            # Poll for completed local Ray tasks
+            if self.execution_mode in ("local", "cluster") and self.local_ray_tasks:
+                self.poll_local_ray_tasks()
+
             # Claim and process tasks
             self.claim_and_process_tasks(queue, concurrency)
 
@@ -181,7 +217,8 @@ class Command(BaseCommand):
     def claim_and_process_tasks(self, queue: str, concurrency: int) -> None:
         """Claim and submit tasks for execution."""
         # Check how many slots are available
-        available_slots = concurrency - len(self.active_tasks)
+        active_count = len(self.active_tasks) + len(self.local_ray_tasks)
+        available_slots = concurrency - active_count
         if available_slots <= 0:
             return
 
@@ -230,7 +267,7 @@ class Command(BaseCommand):
 
         if self.execution_mode == "sync":
             self.execute_task_sync(task)
-        elif self.execution_mode == "local":
+        elif self.execution_mode in ("local", "cluster"):
             self.execute_task_local_ray(task)
         else:
             self.submit_task_to_ray(task)
@@ -286,7 +323,7 @@ class Command(BaseCommand):
             )
 
     def execute_task_local_ray(self, task: RayTaskExecution) -> None:
-        """Execute a task using local Ray (ray.remote)."""
+        """Submit a task to local Ray (non-blocking)."""
         import ray
 
         # Extract short name from callable path for dashboard visibility
@@ -320,45 +357,17 @@ class Command(BaseCommand):
 
         try:
             self.stdout.write(f"  Submitting to Ray as 'django_ray:{task_name}'...")
-            # Submit to Ray and wait for result
+            # Submit to Ray WITHOUT blocking - store the reference for later polling
             result_ref = run_task.remote(
                 task.callable_path,
                 task.args_json,
                 task.kwargs_json,
                 task.pk,
             )
-            result_json = ray.get(result_ref)
-            result = json.loads(result_json)
-
-            now = datetime.now(timezone.utc)
-            if result["success"]:
-                task.state = TaskState.SUCCEEDED
-                task.result_data = json.dumps(result["result"])
-                task.finished_at = now
-                self.stdout.write(
-                    self.style.SUCCESS(
-                        f"  Task {task.pk} succeeded (Ray): {result['result']}"
-                    )
-                )
-            else:
-                task.state = TaskState.FAILED
-                task.error_message = result["error"]
-                task.error_traceback = result["traceback"]
-                task.finished_at = now
-                self.stdout.write(
-                    self.style.ERROR(
-                        f"  Task {task.pk} failed (Ray): {result['error']}"
-                    )
-                )
-
-            task.save(
-                update_fields=[
-                    "state",
-                    "result_data",
-                    "error_message",
-                    "error_traceback",
-                    "finished_at",
-                ]
+            # Track the pending task
+            self.local_ray_tasks[task.pk] = result_ref
+            self.stdout.write(
+                self.style.SUCCESS(f"  Task {task.pk} submitted to Ray (async)")
             )
 
         except Exception as e:
@@ -367,8 +376,90 @@ class Command(BaseCommand):
             task.finished_at = datetime.now(timezone.utc)
             task.save(update_fields=["state", "error_message", "finished_at"])
             self.stdout.write(
-                self.style.ERROR(f"  Task {task.pk} failed with exception: {e}")
+                self.style.ERROR(f"  Task {task.pk} failed to submit: {e}")
             )
+
+    def poll_local_ray_tasks(self) -> None:
+        """Poll for completed local Ray tasks and update their status."""
+        import ray
+
+        if not self.local_ray_tasks:
+            return
+
+        # Get list of all pending refs
+        pending_refs = list(self.local_ray_tasks.values())
+
+        # Check for completed tasks (non-blocking with timeout=0)
+        ready_refs, _ = ray.wait(pending_refs, num_returns=len(pending_refs), timeout=0)
+
+        if not ready_refs:
+            return
+
+        # Process completed tasks
+        for ref in ready_refs:
+            # Find the task_pk for this ref
+            task_pk = None
+            for pk, r in self.local_ray_tasks.items():
+                if r == ref:
+                    task_pk = pk
+                    break
+
+            if task_pk is None:
+                continue
+
+            # Remove from tracking
+            del self.local_ray_tasks[task_pk]
+
+            # Get the task from DB
+            try:
+                task = RayTaskExecution.objects.get(pk=task_pk)
+            except RayTaskExecution.DoesNotExist:
+                continue
+
+            # Get the result
+            try:
+                result_json = ray.get(ref)
+                result = json.loads(result_json)
+
+                now = datetime.now(timezone.utc)
+                if result["success"]:
+                    task.state = TaskState.SUCCEEDED
+                    task.result_data = json.dumps(result["result"])
+                    task.finished_at = now
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"\nTask {task.pk} succeeded (Ray): {result['result']}"
+                        )
+                    )
+                else:
+                    task.state = TaskState.FAILED
+                    task.error_message = result["error"]
+                    task.error_traceback = result["traceback"]
+                    task.finished_at = now
+                    self.stdout.write(
+                        self.style.ERROR(
+                            f"\nTask {task.pk} failed (Ray): {result['error']}"
+                        )
+                    )
+
+                task.save(
+                    update_fields=[
+                        "state",
+                        "result_data",
+                        "error_message",
+                        "error_traceback",
+                        "finished_at",
+                    ]
+                )
+
+            except Exception as e:
+                task.state = TaskState.FAILED
+                task.error_message = str(e)
+                task.finished_at = datetime.now(timezone.utc)
+                task.save(update_fields=["state", "error_message", "finished_at"])
+                self.stdout.write(
+                    self.style.ERROR(f"\nTask {task.pk} failed with exception: {e}")
+                )
 
     def submit_task_to_ray(self, task: RayTaskExecution) -> None:
         """Submit a task to Ray for execution."""

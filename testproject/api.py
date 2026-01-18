@@ -74,6 +74,14 @@ class MessageSchema(Schema):
     message: str
 
 
+class HealthSchema(Schema):
+    """Health check response schema."""
+
+    status: str
+    database: str
+    version: str
+
+
 class StatsSchema(Schema):
     """Task statistics schema."""
 
@@ -84,6 +92,31 @@ class StatsSchema(Schema):
     failed: int
     cancelled: int
     lost: int
+
+
+# ============================================================================
+# Health Endpoints
+# ============================================================================
+
+
+@api.get("/health", response=HealthSchema, tags=["Health"])
+def health_check(request):
+    """Health check endpoint for Kubernetes probes."""
+    from django.db import connection
+
+    # Check database connectivity
+    db_status = "ok"
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+    except Exception:
+        db_status = "error"
+
+    return {
+        "status": "healthy" if db_status == "ok" else "degraded",
+        "database": db_status,
+        "version": "0.1.0",
+    }
 
 
 # ============================================================================
@@ -301,3 +334,4 @@ def enqueue_task(request, task_name: str, payload: TaskEnqueueSchema | None = No
     )
 
     return task
+

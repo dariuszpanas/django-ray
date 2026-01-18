@@ -1,17 +1,20 @@
 """Django settings for testproject."""
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-test-key-not-for-production"
+SECRET_KEY = os.environ.get(
+    "DJANGO_SECRET_KEY", "django-insecure-test-key-not-for-production"
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() in ("true", "1", "yes")
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 
 # Application definition
 INSTALLED_APPS = [
@@ -27,6 +30,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",  # Serve static files in production
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -56,12 +60,33 @@ TEMPLATES = [
 WSGI_APPLICATION = "testproject.wsgi.application"
 
 # Database
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+# Use environment variables for Kubernetes/production deployment
+# Falls back to SQLite for local development
+DATABASE_ENGINE = os.environ.get("DATABASE_ENGINE", "django.db.backends.sqlite3")
+
+if DATABASE_ENGINE == "django.db.backends.sqlite3":
+    DATABASES = {
+        "default": {
+            "ENGINE": DATABASE_ENGINE,
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": DATABASE_ENGINE,
+            "NAME": os.environ.get("DATABASE_NAME", "django_ray"),
+            "USER": os.environ.get("DATABASE_USER", "django_ray"),
+            "PASSWORD": os.environ.get("DATABASE_PASSWORD", ""),
+            "HOST": os.environ.get("DATABASE_HOST", "localhost"),
+            "PORT": os.environ.get("DATABASE_PORT", "5432"),
+            "CONN_MAX_AGE": 60,  # Keep connections open for 60 seconds
+            "CONN_HEALTH_CHECKS": True,  # Check connection health before use
+            "OPTIONS": {
+                "connect_timeout": 10,
+            },
+        }
+    }
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -87,15 +112,27 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Whitenoise for serving static files in production
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # django-ray Configuration
 DJANGO_RAY = {
-    "RAY_ADDRESS": "auto",  # Use "auto" for local Ray, or "ray://host:port" for cluster
+    # Use "auto" for local Ray, or "ray://host:port" for cluster
+    "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
     "RUNTIME_ENV": {},
-    "NUM_CPUS_PER_TASK": 1,
-    "MAX_RETRIES": 3,
-    "RETRY_DELAY_SECONDS": 5,
+    "NUM_CPUS_PER_TASK": int(os.environ.get("RAY_NUM_CPUS_PER_TASK", "1")),
+    "MAX_RETRIES": int(os.environ.get("RAY_MAX_RETRIES", "3")),
+    "RETRY_DELAY_SECONDS": int(os.environ.get("RAY_RETRY_DELAY_SECONDS", "5")),
 }

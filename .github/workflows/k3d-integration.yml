@@ -1,0 +1,166 @@
+name: Integration Tests (k3d)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  K3D_CLUSTER_NAME: django-ray-test
+  IMAGE_NAME: django-ray
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  k3d-integration:
+    name: K3d Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install k3d
+        run: |
+          curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          k3d version
+
+      - name: Create k3d cluster
+        run: |
+          k3d cluster create ${{ env.K3D_CLUSTER_NAME }} \
+            --agents 2 \
+            --wait \
+            --timeout 120s \
+            -p "8080:80@loadbalancer" \
+            -p "8265:8265@loadbalancer"
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Import image to k3d
+        run: |
+          k3d image import ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+            -c ${{ env.K3D_CLUSTER_NAME }}
+
+      - name: Update kustomization with image tag
+        run: |
+          cd k8s/overlays/dev
+          # Update image tag in kustomization
+          cat > kustomization-override.yaml << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - kustomization.yaml
+          images:
+            - name: django-ray
+              newName: ${{ env.IMAGE_NAME }}
+              newTag: ${{ env.IMAGE_TAG }}
+          EOF
+          mv kustomization.yaml kustomization-base.yaml
+          mv kustomization-override.yaml kustomization.yaml
+          cat kustomization.yaml
+
+      - name: Deploy to k3d
+        run: |
+          kubectl apply -k k8s/overlays/dev
+          
+          # Wait for deployments to be ready
+          echo "Waiting for PostgreSQL..."
+          kubectl wait --for=condition=available deployment/postgres \
+            -n django-ray --timeout=120s
+          
+          echo "Waiting for Ray head..."
+          kubectl wait --for=condition=available deployment/ray-head \
+            -n django-ray --timeout=180s
+          
+          echo "Waiting for Ray workers..."
+          kubectl wait --for=condition=available deployment/ray-worker \
+            -n django-ray --timeout=180s
+          
+          echo "Waiting for Django web..."
+          kubectl wait --for=condition=available deployment/django-web \
+            -n django-ray --timeout=180s
+          
+          echo "Waiting for Django-Ray worker..."
+          kubectl wait --for=condition=available deployment/django-ray-worker \
+            -n django-ray --timeout=180s
+
+      - name: Show deployment status
+        if: always()
+        run: |
+          kubectl get pods -n django-ray
+          kubectl get svc -n django-ray
+          kubectl get deployments -n django-ray
+
+      - name: Show pod logs on failure
+        if: failure()
+        run: |
+          echo "=== PostgreSQL logs ==="
+          kubectl logs -n django-ray -l app=postgres --tail=50 || true
+          
+          echo "=== Ray head logs ==="
+          kubectl logs -n django-ray -l app=ray,component=head --tail=50 || true
+          
+          echo "=== Django web logs ==="
+          kubectl logs -n django-ray -l app=django-ray,component=web --tail=50 || true
+          
+          echo "=== Django-Ray worker logs ==="
+          kubectl logs -n django-ray -l app=django-ray,component=worker --tail=50 || true
+
+      - name: Port forward for tests
+        run: |
+          # Forward Django web service
+          kubectl port-forward svc/django-web-svc 8000:80 -n django-ray &
+          sleep 5
+
+      - name: Run integration tests
+        run: |
+          # Test health endpoint
+          echo "Testing health endpoint..."
+          curl -f http://localhost:8000/api/health || exit 1
+          
+          # Test task listing
+          echo "Testing task list endpoint..."
+          curl -f http://localhost:8000/api/tasks || exit 1
+          
+          echo "All integration tests passed!"
+
+      - name: Run API smoke tests
+        run: |
+          # Create a simple task
+          echo "Creating a test task..."
+          RESPONSE=$(curl -s -X POST http://localhost:8000/api/tasks/enqueue \
+            -H "Content-Type: application/json" \
+            -d '{"task_path": "testproject.tasks.add_numbers", "args": [1, 2]}')
+          echo "Response: $RESPONSE"
+          
+          # Extract task ID and verify
+          TASK_ID=$(echo $RESPONSE | python3 -c "import sys, json; print(json.load(sys.stdin).get('task_id', ''))")
+          if [ -n "$TASK_ID" ]; then
+            echo "Task created with ID: $TASK_ID"
+            
+            # Wait for task completion
+            sleep 10
+            
+            # Check task status
+            echo "Checking task status..."
+            STATUS=$(curl -s http://localhost:8000/api/tasks/$TASK_ID)
+            echo "Status: $STATUS"
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          k3d cluster delete ${{ env.K3D_CLUSTER_NAME }} || true
+

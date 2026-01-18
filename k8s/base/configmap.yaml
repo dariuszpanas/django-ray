@@ -1,0 +1,19 @@
+# Django-Ray ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: django-ray-config
+  namespace: django-ray
+data:
+  DJANGO_SETTINGS_MODULE: "testproject.settings"
+  DJANGO_DEBUG: "False"
+  DJANGO_ALLOWED_HOSTS: "*"
+  # Ray configuration
+  RAY_ADDRESS: "ray://ray-head-svc:10001"
+  RAY_DASHBOARD_HOST: "0.0.0.0"
+  # Database configuration (override in production)
+  DATABASE_ENGINE: "django.db.backends.postgresql"
+  DATABASE_NAME: "django_ray"
+  DATABASE_HOST: "postgres-svc"
+  DATABASE_PORT: "5432"
+

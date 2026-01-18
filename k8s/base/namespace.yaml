@@ -1,0 +1,8 @@
+# Django-Ray namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: django-ray
+  labels:
+    app.kubernetes.io/name: django-ray
+
