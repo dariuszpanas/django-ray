@@ -19,6 +19,10 @@ def import_callable(dotted_path: str) -> Callable[..., Any]:
         ImportError: If the module cannot be imported.
         AttributeError: If the callable is not found in the module.
         TypeError: If the imported object is not callable.
+
+    Note:
+        If the imported object is a Django 6 Task object (decorated with @task),
+        this function returns the underlying function via the .func attribute.
     """
     if "." not in dotted_path:
         raise ImportError(
@@ -38,6 +42,11 @@ def import_callable(dotted_path: str) -> Callable[..., Any]:
         raise AttributeError(
             f"Module '{module_path}' has no attribute '{callable_name}'"
         ) from e
+
+    # Handle Django 6 Task objects - extract the underlying function
+    # Django's @task decorator wraps functions in Task objects which have a .func attribute
+    if hasattr(callable_obj, "func") and callable(getattr(callable_obj, "func", None)):
+        callable_obj = callable_obj.func
 
     if not callable(callable_obj):
         raise TypeError(f"'{dotted_path}' is not callable")

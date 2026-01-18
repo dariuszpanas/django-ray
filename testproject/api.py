@@ -1,4 +1,8 @@
-"""Django Ninja API for django-ray task management."""
+"""Django Ninja API for django-ray task management.
+
+This API demonstrates Django 6's native task framework integration with Ray.
+Tasks are defined using @task decorator and enqueued using .enqueue().
+"""
 
 from __future__ import annotations
 
@@ -9,12 +13,14 @@ from django.shortcuts import get_object_or_404
 from ninja import NinjaAPI, Schema
 
 from django_ray.models import RayTaskExecution, TaskState
-from django_ray.runtime.serialization import serialize_args
+
+# Import tasks that use Django 6's @task decorator
+from testproject import tasks
 
 api = NinjaAPI(
     title="Django Ray API",
     version="0.1.0",
-    description="API for managing and monitoring Ray tasks",
+    description="API for managing and monitoring Ray tasks using Django 6's native task framework",
 )
 
 
@@ -46,6 +52,18 @@ class TaskResponseSchema(Schema):
     finished_at: datetime | None
     result_data: str | None
     error_message: str | None
+
+
+class Django6TaskResponseSchema(Schema):
+    """Schema for Django 6 task result response."""
+
+    task_id: str
+    status: str
+    enqueued_at: datetime | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    args: list
+    kwargs: dict
 
 
 class TaskListResponseSchema(Schema):
@@ -120,7 +138,7 @@ def health_check(request):
 
 
 # ============================================================================
-# Task Endpoints
+# Task Endpoints (Legacy - direct model access)
 # ============================================================================
 
 
@@ -204,9 +222,14 @@ def get_task(request, task_id: int):
     return task
 
 
-@api.post("/tasks", response=TaskResponseSchema, tags=["Tasks"])
+@api.post("/tasks", response=TaskResponseSchema, tags=["Tasks"], deprecated=True)
 def create_task(request, payload: TaskCreateSchema):
-    """Create and enqueue a new task."""
+    """[DEPRECATED] Create a task using legacy direct model creation.
+
+    Use Django 6's native @task decorator and .enqueue() API instead.
+    """
+    from django_ray.runtime.serialization import serialize_args
+
     task = RayTaskExecution.objects.create(
         task_id=f"api-{RayTaskExecution.objects.count() + 1}",
         callable_path=payload.callable_path,
@@ -261,13 +284,135 @@ def retry_task(request, task_id: int):
 
 
 # ============================================================================
-# Quick Task Endpoints (shortcuts for testproject tasks)
+# Django 6 Task Endpoints (using @task decorator and .enqueue())
 # ============================================================================
 
 
-@api.post("/enqueue/add/{a}/{b}", response=TaskResponseSchema, tags=["Quick Tasks"])
+@api.post("/v2/enqueue/add/{a}/{b}", response=Django6TaskResponseSchema, tags=["Django 6 Tasks"])
+def enqueue_add_v2(request, a: int, b: int, queue: str = "default"):
+    """Enqueue add_numbers task using Django 6's native .enqueue() API.
+
+    This is the recommended way to enqueue tasks in Django 6.
+    """
+    # Use Django 6's native task API with optional queue override
+    task_obj = tasks.add_numbers.using(queue_name=queue)
+    result = task_obj.enqueue(a, b)
+
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post("/v2/enqueue/multiply/{a}/{b}", response=Django6TaskResponseSchema, tags=["Django 6 Tasks"])
+def enqueue_multiply_v2(request, a: int, b: int, queue: str = "default"):
+    """Enqueue multiply_numbers task using Django 6's native .enqueue() API."""
+    task_obj = tasks.multiply_numbers.using(queue_name=queue)
+    result = task_obj.enqueue(a, b)
+
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post("/v2/enqueue/slow/{seconds}", response=Django6TaskResponseSchema, tags=["Django 6 Tasks"])
+def enqueue_slow_v2(request, seconds: float, queue: str = "default"):
+    """Enqueue slow_task using Django 6's native .enqueue() API."""
+    task_obj = tasks.slow_task.using(queue_name=queue)
+    result = task_obj.enqueue(seconds=seconds)
+
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post("/v2/enqueue/fail", response=Django6TaskResponseSchema, tags=["Django 6 Tasks"])
+def enqueue_fail_v2(request, queue: str = "default"):
+    """Enqueue failing_task using Django 6's native .enqueue() API."""
+    task_obj = tasks.failing_task.using(queue_name=queue)
+    result = task_obj.enqueue()
+
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post("/v2/enqueue/cpu/{n}", response=Django6TaskResponseSchema, tags=["Django 6 Tasks"])
+def enqueue_cpu_v2(request, n: int, queue: str = "default"):
+    """Enqueue cpu_intensive_task using Django 6's native .enqueue() API."""
+    task_obj = tasks.cpu_intensive_task.using(queue_name=queue)
+    result = task_obj.enqueue(n=n)
+
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.get("/v2/tasks/{task_id}", response=Django6TaskResponseSchema, tags=["Django 6 Tasks"])
+def get_task_v2(request, task_id: str):
+    """Get task status using Django 6's native get_result() API.
+
+    This retrieves a task result by its UUID and returns the current status.
+    """
+    from django.tasks import task_backends
+
+    # Access the default backend
+    backend = task_backends["default"]
+    result = backend.get_result(task_id)
+
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+# ============================================================================
+# Legacy Quick Task Endpoints (for backward compatibility)
+# ============================================================================
+
+
+@api.post("/enqueue/add/{a}/{b}", response=TaskResponseSchema, tags=["Legacy Tasks"], deprecated=True)
 def enqueue_add(request, a: int, b: int, queue: str = "default"):
-    """Quick endpoint to enqueue an add_numbers task."""
+    """[DEPRECATED] Use /v2/enqueue/add/{a}/{b} instead.
+
+    Quick endpoint to enqueue an add_numbers task using legacy direct model creation.
+    """
+    from django_ray.runtime.serialization import serialize_args
+
     task = RayTaskExecution.objects.create(
         task_id=f"api-add-{RayTaskExecution.objects.count() + 1}",
         callable_path="testproject.tasks.add_numbers",
@@ -279,9 +424,14 @@ def enqueue_add(request, a: int, b: int, queue: str = "default"):
     return task
 
 
-@api.post("/enqueue/slow/{seconds}", response=TaskResponseSchema, tags=["Quick Tasks"])
+@api.post("/enqueue/slow/{seconds}", response=TaskResponseSchema, tags=["Legacy Tasks"], deprecated=True)
 def enqueue_slow(request, seconds: float, queue: str = "default"):
-    """Quick endpoint to enqueue a slow_task."""
+    """[DEPRECATED] Use /v2/enqueue/slow/{seconds} instead.
+
+    Quick endpoint to enqueue a slow_task using legacy direct model creation.
+    """
+    from django_ray.runtime.serialization import serialize_args
+
     task = RayTaskExecution.objects.create(
         task_id=f"api-slow-{RayTaskExecution.objects.count() + 1}",
         callable_path="testproject.tasks.slow_task",
@@ -293,9 +443,12 @@ def enqueue_slow(request, seconds: float, queue: str = "default"):
     return task
 
 
-@api.post("/enqueue/fail", response=TaskResponseSchema, tags=["Quick Tasks"])
+@api.post("/enqueue/fail", response=TaskResponseSchema, tags=["Legacy Tasks"], deprecated=True)
 def enqueue_fail(request, queue: str = "default"):
-    """Quick endpoint to enqueue a failing_task."""
+    """[DEPRECATED] Use /v2/enqueue/fail instead.
+
+    Quick endpoint to enqueue a failing_task using legacy direct model creation.
+    """
     task = RayTaskExecution.objects.create(
         task_id=f"api-fail-{RayTaskExecution.objects.count() + 1}",
         callable_path="testproject.tasks.failing_task",
@@ -307,9 +460,11 @@ def enqueue_fail(request, queue: str = "default"):
     return task
 
 
-@api.post("/enqueue/{task_name}", response=TaskResponseSchema, tags=["Quick Tasks"])
+@api.post("/enqueue/{task_name}", response=TaskResponseSchema, tags=["Legacy Tasks"], deprecated=True)
 def enqueue_task(request, task_name: str, payload: TaskEnqueueSchema | None = None):
-    """Enqueue a testproject task by name.
+    """[DEPRECATED] Use specific /v2/enqueue/* endpoints instead.
+
+    Enqueue a testproject task by name using legacy direct model creation.
 
     Available tasks:
     - add_numbers: args=[a, b] -> returns a + b
@@ -319,6 +474,8 @@ def enqueue_task(request, task_name: str, payload: TaskEnqueueSchema | None = No
     - echo_task: returns {args, kwargs}
     - cpu_intensive_task: kwargs={n: N} -> CPU intensive loop
     """
+    from django_ray.runtime.serialization import serialize_args
+
     if payload is None:
         payload = TaskEnqueueSchema(task_name=task_name)
 

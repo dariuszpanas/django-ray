@@ -120,10 +120,19 @@ class TestRayRemoteExecution:
 
         @ray.remote
         def remote_add(a: int, b: int) -> int:
+            # Setup Django before importing tasks with @task decorator
+            import os
+
+            import django
+
+            os.environ.setdefault("DJANGO_SETTINGS_MODULE", "testproject.settings")
+            django.setup()
+
             # Import inside the remote function
             from testproject.tasks import add_numbers
 
-            return add_numbers(a, b)
+            # add_numbers is a Django Task object, use .call() to execute
+            return add_numbers.call(a, b)
 
         result = ray.get(remote_add.remote(10, 20))
         assert result == 30

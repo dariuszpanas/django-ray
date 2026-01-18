@@ -2,9 +2,15 @@
 
 This document tracks the implementation progress of django-ray, a Ray.io integration with Django 6 for distributed task execution.
 
-## Project Status: 🟢 Active Development
+## Project Status: 🟢 Django 6 Integration Complete
 
-**Last Updated:** January 11, 2026
+**Last Updated:** January 18, 2026
+
+> **✅ Django 6 Task Framework Integration Completed!**
+> - Created `django_ray/backends.py` with `RayTaskBackend` class implementing Django's `BaseTaskBackend`
+> - Tasks now use Django 6's native `@task` decorator and `.enqueue()` API
+> - Full test suite passing (43 tests)
+> - See [REVIEW_2026-01-18.md](./revisions/REVIEW_2026-01-18.md) for architecture review details.
 
 ---
 
@@ -25,6 +31,26 @@ This document tracks the implementation progress of django-ray, a Ray.io integra
   - Coverage reporting configured
   - Makefile with all common commands
   - GitHub Actions CI/CD workflow
+
+### Django 6 Task Backend Integration (NEW!)
+
+- [x] **Task Backend (`backends.py`)** ✨ NEW
+  - `RayTaskBackend` class implementing Django's `BaseTaskBackend` ABC
+  - Supports deferred execution (`run_after`)
+  - Supports result retrieval via `get_result()`
+  - Integrates with Django's `TASKS` setting
+  - Maps Django `TaskResultStatus` to internal `TaskState`
+
+- [x] **Django 6 Native Patterns**
+  - Tasks decorated with `@task` from `django.tasks`
+  - Enqueueing via `.enqueue()` method
+  - Result tracking via `TaskResult` objects
+  - Queue selection via `.using(queue_name=...)`
+
+- [x] **Updated API Endpoints (`testproject/api.py`)**
+  - `/v2/enqueue/*` endpoints using Django 6 patterns
+  - `/v2/tasks/{task_id}` for Django-native task retrieval
+  - Legacy endpoints deprecated but still functional
 
 ### Django App (`src/django_ray/`)
 

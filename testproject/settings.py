@@ -127,7 +127,19 @@ STORAGES = {
 # Default primary key field type
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# django-ray Configuration
+# Django 6 Tasks Configuration - Use Ray backend for distributed execution
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default", "high-priority", "low-priority"],
+        "OPTIONS": {
+            "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
+            "RAY_RUNTIME_ENV": {},
+        },
+    },
+}
+
+# Legacy django-ray Configuration (for direct worker usage)
 DJANGO_RAY = {
     # Use "auto" for local Ray, or "ray://host:port" for cluster
     "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
