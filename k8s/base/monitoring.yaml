@@ -1,0 +1,859 @@
+# Monitoring Stack: Prometheus + Grafana for Ray Cluster
+# Based on Ray's metrics documentation: https://docs.ray.io/en/latest/cluster/metrics.html
+#
+# Ray exposes Prometheus metrics on port 8080 by default on each node
+# Key metrics include:
+#   - ray_tasks (submitted, running, finished, failed)
+#   - ray_actors (pending, running)
+#   - ray_resources (cpu, memory, object_store_memory)
+#   - ray_node metrics
+---
+# Prometheus ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: django-ray
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      # Ray Head metrics (port 8080 is default metrics port)
+      - job_name: 'ray-head'
+        static_configs:
+          - targets: ['ray-head-svc:8080']
+        metrics_path: /metrics
+
+
+      # Ray Workers metrics - using kubernetes service discovery with annotations
+      - job_name: 'ray-workers'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ['django-ray']
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_label_app, __meta_kubernetes_pod_label_component]
+            regex: ray;worker
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+
+      # Django-Ray application metrics
+      - job_name: 'django-ray'
+        static_configs:
+          - targets: ['django-web-svc:80']
+        metrics_path: /api/metrics
+
+      # Django-Ray worker metrics
+      - job_name: 'django-ray-worker'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ['django-ray']
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app, __meta_kubernetes_pod_label_component]
+            regex: django-ray;worker
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: ${1}:8000
+        metrics_path: /metrics
+---
+# Prometheus Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: django-ray
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.48.0
+          args:
+            - '--config.file=/etc/prometheus/prometheus.yml'
+            - '--storage.tsdb.path=/prometheus'
+            - '--storage.tsdb.retention.time=7d'
+            - '--web.enable-lifecycle'
+          ports:
+            - containerPort: 9090
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          emptyDir: {}
+---
+# Prometheus Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-svc
+  namespace: django-ray
+  labels:
+    app: prometheus
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+      nodePort: 30090  # Access via http://localhost:30090
+  type: NodePort
+---
+# Prometheus ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: django-ray
+---
+# Prometheus ClusterRole for service discovery
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-django-ray
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    verbs: ["get"]
+---
+# Prometheus ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-django-ray
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-django-ray
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: django-ray
+---
+# Grafana ConfigMap - Datasources
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: django-ray
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus-svc:9090
+        access: proxy
+        isDefault: true
+        editable: true
+---
+# Grafana ConfigMap - Dashboard Providers
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provider
+  namespace: django-ray
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards
+---
+# Grafana ConfigMap - Ray Dashboard
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: django-ray
+data:
+  ray-cluster.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "liveNow": false,
+      "panels": [
+        {
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 100,
+          "title": "Ray Cluster Overview",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "short"
+            }
+          },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "id": 1,
+          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "expr": "sum(ray_cluster_active_nodes{}) or vector(0)",
+              "legendFormat": "Active Nodes",
+              "refId": "A"
+            }
+          ],
+          "title": "Active Nodes",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "short"
+            }
+          },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "id": 2,
+          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+          "targets": [
+            {
+              "expr": "sum(ray_resources{Name=\"CPU\"}) or vector(0)",
+              "legendFormat": "Total CPUs",
+              "refId": "A"
+            }
+          ],
+          "title": "Total CPUs",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "bytes"
+            }
+          },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "id": 3,
+          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+          "targets": [
+            {
+              "expr": "sum(ray_resources{Name=\"memory\"}) or vector(0)",
+              "legendFormat": "Total Memory",
+              "refId": "A"
+            }
+          ],
+          "title": "Total Memory",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "bytes"
+            }
+          },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "id": 4,
+          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+          "targets": [
+            {
+              "expr": "sum(ray_resources{Name=\"object_store_memory\"}) or vector(0)",
+              "legendFormat": "Object Store",
+              "refId": "A"
+            }
+          ],
+          "title": "Object Store Memory",
+          "type": "stat"
+        },
+        {
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "id": 101,
+          "title": "Task Metrics",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": false, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "short"
+            }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "id": 5,
+          "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+          "targets": [
+            {
+              "expr": "sum(ray_tasks{State=\"RUNNING\"}) or vector(0)",
+              "legendFormat": "Running",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(ray_tasks{State=\"PENDING_ARGS_AVAIL\"}) or vector(0)",
+              "legendFormat": "Pending Args",
+              "refId": "B"
+            },
+            {
+              "expr": "sum(ray_tasks{State=\"PENDING_NODE_ASSIGNMENT\"}) or vector(0)",
+              "legendFormat": "Pending Node",
+              "refId": "C"
+            }
+          ],
+          "title": "Ray Tasks by State",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": false, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "short"
+            }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "id": 6,
+          "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+          "targets": [
+            {
+              "expr": "sum(rate(ray_tasks{State=\"FINISHED\"}[1m])) or vector(0)",
+              "legendFormat": "Finished/min",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(rate(ray_tasks{State=\"FAILED\"}[1m])) or vector(0)",
+              "legendFormat": "Failed/min",
+              "refId": "B"
+            }
+          ],
+          "title": "Task Completion Rate",
+          "type": "timeseries"
+        },
+        {
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+          "id": 102,
+          "title": "Resource Utilization",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": false, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "percentunit"
+            }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+          "id": 7,
+          "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+          "targets": [
+            {
+              "expr": "1 - (sum(ray_resources{Name=\"CPU\", State=\"AVAILABLE\"}) / sum(ray_resources{Name=\"CPU\"})) or vector(0)",
+              "legendFormat": "CPU Usage",
+              "refId": "A"
+            }
+          ],
+          "title": "CPU Utilization",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": false, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "percentunit"
+            }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          "id": 8,
+          "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+          "targets": [
+            {
+              "expr": "1 - (sum(ray_resources{Name=\"memory\", State=\"AVAILABLE\"}) / sum(ray_resources{Name=\"memory\"})) or vector(0)",
+              "legendFormat": "Memory Usage",
+              "refId": "A"
+            },
+            {
+              "expr": "1 - (sum(ray_resources{Name=\"object_store_memory\", State=\"AVAILABLE\"}) / sum(ray_resources{Name=\"object_store_memory\"})) or vector(0)",
+              "legendFormat": "Object Store Usage",
+              "refId": "B"
+            }
+          ],
+          "title": "Memory Utilization",
+          "type": "timeseries"
+        },
+        {
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+          "id": 103,
+          "title": "Django-Ray Tasks",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 10 }, { "color": "red", "value": 50 }] },
+              "unit": "short"
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 24 },
+          "id": 9,
+          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+          "targets": [
+            {
+              "expr": "django_ray_tasks_queued or vector(0)",
+              "legendFormat": "Queued",
+              "refId": "A"
+            }
+          ],
+          "title": "Queued Tasks",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
+              "unit": "short"
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 24 },
+          "id": 10,
+          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+          "targets": [
+            {
+              "expr": "django_ray_tasks_running or vector(0)",
+              "legendFormat": "Running",
+              "refId": "A"
+            }
+          ],
+          "title": "Running Tasks",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "short"
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 24 },
+          "id": 11,
+          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+          "targets": [
+            {
+              "expr": "django_ray_tasks_total{state=\"SUCCEEDED\"} or vector(0)",
+              "legendFormat": "Succeeded",
+              "refId": "A"
+            }
+          ],
+          "title": "Succeeded Tasks",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] },
+              "unit": "short"
+            }
+          },
+          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 24 },
+          "id": 12,
+          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+          "targets": [
+            {
+              "expr": "django_ray_tasks_total{state=\"FAILED\"} or vector(0)",
+              "legendFormat": "Failed",
+              "refId": "A"
+            }
+          ],
+          "title": "Failed Tasks",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": false, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } },
+              "mappings": [],
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "unit": "short"
+            }
+          },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+          "id": 13,
+          "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+          "targets": [
+            {
+              "expr": "django_ray_tasks_total{state=\"QUEUED\"} or vector(0)",
+              "legendFormat": "Queued",
+              "refId": "A"
+            },
+            {
+              "expr": "django_ray_tasks_total{state=\"RUNNING\"} or vector(0)",
+              "legendFormat": "Running",
+              "refId": "B"
+            },
+            {
+              "expr": "django_ray_tasks_total{state=\"SUCCEEDED\"} or vector(0)",
+              "legendFormat": "Succeeded",
+              "refId": "C"
+            },
+            {
+              "expr": "django_ray_tasks_total{state=\"FAILED\"} or vector(0)",
+              "legendFormat": "Failed",
+              "refId": "D"
+            }
+          ],
+          "title": "Django-Ray Tasks Over Time",
+          "type": "timeseries"
+        }
+      ],
+      "refresh": "5s",
+      "schemaVersion": 38,
+      "style": "dark",
+      "tags": ["ray", "django-ray"],
+      "templating": {
+        "list": [
+          {
+            "current": { "selected": true, "text": "Prometheus", "value": "Prometheus" },
+            "hide": 0,
+            "includeAll": false,
+            "label": "Datasource",
+            "multi": false,
+            "name": "DS_PROMETHEUS",
+            "options": [],
+            "query": "prometheus",
+            "refresh": 1,
+            "regex": "",
+            "skipUrlSync": false,
+            "type": "datasource"
+          }
+        ]
+      },
+      "time": { "from": "now-15m", "to": "now" },
+      "timepicker": {},
+      "timezone": "",
+      "title": "Ray Cluster Dashboard",
+      "uid": "ray-cluster",
+      "version": 1,
+      "weekStart": ""
+    }
+---
+# Grafana Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: django-ray
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:10.2.0
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: "admin"
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: "admin"
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Admin"
+            # Allow embedding in iframes (required for Ray Dashboard)
+            - name: GF_SECURITY_ALLOW_EMBEDDING
+              value: "true"
+            - name: GF_AUTH_DISABLE_LOGIN_FORM
+              value: "false"
+            # CORS settings for Ray Dashboard integration
+            - name: GF_SECURITY_COOKIE_SAMESITE
+              value: "disabled"
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboards-provider
+          configMap:
+            name: grafana-dashboards-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+# Grafana Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-svc
+  namespace: django-ray
+  labels:
+    app: grafana
+spec:
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      nodePort: 30030  # Access via http://localhost:30030
+  type: NodePort
+---
+# ConfigMap containing the dashboard import script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-import-script
+  namespace: django-ray
+data:
+  import_dashboards.py: |
+    #!/usr/bin/env python3
+    """Import Ray Grafana dashboards into Grafana."""
+    import json
+    import urllib.request
+    import urllib.error
+    import os
+    import glob
+    import time
+    import sys
+
+    GRAFANA_URL = os.environ.get("GRAFANA_URL", "http://grafana-svc:3000")
+    DASHBOARDS_PATH = "/tmp/ray/session_latest/metrics/grafana/dashboards"
+    MAX_RETRIES = 30
+    RETRY_DELAY = 10
+
+    def wait_for_grafana():
+        """Wait for Grafana to be ready."""
+        print(f"Waiting for Grafana at {GRAFANA_URL}...")
+        for i in range(MAX_RETRIES):
+            try:
+                req = urllib.request.Request(f"{GRAFANA_URL}/api/health")
+                resp = urllib.request.urlopen(req, timeout=5)
+                if resp.status == 200:
+                    print("Grafana is ready!")
+                    return True
+            except Exception as e:
+                print(f"  Attempt {i+1}/{MAX_RETRIES}: {e}")
+            time.sleep(RETRY_DELAY)
+        return False
+
+    def wait_for_dashboards():
+        """Wait for Ray to generate dashboard files."""
+        print(f"Waiting for Ray dashboards at {DASHBOARDS_PATH}...")
+        for i in range(MAX_RETRIES):
+            pattern = os.path.join(DASHBOARDS_PATH, "*_dashboard.json")
+            files = glob.glob(pattern)
+            if files:
+                print(f"Found {len(files)} dashboard files!")
+                return True
+            print(f"  Attempt {i+1}/{MAX_RETRIES}: No dashboards yet...")
+            time.sleep(RETRY_DELAY)
+        return False
+
+    def import_dashboard(filepath):
+        """Import a single dashboard JSON file into Grafana."""
+        print(f"Importing {os.path.basename(filepath)}...")
+        
+        with open(filepath) as f:
+            dashboard = json.load(f)
+        
+        payload = json.dumps({
+            "dashboard": dashboard,
+            "overwrite": True,
+            "folderUid": "",
+        }).encode("utf-8")
+        
+        req = urllib.request.Request(
+            f"{GRAFANA_URL}/api/dashboards/db",
+            data=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        try:
+            resp = urllib.request.urlopen(req)
+            result = json.loads(resp.read().decode())
+            print(f"  OK: {result.get('status', 'success')} - {result.get('slug', 'unknown')}")
+            return True
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()
+            print(f"  HTTPError {e.code}: {error_body}")
+            return False
+        except Exception as e:
+            print(f"  Error: {type(e).__name__}: {e}")
+            return False
+
+    def main():
+        if not wait_for_grafana():
+            print("ERROR: Grafana not available")
+            return 1
+        
+        if not wait_for_dashboards():
+            print("ERROR: Ray dashboards not available")
+            return 1
+        
+        pattern = os.path.join(DASHBOARDS_PATH, "*_dashboard.json")
+        files = glob.glob(pattern)
+        
+        print(f"\nImporting {len(files)} dashboards...")
+        success = 0
+        for filepath in files:
+            if import_dashboard(filepath):
+                success += 1
+        
+        print(f"\nImported {success}/{len(files)} dashboards")
+        
+        if success == len(files):
+            print("Dashboard import complete! Sleeping to keep sidecar alive...")
+            # Sleep forever to prevent container from exiting
+            while True:
+                time.sleep(3600)
+        
+        return 1
+
+    if __name__ == "__main__":
+        sys.exit(main())
+

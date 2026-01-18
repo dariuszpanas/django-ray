@@ -56,9 +56,21 @@ spec:
           readinessProbe:
             exec:
               command:
-                - python
+                - /bin/sh
                 - -c
-                - "import django; django.setup(); print('ok')"
-            initialDelaySeconds: 10
+                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+            initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
 

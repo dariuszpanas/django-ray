@@ -24,6 +24,10 @@ spec:
       labels:
         app: ray
         component: head
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: ray-head
@@ -36,6 +40,8 @@ spec:
               name: dashboard
             - containerPort: 10001 # Client server
               name: client
+            - containerPort: 8080  # Prometheus metrics
+              name: metrics
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -43,6 +49,7 @@ spec:
                 --port=6379 \
                 --dashboard-host=0.0.0.0 \
                 --dashboard-port=8265 \
+                --metrics-export-port=8080 \
                 --num-cpus=4 \
                 --memory=8000000000 \
                 --object-store-memory=2000000000 \
@@ -51,6 +58,16 @@ spec:
           env:
             - name: RAY_DASHBOARD_HOST
               value: "0.0.0.0"
+            - name: RAY_METRICS_EXPORT_PORT
+              value: "8080"
+            - name: RAY_PROMETHEUS_HOST
+              value: "http://prometheus-svc:9090"
+            - name: RAY_GRAFANA_HOST
+              value: "http://grafana-svc:3000"
+            - name: RAY_GRAFANA_IFRAME_HOST
+              value: "http://localhost:30030"
+            - name: RAY_PROMETHEUS_NAME
+              value: "Prometheus"
           resources:
             requests:
               memory: "8Gi"
@@ -58,6 +75,9 @@ spec:
             limits:
               memory: "12Gi"
               cpu: "4"
+          volumeMounts:
+            - name: ray-tmp
+              mountPath: /tmp/ray
           readinessProbe:
             tcpSocket:
               port: 6379
@@ -68,6 +88,32 @@ spec:
               port: 6379
             initialDelaySeconds: 30
             periodSeconds: 10
+        # Sidecar container to import Ray dashboards into Grafana
+        - name: dashboard-importer
+          image: django-ray-worker:dev
+          command: ["python3", "/scripts/import_dashboards.py"]
+          env:
+            - name: GRAFANA_URL
+              value: "http://grafana-svc:3000"
+          volumeMounts:
+            - name: ray-tmp
+              mountPath: /tmp/ray
+            - name: import-script
+              mountPath: /scripts
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+      volumes:
+        - name: ray-tmp
+          emptyDir: {}
+        - name: import-script
+          configMap:
+            name: grafana-dashboard-import-script
+            defaultMode: 0755
 ---
 # Ray Head Service
 apiVersion: v1
@@ -93,6 +139,9 @@ spec:
     - name: client
       port: 10001
       targetPort: 10001
+    - name: metrics
+      port: 8080
+      targetPort: 8080
   type: NodePort
 ---
 # Ray Worker Nodes
@@ -115,6 +164,10 @@ spec:
       labels:
         app: ray
         component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       initContainers:
         - name: wait-for-head
@@ -124,15 +177,25 @@ spec:
         - name: ray-worker
           # Custom image with django-ray installed (built from Dockerfile.ray)
           image: django-ray-worker:dev
+          ports:
+            - containerPort: 8080  # Prometheus metrics
+              name: metrics
           command: ["/bin/bash", "-c"]
           args:
             - |
               ray start \
                 --address=ray-head-svc:6379 \
+                --metrics-export-port=8080 \
                 --num-cpus=4 \
                 --memory=8000000000 \
                 --object-store-memory=2000000000 \
                 --block
+          env:
+            # Enable Prometheus metrics export
+            - name: RAY_PROMETHEUS_HOST
+              value: "0.0.0.0"
+            - name: RAY_METRICS_EXPORT_PORT
+              value: "8080"
           resources:
             requests:
               memory: "8Gi"
@@ -146,8 +209,21 @@ spec:
           readinessProbe:
             exec:
               command:
-                - ray
-                - status
-            initialDelaySeconds: 10
+                - /bin/sh
+                - -c
+                - "ray status --address=ray-head-svc:6379 2>/dev/null | grep -q 'Active' || pgrep -f raylet"
+            initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "pgrep -f raylet || pgrep -f 'ray::'"
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
 

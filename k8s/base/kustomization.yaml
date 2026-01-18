@@ -13,6 +13,7 @@ resources:
   - django-web.yaml
   - django-ray-worker.yaml
   - django-setup-job.yaml
+  - monitoring.yaml
 
 commonLabels:
   app.kubernetes.io/name: django-ray
