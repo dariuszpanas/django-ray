@@ -28,7 +28,7 @@ Metrics to watch:
     - Response time for task creation (should be fast, just DB insert)
     - Task throughput (tasks created per second)
     - Ray Dashboard for task execution backlog
-    - Task completion rate (check /api/tasks/stats)
+    - Task completion rate (check /api/executions/stats)
 """
 
 import random
@@ -76,9 +76,8 @@ class TaskCreationMixin:
         a = a or random.randint(1, 100)
         b = b or random.randint(1, 100)
         with self.client.post(
-            "/api/enqueue/multiply_numbers",
-            json={"task_name": "multiply_numbers", "args": [a, b]},
-            name="/api/enqueue/multiply_numbers",
+            f"/api/enqueue/multiply/{a}/{b}",
+            name="/api/enqueue/multiply/[a]/[b]",
             catch_response=True,
         ) as response:
             if response.status_code == 200:
@@ -92,9 +91,8 @@ class TaskCreationMixin:
         """Create a CPU-intensive task."""
         n = n or random.randint(100000, 500000)
         with self.client.post(
-            "/api/enqueue/cpu_intensive_task",
-            json={"task_name": "cpu_intensive_task", "kwargs": {"n": n}},
-            name="/api/enqueue/cpu_intensive_task",
+            f"/api/enqueue/cpu/{n}",
+            name="/api/enqueue/cpu/[n]",
             catch_response=True,
         ) as response:
             if response.status_code == 200:
@@ -107,8 +105,8 @@ class TaskCreationMixin:
     def get_task_stats(self):
         """Get task statistics."""
         with self.client.get(
-            "/api/tasks/stats",
-            name="/api/tasks/stats",
+            "/api/executions/stats",
+            name="/api/executions/stats",
             catch_response=True,
         ) as response:
             if response.status_code == 200:
@@ -283,8 +281,8 @@ class MonitoringUser(HttpUser, TaskCreationMixin):
     def list_recent_tasks(self):
         """List recent tasks."""
         with self.client.get(
-            "/api/tasks?limit=20",
-            name="/api/tasks",
+            "/api/executions?limit=20",
+            name="/api/executions",
             catch_response=True,
         ) as response:
             if response.status_code == 200:

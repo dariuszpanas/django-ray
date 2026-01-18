@@ -38,6 +38,16 @@ def pytest_configure(config) -> None:  # type: ignore[no-untyped-def]
             DJANGO_RAY={
                 "RAY_ADDRESS": "ray://localhost:10001",
             },
+            # Django 6 Tasks configuration
+            TASKS={
+                "default": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["default", "high-priority", "low-priority"],
+                    "OPTIONS": {
+                        "RAY_ADDRESS": "auto",
+                    },
+                },
+            },
             DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
         )
 

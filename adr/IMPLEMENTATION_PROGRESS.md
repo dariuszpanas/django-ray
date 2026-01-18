@@ -9,7 +9,8 @@ This document tracks the implementation progress of django-ray, a Ray.io integra
 > **✅ Django 6 Task Framework Integration Completed!**
 > - Created `django_ray/backends.py` with `RayTaskBackend` class implementing Django's `BaseTaskBackend`
 > - Tasks now use Django 6's native `@task` decorator and `.enqueue()` API
-> - Full test suite passing (43 tests)
+> - Clean API with no deprecated endpoints
+> - Full test suite passing (47 tests)
 > - See [REVIEW_2026-01-18.md](./revisions/REVIEW_2026-01-18.md) for architecture review details.
 
 ---
@@ -32,9 +33,9 @@ This document tracks the implementation progress of django-ray, a Ray.io integra
   - Makefile with all common commands
   - GitHub Actions CI/CD workflow
 
-### Django 6 Task Backend Integration (NEW!)
+### Django 6 Task Backend Integration
 
-- [x] **Task Backend (`backends.py`)** ✨ NEW
+- [x] **Task Backend (`backends.py`)**
   - `RayTaskBackend` class implementing Django's `BaseTaskBackend` ABC
   - Supports deferred execution (`run_after`)
   - Supports result retrieval via `get_result()`
@@ -47,10 +48,11 @@ This document tracks the implementation progress of django-ray, a Ray.io integra
   - Result tracking via `TaskResult` objects
   - Queue selection via `.using(queue_name=...)`
 
-- [x] **Updated API Endpoints (`testproject/api.py`)**
-  - `/v2/enqueue/*` endpoints using Django 6 patterns
-  - `/v2/tasks/{task_id}` for Django-native task retrieval
-  - Legacy endpoints deprecated but still functional
+- [x] **Clean API Endpoints (`testproject/api.py`)**
+  - `/api/enqueue/*` - Task submission using Django 6 native API
+  - `/api/tasks/{task_id}` - Task result retrieval by UUID
+  - `/api/executions/*` - Admin/monitoring endpoints for execution tracking
+  - `/api/health` - Kubernetes health probe
 
 ### Django App (`src/django_ray/`)
 
@@ -126,20 +128,25 @@ This document tracks the implementation progress of django-ray, a Ray.io integra
 
 - [x] **REST API (`api.py`)**
   - Django Ninja API with Swagger UI
-  - Task management endpoints:
-    - `GET /api/tasks` - List tasks with filtering
-    - `GET /api/tasks/stats` - Task statistics
-    - `GET /api/tasks/{id}` - Get task details
-    - `POST /api/tasks` - Create new task
-    - `DELETE /api/tasks/{id}` - Delete task
-    - `POST /api/tasks/{id}/cancel` - Cancel task
-    - `POST /api/tasks/{id}/retry` - Retry failed task
-    - `POST /api/tasks/reset` - Reset stuck tasks
-  - Quick task endpoints:
+  - Task enqueueing (Django 6 native):
     - `POST /api/enqueue/add/{a}/{b}` - Add numbers
+    - `POST /api/enqueue/multiply/{a}/{b}` - Multiply numbers
     - `POST /api/enqueue/slow/{seconds}` - Slow task
     - `POST /api/enqueue/fail` - Failing task
-    - `POST /api/enqueue/{task_name}` - Generic enqueue
+    - `POST /api/enqueue/cpu/{n}` - CPU intensive task
+    - `POST /api/enqueue/echo` - Echo task
+  - Task results:
+    - `GET /api/tasks/{task_id}` - Get task by UUID
+  - Execution management (Admin):
+    - `GET /api/executions` - List executions with filtering
+    - `GET /api/executions/stats` - Execution statistics
+    - `GET /api/executions/{id}` - Get execution details
+    - `DELETE /api/executions/{id}` - Delete execution
+    - `POST /api/executions/{id}/cancel` - Cancel execution
+    - `POST /api/executions/{id}/retry` - Retry failed execution
+    - `POST /api/executions/reset` - Reset stuck executions
+  - Health:
+    - `GET /api/health` - Kubernetes health probe
 
 ### Testing
 
