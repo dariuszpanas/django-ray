@@ -157,35 +157,48 @@ class RayTaskExecution(models.Model):
         return f"{self.callable_path} ({self.state})"
 
 
-class RayWorkerLease(models.Model):
-    """Tracks active worker processes for coordination.
+class TaskWorkerLease(models.Model):
+    """Tracks active Django task worker processes for coordination.
 
-    Optional model for distributed worker coordination.
+    This model tracks workers running the `django_ray_worker` management command,
+    NOT Ray cluster workers. These Django workers:
+    - Claim tasks from the database
+    - Submit them to Ray for execution
+    - Update task status when complete
+
+    The lease enables detection of crashed workers through heartbeat expiration.
     """
 
     worker_id = models.CharField(
         max_length=255,
         primary_key=True,
+        help_text="Unique identifier for the worker process",
     )
     hostname = models.CharField(
         max_length=255,
+        help_text="Machine hostname where the worker is running",
     )
-    pid = models.PositiveIntegerField()
+    pid = models.PositiveIntegerField(
+        help_text="Process ID of the worker",
+    )
     queue_name = models.CharField(
         max_length=100,
         default="default",
         db_index=True,
+        help_text="Queue(s) this worker is processing (informational only)",
     )
     started_at = models.DateTimeField(
         default=timezone.now,
+        help_text="When the worker started",
     )
     last_heartbeat_at = models.DateTimeField(
         default=timezone.now,
+        help_text="Last heartbeat from the worker",
     )
 
     class Meta:
-        verbose_name = "Ray Worker Lease"
-        verbose_name_plural = "Ray Worker Leases"
+        verbose_name = "Task Worker Lease"
+        verbose_name_plural = "Task Worker Leases"
 
     def __str__(self) -> str:
-        return f"{self.worker_id} on {self.hostname}"
+        return f"Worker {self.worker_id[:8]}... on {self.hostname}"

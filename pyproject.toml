@@ -22,8 +22,8 @@ postgres = [
 
 [dependency-groups]
 dev = [
-    "ruff>=0.5.0",
-    "ty>=0.0.5",
+    "ruff>=0.14.13",
+    "ty>=0.0.12",
     "pytest>=7.0",
     "pytest-django>=4.7",
     "pytest-cov>=4.0",

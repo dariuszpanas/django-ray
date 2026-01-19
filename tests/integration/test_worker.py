@@ -58,7 +58,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process the task
-        cmd.claim_and_process_tasks(queue="default", concurrency=10)
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
 
         # Verify task was processed
         task.refresh_from_db()
@@ -91,7 +91,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process the task
-        cmd.claim_and_process_tasks(queue="default", concurrency=10)
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
 
         # Verify task failed permanently (no more retries)
         task.refresh_from_db()
@@ -122,7 +122,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process the task
-        cmd.claim_and_process_tasks(queue="default", concurrency=10)
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
 
         # Verify task is queued for retry
         task.refresh_from_db()
@@ -198,7 +198,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process only "other" queue
-        cmd.claim_and_process_tasks(queue="other", concurrency=10)
+        cmd.claim_and_process_tasks(queues=["other"], concurrency=10)
 
         # Verify only the "other" task was processed
         task_default.refresh_from_db()
@@ -233,7 +233,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process with concurrency of 2
-        cmd.claim_and_process_tasks(queue="default", concurrency=2)
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=2)
 
         # Count processed tasks
         processed = 0
@@ -265,7 +265,7 @@ class TestWorkerSync:
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
 
-        cmd.claim_and_process_tasks(queue="default", concurrency=10)
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
 
         task.refresh_from_db()
         assert task.state == TaskState.SUCCEEDED
@@ -275,3 +275,54 @@ class TestWorkerSync:
         result = json.loads(task.result_data)
         assert result["args"] == ["hello"]
         assert result["kwargs"] == {"key": "value", "number": 42}
+
+    def test_worker_processes_multiple_queues(self, setup_django_env):
+        """Test that the worker processes tasks from multiple queues."""
+        # Create tasks in different queues
+        task_default = RayTaskExecution.objects.create(
+            task_id="test-multi-queue-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[1, 1]",
+            kwargs_json="{}",
+        )
+        task_high = RayTaskExecution.objects.create(
+            task_id="test-multi-queue-002",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="high-priority",
+            state=TaskState.QUEUED,
+            args_json="[2, 2]",
+            kwargs_json="{}",
+        )
+        task_other = RayTaskExecution.objects.create(
+            task_id="test-multi-queue-003",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="other",
+            state=TaskState.QUEUED,
+            args_json="[3, 3]",
+            kwargs_json="{}",
+        )
+
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.style = cmd.style
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+
+        # Process both "default" and "high-priority" queues, but not "other"
+        cmd.claim_and_process_tasks(queues=["default", "high-priority"], concurrency=10)
+
+        # Verify tasks from both queues were processed
+        task_default.refresh_from_db()
+        task_high.refresh_from_db()
+        task_other.refresh_from_db()
+
+        assert task_default.state == TaskState.SUCCEEDED
+        assert task_default.result_data == "2"
+        assert task_high.state == TaskState.SUCCEEDED
+        assert task_high.result_data == "4"
+        assert task_other.state == TaskState.QUEUED  # Not processed

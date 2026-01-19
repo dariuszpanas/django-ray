@@ -311,4 +311,3 @@ class RayTaskBackend(BaseTaskBackend):
             )
 
         return errors
-

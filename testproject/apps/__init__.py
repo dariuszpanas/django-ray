@@ -18,4 +18,3 @@ Example usage:
     # Cluster mode (production)
     python manage.py django_ray_worker --cluster ray://head:10001 --queue=default
 """
-

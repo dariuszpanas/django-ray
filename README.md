@@ -164,7 +164,9 @@ make runserver
 
 **Terminal 2 - Start worker:**
 ```bash
-make worker-local   # Uses Ray locally (recommended)
+make worker-all     # Processes ALL queues (recommended for dev)
+# or
+make worker-local   # Processes default queue only
 # or
 make worker-sync    # No Ray, runs tasks in-process
 ```
@@ -174,6 +176,49 @@ make worker-sync    # No Ray, runs tasks in-process
 2. Try `POST /api/enqueue/add/100/200` - enqueues add_numbers(100, 200)
 3. Check `GET /api/tasks` - see task completed with result `300`
 4. View in Admin: http://127.0.0.1:8000/admin/django_ray/raytaskexecution/
+
+### Worker Queue Configuration
+
+The worker supports flexible queue configuration:
+
+```bash
+# Single queue (default)
+python manage.py django_ray_worker --queue=default
+
+# Multiple queues (comma-separated)
+python manage.py django_ray_worker --queue=default,high-priority,low-priority
+
+# Multiple queues (space-separated with --queues)
+python manage.py django_ray_worker --queues default high-priority low-priority
+
+# All configured queues
+python manage.py django_ray_worker --all-queues
+```
+
+**Make commands for common configurations:**
+```bash
+make worker-all       # All queues, local Ray
+make worker-all-sync  # All queues, sync mode (testing)
+make worker-ml        # ML queue only, local Ray
+make worker-multi     # default + high-priority + low-priority
+```
+
+### Example Apps
+
+The test project includes example apps demonstrating different Ray usage patterns:
+
+| App | Queue | Purpose | Usage |
+|-----|-------|---------|-------|
+| `sync_tasks` | `sync` | Testing without Ray | `make worker-all-sync` |
+| `local_ray` | `default` | CPU-intensive tasks | `make worker-local` |
+| `cluster_tasks` | `default` | Distributed patterns | `make worker-cluster` |
+| `ml_pipeline` | `ml` | ML workflows | `make worker-ml` |
+
+**API Endpoints for Example Apps:**
+- `/api/sync/calculate` - Simple calculation (sync queue)
+- `/api/local/fibonacci/{n}` - Fibonacci calculation
+- `/api/cluster/process-chunk` - Data chunk processing
+- `/api/ml/train` - Model training simulation
 
 ### Manual Commands
 
@@ -288,7 +333,7 @@ See [k8s/README.md](k8s/README.md) for detailed deployment documentation.
 ├── src/django_ray/      # Main package
 ├── __init__.py
 ├── apps.py              # Django app configuration
-├── models.py            # RayTaskExecution, RayWorkerLease
+├── models.py            # RayTaskExecution, TaskWorkerLease
 ├── admin.py             # Admin interface
 ├── conf/                # Configuration
 │   ├── defaults.py

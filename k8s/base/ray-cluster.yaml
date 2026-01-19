@@ -32,7 +32,8 @@ spec:
       containers:
         - name: ray-head
           # Custom image with django-ray installed (built from Dockerfile.ray)
-          image: django-ray-worker:dev
+          image: django-ray-worker:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 6379  # GCS server
               name: gcs
@@ -90,7 +91,8 @@ spec:
             periodSeconds: 10
         # Sidecar container to import Ray dashboards into Grafana
         - name: dashboard-importer
-          image: django-ray-worker:dev
+          image: django-ray-worker:latest
+          imagePullPolicy: IfNotPresent
           command: ["python3", "/scripts/import_dashboards.py"]
           env:
             - name: GRAFANA_URL
@@ -176,7 +178,8 @@ spec:
       containers:
         - name: ray-worker
           # Custom image with django-ray installed (built from Dockerfile.ray)
-          image: django-ray-worker:dev
+          image: django-ray-worker:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080  # Prometheus metrics
               name: metrics

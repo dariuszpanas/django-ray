@@ -11,4 +11,3 @@ Usage:
 The sync mode executes tasks directly in the worker process,
 making it easy to debug and test task logic.
 """
-

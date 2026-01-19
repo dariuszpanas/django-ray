@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import signal
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from types import FrameType
 from typing import Any
@@ -14,7 +15,7 @@ from django.db import transaction
 
 from django_ray.conf.settings import get_settings
 from django_ray.logging import get_worker_logger
-from django_ray.models import RayTaskExecution, RayWorkerLease, TaskState
+from django_ray.models import RayTaskExecution, TaskWorkerLease, TaskState
 from django_ray.runner.cancellation import finalize_cancellation
 from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
 from django_ray.runner.reconciliation import (
@@ -40,15 +41,28 @@ class Command(BaseCommand):
         self.local_ray_tasks: dict[int, Any] = {}  # task_pk -> ray ObjectRef
         self.last_reconciliation = 0.0  # Last time we ran stuck task detection
         self.reconciliation_interval = 30.0  # Check for stuck tasks every 30 seconds
-        self.lease: RayWorkerLease | None = None  # Worker lease for coordination
+        self.lease: TaskWorkerLease | None = None  # Worker lease for coordination
+        self.lease_queue_name: str = "default"  # Queue name for lease recreation
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add command arguments."""
         parser.add_argument(
             "--queue",
             type=str,
-            default="default",
-            help="Queue name to process (default: default)",
+            default=None,
+            help="Queue name to process (default: default). Use comma-separated for multiple queues.",
+        )
+        parser.add_argument(
+            "--queues",
+            type=str,
+            nargs="+",
+            default=None,
+            help="Queue names to process (space-separated). Alternative to --queue.",
+        )
+        parser.add_argument(
+            "--all-queues",
+            action="store_true",
+            help="Process tasks from all configured queues.",
         )
         parser.add_argument(
             "--concurrency",
@@ -75,7 +89,9 @@ class Command(BaseCommand):
 
     def handle(self, *args: Any, **options: Any) -> None:
         """Run the worker loop."""
-        queue = options["queue"]
+        # Parse queue arguments - support multiple ways to specify queues
+        queues = self._parse_queues(options)
+
         concurrency = options.get("concurrency")
         self.sync_mode = options.get("sync", False)
         self.local_mode = options.get("local", False)
@@ -86,10 +102,22 @@ class Command(BaseCommand):
             self.execution_mode = "sync"
         elif self.local_mode:
             self.execution_mode = "local"
-            self._init_local_ray()
+            try:
+                self._init_local_ray()
+            except Exception as e:
+                self.stdout.write(
+                    self.style.WARNING(f"Initial Ray init failed: {e}")
+                )
+                self.stdout.write("Will retry connection during operation...")
         elif self.cluster_address:
             self.execution_mode = "cluster"
-            self._init_cluster_ray(self.cluster_address)
+            try:
+                self._init_cluster_ray(self.cluster_address)
+            except Exception as e:
+                self.stdout.write(
+                    self.style.WARNING(f"Initial cluster connection failed: {e}")
+                )
+                self.stdout.write("Will retry connection during operation...")
         else:
             self.execution_mode = "ray"
 
@@ -102,18 +130,18 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(f"Starting django-ray worker {self.worker_id}")
         )
-        self.stdout.write(f"  Queue: {queue}")
+        self.stdout.write(f"  Queues: {', '.join(queues)}")
         self.stdout.write(f"  Concurrency: {concurrency}")
         self.stdout.write(f"  Mode: {self.execution_mode}")
 
         heartbeat_interval = get_heartbeat_interval().total_seconds()
 
-        # Create worker lease for distributed coordination
-        self._create_lease(queue)
+        # Create worker lease for distributed coordination (use first queue for lease)
+        self._create_lease(queues[0] if len(queues) == 1 else ",".join(queues))
 
         try:
             self.run_loop(
-                queue=queue,
+                queues=queues,
                 concurrency=concurrency,
                 heartbeat_interval=heartbeat_interval,
             )
@@ -121,6 +149,49 @@ class Command(BaseCommand):
             self.stdout.write("\nShutdown requested via keyboard interrupt")
         finally:
             self.shutdown()
+
+    def _parse_queues(self, options: dict[str, Any]) -> list[str]:
+        """Parse queue arguments from command options.
+
+        Supports multiple ways to specify queues:
+        - --queue default (single queue)
+        - --queue default,high-priority,low-priority (comma-separated)
+        - --queues default high-priority low-priority (space-separated)
+        - --all-queues (all configured queues from TASKS setting)
+
+        Args:
+            options: Command options dictionary.
+
+        Returns:
+            List of queue names to process.
+        """
+        from django.conf import settings as django_settings
+
+        # Check for --all-queues flag first
+        if options.get("all_queues"):
+            tasks_config = getattr(django_settings, "TASKS", {})
+            default_backend = tasks_config.get("default", {})
+            configured_queues = default_backend.get("QUEUES", ["default"])
+            self.stdout.write(
+                self.style.NOTICE(
+                    f"Processing all configured queues: {configured_queues}"
+                )
+            )
+            return list(configured_queues)
+
+        # Check for --queues (space-separated list)
+        if options.get("queues"):
+            return options["queues"]
+
+        # Check for --queue (single or comma-separated)
+        queue_arg = options.get("queue")
+        if queue_arg:
+            if "," in queue_arg:
+                return [q.strip() for q in queue_arg.split(",") if q.strip()]
+            return [queue_arg]
+
+        # Default to "default" queue
+        return ["default"]
 
     def _init_local_ray(self) -> None:
         """Initialize a local Ray instance."""
@@ -163,25 +234,29 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS("  Dashboard: http://127.0.0.1:8265"))
 
     def _init_cluster_ray(self, address: str) -> None:
-        """Connect to a remote Ray cluster."""
+        """Connect to a remote Ray cluster.
+
+        Args:
+            address: Ray cluster address (e.g., 'ray://localhost:10001')
+
+        Raises:
+            Exception: If connection fails (caller should handle retry)
+        """
         import ray
 
-        if not ray.is_initialized():
-            self.stdout.write(f"Connecting to Ray cluster at {address}...")
-            try:
-                ray.init(
-                    address=address,
-                    ignore_reinit_error=True,
-                )
-                self.stdout.write(self.style.SUCCESS("Connected to Ray cluster"))
-                # Show cluster resources
-                resources = ray.cluster_resources()
-                self.stdout.write(f"  Cluster resources: {resources}")
-            except Exception as e:
-                self.stdout.write(
-                    self.style.ERROR(f"Failed to connect to Ray cluster: {e}")
-                )
-                raise
+        # Shutdown any existing connection first
+        if ray.is_initialized():
+            ray.shutdown()
+
+        self.stdout.write(f"Connecting to Ray cluster at {address}...")
+        ray.init(
+            address=address,
+            ignore_reinit_error=True,
+        )
+        self.stdout.write(self.style.SUCCESS("Connected to Ray cluster"))
+        # Show cluster resources
+        resources = ray.cluster_resources()
+        self.stdout.write(f"  Cluster resources: {resources}")
 
     def _create_lease(self, queue: str) -> None:
         """Create a worker lease for distributed coordination.
@@ -195,20 +270,19 @@ class Command(BaseCommand):
         import os
         import socket
 
+        # Store queue for potential lease recreation
+        self.lease_queue_name = queue
+
         try:
-            self.lease = RayWorkerLease.objects.create(
+            self.lease = TaskWorkerLease.objects.create(
                 worker_id=self.worker_id,
                 hostname=socket.gethostname(),
                 pid=os.getpid(),
                 queue_name=queue,
             )
-            self.stdout.write(
-                self.style.SUCCESS(f"  Lease created: {self.worker_id}")
-            )
+            self.stdout.write(self.style.SUCCESS(f"  Lease created: {self.worker_id}"))
         except Exception as e:
-            self.stdout.write(
-                self.style.WARNING(f"  Failed to create lease: {e}")
-            )
+            self.stdout.write(self.style.WARNING(f"  Failed to create lease: {e}"))
             # Continue without lease - worker will still function
 
     def setup_signal_handlers(self) -> None:
@@ -225,11 +299,17 @@ class Command(BaseCommand):
 
     def run_loop(
         self,
-        queue: str,
+        queues: Sequence[str],
         concurrency: int,
         heartbeat_interval: float,
     ) -> None:
-        """Run the main worker loop."""
+        """Run the main worker loop.
+
+        Args:
+            queues: Sequence of queue names to process (not modified).
+            concurrency: Maximum concurrent tasks.
+            heartbeat_interval: Seconds between heartbeats.
+        """
         last_heartbeat = 0.0
 
         while not self.shutdown_requested:
@@ -244,66 +324,225 @@ class Command(BaseCommand):
             if self.execution_mode in ("local", "cluster") and self.local_ray_tasks:
                 self.poll_local_ray_tasks()
 
-            # Claim and process tasks
-            self.claim_and_process_tasks(queue, concurrency)
+            # Claim and process tasks from all queues
+            self.claim_and_process_tasks(queues, concurrency)
 
             # Reconcile stuck tasks (periodically)
             if current_time - self.last_reconciliation >= self.reconciliation_interval:
                 self.reconcile_tasks()
                 self.detect_stuck_tasks()
                 self.process_cancellations()
+                self.cleanup_expired_leases()
                 self.last_reconciliation = current_time
 
             # Sleep briefly to avoid busy-waiting
             time.sleep(0.1)
 
     def send_heartbeat(self) -> None:
-        """Send worker heartbeat and update lease."""
+        """Send worker heartbeat, update lease, and check Ray connection."""
         from django.utils import timezone
 
         # Update worker lease if we have one
         if self.lease is not None:
             try:
+                # Refresh from DB to check if lease still exists
+                self.lease.refresh_from_db()
                 self.lease.last_heartbeat_at = timezone.now()
                 self.lease.save(update_fields=["last_heartbeat_at"])
-            except Exception:
-                pass  # Best effort - don't fail on heartbeat issues
+            except TaskWorkerLease.DoesNotExist:
+                # Lease was deleted (by another worker's cleanup) - recreate it
+                self.stdout.write(
+                    self.style.WARNING("\nLease was deleted, recreating...")
+                )
+                self._recreate_lease()
+            except Exception as e:
+                # Database error - try to recreate lease on next heartbeat
+                self.stdout.write(
+                    self.style.WARNING(f"\nHeartbeat failed: {e}")
+                )
+
+        # Check Ray connection health for local/cluster modes
+        if self.execution_mode in ("local", "cluster"):
+            self._check_ray_connection()
 
         self.stdout.write(".", ending="")
         self.stdout.flush()
 
-    def claim_and_process_tasks(self, queue: str, concurrency: int) -> None:
-        """Claim and submit tasks for execution."""
+    def _recreate_lease(self) -> None:
+        """Recreate the worker lease after it was deleted."""
+        import os
+        import socket
+        from django.utils import timezone
+
+        queue_name = getattr(self, "lease_queue_name", "default")
+
+        try:
+            # Use update_or_create to handle race conditions
+            self.lease, created = TaskWorkerLease.objects.update_or_create(
+                worker_id=self.worker_id,
+                defaults={
+                    "hostname": socket.gethostname(),
+                    "pid": os.getpid(),
+                    "queue_name": queue_name,
+                    "last_heartbeat_at": timezone.now(),
+                }
+            )
+            action = "created" if created else "updated"
+            self.stdout.write(self.style.SUCCESS(f"  Lease {action}: {self.worker_id}"))
+        except Exception as e:
+            self.stdout.write(self.style.WARNING(f"  Failed to recreate lease: {e}"))
+
+    def _check_ray_connection(self) -> None:
+        """Check if Ray connection is healthy and reconnect if needed."""
+        import ray
+
+        try:
+            # Quick health check - try to get cluster resources
+            if ray.is_initialized():
+                # This will fail if the connection is broken
+                ray.cluster_resources()
+                return  # Connection is healthy
+        except Exception as e:
+            self.stdout.write(
+                self.style.WARNING(f"\nRay connection lost: {e}")
+            )
+
+        # Connection is broken or Ray is not initialized - try to reconnect
+        self._reconnect_ray()
+
+    def _reconnect_ray(self) -> None:
+        """Attempt to reconnect to Ray cluster."""
+        import ray
+
+        self.stdout.write(self.style.WARNING("\nAttempting to reconnect to Ray..."))
+
+        # First, shutdown existing connection if any
+        try:
+            if ray.is_initialized():
+                ray.shutdown()
+                self.stdout.write("  Shut down existing Ray connection")
+        except Exception as e:
+            self.stdout.write(f"  Error during shutdown: {e}")
+
+        # Wait a moment before reconnecting
+        time.sleep(2)
+
+        # Reconnect based on execution mode
+        max_retries = 5
+        retry_delay = 5  # seconds
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                if self.execution_mode == "local":
+                    self._init_local_ray()
+                elif self.execution_mode == "cluster" and self.cluster_address:
+                    self._init_cluster_ray(self.cluster_address)
+
+                # Verify connection
+                if ray.is_initialized():
+                    resources = ray.cluster_resources()
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"\n  Reconnected to Ray (attempt {attempt}/{max_retries})"
+                        )
+                    )
+                    self.stdout.write(f"  Cluster resources: {resources}")
+
+                    # Clear any stale Ray task references - they're invalid now
+                    if self.local_ray_tasks:
+                        stale_count = len(self.local_ray_tasks)
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"  Clearing {stale_count} stale Ray task references"
+                            )
+                        )
+                        # Mark these tasks as LOST so they can be retried
+                        self._mark_stale_tasks_as_lost()
+                        self.local_ray_tasks.clear()
+
+                    return  # Success!
+
+            except Exception as e:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"  Reconnection attempt {attempt}/{max_retries} failed: {e}"
+                    )
+                )
+                if attempt < max_retries:
+                    self.stdout.write(f"  Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
+
+        self.stdout.write(
+            self.style.ERROR(
+                f"\n  Failed to reconnect after {max_retries} attempts. "
+                "Worker will continue but Ray tasks will fail."
+            )
+        )
+
+    def _mark_stale_tasks_as_lost(self) -> None:
+        """Mark tasks with stale Ray references as LOST so they can be retried."""
+        if not self.local_ray_tasks:
+            return
+
+        task_ids = list(self.local_ray_tasks.keys())
+        now = datetime.now(timezone.utc)
+
+        count = RayTaskExecution.objects.filter(
+            pk__in=task_ids,
+            state=TaskState.RUNNING,
+        ).update(
+            state=TaskState.LOST,
+            finished_at=now,
+            error_message="Ray connection lost - task state unknown",
+        )
+
+        if count > 0:
+            self.stdout.write(
+                self.style.WARNING(f"  Marked {count} running tasks as LOST")
+            )
+
+    def claim_and_process_tasks(self, queues: Sequence[str], concurrency: int) -> None:
+        """Claim and submit tasks for execution.
+
+        Args:
+            queues: Sequence of queue names to process (not modified).
+            concurrency: Maximum concurrent tasks.
+        """
         # Check how many slots are available
         active_count = len(self.active_tasks) + len(self.local_ray_tasks)
         available_slots = concurrency - active_count
         if available_slots <= 0:
             return
 
-        # Claim tasks
+        # Claim tasks from any of the specified queues
         now = datetime.now(timezone.utc)
         with transaction.atomic():
-            # Find queued tasks that are ready to run
+            # Find queued tasks that are ready to run (run_after is null)
+            # Order by created_at to ensure FIFO ordering
             tasks = list(
                 RayTaskExecution.objects.select_for_update(skip_locked=True)
                 .filter(
                     state=TaskState.QUEUED,
-                    queue_name=queue,
+                    queue_name__in=queues,
                 )
                 .filter(
                     # run_after is null OR run_after <= now
                     run_after__isnull=True,
-                )[:available_slots]
+                )
+                .order_by("created_at")[:available_slots]
             )
 
             # Also get tasks with run_after <= now
             if len(tasks) < available_slots:
                 more_tasks = list(
-                    RayTaskExecution.objects.select_for_update(skip_locked=True).filter(
+                    RayTaskExecution.objects.select_for_update(skip_locked=True)
+                    .filter(
                         state=TaskState.QUEUED,
-                        queue_name=queue,
+                        queue_name__in=queues,
                         run_after__lte=now,
-                    )[: available_slots - len(tasks)]
+                    )
+                    .order_by("created_at")[: available_slots - len(tasks)]
                 )
                 tasks.extend(more_tasks)
 
@@ -324,10 +563,14 @@ class Command(BaseCommand):
         )
 
         if self.execution_mode == "sync":
+            # Execute without Ray - purely synchronous
             self.execute_task_sync(task)
         elif self.execution_mode in ("local", "cluster"):
-            self.execute_task_local_ray(task)
+            # Execute on this process with Ray available for distributed computing
+            # This allows tasks to use parallel_map, scatter_gather, etc.
+            self.execute_task_with_ray_available(task)
         else:
+            # Legacy: submit entire task as a Ray job
             self.submit_task_to_ray(task)
 
     def execute_task_sync(self, task: RayTaskExecution) -> None:
@@ -442,9 +685,107 @@ class Command(BaseCommand):
                 )
             )
 
-    def execute_task_local_ray(self, task: RayTaskExecution) -> None:
-        """Submit a task to local Ray (non-blocking)."""
+    def execute_task_with_ray_available(self, task: RayTaskExecution) -> None:
+        """Execute a task directly with Ray available for distributed computing.
+
+        This runs the task on the current process (not inside a Ray task),
+        which allows the task code to spawn Ray tasks that use the FULL cluster.
+
+        This is the recommended mode for tasks that use parallel_map, scatter_gather,
+        or other distributed computing patterns.
+        """
         import ray
+        from django_ray.runtime.entrypoint import execute_task
+
+        # Ensure Ray is connected
+        if not ray.is_initialized():
+            self.stdout.write(
+                self.style.WARNING("  Ray not initialized, attempting to connect...")
+            )
+            self._reconnect_ray()
+
+            if not ray.is_initialized():
+                self._handle_task_failure(
+                    task,
+                    error_message="Ray cluster not available",
+                    exception_type="RayConnectionError",
+                )
+                return
+
+        self.stdout.write(
+            f"  Executing with Ray available (CPUs: {ray.cluster_resources().get('CPU', 0)})..."
+        )
+
+        try:
+            # Execute task directly - this allows it to spawn Ray tasks
+            result_json = execute_task(
+                callable_path=task.callable_path,
+                serialized_args=task.args_json,
+                serialized_kwargs=task.kwargs_json,
+            )
+            result = json.loads(result_json)
+
+            now = datetime.now(timezone.utc)
+            if result["success"]:
+                task.state = TaskState.SUCCEEDED
+                task.result_data = json.dumps(result["result"])
+                task.finished_at = now
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"  Task {task.pk} succeeded: {result['result']}"
+                    )
+                )
+                task.save(
+                    update_fields=[
+                        "state",
+                        "result_data",
+                        "finished_at",
+                    ]
+                )
+            else:
+                self._handle_task_failure(
+                    task,
+                    error_message=result["error"],
+                    error_traceback=result.get("traceback"),
+                    exception_type=result.get("exception_type"),
+                )
+
+        except Exception as e:
+            import traceback
+            self._handle_task_failure(
+                task,
+                error_message=str(e),
+                error_traceback=traceback.format_exc(),
+                exception_type=type(e).__name__,
+            )
+
+    def execute_task_local_ray(self, task: RayTaskExecution) -> None:
+        """Submit a task to local Ray (non-blocking).
+
+        NOTE: This wraps the entire task in @ray.remote, which means the task
+        runs INSIDE a Ray worker. If the task tries to use parallel_map or
+        other distributed utilities, those become nested Ray tasks.
+
+        For true distributed computing, use execute_task_with_ray_available instead.
+        """
+        import ray
+
+        # Ensure Ray is connected before submitting
+        if not ray.is_initialized():
+            self.stdout.write(
+                self.style.WARNING("  Ray not initialized, attempting to connect...")
+            )
+            self._reconnect_ray()
+
+            # Check again after reconnection attempt
+            if not ray.is_initialized():
+                # Can't submit to Ray - mark task for retry
+                self._handle_task_failure(
+                    task,
+                    error_message="Ray cluster not available",
+                    exception_type="RayConnectionError",
+                )
+                return
 
         # Extract short name from callable path for dashboard visibility
         task_name = task.callable_path.split(".")[-1] if task.callable_path else "task"
@@ -506,11 +847,28 @@ class Command(BaseCommand):
         if not self.local_ray_tasks:
             return
 
+        # Check if Ray is still connected
+        if not ray.is_initialized():
+            self.stdout.write(
+                self.style.WARNING("\nRay disconnected while tasks were running")
+            )
+            # Mark all running tasks as lost - they need to be retried
+            self._mark_stale_tasks_as_lost()
+            self.local_ray_tasks.clear()
+            return
+
         # Get list of all pending refs
         pending_refs = list(self.local_ray_tasks.values())
 
-        # Check for completed tasks (non-blocking with timeout=0)
-        ready_refs, _ = ray.wait(pending_refs, num_returns=len(pending_refs), timeout=0)
+        try:
+            # Check for completed tasks (non-blocking with timeout=0)
+            ready_refs, _ = ray.wait(pending_refs, num_returns=len(pending_refs), timeout=0)
+        except Exception as e:
+            self.stdout.write(
+                self.style.WARNING(f"\nError polling Ray tasks: {e}")
+            )
+            # Connection may be broken - the heartbeat will handle reconnection
+            return
 
         if not ready_refs:
             return
@@ -716,6 +1074,7 @@ class Command(BaseCommand):
                 # Cancel the running task if we're tracking it
                 if task.pk in self.local_ray_tasks:
                     import ray
+
                     try:
                         ray.cancel(self.local_ray_tasks[task.pk], force=True)
                     except Exception:
@@ -776,6 +1135,26 @@ class Command(BaseCommand):
                 self.style.WARNING(f"Detected {timeout_count} timed out task(s)")
             )
 
+    def cleanup_expired_leases(self) -> None:
+        """Clean up expired worker leases from other workers.
+
+        This helps keep the TaskWorkerLease table clean by removing
+        records from workers that have crashed without graceful shutdown.
+        """
+        from django_ray.runner.leasing import cleanup_expired_leases
+
+        try:
+            deleted_count = cleanup_expired_leases()
+            if deleted_count > 0:
+                self.stdout.write(
+                    self.style.NOTICE(
+                        f"\nCleaned up {deleted_count} expired worker lease(s)"
+                    )
+                )
+        except Exception as e:
+            # Don't fail on lease cleanup errors
+            self.logger.warning(f"Failed to cleanup expired leases: {e}")
+
     def process_cancellations(self) -> None:
         """Process tasks that have been requested for cancellation.
 
@@ -807,9 +1186,7 @@ class Command(BaseCommand):
 
             # Finalize the cancellation
             finalize_cancellation(task)
-            self.stdout.write(
-                self.style.SUCCESS(f"  Task {task.pk} cancelled")
-            )
+            self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} cancelled"))
 
     def shutdown(self) -> None:
         """Perform graceful shutdown."""

@@ -84,6 +84,21 @@ worker-local:
 worker-cluster:
 	cd testproject && python manage.py django_ray_worker --queue=default --cluster=ray://localhost:10001
 
+# Worker with all queues (for development - processes everything)
+worker-all:
+	cd testproject && python manage.py django_ray_worker --all-queues --local
+
+worker-all-sync:
+	cd testproject && python manage.py django_ray_worker --all-queues --sync
+
+# Worker for ML queue only
+worker-ml:
+	cd testproject && python manage.py django_ray_worker --queue=ml --local
+
+# Worker for multiple specific queues (comma-separated)
+worker-multi:
+	cd testproject && python manage.py django_ray_worker --queue=default,high-priority,low-priority --local
+
 # Test connection to Ray cluster
 test-cluster:
 	python scripts/test_ray_cluster.py --address=ray://localhost:10001
@@ -146,9 +161,9 @@ docker-run-worker:
 # Build Docker images for Kubernetes
 k8s-build:
 	@echo "Building Django web image..."
-	docker build -t django-ray:dev .
+	docker build -t django-ray:latest .
 	@echo "Building Ray worker image (with django-ray installed)..."
-	docker build -f Dockerfile.ray -t django-ray-worker:dev .
+	docker build -f Dockerfile.ray -t django-ray-worker:latest .
 
 # Deploy to Kubernetes cluster
 k8s-deploy: k8s-build
@@ -186,7 +201,7 @@ k8s-reset:
 	@echo "Waiting for namespace to be fully deleted..."
 	@powershell -Command "while (kubectl get namespace django-ray -o name 2>$$null) { Start-Sleep -Seconds 2 }"
 	@echo "Redeploying..."
-	$(MAKE) k8s-deploy-local
+	$(MAKE) k8s-deploy
 
 # Show deployment status
 k8s-status:

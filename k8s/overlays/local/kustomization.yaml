@@ -165,8 +165,8 @@ patches:
 images:
   - name: django-ray
     newName: django-ray
-    newTag: dev
+    newTag: latest
   - name: django-ray-worker
     newName: django-ray-worker
-    newTag: dev
+    newTag: latest
 

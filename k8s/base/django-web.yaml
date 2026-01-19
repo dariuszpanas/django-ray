@@ -28,6 +28,7 @@ spec:
         # Run migrations
         - name: run-migrations
           image: django-ray:latest
+          imagePullPolicy: IfNotPresent
           args: ['migrate']
           envFrom:
             - configMapRef:
@@ -37,6 +38,7 @@ spec:
         # Collect static files
         - name: collect-static
           image: django-ray:latest
+          imagePullPolicy: IfNotPresent
           args: ['collectstatic']
           envFrom:
             - configMapRef:
@@ -49,6 +51,7 @@ spec:
       containers:
         - name: django-web
           image: django-ray:latest
+          imagePullPolicy: IfNotPresent
           args: ['web']  # Uses gunicorn in production
           ports:
             - containerPort: 8000

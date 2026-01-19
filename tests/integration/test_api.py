@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 
 import pytest
 from django.test import Client
@@ -305,4 +304,3 @@ class TestExecutionsAPI:
         assert data["queued"] == 1
         assert data["succeeded"] == 1
         assert data["failed"] == 1
-

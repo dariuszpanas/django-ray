@@ -22,6 +22,7 @@ spec:
       containers:
         - name: django-setup
           image: django-ray:latest
+          imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c"]
           args:
             - |

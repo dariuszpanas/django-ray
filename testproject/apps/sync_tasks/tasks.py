@@ -74,7 +74,7 @@ def validate_email(email: str) -> dict[str, Any]:
     """
     import re
 
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
     is_valid = bool(re.match(pattern, email))
 
     return {
@@ -101,4 +101,3 @@ def generate_report(data: dict[str, Any]) -> str:
 
     lines.append("=" * 40)
     return "\n".join(lines)
-

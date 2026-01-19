@@ -25,5 +25,5 @@ images:
     newTag: latest
   - name: django-ray-worker
     newName: django-ray-worker
-    newTag: dev
+    newTag: latest
 

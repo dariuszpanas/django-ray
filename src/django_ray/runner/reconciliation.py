@@ -99,4 +99,3 @@ def mark_task_timed_out(task_execution: RayTaskExecution) -> None:
     task_execution.finished_at = datetime.now(timezone.utc)
     task_execution.error_message = f"Task timed out after {timeout} seconds"
     task_execution.save(update_fields=["state", "finished_at", "error_message"])
-

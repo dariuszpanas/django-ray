@@ -93,7 +93,6 @@ class RayCoreRunner(BaseRunner):
         ) -> str:
             """Execute a Django task on a Ray worker."""
             import json
-            import sys
 
             print(f"[Task {task_id}] Starting: {callable_path}", flush=True)
 
@@ -256,13 +255,15 @@ class RayCoreRunner(BaseRunner):
                 completed.append((task_pk, result_json))
             except Exception as e:
                 # Return error as JSON
-                error_result = json.dumps({
-                    "success": False,
-                    "result": None,
-                    "error": str(e),
-                    "traceback": None,
-                    "exception_type": type(e).__module__ + "." + type(e).__name__,
-                })
+                error_result = json.dumps(
+                    {
+                        "success": False,
+                        "result": None,
+                        "error": str(e),
+                        "traceback": None,
+                        "exception_type": type(e).__module__ + "." + type(e).__name__,
+                    }
+                )
                 completed.append((task_pk, error_result))
 
             # Remove from pending
@@ -274,4 +275,3 @@ class RayCoreRunner(BaseRunner):
     def pending_count(self) -> int:
         """Get the number of pending tasks."""
         return len(self._pending_tasks)
-

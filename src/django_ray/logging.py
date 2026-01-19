@@ -143,4 +143,3 @@ def configure_default_logging(level: int = logging.INFO) -> None:
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.setLevel(level)
-

@@ -5,12 +5,19 @@ These tasks demonstrate patterns that work well in a distributed Ray cluster:
 - Fan-out/fan-in patterns
 - Long-running batch jobs
 
-Example:
-    from testproject.apps.cluster_tasks.tasks import process_chunk
+IMPORTANT: These tasks use Ray's distributed computing capabilities.
+When running on a Ray cluster, the work is actually parallelized across
+all available workers. When Ray is not available, they fall back to
+sequential execution.
 
-    # Process data in chunks across cluster
-    for chunk in chunks:
-        process_chunk.enqueue(data=chunk)
+Example:
+    from testproject.apps.cluster_tasks.tasks import distributed_search
+
+    # This will actually search in parallel across the Ray cluster!
+    result = distributed_search.enqueue(
+        pattern="test",
+        data_sources=["source1", "source2", "source3", ...]
+    )
 """
 
 from __future__ import annotations
@@ -21,13 +28,29 @@ from typing import Any
 
 from django.tasks import task
 
+# Import distributed computing utilities
+from django_ray.runtime.distributed import (
+    get_num_workers,
+    get_total_cpus,
+    is_ray_available,
+    parallel_map,
+    parallel_starmap,
+    scatter_gather,
+)
+
+
+def _process_single_item(item: Any) -> dict[str, Any]:
+    """Process a single item (runs on Ray worker)."""
+    item_hash = hashlib.md5(str(item).encode()).hexdigest()[:8]
+    return {"original": item, "hash": item_hash}
+
 
 @task(queue_name="default")
 def process_chunk(data: list[Any], chunk_id: int = 0) -> dict[str, Any]:
-    """Process a chunk of data.
+    """Process a chunk of data using distributed computing.
 
-    Designed for distributed data processing where large datasets
-    are split into chunks and processed in parallel.
+    When Ray is available, each item is processed in parallel across
+    the entire cluster. Otherwise falls back to sequential processing.
 
     Args:
         data: List of items to process
@@ -38,12 +61,8 @@ def process_chunk(data: list[Any], chunk_id: int = 0) -> dict[str, Any]:
     """
     start = time.time()
 
-    # Simulate processing
-    processed = []
-    for item in data:
-        # Hash each item
-        item_hash = hashlib.md5(str(item).encode()).hexdigest()[:8]
-        processed.append({"original": item, "hash": item_hash})
+    # This actually distributes work across the Ray cluster!
+    processed = parallel_map(_process_single_item, data)
 
     elapsed = time.time() - start
 
@@ -53,6 +72,9 @@ def process_chunk(data: list[Any], chunk_id: int = 0) -> dict[str, Any]:
         "output_count": len(processed),
         "elapsed_seconds": round(elapsed, 4),
         "sample": processed[:3] if processed else [],
+        "distributed": is_ray_available(),
+        "cluster_cpus": get_total_cpus(),
+        "cluster_workers": get_num_workers(),
     }
 
 
@@ -81,15 +103,32 @@ def aggregate_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _search_single_source(source: str, pattern: str, case_sensitive: bool = False) -> dict[str, Any] | None:
+    """Search a single data source (runs on Ray worker)."""
+    time.sleep(0.1)  # Simulate 100ms I/O per source
+
+    search_pattern = pattern if case_sensitive else pattern.lower()
+    search_source = source if case_sensitive else source.lower()
+
+    if search_pattern in search_source:
+        return {
+            "source": source,
+            "matches": 1,
+            "positions": [search_source.find(search_pattern)],
+        }
+    return None
+
+
 @task(queue_name="default")
 def distributed_search(
     pattern: str,
     data_sources: list[str],
     case_sensitive: bool = False,
 ) -> dict[str, Any]:
-    """Search for a pattern across multiple data sources.
+    """Search for a pattern across multiple data sources IN PARALLEL.
 
-    Simulates a distributed search operation.
+    This is a TRUE distributed search - when running on a Ray cluster,
+    each data source is searched on a different worker simultaneously.
 
     Args:
         pattern: Search pattern
@@ -97,27 +136,119 @@ def distributed_search(
         case_sensitive: Whether search is case-sensitive
 
     Returns:
-        Search results
+        Search results with cluster info
     """
-    results = []
+    start = time.time()
 
-    for source in data_sources:
-        # Simulate searching this source
-        time.sleep(0.01)  # Simulate I/O
+    # Create argument tuples for parallel execution
+    search_args = [(source, pattern, case_sensitive) for source in data_sources]
 
-        # Mock result
-        if pattern.lower() in source.lower():
-            results.append({
-                "source": source,
-                "matches": 1,
-                "positions": [source.lower().find(pattern.lower())],
-            })
+    # This distributes the search across the entire Ray cluster!
+    all_results = parallel_starmap(_search_single_source, search_args)
+
+    # Filter out None results
+    results = [r for r in all_results if r is not None]
+
+    elapsed = time.time() - start
+
+    # Calculate what sequential would have taken
+    sequential_estimate = len(data_sources) * 0.1  # 100ms per source
 
     return {
         "pattern": pattern,
         "sources_searched": len(data_sources),
         "matches_found": len(results),
         "results": results,
+        "elapsed_seconds": round(elapsed, 4),
+        "sequential_estimate_seconds": round(sequential_estimate, 4),
+        "speedup": round(sequential_estimate / elapsed, 2) if elapsed > 0 else 0,
+        "distributed": is_ray_available(),
+        "cluster_cpus": get_total_cpus(),
+        "cluster_workers": get_num_workers(),
+    }
+
+
+def _cpu_intensive_work(item_id: int, duration_seconds: float) -> dict[str, Any]:
+    """CPU-intensive work that runs on Ray worker."""
+    import hashlib
+
+    start = time.time()
+    iterations = 0
+    data = f"item_{item_id}_data".encode() * 100
+
+    # Burn CPU for the specified duration
+    while (time.time() - start) < duration_seconds:
+        hashlib.sha256(data).hexdigest()
+        iterations += 1
+
+    actual_duration = time.time() - start
+    return {
+        "item_id": item_id,
+        "iterations": iterations,
+        "duration_seconds": round(actual_duration, 4),
+    }
+
+
+@task(queue_name="default")
+def distributed_cpu_benchmark(
+    num_items: int = 10,
+    seconds_per_item: float = 2.0,
+) -> dict[str, Any]:
+    """Benchmark distributed CPU work across the cluster.
+
+    This task spawns num_items Ray tasks, each doing CPU work for
+    seconds_per_item seconds. With a cluster, these run in parallel.
+
+    Args:
+        num_items: Number of parallel CPU tasks to spawn
+        seconds_per_item: How long each task should burn CPU
+
+    Returns:
+        Benchmark results showing parallelization benefit
+    """
+    start = time.time()
+
+    # Create work items
+    work_items = [(i, seconds_per_item) for i in range(num_items)]
+
+    # Execute in parallel across cluster
+    results = parallel_starmap(_cpu_intensive_work, work_items)
+
+    elapsed = time.time() - start
+    sequential_estimate = num_items * seconds_per_item
+
+    # Calculate effective parallelism (how many tasks ran truly in parallel)
+    # This is more accurate than using Ray's reported CPUs
+    effective_parallelism = sequential_estimate / elapsed if elapsed > 0 else 1
+    batches_needed = num_items / effective_parallelism if effective_parallelism > 0 else num_items
+
+    return {
+        "num_items": num_items,
+        "seconds_per_item": seconds_per_item,
+        "total_work_seconds": round(num_items * seconds_per_item, 2),
+        "actual_elapsed_seconds": round(elapsed, 4),
+        "sequential_estimate_seconds": round(sequential_estimate, 2),
+        "speedup": round(sequential_estimate / elapsed, 2) if elapsed > 0 else 0,
+        "effective_parallelism": round(effective_parallelism, 1),
+        "batches_executed": round(batches_needed, 2),
+        "distributed": is_ray_available(),
+        "ray_reported_cpus": get_total_cpus(),
+        "cluster_workers": get_num_workers(),
+        "item_results": results,
+    }
+
+
+def _fetch_single_url(url: str, timeout_seconds: int = 30) -> dict[str, Any]:
+    """Fetch a single URL (runs on Ray worker)."""
+    start = time.time()
+    time.sleep(0.05)  # 50ms simulated latency
+    elapsed = time.time() - start
+
+    return {
+        "url": url,
+        "status": 200,
+        "elapsed_ms": round(elapsed * 1000, 2),
+        "content_length": len(url) * 100,
     }
 
 
@@ -126,10 +257,10 @@ def batch_http_requests(
     urls: list[str],
     timeout_seconds: int = 30,
 ) -> dict[str, Any]:
-    """Simulate batch HTTP requests.
+    """Fetch multiple URLs in parallel across the cluster.
 
-    In a real cluster, this could make actual HTTP requests in parallel.
-    Here we simulate the pattern.
+    In production, this would make actual HTTP requests.
+    Each URL is fetched on a potentially different Ray worker.
 
     Args:
         urls: List of URLs to fetch
@@ -138,31 +269,27 @@ def batch_http_requests(
     Returns:
         Batch request results
     """
-    results = []
+    start = time.time()
 
-    for url in urls:
-        start = time.time()
+    # Fetch all URLs in parallel across the cluster
+    results = parallel_map(_fetch_single_url, urls, timeout_seconds=timeout_seconds)
 
-        # Simulate HTTP request
-        time.sleep(0.05)  # 50ms per "request"
-
-        elapsed = time.time() - start
-
-        results.append({
-            "url": url,
-            "status": 200,  # Mock success
-            "elapsed_ms": round(elapsed * 1000, 2),
-            "content_length": len(url) * 100,  # Mock content
-        })
+    elapsed = time.time() - start
 
     return {
         "total_requests": len(urls),
         "successful": len(results),
         "failed": 0,
         "total_bytes": sum(r["content_length"] for r in results),
-        "avg_latency_ms": round(
-            sum(r["elapsed_ms"] for r in results) / len(results), 2
-        ) if results else 0,
+        "avg_latency_ms": round(sum(r["elapsed_ms"] for r in results) / len(results), 2)
+        if results
+        else 0,
+        "total_elapsed_seconds": round(elapsed, 4),
+        "distributed": is_ray_available(),
+        "cluster_workers": get_num_workers(),
+        # Show the parallelization benefit
+        "sequential_time_estimate": round(len(urls) * 0.05, 2),
+        "speedup": round((len(urls) * 0.05) / elapsed, 2) if elapsed > 0 else 0,
     }
 
 
@@ -189,8 +316,9 @@ def etl_transform(
 
         for transform in transformations:
             if transform == "uppercase":
-                result = {k: v.upper() if isinstance(v, str) else v
-                         for k, v in result.items()}
+                result = {
+                    k: v.upper() if isinstance(v, str) else v for k, v in result.items()
+                }
             elif transform == "hash_id":
                 if "id" in result:
                     result["id_hash"] = hashlib.md5(
@@ -199,9 +327,7 @@ def etl_transform(
             elif transform == "timestamp":
                 result["processed_at"] = time.time()
             elif transform == "validate":
-                result["is_valid"] = all(
-                    v is not None for v in result.values()
-                )
+                result["is_valid"] = all(v is not None for v in result.values())
 
         transformed.append(result)
 
@@ -237,10 +363,12 @@ def long_running_job(
         time.sleep(min(checkpoint_interval, duration_seconds - elapsed))
         elapsed = time.time() - start
 
-        checkpoints.append({
-            "elapsed": round(elapsed, 2),
-            "progress": min(100, round(elapsed / duration_seconds * 100, 1)),
-        })
+        checkpoints.append(
+            {
+                "elapsed": round(elapsed, 2),
+                "progress": min(100, round(elapsed / duration_seconds * 100, 1)),
+            }
+        )
 
     return {
         "duration_seconds": duration_seconds,
@@ -248,4 +376,3 @@ def long_running_job(
         "checkpoints": checkpoints,
         "status": "completed",
     }
-

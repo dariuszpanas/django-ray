@@ -102,16 +102,18 @@ def train_model(
         loss = loss * (0.9 + random.uniform(-0.05, 0.05))
         accuracy = 1.0 - loss + random.uniform(-0.02, 0.02)
 
-        history.append({
-            "epoch": epoch + 1,
-            "loss": round(loss, 4),
-            "accuracy": round(max(0, min(1, accuracy)), 4),
-        })
+        history.append(
+            {
+                "epoch": epoch + 1,
+                "loss": round(loss, 4),
+                "accuracy": round(max(0, min(1, accuracy)), 4),
+            }
+        )
 
     # Generate mock model ID
-    model_id = hashlib.md5(
-        f"{dataset_id}-{epochs}-{time.time()}".encode()
-    ).hexdigest()[:12]
+    model_id = hashlib.md5(f"{dataset_id}-{epochs}-{time.time()}".encode()).hexdigest()[
+        :12
+    ]
 
     elapsed = time.time() - start
 
@@ -152,12 +154,14 @@ def batch_inference(
         sample_hash = hashlib.md5(str(sample).encode()).hexdigest()
         confidence = int(sample_hash[:2], 16) / 255.0  # 0.0 to 1.0
 
-        predictions.append({
-            "sample_index": i,
-            "prediction": round(confidence, 4),
-            "class": "positive" if confidence > 0.5 else "negative",
-            "confidence": round(abs(confidence - 0.5) * 2, 4),  # Distance from 0.5
-        })
+        predictions.append(
+            {
+                "sample_index": i,
+                "prediction": round(confidence, 4),
+                "class": "positive" if confidence > 0.5 else "negative",
+                "confidence": round(abs(confidence - 0.5) * 2, 4),  # Distance from 0.5
+            }
+        )
 
     elapsed = time.time() - start
 
@@ -210,7 +214,7 @@ def feature_engineering(
                 degree = params.get("degree", 2)
                 for key, value in record.items():
                     if isinstance(value, (int, float)):
-                        result[f"{key}_{feat_name}"] = value ** degree
+                        result[f"{key}_{feat_name}"] = value**degree
                         features_added += 1
 
             elif feat_type == "interaction":
@@ -224,7 +228,9 @@ def feature_engineering(
             elif feat_type == "hash":
                 fields = params.get("fields", list(record.keys()))
                 hash_input = "".join(str(record.get(f, "")) for f in fields)
-                result[feat_name] = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
+                result[feat_name] = int(
+                    hashlib.md5(hash_input.encode()).hexdigest()[:8], 16
+                )
                 features_added += 1
 
         enhanced.append(result)
@@ -273,10 +279,12 @@ def hyperparameter_search(
         param_hash = hashlib.md5(str(params).encode()).hexdigest()
         score = 0.7 + int(param_hash[:2], 16) / 1000.0  # 0.7 to 0.95
 
-        results.append({
-            "params": params,
-            "score": round(score, 4),
-        })
+        results.append(
+            {
+                "params": params,
+                "score": round(score, 4),
+            }
+        )
 
     # Find best
     best = max(results, key=lambda x: x["score"])
@@ -327,7 +335,9 @@ def evaluate_model(
     accuracy = (tp + tn) / total if total > 0 else 0
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    f1 = (
+        2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    )
 
     return {
         "model_id": model_id,
@@ -345,4 +355,3 @@ def evaluate_model(
             "false_negative": fn,
         },
     }
-

@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import logging
 
-import pytest
 
 from django_ray.logging import (
-    StructuredLogAdapter,
     get_backend_logger,
     get_logger,
     get_task_logger,
@@ -85,4 +83,3 @@ class TestStructuredLogAdapter:
         assert "With None" in caplog.text
         # none_key should not appear
         assert "none_key" not in caplog.text
-

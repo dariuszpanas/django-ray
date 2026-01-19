@@ -42,7 +42,13 @@ def pytest_configure(config) -> None:  # type: ignore[no-untyped-def]
             TASKS={
                 "default": {
                     "BACKEND": "django_ray.backends.RayTaskBackend",
-                    "QUEUES": ["default", "high-priority", "low-priority", "sync", "ml"],
+                    "QUEUES": [
+                        "default",
+                        "high-priority",
+                        "low-priority",
+                        "sync",
+                        "ml",
+                    ],
                     "OPTIONS": {
                         "RAY_ADDRESS": "auto",
                     },
