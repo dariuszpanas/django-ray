@@ -12,8 +12,8 @@ Usage:
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from typing import Any
 
 

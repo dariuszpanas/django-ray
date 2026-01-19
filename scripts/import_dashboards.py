@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Import Ray Grafana dashboards into Grafana."""
 
-import json
-import urllib.request
-import urllib.error
-import os
 import glob
+import json
+import os
+import urllib.error
+import urllib.request
 
 GRAFANA_URL = os.environ.get("GRAFANA_URL", "http://grafana-svc:3000")
 DASHBOARDS_PATH = "/tmp/ray/session_latest/metrics/grafana/dashboards"
@@ -36,9 +36,7 @@ def import_dashboard(filepath):
     try:
         resp = urllib.request.urlopen(req)
         result = json.loads(resp.read().decode())
-        print(
-            f"  OK: {result.get('status', 'success')} - {result.get('slug', 'unknown')}"
-        )
+        print(f"  OK: {result.get('status', 'success')} - {result.get('slug', 'unknown')}")
         return True
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()

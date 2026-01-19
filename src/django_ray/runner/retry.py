@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from django_ray.conf.settings import get_settings
@@ -84,7 +84,7 @@ def should_retry(
 
     next_attempt = attempt_number + 1
     backoff = calculate_backoff(next_attempt)
-    next_attempt_at = datetime.now(timezone.utc) + backoff
+    next_attempt_at = datetime.now(UTC) + backoff
 
     return RetryDecision(
         should_retry=True,

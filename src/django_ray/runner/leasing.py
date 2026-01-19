@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
 import uuid
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from django_ray.conf.settings import get_settings
 
@@ -32,57 +32,78 @@ def get_heartbeat_interval() -> timedelta:
 
 
 def is_lease_expired(lease: TaskWorkerLease) -> bool:
-    """Check if a worker lease has expired.
+    """Check if a worker lease has expired based on heartbeat.
 
     Args:
         lease: The lease to check.
 
     Returns:
-        True if the lease has expired.
+        True if the lease has expired (no heartbeat within lease duration).
     """
-    now = datetime.now(timezone.utc)
+    # If already marked inactive, it's expired
+    if not lease.is_active:
+        return True
+
+    now = datetime.now(UTC)
     duration = get_lease_duration()
     last_heartbeat: datetime = lease.last_heartbeat_at  # type: ignore[assignment]
     return (now - last_heartbeat) > duration
 
 
-def cleanup_expired_leases() -> int:
-    """Clean up expired worker leases from the database.
+def mark_expired_leases_inactive() -> int:
+    """Mark expired worker leases as inactive.
 
     This should be called periodically by workers or a management command
-    to remove stale lease records from workers that have crashed.
+    to mark stale lease records from workers that have crashed.
 
     Returns:
-        Number of leases deleted.
+        Number of leases marked inactive.
     """
     from django_ray.models import TaskWorkerLease
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     duration = get_lease_duration()
     cutoff = now - duration
 
-    # Delete leases that haven't had a heartbeat within the lease duration
-    deleted_count, _ = TaskWorkerLease.objects.filter(
-        last_heartbeat_at__lt=cutoff
-    ).delete()
+    # Mark leases inactive that haven't had a heartbeat within the lease duration
+    updated_count = TaskWorkerLease.objects.filter(
+        is_active=True,
+        last_heartbeat_at__lt=cutoff,
+    ).update(
+        is_active=False,
+        stopped_at=now,
+    )
 
-    return deleted_count
+    return updated_count
+
+
+# Keep old name as alias for backward compatibility
+def cleanup_expired_leases() -> int:
+    """Mark expired worker leases as inactive.
+
+    This is an alias for mark_expired_leases_inactive() for backward compatibility.
+
+    Returns:
+        Number of leases marked inactive.
+    """
+    return mark_expired_leases_inactive()
 
 
 def get_active_worker_count() -> int:
     """Get the count of currently active workers.
 
     Returns:
-        Number of workers with non-expired leases.
+        Number of workers with active leases and recent heartbeats.
     """
     from django_ray.models import TaskWorkerLease
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     duration = get_lease_duration()
     cutoff = now - duration
 
     return TaskWorkerLease.objects.filter(
-        last_heartbeat_at__gte=cutoff
+        is_active=True,
+        last_heartbeat_at__gte=cutoff,
     ).count()
 
 
@@ -90,21 +111,26 @@ def get_active_workers() -> list[TaskWorkerLease]:
     """Get all currently active workers.
 
     Returns:
-        List of workers with non-expired leases.
+        List of workers with active leases and recent heartbeats.
     """
     from django_ray.models import TaskWorkerLease
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     duration = get_lease_duration()
     cutoff = now - duration
 
-    return list(TaskWorkerLease.objects.filter(
-        last_heartbeat_at__gte=cutoff
-    ))
+    return list(
+        TaskWorkerLease.objects.filter(
+            is_active=True,
+            last_heartbeat_at__gte=cutoff,
+        )
+    )
 
 
 def release_lease(worker_id: str) -> bool:
     """Release a worker lease (called during graceful shutdown).
+
+    Marks the lease as inactive rather than deleting it.
 
     Args:
         worker_id: The worker ID to release.
@@ -114,11 +140,16 @@ def release_lease(worker_id: str) -> bool:
     """
     from django_ray.models import TaskWorkerLease
 
+    now = datetime.now(UTC)
+
     try:
-        deleted_count, _ = TaskWorkerLease.objects.filter(
-            worker_id=worker_id
-        ).delete()
-        return deleted_count > 0
+        updated_count = TaskWorkerLease.objects.filter(
+            worker_id=worker_id,
+            is_active=True,
+        ).update(
+            is_active=False,
+            stopped_at=now,
+        )
+        return updated_count > 0
     except Exception:
         return False
-

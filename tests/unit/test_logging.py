@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 
-
 from django_ray.logging import (
     get_backend_logger,
     get_logger,

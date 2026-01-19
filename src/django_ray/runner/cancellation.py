@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ def request_cancellation(
         handle = SubmissionHandle(
             ray_job_id=str(task_execution.ray_job_id),
             ray_address=str(task_execution.ray_address or ""),
-            submitted_at=task_execution.started_at or datetime.now(timezone.utc),  # type: ignore[arg-type]
+            submitted_at=task_execution.started_at or datetime.now(UTC),  # type: ignore[arg-type]
         )
 
         try:
@@ -59,5 +59,5 @@ def finalize_cancellation(task_execution: RayTaskExecution) -> None:
         task_execution: The task execution to finalize.
     """
     task_execution.state = "CANCELLED"
-    task_execution.finished_at = datetime.now(timezone.utc)
+    task_execution.finished_at = datetime.now(UTC)
     task_execution.save(update_fields=["state", "finished_at"])

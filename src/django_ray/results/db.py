@@ -32,9 +32,7 @@ class DatabaseResultStore(BaseResultStore):
             raise ResultTooLargeError(f"Result is not JSON-serializable: {e}") from e
 
         if len(serialized.encode("utf-8")) > self.max_size_bytes:
-            raise ResultTooLargeError(
-                f"Result exceeds maximum size of {self.max_size_bytes} bytes"
-            )
+            raise ResultTooLargeError(f"Result exceeds maximum size of {self.max_size_bytes} bytes")
 
         task = RayTaskExecution.objects.get(pk=task_id)  # type: ignore[attr-defined]
         task.result_data = serialized

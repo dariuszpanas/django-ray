@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -58,9 +58,7 @@ class TestLeaseDurations:
         """Test that heartbeat interval is shorter than lease duration."""
         interval = get_heartbeat_interval()
         duration = get_lease_duration()
-        assert interval < duration, (
-            "Heartbeat should be more frequent than lease expiry"
-        )
+        assert interval < duration, "Heartbeat should be more frequent than lease expiry"
 
 
 @pytest.mark.django_db
@@ -88,7 +86,7 @@ class TestLeaseExpiration:
         )
 
         # Set heartbeat to well in the past
-        old_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        old_time = datetime.now(UTC) - timedelta(hours=1)
         lease.last_heartbeat_at = old_time
         lease.save(update_fields=["last_heartbeat_at"])
 
@@ -104,10 +102,23 @@ class TestLeaseExpiration:
         )
 
         # Update heartbeat to now
-        lease.last_heartbeat_at = datetime.now(timezone.utc)
+        lease.last_heartbeat_at = datetime.now(UTC)
         lease.save(update_fields=["last_heartbeat_at"])
 
         assert not is_lease_expired(lease)
+
+    def test_inactive_lease_is_expired(self) -> None:
+        """Test that an inactive lease is always considered expired."""
+        lease = TaskWorkerLease.objects.create(
+            worker_id=generate_worker_id(),
+            hostname="test-host",
+            pid=12345,
+            queue_name="default",
+            is_active=False,
+        )
+
+        # Even with recent heartbeat, inactive lease should be expired
+        assert is_lease_expired(lease)
 
 
 @pytest.mark.django_db
@@ -143,7 +154,7 @@ class TestLeaseLifecycle:
         original_heartbeat = lease.last_heartbeat_at
 
         # Update heartbeat
-        new_time = datetime.now(timezone.utc)
+        new_time = datetime.now(UTC)
         lease.last_heartbeat_at = new_time
         lease.save(update_fields=["last_heartbeat_at"])
 
@@ -209,9 +220,9 @@ class TestLeaseCleanup:
     """Tests for lease cleanup functionality."""
 
     def test_cleanup_expired_leases_removes_old(self) -> None:
-        """Test that cleanup removes expired leases."""
+        """Test that cleanup marks expired leases as inactive."""
         # Create an expired lease
-        old_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        old_time = datetime.now(UTC) - timedelta(hours=1)
         expired_lease = TaskWorkerLease.objects.create(
             worker_id=generate_worker_id(),
             hostname="test-host",
@@ -228,12 +239,19 @@ class TestLeaseCleanup:
             queue_name="default",
         )
 
-        # Cleanup should remove the expired one
-        deleted_count = cleanup_expired_leases()
+        # Cleanup should mark the expired one as inactive
+        inactive_count = cleanup_expired_leases()
 
-        assert deleted_count == 1
-        assert not TaskWorkerLease.objects.filter(worker_id=expired_lease.worker_id).exists()
-        assert TaskWorkerLease.objects.filter(worker_id=fresh_lease.worker_id).exists()
+        assert inactive_count == 1
+
+        # Expired lease should still exist but be marked inactive
+        expired_lease.refresh_from_db()
+        assert not expired_lease.is_active
+        assert expired_lease.stopped_at is not None
+
+        # Fresh lease should still be active
+        fresh_lease.refresh_from_db()
+        assert fresh_lease.is_active
 
     def test_cleanup_expired_leases_none_expired(self) -> None:
         """Test cleanup when no leases are expired."""
@@ -245,11 +263,11 @@ class TestLeaseCleanup:
             queue_name="default",
         )
 
-        deleted_count = cleanup_expired_leases()
-        assert deleted_count == 0
+        inactive_count = cleanup_expired_leases()
+        assert inactive_count == 0
 
     def test_release_lease_success(self) -> None:
-        """Test releasing a lease by worker ID."""
+        """Test releasing a lease by worker ID marks it inactive."""
         worker_id = generate_worker_id()
         TaskWorkerLease.objects.create(
             worker_id=worker_id,
@@ -261,7 +279,10 @@ class TestLeaseCleanup:
         result = release_lease(worker_id)
 
         assert result is True
-        assert not TaskWorkerLease.objects.filter(worker_id=worker_id).exists()
+        # Lease should still exist but be marked inactive
+        lease = TaskWorkerLease.objects.get(worker_id=worker_id)
+        assert not lease.is_active
+        assert lease.stopped_at is not None
 
     def test_release_lease_not_found(self) -> None:
         """Test releasing a non-existent lease."""
@@ -275,7 +296,7 @@ class TestActiveWorkers:
 
     def test_get_active_worker_count(self) -> None:
         """Test counting active workers."""
-        # Create 2 active and 1 expired lease
+        # Create 2 active leases
         TaskWorkerLease.objects.create(
             worker_id=generate_worker_id(),
             hostname="host-1",
@@ -288,7 +309,8 @@ class TestActiveWorkers:
             pid=12346,
             queue_name="default",
         )
-        old_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        # Create 1 lease with expired heartbeat
+        old_time = datetime.now(UTC) - timedelta(hours=1)
         TaskWorkerLease.objects.create(
             worker_id=generate_worker_id(),
             hostname="host-3",
@@ -296,13 +318,21 @@ class TestActiveWorkers:
             queue_name="default",
             last_heartbeat_at=old_time,
         )
+        # Create 1 inactive lease
+        TaskWorkerLease.objects.create(
+            worker_id=generate_worker_id(),
+            hostname="host-4",
+            pid=12348,
+            queue_name="default",
+            is_active=False,
+        )
 
         count = get_active_worker_count()
         assert count == 2
 
     def test_get_active_workers(self) -> None:
         """Test getting list of active workers."""
-        # Create 1 active and 1 expired lease
+        # Create 1 active lease
         active_id = generate_worker_id()
         TaskWorkerLease.objects.create(
             worker_id=active_id,
@@ -310,7 +340,8 @@ class TestActiveWorkers:
             pid=12345,
             queue_name="default",
         )
-        old_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        # Create 1 lease with expired heartbeat
+        old_time = datetime.now(UTC) - timedelta(hours=1)
         TaskWorkerLease.objects.create(
             worker_id=generate_worker_id(),
             hostname="host-2",
@@ -318,8 +349,15 @@ class TestActiveWorkers:
             queue_name="default",
             last_heartbeat_at=old_time,
         )
+        # Create 1 inactive lease
+        TaskWorkerLease.objects.create(
+            worker_id=generate_worker_id(),
+            hostname="host-3",
+            pid=12347,
+            queue_name="default",
+            is_active=False,
+        )
 
         workers = get_active_workers()
         assert len(workers) == 1
         assert workers[0].worker_id == active_id
-

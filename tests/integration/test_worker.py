@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import UTC
 from io import StringIO
 from pathlib import Path
 
@@ -133,10 +134,10 @@ class TestWorkerSync:
 
     def test_worker_detects_timed_out_task(self, setup_django_env):
         """Test that the worker detects and fails timed-out tasks."""
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         # Create a task that started 10 seconds ago with 5 second timeout
-        started_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        started_at = datetime.now(UTC) - timedelta(seconds=10)
         task = RayTaskExecution.objects.create(
             task_id="test-timeout-001",
             callable_path="testproject.tasks.slow_task",
@@ -326,3 +327,74 @@ class TestWorkerSync:
         assert task_high.state == TaskState.SUCCEEDED
         assert task_high.result_data == "4"
         assert task_other.state == TaskState.QUEUED  # Not processed
+
+    def test_worker_processes_high_priority_first(self) -> None:
+        """Test that high-priority tasks are processed before default and low-priority."""
+        # Create tasks in order: low-priority first, then default, then high-priority
+        # They should be processed in reverse order based on priority
+        task_low = RayTaskExecution.objects.create(
+            task_id="test-priority-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="low-priority",
+            state=TaskState.QUEUED,
+            args_json="[1, 1]",
+            kwargs_json="{}",
+        )
+        task_default = RayTaskExecution.objects.create(
+            task_id="test-priority-002",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[2, 2]",
+            kwargs_json="{}",
+        )
+        task_high = RayTaskExecution.objects.create(
+            task_id="test-priority-003",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="high-priority",
+            state=TaskState.QUEUED,
+            args_json="[3, 3]",
+            kwargs_json="{}",
+        )
+
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.style = cmd.style
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+
+        # Process only 1 task at a time to verify order
+        cmd.claim_and_process_tasks(
+            queues=["default", "high-priority", "low-priority"], concurrency=1
+        )
+
+        # High-priority should be processed first
+        task_high.refresh_from_db()
+        task_default.refresh_from_db()
+        task_low.refresh_from_db()
+
+        assert task_high.state == TaskState.SUCCEEDED, "High-priority should be first"
+        assert task_default.state == TaskState.QUEUED, "Default should still be queued"
+        assert task_low.state == TaskState.QUEUED, "Low-priority should still be queued"
+
+        # Process next task
+        cmd.claim_and_process_tasks(
+            queues=["default", "high-priority", "low-priority"], concurrency=1
+        )
+
+        task_default.refresh_from_db()
+        task_low.refresh_from_db()
+
+        assert task_default.state == TaskState.SUCCEEDED, "Default should be second"
+        assert task_low.state == TaskState.QUEUED, "Low-priority should still be queued"
+
+        # Process last task
+        cmd.claim_and_process_tasks(
+            queues=["default", "high-priority", "low-priority"], concurrency=1
+        )
+
+        task_low.refresh_from_db()
+        assert task_low.state == TaskState.SUCCEEDED, "Low-priority should be last"

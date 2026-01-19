@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from django.tasks import TaskResult, TaskResultStatus
@@ -128,7 +128,7 @@ class RayTaskBackend(BaseTaskBackend):
         kwargs_json = serialize_args(kwargs)
 
         # Create the task execution record
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         execution = RayTaskExecution.objects.create(
             task_id=task_id,
             callable_path=callable_path,

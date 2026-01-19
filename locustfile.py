@@ -133,14 +133,15 @@ class TaskCreationMixin:
         b = b or random.randint(1, 100)
         operation = operation or random.choice(["add", "subtract", "multiply", "divide"])
         return self._post_task(
-            f"/api/sync/calculate?a={a}&b={b}&operation={operation}",
-            "/api/sync/calculate"
+            f"/api/sync/calculate?a={a}&b={b}&operation={operation}", "/api/sync/calculate"
         )
 
     def sync_validate_email(self, email: str = None):
         """Validate an email address."""
         email = email or f"user{random.randint(1, 1000)}@example.com"
-        return self._post_task(f"/api/sync/validate-email?email={email}", "/api/sync/validate-email")
+        return self._post_task(
+            f"/api/sync/validate-email?email={email}", "/api/sync/validate-email"
+        )
 
     # ========== Local Ray Tasks (default queue) ==========
 
@@ -155,7 +156,7 @@ class TaskCreationMixin:
         sleep_ms = sleep_ms or random.randint(0, 100)
         return self._post_task(
             f"/api/local/workload?iterations={iterations}&sleep_ms={sleep_ms}",
-            "/api/local/workload"
+            "/api/local/workload",
         )
 
     def local_urgent(self, message: str = None):
@@ -170,26 +171,26 @@ class TaskCreationMixin:
         data = data or [random.randint(1, 100) for _ in range(random.randint(10, 50))]
         chunk_id = chunk_id or random.randint(1, 100)
         return self._post_task(
-            "/api/cluster/process-chunk",
-            payload={"data": data, "chunk_id": chunk_id}
+            "/api/cluster/process-chunk", payload={"data": data, "chunk_id": chunk_id}
         )
 
     def cluster_batch_http(self, urls: list = None, timeout: int = 30):
         """Simulate batch HTTP requests."""
         urls = urls or [f"https://example.com/api/{i}" for i in range(random.randint(3, 10))]
         return self._post_task(
-            "/api/cluster/batch-http",
-            payload={"urls": urls, "timeout_seconds": timeout}
+            "/api/cluster/batch-http", payload={"urls": urls, "timeout_seconds": timeout}
         )
 
     def cluster_search(self, pattern: str = None, sources: list = None):
         """Distributed search across data sources."""
         pattern = pattern or random.choice(["test", "data", "user", "api", "error"])
-        sources = sources or [f"source{i}_{pattern if random.random() > 0.5 else 'other'}"
-                             for i in range(random.randint(3, 8))]
+        sources = sources or [
+            f"source{i}_{pattern if random.random() > 0.5 else 'other'}"
+            for i in range(random.randint(3, 8))
+        ]
         return self._post_task(
             "/api/cluster/search",
-            payload={"pattern": pattern, "data_sources": sources, "case_sensitive": False}
+            payload={"pattern": pattern, "data_sources": sources, "case_sensitive": False},
         )
 
     def cluster_cpu_benchmark(self, num_items: int = None, seconds_per_item: float = None):
@@ -198,7 +199,7 @@ class TaskCreationMixin:
         seconds_per_item = seconds_per_item or random.uniform(1.0, 3.0)
         return self._post_task(
             f"/api/cluster/cpu-benchmark?num_items={num_items}&seconds_per_item={seconds_per_item}",
-            "/api/cluster/cpu-benchmark"
+            "/api/cluster/cpu-benchmark",
         )
 
     # ========== Stress Tests ==========
@@ -218,8 +219,7 @@ class TaskCreationMixin:
         depth = depth or random.randint(5, 12)
         width = width or random.randint(50, 150)
         return self._post_task(
-            f"/api/stress/compute?depth={depth}&width={width}",
-            "/api/stress/compute"
+            f"/api/stress/compute?depth={depth}&width={width}", "/api/stress/compute"
         )
 
     def stress_primes(self, start: int = None, count: int = None):
@@ -227,8 +227,7 @@ class TaskCreationMixin:
         start = start or random.randint(100000, 1000000)
         count = count or random.randint(10, 100)
         return self._post_task(
-            f"/api/stress/primes?start={start}&count={count}",
-            "/api/stress/primes"
+            f"/api/stress/primes?start={start}&count={count}", "/api/stress/primes"
         )
 
     def stress_json(self, size_kb: int = None, depth: int = None):
@@ -236,8 +235,7 @@ class TaskCreationMixin:
         size_kb = size_kb or random.randint(50, 200)
         depth = depth or random.randint(3, 7)
         return self._post_task(
-            f"/api/stress/json?size_kb={size_kb}&depth={depth}",
-            "/api/stress/json"
+            f"/api/stress/json?size_kb={size_kb}&depth={depth}", "/api/stress/json"
         )
 
     def stress_throughput(self, task_count: int = None, duration_ms: int = None):
@@ -246,7 +244,7 @@ class TaskCreationMixin:
         duration_ms = duration_ms or random.randint(5, 50)
         return self._post_task(
             f"/api/stress/throughput?task_count={task_count}&task_duration_ms={duration_ms}",
-            "/api/stress/throughput"
+            "/api/stress/throughput",
         )
 
     # ========== ML Pipeline ==========
@@ -256,18 +254,17 @@ class TaskCreationMixin:
         dataset_id = dataset_id or f"dataset-{random.randint(1, 100)}"
         epochs = epochs or random.randint(5, 20)
         return self._post_task(
-            "/api/ml/train",
-            payload={"dataset_id": dataset_id, "epochs": epochs}
+            "/api/ml/train", payload={"dataset_id": dataset_id, "epochs": epochs}
         )
 
     def ml_inference(self, model_id: str = None, samples: list = None):
         """Run batch inference."""
         model_id = model_id or f"model-{random.randint(1, 10)}"
-        samples = samples or [{"features": [random.random() for _ in range(10)]}
-                             for _ in range(random.randint(5, 20))]
+        samples = samples or [
+            {"features": [random.random() for _ in range(10)]} for _ in range(random.randint(5, 20))
+        ]
         return self._post_task(
-            "/api/ml/inference",
-            payload={"model_id": model_id, "samples": samples}
+            "/api/ml/inference", payload={"model_id": model_id, "samples": samples}
         )
 
     def ml_hyperparam_search(self, dataset_id: str = None):
@@ -276,11 +273,11 @@ class TaskCreationMixin:
         param_grid = {
             "learning_rate": [0.001, 0.01, 0.1],
             "batch_size": [16, 32, 64],
-            "hidden_size": [64, 128, 256]
+            "hidden_size": [64, 128, 256],
         }
         return self._post_task(
             "/api/ml/hyperparam-search",
-            payload={"dataset_id": dataset_id, "param_grid": param_grid, "metric": "accuracy"}
+            payload={"dataset_id": dataset_id, "param_grid": param_grid, "metric": "accuracy"},
         )
 
 
@@ -295,6 +292,7 @@ class BasicTaskUser(HttpUser, TaskCreationMixin):
 
     Good for testing basic task creation overhead and queue throughput.
     """
+
     wait_time = between(0.1, 0.5)
     weight = 3
 
@@ -321,6 +319,7 @@ class SyncTaskUser(HttpUser, TaskCreationMixin):
 
     Requires worker running with: --sync --queue=sync
     """
+
     wait_time = between(0.5, 1.5)
     weight = 1
 
@@ -343,6 +342,7 @@ class LocalRayUser(HttpUser, TaskCreationMixin):
 
     Requires worker running with: --local
     """
+
     wait_time = between(0.5, 2.0)
     weight = 2
 
@@ -370,6 +370,7 @@ class ClusterTaskUser(HttpUser, TaskCreationMixin):
     Requires worker running with: --cluster ray://head:10001
     Tests real distributed computing features.
     """
+
     wait_time = between(1, 3)
     weight = 2
 
@@ -377,8 +378,7 @@ class ClusterTaskUser(HttpUser, TaskCreationMixin):
     def cpu_benchmark(self):
         """Test parallel CPU work distribution."""
         self.cluster_cpu_benchmark(
-            num_items=random.randint(4, 12),
-            seconds_per_item=random.uniform(1.0, 2.0)
+            num_items=random.randint(4, 12), seconds_per_item=random.uniform(1.0, 2.0)
         )
 
     @task(3)
@@ -403,6 +403,7 @@ class MLPipelineUser(HttpUser, TaskCreationMixin):
 
     Requires worker running with: --local --queue=ml
     """
+
     wait_time = between(2, 5)
     weight = 1
 
@@ -428,6 +429,7 @@ class StressTestUser(HttpUser, TaskCreationMixin):
     Usage:
         locust -f locustfile.py --host=http://localhost:8000 -u 50 -r 10 -t 60s StressTestUser
     """
+
     wait_time = between(0.5, 2.0)
     weight = 0  # Disabled by default
 
@@ -458,6 +460,7 @@ class MonitoringUser(HttpUser, TaskCreationMixin):
 
     Simulates dashboard/monitoring traffic during load testing.
     """
+
     wait_time = between(2, 5)
     weight = 1
 
@@ -489,6 +492,7 @@ class BurstTaskUser(HttpUser, TaskCreationMixin):
 
     Tests how well the system handles sudden spikes.
     """
+
     wait_time = between(5, 10)
     weight = 1
 
@@ -522,6 +526,7 @@ class DistributedComputingUser(HttpUser, TaskCreationMixin):
 
     Specifically tests the cluster's ability to parallelize work.
     """
+
     wait_time = between(3, 8)
     weight = 0  # Enable explicitly
 
@@ -546,6 +551,7 @@ class SustainedLoadUser(HttpUser, TaskCreationMixin):
     Usage:
         locust -f locustfile.py --host=http://localhost:8000 -u 20 -r 2 -t 600s SustainedLoadUser
     """
+
     wait_time = between(1, 3)
     weight = 0  # Enable explicitly
 

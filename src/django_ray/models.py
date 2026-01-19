@@ -167,6 +167,7 @@ class TaskWorkerLease(models.Model):
     - Update task status when complete
 
     The lease enables detection of crashed workers through heartbeat expiration.
+    Workers are marked inactive rather than deleted to preserve history.
     """
 
     worker_id = models.CharField(
@@ -195,10 +196,21 @@ class TaskWorkerLease(models.Model):
         default=timezone.now,
         help_text="Last heartbeat from the worker",
     )
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Whether the worker is currently active (False = shutdown or expired)",
+    )
+    stopped_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the worker was stopped or marked inactive",
+    )
 
     class Meta:
         verbose_name = "Task Worker Lease"
         verbose_name_plural = "Task Worker Leases"
 
     def __str__(self) -> str:
-        return f"Worker {self.worker_id[:8]}... on {self.hostname}"
+        status = "active" if self.is_active else "inactive"
+        return f"Worker {self.worker_id[:8]}... on {self.hostname} ({status})"

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from importlib import import_module
-from typing import Any, Callable
+from typing import Any
 
 
 def import_callable(dotted_path: str) -> Callable[..., Any]:
@@ -25,9 +26,7 @@ def import_callable(dotted_path: str) -> Callable[..., Any]:
         this function returns the underlying function via the .func attribute.
     """
     if "." not in dotted_path:
-        raise ImportError(
-            f"Invalid callable path '{dotted_path}': must contain at least one dot"
-        )
+        raise ImportError(f"Invalid callable path '{dotted_path}': must contain at least one dot")
 
     module_path, callable_name = dotted_path.rsplit(".", 1)
 
@@ -39,9 +38,7 @@ def import_callable(dotted_path: str) -> Callable[..., Any]:
     try:
         callable_obj = getattr(module, callable_name)
     except AttributeError as e:
-        raise AttributeError(
-            f"Module '{module_path}' has no attribute '{callable_name}'"
-        ) from e
+        raise AttributeError(f"Module '{module_path}' has no attribute '{callable_name}'") from e
 
     # Handle Django 6 Task objects - extract the underlying function
     # Django's @task decorator wraps functions in Task objects which have a .func attribute

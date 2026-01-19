@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from django_ray.conf.settings import get_settings
@@ -64,7 +64,7 @@ class RayJobRunner(BaseRunner):
         return SubmissionHandle(
             ray_job_id=job_id,
             ray_address=self.ray_address,
-            submitted_at=datetime.now(timezone.utc),
+            submitted_at=datetime.now(UTC),
         )
 
     def get_status(self, handle: SubmissionHandle) -> JobInfo:

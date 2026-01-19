@@ -60,7 +60,7 @@ patches:
           - name: DJANGO_RAY_QUEUES
             value: "default,high-priority,low-priority"
           - name: DJANGO_RAY_CONCURRENCY
-            value: "5"
+            value: "40"
     target:
       kind: Deployment
       name: django-ray-worker

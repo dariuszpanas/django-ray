@@ -46,7 +46,7 @@ spec:
             - name: DJANGO_RAY_QUEUE
               value: "default"
             - name: DJANGO_RAY_CONCURRENCY
-              value: "10"
+              value: "40"
           resources:
             requests:
               memory: "256Mi"

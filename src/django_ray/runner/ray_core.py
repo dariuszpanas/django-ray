@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
@@ -114,7 +114,7 @@ class RayCoreRunner(BaseRunner):
             return result
 
         # Submit to Ray (non-blocking)
-        submitted_at = datetime.now(timezone.utc)
+        submitted_at = datetime.now(UTC)
         object_ref = execute_django_task.remote(
             callable_path,
             args_json,

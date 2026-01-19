@@ -111,9 +111,7 @@ def train_model(
         )
 
     # Generate mock model ID
-    model_id = hashlib.md5(f"{dataset_id}-{epochs}-{time.time()}".encode()).hexdigest()[
-        :12
-    ]
+    model_id = hashlib.md5(f"{dataset_id}-{epochs}-{time.time()}".encode()).hexdigest()[:12]
 
     elapsed = time.time() - start
 
@@ -228,9 +226,7 @@ def feature_engineering(
             elif feat_type == "hash":
                 fields = params.get("fields", list(record.keys()))
                 hash_input = "".join(str(record.get(f, "")) for f in fields)
-                result[feat_name] = int(
-                    hashlib.md5(hash_input.encode()).hexdigest()[:8], 16
-                )
+                result[feat_name] = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
                 features_added += 1
 
         enhanced.append(result)
@@ -335,9 +331,7 @@ def evaluate_model(
     accuracy = (tp + tn) / total if total > 0 else 0
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-    f1 = (
-        2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-    )
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
 
     return {
         "model_id": model_id,

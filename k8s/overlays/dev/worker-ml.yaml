@@ -42,7 +42,7 @@ spec:
             - '--cluster'
             - 'ray://ray-head-svc:10001'
             - '--concurrency'
-            - '5'
+            - '40'
           envFrom:
             - configMapRef:
                 name: django-ray-config

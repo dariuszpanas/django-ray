@@ -411,9 +411,7 @@ def delete_execution(request, execution_id: int):
     return {"message": f"Execution {execution_id} deleted"}
 
 
-@api.post(
-    "/executions/{execution_id}/cancel", response=TaskExecutionSchema, tags=["Admin"]
-)
+@api.post("/executions/{execution_id}/cancel", response=TaskExecutionSchema, tags=["Admin"])
 def cancel_execution(request, execution_id: int):
     """Cancel a queued or running task execution."""
     task = get_object_or_404(RayTaskExecution, pk=execution_id)
@@ -428,9 +426,7 @@ def cancel_execution(request, execution_id: int):
     return task
 
 
-@api.post(
-    "/executions/{execution_id}/retry", response=TaskExecutionSchema, tags=["Admin"]
-)
+@api.post("/executions/{execution_id}/retry", response=TaskExecutionSchema, tags=["Admin"])
 def retry_execution(request, execution_id: int):
     """Retry a failed task execution."""
     task = get_object_or_404(RayTaskExecution, pk=execution_id)
@@ -522,9 +518,7 @@ def local_fibonacci(request, n: int):
 @api.post("/local/workload", response=TaskResultSchema, tags=["Local Ray"])
 def local_workload(request, iterations: int = 1000000, sleep_ms: int = 0):
     """Simulate CPU workload (default queue)."""
-    result = local_tasks.simulate_workload.enqueue(
-        iterations=iterations, sleep_ms=sleep_ms
-    )
+    result = local_tasks.simulate_workload.enqueue(iterations=iterations, sleep_ms=sleep_ms)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -696,9 +690,7 @@ def cluster_process_chunk(request, payload: ChunkDataSchema):
 
     Run with: python manage.py django_ray_worker --cluster ray://head:10001
     """
-    result = cluster_tasks.process_chunk.enqueue(
-        data=payload.data, chunk_id=payload.chunk_id
-    )
+    result = cluster_tasks.process_chunk.enqueue(data=payload.data, chunk_id=payload.chunk_id)
     return {
         "task_id": result.id,
         "status": result.status.value,

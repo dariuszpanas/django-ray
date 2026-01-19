@@ -92,6 +92,38 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         )
 
 
+class ActiveWorkerFilter(admin.SimpleListFilter):
+    """Filter to show active/inactive workers with active as default."""
+
+    title = "status"
+    parameter_name = "is_active"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("active", "Active"),
+            ("inactive", "Inactive"),
+            ("all", "All"),
+        ]
+
+    def queryset(self, request, queryset):
+        if self.value() == "inactive":
+            return queryset.filter(is_active=False)
+        elif self.value() == "all":
+            return queryset
+        else:
+            # Default: show only active
+            return queryset.filter(is_active=True)
+
+    def choices(self, changelist):
+        """Override to set default selection."""
+        for lookup, title in self.lookup_choices:
+            yield {
+                "selected": self.value() == lookup or (self.value() is None and lookup == "active"),
+                "query_string": changelist.get_query_string({self.parameter_name: lookup}),
+                "display": title,
+            }
+
+
 @admin.register(TaskWorkerLease)
 class TaskWorkerLeaseAdmin(admin.ModelAdmin):
     """Admin for TaskWorkerLease model.
@@ -99,6 +131,8 @@ class TaskWorkerLeaseAdmin(admin.ModelAdmin):
     Note: This tracks Django task workers (django_ray_worker command),
     NOT Ray cluster workers. The Django workers claim tasks from the
     database and submit them to Ray for execution.
+
+    By default, only active workers are shown. Use the filter to see inactive workers.
     """
 
     list_display = [
@@ -108,10 +142,11 @@ class TaskWorkerLeaseAdmin(admin.ModelAdmin):
         "queue_name",
         "started_at",
         "last_heartbeat_at",
-        "is_active",
+        "is_active_display_list",
         "time_since_heartbeat",
     ]
     list_filter = [
+        ActiveWorkerFilter,
         "queue_name",
         "hostname",
     ]
@@ -128,27 +163,48 @@ class TaskWorkerLeaseAdmin(admin.ModelAdmin):
         "queue_name",
         "started_at",
         "last_heartbeat_at",
+        "stopped_at",
         "is_active_display",
         "time_since_heartbeat_display",
         "lease_status_display",
     ]
     fieldsets = (
-        ("Worker Identification", {
-            "fields": ("worker_id", "hostname", "pid"),
-        }),
-        ("Configuration", {
-            "fields": ("queue_name",),
-            "description": "Note: Changing the queue here does NOT affect the worker. "
-                          "The queue is set when the worker starts via --queue argument.",
-        }),
-        ("Status", {
-            "fields": ("lease_status_display", "is_active_display", "time_since_heartbeat_display"),
-        }),
-        ("Timing", {
-            "fields": ("started_at", "last_heartbeat_at"),
-        }),
+        (
+            "Worker Identification",
+            {
+                "fields": ("worker_id", "hostname", "pid"),
+            },
+        ),
+        (
+            "Configuration",
+            {
+                "fields": ("queue_name",),
+                "description": "Note: Changing the queue here does NOT affect the worker. "
+                "The queue is set when the worker starts via --queue argument.",
+            },
+        ),
+        (
+            "Status",
+            {
+                "fields": (
+                    "lease_status_display",
+                    "is_active_display",
+                    "time_since_heartbeat_display",
+                ),
+            },
+        ),
+        (
+            "Timing",
+            {
+                "fields": ("started_at", "last_heartbeat_at", "stopped_at"),
+            },
+        ),
     )
-    actions = ["cleanup_expired_leases"]
+    actions = ["mark_inactive", "delete_inactive"]
+
+    def get_queryset(self, request):
+        """Default queryset - filter applied via ActiveWorkerFilter."""
+        return super().get_queryset(request)
 
     @admin.display(description="Worker ID")
     def worker_id_short(self, obj: TaskWorkerLease) -> str:
@@ -156,23 +212,30 @@ class TaskWorkerLeaseAdmin(admin.ModelAdmin):
         return f"{obj.worker_id[:12]}..."
 
     @admin.display(boolean=True, description="Active")
-    def is_active(self, obj: TaskWorkerLease) -> bool:
-        """Check if the worker lease is still active (not expired)."""
+    def is_active_display_list(self, obj: TaskWorkerLease) -> bool:
+        """Display active status as boolean icon in list view."""
+        return obj.is_active and not self._is_heartbeat_expired(obj)
+
+    def _is_heartbeat_expired(self, obj: TaskWorkerLease) -> bool:
+        """Check if heartbeat has expired."""
         from django_ray.runner.leasing import is_lease_expired
-        return not is_lease_expired(obj)
+
+        return is_lease_expired(obj)
 
     @admin.display(description="Active Status")
     def is_active_display(self, obj: TaskWorkerLease) -> str:
         """Display active status with color coding for detail view."""
         from django.utils.safestring import mark_safe
+
         from django_ray.runner.leasing import is_lease_expired
-        is_active = not is_lease_expired(obj)
+
+        is_active = obj.is_active and not is_lease_expired(obj)
         if is_active:
-            return mark_safe(
-                '<span style="color: #28a745; font-weight: bold;">✓ Active</span>'
-            )
+            return mark_safe('<span style="color: #28a745; font-weight: bold;">✓ Active</span>')
+        if not obj.is_active:
+            return mark_safe('<span style="color: #6c757d; font-weight: bold;">✗ Stopped</span>')
         return mark_safe(
-            '<span style="color: #dc3545; font-weight: bold;">✗ Expired/Inactive</span>'
+            '<span style="color: #dc3545; font-weight: bold;">✗ Expired (no heartbeat)</span>'
         )
 
     @admin.display(description="Time Since Heartbeat")
@@ -197,50 +260,77 @@ class TaskWorkerLeaseAdmin(admin.ModelAdmin):
     @admin.display(description="Lease Status")
     def lease_status_display(self, obj: TaskWorkerLease) -> str:
         """Comprehensive lease status for detail view."""
-        from django_ray.runner.leasing import is_lease_expired, get_lease_duration
+        from django_ray.runner.leasing import get_lease_duration, is_lease_expired
 
-        is_active = not is_lease_expired(obj)
         duration = get_lease_duration()
 
-        if is_active:
+        if not obj.is_active:
+            stopped_info = ""
+            if obj.stopped_at:
+                stopped_info = f" Stopped at: {obj.stopped_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+            return format_html(
+                '<div style="padding: 10px; background: #e2e3e5; border-radius: 4px;">'
+                '<strong style="color: #383d41;">✗ Worker is Stopped</strong><br>'
+                "<small>This worker has been gracefully shut down or marked inactive.{}</small>"
+                "</div>",
+                stopped_info,
+            )
+
+        heartbeat_expired = is_lease_expired(obj)
+
+        if not heartbeat_expired:
             return format_html(
                 '<div style="padding: 10px; background: #d4edda; border-radius: 4px;">'
                 '<strong style="color: #155724;">✓ Worker is Active</strong><br>'
-                '<small>Heartbeat received within the last {} seconds.</small>'
-                '</div>',
-                int(duration.total_seconds())
+                "<small>Heartbeat received within the last {} seconds.</small>"
+                "</div>",
+                int(duration.total_seconds()),
             )
         else:
             return format_html(
                 '<div style="padding: 10px; background: #f8d7da; border-radius: 4px;">'
-                '<strong style="color: #721c24;">✗ Worker is Inactive/Expired</strong><br>'
-                '<small>No heartbeat received in {} seconds. '
-                'This worker may have crashed or been stopped. '
-                'You can safely delete this lease record.</small>'
-                '</div>',
-                int(duration.total_seconds())
+                '<strong style="color: #721c24;">⚠ Worker Heartbeat Expired</strong><br>'
+                "<small>No heartbeat received in {} seconds. "
+                "This worker may have crashed. It will be marked inactive automatically.</small>"
+                "</div>",
+                int(duration.total_seconds()),
             )
 
-    @admin.action(description="Clean up expired worker leases")
-    def cleanup_expired_leases(self, request, queryset):  # type: ignore[no-untyped-def]
-        """Delete expired worker leases from selected."""
-        from django_ray.runner.leasing import is_lease_expired
+    @admin.action(description="Mark selected as inactive")
+    def mark_inactive(self, request, queryset):  # type: ignore[no-untyped-def]
+        """Mark selected worker leases as inactive."""
+        from django.utils import timezone
 
-        expired_count = 0
-        for lease in queryset:
-            if is_lease_expired(lease):
-                lease.delete()
-                expired_count += 1
+        count = queryset.filter(is_active=True).update(
+            is_active=False,
+            stopped_at=timezone.now(),
+        )
 
-        if expired_count > 0:
+        if count > 0:
             self.message_user(
                 request,
-                f"Deleted {expired_count} expired worker lease(s).",
+                f"Marked {count} worker lease(s) as inactive.",
             )
         else:
             self.message_user(
                 request,
-                "No expired leases found in selection.",
+                "No active leases found in selection.",
+            )
+
+    @admin.action(description="Delete inactive worker leases")
+    def delete_inactive(self, request, queryset):  # type: ignore[no-untyped-def]
+        """Delete inactive worker leases from selected."""
+        deleted_count, _ = queryset.filter(is_active=False).delete()
+
+        if deleted_count > 0:
+            self.message_user(
+                request,
+                f"Deleted {deleted_count} inactive worker lease(s).",
+            )
+        else:
+            self.message_user(
+                request,
+                "No inactive leases found in selection.",
             )
 
     def has_add_permission(self, request: Any) -> bool:
@@ -250,4 +340,3 @@ class TaskWorkerLeaseAdmin(admin.ModelAdmin):
     def has_change_permission(self, request: Any, obj: Any = None) -> bool:
         """Disable editing leases - they are managed by workers."""
         return False
-

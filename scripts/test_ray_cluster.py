@@ -107,14 +107,12 @@ def test_django_ray_task(address: str) -> bool:
     @ray.remote
     def run_task(callable_path: str, args_json: str, kwargs_json: str) -> str:
         import json
-        import sys
 
         # Add src to path if needed
         import os
+        import sys
 
-        src_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"
-        )
+        src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
         if src_path not in sys.path:
             sys.path.insert(0, src_path)
 
@@ -176,9 +174,7 @@ def main():
         default=5,
         help="Number of parallel tasks to run (default: 5)",
     )
-    parser.add_argument(
-        "--skip-parallel", action="store_true", help="Skip parallel execution test"
-    )
+    parser.add_argument("--skip-parallel", action="store_true", help="Skip parallel execution test")
     args = parser.parse_args()
 
     print("=" * 60)

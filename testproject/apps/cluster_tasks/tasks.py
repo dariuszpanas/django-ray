@@ -35,7 +35,6 @@ from django_ray.runtime.distributed import (
     is_ray_available,
     parallel_map,
     parallel_starmap,
-    scatter_gather,
 )
 
 
@@ -103,7 +102,9 @@ def aggregate_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _search_single_source(source: str, pattern: str, case_sensitive: bool = False) -> dict[str, Any] | None:
+def _search_single_source(
+    source: str, pattern: str, case_sensitive: bool = False
+) -> dict[str, Any] | None:
     """Search a single data source (runs on Ray worker)."""
     time.sleep(0.1)  # Simulate 100ms I/O per source
 
@@ -316,14 +317,10 @@ def etl_transform(
 
         for transform in transformations:
             if transform == "uppercase":
-                result = {
-                    k: v.upper() if isinstance(v, str) else v for k, v in result.items()
-                }
+                result = {k: v.upper() if isinstance(v, str) else v for k, v in result.items()}
             elif transform == "hash_id":
                 if "id" in result:
-                    result["id_hash"] = hashlib.md5(
-                        str(result["id"]).encode()
-                    ).hexdigest()[:8]
+                    result["id_hash"] = hashlib.md5(str(result["id"]).encode()).hexdigest()[:8]
             elif transform == "timestamp":
                 result["processed_at"] = time.time()
             elif transform == "validate":

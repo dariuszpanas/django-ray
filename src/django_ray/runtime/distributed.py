@@ -23,7 +23,8 @@ Example:
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -62,6 +63,7 @@ def is_ray_available() -> bool:
     """
     try:
         import ray
+
         return ray.is_initialized()
     except ImportError:
         return False
@@ -77,6 +79,7 @@ def get_ray_resources() -> dict[str, Any]:
         return {}
 
     import ray
+
     return dict(ray.cluster_resources())
 
 
@@ -125,6 +128,7 @@ def parallel_map(
     @ray.remote(num_cpus=num_cpus, num_gpus=num_gpus)
     def _remote_func(pickled_func: bytes, item: T, **kw: Any) -> R:
         import pickle
+
         # Bootstrap Django before running the function
         _bootstrap_django_if_needed()
         fn = pickle.loads(pickled_func)
@@ -132,6 +136,7 @@ def parallel_map(
 
     # Pickle the function once to send to workers
     import pickle
+
     pickled_func = pickle.dumps(func)
 
     # Submit all tasks
@@ -139,7 +144,7 @@ def parallel_map(
         # Process in batches to limit concurrency
         results = []
         for i in range(0, len(items), max_concurrency):
-            batch = items[i:i + max_concurrency]
+            batch = items[i : i + max_concurrency]
             refs = [_remote_func.remote(pickled_func, item, **kwargs) for item in batch]
             results.extend(ray.get(refs))
         return results
@@ -185,6 +190,7 @@ def parallel_starmap(
         return [func(*args) for args in items]
 
     import pickle
+
     import ray
 
     @ray.remote(num_cpus=num_cpus, num_gpus=num_gpus)
@@ -200,7 +206,7 @@ def parallel_starmap(
     if max_concurrency and max_concurrency < len(items):
         results = []
         for i in range(0, len(items), max_concurrency):
-            batch = items[i:i + max_concurrency]
+            batch = items[i : i + max_concurrency]
             refs = [_remote_func.remote(pickled_func, *args) for args in batch]
             results.extend(ray.get(refs))
         return results
@@ -245,6 +251,7 @@ def scatter_gather(
         return [func(*args, **kwargs) for func, args, kwargs in tasks]
 
     import pickle
+
     import ray
 
     @ray.remote(num_cpus=num_cpus, num_gpus=num_gpus)
@@ -269,9 +276,12 @@ def get_num_workers() -> int:
         return 1
 
     import ray
+
     resources = ray.cluster_resources()
     # Count nodes by looking for node:* resources
-    nodes = sum(1 for k in resources if k.startswith("node:") and not k.endswith("__internal_head__"))
+    nodes = sum(
+        1 for k in resources if k.startswith("node:") and not k.endswith("__internal_head__")
+    )
     return max(1, nodes)
 
 
@@ -285,6 +295,6 @@ def get_total_cpus() -> float:
         return float(os.cpu_count() or 1)
 
     import ray
+
     resources = ray.cluster_resources()
     return resources.get("CPU", 1.0)
-

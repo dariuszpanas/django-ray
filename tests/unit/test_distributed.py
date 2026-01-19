@@ -26,7 +26,7 @@ class TestDistributedUtilities:
 
     def test_parallel_map_fallback_sequential(self) -> None:
         """Test parallel_map falls back to sequential without Ray."""
-        from django_ray.runtime.distributed import parallel_map, is_ray_available
+        from django_ray.runtime.distributed import parallel_map
 
         def double(x: int) -> int:
             return x * 2
@@ -119,6 +119,7 @@ class TestDistributedUtilities:
     def test_get_total_cpus_without_ray(self) -> None:
         """Test get_total_cpus returns local CPU count without Ray."""
         import os
+
         from django_ray.runtime.distributed import get_total_cpus, is_ray_available
 
         if not is_ray_available():
@@ -126,16 +127,13 @@ class TestDistributedUtilities:
             assert get_total_cpus() == expected
 
 
-@pytest.mark.skipif(
-    not pytest.importorskip("ray").is_initialized(),
-    reason="Ray not initialized"
-)
+@pytest.mark.skipif(not pytest.importorskip("ray").is_initialized(), reason="Ray not initialized")
 class TestDistributedWithRay:
     """Tests that require Ray to be running."""
 
     def test_parallel_map_with_ray(self) -> None:
         """Test parallel_map uses Ray when available."""
-        from django_ray.runtime.distributed import parallel_map, is_ray_available
+        from django_ray.runtime.distributed import is_ray_available, parallel_map
 
         if not is_ray_available():
             pytest.skip("Ray not available")
@@ -159,4 +157,3 @@ class TestDistributedWithRay:
 
         assert "CPU" in resources
         assert resources["CPU"] > 0
-

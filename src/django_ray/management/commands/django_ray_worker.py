@@ -6,7 +6,7 @@ import json
 import signal
 import time
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import FrameType
 from typing import Any
 
@@ -15,7 +15,7 @@ from django.db import transaction
 
 from django_ray.conf.settings import get_settings
 from django_ray.logging import get_worker_logger
-from django_ray.models import RayTaskExecution, TaskWorkerLease, TaskState
+from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.runner.cancellation import finalize_cancellation
 from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
 from django_ray.runner.reconciliation import (
@@ -43,6 +43,8 @@ class Command(BaseCommand):
         self.reconciliation_interval = 30.0  # Check for stuck tasks every 30 seconds
         self.lease: TaskWorkerLease | None = None  # Worker lease for coordination
         self.lease_queue_name: str = "default"  # Queue name for lease recreation
+        self.last_task_processed = 0.0  # Last time we processed a task
+        self.tasks_processed_count = 0  # Total tasks processed
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add command arguments."""
@@ -105,18 +107,14 @@ class Command(BaseCommand):
             try:
                 self._init_local_ray()
             except Exception as e:
-                self.stdout.write(
-                    self.style.WARNING(f"Initial Ray init failed: {e}")
-                )
+                self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {e}"))
                 self.stdout.write("Will retry connection during operation...")
         elif self.cluster_address:
             self.execution_mode = "cluster"
             try:
                 self._init_cluster_ray(self.cluster_address)
             except Exception as e:
-                self.stdout.write(
-                    self.style.WARNING(f"Initial cluster connection failed: {e}")
-                )
+                self.stdout.write(self.style.WARNING(f"Initial cluster connection failed: {e}"))
                 self.stdout.write("Will retry connection during operation...")
         else:
             self.execution_mode = "ray"
@@ -127,9 +125,7 @@ class Command(BaseCommand):
 
         self.setup_signal_handlers()
 
-        self.stdout.write(
-            self.style.SUCCESS(f"Starting django-ray worker {self.worker_id}")
-        )
+        self.stdout.write(self.style.SUCCESS(f"Starting django-ray worker {self.worker_id}"))
         self.stdout.write(f"  Queues: {', '.join(queues)}")
         self.stdout.write(f"  Concurrency: {concurrency}")
         self.stdout.write(f"  Mode: {self.execution_mode}")
@@ -173,9 +169,7 @@ class Command(BaseCommand):
             default_backend = tasks_config.get("default", {})
             configured_queues = default_backend.get("QUEUES", ["default"])
             self.stdout.write(
-                self.style.NOTICE(
-                    f"Processing all configured queues: {configured_queues}"
-                )
+                self.style.NOTICE(f"Processing all configured queues: {configured_queues}")
             )
             return list(configured_queues)
 
@@ -270,17 +264,27 @@ class Command(BaseCommand):
         import os
         import socket
 
+        from django.utils import timezone
+
         # Store queue for potential lease recreation
         self.lease_queue_name = queue
 
         try:
-            self.lease = TaskWorkerLease.objects.create(
+            # Use update_or_create in case this worker_id already exists
+            # (e.g., from a previous run that didn't clean up properly)
+            self.lease, created = TaskWorkerLease.objects.update_or_create(
                 worker_id=self.worker_id,
-                hostname=socket.gethostname(),
-                pid=os.getpid(),
-                queue_name=queue,
+                defaults={
+                    "hostname": socket.gethostname(),
+                    "pid": os.getpid(),
+                    "queue_name": queue,
+                    "last_heartbeat_at": timezone.now(),
+                    "is_active": True,
+                    "stopped_at": None,
+                },
             )
-            self.stdout.write(self.style.SUCCESS(f"  Lease created: {self.worker_id}"))
+            action = "created" if created else "reactivated"
+            self.stdout.write(self.style.SUCCESS(f"  Lease {action}: {self.worker_id}"))
         except Exception as e:
             self.stdout.write(self.style.WARNING(f"  Failed to create lease: {e}"))
             # Continue without lease - worker will still function
@@ -292,9 +296,7 @@ class Command(BaseCommand):
 
     def handle_shutdown_signal(self, signum: int, frame: FrameType | None) -> None:
         """Handle shutdown signals."""
-        self.stdout.write(
-            self.style.WARNING(f"\nReceived signal {signum}, shutting down...")
-        )
+        self.stdout.write(self.style.WARNING(f"\nReceived signal {signum}, shutting down..."))
         self.shutdown_requested = True
 
     def run_loop(
@@ -342,42 +344,68 @@ class Command(BaseCommand):
         """Send worker heartbeat, update lease, and check Ray connection."""
         from django.utils import timezone
 
-        # Update worker lease if we have one
+        # Update worker lease if we have one, or try to create one if missing
         if self.lease is not None:
             try:
                 # Refresh from DB to check if lease still exists
                 self.lease.refresh_from_db()
-                self.lease.last_heartbeat_at = timezone.now()
-                self.lease.save(update_fields=["last_heartbeat_at"])
+
+                # Check if lease was marked inactive (by cleanup or manually)
+                if not self.lease.is_active:
+                    self.stdout.write(
+                        self.style.WARNING("\nLease was marked inactive, reactivating...")
+                    )
+                    self._recreate_lease()
+                else:
+                    # Normal heartbeat update
+                    self.lease.last_heartbeat_at = timezone.now()
+                    self.lease.save(update_fields=["last_heartbeat_at"])
             except TaskWorkerLease.DoesNotExist:
-                # Lease was deleted (by another worker's cleanup) - recreate it
-                self.stdout.write(
-                    self.style.WARNING("\nLease was deleted, recreating...")
-                )
+                # Lease was deleted - recreate it
+                self.stdout.write(self.style.WARNING("\nLease was deleted, recreating..."))
                 self._recreate_lease()
             except Exception as e:
                 # Database error - try to recreate lease on next heartbeat
-                self.stdout.write(
-                    self.style.WARNING(f"\nHeartbeat failed: {e}")
-                )
+                self.stdout.write(self.style.WARNING(f"\nHeartbeat failed: {e}"))
+        else:
+            # No lease exists - try to create one
+            self._recreate_lease()
 
         # Check Ray connection health for local/cluster modes
         if self.execution_mode in ("local", "cluster"):
             self._check_ray_connection()
 
-        self.stdout.write(".", ending="")
+        # Periodic status output (every ~60 seconds based on 15s heartbeat)
+        if hasattr(self, "_heartbeat_count"):
+            self._heartbeat_count += 1
+        else:
+            self._heartbeat_count = 1
+
+        if self._heartbeat_count % 4 == 0:  # Every 4th heartbeat (~60 seconds)
+            active = len(self.active_tasks) + len(self.local_ray_tasks)
+            idle_time = (
+                time.time() - self.last_task_processed if self.last_task_processed > 0 else 0
+            )
+            self.stdout.write(
+                f"\n[Status] tasks_processed={self.tasks_processed_count}, "
+                f"active={active}, idle={idle_time:.0f}s"
+            )
+        else:
+            self.stdout.write(".", ending="")
         self.stdout.flush()
 
     def _recreate_lease(self) -> None:
-        """Recreate the worker lease after it was deleted."""
+        """Recreate the worker lease after it was deleted or marked inactive."""
         import os
         import socket
+
         from django.utils import timezone
 
         queue_name = getattr(self, "lease_queue_name", "default")
 
         try:
             # Use update_or_create to handle race conditions
+            # This will reactivate an inactive lease or create a new one
             self.lease, created = TaskWorkerLease.objects.update_or_create(
                 worker_id=self.worker_id,
                 defaults={
@@ -385,27 +413,57 @@ class Command(BaseCommand):
                     "pid": os.getpid(),
                     "queue_name": queue_name,
                     "last_heartbeat_at": timezone.now(),
-                }
+                    "is_active": True,
+                    "stopped_at": None,
+                },
             )
-            action = "created" if created else "updated"
+            action = "created" if created else "reactivated"
             self.stdout.write(self.style.SUCCESS(f"  Lease {action}: {self.worker_id}"))
         except Exception as e:
             self.stdout.write(self.style.WARNING(f"  Failed to recreate lease: {e}"))
 
-    def _check_ray_connection(self) -> None:
-        """Check if Ray connection is healthy and reconnect if needed."""
-        import ray
+    def _update_lease_heartbeat(self) -> None:
+        """Update lease heartbeat without full heartbeat logic.
+
+        This is called before each task execution to ensure the lease
+        doesn't expire during long-running tasks.
+        """
+        from django.utils import timezone
+
+        if self.lease is None:
+            return
 
         try:
-            # Quick health check - try to get cluster resources
-            if ray.is_initialized():
-                # This will fail if the connection is broken
-                ray.cluster_resources()
-                return  # Connection is healthy
-        except Exception as e:
-            self.stdout.write(
-                self.style.WARNING(f"\nRay connection lost: {e}")
+            TaskWorkerLease.objects.filter(worker_id=self.worker_id).update(
+                last_heartbeat_at=timezone.now()
             )
+        except Exception:
+            # Best effort - will be handled by regular heartbeat
+            pass
+
+    def _check_ray_connection(self) -> None:
+        """Check if Ray connection is healthy and reconnect if needed."""
+        import concurrent.futures
+
+        import ray
+
+        def _check_resources():
+            """Check cluster resources with timeout protection."""
+            return ray.cluster_resources()
+
+        try:
+            # Quick health check - try to get cluster resources with timeout
+            if ray.is_initialized():
+                # Use a thread with timeout to avoid blocking forever
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_check_resources)
+                    try:
+                        future.result(timeout=10)  # 10 second timeout
+                        return  # Connection is healthy
+                    except concurrent.futures.TimeoutError:
+                        self.stdout.write(self.style.WARNING("\nRay health check timed out"))
+        except Exception as e:
+            self.stdout.write(self.style.WARNING(f"\nRay connection lost: {e}"))
 
         # Connection is broken or Ray is not initialized - try to reconnect
         self._reconnect_ray()
@@ -486,7 +544,7 @@ class Command(BaseCommand):
             return
 
         task_ids = list(self.local_ray_tasks.keys())
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         count = RayTaskExecution.objects.filter(
             pk__in=task_ids,
@@ -498,9 +556,7 @@ class Command(BaseCommand):
         )
 
         if count > 0:
-            self.stdout.write(
-                self.style.WARNING(f"  Marked {count} running tasks as LOST")
-            )
+            self.stdout.write(self.style.WARNING(f"  Marked {count} running tasks as LOST"))
 
     def claim_and_process_tasks(self, queues: Sequence[str], concurrency: int) -> None:
         """Claim and submit tasks for execution.
@@ -516,10 +572,25 @@ class Command(BaseCommand):
             return
 
         # Claim tasks from any of the specified queues
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
+
+        # Build priority ordering: high-priority=0, default/normal=1, low-priority=2
+        # This ensures high-priority tasks are processed first, then default, then low
+        from django.db.models import Case, IntegerField, Value, When
+
+        priority_order = Case(
+            When(queue_name="high-priority", then=Value(0)),
+            When(queue_name="urgent", then=Value(0)),
+            When(queue_name="low-priority", then=Value(2)),
+            When(queue_name="background", then=Value(2)),
+            When(queue_name="batch", then=Value(2)),
+            default=Value(1),  # default, ml, sync, and others get normal priority
+            output_field=IntegerField(),
+        )
+
         with transaction.atomic():
             # Find queued tasks that are ready to run (run_after is null)
-            # Order by created_at to ensure FIFO ordering
+            # Order by priority first, then by created_at for FIFO within same priority
             tasks = list(
                 RayTaskExecution.objects.select_for_update(skip_locked=True)
                 .filter(
@@ -530,7 +601,8 @@ class Command(BaseCommand):
                     # run_after is null OR run_after <= now
                     run_after__isnull=True,
                 )
-                .order_by("created_at")[:available_slots]
+                .annotate(priority=priority_order)
+                .order_by("priority", "created_at")[:available_slots]
             )
 
             # Also get tasks with run_after <= now
@@ -542,7 +614,8 @@ class Command(BaseCommand):
                         queue_name__in=queues,
                         run_after__lte=now,
                     )
-                    .order_by("created_at")[: available_slots - len(tasks)]
+                    .annotate(priority=priority_order)
+                    .order_by("priority", "created_at")[: available_slots - len(tasks)]
                 )
                 tasks.extend(more_tasks)
 
@@ -558,9 +631,15 @@ class Command(BaseCommand):
 
     def process_task(self, task: RayTaskExecution) -> None:
         """Process a single task."""
-        self.stdout.write(
-            self.style.NOTICE(f"\nProcessing task {task.pk}: {task.callable_path}")
-        )
+        self.stdout.write(self.style.NOTICE(f"\nProcessing task {task.pk}: {task.callable_path}"))
+
+        # Update heartbeat before task execution to prevent lease expiration
+        # during long-running tasks
+        self._update_lease_heartbeat()
+
+        # Track task processing
+        self.last_task_processed = time.time()
+        self.tasks_processed_count += 1
 
         if self.execution_mode == "sync":
             # Execute without Ray - purely synchronous
@@ -585,15 +664,13 @@ class Command(BaseCommand):
             )
             result = json.loads(result_json)
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if result["success"]:
                 task.state = TaskState.SUCCEEDED
                 task.result_data = json.dumps(result["result"])
                 task.finished_at = now
                 self.stdout.write(
-                    self.style.SUCCESS(
-                        f"  Task {task.pk} succeeded: {result['result']}"
-                    )
+                    self.style.SUCCESS(f"  Task {task.pk} succeeded: {result['result']}")
                 )
                 task.save(
                     update_fields=[
@@ -669,7 +746,7 @@ class Command(BaseCommand):
             task.state = TaskState.FAILED
             task.error_message = error_message
             task.error_traceback = error_traceback
-            task.finished_at = datetime.now(timezone.utc)
+            task.finished_at = datetime.now(UTC)
             task.save(
                 update_fields=[
                     "state",
@@ -680,9 +757,7 @@ class Command(BaseCommand):
             )
             reason = retry_decision.reason or "No retry configured"
             self.stdout.write(
-                self.style.ERROR(
-                    f"  Task {task.pk} failed permanently ({reason}): {error_message}"
-                )
+                self.style.ERROR(f"  Task {task.pk} failed permanently ({reason}): {error_message}")
             )
 
     def execute_task_with_ray_available(self, task: RayTaskExecution) -> None:
@@ -695,13 +770,12 @@ class Command(BaseCommand):
         or other distributed computing patterns.
         """
         import ray
+
         from django_ray.runtime.entrypoint import execute_task
 
         # Ensure Ray is connected
         if not ray.is_initialized():
-            self.stdout.write(
-                self.style.WARNING("  Ray not initialized, attempting to connect...")
-            )
+            self.stdout.write(self.style.WARNING("  Ray not initialized, attempting to connect..."))
             self._reconnect_ray()
 
             if not ray.is_initialized():
@@ -712,28 +786,68 @@ class Command(BaseCommand):
                 )
                 return
 
-        self.stdout.write(
-            f"  Executing with Ray available (CPUs: {ray.cluster_resources().get('CPU', 0)})..."
-        )
+        # Get cluster resources with timeout protection
+        try:
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(ray.cluster_resources)
+                try:
+                    resources = future.result(timeout=5)
+                    cpu_count = resources.get("CPU", 0)
+                except concurrent.futures.TimeoutError:
+                    cpu_count = "?"
+                    self.stdout.write(
+                        self.style.WARNING("  Ray resources check timed out, continuing anyway...")
+                    )
+        except Exception:
+            cpu_count = "?"
+
+        self.stdout.write(f"  Executing with Ray available (CPUs: {cpu_count})...")
+
+        # Get task timeout (default 5 minutes if not specified)
+        task_timeout = task.timeout_seconds or 300
 
         try:
-            # Execute task directly - this allows it to spawn Ray tasks
-            result_json = execute_task(
-                callable_path=task.callable_path,
-                serialized_args=task.args_json,
-                serialized_kwargs=task.kwargs_json,
-            )
+            # Execute task with timeout protection
+            import concurrent.futures
+
+            def _run_task():
+                return execute_task(
+                    callable_path=task.callable_path,
+                    serialized_args=task.args_json,
+                    serialized_kwargs=task.kwargs_json,
+                )
+
+            # Use a thread pool to execute with timeout
+            # Note: This doesn't kill the thread if it hangs, but at least
+            # allows the worker to continue and mark the task as failed
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_task)
+                try:
+                    result_json = future.result(timeout=task_timeout)
+                except concurrent.futures.TimeoutError:
+                    self.stdout.write(
+                        self.style.ERROR(
+                            f"  Task {task.pk} execution timed out after {task_timeout}s"
+                        )
+                    )
+                    self._handle_task_failure(
+                        task,
+                        error_message=f"Task execution timed out after {task_timeout} seconds",
+                        exception_type="TimeoutError",
+                    )
+                    return
+
             result = json.loads(result_json)
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if result["success"]:
                 task.state = TaskState.SUCCEEDED
                 task.result_data = json.dumps(result["result"])
                 task.finished_at = now
                 self.stdout.write(
-                    self.style.SUCCESS(
-                        f"  Task {task.pk} succeeded: {result['result']}"
-                    )
+                    self.style.SUCCESS(f"  Task {task.pk} succeeded: {result['result']}")
                 )
                 task.save(
                     update_fields=[
@@ -752,6 +866,7 @@ class Command(BaseCommand):
 
         except Exception as e:
             import traceback
+
             self._handle_task_failure(
                 task,
                 error_message=str(e),
@@ -772,9 +887,7 @@ class Command(BaseCommand):
 
         # Ensure Ray is connected before submitting
         if not ray.is_initialized():
-            self.stdout.write(
-                self.style.WARNING("  Ray not initialized, attempting to connect...")
-            )
+            self.stdout.write(self.style.WARNING("  Ray not initialized, attempting to connect..."))
             self._reconnect_ray()
 
             # Check again after reconnection attempt
@@ -791,9 +904,7 @@ class Command(BaseCommand):
         task_name = task.callable_path.split(".")[-1] if task.callable_path else "task"
 
         @ray.remote(name=f"django_ray:{task_name}")
-        def run_task(
-            callable_path: str, args_json: str, kwargs_json: str, task_id: int
-        ) -> str:
+        def run_task(callable_path: str, args_json: str, kwargs_json: str, task_id: int) -> str:
             import json
             import sys
 
@@ -827,18 +938,14 @@ class Command(BaseCommand):
             )
             # Track the pending task
             self.local_ray_tasks[task.pk] = result_ref
-            self.stdout.write(
-                self.style.SUCCESS(f"  Task {task.pk} submitted to Ray (async)")
-            )
+            self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} submitted to Ray (async)"))
 
         except Exception as e:
             task.state = TaskState.FAILED
             task.error_message = str(e)
-            task.finished_at = datetime.now(timezone.utc)
+            task.finished_at = datetime.now(UTC)
             task.save(update_fields=["state", "error_message", "finished_at"])
-            self.stdout.write(
-                self.style.ERROR(f"  Task {task.pk} failed to submit: {e}")
-            )
+            self.stdout.write(self.style.ERROR(f"  Task {task.pk} failed to submit: {e}"))
 
     def poll_local_ray_tasks(self) -> None:
         """Poll for completed local Ray tasks and update their status."""
@@ -849,9 +956,7 @@ class Command(BaseCommand):
 
         # Check if Ray is still connected
         if not ray.is_initialized():
-            self.stdout.write(
-                self.style.WARNING("\nRay disconnected while tasks were running")
-            )
+            self.stdout.write(self.style.WARNING("\nRay disconnected while tasks were running"))
             # Mark all running tasks as lost - they need to be retried
             self._mark_stale_tasks_as_lost()
             self.local_ray_tasks.clear()
@@ -864,9 +969,7 @@ class Command(BaseCommand):
             # Check for completed tasks (non-blocking with timeout=0)
             ready_refs, _ = ray.wait(pending_refs, num_returns=len(pending_refs), timeout=0)
         except Exception as e:
-            self.stdout.write(
-                self.style.WARNING(f"\nError polling Ray tasks: {e}")
-            )
+            self.stdout.write(self.style.WARNING(f"\nError polling Ray tasks: {e}"))
             # Connection may be broken - the heartbeat will handle reconnection
             return
 
@@ -899,15 +1002,13 @@ class Command(BaseCommand):
                 result_json = ray.get(ref)
                 result = json.loads(result_json)
 
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 if result["success"]:
                     task.state = TaskState.SUCCEEDED
                     task.result_data = json.dumps(result["result"])
                     task.finished_at = now
                     self.stdout.write(
-                        self.style.SUCCESS(
-                            f"\nTask {task.pk} succeeded (Ray): {result['result']}"
-                        )
+                        self.style.SUCCESS(f"\nTask {task.pk} succeeded (Ray): {result['result']}")
                     )
                     task.save(
                         update_fields=[
@@ -934,8 +1035,8 @@ class Command(BaseCommand):
 
     def submit_task_to_ray(self, task: RayTaskExecution) -> None:
         """Submit a task to Ray for execution."""
-        from django_ray.runtime.serialization import deserialize_args
         from django_ray.runner.ray_job import RayJobRunner
+        from django_ray.runtime.serialization import deserialize_args
 
         try:
             runner = RayJobRunner()
@@ -958,19 +1059,15 @@ class Command(BaseCommand):
             self.active_tasks[task.pk] = handle.ray_job_id
 
             self.stdout.write(
-                self.style.SUCCESS(
-                    f"  Task {task.pk} submitted as Ray job {handle.ray_job_id}"
-                )
+                self.style.SUCCESS(f"  Task {task.pk} submitted as Ray job {handle.ray_job_id}")
             )
 
         except Exception as e:
             task.state = TaskState.FAILED
             task.error_message = f"Failed to submit to Ray: {e}"
-            task.finished_at = datetime.now(timezone.utc)
+            task.finished_at = datetime.now(UTC)
             task.save(update_fields=["state", "error_message", "finished_at"])
-            self.stdout.write(
-                self.style.ERROR(f"  Task {task.pk} failed to submit: {e}")
-            )
+            self.stdout.write(self.style.ERROR(f"  Task {task.pk} failed to submit: {e}"))
 
     def reconcile_tasks(self) -> None:
         """Reconcile task states with Ray."""
@@ -989,7 +1086,7 @@ class Command(BaseCommand):
                 handle = SubmissionHandle(
                     ray_job_id=ray_job_id,
                     ray_address=task.ray_address or "",
-                    submitted_at=task.started_at or datetime.now(timezone.utc),
+                    submitted_at=task.started_at or datetime.now(UTC),
                 )
 
                 job_info = runner.get_status(handle)
@@ -998,7 +1095,7 @@ class Command(BaseCommand):
                     # Get logs which contain the result
                     logs = runner.get_logs(handle)
                     task.state = TaskState.SUCCEEDED
-                    task.finished_at = datetime.now(timezone.utc)
+                    task.finished_at = datetime.now(UTC)
                     if logs:
                         # Parse result from logs (last line is JSON result)
                         try:
@@ -1019,7 +1116,7 @@ class Command(BaseCommand):
                 elif job_info.status == JobStatus.FAILED:
                     logs = runner.get_logs(handle)
                     task.state = TaskState.FAILED
-                    task.finished_at = datetime.now(timezone.utc)
+                    task.finished_at = datetime.now(UTC)
                     task.error_message = job_info.message or "Ray job failed"
                     if logs:
                         task.error_traceback = logs
@@ -1031,19 +1128,15 @@ class Command(BaseCommand):
 
                 elif job_info.status == JobStatus.STOPPED:
                     task.state = TaskState.CANCELLED
-                    task.finished_at = datetime.now(timezone.utc)
+                    task.finished_at = datetime.now(UTC)
                     task.save()
                     completed_tasks.append(task_pk)
-                    self.stdout.write(
-                        self.style.WARNING(f"\nTask {task_pk} was stopped")
-                    )
+                    self.stdout.write(self.style.WARNING(f"\nTask {task_pk} was stopped"))
 
             except RayTaskExecution.DoesNotExist:
                 completed_tasks.append(task_pk)
             except Exception as e:
-                self.stdout.write(
-                    self.style.ERROR(f"\nError reconciling task {task_pk}: {e}")
-                )
+                self.stdout.write(self.style.ERROR(f"\nError reconciling task {task_pk}: {e}"))
 
         # Remove completed tasks from active list
         for task_pk in completed_tasks:
@@ -1067,9 +1160,7 @@ class Command(BaseCommand):
             # Check for timeout first (applies to all tasks)
             if is_task_timed_out(task):
                 self.stdout.write(
-                    self.style.WARNING(
-                        f"\nTask {task.pk} timed out after {task.timeout_seconds}s"
-                    )
+                    self.style.WARNING(f"\nTask {task.pk} timed out after {task.timeout_seconds}s")
                 )
                 # Cancel the running task if we're tracking it
                 if task.pk in self.local_ray_tasks:
@@ -1094,9 +1185,7 @@ class Command(BaseCommand):
             # Check if task is stuck using the reconciliation logic
             if is_task_stuck(task):
                 self.stdout.write(
-                    self.style.WARNING(
-                        f"\nTask {task.pk} appears stuck, marking as LOST"
-                    )
+                    self.style.WARNING(f"\nTask {task.pk} appears stuck, marking as LOST")
                 )
                 mark_task_lost(task)
 
@@ -1127,13 +1216,9 @@ class Command(BaseCommand):
                 stuck_count += 1
 
         if stuck_count > 0:
-            self.stdout.write(
-                self.style.WARNING(f"Detected {stuck_count} stuck task(s)")
-            )
+            self.stdout.write(self.style.WARNING(f"Detected {stuck_count} stuck task(s)"))
         if timeout_count > 0:
-            self.stdout.write(
-                self.style.WARNING(f"Detected {timeout_count} timed out task(s)")
-            )
+            self.stdout.write(self.style.WARNING(f"Detected {timeout_count} timed out task(s)"))
 
     def cleanup_expired_leases(self) -> None:
         """Clean up expired worker leases from other workers.
@@ -1147,9 +1232,7 @@ class Command(BaseCommand):
             deleted_count = cleanup_expired_leases()
             if deleted_count > 0:
                 self.stdout.write(
-                    self.style.NOTICE(
-                        f"\nCleaned up {deleted_count} expired worker lease(s)"
-                    )
+                    self.style.NOTICE(f"\nCleaned up {deleted_count} expired worker lease(s)")
                 )
         except Exception as e:
             # Don't fail on lease cleanup errors
@@ -1166,9 +1249,7 @@ class Command(BaseCommand):
         )
 
         for task in cancelling_tasks:
-            self.stdout.write(
-                self.style.WARNING(f"\nFinalizing cancellation for task {task.pk}")
-            )
+            self.stdout.write(self.style.WARNING(f"\nFinalizing cancellation for task {task.pk}"))
 
             # Remove from our tracking if present
             if task.pk in self.local_ray_tasks:
@@ -1190,14 +1271,25 @@ class Command(BaseCommand):
 
     def shutdown(self) -> None:
         """Perform graceful shutdown."""
-        # Delete worker lease to signal we're gone
+        # Mark worker lease as inactive to signal we're gone
         if self.lease is not None:
             try:
-                self.lease.delete()
-                self.stdout.write("  Lease released")
+                from django_ray.runner.leasing import release_lease
+
+                release_lease(self.worker_id)
+                self.stdout.write("  Lease released (marked inactive)")
             except Exception as e:
                 self.stdout.write(f"  Failed to release lease: {e}")
 
-        self.stdout.write(
-            self.style.SUCCESS(f"\nWorker {self.worker_id} shut down cleanly")
-        )
+        # Disconnect from Ray cluster
+        if self.execution_mode in ("local", "cluster"):
+            try:
+                import ray
+
+                if ray.is_initialized():
+                    ray.shutdown()
+                    self.stdout.write("  Ray connection closed")
+            except Exception as e:
+                self.stdout.write(f"  Failed to close Ray connection: {e}")
+
+        self.stdout.write(self.style.SUCCESS(f"\nWorker {self.worker_id} shut down cleanly"))

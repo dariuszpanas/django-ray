@@ -478,5 +478,3 @@ def stress_concurrent_simulation(
         "avg_task_ms": round(elapsed * 1000 / task_count, 4),
         "sample_results": results[:5],
     }
-
-
