@@ -5,6 +5,12 @@ from __future__ import annotations
 import pytest
 
 
+# Module-level functions for Ray tests (must be picklable)
+def _square(x: int) -> int:
+    """Square a number - used in Ray parallel_map test."""
+    return x * x
+
+
 class TestDistributedUtilities:
     """Tests for distributed computing helpers."""
 
@@ -127,22 +133,29 @@ class TestDistributedUtilities:
             assert get_total_cpus() == expected
 
 
-@pytest.mark.skipif(not pytest.importorskip("ray").is_initialized(), reason="Ray not initialized")
 class TestDistributedWithRay:
     """Tests that require Ray to be running."""
+
+    @pytest.fixture(autouse=True)
+    def ray_cluster(self):
+        """Initialize Ray for these tests."""
+        import ray
+
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True)
+        yield
+        if ray.is_initialized():
+            ray.shutdown()
 
     def test_parallel_map_with_ray(self) -> None:
         """Test parallel_map uses Ray when available."""
         from django_ray.runtime.distributed import is_ray_available, parallel_map
 
-        if not is_ray_available():
-            pytest.skip("Ray not available")
+        assert is_ray_available(), "Ray should be initialized by fixture"
 
-        def square(x: int) -> int:
-            return x * x
-
+        # Use module-level function (can be pickled for Ray)
         items = list(range(10))
-        results = parallel_map(square, items)
+        results = parallel_map(_square, items)
 
         assert results == [x * x for x in items]
 
@@ -150,8 +163,7 @@ class TestDistributedWithRay:
         """Test get_ray_resources returns actual resources."""
         from django_ray.runtime.distributed import get_ray_resources, is_ray_available
 
-        if not is_ray_available():
-            pytest.skip("Ray not available")
+        assert is_ray_available(), "Ray should be initialized by fixture"
 
         resources = get_ray_resources()
 

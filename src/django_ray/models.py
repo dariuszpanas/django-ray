@@ -213,4 +213,5 @@ class TaskWorkerLease(models.Model):
 
     def __str__(self) -> str:
         status = "active" if self.is_active else "inactive"
-        return f"Worker {self.worker_id[:8]}... on {self.hostname} ({status})"
+        worker_id = str(self.worker_id)
+        return f"Worker {worker_id[:8]}... on {self.hostname} ({status})"

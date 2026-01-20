@@ -83,7 +83,7 @@ def get_ray_resources() -> dict[str, Any]:
     return dict(ray.cluster_resources())
 
 
-def parallel_map(
+def parallel_map[T, R](
     func: Callable[..., R],
     items: list[T],
     *,
@@ -154,7 +154,7 @@ def parallel_map(
         return ray.get(refs)
 
 
-def parallel_starmap(
+def parallel_starmap[R](
     func: Callable[..., R],
     items: list[tuple[Any, ...]],
     *,
@@ -215,7 +215,7 @@ def parallel_starmap(
         return ray.get(refs)
 
 
-def scatter_gather(
+def scatter_gather[R](
     tasks: list[tuple[Callable[..., R], tuple[Any, ...], dict[str, Any]]],
     *,
     num_cpus: float = 1.0,

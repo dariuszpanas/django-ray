@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def pytest_configure(config) -> None:  # type: ignore[no-untyped-def]
+def pytest_configure(config: object) -> None:
     """Configure Django for testing."""
     if not settings.configured:
         settings.configure(

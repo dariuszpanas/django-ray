@@ -17,6 +17,10 @@ from django_ray.models import RayTaskExecution, TaskState
 
 # Import tasks that use Django 6's @task decorator
 from testproject import tasks
+from testproject.apps.cluster_tasks import tasks as cluster_tasks
+from testproject.apps.local_ray import tasks as local_tasks
+from testproject.apps.ml_pipeline import tasks as ml_tasks
+from testproject.apps.sync_tasks import tasks as sync_tasks
 
 api = NinjaAPI(
     title="Django Ray API",
@@ -449,8 +453,6 @@ def retry_execution(request, execution_id: int):
 # Example App Endpoints - Sync Tasks (--sync mode)
 # ============================================================================
 
-from testproject.apps.sync_tasks import tasks as sync_tasks
-
 
 @api.post("/sync/calculate", response=TaskResultSchema, tags=["Sync Tasks"])
 def sync_calculate(
@@ -493,8 +495,6 @@ def sync_validate_email(request, email: str):
 # ============================================================================
 # Example App Endpoints - Local Ray (--local mode)
 # ============================================================================
-
-from testproject.apps.local_ray import tasks as local_tasks
 
 
 @api.post("/local/fibonacci/{n}", response=TaskResultSchema, tags=["Local Ray"])
@@ -674,8 +674,6 @@ def stress_throughput(request, task_count: int = 100, task_duration_ms: int = 10
 # Example App Endpoints - Cluster Tasks (--cluster mode)
 # ============================================================================
 
-from testproject.apps.cluster_tasks import tasks as cluster_tasks
-
 
 class ChunkDataSchema(Schema):
     """Schema for chunk data input."""
@@ -810,8 +808,6 @@ def cluster_cpu_benchmark(request, num_items: int = 10, seconds_per_item: float 
 # ============================================================================
 # Example App Endpoints - ML Pipeline
 # ============================================================================
-
-from testproject.apps.ml_pipeline import tasks as ml_tasks
 
 
 class TrainModelSchema(Schema):

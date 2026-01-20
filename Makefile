@@ -26,7 +26,7 @@ lint-check:
 # Type check with ty
 # Note: Ignoring Django ORM-related errors (ty doesn't support Django stubs yet)
 typecheck:
-	ty check --ignore unresolved-attribute --ignore invalid-argument-type --ignore possibly-missing-attribute
+	ty check --ignore unresolved-attribute --ignore invalid-argument-type --ignore possibly-missing-attribute --output-format concise
 
 # Run all tests
 test:

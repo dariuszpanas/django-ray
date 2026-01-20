@@ -86,7 +86,7 @@ def test_parallel_execution(address: str, num_tasks: int = 5) -> bool:
         elapsed = time.time() - start
 
         print(f"✓ All {num_tasks} tasks completed in {elapsed:.2f}s")
-        hosts = set(r["hostname"] for r in results)
+        hosts = {r["hostname"] for r in results}
         print(f"  Tasks distributed across {len(hosts)} host(s): {hosts}")
         return True
     except Exception as e:

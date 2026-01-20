@@ -266,7 +266,7 @@ def hyperparameter_search(
     results = []
 
     for combo in combinations:
-        params = dict(zip(keys, combo))
+        params = dict(zip(keys, combo, strict=True))
 
         # Simulate training with these params
         time.sleep(0.05)

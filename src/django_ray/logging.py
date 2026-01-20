@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import MutableMapping
 from typing import Any
 
 
@@ -24,7 +25,9 @@ class StructuredLogAdapter(logging.LoggerAdapter):
     for better parsing by log aggregators (ELK, Splunk, etc.).
     """
 
-    def process(self, msg: str, kwargs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    def process(
+        self, msg: object, kwargs: MutableMapping[str, Any]
+    ) -> tuple[object, MutableMapping[str, Any]]:
         """Process log message with structured context.
 
         Args:
@@ -38,7 +41,7 @@ class StructuredLogAdapter(logging.LoggerAdapter):
         extra = kwargs.get("extra", {})
 
         # Merge adapter's extra with call-time extra
-        combined_extra = {**self.extra, **extra}  # type: ignore
+        combined_extra = {**self.extra, **extra}
 
         # Format structured data as JSON suffix
         if combined_extra:

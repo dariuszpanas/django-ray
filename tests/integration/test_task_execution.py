@@ -23,7 +23,9 @@ def ray_cluster():
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True)
     yield
-    # Don't shutdown - let other tests use it
+    # Shutdown Ray to avoid polluting other tests
+    if ray.is_initialized():
+        ray.shutdown()
 
 
 @pytest.fixture

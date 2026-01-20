@@ -43,6 +43,7 @@ Metrics to watch:
 
 import random
 import time
+from typing import Any
 
 from locust import HttpUser, between, task
 
@@ -50,7 +51,9 @@ from locust import HttpUser, between, task
 class TaskCreationMixin:
     """Mixin providing common task creation and monitoring methods."""
 
-    def _post_task(self, endpoint: str, name: str = None, payload: dict = None):
+    def _post_task(
+        self, endpoint: str, name: str | None = None, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         """Generic task creation helper."""
         name = name or endpoint
         kwargs = {"name": name, "catch_response": True}
@@ -65,7 +68,7 @@ class TaskCreationMixin:
                 response.failure(f"Failed to create task: {response.status_code}")
                 return None
 
-    def _get(self, endpoint: str, name: str = None):
+    def _get(self, endpoint: str, name: str | None = None) -> dict[str, Any] | None:
         """Generic GET helper."""
         name = name or endpoint
         with self.client.get(endpoint, name=name, catch_response=True) as response:
@@ -99,24 +102,26 @@ class TaskCreationMixin:
 
     # ========== Basic Tasks (default queue) ==========
 
-    def create_add_task(self, a: int = None, b: int = None):
+    def create_add_task(self, a: int | None = None, b: int | None = None) -> dict[str, Any] | None:
         """Create an add_numbers task."""
         a = a or random.randint(1, 1000)
         b = b or random.randint(1, 1000)
         return self._post_task(f"/api/enqueue/add/{a}/{b}", "/api/enqueue/add/[a]/[b]")
 
-    def create_multiply_task(self, a: int = None, b: int = None):
+    def create_multiply_task(
+        self, a: int | None = None, b: int | None = None
+    ) -> dict[str, Any] | None:
         """Create a multiply_numbers task."""
         a = a or random.randint(1, 100)
         b = b or random.randint(1, 100)
         return self._post_task(f"/api/enqueue/multiply/{a}/{b}", "/api/enqueue/multiply/[a]/[b]")
 
-    def create_slow_task(self, seconds: float = None):
+    def create_slow_task(self, seconds: float | None = None) -> dict[str, Any] | None:
         """Create a slow_task that sleeps for a duration."""
         seconds = seconds or random.uniform(0.5, 2.0)
         return self._post_task(f"/api/enqueue/slow/{seconds:.1f}", "/api/enqueue/slow/[seconds]")
 
-    def create_cpu_task(self, n: int = None):
+    def create_cpu_task(self, n: int | None = None) -> dict[str, Any] | None:
         """Create a CPU-intensive task."""
         n = n or random.randint(100000, 500000)
         return self._post_task(f"/api/enqueue/cpu/{n}", "/api/enqueue/cpu/[n]")
@@ -127,7 +132,9 @@ class TaskCreationMixin:
 
     # ========== Sync Tasks (sync queue) ==========
 
-    def sync_calculate(self, a: int = None, b: int = None, operation: str = None):
+    def sync_calculate(
+        self, a: int | None = None, b: int | None = None, operation: str | None = None
+    ) -> dict[str, Any] | None:
         """Create a sync calculation task."""
         a = a or random.randint(1, 100)
         b = b or random.randint(1, 100)
@@ -136,7 +143,7 @@ class TaskCreationMixin:
             f"/api/sync/calculate?a={a}&b={b}&operation={operation}", "/api/sync/calculate"
         )
 
-    def sync_validate_email(self, email: str = None):
+    def sync_validate_email(self, email: str | None = None) -> dict[str, Any] | None:
         """Validate an email address."""
         email = email or f"user{random.randint(1, 1000)}@example.com"
         return self._post_task(
@@ -145,12 +152,14 @@ class TaskCreationMixin:
 
     # ========== Local Ray Tasks (default queue) ==========
 
-    def local_fibonacci(self, n: int = None):
+    def local_fibonacci(self, n: int | None = None) -> dict[str, Any] | None:
         """Calculate fibonacci number."""
         n = n or random.randint(10, 30)
         return self._post_task(f"/api/local/fibonacci/{n}", "/api/local/fibonacci/[n]")
 
-    def local_workload(self, iterations: int = None, sleep_ms: int = None):
+    def local_workload(
+        self, iterations: int | None = None, sleep_ms: int | None = None
+    ) -> dict[str, Any] | None:
         """Simulate CPU workload."""
         iterations = iterations or random.randint(100000, 1000000)
         sleep_ms = sleep_ms or random.randint(0, 100)
@@ -159,14 +168,16 @@ class TaskCreationMixin:
             "/api/local/workload",
         )
 
-    def local_urgent(self, message: str = None):
+    def local_urgent(self, message: str | None = None) -> dict[str, Any] | None:
         """High-priority urgent task."""
         message = message or f"Urgent-{random.randint(1, 1000)}"
         return self._post_task(f"/api/local/urgent?message={message}", "/api/local/urgent")
 
     # ========== Cluster Tasks (distributed) ==========
 
-    def cluster_process_chunk(self, data: list = None, chunk_id: int = None):
+    def cluster_process_chunk(
+        self, data: list[int] | None = None, chunk_id: int | None = None
+    ) -> dict[str, Any] | None:
         """Process a data chunk on cluster."""
         data = data or [random.randint(1, 100) for _ in range(random.randint(10, 50))]
         chunk_id = chunk_id or random.randint(1, 100)
@@ -174,14 +185,18 @@ class TaskCreationMixin:
             "/api/cluster/process-chunk", payload={"data": data, "chunk_id": chunk_id}
         )
 
-    def cluster_batch_http(self, urls: list = None, timeout: int = 30):
+    def cluster_batch_http(
+        self, urls: list[str] | None = None, timeout: int = 30
+    ) -> dict[str, Any] | None:
         """Simulate batch HTTP requests."""
         urls = urls or [f"https://example.com/api/{i}" for i in range(random.randint(3, 10))]
         return self._post_task(
             "/api/cluster/batch-http", payload={"urls": urls, "timeout_seconds": timeout}
         )
 
-    def cluster_search(self, pattern: str = None, sources: list = None):
+    def cluster_search(
+        self, pattern: str | None = None, sources: list[str] | None = None
+    ) -> dict[str, Any] | None:
         """Distributed search across data sources."""
         pattern = pattern or random.choice(["test", "data", "user", "api", "error"])
         sources = sources or [
@@ -193,7 +208,9 @@ class TaskCreationMixin:
             payload={"pattern": pattern, "data_sources": sources, "case_sensitive": False},
         )
 
-    def cluster_cpu_benchmark(self, num_items: int = None, seconds_per_item: float = None):
+    def cluster_cpu_benchmark(
+        self, num_items: int | None = None, seconds_per_item: float | None = None
+    ) -> dict[str, Any] | None:
         """Benchmark distributed CPU work."""
         num_items = num_items or random.randint(4, 16)
         seconds_per_item = seconds_per_item or random.uniform(1.0, 3.0)
@@ -204,17 +221,19 @@ class TaskCreationMixin:
 
     # ========== Stress Tests ==========
 
-    def stress_cpu(self, duration: float = None):
+    def stress_cpu(self, duration: float | None = None) -> dict[str, Any] | None:
         """CPU burn stress test."""
         duration = duration or random.uniform(1.0, 5.0)
         return self._post_task(f"/api/stress/cpu?duration_seconds={duration}", "/api/stress/cpu")
 
-    def stress_memory(self, size_mb: int = None):
+    def stress_memory(self, size_mb: int | None = None) -> dict[str, Any] | None:
         """Memory allocation stress test."""
         size_mb = size_mb or random.randint(50, 200)
         return self._post_task(f"/api/stress/memory?size_mb={size_mb}", "/api/stress/memory")
 
-    def stress_compute(self, depth: int = None, width: int = None):
+    def stress_compute(
+        self, depth: int | None = None, width: int | None = None
+    ) -> dict[str, Any] | None:
         """Nested computation stress test."""
         depth = depth or random.randint(5, 12)
         width = width or random.randint(50, 150)
@@ -222,7 +241,9 @@ class TaskCreationMixin:
             f"/api/stress/compute?depth={depth}&width={width}", "/api/stress/compute"
         )
 
-    def stress_primes(self, start: int = None, count: int = None):
+    def stress_primes(
+        self, start: int | None = None, count: int | None = None
+    ) -> dict[str, Any] | None:
         """Prime number search stress test."""
         start = start or random.randint(100000, 1000000)
         count = count or random.randint(10, 100)
@@ -230,7 +251,9 @@ class TaskCreationMixin:
             f"/api/stress/primes?start={start}&count={count}", "/api/stress/primes"
         )
 
-    def stress_json(self, size_kb: int = None, depth: int = None):
+    def stress_json(
+        self, size_kb: int | None = None, depth: int | None = None
+    ) -> dict[str, Any] | None:
         """Large JSON structure stress test."""
         size_kb = size_kb or random.randint(50, 200)
         depth = depth or random.randint(3, 7)
@@ -238,7 +261,9 @@ class TaskCreationMixin:
             f"/api/stress/json?size_kb={size_kb}&depth={depth}", "/api/stress/json"
         )
 
-    def stress_throughput(self, task_count: int = None, duration_ms: int = None):
+    def stress_throughput(
+        self, task_count: int | None = None, duration_ms: int | None = None
+    ) -> dict[str, Any] | None:
         """Throughput simulation stress test."""
         task_count = task_count or random.randint(50, 200)
         duration_ms = duration_ms or random.randint(5, 50)
@@ -249,7 +274,9 @@ class TaskCreationMixin:
 
     # ========== ML Pipeline ==========
 
-    def ml_train(self, dataset_id: str = None, epochs: int = None):
+    def ml_train(
+        self, dataset_id: str | None = None, epochs: int | None = None
+    ) -> dict[str, Any] | None:
         """Train a model."""
         dataset_id = dataset_id or f"dataset-{random.randint(1, 100)}"
         epochs = epochs or random.randint(5, 20)
@@ -257,7 +284,9 @@ class TaskCreationMixin:
             "/api/ml/train", payload={"dataset_id": dataset_id, "epochs": epochs}
         )
 
-    def ml_inference(self, model_id: str = None, samples: list = None):
+    def ml_inference(
+        self, model_id: str | None = None, samples: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any] | None:
         """Run batch inference."""
         model_id = model_id or f"model-{random.randint(1, 10)}"
         samples = samples or [
@@ -267,7 +296,7 @@ class TaskCreationMixin:
             "/api/ml/inference", payload={"model_id": model_id, "samples": samples}
         )
 
-    def ml_hyperparam_search(self, dataset_id: str = None):
+    def ml_hyperparam_search(self, dataset_id: str | None = None) -> dict[str, Any] | None:
         """Run hyperparameter grid search."""
         dataset_id = dataset_id or f"dataset-{random.randint(1, 100)}"
         param_grid = {

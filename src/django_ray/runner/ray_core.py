@@ -151,13 +151,15 @@ class RayCoreRunner(BaseRunner):
 
         # Extract task_pk from handle
         if not handle.ray_job_id.startswith("ray_core:"):
-            return JobInfo(status=JobStatus.FAILED, message="Invalid handle format")
+            return JobInfo(
+                job_id=handle.ray_job_id, status=JobStatus.FAILED, message="Invalid handle format"
+            )
 
         task_pk = int(handle.ray_job_id.split(":")[1])
 
         if task_pk not in self._pending_tasks:
             # Task not tracked - might be completed and removed
-            return JobInfo(status=JobStatus.SUCCEEDED)
+            return JobInfo(job_id=handle.ray_job_id, status=JobStatus.SUCCEEDED)
 
         core_handle = self._pending_tasks[task_pk]
 
@@ -165,7 +167,7 @@ class RayCoreRunner(BaseRunner):
         ready, _ = ray.wait([core_handle.object_ref], timeout=0)
 
         if not ready:
-            return JobInfo(status=JobStatus.RUNNING)
+            return JobInfo(job_id=handle.ray_job_id, status=JobStatus.RUNNING)
 
         # Task is ready - get result and determine status
         try:
@@ -176,16 +178,19 @@ class RayCoreRunner(BaseRunner):
             del self._pending_tasks[task_pk]
 
             if result.get("success"):
-                return JobInfo(status=JobStatus.SUCCEEDED, message=result_json)
+                return JobInfo(
+                    job_id=handle.ray_job_id, status=JobStatus.SUCCEEDED, message=result_json
+                )
             else:
                 return JobInfo(
+                    job_id=handle.ray_job_id,
                     status=JobStatus.FAILED,
                     message=result.get("error", "Task failed"),
                 )
         except Exception as e:
             # Remove from pending on error
             self._pending_tasks.pop(task_pk, None)
-            return JobInfo(status=JobStatus.FAILED, message=str(e))
+            return JobInfo(job_id=handle.ray_job_id, status=JobStatus.FAILED, message=str(e))
 
     def cancel(self, handle: SubmissionHandle) -> bool:
         """Cancel a Ray Core task.

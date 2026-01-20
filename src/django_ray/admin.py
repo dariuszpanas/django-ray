@@ -72,7 +72,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         )
 
     @admin.action(description="Retry selected tasks")
-    def retry_tasks(self, request, queryset):  # type: ignore[no-untyped-def]
+    def retry_tasks(self, request, queryset):
         """Retry failed tasks (placeholder for MVP)."""
         # TODO: Implement retry logic
         count = queryset.filter(state__in=["FAILED", "LOST"]).count()
@@ -82,7 +82,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         )
 
     @admin.action(description="Cancel selected tasks")
-    def cancel_tasks(self, request, queryset):  # type: ignore[no-untyped-def]
+    def cancel_tasks(self, request, queryset):
         """Cancel running or queued tasks."""
         # TODO: Implement cancellation logic
         count = queryset.filter(state__in=["QUEUED", "RUNNING"]).count()
@@ -209,12 +209,13 @@ class TaskWorkerLeaseAdmin(admin.ModelAdmin):
     @admin.display(description="Worker ID")
     def worker_id_short(self, obj: TaskWorkerLease) -> str:
         """Show shortened worker ID."""
-        return f"{obj.worker_id[:12]}..."
+        worker_id = str(obj.worker_id)
+        return f"{worker_id[:12]}..."
 
     @admin.display(boolean=True, description="Active")
     def is_active_display_list(self, obj: TaskWorkerLease) -> bool:
         """Display active status as boolean icon in list view."""
-        return obj.is_active and not self._is_heartbeat_expired(obj)
+        return bool(obj.is_active) and not self._is_heartbeat_expired(obj)
 
     def _is_heartbeat_expired(self, obj: TaskWorkerLease) -> bool:
         """Check if heartbeat has expired."""
@@ -297,7 +298,7 @@ class TaskWorkerLeaseAdmin(admin.ModelAdmin):
             )
 
     @admin.action(description="Mark selected as inactive")
-    def mark_inactive(self, request, queryset):  # type: ignore[no-untyped-def]
+    def mark_inactive(self, request, queryset):
         """Mark selected worker leases as inactive."""
         from django.utils import timezone
 
@@ -318,7 +319,7 @@ class TaskWorkerLeaseAdmin(admin.ModelAdmin):
             )
 
     @admin.action(description="Delete inactive worker leases")
-    def delete_inactive(self, request, queryset):  # type: ignore[no-untyped-def]
+    def delete_inactive(self, request, queryset):
         """Delete inactive worker leases from selected."""
         deleted_count, _ = queryset.filter(is_active=False).delete()
 

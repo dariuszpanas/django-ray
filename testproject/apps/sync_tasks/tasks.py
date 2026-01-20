@@ -56,7 +56,7 @@ def process_data(items: list[Any]) -> dict[str, Any]:
         "count": len(items),
         "items": items,
         "sum": sum(x for x in items if isinstance(x, (int, float))),
-        "types": list(set(type(x).__name__ for x in items)),
+        "types": list({type(x).__name__ for x in items}),
     }
 
 

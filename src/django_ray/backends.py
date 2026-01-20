@@ -169,7 +169,7 @@ class RayTaskBackend(BaseTaskBackend):
         try:
             execution = RayTaskExecution.objects.get(task_id=result_id)
         except RayTaskExecution.DoesNotExist:
-            raise TaskResultDoesNotExist(f"Task result {result_id} does not exist")
+            raise TaskResultDoesNotExist(f"Task result {result_id} does not exist") from None
 
         # Reconstruct the Task object from the execution record
         task = self._reconstruct_task(execution)
@@ -232,7 +232,7 @@ class RayTaskBackend(BaseTaskBackend):
             worker_ids.append(execution.claimed_by_worker)
 
         # Map state to status
-        status = STATE_TO_STATUS.get(execution.state, TaskResultStatus.READY)
+        status = STATE_TO_STATUS.get(str(execution.state), TaskResultStatus.READY)
 
         # Create the result object
         result = TaskResult(

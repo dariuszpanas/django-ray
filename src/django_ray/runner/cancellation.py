@@ -37,10 +37,11 @@ def request_cancellation(
     if task_execution.ray_job_id:
         from django_ray.runner.base import SubmissionHandle
 
+        started = task_execution.started_at
         handle = SubmissionHandle(
             ray_job_id=str(task_execution.ray_job_id),
             ray_address=str(task_execution.ray_address or ""),
-            submitted_at=task_execution.started_at or datetime.now(UTC),  # type: ignore[arg-type]
+            submitted_at=started if isinstance(started, datetime) else datetime.now(UTC),
         )
 
         try:

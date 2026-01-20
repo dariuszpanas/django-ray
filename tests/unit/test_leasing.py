@@ -181,13 +181,13 @@ class TestLeaseLifecycle:
 
     def test_multiple_leases_per_queue(self) -> None:
         """Test that multiple workers can have leases on the same queue."""
-        lease1 = TaskWorkerLease.objects.create(
+        TaskWorkerLease.objects.create(
             worker_id=generate_worker_id(),
             hostname="host-1",
             pid=12345,
             queue_name="default",
         )
-        lease2 = TaskWorkerLease.objects.create(
+        TaskWorkerLease.objects.create(
             worker_id=generate_worker_id(),
             hostname="host-2",
             pid=12346,
@@ -198,13 +198,13 @@ class TestLeaseLifecycle:
 
     def test_leases_on_different_queues(self) -> None:
         """Test workers on different queues have separate leases."""
-        lease1 = TaskWorkerLease.objects.create(
+        TaskWorkerLease.objects.create(
             worker_id=generate_worker_id(),
             hostname="host-1",
             pid=12345,
             queue_name="default",
         )
-        lease2 = TaskWorkerLease.objects.create(
+        TaskWorkerLease.objects.create(
             worker_id=generate_worker_id(),
             hostname="host-2",
             pid=12346,

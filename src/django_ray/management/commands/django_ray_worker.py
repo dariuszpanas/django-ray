@@ -16,8 +16,10 @@ from django.db import transaction
 from django_ray.conf.settings import get_settings
 from django_ray.logging import get_worker_logger
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.cancellation import finalize_cancellation
 from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
+from django_ray.runner.ray_core import RayCoreRunner
 from django_ray.runner.reconciliation import (
     is_task_stuck,
     is_task_timed_out,
@@ -37,8 +39,8 @@ class Command(BaseCommand):
         self.shutdown_requested = False
         self.worker_id = generate_worker_id()
         self.logger = get_worker_logger(self.worker_id)
-        self.active_tasks: dict[int, str] = {}  # task_pk -> ray_job_id
-        self.local_ray_tasks: dict[int, Any] = {}  # task_pk -> ray ObjectRef
+        self.active_tasks: dict[int, str] = {}  # task_pk -> ray_job_id (for Ray Job API mode)
+        self.ray_core_runner: RayCoreRunner | None = None  # For local/cluster modes
         self.last_reconciliation = 0.0  # Last time we ran stuck task detection
         self.reconciliation_interval = 30.0  # Check for stuck tasks every 30 seconds
         self.lease: TaskWorkerLease | None = None  # Worker lease for coordination
@@ -106,6 +108,8 @@ class Command(BaseCommand):
             self.execution_mode = "local"
             try:
                 self._init_local_ray()
+                # Initialize RayCoreRunner for task submission via @ray.remote
+                self.ray_core_runner = RayCoreRunner()
             except Exception as e:
                 self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {e}"))
                 self.stdout.write("Will retry connection during operation...")
@@ -113,6 +117,8 @@ class Command(BaseCommand):
             self.execution_mode = "cluster"
             try:
                 self._init_cluster_ray(self.cluster_address)
+                # Initialize RayCoreRunner for task submission via @ray.remote
+                self.ray_core_runner = RayCoreRunner()
             except Exception as e:
                 self.stdout.write(self.style.WARNING(f"Initial cluster connection failed: {e}"))
                 self.stdout.write("Will retry connection during operation...")
@@ -322,9 +328,9 @@ class Command(BaseCommand):
                 self.send_heartbeat()
                 last_heartbeat = current_time
 
-            # Poll for completed local Ray tasks
-            if self.execution_mode in ("local", "cluster") and self.local_ray_tasks:
-                self.poll_local_ray_tasks()
+            # Poll for completed Ray Core tasks (local/cluster modes)
+            if self.execution_mode in ("local", "cluster") and self.ray_core_runner:
+                self.poll_ray_core_tasks()
 
             # Claim and process tasks from all queues
             self.claim_and_process_tasks(queues, concurrency)
@@ -382,7 +388,8 @@ class Command(BaseCommand):
             self._heartbeat_count = 1
 
         if self._heartbeat_count % 4 == 0:  # Every 4th heartbeat (~60 seconds)
-            active = len(self.active_tasks) + len(self.local_ray_tasks)
+            ray_core_pending = self.ray_core_runner.pending_count if self.ray_core_runner else 0
+            active = len(self.active_tasks) + ray_core_pending
             idle_time = (
                 time.time() - self.last_task_processed if self.last_task_processed > 0 else 0
             )
@@ -507,16 +514,18 @@ class Command(BaseCommand):
                     self.stdout.write(f"  Cluster resources: {resources}")
 
                     # Clear any stale Ray task references - they're invalid now
-                    if self.local_ray_tasks:
-                        stale_count = len(self.local_ray_tasks)
+                    if self.ray_core_runner and self.ray_core_runner.pending_count > 0:
+                        stale_count = self.ray_core_runner.pending_count
                         self.stdout.write(
                             self.style.WARNING(
                                 f"  Clearing {stale_count} stale Ray task references"
                             )
                         )
                         # Mark these tasks as LOST so they can be retried
-                        self._mark_stale_tasks_as_lost()
-                        self.local_ray_tasks.clear()
+                        self._mark_stale_ray_core_tasks_as_lost()
+
+                    # Reinitialize the runner with the new connection
+                    self.ray_core_runner = RayCoreRunner()
 
                     return  # Success!
 
@@ -538,12 +547,12 @@ class Command(BaseCommand):
             )
         )
 
-    def _mark_stale_tasks_as_lost(self) -> None:
-        """Mark tasks with stale Ray references as LOST so they can be retried."""
-        if not self.local_ray_tasks:
+    def _mark_stale_ray_core_tasks_as_lost(self) -> None:
+        """Mark tasks with stale Ray Core references as LOST so they can be retried."""
+        if not self.ray_core_runner or self.ray_core_runner.pending_count == 0:
             return
 
-        task_ids = list(self.local_ray_tasks.keys())
+        task_ids = list(self.ray_core_runner._pending_tasks.keys())
         now = datetime.now(UTC)
 
         count = RayTaskExecution.objects.filter(
@@ -554,6 +563,9 @@ class Command(BaseCommand):
             finished_at=now,
             error_message="Ray connection lost - task state unknown",
         )
+
+        # Clear the runner's pending tasks
+        self.ray_core_runner._pending_tasks.clear()
 
         if count > 0:
             self.stdout.write(self.style.WARNING(f"  Marked {count} running tasks as LOST"))
@@ -566,7 +578,8 @@ class Command(BaseCommand):
             concurrency: Maximum concurrent tasks.
         """
         # Check how many slots are available
-        active_count = len(self.active_tasks) + len(self.local_ray_tasks)
+        ray_core_pending = self.ray_core_runner.pending_count if self.ray_core_runner else 0
+        active_count = len(self.active_tasks) + ray_core_pending
         available_slots = concurrency - active_count
         if available_slots <= 0:
             return
@@ -645,11 +658,11 @@ class Command(BaseCommand):
             # Execute without Ray - purely synchronous
             self.execute_task_sync(task)
         elif self.execution_mode in ("local", "cluster"):
-            # Execute on this process with Ray available for distributed computing
-            # This allows tasks to use parallel_map, scatter_gather, etc.
-            self.execute_task_with_ray_available(task)
+            # Submit to Ray cluster via @ray.remote (RayCoreRunner)
+            # Tasks run on Ray workers, enabling distributed computing
+            self.submit_task_to_ray_core(task)
         else:
-            # Legacy: submit entire task as a Ray job
+            # Submit via Ray Job Submission API (process isolation)
             self.submit_task_to_ray(task)
 
     def execute_task_sync(self, task: RayTaskExecution) -> None:
@@ -716,7 +729,7 @@ class Command(BaseCommand):
         if retry_decision.should_retry:
             # Schedule retry
             task.state = TaskState.QUEUED
-            task.attempt_number += 1
+            task.attempt_number = int(task.attempt_number) + 1
             task.run_after = retry_decision.next_attempt_at
             task.error_message = error_message
             task.error_traceback = error_traceback
@@ -760,20 +773,21 @@ class Command(BaseCommand):
                 self.style.ERROR(f"  Task {task.pk} failed permanently ({reason}): {error_message}")
             )
 
-    def execute_task_with_ray_available(self, task: RayTaskExecution) -> None:
-        """Execute a task directly with Ray available for distributed computing.
+    def submit_task_to_ray_core(self, task: RayTaskExecution) -> None:
+        """Submit a task to Ray via @ray.remote (RayCoreRunner).
 
-        This runs the task on the current process (not inside a Ray task),
-        which allows the task code to spawn Ray tasks that use the FULL cluster.
+        This submits tasks to Ray workers using Ray Core remote functions,
+        providing lower latency than Ray Job API while still executing
+        on the Ray cluster.
 
-        This is the recommended mode for tasks that use parallel_map, scatter_gather,
-        or other distributed computing patterns.
+        Args:
+            task: The task execution to submit.
         """
         import ray
 
-        from django_ray.runtime.entrypoint import execute_task
+        from django_ray.runtime.serialization import deserialize_args
 
-        # Ensure Ray is connected
+        # Ensure Ray is connected and runner is available
         if not ray.is_initialized():
             self.stdout.write(self.style.WARNING("  Ray not initialized, attempting to connect..."))
             self._reconnect_ray()
@@ -786,230 +800,82 @@ class Command(BaseCommand):
                 )
                 return
 
-        # Get cluster resources with timeout protection
-        try:
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(ray.cluster_resources)
-                try:
-                    resources = future.result(timeout=5)
-                    cpu_count = resources.get("CPU", 0)
-                except concurrent.futures.TimeoutError:
-                    cpu_count = "?"
-                    self.stdout.write(
-                        self.style.WARNING("  Ray resources check timed out, continuing anyway...")
-                    )
-        except Exception:
-            cpu_count = "?"
-
-        self.stdout.write(f"  Executing with Ray available (CPUs: {cpu_count})...")
-
-        # Get task timeout (default 5 minutes if not specified)
-        task_timeout = task.timeout_seconds or 300
+        # Ensure runner is initialized
+        if self.ray_core_runner is None:
+            self.ray_core_runner = RayCoreRunner()
 
         try:
-            # Execute task with timeout protection
-            import concurrent.futures
+            args = deserialize_args(task.args_json)
+            kwargs = deserialize_args(task.kwargs_json)
 
-            def _run_task():
-                return execute_task(
-                    callable_path=task.callable_path,
-                    serialized_args=task.args_json,
-                    serialized_kwargs=task.kwargs_json,
-                )
+            handle = self.ray_core_runner.submit(
+                task_execution=task,
+                callable_path=task.callable_path,
+                args=tuple(args),
+                kwargs=kwargs,
+            )
 
-            # Use a thread pool to execute with timeout
-            # Note: This doesn't kill the thread if it hangs, but at least
-            # allows the worker to continue and mark the task as failed
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_run_task)
-                try:
-                    result_json = future.result(timeout=task_timeout)
-                except concurrent.futures.TimeoutError:
-                    self.stdout.write(
-                        self.style.ERROR(
-                            f"  Task {task.pk} execution timed out after {task_timeout}s"
-                        )
-                    )
-                    self._handle_task_failure(
-                        task,
-                        error_message=f"Task execution timed out after {task_timeout} seconds",
-                        exception_type="TimeoutError",
-                    )
-                    return
+            # Update task with tracking info
+            task.ray_job_id = handle.ray_job_id  # "ray_core:{pk}"
+            task.ray_address = handle.ray_address
+            task.save(update_fields=["ray_job_id", "ray_address"])
 
-            result = json.loads(result_json)
-
-            now = datetime.now(UTC)
-            if result["success"]:
-                task.state = TaskState.SUCCEEDED
-                task.result_data = json.dumps(result["result"])
-                task.finished_at = now
-                self.stdout.write(
-                    self.style.SUCCESS(f"  Task {task.pk} succeeded: {result['result']}")
-                )
-                task.save(
-                    update_fields=[
-                        "state",
-                        "result_data",
-                        "finished_at",
-                    ]
-                )
-            else:
-                self._handle_task_failure(
-                    task,
-                    error_message=result["error"],
-                    error_traceback=result.get("traceback"),
-                    exception_type=result.get("exception_type"),
-                )
+            self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} submitted to Ray Core (async)"))
 
         except Exception as e:
             import traceback
 
             self._handle_task_failure(
                 task,
-                error_message=str(e),
+                error_message=f"Failed to submit to Ray Core: {e}",
                 error_traceback=traceback.format_exc(),
                 exception_type=type(e).__name__,
             )
 
-    def execute_task_local_ray(self, task: RayTaskExecution) -> None:
-        """Submit a task to local Ray (non-blocking).
+    def poll_ray_core_tasks(self) -> None:
+        """Poll for completed Ray Core tasks and update their status.
 
-        NOTE: This wraps the entire task in @ray.remote, which means the task
-        runs INSIDE a Ray worker. If the task tries to use parallel_map or
-        other distributed utilities, those become nested Ray tasks.
-
-        For true distributed computing, use execute_task_with_ray_available instead.
+        Uses RayCoreRunner.poll_completed() for efficient batch polling.
         """
-        import ray
-
-        # Ensure Ray is connected before submitting
-        if not ray.is_initialized():
-            self.stdout.write(self.style.WARNING("  Ray not initialized, attempting to connect..."))
-            self._reconnect_ray()
-
-            # Check again after reconnection attempt
-            if not ray.is_initialized():
-                # Can't submit to Ray - mark task for retry
-                self._handle_task_failure(
-                    task,
-                    error_message="Ray cluster not available",
-                    exception_type="RayConnectionError",
-                )
-                return
-
-        # Extract short name from callable path for dashboard visibility
-        task_name = task.callable_path.split(".")[-1] if task.callable_path else "task"
-
-        @ray.remote(name=f"django_ray:{task_name}")
-        def run_task(callable_path: str, args_json: str, kwargs_json: str, task_id: int) -> str:
-            import json
-            import sys
-
-            print(f"[Task {task_id}] Starting: {callable_path}", flush=True)
-
-            from django_ray.runtime.entrypoint import execute_task
-
-            result = execute_task(callable_path, args_json, kwargs_json)
-
-            # Print the result so it's visible in Ray dashboard stdout
-            parsed = json.loads(result)
-            if parsed.get("success"):
-                print(f"[Task {task_id}] SUCCESS: {parsed.get('result')}", flush=True)
-            else:
-                print(
-                    f"[Task {task_id}] FAILED: {parsed.get('error')}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-            return result
-
-        try:
-            self.stdout.write(f"  Submitting to Ray as 'django_ray:{task_name}'...")
-            # Submit to Ray WITHOUT blocking - store the reference for later polling
-            result_ref = run_task.remote(
-                task.callable_path,
-                task.args_json,
-                task.kwargs_json,
-                task.pk,
-            )
-            # Track the pending task
-            self.local_ray_tasks[task.pk] = result_ref
-            self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} submitted to Ray (async)"))
-
-        except Exception as e:
-            task.state = TaskState.FAILED
-            task.error_message = str(e)
-            task.finished_at = datetime.now(UTC)
-            task.save(update_fields=["state", "error_message", "finished_at"])
-            self.stdout.write(self.style.ERROR(f"  Task {task.pk} failed to submit: {e}"))
-
-    def poll_local_ray_tasks(self) -> None:
-        """Poll for completed local Ray tasks and update their status."""
-        import ray
-
-        if not self.local_ray_tasks:
+        if self.ray_core_runner is None or self.ray_core_runner.pending_count == 0:
             return
+
+        import ray
 
         # Check if Ray is still connected
         if not ray.is_initialized():
-            self.stdout.write(self.style.WARNING("\nRay disconnected while tasks were running"))
-            # Mark all running tasks as lost - they need to be retried
-            self._mark_stale_tasks_as_lost()
-            self.local_ray_tasks.clear()
+            self.stdout.write(self.style.WARNING("\nRay disconnected, clearing pending tasks..."))
+            # Mark all pending tasks as needing retry
+            for task_pk in list(self.ray_core_runner._pending_tasks.keys()):
+                try:
+                    task = RayTaskExecution.objects.get(pk=task_pk)
+                    self._handle_task_failure(
+                        task,
+                        error_message="Ray connection lost",
+                        exception_type="RayConnectionError",
+                    )
+                except RayTaskExecution.DoesNotExist:
+                    pass
+            self.ray_core_runner._pending_tasks.clear()
             return
 
-        # Get list of all pending refs
-        pending_refs = list(self.local_ray_tasks.values())
-
+        # Poll for completed tasks
         try:
-            # Check for completed tasks (non-blocking with timeout=0)
-            ready_refs, _ = ray.wait(pending_refs, num_returns=len(pending_refs), timeout=0)
+            completed = self.ray_core_runner.poll_completed()
         except Exception as e:
-            self.stdout.write(self.style.WARNING(f"\nError polling Ray tasks: {e}"))
-            # Connection may be broken - the heartbeat will handle reconnection
+            self.stdout.write(self.style.ERROR(f"\nError polling Ray Core tasks: {e}"))
             return
 
-        if not ready_refs:
-            return
-
-        # Process completed tasks
-        for ref in ready_refs:
-            # Find the task_pk for this ref
-            task_pk = None
-            for pk, r in self.local_ray_tasks.items():
-                if r == ref:
-                    task_pk = pk
-                    break
-
-            if task_pk is None:
-                continue
-
-            # Remove from tracking
-            del self.local_ray_tasks[task_pk]
-
-            # Get the task from DB
+        for task_pk, result_json in completed:
             try:
                 task = RayTaskExecution.objects.get(pk=task_pk)
-            except RayTaskExecution.DoesNotExist:
-                continue
-
-            # Get the result
-            try:
-                result_json = ray.get(ref)
                 result = json.loads(result_json)
 
                 now = datetime.now(UTC)
-                if result["success"]:
+                if result.get("success"):
                     task.state = TaskState.SUCCEEDED
-                    task.result_data = json.dumps(result["result"])
+                    task.result_data = json.dumps(result.get("result"))
                     task.finished_at = now
-                    self.stdout.write(
-                        self.style.SUCCESS(f"\nTask {task.pk} succeeded (Ray): {result['result']}")
-                    )
                     task.save(
                         update_fields=[
                             "state",
@@ -1017,20 +883,22 @@ class Command(BaseCommand):
                             "finished_at",
                         ]
                     )
+                    self.stdout.write(
+                        self.style.SUCCESS(f"\n  Task {task.pk} completed: {result.get('result')}")
+                    )
                 else:
-                    # Task failed - use retry logic
                     self._handle_task_failure(
                         task,
-                        error_message=result["error"],
+                        error_message=result.get("error", "Unknown error"),
                         error_traceback=result.get("traceback"),
                         exception_type=result.get("exception_type"),
                     )
 
+            except RayTaskExecution.DoesNotExist:
+                self.stdout.write(self.style.WARNING(f"\n  Task {task_pk} not found in database"))
             except Exception as e:
-                self._handle_task_failure(
-                    task,
-                    error_message=str(e),
-                    exception_type=type(e).__name__,
+                self.stdout.write(
+                    self.style.ERROR(f"\n  Error processing task {task_pk} result: {e}")
                 )
 
     def submit_task_to_ray(self, task: RayTaskExecution) -> None:
@@ -1163,14 +1031,14 @@ class Command(BaseCommand):
                     self.style.WARNING(f"\nTask {task.pk} timed out after {task.timeout_seconds}s")
                 )
                 # Cancel the running task if we're tracking it
-                if task.pk in self.local_ray_tasks:
-                    import ray
-
-                    try:
-                        ray.cancel(self.local_ray_tasks[task.pk], force=True)
-                    except Exception:
-                        pass
-                    del self.local_ray_tasks[task.pk]
+                if self.ray_core_runner and task.pk in self.ray_core_runner._pending_tasks:
+                    self.ray_core_runner.cancel(
+                        SubmissionHandle(
+                            ray_job_id=f"ray_core:{task.pk}",
+                            ray_address="",
+                            submitted_at=task.started_at or datetime.now(UTC),
+                        )
+                    )
                 if task.pk in self.active_tasks:
                     del self.active_tasks[task.pk]
 
@@ -1179,7 +1047,8 @@ class Command(BaseCommand):
                 continue
 
             # Skip tasks we're actively tracking for stuck check (they're still running)
-            if task.pk in self.local_ray_tasks or task.pk in self.active_tasks:
+            ray_core_pending = self.ray_core_runner._pending_tasks if self.ray_core_runner else {}
+            if task.pk in ray_core_pending or task.pk in self.active_tasks:
                 continue
 
             # Check if task is stuck using the reconciliation logic
@@ -1252,15 +1121,15 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(f"\nFinalizing cancellation for task {task.pk}"))
 
             # Remove from our tracking if present
-            if task.pk in self.local_ray_tasks:
+            if self.ray_core_runner and task.pk in self.ray_core_runner._pending_tasks:
                 # Try to cancel the Ray task
-                import ray
-
-                try:
-                    ray.cancel(self.local_ray_tasks[task.pk], force=True)
-                except Exception:
-                    pass  # Best effort
-                del self.local_ray_tasks[task.pk]
+                self.ray_core_runner.cancel(
+                    SubmissionHandle(
+                        ray_job_id=f"ray_core:{task.pk}",
+                        ray_address="",
+                        submitted_at=task.started_at or datetime.now(UTC),
+                    )
+                )
 
             if task.pk in self.active_tasks:
                 del self.active_tasks[task.pk]
