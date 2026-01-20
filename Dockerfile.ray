@@ -22,13 +22,13 @@ COPY testproject/ testproject/
 COPY README.md ./
 
 # Install django-ray and dependencies using uv
-# We install into the existing Ray environment
-RUN uv pip install --system -e . --no-cache-dir
+# Include postgres for database driver, plus testproject dependencies
+RUN uv pip install --system -e ".[postgres]" django-ninja whitenoise --no-cache-dir
 
 # Set environment variables
 ENV DJANGO_SETTINGS_MODULE=testproject.settings \
     PYTHONPATH=/app/src:/app
 
 # Verify installation
-RUN python -c "import django_ray; print('django-ray installed successfully')"
+RUN python -c "import django_ray; import psycopg; import ninja; print('django-ray and dependencies installed successfully')"
 

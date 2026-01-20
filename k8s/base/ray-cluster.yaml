@@ -69,6 +69,11 @@ spec:
               value: "http://localhost:30030"
             - name: RAY_PROMETHEUS_NAME
               value: "Prometheus"
+          envFrom:
+            - configMapRef:
+                name: django-ray-config
+            - secretRef:
+                name: django-ray-secret
           resources:
             requests:
               memory: "8Gi"
@@ -199,6 +204,11 @@ spec:
               value: "0.0.0.0"
             - name: RAY_METRICS_EXPORT_PORT
               value: "8080"
+          envFrom:
+            - configMapRef:
+                name: django-ray-config
+            - secretRef:
+                name: django-ray-secret
           resources:
             requests:
               memory: "8Gi"

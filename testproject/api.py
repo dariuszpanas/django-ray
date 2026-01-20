@@ -246,9 +246,82 @@ def enqueue_slow(request, seconds: float, queue: str = "default"):
 
 @api.post("/enqueue/fail", response=TaskResultSchema, tags=["Enqueue"])
 def enqueue_fail(request, queue: str = "default"):
-    """Enqueue failing_task that always raises an exception."""
+    """Enqueue failing_task that always raises an exception.
+
+    This task WILL be auto-retried based on MAX_TASK_ATTEMPTS setting.
+    """
     task_obj = tasks.failing_task.using(queue_name=queue)
     result = task_obj.enqueue()
+
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post("/enqueue/fail-no-retry", response=TaskResultSchema, tags=["Enqueue"])
+def enqueue_fail_no_retry(request, queue: str = "default"):
+    """Enqueue failing_task_no_retry that fails without auto-retry.
+
+    Use this to test manual retry via Django admin:
+    1. Call this endpoint - task will fail
+    2. Go to admin, see task in FAILED state
+    3. Select task and use "Retry selected tasks" action
+    4. Task runs again (and fails again, but you can observe the retry)
+    """
+    task_obj = tasks.failing_task_no_retry.using(queue_name=queue)
+    result = task_obj.enqueue()
+
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post("/enqueue/intermittent", response=TaskResultSchema, tags=["Enqueue"])
+def enqueue_intermittent(request, fail_until_attempt: int = 3, queue: str = "default"):
+    """Enqueue intermittent_task that fails until Nth attempt then succeeds.
+
+    Useful for testing retry functionality:
+    1. Task fails on attempt 1
+    2. Use admin "Retry selected tasks" action
+    3. Task fails on attempt 2 (if fail_until_attempt > 2)
+    4. Keep retrying until attempt >= fail_until_attempt - task succeeds
+
+    Args:
+        fail_until_attempt: Number of attempts before success (default: 3)
+        queue: Queue name (default: "default")
+    """
+    import json
+
+    from django_ray.models import RayTaskExecution
+
+    task_obj = tasks.intermittent_task.using(queue_name=queue)
+    # Enqueue with placeholder execution_id=0
+    result = task_obj.enqueue(execution_id=0, fail_until_attempt=fail_until_attempt)
+
+    # Update kwargs_json with the actual execution_id
+    try:
+        execution = RayTaskExecution.objects.get(task_id=result.id)
+        execution.kwargs_json = json.dumps(
+            {
+                "execution_id": execution.pk,
+                "fail_until_attempt": fail_until_attempt,
+            }
+        )
+        execution.save(update_fields=["kwargs_json"])
+    except RayTaskExecution.DoesNotExist:
+        pass
 
     return {
         "task_id": result.id,

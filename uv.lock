@@ -498,9 +498,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "django" },
-    { name = "django-ninja" },
     { name = "ray", extra = ["default"] },
-    { name = "whitenoise" },
 ]
 
 [package.optional-dependencies]
@@ -510,32 +508,34 @@ postgres = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "django-ninja" },
     { name = "locust" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-django" },
     { name = "ruff" },
     { name = "ty" },
+    { name = "whitenoise" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "django", specifier = ">=6.0" },
-    { name = "django-ninja", specifier = ">=1.5.1" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
     { name = "ray", extras = ["default"], specifier = ">=2.53.0" },
-    { name = "whitenoise", specifier = ">=6.6" },
 ]
 provides-extras = ["postgres"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "django-ninja", specifier = ">=1.5.1" },
     { name = "locust", specifier = ">=2.20" },
     { name = "pytest", specifier = ">=7.0" },
     { name = "pytest-cov", specifier = ">=4.0" },
     { name = "pytest-django", specifier = ">=4.7" },
     { name = "ruff", specifier = ">=0.14.13" },
     { name = "ty", specifier = ">=0.0.12" },
+    { name = "whitenoise", specifier = ">=6.6" },
 ]
 
 [[package]]

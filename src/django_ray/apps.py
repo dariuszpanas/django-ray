@@ -12,12 +12,12 @@ class DjangoRayConfig(AppConfig):
 
     def ready(self) -> None:
         """Initialize the app when Django starts."""
-        # Import settings validation to trigger on startup
+        from django.core.exceptions import ImproperlyConfigured
+
         from django_ray.conf.settings import validate_settings
 
-        # Validate settings (will raise ImproperlyConfigured if invalid)
         try:
             validate_settings()
-        except Exception:
+        except ImproperlyConfigured:
             # Allow startup without RAY_ADDRESS for migrations, etc.
             pass

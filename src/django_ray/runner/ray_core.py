@@ -23,6 +23,8 @@ class RayCoreHandle:
     object_ref: Any  # ray.ObjectRef
     submitted_at: datetime
     task_name: str
+    ray_job_id: str = ""  # The worker's Ray job ID (e.g., "02000000")
+    ray_task_id: str = ""  # The task's Ray ID (e.g., "67a2e8cfa5a06db3ffff...")
 
 
 class RayCoreRunner(BaseRunner):
@@ -122,18 +124,42 @@ class RayCoreRunner(BaseRunner):
             task_execution.pk,
         )
 
+        # Get Ray job ID (the worker's client connection job ID)
+        ray_job_id = ""
+        ray_task_id = ""
+        try:
+            # Get the current job ID from Ray runtime context
+            ctx = ray.get_runtime_context()
+            ray_job_id = ctx.get_job_id()
+            # Get the task ID from the ObjectRef
+            # The hex() returns 56 chars but Ray Dashboard uses only first 48
+            full_hex = object_ref.hex()
+            ray_task_id = full_hex[:48] if len(full_hex) >= 48 else full_hex
+        except Exception:
+            pass
+
         # Track the pending task
         handle = RayCoreHandle(
             task_pk=task_execution.pk,
             object_ref=object_ref,
             submitted_at=submitted_at,
             task_name=task_name,
+            ray_job_id=ray_job_id,
+            ray_task_id=ray_task_id,
         )
         self._pending_tasks[task_execution.pk] = handle
 
+        # Build a composite ID that includes both job and task IDs for dashboard linking
+        # Format: job_id:task_id (e.g., "02000000:67a2e8cfa5a06db3ffff...")
+        composite_id = (
+            f"{ray_job_id}:{ray_task_id}"
+            if ray_job_id and ray_task_id
+            else f"ray_core:{task_execution.pk}"
+        )
+
         # Return a SubmissionHandle for compatibility with BaseRunner interface
         return SubmissionHandle(
-            ray_job_id=f"ray_core:{task_execution.pk}",
+            ray_job_id=composite_id,
             ray_address=os.environ.get("RAY_ADDRESS", "auto"),
             submitted_at=submitted_at,
         )
@@ -195,6 +221,9 @@ class RayCoreRunner(BaseRunner):
     def cancel(self, handle: SubmissionHandle) -> bool:
         """Cancel a Ray Core task.
 
+        Uses graceful cancellation (force=False) which raises TaskCancelledError
+        in the task. This allows the task to clean up and doesn't kill the worker.
+
         Args:
             handle: The submission handle from submit().
 
@@ -203,10 +232,19 @@ class RayCoreRunner(BaseRunner):
         """
         import ray
 
-        if not handle.ray_job_id.startswith("ray_core:"):
+        # Check if this is a Ray Core task (old format: ray_core:pk, new format: job_id:task_id)
+        job_id = handle.ray_job_id
+        if job_id.startswith("ray_core:"):
+            # Old format - extract pk
+            task_pk = int(job_id.split(":")[1])
+        elif ":" in job_id and not job_id.startswith("raysubmit_"):
+            # New format with job_id:task_id - this is for reference, but we can't
+            # cancel without the ObjectRef which is only in _pending_tasks
+            # We'd need to find it by iterating
             return False
-
-        task_pk = int(handle.ray_job_id.split(":")[1])
+        else:
+            # Not a Ray Core task
+            return False
 
         if task_pk not in self._pending_tasks:
             return False
@@ -214,10 +252,14 @@ class RayCoreRunner(BaseRunner):
         core_handle = self._pending_tasks[task_pk]
 
         try:
-            ray.cancel(core_handle.object_ref, force=True)
+            # Use force=False for graceful cancellation
+            # This raises TaskCancelledError in the task instead of killing the worker
+            ray.cancel(core_handle.object_ref, force=False)
             del self._pending_tasks[task_pk]
             return True
-        except Exception:
+        except (RuntimeError, ray.exceptions.RayTaskError):
+            # Task may have already completed or failed
+            self._pending_tasks.pop(task_pk, None)
             return False
 
     def get_logs(self, handle: SubmissionHandle) -> str | None:

@@ -869,6 +869,16 @@ class Command(BaseCommand):
         for task_pk, result_json in completed:
             try:
                 task = RayTaskExecution.objects.get(pk=task_pk)
+
+                # Skip if task was cancelled externally
+                if task.state in (TaskState.CANCELLED, TaskState.CANCELLING):
+                    if task.state == TaskState.CANCELLING:
+                        task.state = TaskState.CANCELLED
+                        task.finished_at = datetime.now(UTC)
+                        task.save(update_fields=["state", "finished_at"])
+                    self.stdout.write(self.style.WARNING(f"\n  Task {task.pk} was cancelled"))
+                    continue
+
                 result = json.loads(result_json)
 
                 now = datetime.now(UTC)
@@ -951,6 +961,18 @@ class Command(BaseCommand):
         for task_pk, ray_job_id in self.active_tasks.items():
             try:
                 task = RayTaskExecution.objects.get(pk=task_pk)
+
+                # Skip reconciliation if task was cancelled externally
+                if task.state in (TaskState.CANCELLED, TaskState.CANCELLING):
+                    # Finalize cancellation if still in CANCELLING state
+                    if task.state == TaskState.CANCELLING:
+                        task.state = TaskState.CANCELLED
+                        task.finished_at = datetime.now(UTC)
+                        task.save(update_fields=["state", "finished_at"])
+                    completed_tasks.append(task_pk)
+                    self.stdout.write(self.style.WARNING(f"\nTask {task_pk} was cancelled"))
+                    continue
+
                 handle = SubmissionHandle(
                     ray_job_id=ray_job_id,
                     ray_address=task.ray_address or "",

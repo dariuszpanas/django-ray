@@ -31,9 +31,10 @@ WORKDIR /app
 # Copy dependency files
 COPY pyproject.toml uv.lock ./
 
-# Install dependencies (without dev dependencies, with postgres support)
+# Install dependencies with postgres support
+# Note: We include dev dependencies because testproject requires django-ninja and whitenoise
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project --extra postgres
+    uv sync --frozen --no-install-project --extra postgres
 
 # Copy source code
 COPY src/ src/
@@ -42,7 +43,7 @@ COPY README.md ./
 
 # Install the project itself
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra postgres
+    uv sync --frozen --extra postgres
 
 # Install gunicorn for production
 RUN --mount=type=cache,target=/root/.cache/uv \

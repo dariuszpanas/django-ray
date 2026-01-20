@@ -145,6 +145,10 @@ DJANGO_RAY = {
     "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
     "RUNTIME_ENV": {},
     "NUM_CPUS_PER_TASK": int(os.environ.get("RAY_NUM_CPUS_PER_TASK", "1")),
-    "MAX_RETRIES": int(os.environ.get("RAY_MAX_RETRIES", "3")),
-    "RETRY_DELAY_SECONDS": int(os.environ.get("RAY_RETRY_DELAY_SECONDS", "5")),
+    "MAX_TASK_ATTEMPTS": int(os.environ.get("RAY_MAX_RETRIES", "3")),
+    "RETRY_BACKOFF_SECONDS": int(os.environ.get("RAY_RETRY_DELAY_SECONDS", "5")),
+    # Exceptions that won't trigger auto-retry (use for manual retry testing)
+    "RETRY_EXCEPTION_DENYLIST": [
+        "testproject.tasks.NoRetryError",
+    ],
 }

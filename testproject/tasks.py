@@ -45,8 +45,59 @@ def slow_task(seconds: float = 1.0) -> str:
 
 @task
 def failing_task() -> None:
-    """Task that always fails."""
+    """Task that always fails (will be auto-retried based on MAX_TASK_ATTEMPTS)."""
     raise ValueError("This task is designed to fail!")
+
+
+class NoRetryError(Exception):
+    """Exception that won't trigger automatic retry.
+
+    Add 'testproject.tasks.NoRetryError' to RETRY_EXCEPTION_DENYLIST in settings.
+    """
+
+
+@task
+def failing_task_no_retry() -> None:
+    """Task that fails and won't be auto-retried.
+
+    Uses NoRetryError which should be in RETRY_EXCEPTION_DENYLIST.
+    Use this to test manual retry via admin.
+    """
+    raise NoRetryError("This task failed and won't auto-retry. Use admin to retry manually.")
+
+
+@task
+def intermittent_task(execution_id: int, fail_until_attempt: int = 3) -> dict:
+    """Task that fails until a certain attempt number, then succeeds.
+
+    NOTE: This task will auto-retry based on MAX_TASK_ATTEMPTS setting.
+    To test manual retry, use failing_task_no_retry instead, or set
+    MAX_TASK_ATTEMPTS=1 in your settings.
+
+    Args:
+        execution_id: The RayTaskExecution.pk to look up attempt number
+        fail_until_attempt: Succeed on this attempt number (default: 3)
+
+    Returns:
+        dict with attempt info on success
+    """
+    from django_ray.models import RayTaskExecution
+
+    # Get current attempt from database
+    execution = RayTaskExecution.objects.get(pk=execution_id)
+    current_attempt = execution.attempt_number
+
+    if current_attempt < fail_until_attempt:
+        raise RuntimeError(
+            f"Intermittent failure: attempt {current_attempt}/{fail_until_attempt}. "
+            f"Will succeed on attempt {fail_until_attempt}."
+        )
+
+    return {
+        "success": True,
+        "attempts_needed": current_attempt,
+        "execution_id": execution_id,
+    }
 
 
 @task

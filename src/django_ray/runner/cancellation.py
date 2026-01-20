@@ -46,8 +46,8 @@ def request_cancellation(
 
         try:
             runner.cancel(handle)
-        except Exception:
-            # Best effort - cancellation may fail
+        except (RuntimeError, ConnectionError, TimeoutError):
+            # Best effort - cancellation may fail due to Ray connection issues
             pass
 
     return True

@@ -8,7 +8,7 @@ on:
 
 jobs:
   lint:
-    name: Lint & Format Check
+    name: Lint & Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,8 +47,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Type check with ty
-        run: uv run ty check --ignore unresolved-attribute --ignore invalid-argument-type --ignore possibly-missing-attribute
+      - name: Type check
+        run: uv run ty check
 
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -56,7 +56,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -71,10 +71,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Run tests with coverage
+      - name: Run tests
         run: uv run pytest --cov=src --cov-report=xml --cov-report=term -v
 
       - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage.xml
