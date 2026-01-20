@@ -1,0 +1,124 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "django-ray"
+version = "0.1.0"
+description = "Ray-based backend for Django Tasks with distributed execution and database-backed reliability"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.12"
+authors = [
+    { name = "Dariusz Panas" },
+]
+keywords = [
+    "django",
+    "ray",
+    "distributed",
+    "tasks",
+    "background-tasks",
+    "task-queue",
+    "async",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Framework :: Django :: 6.0",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "django>=6.0",
+    "ray[default]>=2.53.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/dpanas/django-ray"
+Documentation = "https://github.com/dpanas/django-ray/tree/main/docs"
+Repository = "https://github.com/dpanas/django-ray"
+Issues = "https://github.com/dpanas/django-ray/issues"
+
+[project.optional-dependencies]
+postgres = [
+    "psycopg[binary]>=3.1",
+]
+
+[dependency-groups]
+dev = [
+    "django-ninja>=1.5.1",
+    "whitenoise>=6.6",
+    "ruff>=0.14.13",
+    "ty>=0.0.12",
+    "pytest>=7.0",
+    "pytest-django>=4.7",
+    "pytest-cov>=4.0",
+    "locust>=2.20",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "PIE",  # flake8-pie
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["django_ray"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.rules]
+# Django ORM-related errors - ty doesn't have Django stubs yet
+unresolved-attribute = "ignore"
+invalid-argument-type = "ignore"
+possibly-missing-attribute = "ignore"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    # Suppress Ray's FutureWarning about accelerator env var override
+    "ignore:Tip. In future versions of Ray:FutureWarning",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/django_ray"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+

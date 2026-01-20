@@ -1,0 +1,62 @@
+# Docker ignore file for django-ray
+# Exclude files not needed in Docker builds
+
+# Git
+.git/
+.gitignore
+.github/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# Linting/Type checking
+.ruff_cache/
+.mypy_cache/
+
+# Database (use volume mount or external DB in production)
+*.sqlite3
+
+# Documentation
+docs/_build/
+adr/
+
+# Scripts (not needed in container)
+scripts/
+
+# Lock file included for reproducible builds
+# uv.lock
+
+# Kubernetes manifests
+k8s/
+
+# CI/CD
+.github/
+

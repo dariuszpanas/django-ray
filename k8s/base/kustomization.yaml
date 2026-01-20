@@ -1,0 +1,29 @@
+# Kustomize base configuration for django-ray
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: django-ray
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - postgres.yaml
+  - ray-cluster.yaml
+  - django-web.yaml
+  - django-ray-worker.yaml
+  - django-setup-job.yaml
+  - monitoring.yaml
+
+commonLabels:
+  app.kubernetes.io/name: django-ray
+  app.kubernetes.io/part-of: django-ray
+
+images:
+  - name: django-ray
+    newName: django-ray
+    newTag: latest
+  - name: django-ray-worker
+    newName: django-ray-worker
+    newTag: latest
+

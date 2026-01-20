@@ -1,0 +1,56 @@
+# Django setup job - runs migrations, collectstatic, and creates superuser
+# This runs as a one-time Job during deployment
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: django-setup
+  namespace: django-ray
+  labels:
+    app: django-ray
+    component: setup
+spec:
+  ttlSecondsAfterFinished: 300  # Clean up after 5 minutes
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        # Wait for PostgreSQL to be ready
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;']
+      containers:
+        - name: django-setup
+          image: django-ray:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Running migrations..."
+              python testproject/manage.py migrate --noinput
+              
+              echo "Collecting static files..."
+              python testproject/manage.py collectstatic --noinput
+              
+              echo "Creating superuser (if not exists)..."
+              python testproject/manage.py shell -c "
+              from django.contrib.auth import get_user_model
+              User = get_user_model()
+              import os
+              username = os.environ.get('DJANGO_SUPERUSER_USERNAME', 'admin')
+              email = os.environ.get('DJANGO_SUPERUSER_EMAIL', 'admin@example.com')
+              password = os.environ.get('DJANGO_SUPERUSER_PASSWORD', 'admin123')
+              if not User.objects.filter(username=username).exists():
+                  User.objects.create_superuser(username, email, password)
+                  print(f'Superuser {username} created successfully')
+              else:
+                  print(f'Superuser {username} already exists')
+              "
+              
+              echo "Django setup complete!"
+          envFrom:
+            - configMapRef:
+                name: django-ray-config
+            - secretRef:
+                name: django-ray-secret
+

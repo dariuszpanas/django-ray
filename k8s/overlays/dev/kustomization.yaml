@@ -1,0 +1,67 @@
+# Development overlay with all queue workers
+# Optimized for easy local testing with all example apps
+#
+# This overlay creates workers for all configured queues:
+#   - default: General purpose tasks
+#   - high-priority: Urgent tasks processed first
+#   - low-priority: Background/batch tasks
+#   - sync: For testing (runs in sync mode)
+#   - ml: Machine learning pipeline tasks
+#
+# Usage:
+#   kubectl apply -k k8s/overlays/dev
+#
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: django-ray
+
+resources:
+  - ../../base
+  # Additional worker deployments for different queues
+  - worker-all-queues.yaml
+  - worker-ml.yaml
+
+patches:
+  # Enable Django DEBUG mode
+  - patch: |-
+      - op: replace
+        path: /data/DJANGO_DEBUG
+        value: "True"
+    target:
+      kind: ConfigMap
+      name: django-ray-config
+
+  # Reduce resource limits for dev
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "128Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "50m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "256Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "250m"
+    target:
+      kind: Deployment
+      name: django-ray-worker
+
+  # Main worker processes default, high-priority, and low-priority queues
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: RAY_ADDRESS
+            value: "ray://ray-head-svc:10001"
+          - name: DJANGO_RAY_QUEUES
+            value: "default,high-priority,low-priority"
+          - name: DJANGO_RAY_CONCURRENCY
+            value: "40"
+    target:
+      kind: Deployment
+      name: django-ray-worker
+

@@ -1,0 +1,60 @@
+# Worker that processes ALL queues
+# Useful for development when you want a single worker handling everything
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-ray-worker-all
+  namespace: django-ray
+  labels:
+    app: django-ray
+    component: worker
+    queues: all
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: django-ray
+      component: worker
+      queues: all
+  template:
+    metadata:
+      labels:
+        app: django-ray
+        component: worker
+        queues: all
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;']
+        - name: wait-for-ray
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z ray-head-svc 10001; do echo waiting for ray-head; sleep 2; done;']
+      containers:
+        - name: django-ray-worker
+          image: django-ray:latest
+          imagePullPolicy: IfNotPresent
+          command: ['python', 'testproject/manage.py', 'django_ray_worker']
+          args:
+            - '--all-queues'
+            - '--cluster'
+            - 'ray://ray-head-svc:10001'
+            - '--concurrency'
+            - '40'
+          envFrom:
+            - configMapRef:
+                name: django-ray-config
+            - secretRef:
+                name: django-ray-secret
+          env:
+            - name: RAY_ADDRESS
+              value: "ray://ray-head-svc:10001"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+

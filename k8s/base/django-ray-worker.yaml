@@ -1,0 +1,77 @@
+# Django-Ray Worker Deployment
+# Processes tasks from the queue and submits to Ray cluster
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-ray-worker
+  namespace: django-ray
+  labels:
+    app: django-ray
+    component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: django-ray
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: django-ray
+        component: worker
+    spec:
+      initContainers:
+        # Wait for PostgreSQL
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;']
+        # Wait for Ray head
+        - name: wait-for-ray
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z ray-head-svc 10001; do echo waiting for ray-head; sleep 2; done;']
+      containers:
+        - name: django-ray-worker
+          image: django-ray:latest
+          imagePullPolicy: IfNotPresent
+          args: ['worker-cluster']  # Connect to Ray cluster
+          envFrom:
+            - configMapRef:
+                name: django-ray-config
+            - secretRef:
+                name: django-ray-secret
+          env:
+            - name: RAY_ADDRESS
+              value: "ray://ray-head-svc:10001"
+            - name: DJANGO_RAY_QUEUE
+              value: "default"
+            - name: DJANGO_RAY_CONCURRENCY
+              value: "40"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
