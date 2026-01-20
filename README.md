@@ -245,28 +245,28 @@ django-ray/
 
 ## Documentation
 
-Full documentation is available in the [docs/](docs/) directory:
+Full documentation is available in the [docs/](https://github.com/dariuszpanas/django-ray/tree/main/docs) directory:
 
-- [Getting Started](docs/getting-started.md) - Installation and basic setup
-- [Configuration](docs/configuration.md) - All configuration options
-- [Worker Modes](docs/worker-modes.md) - Execution modes explained
-- [Tasks](docs/tasks.md) - Defining and enqueueing tasks
-- [Queues](docs/queues.md) - Working with task queues
-- [Retry & Error Handling](docs/retry.md) - Configuring retries
+- [Getting Started](https://github.com/dariuszpanas/django-ray/blob/main/docs/getting-started.md) - Installation and basic setup
+- [Configuration](https://github.com/dariuszpanas/django-ray/blob/main/docs/configuration.md) - All configuration options
+- [Worker Modes](https://github.com/dariuszpanas/django-ray/blob/main/docs/worker-modes.md) - Execution modes explained
+- [Tasks](https://github.com/dariuszpanas/django-ray/blob/main/docs/tasks.md) - Defining and enqueueing tasks
+- [Queues](https://github.com/dariuszpanas/django-ray/blob/main/docs/queues.md) - Working with task queues
+- [Retry & Error Handling](https://github.com/dariuszpanas/django-ray/blob/main/docs/retry.md) - Configuring retries
 
 ### Deployment
 
-- [Kubernetes](docs/deployment/kubernetes.md) - Deploy to Kubernetes
-- [Docker](docs/deployment/docker.md) - Running with Docker
-- [TLS](docs/deployment/tls.md) - Securing Ray communication
+- [Kubernetes](https://github.com/dariuszpanas/django-ray/blob/main/docs/deployment/kubernetes.md) - Deploy to Kubernetes
+- [Docker](https://github.com/dariuszpanas/django-ray/blob/main/docs/deployment/docker.md) - Running with Docker
+- [TLS](https://github.com/dariuszpanas/django-ray/blob/main/docs/deployment/tls.md) - Securing Ray communication
 
 ### Reference
 
-- [CLI Reference](docs/reference/cli.md) - Command-line options
-- [Settings Reference](docs/reference/settings.md) - All settings
-- [API Reference](docs/reference/api.md) - REST API endpoints
+- [CLI Reference](https://github.com/dariuszpanas/django-ray/blob/main/docs/reference/cli.md) - Command-line options
+- [Settings Reference](https://github.com/dariuszpanas/django-ray/blob/main/docs/reference/settings.md) - All settings
+- [API Reference](https://github.com/dariuszpanas/django-ray/blob/main/docs/reference/api.md) - REST API endpoints
 
 ## License
 
-This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the BSD 3-Clause License - see the [LICENSE](https://github.com/dariuszpanas/django-ray/blob/main/LICENSE) file for details.
 
