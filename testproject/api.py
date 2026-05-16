@@ -9,10 +9,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
+from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
 from ninja import NinjaAPI, Schema
 
+from django_ray import __version__ as django_ray_version
 from django_ray.models import RayTaskExecution, TaskState
 
 # Import tasks that use Django 6's @task decorator
@@ -24,9 +26,17 @@ from testproject.apps.sync_tasks import tasks as sync_tasks
 
 api = NinjaAPI(
     title="Django Ray API",
-    version="0.2.0",
+    version=django_ray_version,
     description="API for managing Ray tasks using Django 6's native task framework",
 )
+
+
+def _task_state_counts() -> dict[str, int]:
+    """Return task counts grouped by state with a single query."""
+    return {
+        row["state"]: row["count"]
+        for row in RayTaskExecution.objects.values("state").annotate(count=Count("id"))
+    }
 
 
 # ============================================================================
@@ -87,6 +97,13 @@ class HealthSchema(Schema):
     version: str
 
 
+class LivenessSchema(Schema):
+    """Lightweight process liveness response schema."""
+
+    status: str
+    version: str
+
+
 class StatsSchema(Schema):
     """Task statistics schema."""
 
@@ -104,9 +121,8 @@ class StatsSchema(Schema):
 # ============================================================================
 
 
-@api.get("/health", response=HealthSchema, tags=["Health"])
-def health_check(request):
-    """Health check endpoint for Kubernetes probes."""
+def _database_health_payload() -> dict[str, str]:
+    """Return a database-backed health payload."""
     from django.db import connection
 
     db_status = "ok"
@@ -119,8 +135,29 @@ def health_check(request):
     return {
         "status": "healthy" if db_status == "ok" else "degraded",
         "database": db_status,
-        "version": "0.2.0",
+        "version": django_ray_version,
     }
+
+
+@api.get("/livez", response=LivenessSchema, tags=["Health"])
+def liveness_check(request):
+    """Cheap liveness endpoint for kubelet probes."""
+    return {
+        "status": "alive",
+        "version": django_ray_version,
+    }
+
+
+@api.get("/readyz", response=HealthSchema, tags=["Health"])
+def readiness_check(request):
+    """Readiness endpoint that verifies database access."""
+    return _database_health_payload()
+
+
+@api.get("/health", response=HealthSchema, tags=["Health"])
+def health_check(request):
+    """Backward-compatible health endpoint for external checks."""
+    return _database_health_payload()
 
 
 @api.get("/metrics", tags=["Health"])
@@ -133,6 +170,17 @@ def prometheus_metrics(request):
 
     from django_ray.models import RayTaskExecution, TaskState
 
+    task_counts = _task_state_counts()
+    queued_depths = {
+        row["queue_name"]: row["count"]
+        for row in (
+            RayTaskExecution.objects.filter(state=TaskState.QUEUED)
+            .values("queue_name")
+            .annotate(count=Count("id"))
+            .order_by()
+        )
+    }
+
     # Build metrics from database state
     lines = [
         "# HELP django_ray_tasks_total Total tasks by state",
@@ -141,7 +189,7 @@ def prometheus_metrics(request):
 
     # Count tasks by state
     for state in TaskState:
-        count = RayTaskExecution.objects.filter(state=state).count()
+        count = task_counts.get(state, 0)
         lines.append(f'django_ray_tasks_total{{state="{state}"}} {count}')
 
     lines.extend(
@@ -149,22 +197,15 @@ def prometheus_metrics(request):
             "",
             "# HELP django_ray_tasks_queued Current queued tasks",
             "# TYPE django_ray_tasks_queued gauge",
-            f"django_ray_tasks_queued {RayTaskExecution.objects.filter(state=TaskState.QUEUED).count()}",
+            f"django_ray_tasks_queued {task_counts.get(TaskState.QUEUED, 0)}",
             "",
             "# HELP django_ray_tasks_running Current running tasks",
             "# TYPE django_ray_tasks_running gauge",
-            f"django_ray_tasks_running {RayTaskExecution.objects.filter(state=TaskState.RUNNING).count()}",
+            f"django_ray_tasks_running {task_counts.get(TaskState.RUNNING, 0)}",
         ]
     )
 
-    # Queue depths
-    queues = (
-        RayTaskExecution.objects.filter(state=TaskState.QUEUED)
-        .values_list("queue_name", flat=True)
-        .distinct()
-    )
-
-    if queues:
+    if queued_depths:
         lines.extend(
             [
                 "",
@@ -172,11 +213,7 @@ def prometheus_metrics(request):
                 "# TYPE django_ray_queue_depth gauge",
             ]
         )
-        for queue in queues:
-            depth = RayTaskExecution.objects.filter(
-                state=TaskState.QUEUED,
-                queue_name=queue,
-            ).count()
+        for queue, depth in sorted(queued_depths.items()):
             lines.append(f'django_ray_queue_depth{{queue="{queue}"}} {depth}')
 
     return HttpResponse(
@@ -418,31 +455,31 @@ def list_executions(
 
     queryset = queryset.order_by("-created_at")[:limit]
 
-    all_tasks = RayTaskExecution.objects.all()
+    task_counts = _task_state_counts()
 
     return {
         "tasks": list(queryset),
-        "total": all_tasks.count(),
-        "queued": all_tasks.filter(state=TaskState.QUEUED).count(),
-        "running": all_tasks.filter(state=TaskState.RUNNING).count(),
-        "succeeded": all_tasks.filter(state=TaskState.SUCCEEDED).count(),
-        "failed": all_tasks.filter(state=TaskState.FAILED).count(),
+        "total": sum(task_counts.values()),
+        "queued": task_counts.get(TaskState.QUEUED, 0),
+        "running": task_counts.get(TaskState.RUNNING, 0),
+        "succeeded": task_counts.get(TaskState.SUCCEEDED, 0),
+        "failed": task_counts.get(TaskState.FAILED, 0),
     }
 
 
 @api.get("/executions/stats", response=StatsSchema, tags=["Admin"])
 def get_stats(request):
     """Get task execution statistics."""
-    all_tasks = RayTaskExecution.objects.all()
+    task_counts = _task_state_counts()
 
     return {
-        "total": all_tasks.count(),
-        "queued": all_tasks.filter(state=TaskState.QUEUED).count(),
-        "running": all_tasks.filter(state=TaskState.RUNNING).count(),
-        "succeeded": all_tasks.filter(state=TaskState.SUCCEEDED).count(),
-        "failed": all_tasks.filter(state=TaskState.FAILED).count(),
-        "cancelled": all_tasks.filter(state=TaskState.CANCELLED).count(),
-        "lost": all_tasks.filter(state=TaskState.LOST).count(),
+        "total": sum(task_counts.values()),
+        "queued": task_counts.get(TaskState.QUEUED, 0),
+        "running": task_counts.get(TaskState.RUNNING, 0),
+        "succeeded": task_counts.get(TaskState.SUCCEEDED, 0),
+        "failed": task_counts.get(TaskState.FAILED, 0),
+        "cancelled": task_counts.get(TaskState.CANCELLED, 0),
+        "lost": task_counts.get(TaskState.LOST, 0),
     }
 
 

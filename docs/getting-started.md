@@ -67,6 +67,9 @@ DJANGO_RAY = {
 
 # Optional: Ray Dashboard URL for admin links
 RAY_DASHBOARD_URL = "http://localhost:8265"
+
+# If you use the local Kubernetes Kong overlay from this repo instead:
+# RAY_DASHBOARD_URL = "http://ray.localhost:30080"
 ```
 
 ### 3. Run Migrations

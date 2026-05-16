@@ -50,6 +50,35 @@ def calculate_backoff(attempt_number: int) -> timedelta:
     return timedelta(seconds=backoff_seconds)
 
 
+def _normalize_exception_name(exception_name: str) -> set[str]:
+    """Return comparable variants of an exception class path/name."""
+    name = exception_name.strip()
+    if not name:
+        return set()
+
+    short_name = name.rsplit(".", 1)[-1]
+    variants = {name, short_name}
+
+    # Common case where runtime emits fully qualified builtins but users configure short names.
+    if "." not in name:
+        variants.add(f"builtins.{name}")
+
+    return variants
+
+
+def _match_denylist_entry(exception_type: str, denylist: list[object]) -> str | None:
+    """Return the matched denylist entry, if any."""
+    exception_variants = _normalize_exception_name(exception_type)
+
+    for entry in denylist:
+        if not isinstance(entry, str):
+            continue
+        if exception_variants & _normalize_exception_name(entry):
+            return entry
+
+    return None
+
+
 def should_retry(
     task_execution: RayTaskExecution,
     exception_type: str | None = None,
@@ -72,14 +101,16 @@ def should_retry(
             reason=f"Max attempts ({max_attempts}) reached",
         )
 
-    # TODO: Check exception allowlist/denylist
     settings = get_settings()
     denylist = settings.get("RETRY_EXCEPTION_DENYLIST", [])
 
-    if exception_type and exception_type in denylist:
+    matched_entry = (
+        _match_denylist_entry(exception_type, denylist) if exception_type is not None else None
+    )
+    if matched_entry is not None:
         return RetryDecision(
             should_retry=False,
-            reason=f"Exception type '{exception_type}' is in denylist",
+            reason=f"Exception type '{exception_type}' matched denylist entry '{matched_entry}'",
         )
 
     next_attempt = attempt_number + 1

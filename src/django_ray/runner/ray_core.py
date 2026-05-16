@@ -164,6 +164,30 @@ class RayCoreRunner(BaseRunner):
             submitted_at=submitted_at,
         )
 
+    @staticmethod
+    def _build_composite_id(handle: RayCoreHandle) -> str | None:
+        """Build dashboard-friendly composite ID for a pending Ray Core handle."""
+        if handle.ray_job_id and handle.ray_task_id:
+            return f"{handle.ray_job_id}:{handle.ray_task_id}"
+        return None
+
+    def _resolve_task_pk(self, handle_id: str) -> int | None:
+        """Resolve task PK from either legacy or composite Ray Core handle ID."""
+        if handle_id.startswith("ray_core:"):
+            try:
+                return int(handle_id.split(":", 1)[1])
+            except (TypeError, ValueError):
+                return None
+
+        # Composite format: job_id:task_id used for dashboard deep-linking.
+        if ":" in handle_id and not handle_id.startswith("raysubmit_"):
+            for task_pk, pending in self._pending_tasks.items():
+                composite_id = self._build_composite_id(pending)
+                if composite_id and composite_id == handle_id:
+                    return task_pk
+
+        return None
+
     def get_status(self, handle: SubmissionHandle) -> JobInfo:
         """Get status of a Ray Core task.
 
@@ -175,13 +199,11 @@ class RayCoreRunner(BaseRunner):
         """
         import ray
 
-        # Extract task_pk from handle
-        if not handle.ray_job_id.startswith("ray_core:"):
+        task_pk = self._resolve_task_pk(handle.ray_job_id)
+        if task_pk is None:
             return JobInfo(
                 job_id=handle.ray_job_id, status=JobStatus.FAILED, message="Invalid handle format"
             )
-
-        task_pk = int(handle.ray_job_id.split(":")[1])
 
         if task_pk not in self._pending_tasks:
             # Task not tracked - might be completed and removed
@@ -232,18 +254,8 @@ class RayCoreRunner(BaseRunner):
         """
         import ray
 
-        # Check if this is a Ray Core task (old format: ray_core:pk, new format: job_id:task_id)
-        job_id = handle.ray_job_id
-        if job_id.startswith("ray_core:"):
-            # Old format - extract pk
-            task_pk = int(job_id.split(":")[1])
-        elif ":" in job_id and not job_id.startswith("raysubmit_"):
-            # New format with job_id:task_id - this is for reference, but we can't
-            # cancel without the ObjectRef which is only in _pending_tasks
-            # We'd need to find it by iterating
-            return False
-        else:
-            # Not a Ray Core task
+        task_pk = self._resolve_task_pk(handle.ray_job_id)
+        if task_pk is None:
             return False
 
         if task_pk not in self._pending_tasks:

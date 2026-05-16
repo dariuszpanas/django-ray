@@ -1,0 +1,17 @@
+# Read the Docs configuration file.
+# Zensical is not one of Read the Docs' built-in builders, so this uses the
+# custom static-site flow and writes generated HTML to $READTHEDOCS_OUTPUT/html.
+
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.12"
+  commands:
+    - python -m pip install --upgrade pip
+    - python -m pip install uv
+    - uv sync --frozen --only-dev --no-install-project
+    - uv run --no-sync zensical build --strict
+    - mkdir -p "$READTHEDOCS_OUTPUT/html"
+    - cp -r site/. "$READTHEDOCS_OUTPUT/html/"

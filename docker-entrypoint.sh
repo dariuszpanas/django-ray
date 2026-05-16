@@ -35,15 +35,41 @@ case "$MODE" in
     web)
         echo "Starting Django web server..."
         wait_for_db
-        exec gunicorn testproject.wsgi:application \
-            --bind 0.0.0.0:8000 \
-            --workers ${GUNICORN_WORKERS:-2} \
-            --threads ${GUNICORN_THREADS:-4} \
-            --worker-class gthread \
-            --access-logfile - \
-            --error-logfile - \
-            --capture-output \
+        gunicorn_args=(
+            testproject.wsgi:application
+            --bind 0.0.0.0:8000
+            --workers "${GUNICORN_WORKERS:-2}"
+            --threads "${GUNICORN_THREADS:-4}"
+            --worker-class gthread
+            --timeout "${GUNICORN_TIMEOUT:-120}"
+            --graceful-timeout "${GUNICORN_GRACEFUL_TIMEOUT:-30}"
+            --keep-alive "${GUNICORN_KEEPALIVE:-5}"
+            --max-requests "${GUNICORN_MAX_REQUESTS:-1000}"
+            --max-requests-jitter "${GUNICORN_MAX_REQUESTS_JITTER:-100}"
+            --worker-tmp-dir "${GUNICORN_WORKER_TMP_DIR:-/dev/shm}"
+            --error-logfile -
+            --capture-output
             --enable-stdio-inheritance
+        )
+
+        access_logfile="${GUNICORN_ACCESS_LOGFILE:--}"
+        if [[ -n "$access_logfile" && "$access_logfile" != "off" ]]; then
+            gunicorn_args+=(--access-logfile "$access_logfile")
+        fi
+
+        control_socket_disable="${GUNICORN_CONTROL_SOCKET_DISABLE:-true}"
+        case "$control_socket_disable" in
+            1|true|TRUE|True|yes|YES|Yes)
+                gunicorn_args+=(--no-control-socket)
+                ;;
+            *)
+                if [[ -n "${GUNICORN_CONTROL_SOCKET:-}" ]]; then
+                    gunicorn_args+=(--control-socket "${GUNICORN_CONTROL_SOCKET}")
+                fi
+                ;;
+        esac
+
+        exec gunicorn "${gunicorn_args[@]}"
         ;;
 
     web-dev)
@@ -55,7 +81,7 @@ case "$MODE" in
     worker)
         echo "Starting Django-Ray worker..."
         wait_for_db
-        QUEUE=${DJANGO_RAY_QUEUE:-default}
+        QUEUE=${DJANGO_RAY_QUEUES:-${DJANGO_RAY_QUEUE:-default}}
         CONCURRENCY=${DJANGO_RAY_CONCURRENCY:-10}
         exec python testproject/manage.py django_ray_worker \
             --queue="$QUEUE" \
@@ -66,7 +92,7 @@ case "$MODE" in
     worker-cluster)
         echo "Starting Django-Ray worker (cluster mode)..."
         wait_for_db
-        QUEUE=${DJANGO_RAY_QUEUE:-default}
+        QUEUE=${DJANGO_RAY_QUEUES:-${DJANGO_RAY_QUEUE:-default}}
         CONCURRENCY=${DJANGO_RAY_CONCURRENCY:-10}
         RAY_CLUSTER=${RAY_ADDRESS:-ray://ray-head-svc:10001}
         exec python testproject/manage.py django_ray_worker \

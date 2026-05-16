@@ -1,0 +1,167 @@
+# Ray cluster managed by KubeRay operator.
+# Requires CRDs from kuberay-operator to be installed.
+#
+# This manifest intentionally keeps the custom django-ray worker image for Ray
+# head and Ray workers so task callables and project dependencies are available.
+---
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ray
+  namespace: django-ray
+  labels:
+    app: ray
+    component: cluster
+spec:
+  rayVersion: "2.53.0"
+  enableInTreeAutoscaling: false
+
+  headGroupSpec:
+    serviceType: NodePort
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      dashboard-port: "8265"
+      num-cpus: "2"
+      metrics-export-port: "8080"
+      disable-usage-stats: "true"
+    template:
+      metadata:
+        labels:
+          app: ray
+          component: head
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "8080"
+          prometheus.io/path: "/metrics"
+      spec:
+        containers:
+          - name: ray-head
+            image: django-ray-worker:latest
+            imagePullPolicy: IfNotPresent
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+              - containerPort: 8080
+                name: metrics
+            env:
+              - name: RAY_DASHBOARD_HOST
+                value: "0.0.0.0"
+              - name: RAY_METRICS_EXPORT_PORT
+                value: "8080"
+              - name: RAY_PROMETHEUS_HOST
+                value: "http://prometheus-svc:9090"
+              - name: RAY_GRAFANA_HOST
+                value: "http://grafana-svc:3000"
+              - name: RAY_GRAFANA_IFRAME_HOST
+                value: "http://localhost:30030"
+              - name: RAY_PROMETHEUS_NAME
+                value: "Prometheus"
+            envFrom:
+              - configMapRef:
+                  name: django-ray-config
+              - secretRef:
+                  name: django-ray-secret
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "2"
+            volumeMounts:
+              - name: ray-tmp
+                mountPath: /tmp/ray
+          - name: dashboard-importer
+            image: django-ray-worker:latest
+            imagePullPolicy: IfNotPresent
+            command: ["python3", "/scripts/import_dashboards.py"]
+            env:
+              - name: GRAFANA_URL
+                value: "http://grafana-svc:3000"
+            volumeMounts:
+              - name: ray-tmp
+                mountPath: /tmp/ray
+              - name: import-script
+                mountPath: /scripts
+            resources:
+              requests:
+                memory: "64Mi"
+                cpu: "50m"
+              limits:
+                memory: "128Mi"
+                cpu: "100m"
+        volumes:
+          - name: ray-tmp
+            emptyDir: {}
+          - name: import-script
+            configMap:
+              name: grafana-dashboard-import-script
+              defaultMode: 0755
+
+  workerGroupSpecs:
+    - groupName: worker-group
+      replicas: 4
+      minReplicas: 4
+      maxReplicas: 4
+      rayStartParams:
+        num-cpus: "2"
+        metrics-export-port: "8080"
+      template:
+        metadata:
+          labels:
+            app: ray
+            component: worker
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "8080"
+            prometheus.io/path: "/metrics"
+        spec:
+          containers:
+            - name: ray-worker
+              image: django-ray-worker:latest
+              imagePullPolicy: IfNotPresent
+              ports:
+                - containerPort: 8080
+                  name: metrics
+              env:
+                - name: RAY_PROMETHEUS_HOST
+                  value: "0.0.0.0"
+                - name: RAY_METRICS_EXPORT_PORT
+                  value: "8080"
+              envFrom:
+                - configMapRef:
+                    name: django-ray-config
+                - secretRef:
+                    name: django-ray-secret
+              resources:
+                requests:
+                  memory: "1Gi"
+                  cpu: "1"
+                limits:
+                  memory: "3Gi"
+                  cpu: "2"
+
+---
+# Stable dashboard NodePort for local development access.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ray-dashboard-svc
+  namespace: django-ray
+  labels:
+    app: ray
+    component: head
+spec:
+  selector:
+    app: ray
+    component: head
+  ports:
+    - name: dashboard
+      port: 8265
+      targetPort: 8265
+      nodePort: 30265
+  type: NodePort

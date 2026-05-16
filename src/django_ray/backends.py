@@ -251,12 +251,35 @@ class RayTaskBackend(BaseTaskBackend):
         )
 
         # Set return value if task succeeded
-        if execution.state == TaskState.SUCCEEDED and execution.result_data:
-            try:
-                return_value = json.loads(execution.result_data)
-                object.__setattr__(result, "_return_value", return_value)
-            except (json.JSONDecodeError, TypeError):
-                pass
+        if execution.state == TaskState.SUCCEEDED:
+            serialized_result = execution.result_data
+            if not serialized_result and execution.result_reference:
+                try:
+                    from django_ray.result_storage import ResultStorageError, load_result_reference
+
+                    serialized_result = load_result_reference(str(execution.result_reference))
+                except ResultStorageError as e:
+                    logger.warning(
+                        "Failed to load external task result",
+                        extra={
+                            "task_id": execution.task_id,
+                            "result_reference": execution.result_reference,
+                            "error": str(e),
+                        },
+                    )
+
+            if serialized_result:
+                try:
+                    return_value = json.loads(serialized_result)
+                    object.__setattr__(result, "_return_value", return_value)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Failed to decode stored task result payload",
+                        extra={
+                            "task_id": execution.task_id,
+                            "result_reference": execution.result_reference,
+                        },
+                    )
 
         return result
 

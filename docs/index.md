@@ -28,11 +28,14 @@ django-ray is a **library** that provides:
 - [Kubernetes Deployment](deployment/kubernetes.md) - Deploy to Kubernetes
 - [Docker](deployment/docker.md) - Running with Docker
 - [TLS Configuration](deployment/tls.md) - Securing Ray cluster communication
+- [Operator Runbook](runbook.md) - Incident diagnosis and manual recovery
 
 ## Reference
 
 - [CLI Reference](reference/cli.md) - Command-line interface
 - [Settings Reference](reference/settings.md) - All settings
+- [Result Storage](reference/result-storage.md) - Oversized result backends and retrieval
+- [Handle Compatibility](reference/handle-compatibility.md) - Ray Core handle formats and migration policy
 - [API Reference](reference/api.md) - How to build your own API (with testproject examples)
 
 ## Development

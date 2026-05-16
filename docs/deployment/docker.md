@@ -99,7 +99,7 @@ volumes:
 Run:
 
 ```bash
-docker-compose up
+docker compose up
 ```
 
 ## Environment Variables
@@ -116,6 +116,12 @@ docker-compose up
 | `DATABASE_HOST` | Database host | `localhost` |
 | `DATABASE_PORT` | Database port | `5432` |
 | `RAY_ADDRESS` | Ray cluster address | `auto` |
+| `DJANGO_RAY_QUEUE` | Queue name for Docker worker modes | `default` |
+| `DJANGO_RAY_QUEUES` | Comma-separated queues for Docker worker modes; overrides `DJANGO_RAY_QUEUE` | - |
+| `DJANGO_RAY_CONCURRENCY` | Worker concurrency for Docker worker modes | `10` |
+| `RAY_DASHBOARD_URL` | Ray Dashboard URL for admin deep links | `http://localhost:8265` |
+| `RAY_MAX_RETRIES` | Sample project retry-attempt setting | `3` |
+| `RAY_RETRY_DELAY_SECONDS` | Sample project retry backoff setting | `5` |
 
 ## Commands
 

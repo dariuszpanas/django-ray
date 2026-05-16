@@ -10,8 +10,8 @@ from django.utils.safestring import mark_safe
 
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 
-# Ray Dashboard URL - can be overridden via Django settings
-RAY_DASHBOARD_URL = "http://localhost:30265"
+# Ray Dashboard URL fallback for local Ray.
+RAY_DASHBOARD_URL = "http://localhost:8265"
 
 
 @admin.register(RayTaskExecution)
@@ -51,6 +51,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "args_json",
         "kwargs_json",
         "result_data",
+        "result_reference",
         "error_message",
         "error_traceback",
     ]
@@ -71,7 +72,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         (
             "Result",
             {
-                "fields": ("result_data", "error_message", "error_traceback"),
+                "fields": ("result_data", "result_reference", "error_message", "error_traceback"),
             },
         ),
         (

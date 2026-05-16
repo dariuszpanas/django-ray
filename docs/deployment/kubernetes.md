@@ -35,12 +35,82 @@ kubectl wait --for=condition=available deployment/django-ray-worker -n django-ra
 
 ### 3. Access
 
+With the default NodePort-oriented manifests, use:
+
 | Service | URL | Description |
 |---------|-----|-------------|
 | Django Web | http://localhost:30080 | Application |
 | API Docs | http://localhost:30080/api/docs | Swagger UI |
 | Admin | http://localhost:30080/admin/ | Django Admin |
 | Ray Dashboard | http://localhost:30265 | Ray monitoring |
+
+When using the Kong local overlay on Docker Desktop's managed kind cluster, use:
+
+| Service | URL | Description |
+|---------|-----|-------------|
+| Django Web | http://localhost:30080 | Application through Kong |
+| API Docs | http://localhost:30080/api/docs | Swagger UI |
+| Admin | http://localhost:30080/admin/ | Django Admin |
+| Grafana | http://grafana.localhost:30080 | Grafana through Kong |
+| Prometheus | http://prometheus.localhost:30080 | Prometheus through Kong |
+| Ray Dashboard | http://ray.localhost:30080 | Ray monitoring through Kong |
+
+The sample app reads `RAY_DASHBOARD_URL` from the deployment config, so Django admin deep links
+track the active local access model instead of assuming the old dashboard NodePort.
+
+## KubeRay Operator (Kind Recommended)
+
+For local multi-node clusters (like kind with 5 nodes), use the KubeRay-managed path.
+
+This keeps Django web/worker Deployments in this repo, but replaces static Ray
+Deployments with a `RayCluster` custom resource.
+
+### 1. Install Operator + Deploy
+
+```bash
+# Build app images, load them into kind, install/upgrade KubeRay, deploy overlay
+make k8s-deploy-kuberay-kind
+```
+
+If you also want the host-based Kong routes used by the Docker Desktop managed kind setup,
+install Kong and apply the local ingress overlay:
+
+```bash
+# One command path
+make k8s-deploy-kong-local
+
+# Equivalent manual path
+helm upgrade --install kong kong/ingress \
+  --namespace kong \
+  --create-namespace \
+  -f k8s/overlays/kong-local/kong-values.yaml
+
+kubectl apply -k k8s/overlays/kong-local
+```
+
+### 2. Check Status
+
+```bash
+make k8s-status
+kubectl get raycluster -n django-ray
+```
+
+### 3. Cleanup
+
+```bash
+make k8s-delete-kuberay-kind
+```
+
+### Notes
+
+- Custom images are still required:
+  - `django-ray:latest` for Django web/worker pods
+  - `django-ray-worker:latest` for Ray head/worker pods
+- Default kind cluster name is `kind`. Override when needed:
+
+```bash
+make k8s-deploy-kuberay-kind KIND_CLUSTER_NAME=my-kind
+```
 
 ## Architecture
 
@@ -299,6 +369,7 @@ kubectl exec -n django-ray deployment/django-ray-worker -- \
 5. **Set up monitoring** with Prometheus/Grafana
 6. **Use proper secret management** (Vault, External Secrets)
 7. **Configure Ingress** with TLS termination
+8. **Prefer KubeRay operator mode** over static Ray Deployments for lifecycle management
 
 ## See Also
 

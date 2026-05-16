@@ -1,0 +1,72 @@
+# KubeRay operator-based deployment for local kind clusters.
+# This path keeps django-web/django workers in Deployments and delegates
+# Ray head/worker lifecycle to a RayCluster custom resource.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: django-ray
+
+resources:
+  - ../../base
+  - ray-cluster-kuberay.yaml
+
+patches:
+  # Remove legacy static Ray resources from base.
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ray-head
+        namespace: django-ray
+    target:
+      kind: Deployment
+      name: ray-head
+
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ray-worker
+        namespace: django-ray
+    target:
+      kind: Deployment
+      name: ray-worker
+
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ray-head-svc
+        namespace: django-ray
+    target:
+      kind: Service
+      name: ray-head-svc
+
+  # Enable Django debug mode for local iteration.
+  - patch: |-
+      - op: replace
+        path: /data/DJANGO_DEBUG
+        value: "True"
+    target:
+      kind: ConfigMap
+      name: django-ray-config
+
+  # Use multiple Django workers to better saturate a multi-node local cluster.
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+    target:
+      kind: Deployment
+      name: django-ray-worker
+
+images:
+  - name: django-ray
+    newName: django-ray
+    newTag: latest
+  - name: django-ray-worker
+    newName: django-ray-worker
+    newTag: latest

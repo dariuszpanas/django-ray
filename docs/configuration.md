@@ -21,6 +21,7 @@ DJANGO_RAY = {
 |---------|------|---------|-------------|
 | `RAY_ADDRESS` | `str` | `None` | Ray cluster address. Use `"auto"` for local, or `"ray://host:port"` for cluster |
 | `RAY_RUNTIME_ENV` | `dict` | `{}` | Ray runtime environment configuration |
+| `RUNNER` | `str` | `"ray_job"` | Default runner when no mode flag is passed: `"ray_job"` or `"ray_core"` |
 
 ### Concurrency
 
@@ -40,15 +41,59 @@ DJANGO_RAY = {
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `STUCK_TASK_TIMEOUT_SECONDS` | `int` | `300` | Time before a running task is considered stuck |
+| `STUCK_TASK_TIMEOUT_SECONDS` | `int` | `300` | Time before a running task with no worker or monitor heartbeat is considered stuck |
 | `WORKER_LEASE_SECONDS` | `int` | `60` | Worker lease duration for distributed coordination |
-| `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval for worker health checks |
+| `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval for worker lease health checks |
+
+`django-ray` uses worker lease heartbeats to track worker liveness and task monitor
+heartbeats to show that a worker is still actively reconciling in-flight work. For
+persisted Ray Job handles from inactive workers, another worker will first try to
+reconcile or adopt the existing job before timeout-based stuck recovery marks it lost.
 
 ### Results
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `MAX_RESULT_SIZE_BYTES` | `int` | `1048576` | Maximum result size to store in database (1MB) |
+| `MAX_RESULT_SIZE_BYTES` | `int` | `1048576` | Maximum inline result size in `result_data` (larger payloads use `result_reference`) |
+| `RESULT_STORAGE_BACKEND` | `str` | `"digest"` | Oversized result backend: `"digest"`, `"filesystem"`, `"s3"`, or `"gcs"` |
+| `RESULT_STORAGE_FILESYSTEM_PATH` | `str \| None` | `None` | Required when backend is `"filesystem"` |
+| `RESULT_STORAGE_S3_BUCKET` | `str \| None` | `None` | Required when backend is `"s3"` |
+| `RESULT_STORAGE_S3_PREFIX` | `str` | `"django-ray/results"` | Object key prefix for `"s3"` backend |
+| `RESULT_STORAGE_S3_REGION` | `str \| None` | `None` | Optional S3 region |
+| `RESULT_STORAGE_S3_ENDPOINT_URL` | `str \| None` | `None` | Optional S3-compatible endpoint |
+| `RESULT_STORAGE_GCS_BUCKET` | `str \| None` | `None` | Required when backend is `"gcs"` |
+| `RESULT_STORAGE_GCS_PREFIX` | `str` | `"django-ray/results"` | Object key prefix for `"gcs"` backend |
+
+When `RESULT_STORAGE_BACKEND` is:
+
+- `digest` (default): oversized payload is not persisted externally; a digest pointer is written.
+- `filesystem`: oversized payload is written to the configured filesystem path and a pointer is written.
+- `s3`: oversized payload is written to S3 (or compatible object storage) and a pointer is written.
+- `gcs`: oversized payload is written to Google Cloud Storage and a pointer is written.
+
+`RayTaskBackend.get_result()` can automatically reload oversized payloads from
+`filesystem`, `s3`, and `gcs` references when the reading process has the same
+storage configuration and credentials available. `digest` references remain
+metadata-only and do not restore the original return value.
+
+Optional install extras:
+
+- `pip install "django-ray[s3]"` for S3 backend dependencies.
+- `pip install "django-ray[gcs]"` for GCS backend dependencies.
+- `pip install "django-ray[object-storage]"` for both.
+
+## Startup Validation
+
+django-ray validates `DJANGO_RAY` at Django app startup (`AppConfig.ready()`).
+Invalid configuration raises `ImproperlyConfigured` by default (fail-fast).
+
+Validation is skipped only in these cases:
+
+- management command is one of: `migrate`, `makemigrations`, `showmigrations`, `collectstatic`
+- environment variable `DJANGO_RAY_SKIP_VALIDATION` is set to `1`, `true`, or `yes`
+
+The env override is intended for bootstrap/maintenance flows where full Ray config is
+not available yet.
 
 ## Example Configurations
 
@@ -90,13 +135,18 @@ DJANGO_RAY = {
 
 ## Environment Variables
 
-Settings can also be configured via environment variables. The worker reads these directly:
+`django-ray` reads runtime settings from Django's `DJANGO_RAY` setting. The sample project and
+Docker entrypoint in this repository also map these environment variables into settings or worker
+CLI flags:
 
-| Variable | Description |
-|----------|-------------|
-| `RAY_ADDRESS` | Ray cluster address |
-| `DJANGO_RAY_QUEUE` | Default queue name |
-| `DJANGO_RAY_CONCURRENCY` | Concurrency limit |
+| Variable | Used by | Description |
+|----------|---------|-------------|
+| `RAY_ADDRESS` | sample settings, Docker entrypoint | Ray cluster address (`"auto"` locally, `ray://...` for clusters) |
+| `RAY_DASHBOARD_URL` | sample settings | Ray Dashboard URL used by Django admin deep links |
+| `DJANGO_RAY_QUEUE` | Docker entrypoint | Queue name passed to `django_ray_worker --queue` |
+| `DJANGO_RAY_QUEUES` | Docker entrypoint | Comma-separated queues passed to `django_ray_worker --queue`; takes precedence over `DJANGO_RAY_QUEUE` |
+| `DJANGO_RAY_CONCURRENCY` | Docker entrypoint | Concurrency passed to `django_ray_worker --concurrency` |
+| `DJANGO_RAY_SKIP_VALIDATION` | django-ray app config | Skip startup setting validation (maintenance/bootstrap only) |
 
 ## Django Tasks Configuration
 

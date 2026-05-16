@@ -61,6 +61,8 @@ result = send_email.using(queue_name="high-priority").enqueue(
 ### Checking Task Status
 
 ```python
+from django.tasks import TaskResultStatus
+
 # Get task result
 result = send_email.enqueue(to="user@example.com", subject="Hi", body="Hello")
 

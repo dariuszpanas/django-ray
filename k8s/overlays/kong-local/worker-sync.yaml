@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-ray-worker-sync
+  namespace: django-ray
+  labels:
+    app: django-ray
+    component: worker
+    queues: sync
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: django-ray
+      component: worker
+      queues: sync
+  template:
+    metadata:
+      labels:
+        app: django-ray
+        component: worker
+        queues: sync
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ["sh", "-c", "until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;"]
+      containers:
+        - name: django-ray-worker
+          image: django-ray:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "testproject/manage.py", "django_ray_worker"]
+          args:
+            - "--sync"
+            - "--queue"
+            - "sync"
+            - "--concurrency"
+            - "20"
+          envFrom:
+            - configMapRef:
+                name: django-ray-config
+            - secretRef:
+                name: django-ray-secret
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3

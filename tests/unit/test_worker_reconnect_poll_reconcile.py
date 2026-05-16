@@ -1,0 +1,717 @@
+"""Focused coverage tests for worker reconnect/poll/reconcile paths."""
+
+from __future__ import annotations
+
+import sys
+from datetime import UTC, datetime, timedelta
+from io import StringIO
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+
+from django_ray.management.commands.django_ray_worker import Command
+from django_ray.models import RayTaskExecution, TaskState
+from django_ray.runner.base import JobInfo, JobStatus, SubmissionHandle
+
+
+def _make_command(worker_id: str = "worker-coverage") -> Command:
+    cmd = Command()
+    cmd.stdout = StringIO()
+    cmd.style = cmd.style
+    cmd.worker_id = worker_id
+    cmd.sync_mode = False
+    cmd.execution_mode = "local"
+    cmd.cluster_address = None
+    cmd.active_tasks = {}
+    cmd.ray_core_runner = None
+    return cmd
+
+
+class TestWorkerDispatchAndReconnectHelpers:
+    """Non-DB tests for dispatch/reconnect helper branches."""
+
+    def test_process_task_dispatches_to_ray_core_and_ray_job(self, monkeypatch) -> None:
+        task = SimpleNamespace(pk=1, callable_path="testproject.tasks.add_numbers")
+        cmd = _make_command()
+        events: list[str] = []
+
+        monkeypatch.setattr(cmd, "_update_lease_heartbeat", lambda: events.append("heartbeat"))
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.time", lambda: 123.0
+        )
+        monkeypatch.setattr(cmd, "submit_task_to_ray_core", lambda _task: events.append("ray-core"))
+        monkeypatch.setattr(cmd, "submit_task_to_ray", lambda _task: events.append("ray-job"))
+
+        cmd.execution_mode = "local"
+        cmd.process_task(task)
+
+        cmd.execution_mode = "ray"
+        cmd.process_task(task)
+
+        assert "ray-core" in events
+        assert "ray-job" in events
+
+    def test_execute_task_sync_routes_entrypoint_exception_to_failure_handler(
+        self, monkeypatch
+    ) -> None:
+        task = SimpleNamespace(
+            pk=7,
+            callable_path="testproject.tasks.add_numbers",
+            args_json="[1,2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command()
+        captured: list[dict[str, Any]] = []
+
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("entrypoint crashed")),
+        )
+        monkeypatch.setattr(
+            cmd,
+            "_handle_task_failure",
+            lambda _task, **kwargs: captured.append(kwargs),
+        )
+
+        cmd.execute_task_sync(task)
+
+        assert captured
+        assert captured[0]["error_message"] == "entrypoint crashed"
+        assert captured[0]["exception_type"] == "RuntimeError"
+
+    def test_update_lease_heartbeat_ignores_update_errors(self, monkeypatch) -> None:
+        cmd = _make_command()
+        cmd.lease = cast(Any, object())
+
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.TaskWorkerLease.objects.filter",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("db unavailable")),
+        )
+
+        # Should not raise.
+        cmd._update_lease_heartbeat()
+
+    def test_check_ray_connection_timeout_triggers_reconnect(self, monkeypatch) -> None:
+        cmd = _make_command()
+        reconnect_calls: list[bool] = []
+
+        fake_ray = SimpleNamespace(is_initialized=lambda: True)
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(
+            cmd, "_get_ray_cluster_resources_with_timeout", lambda timeout_seconds: None
+        )
+        monkeypatch.setattr(cmd, "_reconnect_ray", lambda: reconnect_calls.append(True))
+
+        cmd._check_ray_connection()
+
+        assert reconnect_calls == [True]
+
+    def test_check_ray_connection_exception_triggers_reconnect(self, monkeypatch) -> None:
+        cmd = _make_command()
+        reconnect_calls: list[bool] = []
+
+        fake_ray = SimpleNamespace(
+            is_initialized=lambda: True,
+        )
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(
+            cmd,
+            "_get_ray_cluster_resources_with_timeout",
+            lambda timeout_seconds: (_ for _ in ()).throw(RuntimeError("resources failed")),
+        )
+        monkeypatch.setattr(cmd, "_reconnect_ray", lambda: reconnect_calls.append(True))
+
+        cmd._check_ray_connection()
+
+        assert reconnect_calls == [True]
+
+    def test_check_ray_connection_healthy_returns_without_reconnect(self, monkeypatch) -> None:
+        cmd = _make_command()
+        reconnect_calls: list[bool] = []
+
+        fake_ray = SimpleNamespace(is_initialized=lambda: True)
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(
+            cmd,
+            "_get_ray_cluster_resources_with_timeout",
+            lambda timeout_seconds: {"CPU": 2},
+        )
+        monkeypatch.setattr(cmd, "_reconnect_ray", lambda: reconnect_calls.append(True))
+
+        cmd._check_ray_connection()
+
+        assert reconnect_calls == []
+
+    def test_reconnect_ray_cluster_success_rebuilds_runner(self, monkeypatch) -> None:
+        cmd = _make_command()
+        cmd.execution_mode = "cluster"
+        cmd.cluster_address = "ray://cluster:10001"
+        cmd.ray_core_runner = cast(Any, SimpleNamespace(pending_count=2))
+
+        state = {"initialized": True}
+        calls: list[str] = []
+
+        def _is_initialized() -> bool:
+            return bool(state["initialized"])
+
+        def _shutdown() -> None:
+            calls.append("shutdown")
+            state["initialized"] = False
+
+        def _init_cluster(address: str) -> None:
+            calls.append(f"init:{address}")
+            state["initialized"] = True
+
+        fake_ray = SimpleNamespace(
+            is_initialized=_is_initialized,
+            shutdown=_shutdown,
+            cluster_resources=lambda: {"CPU": 8},
+        )
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(cmd, "_init_cluster_ray", _init_cluster)
+        stale_marks: list[bool] = []
+        monkeypatch.setattr(
+            cmd, "_mark_stale_ray_core_tasks_as_lost", lambda: stale_marks.append(True)
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.sleep", lambda *_: None
+        )
+
+        sentinel_runner = cast(Any, SimpleNamespace(sentinel=True))
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.RayCoreRunner",
+            lambda: sentinel_runner,
+        )
+
+        cmd._reconnect_ray()
+
+        assert calls == ["shutdown", "init:ray://cluster:10001"]
+        assert stale_marks == [True]
+        assert cmd.ray_core_runner is sentinel_runner
+
+    def test_reconnect_ray_shutdown_error_is_logged(self, monkeypatch) -> None:
+        cmd = _make_command()
+        cmd.execution_mode = "sync"
+
+        fake_ray = SimpleNamespace(
+            is_initialized=lambda: True,
+            shutdown=lambda: (_ for _ in ()).throw(RuntimeError("shutdown failed")),
+            cluster_resources=lambda: {"CPU": 1},
+        )
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.sleep", lambda *_: None
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.RayCoreRunner",
+            lambda: cast(Any, SimpleNamespace()),
+        )
+
+        cmd._reconnect_ray()
+
+        assert "Error during shutdown: shutdown failed" in cmd.stdout.getvalue()
+
+
+@pytest.mark.django_db
+class TestWorkerReconnectPollReconcile:
+    """DB-backed tests for reconnect/poll/reconcile branches."""
+
+    def test_mark_stale_ray_core_tasks_returns_when_no_pending(self) -> None:
+        cmd = _make_command()
+        cmd.ray_core_runner = cast(Any, SimpleNamespace(pending_count=0, _pending_tasks={}))
+
+        cmd._mark_stale_ray_core_tasks_as_lost()
+
+    def test_submit_task_to_ray_core_handles_unavailable_cluster(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconnect-core-unavailable-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command()
+        captured: list[dict[str, Any]] = []
+
+        fake_ray = SimpleNamespace(is_initialized=lambda: False)
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(cmd, "_reconnect_ray", lambda: None)
+        monkeypatch.setattr(
+            cmd, "_handle_task_failure", lambda _task, **kwargs: captured.append(kwargs)
+        )
+
+        cmd.submit_task_to_ray_core(task)
+
+        assert captured
+        assert captured[0]["error_message"] == "Ray cluster not available"
+        assert captured[0]["exception_type"] == "RayConnectionError"
+
+    def test_submit_task_to_ray_core_success_persists_tracking(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconnect-core-success-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command()
+
+        fake_ray = SimpleNamespace(is_initialized=lambda: True)
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(
+            "django_ray.runtime.serialization.deserialize_args",
+            lambda payload: [1, 2] if payload == "[1, 2]" else {},
+        )
+
+        fake_runner = cast(
+            Any,
+            SimpleNamespace(
+                submit=lambda **_kwargs: SubmissionHandle(
+                    ray_job_id="ray_core:1",
+                    ray_address="ray://cluster:10001",
+                    submitted_at=datetime.now(UTC),
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.RayCoreRunner",
+            lambda: fake_runner,
+        )
+
+        cmd.submit_task_to_ray_core(task)
+
+        task.refresh_from_db()
+        assert task.ray_job_id == "ray_core:1"
+        assert task.ray_address == "ray://cluster:10001"
+
+    def test_submit_task_to_ray_core_submit_exception_routes_failure(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconnect-core-submit-failure-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command()
+        captured: list[dict[str, Any]] = []
+
+        fake_ray = SimpleNamespace(is_initialized=lambda: True)
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(
+            "django_ray.runtime.serialization.deserialize_args",
+            lambda payload: [1, 2] if payload == "[1, 2]" else {},
+        )
+        cmd.ray_core_runner = cast(
+            Any,
+            SimpleNamespace(
+                submit=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("core submit failed"))
+            ),
+        )
+        monkeypatch.setattr(
+            cmd, "_handle_task_failure", lambda _task, **kwargs: captured.append(kwargs)
+        )
+
+        cmd.submit_task_to_ray_core(task)
+
+        assert captured
+        assert "Failed to submit to Ray Core: core submit failed" in captured[0]["error_message"]
+        assert captured[0]["exception_type"] == "RuntimeError"
+
+    def test_poll_ray_core_tasks_returns_when_no_pending(self) -> None:
+        cmd = _make_command()
+        cmd.ray_core_runner = cast(Any, SimpleNamespace(pending_count=0, _pending_tasks={}))
+
+        cmd.poll_ray_core_tasks()
+
+    def test_poll_ray_core_tasks_handles_disconnected_and_missing_tasks(self, monkeypatch) -> None:
+        existing = RayTaskExecution.objects.create(
+            task_id="poll-disconnect-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            attempt_number=1,
+        )
+
+        class Runner:
+            def __init__(self) -> None:
+                self._pending_tasks = {existing.pk: object(), 999999: object()}
+
+            @property
+            def pending_count(self) -> int:
+                return len(self._pending_tasks)
+
+        cmd = _make_command()
+        cmd.ray_core_runner = cast(Any, Runner())
+        calls: list[dict[str, Any]] = []
+
+        fake_ray = SimpleNamespace(is_initialized=lambda: False)
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(
+            cmd, "_handle_task_failure", lambda _task, **kwargs: calls.append(kwargs)
+        )
+
+        cmd.poll_ray_core_tasks()
+
+        assert len(calls) == 1
+        assert calls[0]["error_message"] == "Ray connection lost"
+        assert calls[0]["exception_type"] == "RayConnectionError"
+        assert cmd.ray_core_runner._pending_tasks == {}
+
+    def test_poll_ray_core_tasks_handles_poll_exception(self, monkeypatch) -> None:
+        class Runner:
+            _pending_tasks = {1: object()}
+            pending_count = 1
+
+            def poll_completed(self):
+                raise RuntimeError("poll exploded")
+
+        cmd = _make_command()
+        cmd.ray_core_runner = cast(Any, Runner())
+
+        fake_ray = SimpleNamespace(is_initialized=lambda: True)
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+
+        cmd.poll_ray_core_tasks()
+
+        assert "Error polling Ray Core tasks: poll exploded" in cmd.stdout.getvalue()
+
+    def test_poll_ray_core_tasks_processes_success_failure_missing_and_bad_json(
+        self, monkeypatch
+    ) -> None:
+        success_task = RayTaskExecution.objects.create(
+            task_id="poll-success-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        failure_task = RayTaskExecution.objects.create(
+            task_id="poll-failure-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[3, 4]",
+            kwargs_json="{}",
+        )
+        bad_json_task = RayTaskExecution.objects.create(
+            task_id="poll-bad-json-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[5, 6]",
+            kwargs_json="{}",
+        )
+
+        class Runner:
+            _pending_tasks = {1: object()}
+            pending_count = 1
+
+            def poll_completed(self):
+                return [
+                    (success_task.pk, '{"success": true, "result": 3}'),
+                    (
+                        failure_task.pk,
+                        (
+                            '{"success": false, "result": null, "error": "boom", '
+                            '"traceback": "tb", "exception_type": "RuntimeError"}'
+                        ),
+                    ),
+                    (999999, '{"success": true, "result": 1}'),
+                    (bad_json_task.pk, "not-json"),
+                ]
+
+        cmd = _make_command()
+        cmd.ray_core_runner = cast(Any, Runner())
+        failures: list[dict[str, Any]] = []
+
+        fake_ray = SimpleNamespace(is_initialized=lambda: True)
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda task, result: setattr(task, "result_data", str(result)),
+        )
+        monkeypatch.setattr(
+            cmd, "_handle_task_failure", lambda _task, **kwargs: failures.append(kwargs)
+        )
+
+        cmd.poll_ray_core_tasks()
+
+        success_task.refresh_from_db()
+        bad_json_task.refresh_from_db()
+
+        assert success_task.state == TaskState.SUCCEEDED
+        assert success_task.result_data == "3"
+        assert success_task.finished_at is not None
+        assert failures and failures[0]["error_message"] == "boom"
+        assert bad_json_task.state == TaskState.RUNNING
+        assert "Task 999999 not found in database" in cmd.stdout.getvalue()
+        assert "Error processing task" in cmd.stdout.getvalue()
+
+    def test_submit_task_to_ray_success_tracks_active_task(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="ray-job-submit-success-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command()
+
+        monkeypatch.setattr(
+            "django_ray.runtime.serialization.deserialize_args",
+            lambda payload: [1, 2] if payload == "[1, 2]" else {},
+        )
+
+        class FakeRunner:
+            def submit(self, **_kwargs):
+                return SubmissionHandle(
+                    ray_job_id="raysubmit_coverage_001",
+                    ray_address="ray://cluster:10001",
+                    submitted_at=datetime.now(UTC),
+                )
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        cmd.submit_task_to_ray(task)
+
+        task.refresh_from_db()
+        assert task.ray_job_id == "raysubmit_coverage_001"
+        assert task.ray_address == "ray://cluster:10001"
+        assert cmd.active_tasks[task.pk] == "raysubmit_coverage_001"
+
+    def test_reconcile_tasks_returns_early_for_sync_or_empty(self) -> None:
+        cmd = _make_command()
+        cmd.sync_mode = True
+        cmd.active_tasks = {1: "raysubmit_x"}
+        cmd.reconcile_tasks()
+
+        cmd.sync_mode = False
+        cmd.active_tasks = {}
+        cmd.reconcile_tasks()
+
+    def test_reconcile_tasks_handles_cancelling_task(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-cancelling-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.CANCELLING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_cancelling_001",
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: "raysubmit_cancelling_001"}
+
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLED
+        assert task.finished_at is not None
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_tasks_success_with_non_json_logs_uses_fallback_store(
+        self, monkeypatch
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-logs-fallback-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_logs_fallback_001",
+            ray_address="ray://cluster:10001",
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=task.ray_job_id or "", status=JobStatus.SUCCEEDED)
+
+            def get_logs(self, _handle):
+                return "plain-text-log"
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda t, result: setattr(t, "result_data", str(result)),
+        )
+
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data == "plain-text-log"
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_tasks_success_with_no_logs_clears_result_fields(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-no-logs-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_no_logs_001",
+            ray_address="ray://cluster:10001",
+            result_data="stale",
+            result_reference="resultfs://sha256/stale?rel=a/b&bytes=5",
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=task.ray_job_id or "", status=JobStatus.SUCCEEDED)
+
+            def get_logs(self, _handle):
+                return ""
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data is None
+        assert task.result_reference is None
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_tasks_handles_missing_task_and_runner_exception(self, monkeypatch) -> None:
+        existing = RayTaskExecution.objects.create(
+            task_id="reconcile-exception-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_exception_001",
+            ray_address="ray://cluster:10001",
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {
+            999999: "raysubmit_missing_001",
+            existing.pk: existing.ray_job_id or "",
+        }
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                raise RuntimeError("runner status exploded")
+
+            def get_logs(self, _handle):  # pragma: no cover - not reached
+                return ""
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        cmd.reconcile_tasks()
+
+        assert 999999 not in cmd.active_tasks
+        assert existing.pk in cmd.active_tasks
+        assert "Error reconciling task" in cmd.stdout.getvalue()
+
+    def test_reconcile_tasks_adopts_orphaned_running_ray_job(self, monkeypatch) -> None:
+        orphan = RayTaskExecution.objects.create(
+            task_id="reconcile-orphan-running-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_orphan_running_001",
+            ray_address="ray://cluster:10001",
+            claimed_by_worker="dead-worker",
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command(worker_id="adopting-worker")
+
+        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=orphan.ray_job_id or "", status=JobStatus.RUNNING)
+
+            def get_logs(self, _handle):  # pragma: no cover - not reached
+                return ""
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        cmd.reconcile_tasks()
+
+        orphan.refresh_from_db()
+        assert orphan.claimed_by_worker == "adopting-worker"
+        assert orphan.last_heartbeat_at is not None
+        assert cmd.active_tasks[orphan.pk] == "raysubmit_orphan_running_001"
+
+    def test_reconcile_tasks_completes_orphaned_succeeded_ray_job(self, monkeypatch) -> None:
+        orphan = RayTaskExecution.objects.create(
+            task_id="reconcile-orphan-success-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_orphan_success_001",
+            ray_address="ray://cluster:10001",
+            claimed_by_worker="dead-worker",
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command(worker_id="adopting-worker")
+
+        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=orphan.ray_job_id or "", status=JobStatus.SUCCEEDED)
+
+            def get_logs(self, _handle):
+                return '{"success": true, "result": 3}'
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda task, result: setattr(task, "result_data", str(result)),
+        )
+
+        cmd.reconcile_tasks()
+
+        orphan.refresh_from_db()
+        assert orphan.state == TaskState.SUCCEEDED
+        assert orphan.result_data == "3"
+        assert orphan.pk not in cmd.active_tasks
+
+    def test_detect_stuck_tasks_recovers_unknown_active_ray_job_when_monitor_heartbeat_stale(
+        self,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-unknown-stuck-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            attempt_number=1,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+            claimed_by_worker="worker-coverage",
+            ray_job_id="raysubmit_unknown_001",
+        )
+
+        cmd = _make_command(worker_id="worker-coverage")
+        cmd.active_tasks = {task.pk: "raysubmit_unknown_001"}
+
+        cmd.detect_stuck_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.QUEUED
+        assert task.attempt_number == 2
+        assert task.run_after is not None

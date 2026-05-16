@@ -13,7 +13,7 @@ Thank you for your interest in contributing to django-ray!
 ### Clone and Install
 
 ```bash
-git clone https://github.com/yourusername/django-ray.git
+git clone https://github.com/dariuszpanas/django-ray.git
 cd django-ray
 uv sync
 ```
@@ -59,6 +59,38 @@ make test-integration
 # With coverage
 make test-cov
 ```
+
+CI enforces coverage floors:
+
+- global coverage: `>= 55%`
+- `src/django_ray/management/commands/django_ray_worker.py`: `>= 50%`
+- `src/django_ray/runner/ray_job.py`: `>= 55%`
+
+### Live Cluster Fault Tests (Opt-In)
+
+`tests/integration/test_live_failure_injection.py` runs against a real Ray cluster and is skipped by default.
+
+Enable it explicitly:
+
+```bash
+# PowerShell
+$env:DJANGO_RAY_LIVE_CLUSTER_TESTS="1"
+$env:DJANGO_RAY_LIVE_RAY_ADDRESS="ray://localhost:10001"
+$env:DJANGO_RAY_LIVE_MIN_NODES="2"
+uv run pytest tests/integration/test_live_failure_injection.py -v
+```
+
+Environment variables:
+
+- `DJANGO_RAY_LIVE_CLUSTER_TESTS`: set to `1/true/yes` to enable suite.
+- `DJANGO_RAY_LIVE_RAY_ADDRESS`: Ray address for live cluster tests.
+- `DJANGO_RAY_LIVE_MIN_NODES`: minimum alive node count required before tests run.
+
+CI strategy:
+
+- Default CI (`.github/workflows/ci.yml`) excludes `live_cluster` tests to keep PR checks deterministic.
+- Live cluster tests run in a dedicated manual workflow: `.github/workflows/live-cluster.yml`.
+- Trigger the workflow with `ray_address` input, or set repository variable `DJANGO_RAY_LIVE_RAY_ADDRESS`.
 
 ### Local Testing
 
@@ -155,23 +187,34 @@ Use pytest fixtures for common setup:
 def task_execution():
     return RayTaskExecution.objects.create(
         task_id="test-task",
-        task_name="myapp.tasks.test",
+        callable_path="myapp.tasks.test",
         state=TaskState.QUEUED,
     )
 ```
 
 ## Documentation
 
-Documentation is in `docs/` as Markdown files.
+Documentation is built with Zensical from `zensical.toml`.
 
 ### Building Docs Locally
 
-Currently docs are plain Markdown. For local preview, use any Markdown viewer or:
-
 ```bash
-# Using Python
-python -m http.server -d docs 8080
+# Local build
+make docs-build
+
+# Strict build (CI-equivalent; fails on warnings/broken links)
+make docs-build-strict
+
+# Local dev server
+make docs-serve
 ```
+
+Versioned docs deployment is intentionally not wired up yet. CI validates the docs site with
+`make docs-build-strict`, which runs `uv run zensical build --strict`.
+
+Read the Docs hosting is configured by `.readthedocs.yaml`. Because Zensical is a custom static
+site generator from Read the Docs' perspective, that config builds with Zensical and copies the
+generated `site/` directory into `$READTHEDOCS_OUTPUT/html`.
 
 ## Releasing
 
@@ -182,8 +225,8 @@ Releases are automated via GitHub Actions:
 3. Create and push a tag:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 The release workflow will:
@@ -194,8 +237,8 @@ The release workflow will:
 
 ## Getting Help
 
-- **Issues**: [GitHub Issues](https://github.com/dpanas/django-ray/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/dpanas/django-ray/discussions)
+- **Issues**: [GitHub Issues](https://github.com/dariuszpanas/django-ray/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/dariuszpanas/django-ray/discussions)
 
 ## License
 

@@ -22,6 +22,8 @@ k8s/
     ├── dev-tls/             # Development overlay with TLS
     │   ├── kustomization.yaml
     │   └── ray-tls-secret.yaml
+    ├── kuberay-kind/        # KubeRay operator overlay for local kind clusters
+    ├── kong-local/          # KubeRay + Kong local ingress overlay
     └── local/               # Local development overlay
         └── kustomization.yaml
 ```
@@ -78,9 +80,120 @@ make k8s-build    # Build images
 make k8s-deploy   # Deploy to cluster
 ```
 
+## KubeRay Operator Path (Recommended for kind multi-node clusters)
+
+Use this path to manage Ray via `RayCluster` custom resources instead of static
+`Deployment/ray-head` and `Deployment/ray-worker` manifests.
+
+```bash
+# Build images, load into kind, install operator, deploy KubeRay overlay
+make k8s-deploy-kuberay-kind
+
+# Check status (includes RayCluster list)
+make k8s-status
+
+# Cleanup KubeRay overlay resources
+make k8s-delete-kuberay-kind
+```
+
+If your local kind cluster has a non-default name:
+
+```bash
+make k8s-deploy-kuberay-kind KIND_CLUSTER_NAME=my-kind
+```
+
+## Kong Ingress Controller Path
+
+If production will use Kong, you can validate the same ingress class locally with
+KubeRay plus Kong Ingress Controller.
+
+```bash
+# One command path
+make k8s-deploy-kong-local
+
+# Equivalent manual path
+# Install Kong Gateway + Kong Ingress Controller
+helm upgrade --install kong kong/ingress \
+  --namespace kong \
+  --create-namespace \
+  -f k8s/overlays/kong-local/kong-values.yaml
+
+# Deploy django-ray with Kong-specific ingress/service patches
+kubectl apply -k k8s/overlays/kong-local
+```
+
+This overlay:
+
+- switches `django-web-svc` from `NodePort` to `ClusterIP`
+- switches `grafana-svc`, `prometheus-svc`, and `ray-dashboard-svc` from `NodePort` to `ClusterIP`
+- sets `spec.ingressClassName: kong`
+- removes the old Traefik-specific ingress annotation
+- keeps the main Django app on the default root route
+- adds host-based Kong routes for Grafana, Prometheus, and the Ray dashboard
+- keeps two cluster-mode `django-ray-worker` replicas for `default,high-priority,low-priority`
+- adds a dedicated `django-ray-worker-sync` deployment for the `sync` queue
+- adds a dedicated `django-ray-worker-ml` deployment for the `ml` queue
+- keeps the main cluster-mode worker submission cap conservative for local stability:
+  - `DJANGO_RAY_CONCURRENCY=16` per worker pod in the Kong local overlay
+  - this is still below the earlier stress setting, but high enough to push the local stack harder now
+    that the web and database paths have been stabilized
+- overprovisions the local PostgreSQL pod for backlog testing:
+  - requests: `500m` CPU / `2Gi` memory
+  - limits: `2` CPU / `4Gi` memory
+  - tuned settings: `shared_buffers=1GB`, `effective_cache_size=3GB`, `work_mem=16MB`,
+    `maintenance_work_mem=256MB`, `wal_buffers=16MB`, `max_wal_size=2GB`
+- increases the local web and Ray capacity profile toward the older stress-test setup:
+  - `django-web` runs `4` replicas and uses `8` Gunicorn workers
+  - Ray worker pods advertise `3` CPUs each instead of `2`
+  - Ray head gets a larger memory budget for scheduling and dashboard stability
+- uses a split local web probe model aimed at overloaded containers:
+  - `startupProbe`: `GET /api/livez` to confirm Django/Gunicorn actually comes up
+  - `livenessProbe`: `exec kill -0 1` so kubelet does not restart a busy-but-alive Gunicorn master
+  - `readinessProbe`: `tcpSocket` on port `8000` so overloaded pods stay in service as long as Gunicorn is listening
+- adds container-focused Gunicorn hardening for the local web path:
+  - `/dev/shm` worker tmp dir
+  - request recycling via `max-requests` plus jitter
+  - longer timeouts for slow in-flight requests
+  - access logging disabled in the Kong local overlay to reduce stdout pressure under heavy load
+  - Gunicorn 25 control socket disabled by default for this image path because the runtime user cannot
+    create the default `gunicorn.ctl` socket in the read-only `/app` working directory
+- reduces DB pressure from observability endpoints:
+  - `/api/metrics`, `/api/executions`, and `/api/executions/stats` now aggregate task counts with grouped
+    queries instead of issuing one `COUNT(*)` query per state and per queue
+- spreads web pods across nodes with topology spreading and preferred anti-affinity to better exercise
+  local load-balancing behavior
+- sets `RAY_DASHBOARD_URL` to `http://ray.localhost:30080` so Django admin deep links match the Kong route
+- patches Ray's Grafana iframe host to `http://grafana.localhost:30080`
+- keeps Ray's Prometheus host on the in-cluster service URL (`http://prometheus-svc:9090`), which is what the Ray dashboard backend queries
+
+If you apply the Kong overlay onto an already-running `RayCluster`, recycle the Ray head pod once and
+restart the Django workers so the dashboard and cluster-mode workers reconnect cleanly:
+
+```bash
+kubectl delete pod -l app=ray,component=head -n django-ray
+kubectl wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s
+kubectl rollout restart deployment/django-ray-worker -n django-ray
+kubectl rollout restart deployment/django-ray-worker-sync -n django-ray
+kubectl rollout restart deployment/django-ray-worker-ml -n django-ray
+```
+
+Notes:
+
+- On Docker Desktop's managed kind cluster, `cloud-provider-kind` can publish the Kong proxy
+  `LoadBalancer` on host ports `30080/30443`, so the local entrypoint becomes `http://localhost:30080`.
+- On a plain kind cluster, host-reachable ingress still requires extra networking setup such as
+  `extraPortMappings` or `cloud-provider-kind`.
+- Mixed load profiles only reflect real queue throughput if the matching workers are deployed. The Kong
+  local overlay covers `default`, `high-priority`, `low-priority`, `sync`, and `ml`, but production
+  overlays still need queue-specific worker planning.
+- `sync` tasks are not supposed to run through Ray. They need a worker started with `--sync --queue=sync`,
+  which is why the Kong local overlay deploys a separate `django-ray-worker-sync`.
+- Because Docker Desktop managed-kind reports duplicated per-node capacity, the practical local ceiling comes
+  more from the Ray/Kubernetes limits in this overlay than from summed node allocatable values.
+
 ### 3. Access the Application
 
-With NodePort (default configuration):
+With the default NodePort-oriented manifests, these are the intended service ports:
 
 | Service | URL | Description |
 |---------|-----|-------------|
@@ -88,6 +201,26 @@ With NodePort (default configuration):
 | Swagger UI | http://localhost:30080/api/docs | API documentation |
 | Django Admin | http://localhost:30080/admin/ | Admin interface |
 | Ray Dashboard | http://localhost:30265 | Ray cluster monitoring |
+
+With the Kong local overlay on Docker Desktop's managed kind cluster, use these URLs instead:
+
+| Service | URL | Description |
+|---------|-----|-------------|
+| Django Web/API | http://localhost:30080 | Application and REST API through Kong |
+| Swagger UI | http://localhost:30080/api/docs | API documentation |
+| Django Admin | http://localhost:30080/admin/ | Admin interface |
+| Grafana | http://grafana.localhost:30080 | Grafana through Kong |
+| Prometheus | http://prometheus.localhost:30080 | Prometheus through Kong |
+| Ray Dashboard | http://ray.localhost:30080 | Ray dashboard through Kong |
+
+Notes:
+
+- On Docker Desktop's managed kind cluster, the direct `NodePort` services from the base/KubeRay
+  manifests are not published to the host in this setup. The Kong local overlay is the intended
+  host-access path.
+- `*.localhost` hostnames work in modern browsers and also resolved correctly in this environment.
+- Kong Manager is not host-exposed in the stable local overlay. The local browser-access path is the
+  Kong proxy on `30080`, not a separate Kong Manager UI.
 
 ### 4. View Logs
 
@@ -269,14 +402,17 @@ For more details, see the [Ray TLS documentation](https://docs.ray.io/en/latest/
 | `DATABASE_HOST` | localhost | Database host |
 | `DATABASE_PORT` | 5432 | Database port |
 
-### Ray Configuration
+### django-ray Worker Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RAY_ADDRESS` | auto | Ray cluster address |
-| `RAY_NUM_CPUS_PER_TASK` | 1 | CPUs per task |
-| `RAY_MAX_RETRIES` | 3 | Max task retries |
-| `RAY_RETRY_DELAY_SECONDS` | 5 | Delay between retries |
+| `RAY_DASHBOARD_URL` | http://localhost:8265 | Ray Dashboard URL for Django admin links |
+| `DJANGO_RAY_QUEUE` | default | Queue name used by Docker worker entrypoint modes |
+| `DJANGO_RAY_QUEUES` | - | Comma-separated queue list; overrides `DJANGO_RAY_QUEUE` |
+| `DJANGO_RAY_CONCURRENCY` | 10 | Worker concurrency used by Docker worker entrypoint modes |
+| `RAY_MAX_RETRIES` | 3 | Sample project max task attempts |
+| `RAY_RETRY_DELAY_SECONDS` | 5 | Sample project retry backoff seconds |
 
 ## Local Kubernetes Options
 
