@@ -65,3 +65,25 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
                 raise ImproperlyConfigured(
                     f"django-ray: {name} must be an integer between {min_val} and {max_val}"
                 )
+
+    result_storage_backend = config.get("RESULT_STORAGE_BACKEND", "digest")
+    valid_result_storage_backends = ("digest", "filesystem", "s3", "gcs")
+    if result_storage_backend not in valid_result_storage_backends:
+        raise ImproperlyConfigured(
+            "django-ray: RESULT_STORAGE_BACKEND must be one of "
+            f"{valid_result_storage_backends}, got '{result_storage_backend}'"
+        )
+
+    if result_storage_backend == "filesystem" and not config.get("RESULT_STORAGE_FILESYSTEM_PATH"):
+        raise ImproperlyConfigured(
+            "django-ray: RESULT_STORAGE_FILESYSTEM_PATH is required when "
+            "RESULT_STORAGE_BACKEND='filesystem'"
+        )
+    if result_storage_backend == "s3" and not config.get("RESULT_STORAGE_S3_BUCKET"):
+        raise ImproperlyConfigured(
+            "django-ray: RESULT_STORAGE_S3_BUCKET is required when RESULT_STORAGE_BACKEND='s3'"
+        )
+    if result_storage_backend == "gcs" and not config.get("RESULT_STORAGE_GCS_BUCKET"):
+        raise ImproperlyConfigured(
+            "django-ray: RESULT_STORAGE_GCS_BUCKET is required when RESULT_STORAGE_BACKEND='gcs'"
+        )

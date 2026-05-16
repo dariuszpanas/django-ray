@@ -16,6 +16,7 @@ python manage.py django_ray_worker [options]
 |--------|-------------|
 | `--queue=QUEUE` | Queue name to process (default: `default`) |
 | `--queue=Q1,Q2` | Multiple queues (comma-separated) |
+| `--queues Q1 Q2` | Multiple queues (space-separated alternative to `--queue`) |
 | `--all-queues` | Process all configured queues |
 
 #### Execution Mode
@@ -25,13 +26,13 @@ python manage.py django_ray_worker [options]
 | `--sync` | Run tasks synchronously (no Ray) |
 | `--local` | Use local Ray cluster |
 | `--cluster=ADDRESS` | Connect to Ray cluster at ADDRESS |
-| *(none)* | Use Ray Job Submission API (default) |
+| *(none)* | Use default from `DJANGO_RAY.RUNNER` (`ray_job` by default) |
 
 #### Concurrency
 
 | Option | Description |
 |--------|-------------|
-| `--concurrency=N` | Maximum concurrent tasks (default: 10) |
+| `--concurrency=N` | Maximum concurrent tasks (default: `DJANGO_RAY["DEFAULT_CONCURRENCY"]`, which defaults to `10`) |
 
 #### Verbosity
 
@@ -66,23 +67,24 @@ python manage.py django_ray_worker --queue=default --local -v 2
 
 ### Signals
 
-The worker responds to these signals:
+The worker explicitly handles these signals for graceful shutdown:
 
 | Signal | Behavior |
 |--------|----------|
 | `SIGTERM` | Graceful shutdown - finish current tasks |
 | `SIGINT` | Graceful shutdown (Ctrl+C) |
-| `SIGQUIT` | Force quit (Ctrl+\\) |
 
 ### Environment Variables
 
-These environment variables override command-line options:
+The management command itself expects CLI flags and Django settings. The Docker entrypoint included
+in this repository maps these environment variables into command-line options:
 
 | Variable | Description |
 |----------|-------------|
-| `RAY_ADDRESS` | Ray cluster address |
-| `DJANGO_RAY_QUEUE` | Default queue name |
-| `DJANGO_RAY_CONCURRENCY` | Concurrency limit |
+| `DJANGO_RAY_QUEUE` | Queue name passed as `--queue` |
+| `DJANGO_RAY_QUEUES` | Comma-separated queue names passed as `--queue`; takes precedence over `DJANGO_RAY_QUEUE` |
+| `DJANGO_RAY_CONCURRENCY` | Concurrency limit passed as `--concurrency` |
+| `RAY_ADDRESS` | Ray cluster address used by sample settings and `worker-cluster` entrypoint mode |
 
 ### Exit Codes
 

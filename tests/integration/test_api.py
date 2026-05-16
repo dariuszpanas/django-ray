@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import pytest
+from django.db import connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 
+from django_ray import __version__ as django_ray_version
 from django_ray.models import RayTaskExecution, TaskState
 
 
@@ -18,6 +21,23 @@ def client():
 class TestHealthAPI:
     """Test the /api/health endpoint."""
 
+    def test_liveness_check(self, client):
+        """Test the lightweight liveness endpoint."""
+        response = client.get("/api/livez")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "alive"
+        assert data["version"] == django_ray_version
+
+    def test_readiness_check(self, client):
+        """Test the readiness endpoint."""
+        response = client.get("/api/readyz")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert data["database"] == "ok"
+        assert data["version"] == django_ray_version
+
     def test_health_check(self, client):
         """Test the health check endpoint."""
         response = client.get("/api/health")
@@ -25,7 +45,7 @@ class TestHealthAPI:
         data = response.json()
         assert data["status"] == "healthy"
         assert data["database"] == "ok"
-        assert data["version"] == "0.2.0"
+        assert data["version"] == django_ray_version
 
     def test_prometheus_metrics(self, client):
         """Test the Prometheus metrics endpoint."""
@@ -65,6 +85,33 @@ class TestHealthAPI:
         # Check for queue labels
         assert 'queue="default"' in content
         assert 'queue="high-priority"' in content
+
+    def test_prometheus_metrics_uses_grouped_queries(self, client):
+        """Metrics endpoint should not issue one count query per state/queue."""
+        RayTaskExecution.objects.create(
+            task_id="metrics-query-test-1",
+            callable_path="test.task",
+            queue_name="default",
+            state=TaskState.QUEUED,
+        )
+        RayTaskExecution.objects.create(
+            task_id="metrics-query-test-2",
+            callable_path="test.task",
+            queue_name="high-priority",
+            state=TaskState.QUEUED,
+        )
+        RayTaskExecution.objects.create(
+            task_id="metrics-query-test-3",
+            callable_path="test.task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get("/api/metrics")
+
+        assert response.status_code == 200
+        assert len(queries) <= 2
 
 
 @pytest.mark.django_db
@@ -303,3 +350,27 @@ class TestExecutionsAPI:
         assert data["queued"] == 1
         assert data["succeeded"] == 1
         assert data["failed"] == 1
+
+    def test_get_stats_uses_single_grouped_query(self, client):
+        """Stats endpoint should aggregate states in one query."""
+        RayTaskExecution.objects.create(
+            task_id="stats-query-test-1",
+            callable_path="test",
+            state=TaskState.QUEUED,
+        )
+        RayTaskExecution.objects.create(
+            task_id="stats-query-test-2",
+            callable_path="test",
+            state=TaskState.SUCCEEDED,
+        )
+        RayTaskExecution.objects.create(
+            task_id="stats-query-test-3",
+            callable_path="test",
+            state=TaskState.FAILED,
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get("/api/executions/stats")
+
+        assert response.status_code == 200
+        assert len(queries) == 1

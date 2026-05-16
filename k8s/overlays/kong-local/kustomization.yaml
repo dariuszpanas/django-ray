@@ -1,0 +1,246 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../kuberay-kind
+  - worker-ml.yaml
+  - worker-sync.yaml
+  - dashboard-ingresses.yaml
+
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/type
+        value: ClusterIP
+      - op: remove
+        path: /spec/ports/0/nodePort
+    target:
+      kind: Service
+      name: django-web-svc
+
+  - patch: |-
+      - op: replace
+        path: /spec/type
+        value: ClusterIP
+      - op: remove
+        path: /spec/ports/0/nodePort
+    target:
+      kind: Service
+      name: grafana-svc
+
+  - patch: |-
+      - op: replace
+        path: /spec/type
+        value: ClusterIP
+      - op: remove
+        path: /spec/ports/0/nodePort
+    target:
+      kind: Service
+      name: prometheus-svc
+
+  - patch: |-
+      - op: replace
+        path: /spec/type
+        value: ClusterIP
+      - op: remove
+        path: /spec/ports/0/nodePort
+    target:
+      kind: Service
+      name: ray-dashboard-svc
+
+  - patch: |-
+      - op: replace
+        path: /data/RAY_DASHBOARD_URL
+        value: "http://ray.localhost:30080"
+    target:
+      kind: ConfigMap
+      name: django-ray-config
+
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args
+        value:
+          - -c
+          - shared_buffers=1024MB
+          - -c
+          - effective_cache_size=3072MB
+          - -c
+          - work_mem=16MB
+          - -c
+          - maintenance_work_mem=256MB
+          - -c
+          - wal_buffers=16MB
+          - -c
+          - max_wal_size=2GB
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            memory: "2Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+    target:
+      kind: Deployment
+      name: postgres
+
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 4
+      - op: replace
+        path: /spec/strategy
+        value:
+          type: RollingUpdate
+          rollingUpdate:
+            maxUnavailable: 0
+            maxSurge: 1
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: GUNICORN_WORKERS
+            value: "8"
+          - name: GUNICORN_THREADS
+            value: "2"
+          - name: GUNICORN_TIMEOUT
+            value: "120"
+          - name: GUNICORN_GRACEFUL_TIMEOUT
+            value: "30"
+          - name: GUNICORN_KEEPALIVE
+            value: "5"
+          - name: GUNICORN_MAX_REQUESTS
+            value: "1000"
+          - name: GUNICORN_MAX_REQUESTS_JITTER
+            value: "100"
+          - name: GUNICORN_WORKER_TMP_DIR
+            value: "/dev/shm"
+          - name: GUNICORN_ACCESS_LOGFILE
+            value: "off"
+          - name: GUNICORN_CONTROL_SOCKET_DISABLE
+            value: "true"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe
+        value:
+          exec:
+            command:
+              - sh
+              - -c
+              - kill -0 1
+          initialDelaySeconds: 30
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 8
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe
+        value:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+      - op: add
+        path: /spec/template/spec/containers/0/startupProbe
+        value:
+          httpGet:
+            path: /api/livez
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 18
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app: django-ray
+                component: web
+      - op: add
+        path: /spec/template/spec/affinity
+        value:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      app: django-ray
+                      component: web
+    target:
+      kind: Deployment
+      name: django-web
+
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: RAY_ADDRESS
+            value: "ray://ray-head-svc:10001"
+          - name: DJANGO_RAY_QUEUE
+            value: "default,high-priority,low-priority"
+          - name: DJANGO_RAY_CONCURRENCY
+            value: "16"
+    target:
+      kind: Deployment
+      name: django-ray-worker
+
+  - patch: |-
+      - op: remove
+        path: /metadata/annotations/kubernetes.io~1ingress.class
+      - op: add
+        path: /spec/ingressClassName
+        value: kong
+      - op: remove
+        path: /spec/rules/0/host
+    target:
+      kind: Ingress
+      name: django-ray-ingress
+
+  - patch: |-
+      - op: replace
+        path: /spec/headGroupSpec/serviceType
+        value: ClusterIP
+      - op: replace
+        path: /spec/headGroupSpec/rayStartParams/num-cpus
+        value: "0"
+      - op: replace
+        path: /spec/headGroupSpec/template/spec/containers/0/resources
+        value:
+          requests:
+            memory: "3Gi"
+            cpu: "1"
+          limits:
+            memory: "6Gi"
+            cpu: "2"
+      - op: replace
+        path: /spec/headGroupSpec/template/spec/containers/0/env/4/value
+        value: http://grafana.localhost:30080
+      - op: replace
+        path: /spec/workerGroupSpecs/0/rayStartParams/num-cpus
+        value: "3"
+      - op: replace
+        path: /spec/workerGroupSpecs/0/template/spec/containers/0/resources
+        value:
+          requests:
+            memory: "2Gi"
+            cpu: "1500m"
+          limits:
+            memory: "4Gi"
+            cpu: "3"
+    target:
+      kind: RayCluster
+      name: ray

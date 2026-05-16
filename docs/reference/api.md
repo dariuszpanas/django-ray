@@ -26,14 +26,18 @@ If you need a REST API for task management in your project, you can use the test
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /api/livez` | Lightweight process liveness check |
+| `GET /api/readyz` | Readiness check with database reachability |
 | `GET /api/health` | Health check |
 | `GET /api/metrics` | Prometheus metrics |
+| `GET /api/tasks/{task_id}` | Get Django task result/status by task id |
 | `GET /api/executions` | List task executions |
-| `GET /api/executions/{id}` | Get execution details |
-| `POST /api/executions/{id}/cancel` | Cancel execution |
-| `POST /api/executions/{id}/retry` | Retry failed execution |
-| `DELETE /api/executions/{id}` | Delete execution |
 | `GET /api/executions/stats` | Get statistics |
+| `GET /api/executions/{id}` | Get execution details |
+| `POST /api/executions/{id}/cancel` | Cancel or request cancellation for an execution |
+| `POST /api/executions/{id}/retry` | Retry failed, cancelled, or lost execution |
+| `POST /api/executions/reset` | Reset matching executions to queued |
+| `DELETE /api/executions/{id}` | Delete execution |
 
 When the testproject server is running:
 - **Swagger UI**: http://localhost:8000/api/docs
@@ -57,9 +61,11 @@ stats = RayTaskExecution.objects.values('state').annotate(count=Count('id'))
 
 # Cancel a task
 execution = RayTaskExecution.objects.get(pk=execution_id)
-if execution.state in (TaskState.QUEUED, TaskState.RUNNING):
+if execution.state == TaskState.QUEUED:
     execution.state = TaskState.CANCELLED
-    execution.save()
+elif execution.state == TaskState.RUNNING:
+    execution.state = TaskState.CANCELLING
+execution.save(update_fields=["state"])
 ```
 
 For a complete REST API example, see `testproject/api.py` in the repository.

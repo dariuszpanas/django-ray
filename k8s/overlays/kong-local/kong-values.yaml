@@ -1,0 +1,10 @@
+ingressController:
+  ingressClass: kong
+
+gateway:
+  proxy:
+    type: LoadBalancer
+    http:
+      servicePort: 30080
+    tls:
+      servicePort: 30443

@@ -1,0 +1,50 @@
+[project]
+site_name = "django-ray"
+site_description = "Ray-based backend for Django Tasks with distributed execution and database-backed reliability"
+site_url = "https://django-ray.readthedocs.io/en/latest/"
+repo_url = "https://github.com/dariuszpanas/django-ray"
+repo_name = "GitHub"
+edit_uri = "edit/main/docs/"
+docs_dir = "docs"
+site_dir = "site"
+use_directory_urls = true
+
+nav = [
+  { "Home" = "index.md" },
+  { "User Guide" = [
+    { "Getting Started" = "getting-started.md" },
+    { "Configuration" = "configuration.md" },
+    { "Worker Modes" = "worker-modes.md" },
+    { "Tasks" = "tasks.md" },
+    { "Queues" = "queues.md" },
+    { "Retry and Error Handling" = "retry.md" },
+  ] },
+  { "Deployment" = [
+    { "Kubernetes" = "deployment/kubernetes.md" },
+    { "Docker" = "deployment/docker.md" },
+    { "TLS" = "deployment/tls.md" },
+    { "Operator Runbook" = "runbook.md" },
+  ] },
+  { "Reference" = [
+    { "CLI" = "reference/cli.md" },
+    { "Settings" = "reference/settings.md" },
+    { "Result Storage" = "reference/result-storage.md" },
+    { "Handle Compatibility" = "reference/handle-compatibility.md" },
+    { "API" = "reference/api.md" },
+  ] },
+  { "Development" = [
+    { "Contributing" = "contributing.md" },
+    { "Architecture" = "architecture.md" },
+    { "Changelog" = "changelog.md" },
+  ] },
+]
+
+[project.theme]
+features = [
+  "navigation.sections",
+  "navigation.path",
+  "navigation.top",
+  "toc.follow",
+  "content.action.edit",
+  "content.action.view",
+]

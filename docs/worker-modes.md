@@ -11,6 +11,11 @@ django-ray supports multiple execution modes to fit different use cases, from lo
 | **cluster** | `--cluster=<addr>` | Remote Ray | Production |
 | **ray-job** | *(default)* | Remote Ray | Production (isolation) |
 
+Note: "default" means no mode flag and `DJANGO_RAY.RUNNER="ray_job"`.  
+If `DJANGO_RAY.RUNNER="ray_core"` and no mode flag is provided, the worker defaults to:
+- local mode when `RAY_ADDRESS="auto"`
+- cluster mode when `RAY_ADDRESS` is a cluster address
+
 ## Sync Mode
 
 **Flag:** `--sync`
@@ -76,7 +81,7 @@ python manage.py django_ray_worker --queue=default --cluster=ray://ray-head:1000
 
 ## Ray Job Mode (Default)
 
-**Flag:** None (default behavior)
+**Flag:** None (default behavior with `DJANGO_RAY.RUNNER="ray_job"`)
 
 Uses Ray's Job Submission API for process isolation.
 

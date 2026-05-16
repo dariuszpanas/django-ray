@@ -500,7 +500,7 @@ class MonitoringUser(HttpUser, TaskCreationMixin):
             queued = stats.get("queued", 0)
             running = stats.get("running", 0)
             if queued > 100:
-                print(f"⚠️  High queue depth: {queued} queued, {running} running")
+                print(f"WARNING: high queue depth: {queued} queued, {running} running")
 
     @task(3)
     def health_check(self):

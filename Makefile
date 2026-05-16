@@ -8,6 +8,7 @@
 .PHONY: all install format lint typecheck test test-unit test-integration test-cov check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
+.PHONY: docs-build docs-build-strict docs-serve
 
 # Include optional modules (comment out if not needed)
 -include mk/docker.mk
@@ -70,6 +71,18 @@ ci:
 # Build the package
 build:
 	uv build
+
+# Build docs
+docs-build:
+	uv run zensical build
+
+# Build docs in strict mode (CI)
+docs-build-strict:
+	uv run zensical build --strict
+
+# Serve docs locally at http://127.0.0.1:8000
+docs-serve:
+	uv run zensical serve --dev-addr 127.0.0.1:8000
 
 # =============================================================================
 # Django (testproject)
@@ -142,6 +155,9 @@ help:
 	@echo "  test-unit      - Run unit tests only"
 	@echo "  test-integration - Run integration tests only"
 	@echo "  test-cov       - Run tests with coverage"
+	@echo "  docs-build     - Build Zensical site"
+	@echo "  docs-build-strict - Build Zensical site (strict mode)"
+	@echo "  docs-serve     - Serve docs locally at http://127.0.0.1:8000"
 	@echo ""
 	@echo "Django:"
 	@echo "  runserver      - Start Django dev server"
@@ -165,7 +181,7 @@ help:
 	@echo "Additional modules (if included):"
 	@echo "  Docker:     make docker-build, docker-run"
 	@echo "  Kubernetes: make k8s-deploy, k8s-status, k8s-delete"
-	@echo "  Load test:  make loadtest, loadtest-quick"
+	@echo "  Load test:  make loadtest, loadtest-18, loadtest-headless"
 	@echo ""
 	@echo "For full k8s commands: make -f mk/k8s.mk help"
 

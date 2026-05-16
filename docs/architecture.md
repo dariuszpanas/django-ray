@@ -1,217 +1,179 @@
 # Architecture
 
-This document provides a high-level overview of django-ray's architecture.
+This document describes the runtime architecture of `django-ray` and how work moves from Django to Ray and back.
 
 ## System Overview
 
-django-ray integrates Django 6 Tasks with Ray by providing:
+`django-ray` integrates Django Tasks with Ray using a database-backed control plane:
 
-- **A Worker** that claims tasks from the database and submits them to Ray
-- **A metadata layer** in the database that tracks execution attempts and state
-- **Pluggable execution adapters** for different Ray execution modes
+- Django app code enqueues tasks through Django's Tasks API.
+- `django-ray` persists execution metadata in the database.
+- `django_ray_worker` claims work, runs it (sync/Ray Core/Ray Job), and reconciles status.
+- Ray executes task callables in local or cluster compute environments.
 
-### Design Principles
+## Request-To-Execution Flow
 
-- **Database is the system of record** for task state
-- **Ray is the execution fabric** for distributed computing
-- **At-least-once execution** with idempotency encouraged
+1. App code calls `.enqueue(...)` on a Django task.
+2. Backend stores a `RayTaskExecution` row in `QUEUED` state.
+3. Worker claims eligible rows and marks them `RUNNING`.
+4. Worker submits task execution in the selected mode.
+5. Worker reconciles completion and stores success/failure details.
+6. Retry policy may requeue `FAILED` or `LOST` tasks until attempts are exhausted.
 
-## Components
+## Runtime Components
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Your Application                          │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │                    Django Web / API                       │   │
-│  │  • Define tasks with @task decorator                      │   │
-│  │  • Enqueue tasks with .enqueue()                          │   │
-│  │  • Read status/results                                    │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     PostgreSQL Database                          │
-│  ┌─────────────────────┐  ┌─────────────────────────────────┐   │
-│  │  Django Task Data   │  │  django-ray Metadata            │   │
-│  │  (canonical state)  │  │  • RayTaskExecution             │   │
-│  │                     │  │  • TaskWorkerLease              │   │
-│  └─────────────────────┘  └─────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                    │                         │
-                    ▼                         ▼
-┌───────────────────────────────┐   ┌─────────────────────────────┐
-│     django-ray Worker         │   │       Ray Cluster           │
-│  ┌─────────────────────────┐  │   │  ┌────────────────────────┐ │
-│  │ Task Claimer (polling)  │  │   │  │  Ray Head (Dashboard)  │ │
-│  │ Task Runner (submit)    │──┼──►│  └────────────────────────┘ │
-│  │ State Reconciler        │  │   │  ┌────────────────────────┐ │
-│  └─────────────────────────┘  │   │  │  Ray Worker            │ │
-│  • Connects to DB             │   │  │  • Django ORM access   │ │
-│  • Connects to Ray cluster    │   │  │  • Executes task code  │ │
-└───────────────────────────────┘   │  └────────────────────────┘ │
-                                    │  ┌────────────────────────┐ │
-                                    │  │  Ray Worker            │ │
-                                    │  │  • Django ORM access   │ │
-                                    │  │  • Executes task code  │ │
-                                    │  └────────────────────────┘ │
-                                    └─────────────────────────────┘
-```
+### Django Application Processes
 
-**Key points:**
-- Ray workers have full Django environment (same settings as web/worker pods)
-- Ray workers can access Django ORM directly within tasks
-- Database is shared across all components
+- Enqueue tasks.
+- Read task status/results via Django Tasks and admin/API views.
+
+### Worker Process (`django_ray_worker`)
+
+- Claims tasks from DB.
+- Maintains worker lease heartbeats.
+- Maintains task-monitor heartbeats for in-flight work it is actively reconciling.
+- Submits and reconciles execution in sync/Ray Core/Ray Job modes.
+- Applies retry policy and stuck-task/orphan recovery.
+
+### Ray Runtime
+
+- Executes submitted functions.
+- Returns completion state and result/error payloads.
+
+### Database
+
+- Canonical source of truth for task lifecycle state.
+- Stores worker leases for cross-worker coordination.
 
 ## Data Model
 
-### RayTaskExecution
+### `RayTaskExecution`
 
-Tracks each task execution attempt:
+Primary execution record for one task attempt chain.
 
-| Field | Description |
-|-------|-------------|
-| `id` | UUID primary key |
+| Field | Notes |
+|---|---|
+| `id` | `BigAutoField` primary key |
 | `task_id` | Django task identifier |
-| `task_name` | Callable import path |
-| `state` | QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED, LOST |
-| `queue_name` | Queue assignment |
-| `attempt_number` | Current attempt (1-based) |
-| `args_json` | Serialized positional arguments |
-| `kwargs_json` | Serialized keyword arguments |
-| `result_data` | JSON result on success |
-| `error_message` | Error message on failure |
-| `error_traceback` | Full traceback on failure |
-| `ray_job_id` | Ray Job ID (if using Job API) |
-| `created_at` | Task creation time |
-| `started_at` | Execution start time |
-| `finished_at` | Execution end time |
+| `callable_path` | Dotted import path for callable |
+| `queue_name` | Queue used for claim/execution |
+| `state` | `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `CANCELLING`, `LOST` |
+| `attempt_number` | Current attempt counter |
+| `args_json`, `kwargs_json` | Serialized call arguments |
+| `result_data` | Inline JSON result when under size limit |
+| `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
+| `error_message`, `error_traceback` | Failure metadata |
+| `ray_job_id`, `ray_address` | Runner-specific execution handle metadata |
+| `claimed_by_worker` | Worker lease owner that currently owns the task |
+| `run_after` | Delayed/retry scheduling timestamp |
+| `timeout_seconds` | Per-task timeout override |
+| `created_at`, `started_at`, `finished_at`, `last_heartbeat_at` | Lifecycle timestamps |
 
-### TaskWorkerLease
+### `TaskWorkerLease`
 
-Tracks active workers for distributed coordination:
+Worker coordination record used to detect dead/inactive workers.
 
-| Field | Description |
-|-------|-------------|
-| `worker_id` | Unique worker identifier |
-| `hostname` | Worker hostname |
-| `pid` | Process ID |
-| `queue_name` | Queue being processed |
-| `is_active` | Whether worker is active |
-| `last_heartbeat_at` | Last heartbeat time |
+| Field | Notes |
+|---|---|
+| `worker_id` | Primary key identifier for worker process |
+| `hostname`, `pid` | Worker identity details |
+| `queue_name` | Informational queue assignment |
+| `started_at`, `last_heartbeat_at`, `stopped_at` | Lease timing |
+| `is_active` | Active/inactive lease state |
 
-## Task State Machine
+## Task State Model
 
+```text
+QUEUED -> RUNNING -> SUCCEEDED
+QUEUED -> CANCELLED
+RUNNING -> CANCELLING -> CANCELLED
+RUNNING -> FAILED
+RUNNING -> LOST
+FAILED/LOST -> QUEUED (if retry policy allows)
 ```
-         ┌─────────┐
-         │ QUEUED  │◄──────────────────┐
-         └────┬────┘                   │
-              │                        │
-              ▼                        │ (retry)
-         ┌─────────┐                   │
-         │ RUNNING │───────────────────┤
-         └────┬────┘                   │
-              │                        │
-       ┌──────┼──────┐                 │
-       │      │      │                 │
-       ▼      ▼      ▼                 │
-┌──────────┐ ┌──────┐ ┌───────────┐    │
-│SUCCEEDED │ │FAILED│ │ CANCELLED │    │
-└──────────┘ └──┬───┘ └───────────┘    │
-                │                      │
-                └──────────────────────┘
-                (if retries remaining)
-```
+
+Notes:
+
+- Retries increment `attempt_number` and set `run_after` backoff.
+- Terminal failure happens after retry policy exhaustion.
+
+## Delivery Semantics
+
+`django-ray` provides at-least-once execution semantics for retryable work. A task can be
+executed more than once when a worker, Ray worker, Ray head, network connection, or process dies
+after user code has performed side effects but before `django-ray` records the successful result.
+
+For side-effecting tasks, use an application-level idempotency key such as the Django task id, an
+order id, or another operation id guarded by a unique constraint in the system being changed. Keep
+external effects such as payments, email sends, webhooks, and third-party mutations idempotent or
+split them into a deduplicated commit step. `SUCCEEDED` means the final observed outcome succeeded;
+it does not prove that every earlier execution attempt had no side effects.
 
 ## Worker Loop
 
-The worker runs a continuous loop:
-
 ```python
 while running:
-    # 1. Heartbeat
-    update_lease()
-    
-    # 2. Claim tasks
-    tasks = claim_available_tasks(limit=concurrency - in_flight)
-    
-    # 3. Submit to Ray
-    for task in tasks:
-        submit_to_ray(task)
-    
-    # 4. Reconcile
-    for handle in in_flight_handles:
-        status = check_ray_status(handle)
-        update_task_state(status)
-    
-    # 5. Recovery
-    detect_and_recover_stuck_tasks()
-    
+    renew_worker_lease()
+    claim_due_queued_tasks()
+    submit_claimed_tasks()
+    reconcile_in_flight_tasks()
+    detect_stuck_and_orphaned_running_tasks()
     sleep(poll_interval)
 ```
 
 ## Execution Adapters
 
-### RayJobRunner
+### Sync mode
 
-Uses Ray's Job Submission API:
-- Process isolation per task
-- Higher overhead
-- Good for long-running tasks
+- Executes callable in worker process.
+- Useful for development/testing.
 
-### RayCoreRunner
+### Ray Core mode
 
-Uses `@ray.remote` directly:
-- Lower overhead
-- Tasks share Ray worker processes
-- Good for high-throughput
+- Uses Ray remote execution directly.
+- Lower submission overhead.
 
-## Serialization
+### Ray Job mode
 
-Tasks are serialized for execution:
+- Uses Ray Job Submission API.
+- Worker submits a payload transport command:
+  - `python -m django_ray.runtime.entrypoint --payload-b64 <...>`
+- Payload is URL-safe base64 JSON containing callable path and serialized args/kwargs.
+- Workers can adopt orphaned persisted Ray Job handles from inactive workers and continue reconciliation
+  instead of immediately retrying duplicate work.
 
-1. **Import path**: `"myapp.tasks.process_data"`
-2. **Arguments**: JSON-serialized `args` and `kwargs`
-3. **Execution**: Worker imports callable and invokes with deserialized args
+## Entrypoint Contract
 
-### Entrypoint
+`django_ray.runtime.entrypoint`:
 
-```python
-# django_ray.runtime.entrypoint
-def execute_task(callable_path, args_json, kwargs_json):
-    # 1. Setup Django
-    django.setup()
-    
-    # 2. Import callable
-    func = import_callable(callable_path)
-    
-    # 3. Deserialize arguments
-    args = json.loads(args_json)
-    kwargs = json.loads(kwargs_json)
-    
-    # 4. Execute
-    result = func(*args, **kwargs)
-    
-    # 5. Return serialized result
-    return json.dumps({"success": True, "result": result})
-```
+- Bootstraps Django in Ray runtime.
+- Decodes task payload.
+- Imports callable and executes it.
+- Returns JSON result envelope:
+  - `success`
+  - `result`
+  - `error`
+  - `traceback`
+  - `exception_type`
 
-## Distributed Computing
+## Reliability Controls
 
-Within tasks, use Ray's distributed primitives:
+- Unified retry policy with denylist support (short and fully-qualified exception names).
+- Worker lease heartbeat + cross-worker orphan recovery.
+- Task monitor heartbeats for active reconciliation paths.
+- Stuck/timeout detection with loss handling and retry path.
+- Startup settings validation fail-fast by default, with migration/bootstrap bypass controls.
+- Result size enforcement with configurable oversized-result backends (`digest`, `filesystem`, `s3`, `gcs`).
+- Backend result retrieval rehydrates `result_reference` payloads for retrievable backends.
 
-```python
-from django_ray.runtime.distributed import parallel_map
+## Observability Surfaces
 
-@task(queue_name="default")
-def process_batch(items):
-    # Parallel execution across Ray cluster
-    return parallel_map(process_item, items)
-```
+- Django admin for task/lease inspection and operations.
+- Worker logs for claim/submit/reconcile/retry events.
+- Optional metrics/API surfaces in `testproject` example app.
 
 ## See Also
 
-- [Worker Modes](worker-modes.md) - Execution modes
-- [Configuration](configuration.md) - Settings
-- [Contributing](contributing.md) - Development guide
-
+- [Configuration](configuration.md)
+- [Worker Modes](worker-modes.md)
+- [Retry & Error Handling](retry.md)

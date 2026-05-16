@@ -57,7 +57,7 @@ INSTALLED_APPS = [
 
 ```python
 DJANGO_RAY = {
-    "RAY_ADDRESS": "ray://localhost:10001",
+    "RAY_ADDRESS": "auto",  # Use "ray://host:port" for a remote cluster
     "DEFAULT_CONCURRENCY": 10,
     "MAX_TASK_ATTEMPTS": 3,
 }
@@ -95,7 +95,7 @@ python manage.py django_ray_worker --queue=default --sync
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `RAY_ADDRESS` | *required* | Ray cluster address |
+| `RAY_ADDRESS` | `None` | Must be set at runtime; use `"auto"` locally or `"ray://host:port"` for a cluster |
 | `DEFAULT_CONCURRENCY` | `10` | Max concurrent tasks per worker |
 | `MAX_TASK_ATTEMPTS` | `3` | Max retry attempts |
 | `RETRY_BACKOFF_SECONDS` | `60` | Base backoff for retries |
@@ -126,6 +126,9 @@ make typecheck   # Type check with ty
 make test        # Run tests
 make check       # Run lint + typecheck
 make ci          # Run all CI checks
+make docs-build  # Build docs (Zensical)
+make docs-build-strict # Build docs in strict mode
+make docs-serve  # Serve docs locally
 ```
 
 ### Django Commands
@@ -245,7 +248,15 @@ django-ray/
 
 ## Documentation
 
-Full documentation is available in the [docs/](https://github.com/dariuszpanas/django-ray/tree/main/docs) directory:
+Published docs are served with Zensical at:
+
+- https://django-ray.readthedocs.io/en/latest/
+
+Read the Docs builds are configured in `.readthedocs.yaml`. The build installs `uv`, runs the
+strict Zensical build, and copies the generated `site/` output into Read the Docs' HTML output
+directory.
+
+Source docs remain in the [`docs/`](https://github.com/dariuszpanas/django-ray/tree/main/docs) directory:
 
 - [Getting Started](https://github.com/dariuszpanas/django-ray/blob/main/docs/getting-started.md) - Installation and basic setup
 - [Configuration](https://github.com/dariuszpanas/django-ray/blob/main/docs/configuration.md) - All configuration options

@@ -127,6 +127,9 @@ STORAGES = {
 # Default primary key field type
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# Ray Dashboard URL used by Django admin deep links.
+RAY_DASHBOARD_URL = os.environ.get("RAY_DASHBOARD_URL", "http://localhost:8265")
+
 # Django 6 Tasks Configuration - Use Ray backend for distributed execution
 TASKS = {
     "default": {
@@ -139,12 +142,11 @@ TASKS = {
     },
 }
 
-# Legacy django-ray Configuration (for direct worker usage)
+# django-ray configuration used by the library backend and worker command.
 DJANGO_RAY = {
     # Use "auto" for local Ray, or "ray://host:port" for cluster
     "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
-    "RUNTIME_ENV": {},
-    "NUM_CPUS_PER_TASK": int(os.environ.get("RAY_NUM_CPUS_PER_TASK", "1")),
+    "RAY_RUNTIME_ENV": {},
     "MAX_TASK_ATTEMPTS": int(os.environ.get("RAY_MAX_RETRIES", "3")),
     "RETRY_BACKOFF_SECONDS": int(os.environ.get("RAY_RETRY_DELAY_SECONDS", "5")),
     # Exceptions that won't trigger auto-retry (use for manual retry testing)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -40,13 +42,16 @@ class RayJobRunner(BaseRunner):
         serialized_args = serialize_args(list(args))
         serialized_kwargs = serialize_args(kwargs)
 
-        # Build entrypoint command
-        entrypoint = (
-            f'python -c "'
-            f"from django_ray.runtime.entrypoint import execute_task; "
-            f"print(execute_task('{callable_path}', '{serialized_args}', '{serialized_kwargs}'))"
-            f'"'
-        )
+        # Transport payload as urlsafe base64 to avoid shell quoting/injection issues.
+        payload = {
+            "callable_path": callable_path,
+            "serialized_args": serialized_args,
+            "serialized_kwargs": serialized_kwargs,
+        }
+        payload_json = json.dumps(payload, separators=(",", ":"))
+        payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
+
+        entrypoint = f"python -m django_ray.runtime.entrypoint --payload-b64 {payload_b64}"
 
         # Get runtime environment settings
         settings = get_settings()

@@ -22,6 +22,14 @@ DEFAULTS: dict[str, Any] = {
     "WORKER_HEARTBEAT_SECONDS": 15,
     # Results
     "MAX_RESULT_SIZE_BYTES": 1024 * 1024,  # 1MB
+    "RESULT_STORAGE_BACKEND": "digest",  # "digest", "filesystem", "s3", "gcs"
+    "RESULT_STORAGE_FILESYSTEM_PATH": None,
+    "RESULT_STORAGE_S3_BUCKET": None,
+    "RESULT_STORAGE_S3_PREFIX": "django-ray/results",
+    "RESULT_STORAGE_S3_REGION": None,
+    "RESULT_STORAGE_S3_ENDPOINT_URL": None,
+    "RESULT_STORAGE_GCS_BUCKET": None,
+    "RESULT_STORAGE_GCS_PREFIX": "django-ray/results",
     # Redaction
     "REDACT_PATTERNS": None,  # Uses defaults if None
 }

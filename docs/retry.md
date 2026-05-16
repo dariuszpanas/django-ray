@@ -10,6 +10,20 @@ By default, tasks are retried up to 3 times with exponential backoff:
 - **Attempt 2**: After 60 seconds
 - **Attempt 3**: After 120 seconds (2x backoff)
 
+## Delivery Semantics
+
+Retries and lost-task recovery make `django-ray` an at-least-once task runner. That is the right
+tradeoff for reliability, but it means task functions must tolerate duplicate execution.
+
+This matters most when task code performs side effects. If a task charges a card, sends an email,
+calls a webhook, writes to another system, or performs any other irreversible action, protect that
+operation with an idempotency key or a unique operation record. A task can run successfully, lose
+its result before Django records `SUCCEEDED`, and then be retried.
+
+Use `attempt_number` to see Django-level retries, but do not treat it as a complete count of every
+Ray-level execution attempt. Ray may also retry or recover internal work before Django observes a
+final task result.
+
 ## Configuration
 
 ### Global Settings
@@ -91,6 +105,9 @@ DJANGO_RAY = {
 }
 ```
 
+You can use short names (for example, `ValueError`) or fully qualified names
+(for example, `builtins.ValueError` or `myapp.errors.PermanentError`).
+
 ### Custom Exception Classes
 
 ```python
@@ -162,7 +179,7 @@ from django_ray.models import RayTaskExecution, TaskState
 failed = RayTaskExecution.objects.filter(state=TaskState.FAILED)
 
 for task in failed:
-    print(f"Task: {task.task_name}")
+    print(f"Task: {task.callable_path}")
     print(f"Error: {task.error_message}")
     print(f"Traceback: {task.error_traceback}")
     print(f"Attempts: {task.attempt_number}")
@@ -176,25 +193,33 @@ for task in failed:
 2. Select failed tasks
 3. Use "Retry selected tasks" action
 
-### Via API
+### Programmatically
 
 ```python
 from django_ray.models import RayTaskExecution, TaskState
 
 def retry_task(task_id: str):
-    """Manually retry a failed task."""
+    """Manually retry a failed or lost task as a fresh retry chain."""
     task = RayTaskExecution.objects.get(task_id=task_id)
     
-    if task.state != TaskState.FAILED:
-        raise ValueError("Can only retry failed tasks")
+    if task.state not in (TaskState.FAILED, TaskState.LOST):
+        raise ValueError("Can only retry failed or lost tasks")
     
-    # Reset task for retry
+    # This mirrors the built-in admin action: reset to a fresh manual retry chain.
     task.state = TaskState.QUEUED
     task.attempt_number = 0
+    task.run_after = None
+    task.started_at = None
+    task.finished_at = None
+    task.claimed_by_worker = None
+    task.ray_job_id = None
     task.error_message = None
     task.error_traceback = None
     task.save()
 ```
+
+If your application needs a lifetime attempt count for audit purposes, store that separately from
+`attempt_number`; the built-in field is the worker retry counter used for the current retry chain.
 
 ## Handling Stuck Tasks
 
@@ -206,7 +231,14 @@ DJANGO_RAY = {
 }
 ```
 
-After this timeout, stuck tasks are marked as `LOST` and can be retried.
+`django-ray` uses two related signals here:
+
+- worker lease heartbeats to detect dead/inactive workers
+- task monitor heartbeats to confirm a live worker is still actively reconciling in-flight work
+
+For persisted Ray Job handles from inactive workers, another worker will try to reconcile or adopt the
+existing Ray job first. If the task remains unmonitored past `STUCK_TASK_TIMEOUT_SECONDS`, it is marked
+`LOST` and retried according to policy.
 
 ## Patterns
 
@@ -281,7 +313,7 @@ def process_dead_letters():
         # Log to dead letter storage
         DeadLetter.objects.create(
             task_id=task.task_id,
-            task_name=task.task_name,
+            callable_path=task.callable_path,
             error=task.error_message,
             failed_at=task.finished_at,
         )

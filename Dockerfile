@@ -76,9 +76,9 @@ COPY --chown=django:django testproject/ testproject/
 # Create staticfiles directory with proper permissions
 RUN mkdir -p /app/staticfiles && chown django:django /app/staticfiles
 
-# Copy and set up entrypoint script
+# Copy and normalize the entrypoint script so Windows checkouts still run in Linux containers.
 COPY --chown=django:django docker-entrypoint.sh /app/
-RUN chmod +x /app/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 # Switch to non-root user
 USER django

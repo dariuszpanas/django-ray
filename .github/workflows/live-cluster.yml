@@ -1,0 +1,47 @@
+name: Live Cluster Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      ray_address:
+        description: "Ray address for live tests (for example ray://host:10001)"
+        required: false
+        type: string
+      min_nodes:
+        description: "Minimum alive Ray nodes required before tests run"
+        required: false
+        default: "2"
+        type: string
+
+jobs:
+  live-cluster:
+    name: Live Cluster Fault Tests
+    runs-on: ubuntu-latest
+    env:
+      DJANGO_RAY_LIVE_CLUSTER_TESTS: "1"
+      DJANGO_RAY_LIVE_RAY_ADDRESS: ${{ inputs.ray_address != '' && inputs.ray_address || vars.DJANGO_RAY_LIVE_RAY_ADDRESS }}
+      DJANGO_RAY_LIVE_MIN_NODES: ${{ inputs.min_nodes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Validate live cluster address
+        run: |
+          if [ -z "$DJANGO_RAY_LIVE_RAY_ADDRESS" ]; then
+            echo "DJANGO_RAY_LIVE_RAY_ADDRESS is required."
+            echo "Set workflow input 'ray_address' or repository variable DJANGO_RAY_LIVE_RAY_ADDRESS."
+            exit 1
+          fi
+
+      - name: Run live cluster fault tests
+        run: uv run pytest tests/integration/test_live_failure_injection.py -m live_cluster -v

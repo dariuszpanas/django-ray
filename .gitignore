@@ -16,6 +16,7 @@ venv/
 .coverage
 coverage.xml
 htmlcov/
+site/
 .idea/
 .vscode/
 
@@ -26,3 +27,5 @@ db.sqlite3
 # UV lock (optional - uncomment if you don't want to commit lock file)
 # uv.lock
 
+# temporary files
+tmp/

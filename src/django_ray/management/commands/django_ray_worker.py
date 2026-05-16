@@ -96,6 +96,7 @@ class Command(BaseCommand):
         # Parse queue arguments - support multiple ways to specify queues
         queues = self._parse_queues(options)
 
+        settings = get_settings()
         concurrency = options.get("concurrency")
         self.sync_mode = options.get("sync", False)
         self.local_mode = options.get("local", False)
@@ -123,9 +124,27 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.WARNING(f"Initial cluster connection failed: {e}"))
                 self.stdout.write("Will retry connection during operation...")
         else:
-            self.execution_mode = "ray"
+            default_mode, default_cluster_address = self._get_default_execution_mode(settings)
+            self.execution_mode = default_mode
 
-        settings = get_settings()
+            if self.execution_mode == "local":
+                try:
+                    self._init_local_ray()
+                    self.ray_core_runner = RayCoreRunner()
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {e}"))
+                    self.stdout.write("Will retry connection during operation...")
+            elif self.execution_mode == "cluster":
+                self.cluster_address = default_cluster_address
+                try:
+                    if not self.cluster_address:
+                        raise RuntimeError("RUNNER=ray_core requires RAY_ADDRESS for cluster mode")
+                    self._init_cluster_ray(self.cluster_address)
+                    self.ray_core_runner = RayCoreRunner()
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(f"Initial cluster connection failed: {e}"))
+                    self.stdout.write("Will retry connection during operation...")
+
         if concurrency is None:
             concurrency = settings.get("DEFAULT_CONCURRENCY", 10)
 
@@ -151,6 +170,22 @@ class Command(BaseCommand):
             self.stdout.write("\nShutdown requested via keyboard interrupt")
         finally:
             self.shutdown()
+
+    def _get_default_execution_mode(self, settings: dict[str, Any]) -> tuple[str, str | None]:
+        """Resolve default worker mode from settings when no CLI mode flag is set.
+
+        Returns:
+            Tuple of (execution_mode, cluster_address).
+        """
+        runner = settings.get("RUNNER", "ray_job")
+        if runner == "ray_core":
+            ray_address = settings.get("RAY_ADDRESS")
+            if ray_address and ray_address != "auto":
+                return "cluster", str(ray_address)
+            return "local", None
+
+        # ray_job default
+        return "ray", None
 
     def _parse_queues(self, options: dict[str, Any]) -> list[str]:
         """Parse queue arguments from command options.
@@ -448,27 +483,60 @@ class Command(BaseCommand):
             # Best effort - will be handled by regular heartbeat
             pass
 
-    def _check_ray_connection(self) -> None:
-        """Check if Ray connection is healthy and reconnect if needed."""
-        import concurrent.futures
+    def _mark_task_monitor_heartbeat(
+        self,
+        task: RayTaskExecution,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Record that a running task is still being actively monitored."""
+        heartbeat_time = now or datetime.now(UTC)
+        updated = RayTaskExecution.objects.filter(
+            pk=task.pk,
+            state=TaskState.RUNNING,
+        ).update(last_heartbeat_at=heartbeat_time)
+        if updated:
+            task.last_heartbeat_at = heartbeat_time
+
+    def _get_ray_cluster_resources_with_timeout(
+        self, timeout_seconds: float
+    ) -> dict[str, Any] | None:
+        """Return Ray cluster resources or None when the check times out."""
+        import queue
+        import threading
 
         import ray
 
-        def _check_resources():
-            """Check cluster resources with timeout protection."""
-            return ray.cluster_resources()
+        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+        def _check_resources() -> None:
+            try:
+                result_queue.put(("ok", ray.cluster_resources()))
+            except Exception as e:
+                result_queue.put(("error", e))
+
+        thread = threading.Thread(target=_check_resources, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout_seconds)
+        if thread.is_alive():
+            return None
+
+        status, payload = result_queue.get_nowait()
+        if status == "error":
+            raise payload
+        return payload
+
+    def _check_ray_connection(self) -> None:
+        """Check if Ray connection is healthy and reconnect if needed."""
+        import ray
 
         try:
             # Quick health check - try to get cluster resources with timeout
             if ray.is_initialized():
-                # Use a thread with timeout to avoid blocking forever
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(_check_resources)
-                    try:
-                        future.result(timeout=10)  # 10 second timeout
-                        return  # Connection is healthy
-                    except concurrent.futures.TimeoutError:
-                        self.stdout.write(self.style.WARNING("\nRay health check timed out"))
+                resources = self._get_ray_cluster_resources_with_timeout(timeout_seconds=10)
+                if resources is not None:
+                    return  # Connection is healthy
+                self.stdout.write(self.style.WARNING("\nRay health check timed out"))
         except Exception as e:
             self.stdout.write(self.style.WARNING(f"\nRay connection lost: {e}"))
 
@@ -548,27 +616,32 @@ class Command(BaseCommand):
         )
 
     def _mark_stale_ray_core_tasks_as_lost(self) -> None:
-        """Mark tasks with stale Ray Core references as LOST so they can be retried."""
+        """Route stale Ray Core references through the normal retry/failure path."""
         if not self.ray_core_runner or self.ray_core_runner.pending_count == 0:
             return
 
         task_ids = list(self.ray_core_runner._pending_tasks.keys())
-        now = datetime.now(UTC)
-
-        count = RayTaskExecution.objects.filter(
+        count = 0
+        for task in RayTaskExecution.objects.filter(
             pk__in=task_ids,
             state=TaskState.RUNNING,
-        ).update(
-            state=TaskState.LOST,
-            finished_at=now,
-            error_message="Ray connection lost - task state unknown",
-        )
+        ):
+            self._handle_task_failure(
+                task,
+                error_message="Ray connection lost - task state unknown",
+                exception_type="RayConnectionError",
+            )
+            count += 1
 
         # Clear the runner's pending tasks
         self.ray_core_runner._pending_tasks.clear()
 
         if count > 0:
-            self.stdout.write(self.style.WARNING(f"  Marked {count} running tasks as LOST"))
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  Routed {count} stale Ray Core task(s) through retry/failure handling"
+                )
+            )
 
     def claim_and_process_tasks(self, queues: Sequence[str], concurrency: int) -> None:
         """Claim and submit tasks for execution.
@@ -635,8 +708,11 @@ class Command(BaseCommand):
             for task in tasks:
                 task.state = TaskState.RUNNING
                 task.started_at = now
+                task.last_heartbeat_at = now
                 task.claimed_by_worker = self.worker_id
-                task.save(update_fields=["state", "started_at", "claimed_by_worker"])
+                task.save(
+                    update_fields=["state", "started_at", "last_heartbeat_at", "claimed_by_worker"]
+                )
 
         # Process each claimed task
         for task in tasks:
@@ -680,7 +756,7 @@ class Command(BaseCommand):
             now = datetime.now(UTC)
             if result["success"]:
                 task.state = TaskState.SUCCEEDED
-                task.result_data = json.dumps(result["result"])
+                self._store_task_result(task, result["result"])
                 task.finished_at = now
                 self.stdout.write(
                     self.style.SUCCESS(f"  Task {task.pk} succeeded: {result['result']}")
@@ -689,6 +765,7 @@ class Command(BaseCommand):
                     update_fields=[
                         "state",
                         "result_data",
+                        "result_reference",
                         "finished_at",
                     ]
                 )
@@ -707,6 +784,52 @@ class Command(BaseCommand):
                 error_message=str(e),
                 exception_type=type(e).__name__,
             )
+
+    def _store_task_result(self, task: RayTaskExecution, result_value: Any) -> None:
+        """Store task result inline or as a reference if result is too large.
+
+        Args:
+            task: The task to update with result fields.
+            result_value: The Python value to serialize and store.
+        """
+        from django_ray.result_storage import (
+            DigestResultStorage,
+            ResultStorageError,
+            get_result_storage_backend,
+        )
+
+        settings = get_settings()
+        max_result_size = int(settings.get("MAX_RESULT_SIZE_BYTES", 1024 * 1024))
+
+        serialized_result = json.dumps(result_value)
+        result_size_bytes = len(serialized_result.encode("utf-8"))
+
+        if result_size_bytes <= max_result_size:
+            task.result_data = serialized_result
+            task.result_reference = None
+            return
+
+        task.result_data = None
+
+        try:
+            backend = get_result_storage_backend(settings)
+            task.result_reference = backend.store(serialized_result=serialized_result)
+        except ResultStorageError as e:
+            # Preserve success semantics if external storage is unavailable.
+            task.result_reference = DigestResultStorage().store(serialized_result=serialized_result)
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  Result storage backend failed ({e}); "
+                    "falling back to digest-only result_reference"
+                )
+            )
+
+        self.stdout.write(
+            self.style.WARNING(
+                f"  Task {task.pk} result is {result_size_bytes} bytes "
+                f"(max={max_result_size}); stored result_reference"
+            )
+        )
 
     def _handle_task_failure(
         self,
@@ -859,6 +982,14 @@ class Command(BaseCommand):
             self.ray_core_runner._pending_tasks.clear()
             return
 
+        monitored_task_ids = list(self.ray_core_runner._pending_tasks.keys())
+        if monitored_task_ids:
+            heartbeat_time = datetime.now(UTC)
+            RayTaskExecution.objects.filter(
+                pk__in=monitored_task_ids,
+                state=TaskState.RUNNING,
+            ).update(last_heartbeat_at=heartbeat_time)
+
         # Poll for completed tasks
         try:
             completed = self.ray_core_runner.poll_completed()
@@ -884,12 +1015,13 @@ class Command(BaseCommand):
                 now = datetime.now(UTC)
                 if result.get("success"):
                     task.state = TaskState.SUCCEEDED
-                    task.result_data = json.dumps(result.get("result"))
+                    self._store_task_result(task, result.get("result"))
                     task.finished_at = now
                     task.save(
                         update_fields=[
                             "state",
                             "result_data",
+                            "result_reference",
                             "finished_at",
                         ]
                     )
@@ -941,92 +1073,212 @@ class Command(BaseCommand):
             )
 
         except Exception as e:
-            task.state = TaskState.FAILED
-            task.error_message = f"Failed to submit to Ray: {e}"
-            task.finished_at = datetime.now(UTC)
-            task.save(update_fields=["state", "error_message", "finished_at"])
-            self.stdout.write(self.style.ERROR(f"  Task {task.pk} failed to submit: {e}"))
+            import traceback
+
+            self._handle_task_failure(
+                task,
+                error_message=f"Failed to submit to Ray: {e}",
+                error_traceback=traceback.format_exc(),
+                exception_type=type(e).__name__,
+            )
+
+    def _build_submission_handle(
+        self,
+        task: RayTaskExecution,
+        ray_job_id: str,
+    ) -> SubmissionHandle:
+        """Build a submission handle from persisted task metadata."""
+        return SubmissionHandle(
+            ray_job_id=ray_job_id,
+            ray_address=task.ray_address or "",
+            submitted_at=task.started_at or datetime.now(UTC),
+        )
+
+    def _adopt_orphaned_ray_job_task(self, task: RayTaskExecution, *, now: datetime) -> bool:
+        """Take ownership of an orphaned Ray Job task for continued reconciliation."""
+        filter_kwargs: dict[str, Any] = {
+            "pk": task.pk,
+            "state": TaskState.RUNNING,
+            "ray_job_id": task.ray_job_id,
+        }
+        if task.claimed_by_worker:
+            filter_kwargs["claimed_by_worker"] = task.claimed_by_worker
+        else:
+            filter_kwargs["claimed_by_worker__isnull"] = True
+
+        updated = RayTaskExecution.objects.filter(**filter_kwargs).update(
+            claimed_by_worker=self.worker_id,
+            last_heartbeat_at=now,
+        )
+        if not updated:
+            return False
+
+        task.claimed_by_worker = self.worker_id
+        task.last_heartbeat_at = now
+        if task.ray_job_id:
+            self.active_tasks[task.pk] = str(task.ray_job_id)
+        return True
+
+    def _reconcile_ray_job_task(
+        self,
+        task: RayTaskExecution,
+        runner: Any,
+        *,
+        ray_job_id: str,
+        completed_tasks: list[int],
+        orphaned: bool,
+    ) -> None:
+        """Reconcile a single Ray Job task from either active or orphaned tracking."""
+        from django_ray.runner.base import JobStatus
+
+        # Skip reconciliation if task was cancelled externally.
+        if task.state in (TaskState.CANCELLED, TaskState.CANCELLING):
+            if task.state == TaskState.CANCELLING:
+                task.state = TaskState.CANCELLED
+                task.finished_at = datetime.now(UTC)
+                task.save(update_fields=["state", "finished_at"])
+            completed_tasks.append(task.pk)
+            self.stdout.write(self.style.WARNING(f"\nTask {task.pk} was cancelled"))
+            return
+
+        handle = self._build_submission_handle(task, ray_job_id)
+        job_info = runner.get_status(handle)
+        now = datetime.now(UTC)
+
+        if job_info.status in (JobStatus.PENDING, JobStatus.RUNNING):
+            self._mark_task_monitor_heartbeat(task, now=now)
+            if orphaned and self._adopt_orphaned_ray_job_task(task, now=now):
+                self.stdout.write(
+                    self.style.NOTICE(
+                        f"\nAdopted orphaned Ray job task {task.pk} for continued monitoring"
+                    )
+                )
+            return
+
+        if job_info.status == JobStatus.SUCCEEDED:
+            logs = runner.get_logs(handle)
+            task_succeeded = True
+
+            if logs:
+                try:
+                    lines = logs.strip().split("\n")
+                    result = json.loads(lines[-1])
+                    if result.get("success"):
+                        task.state = TaskState.SUCCEEDED
+                        task.finished_at = now
+                        self._store_task_result(task, result.get("result"))
+                    else:
+                        task_succeeded = False
+                        self._handle_task_failure(
+                            task,
+                            error_message=result.get("error", "Task failed"),
+                            error_traceback=result.get("traceback"),
+                            exception_type=result.get("exception_type"),
+                        )
+                except (json.JSONDecodeError, IndexError):
+                    task.state = TaskState.SUCCEEDED
+                    task.finished_at = now
+                    self._store_task_result(task, logs)
+            else:
+                # Job succeeded but no logs available; still mark as succeeded.
+                task.state = TaskState.SUCCEEDED
+                task.finished_at = now
+                task.result_data = None
+                task.result_reference = None
+
+            if task_succeeded:
+                task.save()
+                self.stdout.write(self.style.SUCCESS(f"\nTask {task.pk} completed"))
+            else:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"\nTask {task.pk} returned failure payload, handling via retry policy"
+                    )
+                )
+            completed_tasks.append(task.pk)
+            return
+
+        if job_info.status == JobStatus.FAILED:
+            logs = runner.get_logs(handle)
+            self._handle_task_failure(
+                task,
+                error_message=job_info.message or "Ray job failed",
+                error_traceback=logs,
+                exception_type="RayJobFailed",
+            )
+            completed_tasks.append(task.pk)
+            self.stdout.write(self.style.ERROR(f"\nTask {task.pk} failed: {job_info.message}"))
+            return
+
+        if job_info.status == JobStatus.STOPPED:
+            task.state = TaskState.CANCELLED
+            task.finished_at = now
+            task.save()
+            completed_tasks.append(task.pk)
+            self.stdout.write(self.style.WARNING(f"\nTask {task.pk} was stopped"))
+            return
+
+        scope = "orphaned " if orphaned else ""
+        self.stdout.write(
+            self.style.WARNING(
+                f"\nTask {task.pk} {scope}Ray job status is unknown: {job_info.message or 'no details'}"
+            )
+        )
 
     def reconcile_tasks(self) -> None:
         """Reconcile task states with Ray."""
-        if self.sync_mode or not self.active_tasks:
+        if self.sync_mode:
             return
 
-        from django_ray.runner.base import JobStatus, SubmissionHandle
+        from django_ray.runner.leasing import get_active_workers
         from django_ray.runner.ray_job import RayJobRunner
 
         runner = RayJobRunner()
         completed_tasks: list[int] = []
+        reconciled_task_ids: set[int] = set()
 
-        for task_pk, ray_job_id in self.active_tasks.items():
+        for task_pk, ray_job_id in list(self.active_tasks.items()):
             try:
                 task = RayTaskExecution.objects.get(pk=task_pk)
-
-                # Skip reconciliation if task was cancelled externally
-                if task.state in (TaskState.CANCELLED, TaskState.CANCELLING):
-                    # Finalize cancellation if still in CANCELLING state
-                    if task.state == TaskState.CANCELLING:
-                        task.state = TaskState.CANCELLED
-                        task.finished_at = datetime.now(UTC)
-                        task.save(update_fields=["state", "finished_at"])
-                    completed_tasks.append(task_pk)
-                    self.stdout.write(self.style.WARNING(f"\nTask {task_pk} was cancelled"))
-                    continue
-
-                handle = SubmissionHandle(
+                reconciled_task_ids.add(task.pk)
+                self._reconcile_ray_job_task(
+                    task,
+                    runner,
                     ray_job_id=ray_job_id,
-                    ray_address=task.ray_address or "",
-                    submitted_at=task.started_at or datetime.now(UTC),
+                    completed_tasks=completed_tasks,
+                    orphaned=False,
                 )
-
-                job_info = runner.get_status(handle)
-
-                if job_info.status == JobStatus.SUCCEEDED:
-                    # Get logs which contain the result
-                    logs = runner.get_logs(handle)
-                    task.state = TaskState.SUCCEEDED
-                    task.finished_at = datetime.now(UTC)
-                    if logs:
-                        # Parse result from logs (last line is JSON result)
-                        try:
-                            lines = logs.strip().split("\n")
-                            result = json.loads(lines[-1])
-                            if result.get("success"):
-                                task.result_data = json.dumps(result.get("result"))
-                            else:
-                                task.error_message = result.get("error")
-                                task.error_traceback = result.get("traceback")
-                                task.state = TaskState.FAILED
-                        except (json.JSONDecodeError, IndexError):
-                            task.result_data = logs
-                    task.save()
-                    completed_tasks.append(task_pk)
-                    self.stdout.write(self.style.SUCCESS(f"\nTask {task_pk} completed"))
-
-                elif job_info.status == JobStatus.FAILED:
-                    logs = runner.get_logs(handle)
-                    task.state = TaskState.FAILED
-                    task.finished_at = datetime.now(UTC)
-                    task.error_message = job_info.message or "Ray job failed"
-                    if logs:
-                        task.error_traceback = logs
-                    task.save()
-                    completed_tasks.append(task_pk)
-                    self.stdout.write(
-                        self.style.ERROR(f"\nTask {task_pk} failed: {job_info.message}")
-                    )
-
-                elif job_info.status == JobStatus.STOPPED:
-                    task.state = TaskState.CANCELLED
-                    task.finished_at = datetime.now(UTC)
-                    task.save()
-                    completed_tasks.append(task_pk)
-                    self.stdout.write(self.style.WARNING(f"\nTask {task_pk} was stopped"))
 
             except RayTaskExecution.DoesNotExist:
                 completed_tasks.append(task_pk)
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"\nError reconciling task {task_pk}: {e}"))
+
+        active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
+        orphaned_tasks = RayTaskExecution.objects.filter(
+            state=TaskState.RUNNING,
+            ray_job_id__startswith="raysubmit_",
+        ).exclude(pk__in=reconciled_task_ids)
+
+        for task in orphaned_tasks:
+            task_worker_id = str(task.claimed_by_worker) if task.claimed_by_worker else None
+            if task_worker_id == self.worker_id:
+                continue
+            if task_worker_id and task_worker_id in active_worker_ids:
+                continue
+
+            try:
+                self._reconcile_ray_job_task(
+                    task,
+                    runner,
+                    ray_job_id=str(task.ray_job_id or ""),
+                    completed_tasks=completed_tasks,
+                    orphaned=True,
+                )
+            except Exception as e:
+                self.stdout.write(
+                    self.style.ERROR(f"\nError reconciling orphaned task {task.pk}: {e}")
+                )
 
         # Remove completed tasks from active list
         for task_pk in completed_tasks:
@@ -1038,15 +1290,29 @@ class Command(BaseCommand):
         This checks for tasks that have been RUNNING for too long without
         heartbeats, which indicates the worker processing them may have crashed.
         """
-        # Only check tasks claimed by this worker
+        from django_ray.runner.leasing import get_active_workers
+
+        # Check all running tasks. For tasks owned by active workers, skip recovery
+        # and let the owning worker manage its own in-flight work.
         running_tasks = RayTaskExecution.objects.filter(
             state=TaskState.RUNNING,
-            claimed_by_worker=self.worker_id,
         )
+
+        active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
+        ray_core_pending = self.ray_core_runner._pending_tasks if self.ray_core_runner else {}
 
         stuck_count = 0
         timeout_count = 0
+        orphan_recovered_count = 0
         for task in running_tasks:
+            task_worker_id = str(task.claimed_by_worker) if task.claimed_by_worker else None
+            claimed_by_this_worker = task_worker_id == self.worker_id
+            claimed_by_active_worker = bool(task_worker_id) and task_worker_id in active_worker_ids
+
+            # Leave tasks owned by healthy workers alone.
+            if not claimed_by_this_worker and claimed_by_active_worker:
+                continue
+
             # Check for timeout first (applies to all tasks)
             if is_task_timed_out(task):
                 self.stdout.write(
@@ -1066,18 +1332,33 @@ class Command(BaseCommand):
 
                 mark_task_timed_out(task)
                 timeout_count += 1
+                if not claimed_by_this_worker:
+                    orphan_recovered_count += 1
                 continue
 
-            # Skip tasks we're actively tracking for stuck check (they're still running)
-            ray_core_pending = self.ray_core_runner._pending_tasks if self.ray_core_runner else {}
-            if task.pk in ray_core_pending or task.pk in self.active_tasks:
+            tracked_by_this_worker = claimed_by_this_worker and (
+                task.pk in ray_core_pending or task.pk in self.active_tasks
+            )
+
+            # Skip tasks we are actively monitoring while their monitor heartbeat is fresh.
+            if tracked_by_this_worker and not is_task_stuck(task):
                 continue
 
             # Check if task is stuck using the reconciliation logic
             if is_task_stuck(task):
-                self.stdout.write(
-                    self.style.WARNING(f"\nTask {task.pk} appears stuck, marking as LOST")
-                )
+                if claimed_by_this_worker:
+                    self.stdout.write(
+                        self.style.WARNING(f"\nTask {task.pk} appears stuck, marking as LOST")
+                    )
+                else:
+                    owner = task_worker_id or "unknown-worker"
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"\nTask {task.pk} from inactive worker {owner} appears stuck, "
+                            "marking as LOST"
+                        )
+                    )
+
                 mark_task_lost(task)
 
                 # Check if we should retry the lost task
@@ -1087,6 +1368,7 @@ class Command(BaseCommand):
                     task.attempt_number += 1
                     task.run_after = retry_decision.next_attempt_at
                     task.started_at = None
+                    task.finished_at = None
                     task.claimed_by_worker = None
                     task.save(
                         update_fields=[
@@ -1094,6 +1376,7 @@ class Command(BaseCommand):
                             "attempt_number",
                             "run_after",
                             "started_at",
+                            "finished_at",
                             "claimed_by_worker",
                         ]
                     )
@@ -1105,11 +1388,19 @@ class Command(BaseCommand):
                     )
 
                 stuck_count += 1
+                if not claimed_by_this_worker:
+                    orphan_recovered_count += 1
 
         if stuck_count > 0:
             self.stdout.write(self.style.WARNING(f"Detected {stuck_count} stuck task(s)"))
         if timeout_count > 0:
             self.stdout.write(self.style.WARNING(f"Detected {timeout_count} timed out task(s)"))
+        if orphan_recovered_count > 0:
+            self.stdout.write(
+                self.style.NOTICE(
+                    f"Recovered {orphan_recovered_count} task(s) from inactive or missing workers"
+                )
+            )
 
     def cleanup_expired_leases(self) -> None:
         """Clean up expired worker leases from other workers.
