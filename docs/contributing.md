@@ -138,20 +138,20 @@ test: add unit tests for retry logic
 
 ```
 src/django_ray/
-├── models.py           # Database models
-├── admin.py            # Admin interface
-├── backends.py         # Django Task backend
-├── conf/               # Settings
-├── runner/             # Task runners
-│   ├── ray_job.py      # Ray Job API
-│   ├── ray_core.py     # Ray Core (@ray.remote)
-│   └── ...
-├── runtime/            # Task execution
-│   ├── entrypoint.py   # Execution entry
-│   ├── distributed.py  # parallel_map, etc.
-│   └── ...
-└── management/commands/
-    └── django_ray_worker.py
+|-- models.py           # Database models
+|-- admin.py            # Admin interface
+|-- backends.py         # Django Task backend
+|-- conf/               # Settings
+|-- runner/             # Task runners
+|   |-- ray_job.py      # Ray Job API
+|   |-- ray_core.py     # Ray Core (@ray.remote)
+|   `-- ...
+|-- runtime/            # Task execution
+|   |-- entrypoint.py   # Execution entry
+|   |-- distributed.py  # parallel_map, etc.
+|   `-- ...
+`-- management/commands/
+    `-- django_ray_worker.py
 ```
 
 ## Testing Guidelines

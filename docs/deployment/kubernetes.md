@@ -114,25 +114,27 @@ make k8s-deploy-kuberay-kind KIND_CLUSTER_NAME=my-kind
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Kubernetes Cluster                       │
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │  PostgreSQL  │  │  Django Web  │  │  Django-Ray      │  │
-│  │              │  │  (API/Admin) │  │  Worker          │  │
-│  └──────────────┘  └──────────────┘  └──────────────────┘  │
-│         │                 │                   │              │
-│         └─────────────────┴───────────────────┘              │
-│                           │                                  │
-│  ┌────────────────────────┴────────────────────────────┐    │
-│  │                    Ray Cluster                       │    │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐     │    │
-│  │  │  Ray Head  │  │ Ray Worker │  │ Ray Worker │     │    │
-│  │  │ (Dashboard)│  │            │  │            │     │    │
-│  │  └────────────┘  └────────────┘  └────────────┘     │    │
-│  └──────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}} }%%
+flowchart TD
+    subgraph kube["Kubernetes Cluster"]
+        postgres["PostgreSQL"]
+        web["Django Web<br/>API/Admin"]
+        worker["Django-Ray<br/>Worker"]
+
+        subgraph ray["Ray Cluster"]
+            head["Ray Head<br/>Dashboard"]
+            ray_worker_1["Ray Worker"]
+            ray_worker_2["Ray Worker"]
+        end
+
+        web <--> postgres
+        worker <--> postgres
+        web --> head
+        worker --> head
+        head --> ray_worker_1
+        head --> ray_worker_2
+    end
 ```
 
 ## Components

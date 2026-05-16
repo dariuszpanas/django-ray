@@ -1,0 +1,76 @@
+.md-logo img {
+  height: 1.35rem;
+  width: 1.35rem;
+}
+
+.md-typeset .mermaid {
+  --md-mermaid-edge-color: var(--md-default-fg-color--light);
+  --md-mermaid-label-bg-color: var(--md-default-bg-color);
+  --md-mermaid-label-fg-color: var(--md-code-fg-color);
+  --md-mermaid-node-bg-color: var(--md-code-bg-color);
+  --md-mermaid-node-fg-color: var(--md-code-fg-color);
+  background:
+    linear-gradient(var(--md-default-fg-color--lightest) 1px, transparent 1px),
+    linear-gradient(90deg, var(--md-default-fg-color--lightest) 1px, transparent 1px);
+  background-size: 1.25rem 1.25rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.3rem;
+  margin: 1.25rem 0;
+  overflow-x: auto;
+  padding: 1rem;
+}
+
+.md-typeset .mermaid svg {
+  display: block;
+  margin: 0 auto;
+}
+
+.md-typeset .mermaid text {
+  fill: var(--md-code-fg-color) !important;
+  font-family: var(--md-code-font-family) !important;
+  font-size: 0.72rem !important;
+}
+
+.md-typeset .mermaid .node rect,
+.md-typeset .mermaid .node circle,
+.md-typeset .mermaid .node ellipse,
+.md-typeset .mermaid .node polygon,
+.md-typeset .mermaid .node path,
+.md-typeset .mermaid .stateGroup rect {
+  fill: var(--md-code-bg-color) !important;
+  stroke: var(--md-default-fg-color--light) !important;
+  stroke-width: 1.5px !important;
+}
+
+.md-typeset .mermaid .cluster rect {
+  fill: var(--md-default-bg-color) !important;
+  stroke: var(--md-default-fg-color--lighter) !important;
+  stroke-dasharray: 4 4 !important;
+}
+
+.md-typeset .mermaid .edgePath path,
+.md-typeset .mermaid .flowchart-link,
+.md-typeset .mermaid .transition,
+.md-typeset .mermaid .marker {
+  stroke: var(--md-default-fg-color--light) !important;
+}
+
+.md-typeset .mermaid marker path {
+  fill: var(--md-default-fg-color--light) !important;
+  stroke: var(--md-default-fg-color--light) !important;
+}
+
+.md-typeset .mermaid .edgeLabel,
+.md-typeset .mermaid .edgeLabel p,
+.md-typeset .mermaid .labelBkg,
+.md-typeset .mermaid .label rect {
+  background-color: var(--md-default-bg-color) !important;
+  color: var(--md-code-fg-color) !important;
+  fill: var(--md-default-bg-color) !important;
+}
+
+.md-typeset .mermaid .state-start,
+.md-typeset .mermaid .state-end {
+  fill: var(--md-code-fg-color) !important;
+  stroke: var(--md-code-fg-color) !important;
+}

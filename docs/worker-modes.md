@@ -141,38 +141,25 @@ def process_batch(item_ids: list[int]) -> list[dict]:
 
 ## Choosing a Mode
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Which mode to use?                    │
-└─────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-              ┌────────────────────────┐
-              │  Testing or debugging? │
-              └────────────────────────┘
-                     │           │
-                    Yes          No
-                     │           │
-                     ▼           ▼
-               ┌─────────┐  ┌───────────────────┐
-               │  sync   │  │ Need distributed  │
-               └─────────┘  │    computing?     │
-                            └───────────────────┘
-                                  │         │
-                                 Yes        No
-                                  │         │
-                                  ▼         ▼
-                           ┌──────────┐ ┌─────────┐
-                           │ Have Ray │ │  sync   │
-                           │ cluster? │ └─────────┘
-                           └──────────┘
-                              │     │
-                             Yes    No
-                              │     │
-                              ▼     ▼
-                        ┌─────────┐ ┌─────────┐
-                        │ cluster │ │  local  │
-                        └─────────┘ └─────────┘
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}} }%%
+flowchart TD
+    start["Which mode to use?"]
+    testing{"Testing or debugging?"}
+    distributed{"Need distributed computing?"}
+    cluster{"Have Ray cluster?"}
+    sync1["sync"]
+    sync2["sync"]
+    cluster_mode["cluster"]
+    local_mode["local"]
+
+    start --> testing
+    testing -- Yes --> sync1
+    testing -- No --> distributed
+    distributed -- No --> sync2
+    distributed -- Yes --> cluster
+    cluster -- Yes --> cluster_mode
+    cluster -- No --> local_mode
 ```
 
 ## See Also

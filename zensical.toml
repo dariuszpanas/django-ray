@@ -8,6 +8,7 @@ edit_uri = "edit/main/docs/"
 docs_dir = "docs"
 site_dir = "site"
 use_directory_urls = true
+extra_css = ["stylesheets/extra.css"]
 
 nav = [
   { "Home" = "index.md" },
@@ -40,6 +41,8 @@ nav = [
 ]
 
 [project.theme]
+logo = "assets/images/django-ray.svg"
+favicon = "assets/images/django-ray.svg"
 features = [
   "navigation.sections",
   "navigation.path",
