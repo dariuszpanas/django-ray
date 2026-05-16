@@ -1,6 +1,19 @@
-# django-ray
+<p align="center">
+  <img src="docs/assets/images/django-ray.svg" alt="django-ray logo" width="96" height="96">
+</p>
 
-A Ray-based backend for [Django Tasks](https://github.com/django/django) that enables distributed task execution with database-backed reliability.
+<h1 align="center">django-ray</h1>
+
+<p align="center">
+  A Ray-based backend for <a href="https://github.com/django/django">Django Tasks</a> that enables distributed task execution with database-backed reliability.
+</p>
+
+<p align="center">
+  <a href="https://github.com/dariuszpanas/django-ray/actions/workflows/ci.yml"><img src="https://github.com/dariuszpanas/django-ray/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/dariuszpanas/django-ray/actions/workflows/docs.yml"><img src="https://github.com/dariuszpanas/django-ray/actions/workflows/docs.yml/badge.svg" alt="Docs"></a>
+  <a href="https://pypi.org/project/django-ray/"><img src="https://img.shields.io/pypi/pyversions/django-ray.svg" alt="Python versions"></a>
+  <a href="https://github.com/dariuszpanas/django-ray/blob/main/LICENSE"><img src="https://img.shields.io/github/license/dariuszpanas/django-ray.svg" alt="License"></a>
+</p>
 
 ## Why django-ray?
 

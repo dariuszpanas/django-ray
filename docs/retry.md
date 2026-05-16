@@ -44,35 +44,23 @@ DJANGO_RAY = {
 
 ### Retry Flow
 
-```
-Task Fails
-    │
-    ▼
-┌─────────────────────────┐
-│ Check attempt number    │
-│ (current < max_attempts)│
-└─────────────────────────┘
-    │           │
-   Yes          No
-    │           │
-    ▼           ▼
-┌─────────┐  ┌─────────────┐
-│ Check   │  │ Mark FAILED │
-│ denylist│  │ (permanent) │
-└─────────┘  └─────────────┘
-    │
-    ▼
-┌─────────────────────────┐
-│ Exception in denylist?  │
-└─────────────────────────┘
-    │           │
-   Yes          No
-    │           │
-    ▼           ▼
-┌─────────┐  ┌─────────────────┐
-│ Mark    │  │ Calculate delay │
-│ FAILED  │  │ Schedule retry  │
-└─────────┘  └─────────────────┘
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}} }%%
+flowchart TD
+    fail["Task fails"]
+    attempts{"current < max_attempts?"}
+    denylist["Check denylist"]
+    denied{"Exception in denylist?"}
+    permanent["Mark FAILED (permanent)"]
+    failed["Mark FAILED"]
+    retry["Calculate delay and schedule retry"]
+
+    fail --> attempts
+    attempts -- No --> permanent
+    attempts -- Yes --> denylist
+    denylist --> denied
+    denied -- Yes --> failed
+    denied -- No --> retry
 ```
 
 ### Backoff Calculation
@@ -154,14 +142,14 @@ def process_payment(payment_id: int) -> dict:
 
 ### State Transitions
 
-```
-QUEUED ──► RUNNING ──► SUCCEEDED
-              │
-              ▼
-           FAILED ◄── (retries exhausted)
-              │
-              ▼
-           QUEUED ◄── (retry scheduled)
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED
+    QUEUED --> RUNNING
+    RUNNING --> SUCCEEDED
+    RUNNING --> FAILED
+    FAILED --> QUEUED: retry scheduled
+    FAILED --> [*]: retries exhausted
 ```
 
 ## Viewing Failed Tasks
