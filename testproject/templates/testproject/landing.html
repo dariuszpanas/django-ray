@@ -1,0 +1,336 @@
+{% load static %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>django-ray testproject</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7fafc;
+      --panel: #ffffff;
+      --panel-soft: #f1f4f8;
+      --text: #17202a;
+      --muted: #627084;
+      --line: #d9e0ea;
+      --brand: #111827;
+      --brand-soft: #1f2937;
+      --accent: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --accent-strong: #0284c7;
+      --accent-soft: #e0f2fe;
+      --danger: #b42318;
+      --shadow: 0 12px 30px rgba(23, 32, 42, 0.08);
+    }
+    html { overflow-x: hidden; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      isolation: isolate;
+      position: relative;
+      background:
+        radial-gradient(circle at 12% 8%, rgba(56, 189, 248, 0.1), transparent 28%),
+        radial-gradient(circle at 88% 18%, rgba(255, 255, 255, 0.92), transparent 24%),
+        linear-gradient(180deg, #ffffff, var(--bg) 36%, var(--bg));
+    }
+    .hero-bg::before,
+    .hero-bg::after {
+      content: "";
+      position: fixed;
+      top: 92px;
+      bottom: 0;
+      width: min(38vw, 500px);
+      pointer-events: none;
+      background: url("{% static 'testproject/landing-graph-bg.png' %}") left top / min(38vw, 500px) auto no-repeat;
+      mix-blend-mode: normal;
+      -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 58%, transparent 100%);
+      mask-image: linear-gradient(90deg, #000 0%, #000 58%, transparent 100%);
+    }
+    .hero-bg::before {
+      left: 0;
+      opacity: 0.58;
+    }
+    .hero-bg::after {
+      right: 0;
+      opacity: 0.48;
+      transform: scaleX(-1);
+      transform-origin: center;
+    }
+    main {
+      position: relative;
+      z-index: 1;
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 28px;
+      padding: 28px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      color: var(--brand);
+      box-shadow: var(--shadow);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      min-width: 0;
+    }
+    .logo {
+      width: 72px;
+      height: 72px;
+      flex: 0 0 auto;
+      border-radius: 14px;
+      box-shadow: 0 16px 34px rgba(0, 0, 0, 0.24);
+    }
+    h1 {
+      margin: 0 0 14px;
+      font-size: clamp(2rem, 5vw, 4.5rem);
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+    p { margin: 0; color: var(--muted); max-width: 720px; }
+    header p {
+      color: #475569;
+      line-height: 1.65;
+      max-width: 620px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 6px 10px;
+      border: 1px solid rgba(2, 132, 199, 0.18);
+      background: rgba(255, 255, 255, 0.76);
+      border-radius: 8px;
+      color: var(--accent-strong);
+      white-space: nowrap;
+    }
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+    .stats {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      margin-bottom: 16px;
+    }
+    .links {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-bottom: 16px;
+    }
+    .project-links {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-bottom: 16px;
+    }
+    .card {
+      background: rgba(255, 255, 255, 0.84);
+      border: 1px solid rgba(255, 255, 255, 0.9);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+    .stat-label {
+      color: var(--muted);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+    .stat-value {
+      display: block;
+      margin-top: 8px;
+      font-size: 2rem;
+      font-weight: 750;
+      line-height: 1;
+    }
+    .link-card {
+      display: block;
+      min-height: 116px;
+      text-decoration: none;
+      color: inherit;
+      transition: transform 140ms ease, border-color 140ms ease;
+    }
+    .link-card:hover {
+      border-color: var(--accent);
+      box-shadow: 0 14px 32px rgba(56, 189, 248, 0.14);
+      transform: translateY(-2px);
+    }
+    .link-title {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--accent-strong);
+      font-weight: 700;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 16px;
+      align-items: stretch;
+    }
+    .action-panel {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+    button {
+      appearance: none;
+      border: 1px solid rgba(2, 132, 199, 0.35);
+      border-radius: 8px;
+      background: var(--accent);
+      color: #082f49;
+      cursor: pointer;
+      font-weight: 750;
+      box-shadow: 0 10px 24px rgba(56, 189, 248, 0.24);
+      padding: 12px 16px;
+      min-height: 44px;
+    }
+    button:hover {
+      background: var(--accent-hover);
+      color: #f8fafc;
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.65;
+    }
+    code {
+      display: block;
+      overflow-wrap: anywhere;
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 12px;
+      color: var(--muted);
+    }
+    .danger { color: var(--danger); }
+    footer {
+      margin-top: 16px;
+      padding: 16px 18px;
+      border-top: 3px solid var(--accent);
+      border-radius: 8px;
+      background: var(--brand);
+      color: #cbd5e1;
+    }
+    @media (max-width: 860px) {
+      .hero-bg::before {
+        top: 120px;
+        width: 72vw;
+        background-size: min(72vw, 420px) auto;
+        opacity: 0.46;
+      }
+      .hero-bg::after {
+        display: none;
+      }
+      header, .actions { grid-template-columns: 1fr; display: grid; }
+      .brand { align-items: flex-start; }
+      .logo { width: 56px; height: 56px; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .links { grid-template-columns: 1fr; }
+      .badge { white-space: normal; }
+    }
+  </style>
+</head>
+<body>
+  <div class="hero-bg" aria-hidden="true"></div>
+  <main>
+    <header>
+      <div class="brand">
+        <img class="logo" src="{% static 'testproject/django-ray.svg' %}" alt="" width="72" height="72">
+        <div>
+          <h1>django-ray</h1>
+          <p>Sample project panel for exploring task queues, workers, and Ray-backed execution.</p>
+        </div>
+      </div>
+      <span class="badge">v{{ django_ray_version }} / debug {% if debug %}on{% else %}off{% endif %}</span>
+    </header>
+
+    <section class="grid stats" aria-label="Task statistics">
+      <div class="card"><span class="stat-label">Total</span><strong class="stat-value" id="stat-total">{{ total }}</strong></div>
+      <div class="card"><span class="stat-label">Queued</span><strong class="stat-value" id="stat-queued">{{ queued }}</strong></div>
+      <div class="card"><span class="stat-label">Running</span><strong class="stat-value" id="stat-running">{{ running }}</strong></div>
+      <div class="card"><span class="stat-label">Succeeded</span><strong class="stat-value" id="stat-succeeded">{{ succeeded }}</strong></div>
+      <div class="card"><span class="stat-label">Failed</span><strong class="stat-value danger" id="stat-failed">{{ failed }}</strong></div>
+    </section>
+
+    <section class="grid links" aria-label="Runtime links">
+      <a class="card link-card" href="/api/docs"><span class="link-title">API Docs</span><p>Swagger UI for enqueue, task status, metrics, and admin endpoints.</p></a>
+      <a class="card link-card" href="/admin/"><span class="link-title">Django Admin</span><p>Inspect task executions, worker leases, retries, and cancellation state.</p></a>
+      <a class="card link-card" href="{{ ray_dashboard_url }}"><span class="link-title">Ray Dashboard</span><p>Open the configured Ray dashboard for cluster and task runtime visibility.</p></a>
+      <a class="card link-card" href="/api/health"><span class="link-title">Health</span><p>Database-backed application health check used by the Kubernetes probes.</p></a>
+      <a class="card link-card" href="/api/metrics"><span class="link-title">Metrics</span><p>Prometheus-format metrics exposed by the sample Django application.</p></a>
+      <a class="card link-card" href="/api/executions"><span class="link-title">Executions</span><p>Recent task execution records returned as JSON.</p></a>
+    </section>
+
+    <section class="grid project-links" aria-label="Project links">
+      <a class="card link-card" href="https://github.com/dariuszpanas/django-ray"><span class="link-title">GitHub</span><p>Source code, issues, examples, and development history.</p></a>
+      <a class="card link-card" href="https://django-ray.readthedocs.io/en/latest/"><span class="link-title">Read the Docs</span><p>Guides, deployment notes, API reference, and operations docs.</p></a>
+      <a class="card link-card" href="https://pypi.org/project/django-ray/"><span class="link-title">PyPI</span><p>Package releases and installation metadata.</p></a>
+    </section>
+
+    <section class="actions">
+      <div class="card action-panel">
+        <div>
+          <strong>Trigger a smoke task</strong>
+          <p>Enqueues <code>add_numbers(2, 3)</code> on the default queue and refreshes stats.</p>
+        </div>
+        <button id="trigger">Run test task</button>
+      </div>
+      <div class="card">
+        <strong>Last action</strong>
+        <code id="output">Ready.</code>
+      </div>
+    </section>
+
+    <footer>
+      This page belongs to the bundled testproject and adapts to runserver, Docker, Kubernetes, or any deployment path that serves the sample app.
+    </footer>
+  </main>
+  <script>
+    const output = document.querySelector("#output");
+    const trigger = document.querySelector("#trigger");
+    const statMap = {
+      total: document.querySelector("#stat-total"),
+      queued: document.querySelector("#stat-queued"),
+      running: document.querySelector("#stat-running"),
+      succeeded: document.querySelector("#stat-succeeded"),
+      failed: document.querySelector("#stat-failed"),
+    };
+
+    async function refreshStats() {
+      const response = await fetch("/api/executions/stats");
+      if (!response.ok) throw new Error(`Stats request failed: ${response.status}`);
+      const stats = await response.json();
+      for (const [key, element] of Object.entries(statMap)) {
+        element.textContent = stats[key] ?? 0;
+      }
+      return stats;
+    }
+
+    async function triggerTask() {
+      trigger.disabled = true;
+      output.textContent = "Enqueuing task...";
+      try {
+        const response = await fetch("/api/enqueue/add/2/3", { method: "POST" });
+        if (!response.ok) throw new Error(`Enqueue failed: ${response.status}`);
+        const task = await response.json();
+        output.textContent = `Task ${task.task_id} enqueued with status ${task.status}.`;
+        setTimeout(refreshStats, 700);
+      } catch (error) {
+        output.textContent = error.message;
+      } finally {
+        trigger.disabled = false;
+      }
+    }
+
+    trigger.addEventListener("click", triggerTask);
+    refreshStats().catch((error) => output.textContent = error.message);
+  </script>
+</body>
+</html>

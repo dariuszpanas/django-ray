@@ -35,6 +35,12 @@ kubectl wait --for=condition=available deployment/django-ray-worker -n django-ra
 
 ### 3. Access
 
+Print the URLs for the active local access path:
+
+```bash
+make k8s-urls
+```
+
 With the default NodePort-oriented manifests, use:
 
 | Service | URL | Description |
@@ -44,7 +50,15 @@ With the default NodePort-oriented manifests, use:
 | Admin | http://localhost:30080/admin/ | Django Admin |
 | Ray Dashboard | http://localhost:30265 | Ray monitoring |
 
+The Django Web URL opens the bundled testproject landing page:
+
+![django-ray testproject landing page](../assets/images/testproject-landing.png)
+
 When using the Kong local overlay on Docker Desktop's managed kind cluster, use:
+
+```bash
+make k8s-urls-kong
+```
 
 | Service | URL | Description |
 |---------|-----|-------------|
@@ -57,6 +71,17 @@ When using the Kong local overlay on Docker Desktop's managed kind cluster, use:
 
 The sample app reads `RAY_DASHBOARD_URL` from the deployment config, so Django admin deep links
 track the active local access model instead of assuming the old dashboard NodePort.
+
+For non-local clusters, override the printed host, scheme, or ports instead of relying on
+the Docker Desktop defaults. `K8S_URL_HOST` changes the host for every default NodePort
+URL, while `K8S_WEB_URL`, `K8S_RAY_DASHBOARD_URL`, `K8S_GRAFANA_URL`, and
+`K8S_PROMETHEUS_URL` are per-service full URL overrides:
+
+```bash
+make k8s-urls K8S_URL_HOST=my-load-balancer.example.com K8S_WEB_PORT=80 K8S_GRAFANA_PORT=3000 K8S_PROMETHEUS_PORT=9090
+make k8s-urls K8S_WEB_URL=https://app.example.com K8S_RAY_DASHBOARD_URL=https://ray.example.com K8S_GRAFANA_URL=https://grafana.example.com K8S_PROMETHEUS_URL=https://prometheus.example.com
+make k8s-urls-kong K8S_KONG_WEB_URL=https://app.example.com K8S_KONG_RAY_DASHBOARD_URL=https://ray.example.com K8S_KONG_GRAFANA_URL=https://grafana.example.com K8S_KONG_PROMETHEUS_URL=https://prometheus.example.com
+```
 
 ## KubeRay Operator (Kind Recommended)
 

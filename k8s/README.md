@@ -43,6 +43,9 @@ k8s/
 - Kubernetes cluster (Docker Desktop, k3d, kind, minikube, or any cloud provider)
 - kubectl configured to access your cluster
 - Docker (for building images)
+- GNU Make, if you use the `make ...` command shortcuts
+- Helm, for KubeRay or Kong operator installation targets
+- kind, for `make k8s-deploy-kuberay-kind` image-loading targets
 
 ## Quick Start
 
@@ -85,6 +88,9 @@ make k8s-deploy   # Deploy to cluster
 Use this path to manage Ray via `RayCluster` custom resources instead of static
 `Deployment/ray-head` and `Deployment/ray-worker` manifests.
 
+This path requires `helm` and `kind` on your PATH. The default Docker Desktop
+Kubernetes path above does not require either tool.
+
 ```bash
 # Build images, load into kind, install operator, deploy KubeRay overlay
 make k8s-deploy-kuberay-kind
@@ -106,6 +112,9 @@ make k8s-deploy-kuberay-kind KIND_CLUSTER_NAME=my-kind
 
 If production will use Kong, you can validate the same ingress class locally with
 KubeRay plus Kong Ingress Controller.
+
+This path requires `helm`; the one-command path also runs the KubeRay kind target,
+so it expects `kind` unless your environment provides an equivalent image-loading path.
 
 ```bash
 # One command path
@@ -193,6 +202,12 @@ Notes:
 
 ### 3. Access the Application
 
+Print the URLs for the default NodePort-oriented manifests:
+
+```bash
+make k8s-urls
+```
+
 With the default NodePort-oriented manifests, these are the intended service ports:
 
 | Service | URL | Description |
@@ -203,6 +218,10 @@ With the default NodePort-oriented manifests, these are the intended service por
 | Ray Dashboard | http://localhost:30265 | Ray cluster monitoring |
 
 With the Kong local overlay on Docker Desktop's managed kind cluster, use these URLs instead:
+
+```bash
+make k8s-urls-kong
+```
 
 | Service | URL | Description |
 |---------|-----|-------------|
@@ -218,6 +237,9 @@ Notes:
 - On Docker Desktop's managed kind cluster, the direct `NodePort` services from the base/KubeRay
   manifests are not published to the host in this setup. The Kong local overlay is the intended
   host-access path.
+- For non-local clusters, override the printed host, scheme, ports, or full URLs. `K8S_URL_HOST`
+  changes every default NodePort host. Full URL variables such as `K8S_WEB_URL`,
+  `K8S_GRAFANA_URL`, and `K8S_PROMETHEUS_URL` are per-service overrides.
 - `*.localhost` hostnames work in modern browsers and also resolved correctly in this environment.
 - Kong Manager is not host-exposed in the stable local overlay. The local browser-access path is the
   Kong proxy on `30080`, not a separate Kong Manager UI.

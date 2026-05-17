@@ -18,6 +18,36 @@ def client():
 
 
 @pytest.mark.django_db
+class TestLandingPage:
+    """Test the sample project landing page."""
+
+    def test_landing_page(self, client):
+        """Test the root page renders links and task stats."""
+        RayTaskExecution.objects.create(
+            task_id="landing-test-1",
+            callable_path="test.task",
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+        )
+
+        response = client.get("/")
+        assert response.status_code == 200
+
+        content = response.content.decode("utf-8")
+        assert "django-ray" in content
+        assert "/static/testproject/django-ray.svg" in content
+        assert "/static/testproject/landing-graph-bg.png" in content
+        assert "bundled testproject" in content
+        assert "/api/docs" in content
+        assert "/admin/" in content
+        assert "https://github.com/dariuszpanas/django-ray" in content
+        assert "https://django-ray.readthedocs.io/en/latest/" in content
+        assert "https://pypi.org/project/django-ray/" in content
+        assert "/api/enqueue/add/2/3" in content
+        assert 'id="stat-succeeded">1</strong>' in content
+
+
+@pytest.mark.django_db
 class TestHealthAPI:
     """Test the /api/health endpoint."""
 

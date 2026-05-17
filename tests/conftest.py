@@ -34,7 +34,23 @@ def pytest_configure(config: object) -> None:
                 "django_ray",
                 "testproject",
             ],
+            TEMPLATES=[
+                {
+                    "BACKEND": "django.template.backends.django.DjangoTemplates",
+                    "DIRS": [PROJECT_ROOT / "testproject" / "templates"],
+                    "APP_DIRS": True,
+                    "OPTIONS": {
+                        "context_processors": [
+                            "django.template.context_processors.debug",
+                            "django.template.context_processors.request",
+                            "django.contrib.auth.context_processors.auth",
+                            "django.contrib.messages.context_processors.messages",
+                        ],
+                    },
+                },
+            ],
             ROOT_URLCONF="testproject.urls",
+            STATIC_URL="static/",
             DJANGO_RAY={
                 "RAY_ADDRESS": "ray://localhost:10001",
             },
