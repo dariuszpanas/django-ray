@@ -1,11 +1,34 @@
 # Kubernetes deployment commands
 # Include in main Makefile with: include mk/k8s.mk
 
-.PHONY: k8s-build k8s-deploy k8s-deploy-local k8s-deploy-tls k8s-delete k8s-status k8s-reset
+.PHONY: k8s-build k8s-deploy k8s-deploy-local k8s-deploy-tls k8s-delete k8s-status k8s-reset k8s-urls k8s-urls-kong
 .PHONY: k8s-install-kuberay k8s-uninstall-kuberay k8s-kind-load k8s-deploy-kuberay-kind k8s-delete-kuberay-kind
 .PHONY: k8s-install-kong-local k8s-deploy-kong-local
 
 KIND_CLUSTER_NAME ?= kind
+K8S_URL_SCHEME ?= http
+K8S_URL_HOST ?= localhost
+K8S_WEB_PORT ?= 30080
+K8S_RAY_DASHBOARD_PORT ?= 30265
+K8S_GRAFANA_PORT ?= 30030
+K8S_PROMETHEUS_PORT ?= 30090
+K8S_WEB_URL ?= $(K8S_URL_SCHEME)://$(K8S_URL_HOST):$(K8S_WEB_PORT)
+K8S_API_DOCS_URL ?= $(K8S_WEB_URL)/api/docs
+K8S_ADMIN_URL ?= $(K8S_WEB_URL)/admin/
+K8S_RAY_DASHBOARD_URL ?= $(K8S_URL_SCHEME)://$(K8S_URL_HOST):$(K8S_RAY_DASHBOARD_PORT)
+K8S_GRAFANA_URL ?= $(K8S_URL_SCHEME)://$(K8S_URL_HOST):$(K8S_GRAFANA_PORT)
+K8S_PROMETHEUS_URL ?= $(K8S_URL_SCHEME)://$(K8S_URL_HOST):$(K8S_PROMETHEUS_PORT)
+K8S_KONG_PORT ?= 30080
+K8S_KONG_WEB_HOST ?= localhost
+K8S_KONG_GRAFANA_HOST ?= grafana.localhost
+K8S_KONG_PROMETHEUS_HOST ?= prometheus.localhost
+K8S_KONG_RAY_HOST ?= ray.localhost
+K8S_KONG_WEB_URL ?= $(K8S_URL_SCHEME)://$(K8S_KONG_WEB_HOST):$(K8S_KONG_PORT)
+K8S_KONG_API_DOCS_URL ?= $(K8S_KONG_WEB_URL)/api/docs
+K8S_KONG_ADMIN_URL ?= $(K8S_KONG_WEB_URL)/admin/
+K8S_KONG_GRAFANA_URL ?= $(K8S_URL_SCHEME)://$(K8S_KONG_GRAFANA_HOST):$(K8S_KONG_PORT)
+K8S_KONG_PROMETHEUS_URL ?= $(K8S_URL_SCHEME)://$(K8S_KONG_PROMETHEUS_HOST):$(K8S_KONG_PORT)
+K8S_KONG_RAY_DASHBOARD_URL ?= $(K8S_URL_SCHEME)://$(K8S_KONG_RAY_HOST):$(K8S_KONG_PORT)
 
 # Build Docker images for Kubernetes
 k8s-build:
@@ -25,8 +48,7 @@ k8s-deploy: k8s-build
 	kubectl wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
 	@echo ""
 	@echo "Deployment complete!"
-	@echo "  Django Web:     http://localhost:30080"
-	@echo "  Ray Dashboard:  http://localhost:30265"
+	@$(MAKE) --no-print-directory k8s-urls
 
 # Deploy with full resources (16+ CPUs, 32GB+ RAM)
 k8s-deploy-local: k8s-build
@@ -39,6 +61,7 @@ k8s-deploy-local: k8s-build
 	kubectl wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
 	@echo ""
 	@echo "Deployment complete!"
+	@$(MAKE) --no-print-directory k8s-urls
 
 # Deploy with TLS enabled
 k8s-deploy-tls: k8s-build k8s-create-tls-secret
@@ -51,6 +74,7 @@ k8s-deploy-tls: k8s-build k8s-create-tls-secret
 	kubectl wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
 	@echo ""
 	@echo "TLS-enabled deployment complete!"
+	@$(MAKE) --no-print-directory k8s-urls
 
 # Install/upgrade KubeRay operator (required for RayCluster CRD mode)
 k8s-install-kuberay:
@@ -83,8 +107,7 @@ k8s-deploy-kuberay-kind: k8s-build k8s-kind-load k8s-install-kuberay
 	kubectl wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s || true
 	@echo ""
 	@echo "KubeRay deployment complete!"
-	@echo "  Django Web (NodePort path):    http://localhost:30080"
-	@echo "  Ray Dashboard (NodePort path): http://localhost:30265"
+	@$(MAKE) --no-print-directory k8s-urls
 	@echo "  For Kong subdomain routing on Docker Desktop managed kind:"
 	@echo "    make k8s-deploy-kong-local"
 
@@ -114,10 +137,7 @@ k8s-deploy-kong-local: k8s-deploy-kuberay-kind k8s-install-kong-local
 	-kubectl rollout status deployment/django-ray-worker-ml -n django-ray --timeout=180s
 	@echo ""
 	@echo "Kong local deployment complete!"
-	@echo "  Django Web:     http://localhost:30080"
-	@echo "  Grafana:        http://grafana.localhost:30080"
-	@echo "  Prometheus:     http://prometheus.localhost:30080"
-	@echo "  Ray Dashboard:  http://ray.localhost:30080"
+	@$(MAKE) --no-print-directory k8s-urls-kong
 
 # Delete KubeRay operator-based overlay resources
 k8s-delete-kuberay-kind:
@@ -136,10 +156,38 @@ k8s-status:
 	kubectl get svc -n django-ray
 	@echo ""
 	@echo "=== RayClusters ==="
-	-kubectl get rayclusters -n django-ray
+	@kubectl get crd rayclusters.ray.io >NUL 2>&1 && kubectl get rayclusters -n django-ray || echo "RayCluster CRD not installed (static Ray deployment path)"
 	@echo ""
 	@echo "=== Deployments ==="
 	kubectl get deployments -n django-ray
+
+# Print local service URLs. Override K8S_URL_HOST, K8S_URL_SCHEME, or ports for non-local clusters.
+k8s-urls:
+	@echo === Project URLs ===
+	@echo Django Web:       $(K8S_WEB_URL)
+	@echo API Docs:         $(K8S_API_DOCS_URL)
+	@echo Django Admin:     $(K8S_ADMIN_URL)
+	@echo Ray Dashboard:    $(K8S_RAY_DASHBOARD_URL)
+	@echo Grafana:          $(K8S_GRAFANA_URL)
+	@echo Prometheus:       $(K8S_PROMETHEUS_URL)
+	@echo.
+	@echo Override examples:
+	@echo   make k8s-urls K8S_URL_HOST=my-load-balancer.example.com K8S_WEB_PORT=80 K8S_GRAFANA_PORT=3000 K8S_PROMETHEUS_PORT=9090
+	@echo   make k8s-urls K8S_WEB_URL=https://app.example.com K8S_RAY_DASHBOARD_URL=https://ray.example.com K8S_GRAFANA_URL=https://grafana.example.com K8S_PROMETHEUS_URL=https://prometheus.example.com
+
+# Print Kong host-based local URLs. Override K8S_KONG_* variables for custom ingress hosts.
+k8s-urls-kong:
+	@echo === Project URLs (Kong) ===
+	@echo Django Web:       $(K8S_KONG_WEB_URL)
+	@echo API Docs:         $(K8S_KONG_API_DOCS_URL)
+	@echo Django Admin:     $(K8S_KONG_ADMIN_URL)
+	@echo Grafana:          $(K8S_KONG_GRAFANA_URL)
+	@echo Prometheus:       $(K8S_KONG_PROMETHEUS_URL)
+	@echo Ray Dashboard:    $(K8S_KONG_RAY_DASHBOARD_URL)
+	@echo.
+	@echo Override examples:
+	@echo   make k8s-urls-kong K8S_KONG_WEB_HOST=app.example.com K8S_KONG_GRAFANA_HOST=grafana.example.com K8S_KONG_PROMETHEUS_HOST=prometheus.example.com K8S_KONG_RAY_HOST=ray.example.com K8S_KONG_PORT=443 K8S_URL_SCHEME=https
+	@echo   make k8s-urls-kong K8S_KONG_WEB_URL=https://app.example.com K8S_KONG_RAY_DASHBOARD_URL=https://ray.example.com K8S_KONG_GRAFANA_URL=https://grafana.example.com K8S_KONG_PROMETHEUS_URL=https://prometheus.example.com
 
 # Complete reset - delete namespace and redeploy
 k8s-reset:

@@ -14,6 +14,11 @@ django-ray is a **library** that provides:
 
 > **Note**: This repository also contains a `testproject/` directory with example code demonstrating django-ray features. The testproject (including its REST API) is **not part of the django-ray library** - it's provided for learning and testing purposes only.
 
+The bundled testproject includes a landing page that links to the sample API, admin, Ray dashboard,
+project resources, task stats, and a smoke-task trigger:
+
+![django-ray testproject landing page](assets/images/testproject-landing.png)
+
 ## User Guide
 
 - [Getting Started](getting-started.md) - Installation and basic setup

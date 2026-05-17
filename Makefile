@@ -180,7 +180,7 @@ help:
 	@echo ""
 	@echo "Additional modules (if included):"
 	@echo "  Docker:     make docker-build, docker-run"
-	@echo "  Kubernetes: make k8s-deploy, k8s-status, k8s-delete"
+	@echo "  Kubernetes: make k8s-deploy, k8s-urls, k8s-status, k8s-delete"
 	@echo "  Load test:  make loadtest, loadtest-18, loadtest-headless"
 	@echo ""
 	@echo "For full k8s commands: make -f mk/k8s.mk help"

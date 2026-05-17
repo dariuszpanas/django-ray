@@ -37,6 +37,11 @@ django-ray bridges Django's built-in Tasks framework with Ray's distributed comp
 - **Admin visibility**: Monitor and manage tasks through Django admin
 - **Graceful shutdown**: Workers handle signals properly for clean shutdown
 
+The repository includes a sample `testproject/` with a small landing page for exploring the bundled API,
+task stats, project links, and smoke-task trigger:
+
+![django-ray testproject landing page](docs/assets/images/testproject-landing.png)
+
 ## Requirements
 
 - Python 3.12+
