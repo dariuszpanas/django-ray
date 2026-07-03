@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Immutable RuntimeEnv JSON and SHA-256 identity persisted on each task execution.
 - Per-workflow-step RuntimeEnv profile and inline environment overrides.
 - Test-project RuntimeEnv probe and cold-versus-cached benchmark endpoints.
+- UI-ready workflow graph snapshots containing stable nodes, dependency edges,
+  runtime environment identity, and Ray execution identifiers.
+- Application-level `report_progress()` for long-running workflow leaves.
+- Workflow graph, node-state, and bounded Ray log-tail example endpoints.
+- Ray Job workflow drivers now carry durable task context and lazily initialize
+  Ray so they produce the same graph/progress snapshots as Ray Core workflows.
 
 ### Changed
 
@@ -31,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of on every 100 ms polling iteration.
 - The KubeRay example now uses the upstream Ray image for head and worker
   containers; project code and Python dependencies arrive through RuntimeEnv.
+- Workflow progress persistence now follows coordinator revisions instead of
+  writing an unchanged snapshot every polling interval.
+- Workflow leaf output now uses structured, correlation-friendly logging.
 
 ## [0.2.0] - 2026-05-15
 

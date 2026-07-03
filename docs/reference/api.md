@@ -38,6 +38,9 @@ If you need a REST API for task management in your project, you can use the test
 | `POST /api/executions/{id}/retry` | Retry failed, cancelled, or lost execution |
 | `POST /api/executions/reset` | Reset matching executions to queued |
 | `DELETE /api/executions/{id}` | Delete execution |
+| `GET /api/cluster/workflows/{task_id}/graph` | Get the versioned workflow node/edge graph |
+| `GET /api/cluster/workflows/{task_id}/nodes/{node_id}` | Get durable node metadata and live Ray state |
+| `GET /api/cluster/workflows/{task_id}/nodes/{node_id}?include_logs=true` | Include bounded Ray stdout/stderr tails |
 
 When the testproject server is running:
 - **Swagger UI**: http://localhost:8000/api/docs
@@ -69,6 +72,11 @@ execution.save(update_fields=["state"])
 ```
 
 For a complete REST API example, see `testproject/api.py` in the repository.
+
+The reusable library helpers in `django_ray.observability` decode durable graph
+snapshots, locate nodes, and optionally query Ray's live State and Log APIs.
+Treat node logs as sensitive operational data and protect these example endpoints
+with the same authorization used for task arguments and results.
 
 ## See Also
 

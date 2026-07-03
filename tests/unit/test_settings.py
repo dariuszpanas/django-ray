@@ -74,6 +74,15 @@ class TestValidateSettings:
             }
         )
 
+    def test_validate_ray_state_api_address_type(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="RAY_STATE_API_ADDRESS"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "RAY_STATE_API_ADDRESS": 8265,
+                }
+            )
+
     def test_validate_unknown_default_runtime_env_profile(self) -> None:
         with pytest.raises(ImproperlyConfigured, match="DEFAULT_RUNTIME_ENV_PROFILE"):
             validate_settings(

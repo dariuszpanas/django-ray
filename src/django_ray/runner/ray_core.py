@@ -102,6 +102,8 @@ class RayCoreRunner(BaseRunner):
             args_json,
             kwargs_json,
             task_execution.pk,
+            runtime_env.profile,
+            runtime_env.digest,
         )
 
         # Get Ray job ID (the worker's client connection job ID)

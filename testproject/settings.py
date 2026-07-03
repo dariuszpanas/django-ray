@@ -171,6 +171,7 @@ TASKS = {
 DJANGO_RAY = {
     # Use "auto" for local Ray, or "ray://host:port" for cluster
     "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
+    "RAY_STATE_API_ADDRESS": os.environ.get("RAY_STATE_API_ADDRESS"),
     "RUNTIME_ENV_PROFILES": {
         "project": {
             "working_dir": str(BASE_DIR),

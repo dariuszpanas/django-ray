@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -10,13 +12,17 @@ import pytest
 from django_ray.runtime.context import (
     durable_task_execution,
     get_current_task_execution_pk,
+    workflow_step_execution,
 )
 from django_ray.runtime.remote import WorkflowProgressActor
 from django_ray.workflows import (
     WorkflowDefinitionError,
+    _Executor,
+    _get_executor,
     chain,
     group,
     map_step,
+    report_progress,
     step,
 )
 
@@ -35,6 +41,38 @@ def increment(value: int) -> int:
 
 def sum_values(values: list[int]) -> int:
     return sum(values)
+
+
+@dataclass
+class _GraphExecutor(_Executor):
+    nodes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def submit_step(
+        self,
+        signature,
+        input_args,
+        input_kwargs,
+        node_id,
+        dependencies,
+    ):
+        self.nodes[node_id] = dependencies
+        callable_obj = __import__(
+            signature.callable_path.rsplit(".", 1)[0],
+            fromlist=[signature.callable_path.rsplit(".", 1)[1]],
+        )
+        function = getattr(callable_obj, signature.callable_path.rsplit(".", 1)[1])
+        kwargs = {**input_kwargs, **signature.bound_kwargs}
+        return function(
+            *input_args,
+            *signature.bound_args,
+            **kwargs,
+        )
+
+    def collect(self, values):
+        return values
+
+    def resolve(self, value):
+        return value
 
 
 def run_nested_workflow(limit: int) -> int:
@@ -77,9 +115,14 @@ class _FakeRay:
         self.submissions = 0
         self.get_calls = 0
         self.options_seen: list[dict[str, Any]] = []
+        self.init_calls: list[dict[str, Any]] = []
 
     def is_initialized(self) -> bool:
         return self.initialized
+
+    def init(self, **kwargs: Any) -> None:
+        self.init_calls.append(kwargs)
+        self.initialized = True
 
     def remote(self, function: Any) -> _RemoteFunction:
         return _RemoteFunction(self, function)
@@ -109,6 +152,43 @@ def test_local_group_fans_out_same_input() -> None:
     )
 
     assert workflow.run(4, use_ray=False) == [10, 15]
+
+
+def test_workflow_submission_captures_group_dependency_edges(monkeypatch) -> None:
+    executor = _GraphExecutor()
+    monkeypatch.setattr("django_ray.workflows._get_executor", lambda use_ray: executor)
+    workflow = chain(
+        step(increment),
+        group(
+            step(multiply, factor=2),
+            step(multiply, factor=3),
+        ),
+        step(sum_values),
+    )
+
+    assert workflow.run(4) == 25
+    assert executor.nodes == {
+        "0.0": (),
+        "0.1.g0": ("0.0",),
+        "0.1.g1": ("0.0",),
+        "0.2": ("0.1.g0", "0.1.g1"),
+    }
+
+
+def test_workflow_submission_captures_dynamic_map_edges(monkeypatch) -> None:
+    executor = _GraphExecutor()
+    monkeypatch.setattr("django_ray.workflows._get_executor", lambda use_ray: executor)
+    workflow = chain(
+        step(make_range),
+        map_step(multiply, factor=2),
+        step(sum_values),
+    )
+
+    assert workflow.run(3) == 6
+    assert executor.nodes["0.1.m0"] == ("0.0",)
+    assert executor.nodes["0.1.m1"] == ("0.0",)
+    assert executor.nodes["0.1.m2"] == ("0.0",)
+    assert executor.nodes["0.2"] == ("0.1.m0", "0.1.m1", "0.1.m2")
 
 
 def test_ray_chain_uses_native_submissions_and_resource_options(monkeypatch) -> None:
@@ -197,6 +277,18 @@ def test_forced_ray_mode_requires_initialized_ray(monkeypatch) -> None:
         step(increment).run(1, use_ray=True)
 
 
+def test_ray_job_workflow_lazily_initializes_ray(monkeypatch) -> None:
+    fake_ray = _FakeRay(initialized=False)
+    executor = object()
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.setattr("django_ray.workflows._RayExecutor", lambda: executor)
+
+    with durable_task_execution(42, ray_job_driver=True):
+        assert _get_executor(True) is executor
+
+    assert fake_ray.init_calls == [{"address": "auto", "ignore_reinit_error": True}]
+
+
 def test_workflow_executes_on_real_ray() -> None:
     import ray
 
@@ -208,6 +300,47 @@ def test_workflow_executes_on_real_ray() -> None:
         ray.shutdown()
 
 
+@pytest.mark.django_db
+def test_real_ray_workflow_persists_graph_and_execution_metadata() -> None:
+    import ray
+
+    from django_ray.models import RayTaskExecution
+
+    execution = RayTaskExecution.objects.create(
+        task_id="real-ray-workflow-graph",
+        callable_path="tests.unit.test_workflows.run_nested_workflow",
+    )
+    workflow = chain(
+        step(increment),
+        step(multiply, factor=2),
+    )
+
+    ray.init(ignore_reinit_error=True)
+    try:
+        with durable_task_execution(
+            execution.pk,
+            runtime_env_profile="test",
+            runtime_env_hash="abc123",
+        ):
+            assert workflow.run(2, use_ray=True) == 6
+    finally:
+        ray.shutdown()
+
+    execution.refresh_from_db()
+    progress = json.loads(execution.progress_data)
+    nodes = progress["graph"]["nodes"]
+
+    assert progress["state"] == "SUCCEEDED"
+    assert progress["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]
+    assert nodes[0]["runtime_env"] == {
+        "mode": "inherit",
+        "profile": "test",
+        "hash": "abc123",
+    }
+    assert nodes[0]["execution"]["ray_task_id"]
+    assert nodes[0]["execution"]["ray_node_id"]
+
+
 def test_durable_task_context_is_scoped() -> None:
     assert get_current_task_execution_pk() is None
     with durable_task_execution(42):
@@ -217,21 +350,53 @@ def test_durable_task_context_is_scoped() -> None:
 
 def test_progress_actor_builds_node_snapshot() -> None:
     progress = WorkflowProgressActor()
-    progress.register("0.0", "prepare")
-    progress.started("0.0", "prepare")
+    progress.register(
+        "0.0",
+        "prepare",
+        "tests.unit.test_workflows.increment",
+        [],
+        {"mode": "inherit", "hash": "abc"},
+        {"num_cpus": 1},
+    )
+    progress.started("0.0", "prepare", {"ray_task_id": "ray-task-1"})
     progress.completed("0.0", "prepare")
-    progress.register("0.1.m0", "leaf")
+    progress.register(
+        "0.1.m0",
+        "leaf",
+        "tests.unit.test_workflows.multiply",
+        ["0.0"],
+    )
     progress.started("0.1.m0", "leaf")
+    progress.submitted("0.1.m0", "leaf", "ray-task-2")
+    progress.progress("0.1.m0", 2, 4, "half way", {"rows": 10})
 
     snapshot = progress.snapshot()
+    unchanged = progress.snapshot()
 
+    assert snapshot["schema_version"] == 1
     assert snapshot["state"] == "RUNNING"
     assert snapshot["total_nodes"] == 2
     assert snapshot["completed_nodes"] == 1
     assert snapshot["running_nodes"] == 1
     assert snapshot["progress_percent"] == 50.0
-    assert [event["state"] for event in snapshot["recent_events"]] == [
-        "RUNNING",
-        "SUCCEEDED",
-        "RUNNING",
-    ]
+    assert snapshot["graph"]["edges"] == [{"source": "0.0", "target": "0.1.m0"}]
+    assert snapshot["graph"]["nodes"][0]["execution"]["ray_task_id"] == "ray-task-1"
+    assert snapshot["graph"]["nodes"][1]["progress"]["percent"] == 50.0
+    assert snapshot["revision"] == unchanged["revision"]
+    assert snapshot["updated_at"] == unchanged["updated_at"]
+
+
+def test_report_progress_uses_current_workflow_context() -> None:
+    calls: list[tuple] = []
+
+    class _RemoteMethod:
+        def remote(self, *args):
+            calls.append(args)
+
+    actor = type("_Actor", (), {"progress": _RemoteMethod()})()
+
+    assert report_progress(1, 2) is False
+    with workflow_step_execution(actor, "0.1"):
+        assert report_progress(1, 2, message="half", metrics={"rows": 5}) is True
+
+    assert calls == [("0.1", 1.0, 2.0, "half", {"rows": 5})]

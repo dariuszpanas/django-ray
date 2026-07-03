@@ -8,6 +8,8 @@ DEFAULTS: dict[str, Any] = {
     # Ray connection
     "RAY_ADDRESS": None,  # Required - e.g., "ray://localhost:10001"
     "RAY_RUNTIME_ENV": {},
+    "RAY_STATE_API_ADDRESS": None,
+    "RAY_STATE_API_TIMEOUT_SECONDS": 5,
     "RUNTIME_ENV_PROFILES": {},
     "DEFAULT_RUNTIME_ENV_PROFILE": None,
     # Runner configuration

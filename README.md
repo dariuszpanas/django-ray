@@ -40,6 +40,8 @@ django-ray bridges Django's built-in Tasks framework with Ray's distributed comp
   internal steps behind one durable Django task
 - **RuntimeEnv profiles**: Run versioned or lightweight Python environments on a
   generic Ray cluster, with immutable environment identity per durable task
+- **Observable workflow graphs**: Track dependency edges, node progress, Ray
+  execution identifiers, and correlated logs for custom monitoring UIs
 
 The repository includes a sample `testproject/` with a small landing page for exploring the bundled API,
 task stats, project links, and smoke-task trigger:

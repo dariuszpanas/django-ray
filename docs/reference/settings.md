@@ -46,6 +46,30 @@ requires this setting unless `DJANGO_RAY_SKIP_VALIDATION` is used for a maintena
 "RAY_ADDRESS": "ray://ray-head-svc:10001"
 ```
 
+### RAY_STATE_API_ADDRESS
+
+- **Type**: `str | None`
+- **Default**: `None`
+
+Ray dashboard address used by the optional workflow-node state and log helpers.
+Processes already initialized with Ray can leave this unset. A separate Django web
+process normally needs the internal dashboard URL:
+
+```python
+"RAY_STATE_API_ADDRESS": "http://ray-head-svc:8265"
+```
+
+Ray's State API is live operational data rather than durable state. Queries may be
+partial or stale, and logs from dead nodes are unavailable.
+
+### RAY_STATE_API_TIMEOUT_SECONDS
+
+- **Type**: `int`
+- **Default**: `5`
+- **Range**: `1` to `60`
+
+Timeout applied independently to optional Ray state and log API requests.
+
 ### RAY_RUNTIME_ENV
 
 - **Type**: `dict`

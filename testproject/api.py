@@ -11,12 +11,20 @@ from datetime import datetime
 from typing import Literal
 
 from django.db.models import Count
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
 from ninja import NinjaAPI, Schema
 
 from django_ray import __version__ as django_ray_version
 from django_ray.models import RayTaskExecution, TaskState
+from django_ray.observability import (
+    WorkflowObservabilityError,
+    get_ray_task_logs,
+    get_ray_task_state,
+    get_workflow_node,
+    get_workflow_progress,
+)
 
 # Import tasks that use Django 6's @task decorator
 from testproject import tasks
@@ -131,6 +139,35 @@ class WorkflowResultSchema(Schema):
     progress: dict | None
     result: dict | None
     error: str | None
+
+
+class WorkflowGraphSchema(Schema):
+    """UI-ready durable workflow graph and aggregate state."""
+
+    task_id: str
+    task_state: str
+    schema_version: int
+    revision: int
+    workflow_state: str
+    total_nodes: int
+    completed_nodes: int
+    failed_nodes: int
+    running_nodes: int
+    pending_nodes: int
+    progress_percent: float
+    updated_at: float
+    graph: dict
+    recent_events: list[dict]
+
+
+class WorkflowNodeSchema(Schema):
+    """Durable node metadata enriched with optional live Ray data."""
+
+    task_id: str
+    node: dict
+    ray_state: list[dict] | None
+    logs: dict[str, str] | None
+    observability_error: str | None
 
 
 class RuntimeEnvResultSchema(Schema):
@@ -1047,6 +1084,77 @@ def get_cluster_complex_workflow(request, task_id: str):
         "progress": (json.loads(execution.progress_data) if execution.progress_data else None),
         "result": json.loads(execution.result_data) if execution.result_data else None,
         "error": execution.error_message,
+    }
+
+
+@api.get(
+    "/cluster/workflows/{task_id}/graph",
+    response=WorkflowGraphSchema,
+    tags=["Workflows"],
+)
+def get_cluster_workflow_graph(request, task_id: str):
+    """Return a versioned node/edge graph suitable for custom tracking UIs."""
+    execution = get_object_or_404(RayTaskExecution, task_id=task_id)
+    progress = get_workflow_progress(execution)
+    if progress is None:
+        raise Http404("Workflow graph is not available yet")
+    return {
+        "task_id": execution.task_id,
+        "task_state": execution.state,
+        "schema_version": progress.get("schema_version", 1),
+        "revision": progress.get("revision", 0),
+        "workflow_state": progress.get("state", "RUNNING"),
+        "total_nodes": progress.get("total_nodes", 0),
+        "completed_nodes": progress.get("completed_nodes", 0),
+        "failed_nodes": progress.get("failed_nodes", 0),
+        "running_nodes": progress.get("running_nodes", 0),
+        "pending_nodes": progress.get("pending_nodes", 0),
+        "progress_percent": progress.get("progress_percent", 0.0),
+        "updated_at": progress.get("updated_at", 0.0),
+        "graph": progress.get(
+            "graph",
+            {"nodes": progress.get("nodes", []), "edges": []},
+        ),
+        "recent_events": progress.get("recent_events", []),
+    }
+
+
+@api.get(
+    "/cluster/workflows/{task_id}/nodes/{node_id}",
+    response=WorkflowNodeSchema,
+    tags=["Workflows"],
+)
+def get_cluster_workflow_node(
+    request,
+    task_id: str,
+    node_id: str,
+    include_logs: bool = False,
+    tail: int = 200,
+):
+    """Return durable node metadata plus live Ray state and optional log tails."""
+    execution = get_object_or_404(RayTaskExecution, task_id=task_id)
+    node = get_workflow_node(execution, node_id)
+    if node is None:
+        raise Http404("Workflow node was not found")
+
+    ray_state = None
+    logs = None
+    observability_error = None
+    ray_task_id = node.get("execution", {}).get("ray_task_id")
+    if ray_task_id:
+        try:
+            ray_state = get_ray_task_state(ray_task_id)
+            if include_logs:
+                logs = get_ray_task_logs(ray_task_id, tail=tail)
+        except (WorkflowObservabilityError, ValueError) as error:
+            observability_error = str(error)
+
+    return {
+        "task_id": execution.task_id,
+        "node": node,
+        "ray_state": ray_state,
+        "logs": logs,
+        "observability_error": observability_error,
     }
 
 

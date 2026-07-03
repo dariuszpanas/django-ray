@@ -42,6 +42,10 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
             "Example: DJANGO_RAY = {'RAY_ADDRESS': 'ray://localhost:10001'}"
         )
 
+    state_api_address = config.get("RAY_STATE_API_ADDRESS")
+    if state_api_address is not None and not isinstance(state_api_address, str):
+        raise ImproperlyConfigured("django-ray: RAY_STATE_API_ADDRESS must be a string or None")
+
     # Validate runner choice
     valid_runners = ("ray_job", "ray_core")
     runner = config.get("RUNNER", "ray_job")
@@ -61,6 +65,7 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
         ("STUCK_TASK_TIMEOUT_SECONDS", 30, 86400),
         ("TASK_MONITOR_HEARTBEAT_SECONDS", 1, 300),
         ("WORKFLOW_PROGRESS_FLUSH_SECONDS", 1, 300),
+        ("RAY_STATE_API_TIMEOUT_SECONDS", 1, 60),
         ("MAX_RESULT_SIZE_BYTES", 1024, 100 * 1024 * 1024),
     ]
 

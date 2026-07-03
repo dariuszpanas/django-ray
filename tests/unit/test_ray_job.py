@@ -64,6 +64,9 @@ class TestRayJobRunnerSubmit:
         assert payload["callable_path"] == "testproject.tasks.echo_task"
         assert json.loads(payload["serialized_args"]) == ["it's broken"]
         assert json.loads(payload["serialized_kwargs"]) == {"publisher": "O'Reilly"}
+        assert payload["task_execution_pk"] == 123
+        assert payload["runtime_env_profile"] is None
+        assert len(payload["runtime_env_hash"]) == 64
         assert submission["metadata"] == {
             "django_ray_task_id": "123",
             "callable_path": "testproject.tasks.echo_task",

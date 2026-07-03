@@ -13,7 +13,7 @@ import platform
 import time
 from typing import Any
 
-from django_ray.workflows import chain, group, map_step, step
+from django_ray.workflows import chain, group, map_step, report_progress, step
 
 
 def build_cpu_work_items(
@@ -36,13 +36,29 @@ def run_cpu_work_item(item: dict[str, Any]) -> dict[str, Any]:
     duration = float(item["seconds_per_item"])
     started_at = time.perf_counter()
     iterations = 0
+    next_report = 0.25
     data = f"workflow_item_{item_id}".encode() * 100
 
-    while time.perf_counter() - started_at < duration:
+    while (elapsed := time.perf_counter() - started_at) < duration:
         hashlib.sha256(data).digest()
         iterations += 1
+        fraction = elapsed / duration
+        if fraction >= next_report:
+            report_progress(
+                min(fraction, 1.0),
+                1.0,
+                message=f"Processing item {item_id}",
+                metrics={"iterations": iterations},
+            )
+            next_report += 0.25
 
     elapsed = time.perf_counter() - started_at
+    report_progress(
+        1.0,
+        1.0,
+        message=f"Processed item {item_id}",
+        metrics={"iterations": iterations},
+    )
     return {
         "item_id": item_id,
         "iterations": iterations,

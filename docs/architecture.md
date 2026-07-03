@@ -150,6 +150,8 @@ while running:
   - `python -m django_ray.runtime.entrypoint --payload-b64 <...>`
 - Payload is URL-safe base64 JSON containing callable path and serialized args/kwargs.
 - Applies the same persisted RuntimeEnv snapshot to the submitted Ray Job.
+- Carries durable task identity into the driver and initializes Ray lazily for
+  nested workflows, giving Ray Job and Ray Core the same graph/progress protocol.
 - Workers can adopt orphaned persisted Ray Job handles from inactive workers and continue reconciliation
   instead of immediately retrying duplicate work.
 
@@ -173,7 +175,9 @@ while running:
 - Worker lease heartbeat + cross-worker orphan recovery.
 - Task monitor heartbeats for active reconciliation paths.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
-- Per-workflow in-memory progress coordination with bounded database snapshots.
+- Per-workflow in-memory progress coordination with revision-based database snapshots.
+- Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
+  identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.
 - Startup settings validation fail-fast by default, with migration/bootstrap bypass controls.
 - Result size enforcement with configurable oversized-result backends (`digest`, `filesystem`, `s3`, `gcs`).
@@ -183,6 +187,8 @@ while running:
 
 - Django admin for task/lease inspection and operations.
 - Worker logs for claim/submit/reconcile/retry events.
+- Structured workflow-leaf logs correlated by durable task, workflow node, and Ray IDs.
+- Optional Ray State API lookup for live task attempts and bounded stdout/stderr tails.
 - Optional metrics/API surfaces in `testproject` example app.
 
 ## See Also
