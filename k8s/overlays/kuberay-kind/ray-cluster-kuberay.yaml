@@ -76,7 +76,7 @@ spec:
               - name: ray-tmp
                 mountPath: /tmp/ray
           - name: dashboard-importer
-            image: django-ray-worker:latest
+            image: python:3.12-slim
             imagePullPolicy: IfNotPresent
             command: ["python3", "/scripts/import_dashboards.py"]
             env:

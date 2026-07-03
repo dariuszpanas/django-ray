@@ -136,8 +136,9 @@ installation free.
 ## Generic KubeRay Images
 
 The KubeRay example uses the upstream `rayproject/ray` image for Ray head and
-worker containers. The project profile uploads source and installs Python
-dependencies. The Django web and task-manager images remain application-specific.
+worker containers, plus a stock Python image for its dashboard-import helper.
+The project profile uploads source and installs Python dependencies. The Django
+web and task-manager images remain application-specific.
 
 This separation works well for a shared cluster within one trust boundary:
 
