@@ -172,6 +172,7 @@ class _RayExecutor(_Executor):
         if signature.runtime_env is not None:
             from django_ray.runtime.runtime_env import (
                 normalize_runtime_env,
+                prepare_runtime_env_for_ray_core,
                 resolve_runtime_env_profile,
             )
 
@@ -201,7 +202,7 @@ class _RayExecutor(_Executor):
             **signature.ray_options,
         }
         if resolved_runtime_env is not None:
-            options["runtime_env"] = resolved_runtime_env.spec
+            options["runtime_env"] = prepare_runtime_env_for_ray_core(resolved_runtime_env)
         object_ref = self.remote_step.options(**options).remote(
             signature.callable_path,
             signature.bootstrap_django,

@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow progress persistence now follows coordinator revisions instead of
   writing an unchanged snapshot every polling interval.
 - Workflow leaf output now uses structured, correlation-friendly logging.
+- Ray Core converts trusted local RuntimeEnv code paths into content-addressed
+  GCS package URIs before per-task submission; local uploads now fail early with
+  a clear message when attempted through Ray Client.
+- Ray Client submissions serialize the outer bootstrap executor by value, allowing
+  generic Ray head images to apply the task RuntimeEnv before importing django-ray.
 
 ## [0.2.0] - 2026-05-15
 

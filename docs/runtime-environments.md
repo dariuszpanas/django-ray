@@ -56,7 +56,15 @@ Other fields are replaced:
 
 Pin production dependencies and use immutable archive URIs for `working_dir` or
 `py_modules` when reproducibility matters. A local directory is convenient in
-development because Ray uploads it automatically.
+development. In Ray Core mode, django-ray content-addresses local paths and uploads
+them to Ray's GCS package store before applying the per-task environment.
+
+Per-task local uploads require the Django task manager to use a direct Ray/GCS
+connection such as `ray-head-svc:6379`. Ray Client (`ray://...`) cannot upload a
+local directory from task-level `.options(runtime_env=...)`; use a remote
+`gcs://`, `https://`, or `s3://` archive URI when a direct connection is not
+available. Ray Job submission continues to support local paths through its
+job-level upload.
 
 ## Select a Profile for a Django Task
 
@@ -139,6 +147,10 @@ The KubeRay example uses the upstream `rayproject/ray` image for Ray head and
 worker containers, plus a stock Python image for its dashboard-import helper.
 The project profile uploads source and installs Python dependencies. The Django
 web and task-manager images remain application-specific.
+
+For Ray Client submissions, django-ray serializes only its small outer bootstrap
+executor by value. The generic head can therefore deserialize the submission
+before the task-level RuntimeEnv installs and exposes the full project package.
 
 This separation works well for a shared cluster within one trust boundary:
 

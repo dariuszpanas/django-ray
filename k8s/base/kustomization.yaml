@@ -9,6 +9,7 @@ resources:
   - configmap.yaml
   - secret.yaml
   - postgres.yaml
+  - runtime-env-storage.yaml
   - ray-cluster.yaml
   - django-web.yaml
   - django-ray-worker.yaml

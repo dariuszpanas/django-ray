@@ -84,6 +84,9 @@ spec:
           volumeMounts:
             - name: ray-tmp
               mountPath: /tmp/ray
+            - name: runtime-env
+              mountPath: /runtime-env
+              readOnly: true
           readinessProbe:
             tcpSocket:
               port: 6379
@@ -121,6 +124,9 @@ spec:
           configMap:
             name: grafana-dashboard-import-script
             defaultMode: 0755
+        - name: runtime-env
+          persistentVolumeClaim:
+            claimName: runtime-env-pvc
 ---
 # Ray Head Service
 apiVersion: v1
@@ -220,6 +226,10 @@ spec:
               memory: "12Gi"
               cpu: "4"
               # nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: runtime-env
+              mountPath: /runtime-env
+              readOnly: true
           readinessProbe:
             exec:
               command:
@@ -240,4 +250,8 @@ spec:
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 3
+      volumes:
+        - name: runtime-env
+          persistentVolumeClaim:
+            claimName: runtime-env-pvc
 

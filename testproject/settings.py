@@ -174,7 +174,10 @@ DJANGO_RAY = {
     "RAY_STATE_API_ADDRESS": os.environ.get("RAY_STATE_API_ADDRESS"),
     "RUNTIME_ENV_PROFILES": {
         "project": {
-            "working_dir": str(BASE_DIR),
+            "working_dir": os.environ.get(
+                "DJANGO_RAY_WORKING_DIR_URI",
+                str(BASE_DIR),
+            ),
             "excludes": [".git", ".venv", "__pycache__", "staticfiles"],
             "pip": [
                 "django>=6.0",

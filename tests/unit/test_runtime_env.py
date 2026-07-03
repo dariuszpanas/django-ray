@@ -10,6 +10,7 @@ from django.core.exceptions import ImproperlyConfigured
 
 from django_ray.runtime.runtime_env import (
     normalize_runtime_env,
+    prepare_runtime_env_for_ray_core,
     resolve_runtime_env_profile,
     runtime_env_for_execution,
     validate_runtime_env_profiles,
@@ -119,3 +120,37 @@ def test_execution_snapshot_detects_tampering() -> None:
 
     with pytest.raises(ImproperlyConfigured, match="hash does not match"):
         runtime_env_for_execution(execution)
+
+
+def test_prepare_runtime_env_uploads_local_working_dir(monkeypatch, tmp_path) -> None:
+    resolved = normalize_runtime_env(
+        {
+            "working_dir": str(tmp_path),
+            "excludes": [".git"],
+        }
+    )
+    monkeypatch.setattr("ray.util.client.ray.is_connected", lambda: False)
+    monkeypatch.setattr(
+        "ray._private.runtime_env.working_dir.upload_working_dir_if_needed",
+        lambda spec, **kwargs: {**spec, "working_dir": "gcs://project.zip"},
+    )
+    monkeypatch.setattr(
+        "ray._private.runtime_env.py_modules.upload_py_modules_if_needed",
+        lambda spec, **kwargs: spec,
+    )
+
+    prepared = prepare_runtime_env_for_ray_core(resolved)
+
+    assert prepared["working_dir"] == "gcs://project.zip"
+    assert resolved.spec["working_dir"] == str(tmp_path)
+
+
+def test_prepare_runtime_env_rejects_local_paths_over_ray_client(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    resolved = normalize_runtime_env({"working_dir": str(tmp_path)})
+    monkeypatch.setattr("ray.util.client.ray.is_connected", lambda: True)
+
+    with pytest.raises(ImproperlyConfigured, match="direct Ray connection"):
+        prepare_runtime_env_for_ray_core(resolved)

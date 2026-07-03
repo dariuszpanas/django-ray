@@ -85,14 +85,26 @@ class RayCoreRunner(BaseRunner):
         task_name = callable_path.split(".")[-1] if callable_path else "task"
 
         from django_ray.runtime.remote import execute_django_task_remote
-        from django_ray.runtime.runtime_env import runtime_env_for_execution
+        from django_ray.runtime.runtime_env import (
+            prepare_runtime_env_for_ray_core,
+            runtime_env_for_execution,
+        )
 
         # Keep the executor importable at module scope so Ray can reuse worker
         # processes without serializing a new nested function for every task.
         runtime_env = runtime_env_for_execution(task_execution)
+        submitted_runtime_env = prepare_runtime_env_for_ray_core(runtime_env)
+        # Ray Client deserializes the remote function on the server before its
+        # task-level RuntimeEnv exists. Ship this small bootstrap function by
+        # value so a generic Ray head does not need django-ray installed.
+        cloudpickle = getattr(ray, "cloudpickle", None)
+        if cloudpickle is not None:
+            import django_ray.runtime.remote as remote_module
+
+            cloudpickle.register_pickle_by_value(remote_module)
         remote_options: dict[str, Any] = {"name": f"django_ray:{task_name}"}
-        if runtime_env.spec:
-            remote_options["runtime_env"] = runtime_env.spec
+        if submitted_runtime_env:
+            remote_options["runtime_env"] = submitted_runtime_env
         execute_django_task = ray.remote(**remote_options)(execute_django_task_remote)
 
         # Submit to Ray (non-blocking)

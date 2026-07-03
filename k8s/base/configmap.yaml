@@ -10,6 +10,7 @@ data:
   DJANGO_ALLOWED_HOSTS: "*"
   # Ray configuration
   RAY_ADDRESS: "ray://ray-head-svc:10001"
+  DJANGO_RAY_WORKING_DIR_URI: "file:///runtime-env/django-ray-source.zip"
   RAY_DASHBOARD_HOST: "0.0.0.0"
   RAY_DASHBOARD_URL: "http://localhost:30265"
   RAY_STATE_API_ADDRESS: "http://ray-head-svc:8265"

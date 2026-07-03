@@ -75,6 +75,9 @@ spec:
             volumeMounts:
               - name: ray-tmp
                 mountPath: /tmp/ray
+              - name: runtime-env
+                mountPath: /runtime-env
+                readOnly: true
           - name: dashboard-importer
             image: python:3.12-slim
             imagePullPolicy: IfNotPresent
@@ -101,6 +104,9 @@ spec:
             configMap:
               name: grafana-dashboard-import-script
               defaultMode: 0755
+          - name: runtime-env
+            persistentVolumeClaim:
+              claimName: runtime-env-pvc
 
   workerGroupSpecs:
     - groupName: worker-group
@@ -144,6 +150,14 @@ spec:
                 limits:
                   memory: "3Gi"
                   cpu: "2"
+              volumeMounts:
+                - name: runtime-env
+                  mountPath: /runtime-env
+                  readOnly: true
+          volumes:
+            - name: runtime-env
+              persistentVolumeClaim:
+                claimName: runtime-env-pvc
 
 ---
 # Stable dashboard NodePort for local development access.

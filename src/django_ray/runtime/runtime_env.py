@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
+from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ImproperlyConfigured
@@ -240,9 +243,66 @@ def runtime_env_for_execution(task_execution: RayTaskExecution) -> ResolvedRunti
     return resolved
 
 
+def prepare_runtime_env_for_ray_core(
+    runtime_env: ResolvedRuntimeEnv,
+) -> dict[str, Any]:
+    """Upload local code paths and return a per-task-compatible RuntimeEnv.
+
+    Ray only accepts local ``working_dir`` and ``py_modules`` paths at job
+    initialization. Ray Core task options require URIs, so direct Ray drivers
+    upload local paths to Ray's content-addressed GCS package store first.
+    """
+    spec = deepcopy(runtime_env.spec)
+    if not _contains_local_code_path(spec):
+        return spec
+
+    try:
+        from ray.util.client import ray as ray_client
+
+        if ray_client.is_connected():
+            raise ImproperlyConfigured(
+                "django-ray: Per-task RuntimeEnv local paths require a direct Ray "
+                "connection. Use a GCS/HTTPS/S3 URI or connect the task manager "
+                "to the cluster's GCS address instead of ray:// Ray Client."
+            )
+
+        from ray._private.runtime_env.py_modules import upload_py_modules_if_needed
+        from ray._private.runtime_env.working_dir import upload_working_dir_if_needed
+
+        with tempfile.TemporaryDirectory(prefix="django-ray-runtime-env-") as scratch_dir:
+            spec = upload_working_dir_if_needed(
+                spec,
+                include_gitignore=True,
+                scratch_dir=scratch_dir,
+            )
+            spec = upload_py_modules_if_needed(
+                spec,
+                include_gitignore=True,
+                scratch_dir=scratch_dir,
+            )
+    except ImproperlyConfigured:
+        raise
+    except Exception as error:
+        raise ImproperlyConfigured(
+            f"django-ray: Failed to package local RuntimeEnv paths: {error}"
+        ) from error
+    return spec
+
+
+def _contains_local_code_path(spec: dict[str, Any]) -> bool:
+    working_dir = spec.get("working_dir")
+    if isinstance(working_dir, str) and Path(working_dir).exists():
+        return True
+    py_modules = spec.get("py_modules", [])
+    return isinstance(py_modules, list) and any(
+        isinstance(module, str) and Path(module).exists() for module in py_modules
+    )
+
+
 __all__ = [
     "ResolvedRuntimeEnv",
     "normalize_runtime_env",
+    "prepare_runtime_env_for_ray_core",
     "resolve_runtime_env_profile",
     "runtime_env_for_execution",
     "validate_runtime_env_profiles",
