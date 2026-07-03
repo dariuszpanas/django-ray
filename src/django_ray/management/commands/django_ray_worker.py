@@ -47,6 +47,8 @@ class Command(BaseCommand):
         self.lease_queue_name: str = "default"  # Queue name for lease recreation
         self.last_task_processed = 0.0  # Last time we processed a task
         self.tasks_processed_count = 0  # Total tasks processed
+        self.task_monitor_heartbeat_interval = 15.0
+        self.last_task_monitor_heartbeat = 0.0
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add command arguments."""
@@ -147,6 +149,9 @@ class Command(BaseCommand):
 
         if concurrency is None:
             concurrency = settings.get("DEFAULT_CONCURRENCY", 10)
+        self.task_monitor_heartbeat_interval = float(
+            settings.get("TASK_MONITOR_HEARTBEAT_SECONDS", 15)
+        )
 
         self.setup_signal_handlers()
 
@@ -859,6 +864,7 @@ class Command(BaseCommand):
             task.started_at = None
             task.finished_at = None
             task.claimed_by_worker = None
+            task.progress_data = None
             task.save(
                 update_fields=[
                     "state",
@@ -869,6 +875,7 @@ class Command(BaseCommand):
                     "started_at",
                     "finished_at",
                     "claimed_by_worker",
+                    "progress_data",
                 ]
             )
             self.stdout.write(
@@ -983,12 +990,18 @@ class Command(BaseCommand):
             return
 
         monitored_task_ids = list(self.ray_core_runner._pending_tasks.keys())
-        if monitored_task_ids:
+        monitor_time = time.monotonic()
+        if (
+            monitored_task_ids
+            and monitor_time - self.last_task_monitor_heartbeat
+            >= self.task_monitor_heartbeat_interval
+        ):
             heartbeat_time = datetime.now(UTC)
             RayTaskExecution.objects.filter(
                 pk__in=monitored_task_ids,
                 state=TaskState.RUNNING,
             ).update(last_heartbeat_at=heartbeat_time)
+            self.last_task_monitor_heartbeat = monitor_time
 
         # Poll for completed tasks
         try:

@@ -36,6 +36,10 @@ django-ray bridges Django's built-in Tasks framework with Ray's distributed comp
 - **Automatic retries**: Failed tasks are retried with exponential backoff
 - **Admin visibility**: Monitor and manage tasks through Django admin
 - **Graceful shutdown**: Workers handle signals properly for clean shutdown
+- **Ray-native workflows**: Chain, group, and dynamically fan out low-overhead
+  internal steps behind one durable Django task
+- **RuntimeEnv profiles**: Run versioned or lightweight Python environments on a
+  generic Ray cluster, with immutable environment identity per durable task
 
 The repository includes a sample `testproject/` with a small landing page for exploring the bundled API,
 task stats, project links, and smoke-task trigger:
@@ -119,6 +123,14 @@ python manage.py django_ray_worker --queue=default --sync
 | `RETRY_BACKOFF_SECONDS` | `60` | Base backoff for retries |
 | `RETRY_EXCEPTION_DENYLIST` | `[]` | Exception types that skip auto-retry |
 | `STUCK_TASK_TIMEOUT_SECONDS` | `300` | Timeout before marking tasks as LOST |
+| `TASK_MONITOR_HEARTBEAT_SECONDS` | `15` | Database heartbeat interval for in-flight Ray Core tasks |
+| `RUNTIME_ENV_PROFILES` | `{}` | Named Ray environments for code and dependencies |
+| `DEFAULT_RUNTIME_ENV_PROFILE` | `None` | Default named environment |
+
+See [Ray-Native Workflows](docs/workflows.md) for low-latency `chain`, `group`,
+and `map_step` execution.
+See [Runtime Environments](docs/runtime-environments.md) for per-task profiles,
+workflow overrides, and generic KubeRay images.
 
 ## Development Setup
 

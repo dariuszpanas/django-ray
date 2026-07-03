@@ -191,8 +191,9 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
+              RAY_HEAD_IP="$(getent hosts ray-head-svc | awk 'NR == 1 { print $1 }')"
               ray start \
-                --address=ray-head-svc:6379 \
+                --address="${RAY_HEAD_IP}:6379" \
                 --metrics-export-port=8080 \
                 --num-cpus=4 \
                 --memory=8000000000 \

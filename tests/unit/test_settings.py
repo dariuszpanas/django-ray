@@ -54,6 +54,36 @@ class TestValidateSettings:
                 }
             )
 
+    def test_validate_invalid_task_monitor_heartbeat(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="TASK_MONITOR_HEARTBEAT_SECONDS"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "TASK_MONITOR_HEARTBEAT_SECONDS": 0,
+                }
+            )
+
+    def test_validate_runtime_env_profiles(self) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "RUNTIME_ENV_PROFILES": {
+                    "thin": {"env_vars": {"MODE": "thin"}},
+                },
+                "DEFAULT_RUNTIME_ENV_PROFILE": "thin",
+            }
+        )
+
+    def test_validate_unknown_default_runtime_env_profile(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="DEFAULT_RUNTIME_ENV_PROFILE"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "RUNTIME_ENV_PROFILES": {},
+                    "DEFAULT_RUNTIME_ENV_PROFILE": "missing",
+                }
+            )
+
     def test_validate_invalid_result_storage_backend(self) -> None:
         """Test that unknown RESULT_STORAGE_BACKEND raises error."""
         with pytest.raises(ImproperlyConfigured, match="RESULT_STORAGE_BACKEND"):

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Ray-native workflow signatures with `step`, `chain`, `group`, and dynamic
+  `map_step` primitives.
+- Local workflow execution fallback for sync workers and unit tests.
+- Per-step Django bootstrap opt-in and Ray resource options.
+- Live workflow progress snapshots with node states, counts, and recent events.
+- Test-project endpoints for simple fan-out and nested fast/slow workflow examples.
+- `TASK_MONITOR_HEARTBEAT_SECONDS` setting for controlling in-flight task
+  heartbeat persistence.
+- Named RuntimeEnv profiles with inheritance, startup validation, and backend-alias
+  selection through Django Tasks.
+- Immutable RuntimeEnv JSON and SHA-256 identity persisted on each task execution.
+- Per-workflow-step RuntimeEnv profile and inline environment overrides.
+- Test-project RuntimeEnv probe and cold-versus-cached benchmark endpoints.
+
+### Changed
+
+- Ray Core durable tasks now use a module-level remote executor instead of defining
+  and serializing a nested remote function for every submission.
+- Ray Core monitor heartbeats are written in one batch at a configurable interval
+  instead of on every 100 ms polling iteration.
+- The KubeRay example now uses the upstream Ray image for head and worker
+  containers; project code and Python dependencies arrive through RuntimeEnv.
+
 ## [0.2.0] - 2026-05-15
 
 ### Added

@@ -86,6 +86,10 @@ make k8s-urls-kong K8S_KONG_WEB_URL=https://app.example.com K8S_KONG_RAY_DASHBOA
 ## KubeRay Operator (Kind Recommended)
 
 For local multi-node clusters (like kind with 5 nodes), use the KubeRay-managed path.
+The example RayCluster uses the upstream `rayproject/ray` image. The Django task
+manager sends project code and dependencies through the persisted RuntimeEnv
+profile, so changing a Python dependency does not require rebuilding Ray head and
+worker images. See [Runtime Environments](../runtime-environments.md).
 
 This keeps Django web/worker Deployments in this repo, but replaces static Ray
 Deployments with a `RayCluster` custom resource.

@@ -327,6 +327,49 @@ class TestWorkerReconnectPollReconcile:
 
         cmd.poll_ray_core_tasks()
 
+    def test_poll_ray_core_tasks_throttles_monitor_heartbeat_writes(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="poll-heartbeat-throttle-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+
+        class Runner:
+            _pending_tasks = {task.pk: object()}
+            pending_count = 1
+
+            def poll_completed(self):
+                return []
+
+        cmd = _make_command()
+        cmd.ray_core_runner = cast(Any, Runner())
+        cmd.task_monitor_heartbeat_interval = 15
+        clock = iter([100.0, 105.0, 116.0])
+
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.monotonic",
+            lambda: next(clock),
+        )
+
+        cmd.poll_ray_core_tasks()
+        task.refresh_from_db()
+        first_heartbeat = task.last_heartbeat_at
+        assert first_heartbeat is not None
+
+        cmd.poll_ray_core_tasks()
+        task.refresh_from_db()
+        assert task.last_heartbeat_at == first_heartbeat
+        assert cmd.last_task_monitor_heartbeat == 100.0
+
+        cmd.poll_ray_core_tasks()
+        task.refresh_from_db()
+        assert task.last_heartbeat_at is not None
+        assert cmd.last_task_monitor_heartbeat == 116.0
+
     def test_poll_ray_core_tasks_handles_disconnected_and_missing_tasks(self, monkeypatch) -> None:
         existing = RayTaskExecution.objects.create(
             task_id="poll-disconnect-001",

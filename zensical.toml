@@ -17,6 +17,8 @@ nav = [
     { "Configuration" = "configuration.md" },
     { "Worker Modes" = "worker-modes.md" },
     { "Tasks" = "tasks.md" },
+    { "Ray-Native Workflows" = "workflows.md" },
+    { "Runtime Environments" = "runtime-environments.md" },
     { "Queues" = "queues.md" },
     { "Retry and Error Handling" = "retry.md" },
   ] },

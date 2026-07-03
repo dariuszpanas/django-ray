@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from django_ray.conf.settings import get_settings
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
+from django_ray.runtime.runtime_env import runtime_env_for_execution
 from django_ray.runtime.serialization import serialize_args
 
 if TYPE_CHECKING:
@@ -53,16 +54,16 @@ class RayJobRunner(BaseRunner):
 
         entrypoint = f"python -m django_ray.runtime.entrypoint --payload-b64 {payload_b64}"
 
-        # Get runtime environment settings
-        settings = get_settings()
-        runtime_env = settings.get("RAY_RUNTIME_ENV", {})
+        runtime_env = runtime_env_for_execution(task_execution)
 
         job_id = client.submit_job(
             entrypoint=entrypoint,
-            runtime_env=runtime_env,
+            runtime_env=runtime_env.spec,
             metadata={
                 "django_ray_task_id": str(task_execution.pk),
                 "callable_path": callable_path,
+                "runtime_env_profile": runtime_env.profile or "",
+                "runtime_env_hash": runtime_env.digest,
             },
         )
 

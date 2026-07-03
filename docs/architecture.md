@@ -10,11 +10,13 @@ This document describes the runtime architecture of `django-ray` and how work mo
 - `django-ray` persists execution metadata in the database.
 - `django_ray_worker` claims work, runs it (sync/Ray Core/Ray Job), and reconciles status.
 - Ray executes task callables in local or cluster compute environments.
+- Ray-native workflow steps can fan out and chain within one durable task boundary.
 
 ## Request-To-Execution Flow
 
 1. App code calls `.enqueue(...)` on a Django task.
-2. Backend stores a `RayTaskExecution` row in `QUEUED` state.
+2. Backend stores a `RayTaskExecution` row in `QUEUED` state. The selected
+   RuntimeEnv profile is resolved into an immutable JSON snapshot.
 3. Worker claims eligible rows and marks them `RUNNING`.
 4. Worker submits task execution in the selected mode.
 5. Worker reconciles completion and stores success/failure details.
@@ -39,6 +41,8 @@ This document describes the runtime architecture of `django-ray` and how work mo
 
 - Executes submitted functions.
 - Returns completion state and result/error payloads.
+- Resolves workflow step dependencies through object references without a database
+  round trip for each internal step.
 
 ### Database
 
@@ -62,6 +66,10 @@ Primary execution record for one task attempt chain.
 | `args_json`, `kwargs_json` | Serialized call arguments |
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
+| `progress_data` | Latest JSON progress snapshot for a Ray-native workflow |
+| `runtime_env_profile` | Optional name selected by the enqueueing backend |
+| `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
+| `runtime_env_hash` | SHA-256 content identity used to correlate cache reuse |
 | `error_message`, `error_traceback` | Failure metadata |
 | `ray_job_id`, `ray_address` | Runner-specific execution handle metadata |
 | `claimed_by_worker` | Worker lease owner that currently owns the task |
@@ -132,6 +140,8 @@ while running:
 
 - Uses Ray remote execution directly.
 - Lower submission overhead.
+- Applies the persisted RuntimeEnv snapshot to the outer remote task.
+- Supports nested Ray-native workflows (`chain`, `group`, and `map_step`).
 
 ### Ray Job mode
 
@@ -139,6 +149,7 @@ while running:
 - Worker submits a payload transport command:
   - `python -m django_ray.runtime.entrypoint --payload-b64 <...>`
 - Payload is URL-safe base64 JSON containing callable path and serialized args/kwargs.
+- Applies the same persisted RuntimeEnv snapshot to the submitted Ray Job.
 - Workers can adopt orphaned persisted Ray Job handles from inactive workers and continue reconciliation
   instead of immediately retrying duplicate work.
 
@@ -161,6 +172,8 @@ while running:
 - Unified retry policy with denylist support (short and fully-qualified exception names).
 - Worker lease heartbeat + cross-worker orphan recovery.
 - Task monitor heartbeats for active reconciliation paths.
+- Throttled, batched Ray Core task-monitor heartbeat persistence.
+- Per-workflow in-memory progress coordination with bounded database snapshots.
 - Stuck/timeout detection with loss handling and retry path.
 - Startup settings validation fail-fast by default, with migration/bootstrap bypass controls.
 - Result size enforcement with configurable oversized-result backends (`digest`, `filesystem`, `s3`, `gcs`).
@@ -176,4 +189,6 @@ while running:
 
 - [Configuration](configuration.md)
 - [Worker Modes](worker-modes.md)
+- [Ray-Native Workflows](workflows.md)
+- [Runtime Environments](runtime-environments.md)
 - [Retry & Error Handling](retry.md)

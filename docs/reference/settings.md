@@ -51,7 +51,8 @@ requires this setting unless `DJANGO_RAY_SKIP_VALIDATION` is used for a maintena
 - **Type**: `dict`
 - **Default**: `{}`
 
-Ray runtime environment configuration. Passed to Ray when initializing.
+Unnamed default Ray runtime environment. It is resolved and stored on each task
+when no named profile is selected.
 
 ```python
 "RAY_RUNTIME_ENV": {
@@ -59,6 +60,36 @@ Ray runtime environment configuration. Passed to Ray when initializing.
     "env_vars": {"MY_VAR": "value"},
 }
 ```
+
+### RUNTIME_ENV_PROFILES
+
+- **Type**: `dict`
+- **Default**: `{}`
+
+Named Ray RuntimeEnv definitions. A direct profile is a RuntimeEnv dictionary. A
+composed profile has `extends` and `runtime_env` keys. Profile inheritance merges
+dictionaries and appends the `pip`, `uv`, `py_modules`, and `excludes` lists.
+
+```python
+"RUNTIME_ENV_PROFILES": {
+    "project": {
+        "working_dir": "/app",
+        "pip": ["django>=6.0"],
+    },
+    "numpy": {
+        "extends": "project",
+        "runtime_env": {"pip": ["numpy==2.3.5"]},
+    },
+}
+```
+
+### DEFAULT_RUNTIME_ENV_PROFILE
+
+- **Type**: `str | None`
+- **Default**: `None`
+
+Profile selected when the task backend does not specify
+`OPTIONS["RUNTIME_ENV_PROFILE"]`. The named profile must exist.
 
 ## Concurrency
 
@@ -177,6 +208,36 @@ actively reconciled in-flight work are updated separately.
 
 ```python
 "WORKER_HEARTBEAT_SECONDS": 30
+```
+
+### TASK_MONITOR_HEARTBEAT_SECONDS
+
+- **Type**: `int`
+- **Default**: `15`
+- **Allowed**: `1` to `300`
+
+Minimum interval between database heartbeat updates for in-flight Ray Core tasks.
+Each update covers all tasks currently monitored by that worker. Status polling remains
+non-blocking and frequent; this setting only throttles persistence writes.
+
+Keep this value comfortably below `STUCK_TASK_TIMEOUT_SECONDS`.
+
+```python
+"TASK_MONITOR_HEARTBEAT_SECONDS": 15
+```
+
+### WORKFLOW_PROGRESS_FLUSH_SECONDS
+
+- **Type**: `int`
+- **Default**: `1`
+- **Allowed**: `1` to `300`
+
+Minimum interval between database writes of the active Ray-native workflow's
+progress snapshot. Leaf events are collected by a per-workflow Ray actor; this
+setting bounds database traffic independently of workflow fan-out size.
+
+```python
+"WORKFLOW_PROGRESS_FLUSH_SECONDS": 1
 ```
 
 ## Results
@@ -343,6 +404,8 @@ DJANGO_RAY = {
     "STUCK_TASK_TIMEOUT_SECONDS": 300,
     "WORKER_LEASE_SECONDS": 60,
     "WORKER_HEARTBEAT_SECONDS": 15,
+    "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
+    "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
 }
 ```
 

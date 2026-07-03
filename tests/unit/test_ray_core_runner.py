@@ -142,6 +142,30 @@ class TestRayCoreRunnerRuntime:
         assert pending.ray_job_id == "02000000"
         assert pending.ray_task_id == fake.default_hex[:48]
 
+    def test_submit_applies_persisted_runtime_env(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda callable_path, args_json, kwargs_json: json.dumps(
+                {"success": True, "result": callable_path}
+            ),
+        )
+
+        runner = RayCoreRunner()
+        runner.submit(
+            task_execution=SimpleNamespace(
+                pk=12,
+                runtime_env_profile="thin",
+                runtime_env_json='{"env_vars":{"MODE":"thin"}}',
+                runtime_env_hash="",
+            ),
+            callable_path="testproject.tasks.echo_task",
+            args=("hello",),
+            kwargs={},
+        )
+
+        assert fake.remote_calls[-1]["runtime_env"] == {"env_vars": {"MODE": "thin"}}
+
     def test_submit_falls_back_to_legacy_id_when_runtime_context_fails(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         fake.runtime_context_error = RuntimeError("no runtime context")

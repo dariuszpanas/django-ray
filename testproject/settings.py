@@ -138,7 +138,31 @@ TASKS = {
         "QUEUES": ["default", "high-priority", "low-priority", "sync", "ml"],
         "OPTIONS": {
             "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
-            "RAY_RUNTIME_ENV": {},
+            "RUNTIME_ENV_PROFILE": "project",
+        },
+    },
+    "thin": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {
+            "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
+            "RUNTIME_ENV_PROFILE": "thin",
+        },
+    },
+    "numpy-2-2": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {
+            "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
+            "RUNTIME_ENV_PROFILE": "numpy-2-2",
+        },
+    },
+    "numpy-2-3": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {
+            "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
+            "RUNTIME_ENV_PROFILE": "numpy-2-3",
         },
     },
 }
@@ -147,7 +171,43 @@ TASKS = {
 DJANGO_RAY = {
     # Use "auto" for local Ray, or "ray://host:port" for cluster
     "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
-    "RAY_RUNTIME_ENV": {},
+    "RUNTIME_ENV_PROFILES": {
+        "project": {
+            "working_dir": str(BASE_DIR),
+            "excludes": [".git", ".venv", "__pycache__", "staticfiles"],
+            "pip": [
+                "django>=6.0",
+                "psycopg[binary]>=3.1",
+                "django-ninja>=1.5.1",
+                "whitenoise>=6.6",
+            ],
+            "env_vars": {
+                "DJANGO_RAY_RUNTIME_ENV": "project",
+                "PYTHONPATH": "src",
+            },
+        },
+        "thin": {
+            "extends": "project",
+            "runtime_env": {
+                "env_vars": {"DJANGO_RAY_RUNTIME_ENV": "thin"},
+            },
+        },
+        "numpy-2-2": {
+            "extends": "project",
+            "runtime_env": {
+                "pip": ["numpy==2.2.6"],
+                "env_vars": {"DJANGO_RAY_RUNTIME_ENV": "numpy-2-2"},
+            },
+        },
+        "numpy-2-3": {
+            "extends": "project",
+            "runtime_env": {
+                "pip": ["numpy==2.3.5"],
+                "env_vars": {"DJANGO_RAY_RUNTIME_ENV": "numpy-2-3"},
+            },
+        },
+    },
+    "DEFAULT_RUNTIME_ENV_PROFILE": "project",
     "MAX_TASK_ATTEMPTS": int(os.environ.get("RAY_MAX_RETRIES", "3")),
     "RETRY_BACKOFF_SECONDS": int(os.environ.get("RAY_RETRY_DELAY_SECONDS", "5")),
     # Exceptions that won't trigger auto-retry (use for manual retry testing)

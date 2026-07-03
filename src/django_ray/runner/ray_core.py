@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -85,35 +84,16 @@ class RayCoreRunner(BaseRunner):
         # Extract task name for Ray dashboard visibility
         task_name = callable_path.split(".")[-1] if callable_path else "task"
 
-        # Define the remote function
-        @ray.remote(name=f"django_ray:{task_name}")
-        def execute_django_task(
-            callable_path: str,
-            args_json: str,
-            kwargs_json: str,
-            task_id: int,
-        ) -> str:
-            """Execute a Django task on a Ray worker."""
-            import json
+        from django_ray.runtime.remote import execute_django_task_remote
+        from django_ray.runtime.runtime_env import runtime_env_for_execution
 
-            print(f"[Task {task_id}] Starting: {callable_path}", flush=True)
-
-            from django_ray.runtime.entrypoint import execute_task
-
-            result = execute_task(callable_path, args_json, kwargs_json)
-
-            # Print result for visibility in Ray dashboard
-            parsed = json.loads(result)
-            if parsed.get("success"):
-                print(f"[Task {task_id}] SUCCESS: {parsed.get('result')}", flush=True)
-            else:
-                print(
-                    f"[Task {task_id}] FAILED: {parsed.get('error')}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-            return result
+        # Keep the executor importable at module scope so Ray can reuse worker
+        # processes without serializing a new nested function for every task.
+        runtime_env = runtime_env_for_execution(task_execution)
+        remote_options: dict[str, Any] = {"name": f"django_ray:{task_name}"}
+        if runtime_env.spec:
+            remote_options["runtime_env"] = runtime_env.spec
+        execute_django_task = ray.remote(**remote_options)(execute_django_task_remote)
 
         # Submit to Ray (non-blocking)
         submitted_at = datetime.now(UTC)

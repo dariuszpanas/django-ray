@@ -44,6 +44,9 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "callable_path",
         "ray_job_id_display",
         "ray_address",
+        "runtime_env_profile",
+        "runtime_env_json",
+        "runtime_env_hash",
         "created_at",
         "started_at",
         "finished_at",
@@ -52,6 +55,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "kwargs_json",
         "result_data",
         "result_reference",
+        "progress_data",
         "error_message",
         "error_traceback",
     ]
@@ -72,13 +76,26 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         (
             "Result",
             {
-                "fields": ("result_data", "result_reference", "error_message", "error_traceback"),
+                "fields": (
+                    "result_data",
+                    "result_reference",
+                    "progress_data",
+                    "error_message",
+                    "error_traceback",
+                ),
             },
         ),
         (
             "Ray Execution",
             {
-                "fields": ("ray_job_id_display", "ray_address", "claimed_by_worker"),
+                "fields": (
+                    "ray_job_id_display",
+                    "ray_address",
+                    "claimed_by_worker",
+                    "runtime_env_profile",
+                    "runtime_env_hash",
+                    "runtime_env_json",
+                ),
                 "description": "Ray Job ID is only available for Ray Job API mode.",
             },
         ),
@@ -193,6 +210,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             state=TaskState.QUEUED,
             attempt_number=0,
             result_data=None,
+            progress_data=None,
             error_message=None,
             error_traceback=None,
             started_at=None,

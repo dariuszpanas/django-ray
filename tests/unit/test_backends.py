@@ -40,6 +40,42 @@ class TestRayTaskBackend:
         assert execution.state == TaskState.QUEUED
         assert json.loads(execution.args_json) == [2, 3]
         assert json.loads(execution.kwargs_json) == {}
+        assert json.loads(execution.runtime_env_json) == {}
+        assert len(execution.runtime_env_hash) == 64
+
+    def test_enqueue_snapshots_named_runtime_env_profile(self, settings) -> None:
+        from testproject.tasks import add_numbers
+
+        settings.DJANGO_RAY = {
+            "RAY_ADDRESS": "auto",
+            "RUNTIME_ENV_PROFILES": {
+                "numpy": {
+                    "pip": ["numpy==2.3.5"],
+                    "env_vars": {"DJANGO_RAY_RUNTIME_ENV": "numpy"},
+                }
+            },
+        }
+        backend = RayTaskBackend(
+            "numpy",
+            {
+                "QUEUES": ["default"],
+                "OPTIONS": {
+                    "RAY_ADDRESS": "auto",
+                    "RUNTIME_ENV_PROFILE": "numpy",
+                },
+            },
+        )
+
+        result = backend.enqueue(
+            add_numbers.using(queue_name="default"),
+            args=(2, 3),
+            kwargs={},
+        )
+        execution = RayTaskExecution.objects.get(task_id=result.id)
+
+        assert execution.runtime_env_profile == "numpy"
+        assert json.loads(execution.runtime_env_json)["pip"] == ["numpy==2.3.5"]
+        assert len(execution.runtime_env_hash) == 64
 
     def test_get_result_parses_inline_success_error_and_worker_metadata(self) -> None:
         execution = RayTaskExecution.objects.create(

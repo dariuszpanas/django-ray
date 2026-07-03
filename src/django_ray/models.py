@@ -67,6 +67,22 @@ class RayTaskExecution(models.Model):
         blank=True,
         help_text="Ray cluster address used",
     )
+    runtime_env_profile = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        help_text="Named RuntimeEnv profile selected when this task was enqueued",
+    )
+    runtime_env_json = models.TextField(
+        default="{}",
+        help_text="Immutable JSON snapshot of the Ray RuntimeEnv used for this task",
+    )
+    runtime_env_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        db_index=True,
+        help_text="SHA-256 identity of the RuntimeEnv snapshot",
+    )
 
     # Timing
     created_at = models.DateTimeField(
@@ -126,6 +142,11 @@ class RayTaskExecution(models.Model):
         null=True,
         blank=True,
         help_text="Reference to external result storage",
+    )
+    progress_data = models.TextField(
+        null=True,
+        blank=True,
+        help_text="JSON workflow progress snapshot for the durable outer task",
     )
 
     # Error tracking

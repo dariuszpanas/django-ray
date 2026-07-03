@@ -36,12 +36,77 @@ from django_ray.runtime.distributed import (
     parallel_map,
     parallel_starmap,
 )
+from testproject.apps.cluster_tasks.workflows import (
+    inspect_runtime_environment,
+    run_complex_branch_workflow,
+    run_cpu_fanout_workflow,
+    run_runtime_env_cache_benchmark,
+)
 
 
 def _process_single_item(item: Any) -> dict[str, Any]:
     """Process a single item (runs on Ray worker)."""
     item_hash = hashlib.md5(str(item).encode()).hexdigest()[:8]
     return {"original": item, "hash": item_hash}
+
+
+@task(queue_name="default")
+def workflow_fanout_benchmark(
+    num_items: int = 8,
+    seconds_per_item: float = 0.25,
+) -> dict[str, Any]:
+    """Run a dynamic Ray-native fan-out behind one durable Django task."""
+    if not 1 <= num_items <= 100:
+        raise ValueError("num_items must be between 1 and 100")
+    if not 0.01 <= seconds_per_item <= 10:
+        raise ValueError("seconds_per_item must be between 0.01 and 10")
+
+    return run_cpu_fanout_workflow(num_items, seconds_per_item, use_ray=True)
+
+
+@task(queue_name="default")
+def complex_workflow_benchmark(
+    fast_items: int = 8,
+    slow_items: int = 4,
+    fast_seconds: float = 0.02,
+    slow_seconds: float = 0.5,
+) -> dict[str, Any]:
+    """Run nested fast and slow workflow branches behind one durable task."""
+    if not 1 <= fast_items <= 100 or not 1 <= slow_items <= 100:
+        raise ValueError("branch item counts must be between 1 and 100")
+    if not 0.01 <= fast_seconds <= 10 or not 0.01 <= slow_seconds <= 10:
+        raise ValueError("branch durations must be between 0.01 and 10")
+
+    return run_complex_branch_workflow(
+        fast_items,
+        slow_items,
+        fast_seconds,
+        slow_seconds,
+        use_ray=True,
+    )
+
+
+@task(queue_name="default")
+def runtime_env_probe(package: str | None = None) -> dict[str, Any]:
+    """Inspect the selected outer task RuntimeEnv."""
+    return inspect_runtime_environment(package)
+
+
+@task(queue_name="default")
+def runtime_env_benchmark(
+    profile: str = "thin",
+    repeats: int = 2,
+    package: str | None = None,
+) -> dict[str, Any]:
+    """Compare the first and cached launch of a workflow leaf RuntimeEnv."""
+    if not 2 <= repeats <= 10:
+        raise ValueError("repeats must be between 2 and 10")
+    return run_runtime_env_cache_benchmark(
+        profile,
+        repeats=repeats,
+        package=package,
+        use_ray=True,
+    )
 
 
 @task(queue_name="default")

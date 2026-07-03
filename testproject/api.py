@@ -6,6 +6,7 @@ Tasks are defined using @task decorator and enqueued using .enqueue().
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Literal
 
@@ -69,6 +70,9 @@ class TaskExecutionSchema(Schema):
     started_at: datetime | None
     finished_at: datetime | None
     result_data: str | None
+    progress_data: str | None
+    runtime_env_profile: str | None
+    runtime_env_hash: str
     error_message: str | None
 
 
@@ -114,6 +118,33 @@ class StatsSchema(Schema):
     failed: int
     cancelled: int
     lost: int
+
+
+class WorkflowResultSchema(Schema):
+    """Status and result for a Ray-native workflow task."""
+
+    task_id: str
+    state: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    progress: dict | None
+    result: dict | None
+    error: str | None
+
+
+class RuntimeEnvResultSchema(Schema):
+    """Durable task state plus its immutable RuntimeEnv identity."""
+
+    task_id: str
+    state: str
+    runtime_env_profile: str | None
+    runtime_env_hash: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    result: dict | None
+    error: str | None
 
 
 # ============================================================================
@@ -505,6 +536,7 @@ def reset_executions(
         ray_job_id=None,
         error_message=None,
         error_traceback=None,
+        progress_data=None,
     )
 
     return {"message": f"Reset {count} execution(s) to QUEUED state"}
@@ -554,6 +586,7 @@ def retry_execution(request, execution_id: int):
         task.error_traceback = None
         task.ray_job_id = None
         task.claimed_by_worker = None
+        task.progress_data = None
         task.save()
 
     return task
@@ -912,6 +945,192 @@ def cluster_cpu_benchmark(request, num_items: int = 10, seconds_per_item: float 
         "finished_at": result.finished_at,
         "args": result.args,
         "kwargs": result.kwargs,
+    }
+
+
+@api.post("/cluster/workflow-benchmark", response=TaskResultSchema, tags=["Workflows"])
+def cluster_workflow_benchmark(
+    request,
+    num_items: int = 8,
+    seconds_per_item: float = 0.25,
+):
+    """Enqueue one durable task that fans out Ray-native workflow leaves.
+
+    Poll ``GET /api/cluster/workflow-benchmark/{task_id}`` for the result.
+    Only the outer task creates a database execution row.
+    """
+    result = cluster_tasks.workflow_fanout_benchmark.enqueue(
+        num_items=num_items,
+        seconds_per_item=seconds_per_item,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.get(
+    "/cluster/workflow-benchmark/{task_id}",
+    response=WorkflowResultSchema,
+    tags=["Workflows"],
+)
+def get_cluster_workflow_benchmark(request, task_id: str):
+    """Return workflow state, timing summary, leaf details, or failure."""
+    execution = get_object_or_404(
+        RayTaskExecution,
+        task_id=task_id,
+        callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
+    )
+    result = json.loads(execution.result_data) if execution.result_data else None
+    progress = json.loads(execution.progress_data) if execution.progress_data else None
+    return {
+        "task_id": execution.task_id,
+        "state": execution.state,
+        "created_at": execution.created_at,
+        "started_at": execution.started_at,
+        "finished_at": execution.finished_at,
+        "progress": progress,
+        "result": result,
+        "error": execution.error_message,
+    }
+
+
+@api.post("/cluster/complex-workflow", response=TaskResultSchema, tags=["Workflows"])
+def cluster_complex_workflow(
+    request,
+    fast_items: int = 8,
+    slow_items: int = 4,
+    fast_seconds: float = 0.02,
+    slow_seconds: float = 0.5,
+):
+    """Run nested fast and slow branches to demonstrate groups and chains."""
+    result = cluster_tasks.complex_workflow_benchmark.enqueue(
+        fast_items=fast_items,
+        slow_items=slow_items,
+        fast_seconds=fast_seconds,
+        slow_seconds=slow_seconds,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.get(
+    "/cluster/complex-workflow/{task_id}",
+    response=WorkflowResultSchema,
+    tags=["Workflows"],
+)
+def get_cluster_complex_workflow(request, task_id: str):
+    """Return live progress and results for the nested workflow example."""
+    execution = get_object_or_404(
+        RayTaskExecution,
+        task_id=task_id,
+        callable_path=("testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"),
+    )
+    return {
+        "task_id": execution.task_id,
+        "state": execution.state,
+        "created_at": execution.created_at,
+        "started_at": execution.started_at,
+        "finished_at": execution.finished_at,
+        "progress": (json.loads(execution.progress_data) if execution.progress_data else None),
+        "result": json.loads(execution.result_data) if execution.result_data else None,
+        "error": execution.error_message,
+    }
+
+
+_RUNTIME_ENV_BACKENDS = {
+    "project": "default",
+    "thin": "thin",
+    "numpy-2-2": "numpy-2-2",
+    "numpy-2-3": "numpy-2-3",
+}
+
+
+@api.post("/cluster/runtime-env/probe", response=TaskResultSchema, tags=["Runtime Environments"])
+def cluster_runtime_env_probe(
+    request,
+    profile: Literal["project", "thin", "numpy-2-2", "numpy-2-3"] = "thin",
+    package: str | None = None,
+):
+    """Enqueue a task through a backend bound to the selected RuntimeEnv profile."""
+    task_obj = cluster_tasks.runtime_env_probe.using(backend=_RUNTIME_ENV_BACKENDS[profile])
+    result = task_obj.enqueue(package=package)
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post(
+    "/cluster/runtime-env/benchmark",
+    response=TaskResultSchema,
+    tags=["Runtime Environments"],
+)
+def cluster_runtime_env_benchmark(
+    request,
+    profile: Literal["thin", "numpy-2-2", "numpy-2-3"] = "thin",
+    repeats: int = 2,
+    package: str | None = None,
+):
+    """Time repeated workflow leaves to compare cold and cached environment setup."""
+    result = cluster_tasks.runtime_env_benchmark.enqueue(
+        profile=profile,
+        repeats=repeats,
+        package=package,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.get(
+    "/cluster/runtime-env/{task_id}",
+    response=RuntimeEnvResultSchema,
+    tags=["Runtime Environments"],
+)
+def get_cluster_runtime_env_result(request, task_id: str):
+    """Return a probe or benchmark result with the durable environment identity."""
+    execution = get_object_or_404(
+        RayTaskExecution,
+        task_id=task_id,
+        callable_path__in=[
+            "testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+            "testproject.apps.cluster_tasks.tasks.runtime_env_benchmark",
+        ],
+    )
+    return {
+        "task_id": execution.task_id,
+        "state": execution.state,
+        "runtime_env_profile": execution.runtime_env_profile,
+        "runtime_env_hash": execution.runtime_env_hash,
+        "created_at": execution.created_at,
+        "started_at": execution.started_at,
+        "finished_at": execution.finished_at,
+        "result": json.loads(execution.result_data) if execution.result_data else None,
+        "error": execution.error_message,
     }
 
 

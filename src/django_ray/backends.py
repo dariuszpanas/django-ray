@@ -39,6 +39,7 @@ from django.tasks.exceptions import TaskResultDoesNotExist
 
 from django_ray.logging import get_backend_logger
 from django_ray.models import RayTaskExecution, TaskState
+from django_ray.runtime.runtime_env import resolve_runtime_env_profile
 from django_ray.runtime.serialization import serialize_args
 
 if TYPE_CHECKING:
@@ -95,7 +96,10 @@ class RayTaskBackend(BaseTaskBackend):
         # Extract Ray-specific options
         options = params.get("OPTIONS", {})
         self.ray_address = options.get("RAY_ADDRESS", "auto")
-        self.ray_runtime_env = options.get("RAY_RUNTIME_ENV", {})
+        self.runtime_env_profile = options.get("RUNTIME_ENV_PROFILE")
+        self.inline_runtime_env = (
+            options["RAY_RUNTIME_ENV"] if "RAY_RUNTIME_ENV" in options else None
+        )
 
     def enqueue(
         self,
@@ -126,6 +130,10 @@ class RayTaskBackend(BaseTaskBackend):
         # Serialize arguments
         args_json = serialize_args(list(args))
         kwargs_json = serialize_args(kwargs)
+        runtime_env = resolve_runtime_env_profile(
+            self.runtime_env_profile,
+            inline_spec=self.inline_runtime_env,
+        )
 
         # Create the task execution record
         now = datetime.now(UTC)
@@ -138,6 +146,9 @@ class RayTaskBackend(BaseTaskBackend):
             kwargs_json=kwargs_json,
             run_after=task.run_after,
             ray_address=self.ray_address,
+            runtime_env_profile=runtime_env.profile,
+            runtime_env_json=runtime_env.serialized,
+            runtime_env_hash=runtime_env.digest,
             created_at=now,
         )
 
@@ -148,6 +159,8 @@ class RayTaskBackend(BaseTaskBackend):
                 "callable_path": callable_path,
                 "queue_name": task.queue_name,
                 "run_after": str(task.run_after) if task.run_after else None,
+                "runtime_env_profile": runtime_env.profile,
+                "runtime_env_hash": runtime_env.digest,
             },
         )
 
