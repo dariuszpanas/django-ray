@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import django
+import pytest
 from django.conf import settings
 
 # Add testproject to path so it can be imported
@@ -74,3 +75,22 @@ def pytest_configure(config: object) -> None:
         )
 
     django.setup()
+
+
+@pytest.fixture(autouse=True)
+def _clear_django_ray_remote_caches():
+    try:
+        import django_ray.runner.ray_core as ray_core
+
+        ray_core._execute_django_task_remote_cached = None
+    except ImportError:
+        pass
+
+    try:
+        import django_ray.workflows as workflows
+
+        workflows._execute_workflow_step_remote_cached = None
+        workflows._collect_workflow_results_remote_cached = None
+        workflows._workflow_progress_actor_cached = None
+    except ImportError:
+        pass

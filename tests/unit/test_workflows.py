@@ -116,6 +116,7 @@ class _FakeRay:
         self.get_calls = 0
         self.options_seen: list[dict[str, Any]] = []
         self.init_calls: list[dict[str, Any]] = []
+        self.remote_calls: list[dict[str, Any]] = []
 
     def is_initialized(self) -> bool:
         return self.initialized
@@ -124,8 +125,34 @@ class _FakeRay:
         self.init_calls.append(kwargs)
         self.initialized = True
 
-    def remote(self, function: Any) -> _RemoteFunction:
-        return _RemoteFunction(self, function)
+    def remote(self, *args, **kwargs: Any):
+        self.remote_calls.append(kwargs)
+
+        def _decorator(fn):
+            fake = self
+
+            class _RemoteCallable:
+                @staticmethod
+                def remote(*args: Any, **kw: Any) -> _Ref:
+                    resolved_args = tuple(
+                        arg.value if isinstance(arg, _Ref) else arg for arg in args
+                    )
+                    resolved_kwargs = {
+                        key: value.value if isinstance(value, _Ref) else value
+                        for key, value in kw.items()
+                    }
+                    fake.submissions += 1
+                    return _Ref(fn(*resolved_args, **resolved_kwargs))
+
+                def options(self, **kw: Any):
+                    fake.options_seen.append(kw)
+                    return self
+
+            return _RemoteCallable()
+
+        if args and callable(args[0]):
+            return _decorator(args[0])
+        return _decorator
 
     def get(self, ref: _Ref) -> Any:
         self.get_calls += 1

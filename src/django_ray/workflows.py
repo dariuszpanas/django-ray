@@ -135,20 +135,48 @@ class _LocalExecutor(_Executor):
         return value
 
 
-class _RayExecutor(_Executor):
-    def __init__(self) -> None:
+_execute_workflow_step_remote_cached = None
+_collect_workflow_results_remote_cached = None
+_workflow_progress_actor_cached = None
+
+
+def _get_cached_workflow_remotes() -> tuple[Any, Any, Any]:
+    global _execute_workflow_step_remote_cached
+    global _collect_workflow_results_remote_cached
+    global _workflow_progress_actor_cached
+
+    if _execute_workflow_step_remote_cached is None:
         import ray
 
-        from django_ray.runtime.context import get_current_task_context
         from django_ray.runtime.remote import (
             WorkflowProgressActor,
             collect_workflow_results_remote,
             execute_workflow_step_remote,
         )
 
+        _execute_workflow_step_remote_cached = ray.remote(execute_workflow_step_remote)
+        _collect_workflow_results_remote_cached = ray.remote(collect_workflow_results_remote)
+        _workflow_progress_actor_cached = ray.remote(num_cpus=0)(WorkflowProgressActor)
+
+    return (
+        _execute_workflow_step_remote_cached,
+        _collect_workflow_results_remote_cached,
+        _workflow_progress_actor_cached,
+    )
+
+
+class _RayExecutor(_Executor):
+    def __init__(self) -> None:
+        import ray
+
+        from django_ray.runtime.context import get_current_task_context
+
         self.ray = ray
-        self.remote_step = ray.remote(execute_workflow_step_remote)
-        self.remote_collect = ray.remote(collect_workflow_results_remote)
+
+        remote_step, remote_collect, progress_actor_cls = _get_cached_workflow_remotes()
+        self.remote_step = remote_step
+        self.remote_collect = remote_collect
+
         self.task_context = get_current_task_context()
         self.task_execution_pk = (
             self.task_context.task_pk if self.task_context is not None else None
@@ -156,9 +184,7 @@ class _RayExecutor(_Executor):
         self.progress_actor = None
         self.last_progress_revision = -1
         if self.task_execution_pk is not None:
-            self.progress_actor = ray.remote(num_cpus=0)(WorkflowProgressActor).remote(
-                self.task_execution_pk
-            )
+            self.progress_actor = progress_actor_cls.remote(self.task_execution_pk)
 
     def submit_step(
         self,
@@ -265,7 +291,15 @@ class _RayExecutor(_Executor):
         ready, _ = self.ray.wait([snapshot_ref], timeout=0.5)
         if not ready:
             return None
-        snapshot = self.ray.get(ready[0])
+
+        try:
+            snapshot = self.ray.get(ready[0])
+        except Exception:
+            # If the actor died (e.g. OOM), disable further tracking attempts
+            # so we don't crash the workflow or repeatedly timeout.
+            self.progress_actor = None
+            return None
+
         if failed:
             snapshot["state"] = "FAILED"
         revision = int(snapshot["revision"])

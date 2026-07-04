@@ -26,6 +26,27 @@ class RayCoreHandle:
     ray_task_id: str = ""  # The task's Ray ID (e.g., "67a2e8cfa5a06db3ffff...")
 
 
+# Global remote functions to prevent Ray GCS memory leaks
+# Ray caches remote function definitions, so dynamically decorating functions
+# inside hot paths like submit_task or _RayExecutor.__init__ causes OOMs.
+
+_execute_django_task_remote_cached = None
+_execute_workflow_step_remote_cached = None
+_collect_workflow_results_remote_cached = None
+_workflow_progress_actor_cached = None
+
+
+def _get_remote_execute_django_task() -> Any:
+    global _execute_django_task_remote_cached
+    if _execute_django_task_remote_cached is None:
+        import ray
+
+        from django_ray.runtime.remote import execute_django_task_remote
+
+        _execute_django_task_remote_cached = ray.remote(execute_django_task_remote)
+    return _execute_django_task_remote_cached
+
+
 class RayCoreRunner(BaseRunner):
     """Runner that uses Ray Core remote functions.
 
@@ -84,7 +105,6 @@ class RayCoreRunner(BaseRunner):
         # Extract task name for Ray dashboard visibility
         task_name = callable_path.split(".")[-1] if callable_path else "task"
 
-        from django_ray.runtime.remote import execute_django_task_remote
         from django_ray.runtime.runtime_env import (
             prepare_runtime_env_for_ray_core,
             runtime_env_for_execution,
@@ -102,10 +122,12 @@ class RayCoreRunner(BaseRunner):
             import django_ray.runtime.remote as remote_module
 
             cloudpickle.register_pickle_by_value(remote_module)
+
         remote_options: dict[str, Any] = {"name": f"django_ray:{task_name}"}
         if submitted_runtime_env:
             remote_options["runtime_env"] = submitted_runtime_env
-        execute_django_task = ray.remote(**remote_options)(execute_django_task_remote)
+
+        execute_django_task = _get_remote_execute_django_task().options(**remote_options)
 
         # Submit to Ray (non-blocking)
         submitted_at = datetime.now(UTC)
@@ -114,7 +136,7 @@ class RayCoreRunner(BaseRunner):
             args_json,
             kwargs_json,
             task_execution.pk,
-            runtime_env.profile,  # ty: ignore[too-many-positional-arguments]
+            runtime_env.profile,
             runtime_env.digest,
         )
 

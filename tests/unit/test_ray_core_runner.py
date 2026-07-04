@@ -20,9 +20,13 @@ class _FakeObjectRef:
         return self._hex_value
 
 
+class _FakeExceptions:
+    RayTaskError = RuntimeError
+
+
 class _FakeRay:
-    def __init__(self) -> None:
-        self.initialized = True
+    def __init__(self, *, initialized: bool = True) -> None:
+        self.initialized = initialized
         self.init_calls: list[dict[str, Any]] = []
         self.remote_calls: list[dict[str, Any]] = []
         self.runtime_job_id = "02000000"
@@ -33,16 +37,16 @@ class _FakeRay:
         self.values: dict[_FakeObjectRef, Any] = {}
         self.ready_refs: set[_FakeObjectRef] = set()
         self.cancelled: list[tuple[_FakeObjectRef, bool]] = []
-        self.exceptions = SimpleNamespace(RayTaskError=RuntimeError)
-
-    def is_initialized(self) -> bool:
-        return self.initialized
+        self.exceptions = _FakeExceptions()
 
     def init(self, **kwargs: Any) -> None:
         self.init_calls.append(kwargs)
         self.initialized = True
 
-    def remote(self, **kwargs: Any):
+    def is_initialized(self) -> bool:
+        return self.initialized
+
+    def remote(self, *args, **kwargs: Any):
         self.remote_calls.append(kwargs)
 
         def _decorator(fn):
@@ -56,8 +60,14 @@ class _FakeRay:
                     fake.values[ref] = value
                     return ref
 
+                def options(self, **kw: Any):
+                    fake.remote_calls.append(kw)
+                    return self
+
             return _RemoteCallable()
 
+        if args and callable(args[0]):
+            return _decorator(args[0])
         return _decorator
 
     def get_runtime_context(self) -> Any:
@@ -87,6 +97,7 @@ class _FakeRay:
 def _install_fake_ray(monkeypatch) -> _FakeRay:
     fake = _FakeRay()
     monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setitem(sys.modules, "ray.exceptions", fake.exceptions)
     return fake
 
 
