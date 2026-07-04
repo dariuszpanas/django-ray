@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from django.db import connection
@@ -319,6 +320,70 @@ class TestTasksAPI:
         assert data["runtime_env_profile"] == "numpy-2-3"
         assert data["runtime_env_hash"] == "a" * 64
         assert data["result"]["package_version"] == "2.3.5"
+
+    def test_get_workflow_benchmark_resolves_backend_result(self, client, monkeypatch):
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-result-002",
+            callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            runtime_env_profile="project",
+            runtime_env_hash="b" * 64,
+            result_data=None,
+            progress_data='{"state": "SUCCEEDED", "total_nodes": 1, "completed_nodes": 1}',
+        )
+
+        class _Backend:
+            def __init__(self, value):
+                self.value = value
+
+            def get_result(self, task_id):
+                assert task_id == "workflow-result-002"
+                return SimpleNamespace(return_value=self.value)
+
+        monkeypatch.setattr(
+            "testproject.api.task_backends",
+            {"default": _Backend({"leaf_tasks": 99})},
+        )
+
+        response = client.get(f"/api/cluster/workflow-benchmark/{execution.task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["result"]["leaf_tasks"] == 99
+
+    def test_get_runtime_env_result_resolves_profile_backend_result(self, client, monkeypatch):
+        execution = RayTaskExecution.objects.create(
+            task_id="runtime-env-result-002",
+            callable_path=("testproject.apps.cluster_tasks.tasks.runtime_env_probe"),
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            runtime_env_profile="numpy-2-3",
+            runtime_env_hash="c" * 64,
+            result_data=None,
+        )
+
+        class _Backend:
+            def __init__(self, value):
+                self.value = value
+
+            def get_result(self, task_id):
+                assert task_id == "runtime-env-result-002"
+                return SimpleNamespace(return_value=self.value)
+
+        monkeypatch.setattr(
+            "testproject.api.task_backends",
+            {
+                "default": _Backend({"source": "default"}),
+                "numpy-2-3": _Backend({"source": "numpy-2-3"}),
+            },
+        )
+
+        response = client.get(f"/api/cluster/runtime-env/{execution.task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["result"]["source"] == "numpy-2-3"
 
     def test_get_workflow_graph_returns_ui_ready_nodes_and_edges(self, client):
         execution = RayTaskExecution.objects.create(

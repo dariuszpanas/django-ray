@@ -11,6 +11,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,6 +58,14 @@ def _callable_path(callable_obj: Callable[..., Any] | str) -> str:
 def _json_safe(value: Any) -> Any:
     """Make scheduling metadata safe for the durable progress snapshot."""
     return json.loads(json.dumps(value, default=str))
+
+
+def _clone_runtime_env(
+    runtime_env: str | dict[str, Any] | None,
+) -> str | dict[str, Any] | None:
+    if isinstance(runtime_env, dict):
+        return deepcopy(runtime_env)
+    return runtime_env
 
 
 def report_progress(
@@ -250,7 +259,13 @@ class _RayExecutor(_Executor):
         if self.progress_actor is None or self.task_execution_pk is None:
             return None
 
-        snapshot = self.ray.get(self.progress_actor.snapshot.remote())
+        # Avoid blocking the caller indefinitely if the snapshot actor is unhealthy
+        # or transiently unavailable under load.
+        snapshot_ref = self.progress_actor.snapshot.remote()
+        ready, _ = self.ray.wait([snapshot_ref], timeout=0.5)
+        if not ready:
+            return None
+        snapshot = self.ray.get(ready[0])
         if failed:
             snapshot["state"] = "FAILED"
         revision = int(snapshot["revision"])
@@ -354,7 +369,7 @@ class Step(WorkflowSignature):
             bound_kwargs=dict(self.bound_kwargs),
             bootstrap_django=self.bootstrap_django,
             ray_options={**self.ray_options, **ray_options},
-            runtime_env=self.runtime_env,
+            runtime_env=_clone_runtime_env(self.runtime_env),
         )
 
     def with_runtime_env(self, runtime_env: str | dict[str, Any] | None) -> Step:
@@ -365,7 +380,7 @@ class Step(WorkflowSignature):
             bound_kwargs=dict(self.bound_kwargs),
             bootstrap_django=self.bootstrap_django,
             ray_options=dict(self.ray_options),
-            runtime_env=runtime_env,
+            runtime_env=_clone_runtime_env(runtime_env),
         )
 
 
@@ -501,7 +516,7 @@ def step(
         bound_kwargs=bound_kwargs,
         bootstrap_django=django,
         ray_options={} if ray_options is None else dict(ray_options),
-        runtime_env=runtime_env,
+        runtime_env=_clone_runtime_env(runtime_env),
     )
 
 

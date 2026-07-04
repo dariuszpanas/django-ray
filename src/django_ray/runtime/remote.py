@@ -99,10 +99,10 @@ def _ray_execution_metadata() -> dict[str, Any]:
 
         context = ray.get_runtime_context()
         return {
-            "ray_task_id": context.get_task_id(),
-            "ray_job_id": context.get_job_id(),
-            "ray_node_id": context.get_node_id(),
-            "ray_worker_id": context.get_worker_id(),
+            "ray_task_id": str(context.get_task_id()),
+            "ray_job_id": str(context.get_job_id()),
+            "ray_node_id": str(context.get_node_id()),
+            "ray_worker_id": str(context.get_worker_id()),
             "assigned_resources": context.get_assigned_resources(),
         }
     except (AttributeError, RuntimeError, AssertionError):
@@ -161,6 +161,9 @@ class WorkflowProgressActor:
         if node_id in self.nodes:
             node = self.nodes[node_id]
             changed = False
+            if label is not None and node["label"] != label:
+                node["label"] = label
+                changed = True
             if callable_path is not None and node["callable_path"] != callable_path:
                 node["callable_path"] = callable_path
                 changed = True

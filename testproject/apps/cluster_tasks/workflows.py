@@ -34,6 +34,7 @@ def run_cpu_work_item(item: dict[str, Any]) -> dict[str, Any]:
     """Burn CPU for one workflow leaf and report its execution details."""
     item_id = int(item["item_id"])
     duration = float(item["seconds_per_item"])
+    wall_started_at = time.time()
     started_at = time.perf_counter()
     iterations = 0
     next_report = 0.25
@@ -63,7 +64,7 @@ def run_cpu_work_item(item: dict[str, Any]) -> dict[str, Any]:
         "item_id": item_id,
         "iterations": iterations,
         "elapsed_seconds": round(elapsed, 4),
-        "worker_started_at": round(started_at, 6),
+        "worker_started_at": round(wall_started_at, 6),
     }
 
 

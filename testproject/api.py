@@ -14,6 +14,7 @@ from django.db.models import Count
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
+from django.tasks.exceptions import InvalidTaskBackend
 from ninja import NinjaAPI, Schema
 
 from django_ray import __version__ as django_ray_version
@@ -1023,8 +1024,11 @@ def get_cluster_workflow_benchmark(request, task_id: str):
         task_id=task_id,
         callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
     )
-    result = json.loads(execution.result_data) if execution.result_data else None
-    progress = json.loads(execution.progress_data) if execution.progress_data else None
+    result = _result_value_for_execution(execution)
+    try:
+        progress = get_workflow_progress(execution)
+    except WorkflowObservabilityError:
+        progress = None
     return {
         "task_id": execution.task_id,
         "state": execution.state,
@@ -1075,14 +1079,18 @@ def get_cluster_complex_workflow(request, task_id: str):
         task_id=task_id,
         callable_path=("testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"),
     )
+    try:
+        progress = get_workflow_progress(execution)
+    except WorkflowObservabilityError:
+        progress = None
     return {
         "task_id": execution.task_id,
         "state": execution.state,
         "created_at": execution.created_at,
         "started_at": execution.started_at,
         "finished_at": execution.finished_at,
-        "progress": (json.loads(execution.progress_data) if execution.progress_data else None),
-        "result": json.loads(execution.result_data) if execution.result_data else None,
+        "progress": progress,
+        "result": _result_value_for_execution(execution),
         "error": execution.error_message,
     }
 
@@ -1095,7 +1103,10 @@ def get_cluster_complex_workflow(request, task_id: str):
 def get_cluster_workflow_graph(request, task_id: str):
     """Return a versioned node/edge graph suitable for custom tracking UIs."""
     execution = get_object_or_404(RayTaskExecution, task_id=task_id)
-    progress = get_workflow_progress(execution)
+    try:
+        progress = get_workflow_progress(execution)
+    except WorkflowObservabilityError as exc:
+        raise Http404(str(exc)) from exc
     if progress is None:
         raise Http404("Workflow graph is not available yet")
     return {
@@ -1146,7 +1157,7 @@ def get_cluster_workflow_node(
             ray_state = get_ray_task_state(ray_task_id)
             if include_logs:
                 logs = get_ray_task_logs(ray_task_id, tail=tail)
-        except (WorkflowObservabilityError, ValueError) as error:
+        except Exception as error:
             observability_error = str(error)
 
     return {
@@ -1164,6 +1175,24 @@ _RUNTIME_ENV_BACKENDS = {
     "numpy-2-2": "numpy-2-2",
     "numpy-2-3": "numpy-2-3",
 }
+
+
+def _result_backend_alias_for_execution(execution: RayTaskExecution) -> str:
+    profile = execution.runtime_env_profile or "project"
+    return _RUNTIME_ENV_BACKENDS.get(profile, "default")
+
+
+def _result_value_for_execution(execution: RayTaskExecution) -> object:
+    """Resolve durable task return values, including externally stored payloads."""
+    if execution.state != TaskState.SUCCEEDED:
+        return json.loads(execution.result_data) if execution.result_data else None
+
+    backend_alias = _result_backend_alias_for_execution(execution)
+    try:
+        backend = task_backends[backend_alias]
+    except (KeyError, InvalidTaskBackend):
+        backend = task_backends["default"]
+    return backend.get_result(execution.task_id).return_value
 
 
 @api.post("/cluster/runtime-env/probe", response=TaskResultSchema, tags=["Runtime Environments"])
@@ -1237,7 +1266,7 @@ def get_cluster_runtime_env_result(request, task_id: str):
         "created_at": execution.created_at,
         "started_at": execution.started_at,
         "finished_at": execution.finished_at,
-        "result": json.loads(execution.result_data) if execution.result_data else None,
+        "result": _result_value_for_execution(execution),
         "error": execution.error_message,
     }
 

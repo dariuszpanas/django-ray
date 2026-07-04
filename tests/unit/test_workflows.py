@@ -239,6 +239,24 @@ def test_workflow_step_accepts_legacy_runtime_env_ray_option(monkeypatch) -> Non
     )
 
 
+def test_step_defensively_copies_inline_runtime_env() -> None:
+    runtime_env = {"env_vars": {"MODE": "inline"}}
+    signature = step(increment, runtime_env=runtime_env)
+
+    runtime_env["env_vars"]["MODE"] = "mutated"
+
+    assert signature.runtime_env == {"env_vars": {"MODE": "inline"}}
+
+
+def test_with_runtime_env_defensively_copies_inline_runtime_env() -> None:
+    runtime_env = {"env_vars": {"MODE": "inline"}}
+    signature = step(increment).with_runtime_env(runtime_env)
+
+    runtime_env["env_vars"]["MODE"] = "mutated"
+
+    assert signature.runtime_env == {"env_vars": {"MODE": "inline"}}
+
+
 def test_step_can_request_django_bootstrap(monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(
@@ -289,6 +307,7 @@ def test_ray_job_workflow_lazily_initializes_ray(monkeypatch) -> None:
     assert fake_ray.init_calls == [{"address": "auto", "ignore_reinit_error": True}]
 
 
+@pytest.mark.real_ray
 def test_workflow_executes_on_real_ray() -> None:
     import ray
 

@@ -99,8 +99,16 @@ def get_ray_task_state(
         return []
     attempts = result if isinstance(result, list) else [result]
     return [
-        attempt.asdict() if hasattr(attempt, "asdict") else dict(attempt) for attempt in attempts
+        attempt.asdict() if hasattr(attempt, "asdict") else _attempt_to_dict(attempt)
+        for attempt in attempts
     ]
+
+
+def _attempt_to_dict(attempt: Any) -> dict[str, Any]:
+    try:
+        return dict(attempt)
+    except TypeError:
+        return vars(attempt) if hasattr(attempt, "__dict__") else {"raw": str(attempt)}
 
 
 def get_ray_task_logs(
