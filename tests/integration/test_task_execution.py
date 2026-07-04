@@ -188,8 +188,9 @@ class TestModelIntegration:
     def task_execution(self, django_settings_env):
         """Create a RayTaskExecution model instance."""
         import django
+        from django.apps import apps
 
-        if not django.apps.apps.ready:
+        if not apps.ready:
             django.setup()
 
         from django_ray.models import RayTaskExecution, TaskState

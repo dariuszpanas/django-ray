@@ -1,0 +1,40 @@
+# django-ray
+
+> A Django 6 Tasks backend that combines database-backed task durability with Ray
+> execution, Ray-native workflow graphs, RuntimeEnv profiles, and Django admin
+> observability.
+
+Documentation: https://django-ray.readthedocs.io/en/latest/
+Repository: https://github.com/dariuszpanas/django-ray
+
+Important distinction: `src/django_ray/` is the reusable package. `testproject/` and
+its HTTP API are examples and are not installed as public django-ray APIs.
+
+## Start here
+
+- [Getting started](https://django-ray.readthedocs.io/en/latest/getting-started/)
+- [Performance](https://django-ray.readthedocs.io/en/latest/performance/)
+- [Compatibility](https://django-ray.readthedocs.io/en/latest/compatibility/)
+- [Tasks](https://django-ray.readthedocs.io/en/latest/tasks/)
+- [Ray-native workflows](https://django-ray.readthedocs.io/en/latest/workflows/)
+- [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/)
+
+## Operations and reference
+
+- [Worker modes](https://django-ray.readthedocs.io/en/latest/worker-modes/)
+- [Queues](https://django-ray.readthedocs.io/en/latest/queues/)
+- [Configuration](https://django-ray.readthedocs.io/en/latest/configuration/)
+- [Settings reference](https://django-ray.readthedocs.io/en/latest/reference/settings/)
+- [API and UI integration](https://django-ray.readthedocs.io/en/latest/reference/api/)
+- [Kubernetes](https://django-ray.readthedocs.io/en/latest/deployment/kubernetes/)
+- [Operator runbook](https://django-ray.readthedocs.io/en/latest/runbook/)
+- [Architecture](https://django-ray.readthedocs.io/en/latest/architecture/)
+
+## Key semantics
+
+- One workflow is one durable `RayTaskExecution`; internal leaves are Ray tasks.
+- `enqueue()` returns a snapshot; use `task_backends[alias].get_result(id)` to refresh.
+- Per-task numeric priority is not supported.
+- Workflow callables should be importable module-level functions.
+- Ray Client RuntimeEnv code requires a remote/shared URI.
+- RuntimeEnv is not a tenant security boundary.

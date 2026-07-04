@@ -1,0 +1,63 @@
+# django-ray
+
+> A Django 6 Tasks backend that combines database-backed task durability with Ray
+> execution, Ray-native workflow graphs, RuntimeEnv profiles, and Django admin
+> observability.
+
+Documentation: https://django-ray.readthedocs.io/en/latest/
+Repository: https://github.com/dariuszpanas/django-ray
+
+Important distinction: `src/django_ray/` is the reusable package. `testproject/` and
+its HTTP API are examples and are not installed as public django-ray APIs.
+
+## Start here
+
+- [Getting started](https://django-ray.readthedocs.io/en/latest/getting-started/):
+  complete backend configuration, task definition, worker startup, and result lookup.
+- [Performance](https://django-ray.readthedocs.io/en/latest/performance/): choose
+  durable task boundaries, Ray Core versus Ray Job, batching, and RuntimeEnv strategy.
+- [Compatibility](https://django-ray.readthedocs.io/en/latest/compatibility/):
+  supported Python, Django, Ray, CI, and platform policy.
+- [Tasks](https://django-ray.readthedocs.io/en/latest/tasks/): Django task arguments,
+  results, errors, batching, and distributed utilities.
+- [Ray-native workflows](https://django-ray.readthedocs.io/en/latest/workflows/):
+  `step`, `chain`, `group`, `map_step`, progress, and graph semantics.
+- [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
+  named profiles, code delivery, cache behavior, and security boundaries.
+
+## Operations and reference
+
+- [Worker modes](https://django-ray.readthedocs.io/en/latest/worker-modes/)
+- [Queues](https://django-ray.readthedocs.io/en/latest/queues/)
+- [Configuration](https://django-ray.readthedocs.io/en/latest/configuration/)
+- [Settings reference](https://django-ray.readthedocs.io/en/latest/reference/settings/)
+- [API and UI integration](https://django-ray.readthedocs.io/en/latest/reference/api/)
+- [Kubernetes](https://django-ray.readthedocs.io/en/latest/deployment/kubernetes/)
+- [Operator runbook](https://django-ray.readthedocs.io/en/latest/runbook/)
+- [Architecture](https://django-ray.readthedocs.io/en/latest/architecture/)
+
+## Source map
+
+- `src/django_ray/backends.py`: Django Tasks backend and result reconstruction.
+- `src/django_ray/management/commands/django_ray_worker.py`: claims, leases, retries,
+  mode selection, and reconciliation.
+- `src/django_ray/workflows.py`: workflow signature construction and execution.
+- `src/django_ray/runtime/runtime_env.py`: profile validation, inheritance, hashing,
+  and local-path preparation.
+- `src/django_ray/runner/ray_core.py`: low-overhead Ray Core submission.
+- `src/django_ray/runner/ray_job.py`: Ray Job submission and reconciliation.
+- `src/django_ray/observability.py`: graph, Ray state, and bounded log helpers.
+- `testproject/apps/cluster_tasks/`: executable workflow and RuntimeEnv examples.
+
+## Semantic constraints
+
+- One workflow is one durable `RayTaskExecution`; internal leaves are not independent
+  Django tasks.
+- The result returned by `enqueue()` is a snapshot. Fetch current state with
+  `task_backends[alias].get_result(task_id)`.
+- Per-task numeric priority is not supported. Conventional queue names influence claim
+  order when one worker consumes multiple queues.
+- Ray-native callables should be importable module-level functions.
+- Ray Client task-level RuntimeEnv code must use a remote/shared URI, not a Django-pod
+  local directory.
+- RuntimeEnv is dependency isolation inside one trust boundary, not tenant isolation.

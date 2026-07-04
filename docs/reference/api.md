@@ -53,22 +53,26 @@ When the testproject server is running:
 To add task management endpoints to your project, query the django-ray models directly:
 
 ```python
+from django.db.models import Count
+
 from django_ray.models import RayTaskExecution, TaskState
 
 # List executions
 executions = RayTaskExecution.objects.filter(state=TaskState.QUEUED)
 
 # Get stats
-from django.db.models import Count
-stats = RayTaskExecution.objects.values('state').annotate(count=Count('id'))
+stats = RayTaskExecution.objects.values("state").annotate(count=Count("id"))
 
-# Cancel a task
-execution = RayTaskExecution.objects.get(pk=execution_id)
-if execution.state == TaskState.QUEUED:
-    execution.state = TaskState.CANCELLED
-elif execution.state == TaskState.RUNNING:
-    execution.state = TaskState.CANCELLING
-execution.save(update_fields=["state"])
+
+def request_cancellation(execution_id: int) -> None:
+    execution = RayTaskExecution.objects.get(pk=execution_id)
+    if execution.state == TaskState.QUEUED:
+        execution.state = TaskState.CANCELLED
+    elif execution.state == TaskState.RUNNING:
+        execution.state = TaskState.CANCELLING
+    else:
+        return
+    execution.save(update_fields=["state"])
 ```
 
 For a complete REST API example, see `testproject/api.py` in the repository.

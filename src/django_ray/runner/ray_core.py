@@ -114,7 +114,7 @@ class RayCoreRunner(BaseRunner):
             args_json,
             kwargs_json,
             task_execution.pk,
-            runtime_env.profile,
+            runtime_env.profile,  # ty: ignore[too-many-positional-arguments]
             runtime_env.digest,
         )
 
@@ -247,6 +247,7 @@ class RayCoreRunner(BaseRunner):
             True if cancellation was initiated.
         """
         import ray
+        from ray.exceptions import RayTaskError
 
         task_pk = self._resolve_task_pk(handle.ray_job_id)
         if task_pk is None:
@@ -263,7 +264,7 @@ class RayCoreRunner(BaseRunner):
             ray.cancel(core_handle.object_ref, force=False)
             del self._pending_tasks[task_pk]
             return True
-        except (RuntimeError, ray.exceptions.RayTaskError):
+        except (RuntimeError, RayTaskError):
             # Task may have already completed or failed
             self._pending_tasks.pop(task_pk, None)
             return False

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Performance, compatibility, and `llms.txt` guidance.
+- Python 3.14, minimum-direct dependency, and latest dependency CI coverage.
 - Ray-native workflow signatures with `step`, `chain`, `group`, and dynamic
   `map_step` primitives.
 - Local workflow execution fallback for sync workers and unit tests.
@@ -31,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Documentation examples are now complete, file-scoped, and aligned with the public
+  result refresh, queue priority, workflow, and RuntimeEnv APIs.
 - Ray Core durable tasks now use a module-level remote executor instead of defining
   and serializing a nested remote function for every submission.
 - Ray Core monitor heartbeats are written in one batch at a configurable interval

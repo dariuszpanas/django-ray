@@ -9,11 +9,20 @@ named profiles and a durable environment identity on top of Ray's native feature
 Profiles live in `DJANGO_RAY`. A profile can be a direct Ray RuntimeEnv mapping:
 
 ```python
+# settings.py
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
 DJANGO_RAY = {
     "RAY_ADDRESS": "ray://ray-head-svc:10001",
     "RUNTIME_ENV_PROFILES": {
         "project": {
-            "working_dir": "/app",
+            "working_dir": os.environ.get(
+                "DJANGO_RAY_WORKING_DIR_URI",
+                str(BASE_DIR),
+            ),
             "excludes": [".git", ".venv"],
             "pip": ["django>=6.0", "psycopg[binary]>=3.1"],
             "env_vars": {
@@ -31,40 +40,45 @@ merged; list fields `pip`, `uv`, `py_modules`, and `excludes` are appended.
 Other fields are replaced:
 
 ```python
-"RUNTIME_ENV_PROFILES": {
-    "project": {
-        "working_dir": "/app",
-        "pip": ["django>=6.0"],
-        "env_vars": {"DJANGO_SETTINGS_MODULE": "config.settings"},
-    },
-    "numpy-2-2": {
-        "extends": "project",
-        "runtime_env": {
-            "pip": ["numpy==2.2.6"],
-            "env_vars": {"APP_VARIANT": "numpy-2-2"},
+DJANGO_RAY = {
+    "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNTIME_ENV_PROFILES": {
+        "project": {
+            "working_dir": "s3://deployments/myapp/7f3a2c1.zip",
+            "pip": ["django>=6.0"],
+            "env_vars": {"DJANGO_SETTINGS_MODULE": "config.settings"},
         },
-    },
-    "numpy-2-3": {
-        "extends": "project",
-        "runtime_env": {
-            "pip": ["numpy==2.3.5"],
-            "env_vars": {"APP_VARIANT": "numpy-2-3"},
+        "numpy-2-2": {
+            "extends": "project",
+            "runtime_env": {
+                "pip": ["numpy==2.2.6"],
+                "env_vars": {"APP_VARIANT": "numpy-2-2"},
+            },
+        },
+        "numpy-2-3": {
+            "extends": "project",
+            "runtime_env": {
+                "pip": ["numpy==2.3.5"],
+                "env_vars": {"APP_VARIANT": "numpy-2-3"},
+            },
         },
     },
 }
 ```
 
 Pin production dependencies and use immutable archive URIs for `working_dir` or
-`py_modules` when reproducibility matters. A local directory is convenient in
-development. In Ray Core mode, django-ray content-addresses local paths and uploads
-them to Ray's GCS package store before applying the per-task environment.
+`py_modules` when reproducibility matters.
 
-Per-task local uploads require the Django task manager to use a direct Ray/GCS
-connection such as `ray-head-svc:6379`. Ray Client (`ray://...`) cannot upload a
-local directory from task-level `.options(runtime_env=...)`; use a remote
-`gcs://`, `https://`, or `s3://` archive URI when a direct connection is not
-available. Ray Job submission continues to support local paths through its
-job-level upload.
+- Local mode can content-address and upload a local directory.
+- Ray Job submission can upload its job-level local working directory.
+- Ray Client (`ray://...`) cannot turn a task-level local path from the Django pod
+  into a remote RuntimeEnv. Use `https://`, `s3://`, or `gs://`, or a `file://` ZIP
+  on storage mounted at the same path on every Ray node.
+
+Do not point a standalone Django pod at the head node's GCS port as a substitute for a
+Ray node. A direct Ray Core driver also expects a local raylet. The repository's
+KubeRay overlay demonstrates the shared `file:///runtime-env/django-ray-source.zip`
+pattern for local testing.
 
 ## Select a Profile for a Django Task
 
@@ -88,7 +102,18 @@ TASKS = {
 Select it with the standard Django API:
 
 ```python
-result = analyze_dataset.using(backend="numpy-2-3").enqueue(dataset_id)
+# myapp/tasks.py
+from django.tasks import task
+
+
+@task(queue_name="default")
+def average(values: list[float]) -> float:
+    import numpy
+
+    return float(numpy.mean(values))
+
+
+result = average.using(backend="numpy-2-3").enqueue([1.0, 2.0, 3.0])
 ```
 
 The backend resolves the profile during enqueue and stores its canonical JSON and
@@ -106,6 +131,21 @@ Workflow leaves inherit the outer task environment unless they request another:
 ```python
 from django_ray.workflows import chain, step
 
+
+def load_rows(values: list[float]) -> list[float]:
+    return values
+
+
+def run_numpy_model(values: list[float]) -> dict[str, float]:
+    import numpy
+
+    return {"mean": float(numpy.mean(values))}
+
+
+def store_summary(summary: dict[str, float]) -> dict[str, float]:
+    return summary
+
+
 pipeline = chain(
     step(load_rows),
     step(run_numpy_model, runtime_env="numpy-2-3"),
@@ -116,8 +156,14 @@ pipeline = chain(
 Inline environments are also accepted:
 
 ```python
+def column_names(rows: list[dict[str, object]]) -> list[str]:
+    import pandas
+
+    return [str(name) for name in pandas.DataFrame(rows).columns]
+
+
 step(
-    inspect_data,
+    column_names,
     runtime_env={"pip": ["pandas==2.3.0"]},
 )
 ```
@@ -140,6 +186,11 @@ Keep the number of environment variants bounded:
 
 RuntimeEnv removes application-image rebuilds; it does not make dependency
 installation free.
+
+The cache is node-local. The first fan-out across four cold nodes may install the same
+environment four times in parallel. Warm each node before a latency-sensitive rollout,
+or keep large, common dependencies in the base image. See
+[Performance](performance.md#runtime-environment-cost).
 
 ## Generic KubeRay Images
 

@@ -6,8 +6,16 @@ django-ray is configured through the `DJANGO_RAY` setting in your Django setting
 
 ```python
 # settings.py
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+    },
+}
+
 DJANGO_RAY = {
     "RAY_ADDRESS": "auto",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 10,
     "MAX_TASK_ATTEMPTS": 3,
 }
@@ -116,6 +124,7 @@ not available yet.
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "auto",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 5,
     "MAX_TASK_ATTEMPTS": 1,  # Fail fast during development
     "STUCK_TASK_TIMEOUT_SECONDS": 60,
@@ -127,6 +136,7 @@ DJANGO_RAY = {
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 50,
     "MAX_TASK_ATTEMPTS": 3,
     "RETRY_BACKOFF_SECONDS": 120,
@@ -137,11 +147,12 @@ DJANGO_RAY = {
 }
 ```
 
-### High-Throughput
+### High-Throughput Starting Point
 
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 100,
     "MAX_TASK_ATTEMPTS": 5,
     "RETRY_BACKOFF_SECONDS": 30,
@@ -176,12 +187,24 @@ TASKS = {
 }
 ```
 
-Backend `OPTIONS` may select a named environment:
+`DEFAULT_CONCURRENCY=100` is not a universal recommendation. It controls how many
+durable tasks one task manager can keep active; Ray resources, database capacity, and
+external API limits may require a much lower value. See [Performance](performance.md).
+
+Backend `OPTIONS` may select a named environment. This is a complete second alias:
 
 ```python
-"OPTIONS": {
-    "RAY_ADDRESS": "ray://ray-head-svc:10001",
-    "RUNTIME_ENV_PROFILE": "numpy-2-3",
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {"RUNTIME_ENV_PROFILE": "project"},
+    },
+    "numpy": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {"RUNTIME_ENV_PROFILE": "numpy-2-3"},
+    },
 }
 ```
 

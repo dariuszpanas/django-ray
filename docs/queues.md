@@ -1,232 +1,145 @@
 # Working with Queues
 
-Queues allow you to organize and prioritize tasks. Different queues can be processed by different workers with different concurrency settings.
+Queues separate workloads by latency, resource needs, or ownership. They affect which
+task-manager process claims a durable task; Ray resource options affect where the
+claimed work runs.
 
-## Defining Queues
-
-Queues are defined in your Django settings:
+## Configure and Use Queues
 
 ```python
 # settings.py
 TASKS = {
     "default": {
         "BACKEND": "django_ray.backends.RayTaskBackend",
-        "QUEUES": [
-            "default",
-            "high-priority",
-            "low-priority",
-            "email",
-            "reports",
-        ],
+        "QUEUES": ["default", "urgent", "email", "batch"],
     },
 }
 ```
 
-## Assigning Tasks to Queues
-
-### In Task Definition
+Define tasks in `myapp/tasks.py`:
 
 ```python
+from django.core.mail import send_mail
+from django.tasks import task
+
+
 @task(queue_name="email")
-def send_email(to: str, subject: str, body: str):
-    pass
+def send_email(to: str, subject: str, body: str) -> int:
+    return send_mail(subject, body, None, [to])
 
-@task(queue_name="reports")
-def generate_report(report_id: int):
-    pass
 
-@task(queue_name="high-priority")
-def urgent_notification(user_id: int, message: str):
-    pass
+@task(queue_name="batch")
+def sum_values(values: list[int]) -> int:
+    return sum(values)
 ```
 
-### At Enqueue Time
+The decorator supplies the normal queue. A caller may select another configured queue:
 
 ```python
-# Override the default queue
-send_email.using(queue_name="high-priority").enqueue(
-    to="vip@example.com",
-    subject="Urgent",
-    body="Important!"
+from myapp.tasks import send_email
+
+send_email.using(queue_name="urgent").enqueue(
+    to="on-call@example.com",
+    subject="Service alert",
+    body="The error budget threshold was crossed.",
 )
 ```
 
-## Running Workers for Specific Queues
-
-### Single Queue
+## Run Queue-Specific Workers
 
 ```bash
-# Process only the email queue
-python manage.py django_ray_worker --queue=email --local
-```
+# One queue
+python manage.py django_ray_worker --queue=email --local --concurrency=10
 
-### Multiple Queues
+# Several queues
+python manage.py django_ray_worker --queue=urgent,default --local --concurrency=20
 
-```bash
-# Process multiple queues
-python manage.py django_ray_worker --queue=default,high-priority --local
-```
-
-### All Queues
-
-```bash
-# Process all configured queues
+# Every queue configured on the default backend
 python manage.py django_ray_worker --all-queues --local
 ```
 
-## Queue Priorities
+In production, separate deployments can run the same image with different queue and
+concurrency arguments. This is usually more predictable than one worker consuming
+latency-sensitive and bulk queues together.
 
-Tasks with higher priority values are processed first within a queue:
+## Priority Semantics
 
-```python
-# Higher priority (processed first)
-urgent_task.using(priority=10).enqueue(data="urgent")
+django-ray does **not** currently support Django's per-task numeric `priority` option;
+`RayTaskBackend.supports_priority` is `False`. Do not use
+`.using(priority=...)` and expect it to change claim order.
 
-# Normal priority
-normal_task.using(priority=0).enqueue(data="normal")
+The task manager gives these conventional queue names different claim precedence when
+one process consumes several queues:
 
-# Lower priority (processed last)
-background_task.using(priority=-10).enqueue(data="background")
-```
+| Claim first | Normal | Claim last |
+|---|---|---|
+| `high-priority`, `urgent` | all other names | `low-priority`, `background`, `batch` |
 
-## Worker Deployment Patterns
+Tasks are FIFO by creation time within one precedence tier. For strict isolation,
+dedicate workers to a queue rather than relying on precedence.
 
-### Dedicated Workers per Queue
+## Queue vs Ray Resources
 
-```yaml
-# High-priority worker (fast, low concurrency)
-- name: worker-high-priority
-  command: python manage.py django_ray_worker --queue=high-priority --local
-  concurrency: 5
-
-# Default worker (normal workload)
-- name: worker-default
-  command: python manage.py django_ray_worker --queue=default --local
-  concurrency: 20
-
-# Background worker (slow tasks, high concurrency)
-- name: worker-background
-  command: python manage.py django_ray_worker --queue=low-priority,reports --local
-  concurrency: 50
-```
-
-### Shared Workers
-
-```bash
-# Single worker processing all queues
-python manage.py django_ray_worker --all-queues --local
-```
-
-## Queue Isolation
-
-For workload isolation, use separate queues:
+A queue selects a task manager. It does not reserve CPUs, GPUs, memory, or a specific
+Ray node. Use Ray scheduling options inside a workflow for that:
 
 ```python
-# CPU-intensive tasks
-@task(queue_name="compute")
-def heavy_computation(data: dict):
-    pass
+from django_ray.workflows import step
 
-# I/O-bound tasks
-@task(queue_name="io")
-def fetch_external_data(url: str):
-    pass
 
-# Quick tasks
-@task(queue_name="quick")
-def send_notification(user_id: int):
-    pass
+def run_inference(features: list[float]) -> float:
+    return sum(features)
+
+gpu_inference = step(
+    run_inference,
+    ray_options={"num_gpus": 1},
+)
 ```
 
-Then run workers with appropriate resources:
+A common deployment pattern is:
 
-```bash
-# High-CPU worker for compute queue
-python manage.py django_ray_worker --queue=compute --local
+- `urgent`: dedicated low-concurrency task managers, warm RuntimeEnv;
+- `default`: general application work;
+- `batch`: separate task managers with high submission concurrency;
+- workflow leaf `ray_options`: actual CPU/GPU requirements enforced by Ray.
 
-# High-concurrency worker for I/O queue
-python manage.py django_ray_worker --queue=io --local --concurrency=100
+## Monitor Queue Depth
 
-# Quick tasks worker
-python manage.py django_ray_worker --queue=quick --local --concurrency=50
-```
-
-## Monitoring Queue Depth
-
-### Via API
+The durable model works in a management command, view, or shell:
 
 ```python
+from django.db.models import Count
+
 from django_ray.models import RayTaskExecution, TaskState
 
-# Get queue depths
-queues = (
-    RayTaskExecution.objects
-    .filter(state=TaskState.QUEUED)
-    .values('queue_name')
-    .annotate(count=Count('id'))
+depths = (
+    RayTaskExecution.objects.filter(state=TaskState.QUEUED)
+    .values("queue_name")
+    .annotate(count=Count("id"))
+    .order_by("queue_name")
 )
-for q in queues:
-    print(f"{q['queue_name']}: {q['count']} pending")
+for depth in depths:
+    print(f"{depth['queue_name']}: {depth['count']}")
 ```
 
-### Via Prometheus Metrics
+The bundled testproject also exposes Prometheus queue-depth metrics. Those HTTP
+endpoints belong to the example project, not the reusable django-ray package.
 
-The `/api/metrics` endpoint exposes queue depth:
+## Choosing Queue Boundaries
 
-```
-django_ray_queue_depth{queue="default"} 42
-django_ray_queue_depth{queue="email"} 10
-django_ray_queue_depth{queue="reports"} 5
-```
+Create a queue when it needs a different:
 
-## Best Practices
+- latency objective or backlog policy;
+- task-manager concurrency;
+- RuntimeEnv backend alias;
+- operational owner or deployment;
+- maintenance/drain schedule.
 
-### 1. Separate by Latency Requirements
-
-```python
-# Fast response needed
-@task(queue_name="realtime")
-def process_webhook(payload: dict):
-    pass
-
-# Can wait
-@task(queue_name="batch")
-def generate_monthly_report(month: int, year: int):
-    pass
-```
-
-### 2. Separate by Resource Needs
-
-```python
-# Memory-intensive
-@task(queue_name="memory-heavy")
-def process_large_dataset(dataset_id: int):
-    pass
-
-# CPU-intensive
-@task(queue_name="cpu-heavy")
-def train_model(model_id: int):
-    pass
-```
-
-### 3. Use Priorities Within Queues
-
-```python
-# Same queue, different priorities
-@task(queue_name="notifications")
-def send_sms(phone: str, message: str):
-    pass
-
-# Urgent SMS
-send_sms.using(priority=10).enqueue(phone="+1234567890", message="Alert!")
-
-# Normal SMS
-send_sms.enqueue(phone="+1234567890", message="Hello")
-```
+Do not create a queue for every function. Each extra queue adds worker and routing
+configuration without reducing Ray task overhead.
 
 ## See Also
 
-- [Getting Started](getting-started.md) - Basic setup
-- [Worker Modes](worker-modes.md) - Execution modes
-- [Configuration](configuration.md) - All settings
-
+- [Performance](performance.md) for concurrency and granularity
+- [Worker Modes](worker-modes.md) for execution topology
+- [Configuration](configuration.md) for backend aliases

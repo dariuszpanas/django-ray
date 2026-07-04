@@ -10,14 +10,14 @@ cost more than the individual units of work.
 
 ## Requirements
 
-Run the outer task in Ray Core mode. Workflows also have a local fallback for sync
-workers and tests, but Ray Job mode does not automatically provide nested Ray
-submission.
+Ray Core is the lowest-latency production path. Ray Job mode also supports workflows:
+its isolated driver connects back to Ray lazily before submitting leaves. Local
+execution is available for sync workers and unit tests.
 
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "ray://ray-head:10001",
-    "RUNNER": "ray_core",
+    "RUNNER": "ray_core",  # Lowest submission overhead.
 }
 ```
 
@@ -27,9 +27,10 @@ Start a worker normally, or select the cluster explicitly:
 python manage.py django_ray_worker --cluster=ray://ray-head:10001
 ```
 
-## Dynamic Fan-Out
+## Complete Dynamic Fan-Out
 
-Define workflow callables at module scope so Ray workers can import them:
+The following is one complete `myapp/workflows.py` module. Every callable is defined at
+module scope so Ray workers can import it:
 
 ```python
 from django.tasks import task
@@ -37,47 +38,55 @@ from django.tasks import task
 from django_ray.workflows import chain, map_step, step
 
 
-def list_namespaces(cluster_name: str) -> list[str]:
-    return load_kubernetes_client().list_namespaces(cluster_name)
+def build_items(count: int) -> list[int]:
+    return list(range(count))
 
 
-def sync_namespace(namespace: str) -> dict:
-    return sync_resources_for_namespace(namespace)
+def calculate(value: int) -> dict[str, int]:
+    # Stand-in for one independently expensive API or compute operation.
+    checksum = sum((value * number) % 97 for number in range(500_000))
+    return {"value": value, "checksum": checksum}
 
 
-def summarize(results: list[dict]) -> dict:
+def summarize(results: list[dict[str, int]]) -> dict[str, int]:
     return {
-        "namespaces": len(results),
-        "resources": sum(result["resources"] for result in results),
+        "items": len(results),
+        "checksum": sum(result["checksum"] for result in results),
     }
 
 
-cluster_sync = chain(
-    step(list_namespaces),
-    map_step(sync_namespace, ray_options={"num_cpus": 0.25}),
+calculation = chain(
+    step(build_items),
+    map_step(calculate, ray_options={"num_cpus": 0.25}),
     step(summarize),
 )
 
 
-@task(queue_name="sync")
-def sync_cluster(cluster_name: str) -> dict:
-    return cluster_sync.run(cluster_name)
+@task(queue_name="default")
+def calculate_batch(count: int) -> dict[str, int]:
+    return calculation.run(count)
 ```
 
-Calling `sync_cluster.enqueue(...)` creates one durable `RayTaskExecution`. Once it
-starts, `list_namespaces`, every `sync_namespace` call, and `summarize` are connected
-inside Ray. `map_step` resolves the namespace list at the fan-out boundary, submits
-one Ray task per item, and gathers the results in input order.
+Calling `calculate_batch.enqueue(20)` creates one durable `RayTaskExecution`. Once it
+starts, `build_items`, every `calculate` call, and `summarize` are connected inside
+Ray. `map_step` resolves the list at the fan-out boundary, submits one Ray task per
+item, and gathers results in input order.
+
+For a Kubernetes sync, the same shape is typically `list_namespaces → map(sync one
+namespace) → summarize`. Keep client creation or discovery outside the smallest inner
+resource loop where possible, and batch resources when each API operation is shorter
+than Ray submission overhead.
 
 ## Chains and Groups
 
-`chain` passes each result as the first argument to the next signature:
+`chain` passes each result as the first argument to the next signature. Reusing the
+module above:
 
 ```python
 pipeline = chain(
-    step(download_manifest),
-    step(validate_manifest),
-    step(apply_manifest),
+    step(build_items),
+    map_step(calculate),
+    step(summarize),
 )
 ```
 
@@ -86,14 +95,26 @@ pipeline = chain(
 ```python
 from django_ray.workflows import group
 
-inspect_cluster = chain(
-    step(load_cluster),
+
+def minimum(values: list[int]) -> int:
+    return min(values)
+
+
+def maximum(values: list[int]) -> int:
+    return max(values)
+
+
+def total(values: list[int]) -> int:
+    return sum(values)
+
+
+inspect_values = chain(
+    step(build_items),
     group(
-        step(inspect_workloads),
-        step(inspect_networking),
-        step(inspect_storage),
+        step(minimum),
+        step(maximum),
+        step(total),
     ),
-    step(build_report),
 )
 ```
 
@@ -105,14 +126,20 @@ Workflow steps are Ray-native by default and skip Django initialization. This is
 fast path for API clients, transformations, and compute that do not use Django models:
 
 ```python
-step(sync_namespace)
+step(calculate)
 ```
 
 Set `django=True` when a step needs Django's app registry, ORM, settings-dependent
 components, or another Django facility:
 
 ```python
-step(load_cluster_from_database, django=True)
+def load_account_name(account_id: int) -> str:
+    from myapp.models import Account
+
+    return Account.objects.values_list("name", flat=True).get(pk=account_id)
+
+
+load_account = step(load_account_name, django=True)
 ```
 
 Django initialization is guarded by the app registry, so a reused Ray worker does not
@@ -121,15 +148,17 @@ initialize Django again for every step.
 Use `ray_options` or `Step.with_options()` for Ray scheduling controls:
 
 ```python
-step(run_inference, ray_options={"num_gpus": 1, "max_retries": 2})
-
-step(transform).with_options(num_cpus=2)
+gpu_calculation = step(
+    calculate,
+    ray_options={"num_gpus": 1, "max_retries": 2},
+)
+two_cpu_calculation = step(calculate).with_options(num_cpus=2)
 ```
 
 Use a named RuntimeEnv profile when a leaf needs different dependencies:
 
 ```python
-step(run_inference, runtime_env="numpy-2-3")
+numpy_calculation = step(calculate, runtime_env="numpy-2-3")
 ```
 
 Leaves otherwise inherit the outer durable task's environment. See
@@ -142,16 +171,19 @@ Long-running leaves can report progress without writing to Django directly:
 ```python
 from django_ray.workflows import report_progress
 
-def import_rows(rows):
+
+def normalize_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    normalized = []
     for index, row in enumerate(rows, start=1):
-        import_row(row)
+        normalized.append({key: value.strip() for key, value in row.items()})
         if index % 100 == 0:
             report_progress(
                 index,
                 len(rows),
-                message="Importing rows",
+                message="Normalizing rows",
                 metrics={"last_row": index},
             )
+    return normalized
 ```
 
 `report_progress()` is a no-op that returns `False` during local workflow
@@ -204,7 +236,8 @@ Signatures run locally when Ray is not initialized. This makes workflow logic ea
 exercise in unit tests:
 
 ```python
-result = cluster_sync.run("development", use_ray=False)
+result = calculation.run(4, use_ray=False)
+assert result["items"] == 4
 ```
 
 Set `use_ray=True` to fail instead of falling back when Ray is unavailable.
@@ -271,7 +304,7 @@ the timing/result tree after it completes.
 
 | API | Behavior |
 |---|---|
-| `step(callable, *args, django=False, ray_options=None, **kwargs)` | Bind an importable callable as one workflow step |
+| `step(callable, *args, django=False, ray_options=None, runtime_env=None, **kwargs)` | Bind an importable callable as one workflow step |
 | `chain(*signatures)` | Run signatures sequentially |
 | `group(*signatures)` | Fan out the same input and gather ordered results |
 | `map_step(callable_or_signature, ...)` | Fan out over the preceding iterable |

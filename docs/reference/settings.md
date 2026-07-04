@@ -46,6 +46,10 @@ requires this setting unless `DJANGO_RAY_SKIP_VALIDATION` is used for a maintena
 "RAY_ADDRESS": "ray://ray-head-svc:10001"
 ```
 
+Short examples in this reference are individual dictionary entries to place inside
+`DJANGO_RAY`; they are intentionally not standalone Python modules. Longer examples
+show the complete dictionary.
+
 ### RAY_STATE_API_ADDRESS
 
 - **Type**: `str | None`
@@ -79,9 +83,12 @@ Unnamed default Ray runtime environment. It is resolved and stored on each task
 when no named profile is selected.
 
 ```python
-"RAY_RUNTIME_ENV": {
-    "pip": ["pandas", "numpy"],
-    "env_vars": {"MY_VAR": "value"},
+DJANGO_RAY = {
+    "RAY_ADDRESS": "auto",
+    "RAY_RUNTIME_ENV": {
+        "pip": ["pandas", "numpy"],
+        "env_vars": {"MY_VAR": "value"},
+    },
 }
 ```
 
@@ -95,14 +102,17 @@ composed profile has `extends` and `runtime_env` keys. Profile inheritance merge
 dictionaries and appends the `pip`, `uv`, `py_modules`, and `excludes` lists.
 
 ```python
-"RUNTIME_ENV_PROFILES": {
-    "project": {
-        "working_dir": "/app",
-        "pip": ["django>=6.0"],
-    },
-    "numpy": {
-        "extends": "project",
-        "runtime_env": {"pip": ["numpy==2.3.5"]},
+DJANGO_RAY = {
+    "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNTIME_ENV_PROFILES": {
+        "project": {
+            "working_dir": "s3://deployments/myapp/7f3a2c1.zip",
+            "pip": ["django>=6.0"],
+        },
+        "numpy": {
+            "extends": "project",
+            "runtime_env": {"pip": ["numpy==2.3.5"]},
+        },
     },
 }
 ```

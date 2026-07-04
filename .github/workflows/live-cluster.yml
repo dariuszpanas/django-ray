@@ -22,10 +22,10 @@ jobs:
       DJANGO_RAY_LIVE_RAY_ADDRESS: ${{ inputs.ray_address != '' && inputs.ray_address || vars.DJANGO_RAY_LIVE_RAY_ADDRESS }}
       DJANGO_RAY_LIVE_MIN_NODES: ${{ inputs.min_nodes }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v8
         with:
           version: "latest"
 

@@ -50,7 +50,7 @@ task stats, project links, and smoke-task trigger:
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.12, 3.13, or 3.14
 - Django 6.0+
 - Ray 2.53.0+
 
@@ -77,11 +77,19 @@ INSTALLED_APPS = [
 ]
 ```
 
-2. Configure django-ray settings:
+2. Configure Django Tasks and django-ray:
 
 ```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+    },
+}
+
 DJANGO_RAY = {
     "RAY_ADDRESS": "auto",  # Use "ray://host:port" for a remote cluster
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 10,
     "MAX_TASK_ATTEMPTS": 3,
 }
@@ -133,11 +141,13 @@ See [Ray-Native Workflows](docs/workflows.md) for low-latency `chain`, `group`,
 and `map_step` execution.
 See [Runtime Environments](docs/runtime-environments.md) for per-task profiles,
 workflow overrides, and generic KubeRay images.
+See [Performance](docs/performance.md) for choosing durable task boundaries,
+execution modes, and useful fan-out granularity.
 
 ## Development Setup
 
 ### Prerequisites
-- Python 3.12+
+- Python 3.12, 3.13, or 3.14
 - [uv](https://github.com/astral-sh/uv) package manager
 
 ### Installation
@@ -283,6 +293,9 @@ django-ray/
 Published docs are served with Zensical at:
 
 - https://django-ray.readthedocs.io/en/latest/
+
+Agents and documentation tools can start with [`llms.txt`](llms.txt). The published
+documentation also serves `/llms.txt`.
 
 Read the Docs builds are configured in `.readthedocs.yaml`. The build installs `uv`, runs the
 strict Zensical build, and copies the generated `site/` output into Read the Docs' HTML output

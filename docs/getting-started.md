@@ -1,163 +1,165 @@
 # Getting Started
 
-This guide will help you integrate django-ray into your Django project.
+This guide creates a complete task that can be copied into a Django project. Every
+name used below is either imported in the snippet or defined in the indicated file.
 
 ## Requirements
 
-- Python 3.12 or 3.13
+- Python 3.12, 3.13, or 3.14
 - Django 6.0+
 - Ray 2.53.0+
-- PostgreSQL (recommended) or SQLite
+- PostgreSQL for production; SQLite is sufficient for a local walkthrough
 
-## Installation
+Python 3.12 is the minimum because Django 6.0 requires it. See
+[Compatibility](compatibility.md) for the tested version policy.
 
-Install django-ray using pip:
-
-```bash
-pip install django-ray
-```
-
-Or with uv:
+## Install
 
 ```bash
-uv add django-ray
+python -m pip install django-ray
 ```
 
-For PostgreSQL support:
+With PostgreSQL:
 
 ```bash
-pip install django-ray[postgres]
+python -m pip install "django-ray[postgres]"
 ```
 
-## Quick Setup
+The equivalent uv command is `uv add django-ray`.
 
-### 1. Add to INSTALLED_APPS
+## Configure Django
+
+Add the application and task backend in `settings.py`:
 
 ```python
 # settings.py
 INSTALLED_APPS = [
-    # Django apps...
-    "django.contrib.admin",
-    "django.contrib.auth",
-    # ...
-    
-    # Add django-ray
+    # Your Django applications...
     "django_ray",
-    
-    # Your apps...
 ]
-```
 
-### 2. Configure Settings
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+    },
+}
 
-Add the django-ray configuration to your settings:
-
-```python
-# settings.py
 DJANGO_RAY = {
-    "RAY_ADDRESS": "auto",  # or "ray://localhost:10001" for cluster
+    "RAY_ADDRESS": "auto",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 10,
     "MAX_TASK_ATTEMPTS": 3,
     "RETRY_BACKOFF_SECONDS": 60,
-    # Exceptions that won't trigger auto-retry
-    "RETRY_EXCEPTION_DENYLIST": [
-        "myapp.exceptions.PermanentError",
-    ],
 }
-
-# Optional: Ray Dashboard URL for admin links
-RAY_DASHBOARD_URL = "http://localhost:8265"
-
-# If you use the local Kubernetes Kong overlay from this repo instead:
-# RAY_DASHBOARD_URL = "http://ray.localhost:30080"
 ```
 
-### 3. Run Migrations
+`TASKS` tells Django where to enqueue work. `DJANGO_RAY` configures the worker that
+claims it. For a remote cluster, use a Ray Client address such as
+`ray://ray-head.example:10001`.
+
+Apply the database migrations:
 
 ```bash
-python manage.py migrate django_ray
+python manage.py migrate
 ```
 
-### 4. Define a Task
+## Define a Complete Task
 
-Create a task using Django's `@task` decorator:
+Create `myapp/tasks.py`:
+
+```python
+from django.tasks import task
+
+
+@task(queue_name="default")
+def add_numbers(left: int, right: int) -> int:
+    return left + right
+```
+
+This deliberately small task verifies the queue and Ray connection without requiring
+models, email configuration, or application-specific helper functions.
+
+## Start a Worker
+
+In a separate terminal:
+
+```bash
+python manage.py django_ray_worker --queue=default --local
+```
+
+`--local` starts Ray on the same machine and uses the low-overhead Ray Core runner.
+For a logic-only check without Ray, use `--sync`. See
+[Choosing an execution model](performance.md#choose-an-execution-model) before
+selecting a production mode.
+
+## Enqueue and Read the Result
+
+Open `python manage.py shell`:
+
+```python
+from django.tasks import TaskResultStatus, task_backends
+
+from myapp.tasks import add_numbers
+
+enqueued = add_numbers.enqueue(20, 22)
+print(enqueued.id)
+print(enqueued.status)  # READY: this object is the enqueue-time snapshot
+
+# Run this again after the worker finishes the task.
+current = task_backends["default"].get_result(enqueued.id)
+print(current.status)
+if current.status == TaskResultStatus.SUCCESSFUL:
+    print(current.return_value)  # 42
+```
+
+`TaskResult` does not poll in the background. Call the backend's `get_result()` again
+when a UI, API, or management command needs the current state.
+
+## A Real Django Task
+
+Tasks may use the ORM normally. This example uses only Django APIs and assumes the
+built-in user model has an email address:
 
 ```python
 # myapp/tasks.py
+from django.contrib.auth import get_user_model
+from django.core.mail import send_mail
 from django.tasks import task
 
+
 @task(queue_name="default")
-def send_welcome_email(user_id: int) -> dict:
-    """Send welcome email to a new user."""
-    from myapp.models import User
-    from myapp.email import send_email
-    
-    user = User.objects.get(id=user_id)
-    send_email(
-        to=user.email,
-        subject="Welcome!",
-        body=f"Hello {user.name}, welcome to our platform!"
+def send_welcome_email(user_id: int) -> dict[str, str]:
+    user = get_user_model().objects.get(pk=user_id)
+    send_mail(
+        subject="Welcome",
+        message=f"Hello {user.get_username()}!",
+        from_email=None,  # Uses DEFAULT_FROM_EMAIL.
+        recipient_list=[user.email],
     )
     return {"sent_to": user.email}
 ```
 
-### 5. Enqueue a Task
+Pass model primary keys rather than model instances. Task arguments and results cross
+process boundaries and must be JSON-serializable.
+
+## Verify and Monitor
+
+The Django admin page `/admin/django_ray/raytaskexecution/` shows queue state,
+attempts, errors, RuntimeEnv identity, and workflow progress. Programmatic operational
+queries use the durable model:
 
 ```python
-# In your view or anywhere in your code
-from myapp.tasks import send_welcome_email
+from django_ray.models import RayTaskExecution, TaskState
 
-# Enqueue the task
-result = send_welcome_email.enqueue(user_id=123)
-
-# Get the task ID for tracking
-print(f"Task ID: {result.id}")
+running = RayTaskExecution.objects.filter(state=TaskState.RUNNING)
+failed = RayTaskExecution.objects.filter(state=TaskState.FAILED)
 ```
-
-### 6. Start the Worker
-
-In a separate terminal, start the worker:
-
-```bash
-# Local Ray (recommended for development)
-python manage.py django_ray_worker --queue=default --local
-
-# Or sync mode for testing (no Ray required)
-python manage.py django_ray_worker --queue=default --sync
-```
-
-## Verifying the Setup
-
-### Check Task Status
-
-You can check task status via the Django admin or programmatically:
-
-```python
-from django_ray.models import RayTaskExecution
-
-# Get all executions
-executions = RayTaskExecution.objects.all()
-
-# Filter by state
-succeeded = RayTaskExecution.objects.filter(state="SUCCEEDED")
-failed = RayTaskExecution.objects.filter(state="FAILED")
-```
-
-### Django Admin
-
-Access the Django admin at `/admin/django_ray/` to:
-
-- View all task executions
-- Monitor task states
-- Filter by state, queue, or date
-- View error messages and tracebacks for failed tasks
-- Retry failed tasks (select tasks and use "Retry selected tasks" action)
-- Cancel queued or running tasks (select tasks and use "Cancel selected tasks" action)
 
 ## Next Steps
 
-- [Configuration](configuration.md) - Learn about all configuration options
-- [Worker Modes](worker-modes.md) - Understand different execution modes
-- [Task Definition](tasks.md) - Advanced task patterns
-- [Deployment](deployment/kubernetes.md) - Deploy to production
-
+- [Tasks](tasks.md) for arguments, results, and error behavior
+- [Performance](performance.md) for task granularity and mode selection
+- [Ray-Native Workflows](workflows.md) for chain, group, and fan-out
+- [Runtime Environments](runtime-environments.md) for per-task dependencies
+- [Kubernetes Deployment](deployment/kubernetes.md) for the sample production stack

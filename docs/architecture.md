@@ -119,7 +119,9 @@ it does not prove that every earlier execution attempt had no side effects.
 
 ## Worker Loop
 
-```python
+The loop below is pseudocode, not a public callable API:
+
+```text
 while running:
     renew_worker_lease()
     claim_due_queued_tasks()

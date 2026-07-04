@@ -158,43 +158,49 @@ src/django_ray/
 
 ### Unit Tests
 
-Test individual components in isolation:
-
-```python
-# tests/unit/test_retry.py
-def test_should_retry_on_retryable_error():
-    """Test that retryable errors trigger retry."""
-    ...
-```
+Test individual components in isolation. Use the existing
+`tests/unit/test_retry.py` and `tests/unit/test_runtime_env.py` as concrete patterns;
+do not copy placeholder test bodies from documentation.
 
 ### Integration Tests
 
-Test components working together:
-
-```python
-# tests/integration/test_worker.py
-def test_worker_processes_task():
-    """Test full task processing flow."""
-    ...
-```
+Test components working together. `tests/integration/test_worker.py` contains runnable
+database/worker examples, and `tests/integration/test_live_failure_injection.py`
+contains the opt-in real-cluster cases.
 
 ### Test Fixtures
 
 Use pytest fixtures for common setup:
 
 ```python
+import pytest
+
+from django_ray.models import RayTaskExecution, TaskState
+
+
 @pytest.fixture
-def task_execution():
+def task_execution() -> RayTaskExecution:
     return RayTaskExecution.objects.create(
         task_id="test-task",
         callable_path="myapp.tasks.test",
+        queue_name="default",
         state=TaskState.QUEUED,
+        args_json="[]",
+        kwargs_json="{}",
     )
 ```
 
 ## Documentation
 
 Documentation is built with Zensical from `zensical.toml`.
+
+Code examples should be copyable:
+
+- identify the target file, such as `myapp/tasks.py` or `settings.py`;
+- import or define every name used by a runnable snippet;
+- use a `text` fence and label pseudocode or configuration fragments explicitly;
+- mark testproject endpoints as examples rather than public library APIs;
+- link to real source or tests instead of using an unexplained `...` body.
 
 ### Building Docs Locally
 
