@@ -26,14 +26,11 @@ class RayCoreHandle:
     ray_task_id: str = ""  # The task's Ray ID (e.g., "67a2e8cfa5a06db3ffff...")
 
 
-# Global remote functions to prevent Ray GCS memory leaks
+# Global remote function cache to prevent Ray GCS memory leaks.
 # Ray caches remote function definitions, so dynamically decorating functions
 # inside hot paths like submit_task or _RayExecutor.__init__ causes OOMs.
 
 _execute_django_task_remote_cached = None
-_execute_workflow_step_remote_cached = None
-_collect_workflow_results_remote_cached = None
-_workflow_progress_actor_cached = None
 
 
 def _get_remote_execute_django_task() -> Any:

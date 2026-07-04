@@ -346,6 +346,7 @@ def test_workflow_executes_on_real_ray() -> None:
         ray.shutdown()
 
 
+@pytest.mark.real_ray
 @pytest.mark.django_db
 def test_real_ray_workflow_persists_graph_and_execution_metadata() -> None:
     import ray
@@ -427,6 +428,7 @@ def test_progress_actor_builds_node_snapshot() -> None:
     assert snapshot["progress_percent"] == 50.0
     assert snapshot["graph"]["edges"] == [{"source": "0.0", "target": "0.1.m0"}]
     assert snapshot["graph"]["nodes"][0]["execution"]["ray_task_id"] == "ray-task-1"
+    assert snapshot["graph"]["nodes"][1]["label"] == "leaf"
     assert snapshot["graph"]["nodes"][1]["progress"]["percent"] == 50.0
     assert snapshot["revision"] == unchanged["revision"]
     assert snapshot["updated_at"] == unchanged["updated_at"]

@@ -244,7 +244,8 @@ class WorkflowProgressActor:
         message: str | None,
         metrics: dict[str, Any],
     ) -> None:
-        self.register(node_id, node_id)
+        if node_id not in self.nodes:
+            self.register(node_id, node_id)
         node = self.nodes[node_id]
         node["progress"] = {
             "current": current,

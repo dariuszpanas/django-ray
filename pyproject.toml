@@ -118,6 +118,7 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short"
 markers = [
     "live_cluster: Requires DJANGO_RAY_LIVE_CLUSTER_TESTS and a real Ray cluster",
+    "real_ray: Starts a real local Ray runtime (ray.init/ray.shutdown)",
 ]
 filterwarnings = [
     # Suppress Ray's FutureWarning about accelerator env var override
