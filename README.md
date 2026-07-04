@@ -46,7 +46,7 @@ django-ray bridges Django's built-in Tasks framework with Ray's distributed comp
 The repository includes a sample `testproject/` with a small landing page for exploring the bundled API,
 task stats, project links, and smoke-task trigger:
 
-![django-ray testproject landing page](docs/assets/images/testproject-landing.png)
+![django-ray testproject landing page](https://raw.githubusercontent.com/dariuszpanas/django-ray/main/docs/assets/images/testproject-landing.png)
 
 ## Requirements
 

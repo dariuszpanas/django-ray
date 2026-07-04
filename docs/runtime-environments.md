@@ -4,6 +4,60 @@ Ray RuntimeEnv lets one Ray cluster execute tasks with different Python packages
 uploaded project code, environment variables, or container images. django-ray adds
 named profiles and a durable environment identity on top of Ray's native feature.
 
+> **Cold-start warning:** The first task using a new profile can be substantially
+> slower while Ray downloads code and creates the environment on the selected node.
+> RuntimeEnv caches are node-local, so the first use on every node is cold; later
+> executions of the identical environment on a warm node are usually much faster.
+
+## RuntimeEnv Is More Than pip
+
+django-ray passes the resolved profile to Ray as a native RuntimeEnv mapping. Use
+the environment mechanism that fits the workload:
+
+| Field | Best suited to |
+| --- | --- |
+| `working_dir` | Shipping an application directory or remote ZIP archive |
+| `py_modules` | Adding reusable modules, wheels, or remote archives to `PYTHONPATH` |
+| `pip` | Installing Python packages with pip |
+| `uv` | Installing Python packages with uv |
+| `conda` | Selecting a named Conda environment or defining one inline |
+| `env_vars` | Setting non-secret worker environment variables |
+| `image_uri` / `container` | Running workers in a prebuilt container image |
+| `py_executable` | Selecting an alternate Python executable or launcher |
+| `config` | Controlling setup timeout and other RuntimeEnv behavior |
+
+See Ray's complete
+[RuntimeEnv API reference](https://docs.ray.io/en/latest/ray-core/api/doc/ray.runtime_env.RuntimeEnv.html)
+for supported fields, value formats, and version-specific constraints.
+
+For example, profiles can use uv or Conda without changing django-ray's task API:
+
+```python
+DJANGO_RAY = {
+    "RUNTIME_ENV_PROFILES": {
+        "analytics-uv": {
+            "working_dir": "s3://deployments/analytics/7f3a2c1.zip",
+            "uv": ["numpy==2.3.5", "polars==1.31.0"],
+            "env_vars": {"DJANGO_SETTINGS_MODULE": "config.settings"},
+        },
+        "analytics-conda": {
+            "working_dir": "s3://deployments/analytics/7f3a2c1.zip",
+            "conda": {
+                "channels": ["conda-forge"],
+                "dependencies": ["python=3.12", "numpy=2.3"],
+            },
+            "env_vars": {"DJANGO_SETTINGS_MODULE": "config.settings"},
+        },
+    },
+}
+```
+
+Ray does not allow top-level `pip` and `conda` in the same RuntimeEnv. Its
+container-based fields also have stricter combination rules: `image_uri` must
+generally be used alone except for `env_vars` and `config`, so application code
+and dependencies should already be present in that image. Consult the linked Ray
+reference when mixing fields.
+
 ## Define Profiles
 
 Profiles live in `DJANGO_RAY`. A profile can be a direct Ray RuntimeEnv mapping:
@@ -205,10 +259,10 @@ before the task-level RuntimeEnv installs and exposes the full project package.
 
 This separation works well for a shared cluster within one trust boundary:
 
-```text
-Django task manager -> persisted profile snapshot -> generic Ray cluster
-                                              \-> RuntimeEnv cache per Ray node
-```
+1. The Django task manager resolves a named profile at enqueue time.
+2. The task row stores the resolved profile snapshot and its content hash.
+3. The generic Ray cluster creates that environment on the node selected for work.
+4. That node can reuse its cached copy for later tasks with the same environment.
 
 Mount credentials, certificates, and shared data through the cluster deployment.
 Do not put secrets in profile URIs or `env_vars`: the resolved RuntimeEnv is stored
