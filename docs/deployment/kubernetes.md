@@ -96,6 +96,14 @@ The task manager selects its `file:///runtime-env/django-ray-source.zip` URI whi
 continuing to use Ray Client. Production deployments should use an immutable
 HTTPS, S3, or GCS archive on storage reachable from every Ray node.
 
+> **Storage requirement**: `runtime-env-pvc` uses `ReadWriteMany` (RWX) because
+> the setup job, Django workers, and every Ray pod must see the same archive.
+> Verify that the cluster has an RWX-capable StorageClass/provisioner before
+> deploying this example. A cluster whose available storage only supports
+> `ReadWriteOnce` will leave the PVC and dependent pods Pending. Install an RWX
+> provisioner, explicitly select an RWX-capable StorageClass, or use a shared
+> HTTPS/S3/GCS archive instead.
+
 This keeps Django web/worker Deployments in this repo, but replaces static Ray
 Deployments with a `RayCluster` custom resource.
 
