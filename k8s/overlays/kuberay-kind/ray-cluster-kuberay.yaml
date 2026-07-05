@@ -36,7 +36,7 @@ spec:
       spec:
         containers:
           - name: ray-head
-            image: rayproject/ray:2.53.0-py312
+            image: rayproject/ray:2.56.0-py312
             imagePullPolicy: IfNotPresent
             ports:
               - containerPort: 6379
@@ -128,7 +128,7 @@ spec:
         spec:
           containers:
             - name: ray-worker
-              image: rayproject/ray:2.53.0-py312
+              image: rayproject/ray:2.56.0-py312
               imagePullPolicy: IfNotPresent
               ports:
                 - containerPort: 8080
