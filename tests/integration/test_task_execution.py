@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import ray
 
+pytestmark = pytest.mark.real_ray
+
 # Get project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 

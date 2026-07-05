@@ -133,6 +133,7 @@ class TestDistributedUtilities:
             assert get_total_cpus() == expected
 
 
+@pytest.mark.real_ray
 class TestDistributedWithRay:
     """Tests that require Ray to be running."""
 
