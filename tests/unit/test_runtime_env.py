@@ -37,6 +37,27 @@ def test_normalization_is_canonical_and_content_addressed() -> None:
     assert len(first.digest) == 64
 
 
+def test_normalization_accepts_none() -> None:
+    assert normalize_runtime_env(None).spec == {}
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        ("not-a-dict", "must be a dictionary"),
+        ({"env_vars": {"VALID": 1}}, "env_vars must map"),
+        ({"working_dir": 1}, "working_dir must be a string"),
+        ({"image_uri": []}, "image_uri must be a string"),
+        ({"py_executable": object()}, "py_executable must be a string"),
+        ({"py_modules": ["valid", 1]}, "py_modules must be a list"),
+        ({"pip": {object()}}, "JSON-serializable"),
+    ],
+)
+def test_normalization_rejects_invalid_fields(spec, message) -> None:
+    with pytest.raises(ImproperlyConfigured, match=message):
+        normalize_runtime_env(spec)
+
+
 def test_resolve_named_and_default_profiles() -> None:
     named = resolve_runtime_env_profile("numpy", config=_config())
     default = resolve_runtime_env_profile(config=_config())
@@ -44,6 +65,22 @@ def test_resolve_named_and_default_profiles() -> None:
     assert named.profile == "numpy"
     assert named.spec["pip"] == ["numpy==2.3.5"]
     assert default.profile == "thin"
+
+
+def test_resolve_inline_and_legacy_default_environments() -> None:
+    inline = resolve_runtime_env_profile(
+        config={"RUNTIME_ENV_PROFILES": {}, "RAY_RUNTIME_ENV": {}},
+        inline_spec={"env_vars": {"INLINE": "1"}},
+    )
+    legacy = resolve_runtime_env_profile(
+        config={
+            "RUNTIME_ENV_PROFILES": {},
+            "RAY_RUNTIME_ENV": {"env_vars": {"LEGACY": "1"}},
+        }
+    )
+
+    assert inline.spec == {"env_vars": {"INLINE": "1"}}
+    assert legacy.spec == {"env_vars": {"LEGACY": "1"}}
 
 
 def test_profile_inheritance_merges_environment_and_appends_packages() -> None:
@@ -79,6 +116,48 @@ def test_profile_inheritance_cycles_are_rejected() -> None:
                     "one": {"extends": "two", "runtime_env": {}},
                     "two": {"extends": "one", "runtime_env": {}},
                 },
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("profiles", "message"),
+    [
+        ({"bad": "not-a-dict"}, "must be a dictionary"),
+        (
+            {"bad": {"extends": "missing", "runtime_env": {}}},
+            "extends an unknown profile",
+        ),
+        (
+            {"base": {}, "bad": {"extends": "base", "runtime_env": "invalid"}},
+            "runtime_env must be a dictionary",
+        ),
+        (
+            {"base": {}, "bad": {"extends": "base", "runtime_env": {}, "extra": True}},
+            "unexpected fields",
+        ),
+    ],
+)
+def test_profile_composition_rejects_invalid_definitions(profiles, message) -> None:
+    with pytest.raises(ImproperlyConfigured, match=message):
+        validate_runtime_env_profiles(
+            {
+                "RAY_RUNTIME_ENV": {},
+                "RUNTIME_ENV_PROFILES": profiles,
+            }
+        )
+
+
+def test_profile_validation_rejects_invalid_container_and_default() -> None:
+    with pytest.raises(ImproperlyConfigured, match="RUNTIME_ENV_PROFILES must be"):
+        validate_runtime_env_profiles({"RUNTIME_ENV_PROFILES": []})
+    with pytest.raises(ImproperlyConfigured, match="profile names"):
+        validate_runtime_env_profiles({"RUNTIME_ENV_PROFILES": {"bad name": {}}})
+    with pytest.raises(ImproperlyConfigured, match="DEFAULT_RUNTIME_ENV_PROFILE"):
+        validate_runtime_env_profiles(
+            {
+                "RUNTIME_ENV_PROFILES": {"thin": {}},
+                "DEFAULT_RUNTIME_ENV_PROFILE": "missing",
             }
         )
 
@@ -158,6 +237,25 @@ def test_empty_snapshot_with_digest_remains_immutable(settings) -> None:
     assert resolved == empty
 
 
+def test_execution_snapshot_handles_missing_and_invalid_json() -> None:
+    missing = SimpleNamespace(
+        pk=10,
+        runtime_env_profile="thin",
+        runtime_env_json="",
+        runtime_env_hash="",
+    )
+    invalid = SimpleNamespace(
+        pk=11,
+        runtime_env_profile="thin",
+        runtime_env_json="{",
+        runtime_env_hash="digest",
+    )
+
+    assert runtime_env_for_execution(missing).spec == {}
+    with pytest.raises(ImproperlyConfigured, match="invalid runtime_env_json"):
+        runtime_env_for_execution(invalid)
+
+
 def test_prepare_runtime_env_uploads_local_working_dir(monkeypatch, tmp_path) -> None:
     resolved = normalize_runtime_env(
         {
@@ -189,4 +287,16 @@ def test_prepare_runtime_env_rejects_local_paths_over_ray_client(
     monkeypatch.setattr("ray.util.client.ray.is_connected", lambda: True)
 
     with pytest.raises(ImproperlyConfigured, match="direct Ray connection"):
+        prepare_runtime_env_for_ray_core(resolved)
+
+
+def test_prepare_runtime_env_wraps_packaging_errors(monkeypatch, tmp_path) -> None:
+    resolved = normalize_runtime_env({"py_modules": [str(tmp_path)]})
+    monkeypatch.setattr("ray.util.client.ray.is_connected", lambda: False)
+    monkeypatch.setattr(
+        "ray._private.runtime_env.working_dir.upload_working_dir_if_needed",
+        lambda spec, **kwargs: (_ for _ in ()).throw(RuntimeError("upload failed")),
+    )
+
+    with pytest.raises(ImproperlyConfigured, match="upload failed"):
         prepare_runtime_env_for_ray_core(resolved)

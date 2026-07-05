@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -67,6 +68,36 @@ class TestFilesystemResultStorage:
         with pytest.raises(ResultStorageError, match="Unsafe relative path"):
             storage.load(reference="resultfs://sha256/abc?rel=../secrets.json")
 
+    def test_store_and_load_wrap_filesystem_errors(self, monkeypatch, tmp_path) -> None:
+        storage = FilesystemResultStorage(tmp_path)
+
+        def _mkdir_error(*args, **kwargs):
+            raise OSError("read only")
+
+        monkeypatch.setattr(Path, "mkdir", _mkdir_error)
+        with pytest.raises(ResultStorageError, match="read only"):
+            storage.store(serialized_result="payload")
+
+        monkeypatch.undo()
+        reference = storage.store(serialized_result="payload")
+
+        def _read_error(*args, **kwargs):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(Path, "read_text", _read_error)
+        with pytest.raises(ResultStorageError, match="Failed to read"):
+            storage.load(reference=reference)
+
+    def test_load_rejects_missing_and_malformed_references(self, tmp_path) -> None:
+        storage = FilesystemResultStorage(tmp_path)
+
+        with pytest.raises(ResultStorageError, match="payload not found"):
+            storage.load(reference="resultfs://sha256/abc?rel=aa/bb/missing.json")
+        with pytest.raises(ResultStorageError, match="Unsupported filesystem"):
+            storage.load(reference="s3://bucket/key")
+        with pytest.raises(ResultStorageError, match="Missing rel"):
+            storage.load(reference="resultfs://sha256/abc")
+
 
 class TestS3ResultStorage:
     """Tests for S3-backed result storage."""
@@ -102,6 +133,61 @@ class TestS3ResultStorage:
 
         with pytest.raises(ResultStorageError, match="Unsafe S3 key"):
             storage.load(reference="s3://test-bucket/../secrets.json")
+
+    def test_imports_boto3_when_client_is_omitted(self, monkeypatch) -> None:
+        marker = object()
+        module = SimpleNamespace(client=lambda *args, **kwargs: marker)
+        monkeypatch.setattr(result_storage_module.importlib, "import_module", lambda name: module)
+
+        storage = S3ResultStorage(bucket="bucket")
+
+        assert storage.client is marker
+
+    def test_missing_boto3_has_install_guidance(self, monkeypatch) -> None:
+        def _missing(name: str):
+            raise ImportError(name)
+
+        monkeypatch.setattr(result_storage_module.importlib, "import_module", _missing)
+
+        with pytest.raises(ResultStorageError, match="pip install boto3"):
+            S3ResultStorage(bucket="bucket")
+
+    def test_wraps_client_errors_and_validates_body_type(self) -> None:
+        client = SimpleNamespace(
+            put_object=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("put failed")),
+            get_object=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("get failed")),
+        )
+        storage = S3ResultStorage(bucket="bucket", client=client)
+
+        with pytest.raises(ResultStorageError, match="put failed"):
+            storage.store(serialized_result="payload")
+        with pytest.raises(ResultStorageError, match="get failed"):
+            storage.load(reference="s3://bucket/key")
+
+        storage.client = SimpleNamespace(
+            get_object=lambda **kwargs: {"Body": SimpleNamespace(read=lambda: "text")}
+        )
+        assert storage.load(reference="s3://bucket/key") == "text"
+
+        storage.client = SimpleNamespace(
+            get_object=lambda **kwargs: {"Body": SimpleNamespace(read=lambda: object())}
+        )
+        with pytest.raises(ResultStorageError, match="Unexpected S3 response"):
+            storage.load(reference="s3://bucket/key")
+
+    def test_rejects_malformed_reference(self) -> None:
+        storage = S3ResultStorage(bucket="bucket", client=self._make_client())
+
+        with pytest.raises(ResultStorageError, match="Unsupported S3"):
+            storage.load(reference="https://example.com/result")
+
+    def test_empty_prefix_stores_at_digest_root(self) -> None:
+        storage = S3ResultStorage(bucket="bucket", prefix="", client=self._make_client())
+
+        reference = storage.store(serialized_result="payload")
+
+        assert reference.startswith("s3://bucket/")
+        assert "django-ray/results" not in reference
 
 
 class TestGCSResultStorage:
@@ -152,6 +238,49 @@ class TestGCSResultStorage:
 
         with pytest.raises(ResultStorageError, match="Unsafe GCS key"):
             storage.load(reference="gs://test-bucket/../secrets.json")
+
+    def test_imports_storage_client_when_client_is_omitted(self, monkeypatch) -> None:
+        marker = object()
+        module = SimpleNamespace(Client=lambda: marker)
+        monkeypatch.setattr(result_storage_module.importlib, "import_module", lambda name: module)
+
+        storage = GCSResultStorage(bucket="bucket")
+
+        assert storage.client is marker
+
+    def test_missing_storage_sdk_has_install_guidance(self, monkeypatch) -> None:
+        def _missing(name: str):
+            raise ImportError(name)
+
+        monkeypatch.setattr(result_storage_module.importlib, "import_module", _missing)
+
+        with pytest.raises(ResultStorageError, match="google-cloud-storage"):
+            GCSResultStorage(bucket="bucket")
+
+    def test_wraps_client_errors(self) -> None:
+        bucket = SimpleNamespace(
+            blob=lambda key: SimpleNamespace(
+                upload_from_string=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    RuntimeError("upload failed")
+                ),
+                download_as_bytes=lambda: (_ for _ in ()).throw(RuntimeError("download failed")),
+            )
+        )
+        storage = GCSResultStorage(
+            bucket="bucket",
+            client=SimpleNamespace(bucket=lambda name: bucket),
+        )
+
+        with pytest.raises(ResultStorageError, match="upload failed"):
+            storage.store(serialized_result="payload")
+        with pytest.raises(ResultStorageError, match="download failed"):
+            storage.load(reference="gs://bucket/key")
+
+    def test_rejects_malformed_reference(self) -> None:
+        storage = GCSResultStorage(bucket="bucket", client=self._make_client())
+
+        with pytest.raises(ResultStorageError, match="Unsupported GCS"):
+            storage.load(reference="https://example.com/result")
 
 
 class TestResultStorageFactory:
@@ -288,3 +417,46 @@ class TestResultStorageFactory:
         loaded = load_result_reference("resultfs://sha256/abc?rel=x/y.json&bytes=4")
 
         assert loaded == "loaded:resultfs://sha256/abc?rel=x/y.json&bytes=4"
+
+    def test_reference_factory_handles_digest_and_missing_configuration(self) -> None:
+        assert isinstance(
+            get_result_storage_backend_for_reference("oversize://sha256/abc?bytes=1", {}),
+            DigestResultStorage,
+        )
+
+        with pytest.raises(ResultStorageError, match="RESULT_STORAGE_FILESYSTEM_PATH"):
+            get_result_storage_backend_for_reference("resultfs://sha256/abc?rel=a.json", {})
+        with pytest.raises(ResultStorageError, match="Unsupported S3"):
+            get_result_storage_backend_for_reference("s3:///key", {})
+        with pytest.raises(ResultStorageError, match="Unsupported GCS"):
+            get_result_storage_backend_for_reference("gs:///key", {})
+        with pytest.raises(ResultStorageError, match="Unsupported result reference"):
+            get_result_storage_backend_for_reference("https://example.com/result", {})
+
+    def test_reference_factory_resolves_gcs_backend(self, monkeypatch) -> None:
+        class FakeGCSBackend:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+            def load(self, *, reference: str) -> str | None:  # noqa: ARG002
+                return None
+
+        monkeypatch.setattr(result_storage_module, "GCSResultStorage", FakeGCSBackend)
+
+        backend = get_result_storage_backend_for_reference("gs://bucket/key", {})
+
+        assert isinstance(backend, FakeGCSBackend)
+        assert backend.kwargs == {"bucket": "bucket"}
+
+    def test_factories_use_django_settings_when_config_is_omitted(
+        self, monkeypatch, settings
+    ) -> None:
+        settings.DJANGO_RAY = {"RESULT_STORAGE_BACKEND": "digest"}
+        assert isinstance(get_result_storage_backend(), DigestResultStorage)
+
+        monkeypatch.setattr(
+            result_storage_module,
+            "get_result_storage_backend_for_reference",
+            lambda reference, config=None: DigestResultStorage(),
+        )
+        assert load_result_reference("oversize://sha256/abc?bytes=1") is None

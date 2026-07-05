@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,8 +18,10 @@ from django_ray.runtime.context import (
 from django_ray.runtime.remote import WorkflowProgressActor
 from django_ray.workflows import (
     WorkflowDefinitionError,
+    _callable_path,
     _Executor,
     _get_executor,
+    _RayExecutor,
     chain,
     group,
     map_step,
@@ -284,6 +287,31 @@ def test_with_runtime_env_defensively_copies_inline_runtime_env() -> None:
     assert signature.runtime_env == {"env_vars": {"MODE": "inline"}}
 
 
+def test_with_options_copies_signature_metadata() -> None:
+    original = step(
+        increment,
+        ray_options={"num_cpus": 1},
+        runtime_env={"env_vars": {"MODE": "inline"}},
+    )
+
+    updated = original.with_options(num_gpus=1)
+    assert isinstance(updated.runtime_env, dict)
+    updated.runtime_env["env_vars"]["MODE"] = "changed"
+
+    assert updated.ray_options == {"num_cpus": 1, "num_gpus": 1}
+    assert original.runtime_env == {"env_vars": {"MODE": "inline"}}
+
+
+def test_callable_path_supports_wrappers_and_rejects_invalid_shapes() -> None:
+    wrapper = SimpleNamespace(module_path="tests.unit.test_workflows.increment")
+
+    assert _callable_path(wrapper) == "tests.unit.test_workflows.increment"
+    with pytest.raises(WorkflowDefinitionError, match="dotted import path"):
+        step("increment")
+    with pytest.raises(WorkflowDefinitionError, match="not methods"):
+        step(_GraphExecutor().collect)
+
+
 def test_step_can_request_django_bootstrap(monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(
@@ -298,6 +326,25 @@ def test_step_can_request_django_bootstrap(monkeypatch) -> None:
 def test_map_rejects_non_iterable_input() -> None:
     with pytest.raises(WorkflowDefinitionError, match="non-string iterable"):
         map_step(increment).run(1, use_ray=False)
+
+
+def test_map_requires_one_positional_input() -> None:
+    with pytest.raises(WorkflowDefinitionError, match="exactly one iterable"):
+        map_step(increment).run([1, 2], extra=True, use_ray=False)
+
+
+def test_step_rejects_duplicate_runtime_env_options() -> None:
+    with pytest.raises(WorkflowDefinitionError, match="not in both"):
+        step(
+            increment,
+            runtime_env="thin",
+            ray_options={"runtime_env": {"env_vars": {"MODE": "inline"}}},
+        )
+
+
+def test_map_rejects_options_on_existing_signature() -> None:
+    with pytest.raises(WorkflowDefinitionError, match="cannot be added"):
+        map_step(step(increment), django=True)
 
 
 def test_empty_compositions_are_rejected() -> None:
@@ -332,6 +379,57 @@ def test_ray_job_workflow_lazily_initializes_ray(monkeypatch) -> None:
         assert _get_executor(True) is executor
 
     assert fake_ray.init_calls == [{"address": "auto", "ignore_reinit_error": True}]
+
+
+def test_ray_executor_progress_flush_handles_unavailable_actor() -> None:
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = None
+    executor.task_execution_pk = 1
+
+    assert executor._flush_progress() is None
+
+    snapshot_ref = object()
+    executor.progress_actor = SimpleNamespace(snapshot=SimpleNamespace(remote=lambda: snapshot_ref))
+    executor.ray = SimpleNamespace(wait=lambda refs, timeout: ([], refs))
+    assert executor._flush_progress() is None
+
+    executor.ray = SimpleNamespace(
+        wait=lambda refs, timeout: (refs, []),
+        get=lambda ref: (_ for _ in ()).throw(RuntimeError("actor died")),
+    )
+    assert executor._flush_progress() is None
+    assert executor.progress_actor is None
+
+
+@pytest.mark.django_db
+def test_ray_executor_flushes_failed_progress_snapshot() -> None:
+    from django_ray.models import RayTaskExecution
+
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-flush",
+        callable_path="tests.unit.test_workflows.increment",
+    )
+    snapshot_ref = object()
+    snapshot = {
+        "revision": 2,
+        "state": "RUNNING",
+        "completed_nodes": 0,
+        "failed_nodes": 1,
+        "total_nodes": 1,
+    }
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = SimpleNamespace(snapshot=SimpleNamespace(remote=lambda: snapshot_ref))
+    executor.task_execution_pk = execution.pk
+    executor.last_progress_revision = -1
+    executor.ray = SimpleNamespace(
+        wait=lambda refs, timeout: (refs, []),
+        get=lambda ref: snapshot,
+    )
+
+    assert executor._flush_progress(failed=True)["state"] == "FAILED"
+
+    execution.refresh_from_db()
+    assert json.loads(execution.progress_data)["state"] == "FAILED"
 
 
 @pytest.mark.real_ray
