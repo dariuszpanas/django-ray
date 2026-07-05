@@ -30,6 +30,8 @@ Scenarios:
     - SyncTaskUser: Uses sync mode tasks (simple calculations)
     - LocalRayUser: Uses local Ray mode (fibonacci, workload)
     - ClusterTaskUser: Tests distributed computing features
+    - WorkflowUser: Exercises fan-out and nested workflow composition (0.3.0)
+    - RuntimeEnvUser: Exercises named RuntimeEnv profiles and cache benchmarks (0.3.0)
     - MLPipelineUser: Tests ML pipeline tasks
     - StressTestUser: Pushes system to limits
     - MonitoringUser: Monitors task statistics and health
@@ -217,6 +219,77 @@ class TaskCreationMixin:
         return self._post_task(
             f"/api/cluster/cpu-benchmark?num_items={num_items}&seconds_per_item={seconds_per_item}",
             "/api/cluster/cpu-benchmark",
+        )
+
+    # ========== Workflows (0.3.0) ==========
+
+    def workflow_fanout_benchmark(
+        self, num_items: int | None = None, seconds_per_item: float | None = None
+    ) -> dict[str, Any] | None:
+        """Enqueue a fan-out workflow benchmark."""
+        num_items = num_items or random.randint(4, 12)
+        seconds_per_item = seconds_per_item or random.uniform(0.1, 0.5)
+        return self._post_task(
+            f"/api/cluster/workflow-benchmark"
+            f"?num_items={num_items}&seconds_per_item={seconds_per_item:.2f}",
+            "/api/cluster/workflow-benchmark",
+        )
+
+    def workflow_fanout_result(self, task_id: str) -> dict[str, Any] | None:
+        """Poll fan-out workflow result."""
+        return self._get(
+            f"/api/cluster/workflow-benchmark/{task_id}",
+            "/api/cluster/workflow-benchmark/[task_id]",
+        )
+
+    def complex_workflow(
+        self,
+        fast_items: int | None = None,
+        slow_items: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Enqueue a nested group/chain workflow."""
+        fast_items = fast_items or random.randint(4, 10)
+        slow_items = slow_items or random.randint(2, 6)
+        return self._post_task(
+            f"/api/cluster/complex-workflow"
+            f"?fast_items={fast_items}&slow_items={slow_items}"
+            f"&fast_seconds=0.02&slow_seconds=0.3",
+            "/api/cluster/complex-workflow",
+        )
+
+    def complex_workflow_result(self, task_id: str) -> dict[str, Any] | None:
+        """Poll complex workflow result."""
+        return self._get(
+            f"/api/cluster/complex-workflow/{task_id}",
+            "/api/cluster/complex-workflow/[task_id]",
+        )
+
+    # ========== Runtime Environments (0.3.0) ==========
+
+    def runtime_env_probe(self, profile: str | None = None) -> dict[str, Any] | None:
+        """Enqueue a task through a named RuntimeEnv profile."""
+        profile = profile or random.choice(["project", "thin"])
+        return self._post_task(
+            f"/api/cluster/runtime-env/probe?profile={profile}",
+            "/api/cluster/runtime-env/probe",
+        )
+
+    def runtime_env_benchmark(
+        self, profile: str | None = None, repeats: int | None = None
+    ) -> dict[str, Any] | None:
+        """Time repeated workflow leaves to compare cold vs cached env setup."""
+        profile = profile or random.choice(["thin", "numpy-2-2"])
+        repeats = repeats or random.randint(2, 4)
+        return self._post_task(
+            f"/api/cluster/runtime-env/benchmark?profile={profile}&repeats={repeats}",
+            "/api/cluster/runtime-env/benchmark",
+        )
+
+    def runtime_env_result(self, task_id: str) -> dict[str, Any] | None:
+        """Fetch a runtime-env probe or benchmark result."""
+        return self._get(
+            f"/api/cluster/runtime-env/{task_id}",
+            "/api/cluster/runtime-env/[task_id]",
         )
 
     # ========== Stress Tests ==========
@@ -424,6 +497,71 @@ class ClusterTaskUser(HttpUser, TaskCreationMixin):
     def batch_http(self):
         """Test batch HTTP simulation."""
         self.cluster_batch_http()
+
+
+class WorkflowUser(HttpUser, TaskCreationMixin):
+    """
+    User that exercises Ray-native workflow composition (0.3.0).
+
+    Tests fan-out benchmarks and nested group/chain workflows.
+    Requires worker running with: --cluster ray://head:10001
+    """
+
+    wait_time = between(2, 5)
+    weight = 2
+
+    @task(4)
+    def fanout_workflow(self):
+        """Submit a fan-out workflow and poll for its result."""
+        result = self.workflow_fanout_benchmark(
+            num_items=random.randint(4, 10),
+            seconds_per_item=random.uniform(0.1, 0.3),
+        )
+        if result:
+            self.workflow_fanout_result(result["task_id"])
+
+    @task(3)
+    def complex_nested_workflow(self):
+        """Submit a nested group/chain workflow and poll progress."""
+        result = self.complex_workflow(
+            fast_items=random.randint(4, 8),
+            slow_items=random.randint(2, 4),
+        )
+        if result:
+            self.complex_workflow_result(result["task_id"])
+
+    @task(1)
+    def check_stats(self):
+        self._get_stats()
+
+
+class RuntimeEnvUser(HttpUser, TaskCreationMixin):
+    """
+    User that exercises RuntimeEnv profiles (0.3.0).
+
+    Tests named profile probes and repeated cold/cached benchmarks.
+    Requires worker running with: --cluster ray://head:10001
+    """
+
+    wait_time = between(3, 8)
+    weight = 1
+
+    @task(4)
+    def probe_profile(self):
+        """Enqueue a probe task through a RuntimeEnv profile and fetch the result."""
+        result = self.runtime_env_probe(profile=random.choice(["project", "thin"]))
+        if result:
+            self.runtime_env_result(result["task_id"])
+
+    @task(2)
+    def benchmark_cache(self):
+        """Benchmark cold vs cached env startup and fetch timing summary."""
+        result = self.runtime_env_benchmark(
+            profile=random.choice(["thin", "numpy-2-2"]),
+            repeats=random.randint(2, 3),
+        )
+        if result:
+            self.runtime_env_result(result["task_id"])
 
 
 class MLPipelineUser(HttpUser, TaskCreationMixin):
