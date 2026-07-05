@@ -128,6 +128,36 @@ def test_execution_snapshot_detects_tampering() -> None:
         runtime_env_for_execution(execution)
 
 
+def test_legacy_execution_without_snapshot_identity_uses_current_default(settings) -> None:
+    settings.DJANGO_RAY = _config()
+    execution = SimpleNamespace(
+        pk=8,
+        runtime_env_profile=None,
+        runtime_env_json="{}",
+        runtime_env_hash="",
+    )
+
+    resolved = runtime_env_for_execution(execution)
+
+    assert resolved.profile == "thin"
+    assert resolved.spec == {"env_vars": {"MODE": "thin"}}
+
+
+def test_empty_snapshot_with_digest_remains_immutable(settings) -> None:
+    settings.DJANGO_RAY = _config()
+    empty = normalize_runtime_env({})
+    execution = SimpleNamespace(
+        pk=9,
+        runtime_env_profile=None,
+        runtime_env_json=empty.serialized,
+        runtime_env_hash=empty.digest,
+    )
+
+    resolved = runtime_env_for_execution(execution)
+
+    assert resolved == empty
+
+
 def test_prepare_runtime_env_uploads_local_working_dir(monkeypatch, tmp_path) -> None:
     resolved = normalize_runtime_env(
         {

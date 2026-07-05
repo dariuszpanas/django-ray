@@ -222,6 +222,15 @@ def _merge_runtime_envs(parent: dict[str, Any], child: dict[str, Any]) -> dict[s
 
 def runtime_env_for_execution(task_execution: RayTaskExecution) -> ResolvedRuntimeEnv:
     """Load and verify the immutable RuntimeEnv snapshot on an execution."""
+    profile = getattr(task_execution, "runtime_env_profile", None) or None
+    stored_digest = getattr(task_execution, "runtime_env_hash", "")
+    if not stored_digest and profile is None:
+        # Migration 0002 backfills pre-0.3 rows with "{}" but cannot reconstruct
+        # the RuntimeEnv that would previously have been resolved at submission.
+        # No digest/profile is the durable legacy marker; new empty snapshots
+        # still carry the SHA-256 digest of their canonical "{}" payload.
+        return resolve_runtime_env_profile()
+
     serialized = getattr(task_execution, "runtime_env_json", None)
     if not serialized:
         return normalize_runtime_env({})
@@ -235,10 +244,9 @@ def runtime_env_for_execution(task_execution: RayTaskExecution) -> ResolvedRunti
 
     resolved = normalize_runtime_env(
         spec,
-        profile=getattr(task_execution, "runtime_env_profile", None) or None,
+        profile=profile,
         source=f"task {task_execution.pk} RuntimeEnv",
     )
-    stored_digest = getattr(task_execution, "runtime_env_hash", "")
     if stored_digest and stored_digest != resolved.digest:
         raise ImproperlyConfigured(
             f"django-ray: Task {task_execution.pk} RuntimeEnv snapshot hash does not match"
