@@ -97,6 +97,12 @@ def test_unknown_profile_lists_available_profiles() -> None:
         resolve_runtime_env_profile("missing", config=_config())
 
 
+@pytest.mark.parametrize("profile", [1, {}, []])
+def test_profile_name_must_be_a_string(profile) -> None:
+    with pytest.raises(ImproperlyConfigured, match="RUNTIME_ENV_PROFILE must be a string"):
+        resolve_runtime_env_profile(profile, config=_config())
+
+
 def test_profile_validation_rejects_non_durable_values() -> None:
     with pytest.raises(ImproperlyConfigured, match="import path string"):
         validate_runtime_env_profiles(

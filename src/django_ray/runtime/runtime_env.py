@@ -132,6 +132,9 @@ def resolve_runtime_env_profile(
 
         config = get_settings()
 
+    if profile is not None and not isinstance(profile, str):
+        raise ImproperlyConfigured("django-ray: RUNTIME_ENV_PROFILE must be a string")
+
     if profile is not None and inline_spec is not None:
         raise ImproperlyConfigured(
             "django-ray: RUNTIME_ENV_PROFILE and RAY_RUNTIME_ENV cannot both be set "

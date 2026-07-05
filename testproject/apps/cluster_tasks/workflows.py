@@ -7,7 +7,7 @@ imported by Ray workers without bootstrapping Django.
 from __future__ import annotations
 
 import hashlib
-import importlib
+import importlib.metadata
 import os
 import platform
 import time
@@ -220,8 +220,10 @@ def inspect_runtime_environment(package: str | None = None) -> dict[str, Any]:
     """Return observable details from the Ray worker's active environment."""
     package_version = None
     if package:
-        imported = importlib.import_module(package)
-        package_version = getattr(imported, "__version__", "unknown")
+        try:
+            package_version = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            package_version = "not installed"
 
     return {
         "profile_marker": os.environ.get("DJANGO_RAY_RUNTIME_ENV", "unset"),

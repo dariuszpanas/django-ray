@@ -33,6 +33,16 @@ class RayCoreHandle:
 _execute_django_task_remote_cached = None
 
 
+def _ray_id_to_string(ray_id: Any) -> str:
+    """Return the stable hexadecimal representation preferred by Ray APIs."""
+    if ray_id is None:
+        return ""
+    hex_method = getattr(ray_id, "hex", None)
+    if callable(hex_method):
+        return str(hex_method())
+    return str(ray_id)
+
+
 def _get_remote_execute_django_task() -> Any:
     global _execute_django_task_remote_cached
     if _execute_django_task_remote_cached is None:
@@ -143,7 +153,7 @@ class RayCoreRunner(BaseRunner):
         try:
             # Get the current job ID from Ray runtime context
             ctx = ray.get_runtime_context()
-            ray_job_id = ctx.get_job_id()
+            ray_job_id = _ray_id_to_string(ctx.get_job_id())
             # Get the task ID from the ObjectRef
             # The hex() returns 56 chars but Ray Dashboard uses only first 48
             full_hex = object_ref.hex()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from testproject.apps.cluster_tasks.workflows import (
+    inspect_runtime_environment,
     run_complex_branch_workflow,
     run_cpu_fanout_workflow,
     run_runtime_env_cache_benchmark,
@@ -47,3 +48,24 @@ def test_runtime_env_cache_benchmark_has_local_fallback() -> None:
 
     assert result["runtime_env_profile"] == "thin"
     assert [run["run"] for run in result["runs"]] == [1, 2]
+
+
+def test_runtime_env_probe_reads_distribution_metadata(monkeypatch) -> None:
+    monkeypatch.setattr("importlib.metadata.version", lambda package: f"{package}-version")
+
+    result = inspect_runtime_environment("sample-package")
+
+    assert result["package_version"] == "sample-package-version"
+
+
+def test_runtime_env_probe_handles_missing_distribution(monkeypatch) -> None:
+    def _missing(package: str) -> str:
+        from importlib.metadata import PackageNotFoundError
+
+        raise PackageNotFoundError(package)
+
+    monkeypatch.setattr("importlib.metadata.version", _missing)
+
+    result = inspect_runtime_environment("missing-package")
+
+    assert result["package_version"] == "not installed"

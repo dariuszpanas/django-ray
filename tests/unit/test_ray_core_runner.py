@@ -24,6 +24,14 @@ class _FakeExceptions:
     RayTaskError = RuntimeError
 
 
+class _FakeJobID:
+    def hex(self) -> str:
+        return "02000000"
+
+    def __str__(self) -> str:
+        return "JobID(02000000)"
+
+
 class _FakeRay:
     def __init__(self, *, initialized: bool = True) -> None:
         self.initialized = initialized
@@ -176,6 +184,27 @@ class TestRayCoreRunnerRuntime:
         )
 
         assert fake.remote_calls[-1]["runtime_env"] == {"env_vars": {"MODE": "thin"}}
+
+    def test_submit_normalizes_ray_job_id_to_hex(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        fake.runtime_job_id = _FakeJobID()
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda callable_path, args_json, kwargs_json: json.dumps(
+                {"success": True, "result": callable_path}
+            ),
+        )
+
+        runner = RayCoreRunner()
+        handle = runner.submit(
+            task_execution=SimpleNamespace(pk=13),
+            callable_path="testproject.tasks.echo_task",
+            args=("hello",),
+            kwargs={},
+        )
+
+        assert handle.ray_job_id.startswith("02000000:")
+        assert runner._pending_tasks[13].ray_job_id == "02000000"
 
     def test_submit_falls_back_to_legacy_id_when_runtime_context_fails(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
