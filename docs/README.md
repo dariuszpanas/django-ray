@@ -19,6 +19,8 @@ django-ray is a **library** that provides:
 - [Getting Started](getting-started.md) - Installation and basic setup
 - [Configuration](configuration.md) - All configuration options
 - [Worker Modes](worker-modes.md) - Understanding execution modes
+- [Performance](performance.md) - Choosing execution and batching strategies
+- [Compatibility](compatibility.md) - Supported versions and dependency policy
 - [Task Definition](tasks.md) - Defining and enqueueing tasks
 - [Queues](queues.md) - Working with task queues
 - [Retry & Error Handling](retry.md) - Configuring retries and handling failures

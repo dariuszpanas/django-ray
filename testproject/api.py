@@ -6,16 +6,26 @@ Tasks are defined using @task decorator and enqueued using .enqueue().
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Literal
 
 from django.db.models import Count
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
+from django.tasks.exceptions import InvalidTaskBackend
 from ninja import NinjaAPI, Schema
 
 from django_ray import __version__ as django_ray_version
 from django_ray.models import RayTaskExecution, TaskState
+from django_ray.observability import (
+    WorkflowObservabilityError,
+    get_ray_task_logs,
+    get_ray_task_state,
+    get_workflow_node,
+    get_workflow_progress,
+)
 
 # Import tasks that use Django 6's @task decorator
 from testproject import tasks
@@ -69,6 +79,9 @@ class TaskExecutionSchema(Schema):
     started_at: datetime | None
     finished_at: datetime | None
     result_data: str | None
+    progress_data: str | None
+    runtime_env_profile: str | None
+    runtime_env_hash: str
     error_message: str | None
 
 
@@ -114,6 +127,62 @@ class StatsSchema(Schema):
     failed: int
     cancelled: int
     lost: int
+
+
+class WorkflowResultSchema(Schema):
+    """Status and result for a Ray-native workflow task."""
+
+    task_id: str
+    state: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    progress: dict | None
+    result: dict | None
+    error: str | None
+
+
+class WorkflowGraphSchema(Schema):
+    """UI-ready durable workflow graph and aggregate state."""
+
+    task_id: str
+    task_state: str
+    schema_version: int
+    revision: int
+    workflow_state: str
+    total_nodes: int
+    completed_nodes: int
+    failed_nodes: int
+    running_nodes: int
+    pending_nodes: int
+    progress_percent: float
+    updated_at: float
+    graph: dict
+    recent_events: list[dict]
+
+
+class WorkflowNodeSchema(Schema):
+    """Durable node metadata enriched with optional live Ray data."""
+
+    task_id: str
+    node: dict
+    ray_state: list[dict] | None
+    logs: dict[str, str] | None
+    observability_error: str | None
+
+
+class RuntimeEnvResultSchema(Schema):
+    """Durable task state plus its immutable RuntimeEnv identity."""
+
+    task_id: str
+    state: str
+    runtime_env_profile: str | None
+    runtime_env_hash: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    result: dict | None
+    error: str | None
 
 
 # ============================================================================
@@ -505,6 +574,7 @@ def reset_executions(
         ray_job_id=None,
         error_message=None,
         error_traceback=None,
+        progress_data=None,
     )
 
     return {"message": f"Reset {count} execution(s) to QUEUED state"}
@@ -554,6 +624,7 @@ def retry_execution(request, execution_id: int):
         task.error_traceback = None
         task.ray_job_id = None
         task.claimed_by_worker = None
+        task.progress_data = None
         task.save()
 
     return task
@@ -912,6 +983,291 @@ def cluster_cpu_benchmark(request, num_items: int = 10, seconds_per_item: float 
         "finished_at": result.finished_at,
         "args": result.args,
         "kwargs": result.kwargs,
+    }
+
+
+@api.post("/cluster/workflow-benchmark", response=TaskResultSchema, tags=["Workflows"])
+def cluster_workflow_benchmark(
+    request,
+    num_items: int = 8,
+    seconds_per_item: float = 0.25,
+):
+    """Enqueue one durable task that fans out Ray-native workflow leaves.
+
+    Poll ``GET /api/cluster/workflow-benchmark/{task_id}`` for the result.
+    Only the outer task creates a database execution row.
+    """
+    result = cluster_tasks.workflow_fanout_benchmark.enqueue(
+        num_items=num_items,
+        seconds_per_item=seconds_per_item,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.get(
+    "/cluster/workflow-benchmark/{task_id}",
+    response=WorkflowResultSchema,
+    tags=["Workflows"],
+)
+def get_cluster_workflow_benchmark(request, task_id: str):
+    """Return workflow state, timing summary, leaf details, or failure."""
+    execution = get_object_or_404(
+        RayTaskExecution,
+        task_id=task_id,
+        callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
+    )
+    result = _result_value_for_execution(execution)
+    try:
+        progress = get_workflow_progress(execution)
+    except WorkflowObservabilityError:
+        progress = None
+    return {
+        "task_id": execution.task_id,
+        "state": execution.state,
+        "created_at": execution.created_at,
+        "started_at": execution.started_at,
+        "finished_at": execution.finished_at,
+        "progress": progress,
+        "result": result,
+        "error": execution.error_message,
+    }
+
+
+@api.post("/cluster/complex-workflow", response=TaskResultSchema, tags=["Workflows"])
+def cluster_complex_workflow(
+    request,
+    fast_items: int = 8,
+    slow_items: int = 4,
+    fast_seconds: float = 0.02,
+    slow_seconds: float = 0.5,
+):
+    """Run nested fast and slow branches to demonstrate groups and chains."""
+    result = cluster_tasks.complex_workflow_benchmark.enqueue(
+        fast_items=fast_items,
+        slow_items=slow_items,
+        fast_seconds=fast_seconds,
+        slow_seconds=slow_seconds,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.get(
+    "/cluster/complex-workflow/{task_id}",
+    response=WorkflowResultSchema,
+    tags=["Workflows"],
+)
+def get_cluster_complex_workflow(request, task_id: str):
+    """Return live progress and results for the nested workflow example."""
+    execution = get_object_or_404(
+        RayTaskExecution,
+        task_id=task_id,
+        callable_path=("testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"),
+    )
+    try:
+        progress = get_workflow_progress(execution)
+    except WorkflowObservabilityError:
+        progress = None
+    return {
+        "task_id": execution.task_id,
+        "state": execution.state,
+        "created_at": execution.created_at,
+        "started_at": execution.started_at,
+        "finished_at": execution.finished_at,
+        "progress": progress,
+        "result": _result_value_for_execution(execution),
+        "error": execution.error_message,
+    }
+
+
+@api.get(
+    "/cluster/workflows/{task_id}/graph",
+    response=WorkflowGraphSchema,
+    tags=["Workflows"],
+)
+def get_cluster_workflow_graph(request, task_id: str):
+    """Return a versioned node/edge graph suitable for custom tracking UIs."""
+    execution = get_object_or_404(RayTaskExecution, task_id=task_id)
+    try:
+        progress = get_workflow_progress(execution)
+    except WorkflowObservabilityError as exc:
+        raise Http404(str(exc)) from exc
+    if progress is None:
+        raise Http404("Workflow graph is not available yet")
+    return {
+        "task_id": execution.task_id,
+        "task_state": execution.state,
+        "schema_version": progress.get("schema_version", 1),
+        "revision": progress.get("revision", 0),
+        "workflow_state": progress.get("state", "RUNNING"),
+        "total_nodes": progress.get("total_nodes", 0),
+        "completed_nodes": progress.get("completed_nodes", 0),
+        "failed_nodes": progress.get("failed_nodes", 0),
+        "running_nodes": progress.get("running_nodes", 0),
+        "pending_nodes": progress.get("pending_nodes", 0),
+        "progress_percent": progress.get("progress_percent", 0.0),
+        "updated_at": progress.get("updated_at", 0.0),
+        "graph": progress.get(
+            "graph",
+            {"nodes": progress.get("nodes", []), "edges": []},
+        ),
+        "recent_events": progress.get("recent_events", []),
+    }
+
+
+@api.get(
+    "/cluster/workflows/{task_id}/nodes/{node_id}",
+    response=WorkflowNodeSchema,
+    tags=["Workflows"],
+)
+def get_cluster_workflow_node(
+    request,
+    task_id: str,
+    node_id: str,
+    include_logs: bool = False,
+    tail: int = 200,
+):
+    """Return durable node metadata plus live Ray state and optional log tails."""
+    execution = get_object_or_404(RayTaskExecution, task_id=task_id)
+    node = get_workflow_node(execution, node_id)
+    if node is None:
+        raise Http404("Workflow node was not found")
+
+    ray_state = None
+    logs = None
+    observability_error = None
+    ray_task_id = node.get("execution", {}).get("ray_task_id")
+    if ray_task_id:
+        try:
+            ray_state = get_ray_task_state(ray_task_id)
+            if include_logs:
+                logs = get_ray_task_logs(ray_task_id, tail=tail)
+        except Exception as error:
+            observability_error = str(error)
+
+    return {
+        "task_id": execution.task_id,
+        "node": node,
+        "ray_state": ray_state,
+        "logs": logs,
+        "observability_error": observability_error,
+    }
+
+
+_RUNTIME_ENV_BACKENDS = {
+    "project": "default",
+    "thin": "thin",
+    "numpy-2-2": "numpy-2-2",
+    "numpy-2-3": "numpy-2-3",
+}
+
+
+def _result_backend_alias_for_execution(execution: RayTaskExecution) -> str:
+    profile = execution.runtime_env_profile or "project"
+    return _RUNTIME_ENV_BACKENDS.get(profile, "default")
+
+
+def _result_value_for_execution(execution: RayTaskExecution) -> object:
+    """Resolve durable task return values, including externally stored payloads."""
+    if execution.state != TaskState.SUCCEEDED:
+        return json.loads(execution.result_data) if execution.result_data else None
+
+    backend_alias = _result_backend_alias_for_execution(execution)
+    try:
+        backend = task_backends[backend_alias]
+    except (KeyError, InvalidTaskBackend):
+        backend = task_backends["default"]
+    return backend.get_result(execution.task_id).return_value
+
+
+@api.post("/cluster/runtime-env/probe", response=TaskResultSchema, tags=["Runtime Environments"])
+def cluster_runtime_env_probe(
+    request,
+    profile: Literal["project", "thin", "numpy-2-2", "numpy-2-3"] = "thin",
+    package: str | None = None,
+):
+    """Enqueue a task through a backend bound to the selected RuntimeEnv profile."""
+    task_obj = cluster_tasks.runtime_env_probe.using(backend=_RUNTIME_ENV_BACKENDS[profile])
+    result = task_obj.enqueue(package=package)
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.post(
+    "/cluster/runtime-env/benchmark",
+    response=TaskResultSchema,
+    tags=["Runtime Environments"],
+)
+def cluster_runtime_env_benchmark(
+    request,
+    profile: Literal["thin", "numpy-2-2", "numpy-2-3"] = "thin",
+    repeats: int = 2,
+    package: str | None = None,
+):
+    """Time repeated workflow leaves to compare cold and cached environment setup."""
+    result = cluster_tasks.runtime_env_benchmark.enqueue(
+        profile=profile,
+        repeats=repeats,
+        package=package,
+    )
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.get(
+    "/cluster/runtime-env/{task_id}",
+    response=RuntimeEnvResultSchema,
+    tags=["Runtime Environments"],
+)
+def get_cluster_runtime_env_result(request, task_id: str):
+    """Return a probe or benchmark result with the durable environment identity."""
+    execution = get_object_or_404(
+        RayTaskExecution,
+        task_id=task_id,
+        callable_path__in=[
+            "testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+            "testproject.apps.cluster_tasks.tasks.runtime_env_benchmark",
+        ],
+    )
+    return {
+        "task_id": execution.task_id,
+        "state": execution.state,
+        "runtime_env_profile": execution.runtime_env_profile,
+        "runtime_env_hash": execution.runtime_env_hash,
+        "created_at": execution.created_at,
+        "started_at": execution.started_at,
+        "finished_at": execution.finished_at,
+        "result": _result_value_for_execution(execution),
+        "error": execution.error_message,
     }
 
 

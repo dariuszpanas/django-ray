@@ -3,6 +3,22 @@
   width: 1.35rem;
 }
 
+/*
+ * Command-line flags and backend addresses lose meaning when their punctuation
+ * wraps independently. Let descriptive cells wrap and let wide tables scroll.
+ */
+.md-typeset__table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.md-typeset table:not([class]) code {
+  hyphens: none;
+  overflow-wrap: normal;
+  white-space: nowrap;
+  word-break: normal;
+}
+
 .md-typeset .mermaid {
   --md-mermaid-edge-color: var(--md-default-fg-color--light);
   --md-mermaid-label-bg-color: var(--md-default-bg-color);

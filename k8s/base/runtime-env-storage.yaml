@@ -1,0 +1,16 @@
+# Shared source bundles for local RuntimeEnv testing.
+# Production deployments should normally use immutable HTTPS/S3/GCS archive URIs.
+# This claim requires an RWX-capable StorageClass/provisioner. If the cluster only
+# provides ReadWriteOnce storage, the claim remains Pending; install an RWX
+# provisioner or replace this volume-backed example with shared object storage.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: runtime-env-pvc
+  namespace: django-ray
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 256Mi

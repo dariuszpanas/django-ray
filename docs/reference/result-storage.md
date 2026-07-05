@@ -113,11 +113,18 @@ This requires the reading process to have the same storage configuration availab
 
 ```python
 import json
+
+from django_ray.models import RayTaskExecution
 from django_ray.result_storage import FilesystemResultStorage
 
-storage = FilesystemResultStorage("/var/lib/django-ray/results")
-serialized = storage.load(reference=task.result_reference)
-result_value = json.loads(serialized)
+
+def load_raw_result(task_id: str) -> object:
+    execution = RayTaskExecution.objects.get(task_id=task_id)
+    if not execution.result_reference:
+        return json.loads(execution.result_data)
+    storage = FilesystemResultStorage("/var/lib/django-ray/results")
+    serialized = storage.load(reference=execution.result_reference)
+    return json.loads(serialized)
 ```
 
 ## Failure Behavior

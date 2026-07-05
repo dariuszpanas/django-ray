@@ -1,170 +1,116 @@
 # Worker Execution Modes
 
-django-ray supports multiple execution modes to fit different use cases, from local development to production clusters.
+The task-manager process always claims durable work from Django's database. Its
+execution mode determines how that work reaches Ray.
 
-## Overview
+## Comparison
 
-| Mode | Flag | Ray Required | Use Case |
-|------|------|--------------|----------|
-| **sync** | `--sync` | No | Testing, debugging |
-| **local** | `--local` | Local Ray | Development |
-| **cluster** | `--cluster=<addr>` | Remote Ray | Production |
-| **ray-job** | *(default)* | Remote Ray | Production (isolation) |
+| Mode | Command | Best fit | Relative startup cost |
+|---|---|---|---|
+| Sync | `--sync` | Tests and debugging | Lowest |
+| Local Ray Core | `--local` | Development and one-machine execution | Low after Ray starts |
+| Cluster Ray Core | `--cluster=ray://host:10001` | Low-latency production workflows | Low |
+| Ray Job | no mode flag with `RUNNER="ray_job"` | Isolated, coarse jobs | Highest |
 
-Note: "default" means no mode flag and `DJANGO_RAY.RUNNER="ray_job"`.  
-If `DJANGO_RAY.RUNNER="ray_core"` and no mode flag is provided, the worker defaults to:
-- local mode when `RAY_ADDRESS="auto"`
-- cluster mode when `RAY_ADDRESS` is a cluster address
+If `RUNNER="ray_core"` and no mode flag is supplied, `RAY_ADDRESS="auto"` selects
+local mode and a cluster address selects cluster mode.
 
-## Sync Mode
-
-**Flag:** `--sync`
-
-Executes tasks directly in the worker process without Ray. Useful for testing and debugging.
+## Sync
 
 ```bash
 python manage.py django_ray_worker --queue=default --sync
 ```
 
-**Characteristics:**
-- No Ray installation required
-- Sequential execution (one task at a time)
-- Full Django context available
-- Easy to debug with breakpoints
+No running Ray cluster is required. Tasks execute in the task-manager process, one at
+a time, which makes breakpoints and deterministic tests straightforward. Ray-native
+workflow signatures use their local fallback, so sync mode does not demonstrate
+parallel speedup or Ray failure behavior.
 
-**When to use:**
-- Unit testing
-- Debugging task logic
-- CI/CD pipelines without Ray
-
-## Local Mode
-
-**Flag:** `--local`
-
-Starts a local Ray instance and executes tasks via `@ray.remote`. Recommended for development.
+## Local Ray Core
 
 ```bash
 python manage.py django_ray_worker --queue=default --local
 ```
 
-**Characteristics:**
-- Automatic local Ray cluster
-- Ray Dashboard available at http://127.0.0.1:8265
-- Tasks run in separate Ray workers
-- Supports `parallel_map` and distributed utilities
+The task manager starts a local Ray runtime, and the dashboard is normally available at
+http://127.0.0.1:8265. Use this for development, workflow tests, and single-machine
+parallelism.
 
-**When to use:**
-- Local development
-- Testing distributed patterns
-- Single-machine deployments
-
-## Cluster Mode
-
-**Flag:** `--cluster=<address>`
-
-Connects to an existing Ray cluster and executes tasks via `@ray.remote`.
+## Cluster Ray Core
 
 ```bash
-python manage.py django_ray_worker --queue=default --cluster=ray://ray-head:10001
+python manage.py django_ray_worker \
+  --queue=default \
+  --cluster=ray://ray-head.example:10001
 ```
 
-**Characteristics:**
-- Connects to remote Ray cluster
-- Tasks distributed across cluster workers
-- Full Ray features available
-- Lower overhead than Ray Job API
+The task manager submits functions through Ray Client. Worker processes are reused,
+workflow leaves exchange object references directly, and there is no separate Ray Job
+driver per durable task. This is normally the best production mode for short tasks,
+high throughput, and multi-stage workflows.
 
-**When to use:**
-- Production with dedicated Ray cluster
-- When you need distributed computing features
-- High-throughput workloads
-
-## Ray Job Mode (Default)
-
-**Flag:** None (default behavior with `DJANGO_RAY.RUNNER="ray_job"`)
-
-Uses Ray's Job Submission API for process isolation.
+## Ray Job
 
 ```bash
 python manage.py django_ray_worker --queue=default
 ```
 
-**Characteristics:**
-- Each task runs in isolated process
-- Better fault isolation
-- Higher overhead per task
-- Requires `RAY_ADDRESS` in settings
+With `DJANGO_RAY["RUNNER"] = "ray_job"`, each durable task is submitted through Ray's
+Job Submission API and gets an isolated driver process. Ray-native workflows are
+supported: the driver connects back to its Ray cluster when it starts submitting
+leaves.
 
-**When to use:**
-- Production requiring strict isolation
-- Long-running tasks
-- Tasks with heavy dependencies
+Choose Ray Job when driver isolation, independent logs, or coarse job lifecycle is
+more valuable than startup latency. Avoid it for thousands of tiny tasks.
 
-## Comparison
+## Distributed Utilities
 
-| Feature | Sync | Local | Cluster | Ray Job |
-|---------|------|-------|---------|---------|
-| Ray required | ❌ | ✅ | ✅ | ✅ |
-| Process isolation | ❌ | Partial | Partial | ✅ |
-| Distributed computing | ❌ | ✅ | ✅ | ✅ |
-| `parallel_map` support | ❌ | ✅ | ✅ | ✅ |
-| Overhead | Lowest | Low | Low | Higher |
-| Debugging ease | Best | Good | Moderate | Harder |
-
-## Distributed Computing Utilities
-
-In **local** and **cluster** modes, you can use distributed computing utilities within your tasks:
+`parallel_map()`, `parallel_starmap()`, and `scatter_gather()` work in local, cluster,
+and Ray Job execution. Their callables must be serializable; module-level functions are
+the reliable pattern:
 
 ```python
+# myapp/tasks.py
 from django.tasks import task
-from django_ray.runtime.distributed import parallel_map, scatter_gather
+
+from django_ray.runtime.distributed import parallel_map
+
+
+def process_one(item_id: int) -> dict[str, int | bool]:
+    return {"id": item_id, "processed": True}
+
 
 @task(queue_name="default")
-def process_batch(item_ids: list[int]) -> list[dict]:
-    """Process items in parallel using Ray."""
-    
-    def process_one(item_id: int) -> dict:
-        # This runs on Ray workers
-        return {"id": item_id, "processed": True}
-    
-    # Automatically parallelized across Ray cluster
-    results = parallel_map(process_one, item_ids)
-    return results
+def process_batch(item_ids: list[int]) -> list[dict[str, int | bool]]:
+    return parallel_map(process_one, item_ids, max_concurrency=16)
 ```
 
-**Available utilities:**
-- `parallel_map(func, items)` - Apply function to items in parallel
-- `parallel_starmap(func, args_list)` - Apply function with argument tuples
-- `scatter_gather(tasks)` - Execute heterogeneous tasks in parallel
-- `get_num_workers()` - Get number of Ray workers
-- `get_ray_resources()` - Get cluster resources
+Available helpers:
 
-## Choosing a Mode
+- `parallel_map(func, items)` applies one callable to every item.
+- `parallel_starmap(func, argument_tuples)` unpacks positional arguments.
+- `scatter_gather(calls)` executes heterogeneous call tuples.
+- `get_num_workers()` reports the current Ray worker-node count.
+- `get_ray_resources()` reports cluster resources.
 
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}} }%%
-flowchart TD
-    start["Which mode to use?"]
-    testing{"Testing or debugging?"}
-    distributed{"Need distributed computing?"}
-    cluster{"Have Ray cluster?"}
-    sync1["sync"]
-    sync2["sync"]
-    cluster_mode["cluster"]
-    local_mode["local"]
+For dependent stages and UI-visible graphs, prefer
+[Ray-native workflows](workflows.md).
 
-    start --> testing
-    testing -- Yes --> sync1
-    testing -- No --> distributed
-    distributed -- No --> sync2
-    distributed -- Yes --> cluster
-    cluster -- Yes --> cluster_mode
-    cluster -- No --> local_mode
-```
+## Choose an Execution Model
+
+| Main concern | Start with |
+|---|---|
+| deterministic tests or stepping through Python | Sync |
+| development on one machine | Local Ray Core |
+| low-latency task and workflow submission | Cluster Ray Core |
+| process isolation for long, coarse jobs | Ray Job |
+
+Ray Core is the performance default. Ray Job is deliberately more expensive: choose it
+because isolation is worth the cost, not merely because it is the configuration
+default.
 
 ## See Also
 
-- [Getting Started](getting-started.md) - Basic setup
-- [Configuration](configuration.md) - Worker configuration options
-- [Kubernetes Deployment](deployment/kubernetes.md) - Production deployment
-
+- [Performance](performance.md) for workload-size and batching guidance
+- [Runtime Environments](runtime-environments.md) for environment startup cost
+- [Kubernetes Deployment](deployment/kubernetes.md) for production topology

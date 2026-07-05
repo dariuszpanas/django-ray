@@ -9,6 +9,8 @@ namespace: django-ray
 resources:
   - ../../base
   - ray-cluster-kuberay.yaml
+  - worker-ml.yaml
+  - worker-sync.yaml
 
 patches:
   # Remove legacy static Ray resources from base.
@@ -59,6 +61,18 @@ patches:
       - op: replace
         path: /spec/replicas
         value: 2
+    target:
+      kind: Deployment
+      name: django-ray-worker
+
+  # Also consume the high-priority and low-priority queues from the default
+  # worker pool so tasks submitted to them aren't stuck with no consumer.
+  # ml/sync have their own dedicated worker deployments (worker-ml.yaml,
+  # worker-sync.yaml) since they have different resource/runtime needs.
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1/value
+        value: "default,high-priority,low-priority"
     target:
       kind: Deployment
       name: django-ray-worker

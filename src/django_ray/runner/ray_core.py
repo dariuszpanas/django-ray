@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -25,6 +24,34 @@ class RayCoreHandle:
     task_name: str
     ray_job_id: str = ""  # The worker's Ray job ID (e.g., "02000000")
     ray_task_id: str = ""  # The task's Ray ID (e.g., "67a2e8cfa5a06db3ffff...")
+
+
+# Global remote function cache to prevent Ray GCS memory leaks.
+# Ray caches remote function definitions, so dynamically decorating functions
+# inside hot paths like submit_task or _RayExecutor.__init__ causes OOMs.
+
+_execute_django_task_remote_cached = None
+
+
+def _ray_id_to_string(ray_id: Any) -> str:
+    """Return the stable hexadecimal representation preferred by Ray APIs."""
+    if ray_id is None:
+        return ""
+    hex_method = getattr(ray_id, "hex", None)
+    if callable(hex_method):
+        return str(hex_method())
+    return str(ray_id)
+
+
+def _get_remote_execute_django_task() -> Any:
+    global _execute_django_task_remote_cached
+    if _execute_django_task_remote_cached is None:
+        import ray
+
+        from django_ray.runtime.remote import execute_django_task_remote
+
+        _execute_django_task_remote_cached = ray.remote(execute_django_task_remote)
+    return _execute_django_task_remote_cached
 
 
 class RayCoreRunner(BaseRunner):
@@ -85,35 +112,29 @@ class RayCoreRunner(BaseRunner):
         # Extract task name for Ray dashboard visibility
         task_name = callable_path.split(".")[-1] if callable_path else "task"
 
-        # Define the remote function
-        @ray.remote(name=f"django_ray:{task_name}")
-        def execute_django_task(
-            callable_path: str,
-            args_json: str,
-            kwargs_json: str,
-            task_id: int,
-        ) -> str:
-            """Execute a Django task on a Ray worker."""
-            import json
+        from django_ray.runtime.runtime_env import (
+            prepare_runtime_env_for_ray_core,
+            runtime_env_for_execution,
+        )
 
-            print(f"[Task {task_id}] Starting: {callable_path}", flush=True)
+        # Keep the executor importable at module scope so Ray can reuse worker
+        # processes without serializing a new nested function for every task.
+        runtime_env = runtime_env_for_execution(task_execution)
+        submitted_runtime_env = prepare_runtime_env_for_ray_core(runtime_env)
+        # Ray Client deserializes the remote function on the server before its
+        # task-level RuntimeEnv exists. Ship this small bootstrap function by
+        # value so a generic Ray head does not need django-ray installed.
+        cloudpickle = getattr(ray, "cloudpickle", None)
+        if cloudpickle is not None:
+            import django_ray.runtime.remote as remote_module
 
-            from django_ray.runtime.entrypoint import execute_task
+            cloudpickle.register_pickle_by_value(remote_module)
 
-            result = execute_task(callable_path, args_json, kwargs_json)
+        remote_options: dict[str, Any] = {"name": f"django_ray:{task_name}"}
+        if submitted_runtime_env:
+            remote_options["runtime_env"] = submitted_runtime_env
 
-            # Print result for visibility in Ray dashboard
-            parsed = json.loads(result)
-            if parsed.get("success"):
-                print(f"[Task {task_id}] SUCCESS: {parsed.get('result')}", flush=True)
-            else:
-                print(
-                    f"[Task {task_id}] FAILED: {parsed.get('error')}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-            return result
+        execute_django_task = _get_remote_execute_django_task().options(**remote_options)
 
         # Submit to Ray (non-blocking)
         submitted_at = datetime.now(UTC)
@@ -122,6 +143,8 @@ class RayCoreRunner(BaseRunner):
             args_json,
             kwargs_json,
             task_execution.pk,
+            runtime_env.profile,
+            runtime_env.digest,
         )
 
         # Get Ray job ID (the worker's client connection job ID)
@@ -130,7 +153,7 @@ class RayCoreRunner(BaseRunner):
         try:
             # Get the current job ID from Ray runtime context
             ctx = ray.get_runtime_context()
-            ray_job_id = ctx.get_job_id()
+            ray_job_id = _ray_id_to_string(ctx.get_job_id())
             # Get the task ID from the ObjectRef
             # The hex() returns 56 chars but Ray Dashboard uses only first 48
             full_hex = object_ref.hex()
@@ -253,6 +276,7 @@ class RayCoreRunner(BaseRunner):
             True if cancellation was initiated.
         """
         import ray
+        from ray.exceptions import RayTaskError
 
         task_pk = self._resolve_task_pk(handle.ray_job_id)
         if task_pk is None:
@@ -269,7 +293,7 @@ class RayCoreRunner(BaseRunner):
             ray.cancel(core_handle.object_ref, force=False)
             del self._pending_tasks[task_pk]
             return True
-        except (RuntimeError, ray.exceptions.RayTaskError):
+        except (RuntimeError, RayTaskError):
             # Task may have already completed or failed
             self._pending_tasks.pop(task_pk, None)
             return False

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from django_ray.conf.settings import get_settings
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
+from django_ray.runtime.runtime_env import runtime_env_for_execution
 from django_ray.runtime.serialization import serialize_args
 
 if TYPE_CHECKING:
@@ -41,28 +42,30 @@ class RayJobRunner(BaseRunner):
 
         serialized_args = serialize_args(list(args))
         serialized_kwargs = serialize_args(kwargs)
+        runtime_env = runtime_env_for_execution(task_execution)
 
         # Transport payload as urlsafe base64 to avoid shell quoting/injection issues.
         payload = {
             "callable_path": callable_path,
             "serialized_args": serialized_args,
             "serialized_kwargs": serialized_kwargs,
+            "task_execution_pk": task_execution.pk,
+            "runtime_env_profile": runtime_env.profile,
+            "runtime_env_hash": runtime_env.digest,
         }
         payload_json = json.dumps(payload, separators=(",", ":"))
         payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
 
         entrypoint = f"python -m django_ray.runtime.entrypoint --payload-b64 {payload_b64}"
 
-        # Get runtime environment settings
-        settings = get_settings()
-        runtime_env = settings.get("RAY_RUNTIME_ENV", {})
-
         job_id = client.submit_job(
             entrypoint=entrypoint,
-            runtime_env=runtime_env,
+            runtime_env=runtime_env.spec,
             metadata={
                 "django_ray_task_id": str(task_execution.pk),
                 "callable_path": callable_path,
+                "runtime_env_profile": runtime_env.profile or "",
+                "runtime_env_hash": runtime_env.digest,
             },
         )
 

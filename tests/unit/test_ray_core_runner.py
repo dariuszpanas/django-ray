@@ -20,9 +20,21 @@ class _FakeObjectRef:
         return self._hex_value
 
 
+class _FakeExceptions:
+    RayTaskError = RuntimeError
+
+
+class _FakeJobID:
+    def hex(self) -> str:
+        return "02000000"
+
+    def __str__(self) -> str:
+        return "JobID(02000000)"
+
+
 class _FakeRay:
-    def __init__(self) -> None:
-        self.initialized = True
+    def __init__(self, *, initialized: bool = True) -> None:
+        self.initialized = initialized
         self.init_calls: list[dict[str, Any]] = []
         self.remote_calls: list[dict[str, Any]] = []
         self.runtime_job_id = "02000000"
@@ -33,16 +45,16 @@ class _FakeRay:
         self.values: dict[_FakeObjectRef, Any] = {}
         self.ready_refs: set[_FakeObjectRef] = set()
         self.cancelled: list[tuple[_FakeObjectRef, bool]] = []
-        self.exceptions = SimpleNamespace(RayTaskError=RuntimeError)
-
-    def is_initialized(self) -> bool:
-        return self.initialized
+        self.exceptions = _FakeExceptions()
 
     def init(self, **kwargs: Any) -> None:
         self.init_calls.append(kwargs)
         self.initialized = True
 
-    def remote(self, **kwargs: Any):
+    def is_initialized(self) -> bool:
+        return self.initialized
+
+    def remote(self, *args, **kwargs: Any):
         self.remote_calls.append(kwargs)
 
         def _decorator(fn):
@@ -56,8 +68,14 @@ class _FakeRay:
                     fake.values[ref] = value
                     return ref
 
+                def options(self, **kw: Any):
+                    fake.remote_calls.append(kw)
+                    return self
+
             return _RemoteCallable()
 
+        if args and callable(args[0]):
+            return _decorator(args[0])
         return _decorator
 
     def get_runtime_context(self) -> Any:
@@ -87,6 +105,7 @@ class _FakeRay:
 def _install_fake_ray(monkeypatch) -> _FakeRay:
     fake = _FakeRay()
     monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setitem(sys.modules, "ray.exceptions", fake.exceptions)
     return fake
 
 
@@ -141,6 +160,51 @@ class TestRayCoreRunnerRuntime:
         pending = runner._pending_tasks[11]
         assert pending.ray_job_id == "02000000"
         assert pending.ray_task_id == fake.default_hex[:48]
+
+    def test_submit_applies_persisted_runtime_env(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda callable_path, args_json, kwargs_json: json.dumps(
+                {"success": True, "result": callable_path}
+            ),
+        )
+
+        runner = RayCoreRunner()
+        runner.submit(
+            task_execution=SimpleNamespace(
+                pk=12,
+                runtime_env_profile="thin",
+                runtime_env_json='{"env_vars":{"MODE":"thin"}}',
+                runtime_env_hash="",
+            ),
+            callable_path="testproject.tasks.echo_task",
+            args=("hello",),
+            kwargs={},
+        )
+
+        assert fake.remote_calls[-1]["runtime_env"] == {"env_vars": {"MODE": "thin"}}
+
+    def test_submit_normalizes_ray_job_id_to_hex(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        fake.runtime_job_id = _FakeJobID()
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda callable_path, args_json, kwargs_json: json.dumps(
+                {"success": True, "result": callable_path}
+            ),
+        )
+
+        runner = RayCoreRunner()
+        handle = runner.submit(
+            task_execution=SimpleNamespace(pk=13),
+            callable_path="testproject.tasks.echo_task",
+            args=("hello",),
+            kwargs={},
+        )
+
+        assert handle.ray_job_id.startswith("02000000:")
+        assert runner._pending_tasks[13].ray_job_id == "02000000"
 
     def test_submit_falls_back_to_legacy_id_when_runtime_context_fails(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)

@@ -20,14 +20,18 @@ class TestEntrypointPayload:
         }
         payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
 
-        captured: dict[str, str] = {}
+        captured: dict[str, object] = {}
 
         def fake_execute_task(
-            callable_path: str, serialized_args: str, serialized_kwargs: str
+            callable_path: str,
+            serialized_args: str,
+            serialized_kwargs: str,
+            **kwargs,
         ) -> str:
             captured["callable_path"] = callable_path
             captured["serialized_args"] = serialized_args
             captured["serialized_kwargs"] = serialized_kwargs
+            captured.update(kwargs)
             return '{"success": true}'
 
         monkeypatch.setattr(entrypoint, "execute_task", fake_execute_task)
@@ -35,7 +39,12 @@ class TestEntrypointPayload:
         result = entrypoint.execute_task_from_payload(payload_b64)
 
         assert result == '{"success": true}'
-        assert captured == payload
+        assert captured == {
+            **payload,
+            "task_execution_pk": None,
+            "runtime_env_profile": None,
+            "runtime_env_hash": "",
+        }
 
     def test_execute_task_from_payload_invalid_payload_returns_error_result(self) -> None:
         """Invalid payload should produce a structured failure JSON result."""

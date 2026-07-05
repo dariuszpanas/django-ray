@@ -181,6 +181,68 @@ class TestWorkerCommandRuntime:
         assert recreated == [True]
         assert cmd._heartbeat_count == 1
 
+    def test_send_heartbeat_updates_active_lease_and_reports_status(self) -> None:
+        cmd = _make_command()
+        saved: list[list[str]] = []
+        lease = SimpleNamespace(
+            is_active=True,
+            refresh_from_db=lambda: None,
+            save=lambda update_fields: saved.append(update_fields),
+        )
+        cmd.lease = cast(Any, lease)
+        cmd._heartbeat_count = 3
+        cmd.tasks_processed_count = 5
+        cmd.last_task_processed = 0
+        cmd.active_tasks = {1: "active"}
+        cmd.ray_core_runner = cast(Any, SimpleNamespace(pending_count=2))
+
+        cmd.send_heartbeat()
+
+        assert saved == [["last_heartbeat_at"]]
+        assert lease.last_heartbeat_at is not None
+        assert any("tasks_processed=5, active=3" in message for message in cmd.stdout.messages)
+
+    def test_send_heartbeat_recreates_inactive_or_deleted_lease(self, monkeypatch) -> None:
+        cmd = _make_command()
+        recreated: list[str] = []
+        monkeypatch.setattr(cmd, "_recreate_lease", lambda: recreated.append("recreated"))
+
+        cmd.lease = cast(
+            Any,
+            SimpleNamespace(is_active=False, refresh_from_db=lambda: None),
+        )
+        cmd.send_heartbeat()
+
+        def _deleted() -> None:
+            from django_ray.models import TaskWorkerLease
+
+            raise TaskWorkerLease.DoesNotExist
+
+        cmd.lease = cast(
+            Any,
+            SimpleNamespace(is_active=True, refresh_from_db=_deleted),
+        )
+        cmd.send_heartbeat()
+
+        assert recreated == ["recreated", "recreated"]
+
+    def test_send_heartbeat_logs_database_errors(self) -> None:
+        cmd = _make_command()
+
+        def _broken() -> None:
+            raise RuntimeError("database offline")
+
+        cmd.lease = cast(
+            Any,
+            SimpleNamespace(is_active=True, refresh_from_db=_broken),
+        )
+
+        cmd.send_heartbeat()
+
+        assert any(
+            "Heartbeat failed: database offline" in message for message in cmd.stdout.messages
+        )
+
     def test_check_ray_connection_reconnects_when_not_initialized(self, monkeypatch) -> None:
         cmd = _make_command()
         reconnect_calls: list[bool] = []
@@ -339,6 +401,33 @@ class TestWorkerCommandRuntimeDb:
         assert task.run_after is not None
         assert task.finished_at is None
         assert cmd.ray_core_runner._pending_tasks == {}
+
+    def test_create_lease_creates_and_reactivates_worker(self) -> None:
+        cmd = _make_command(worker_id="lease-worker")
+
+        cmd._create_lease("high-priority")
+        first_pk = cmd.lease.pk
+        cmd._create_lease("low-priority")
+
+        assert cmd.lease.pk == first_pk
+        assert cmd.lease.queue_name == "low-priority"
+        assert cmd.lease.is_active is True
+        assert cmd.lease_queue_name == "low-priority"
+        assert any("Lease created" in message for message in cmd.stdout.messages)
+        assert any("Lease reactivated" in message for message in cmd.stdout.messages)
+
+    def test_create_and_recreate_lease_handle_database_errors(self, monkeypatch) -> None:
+        cmd = _make_command(worker_id="lease-error-worker")
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.TaskWorkerLease.objects.update_or_create",
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("database offline")),
+        )
+
+        cmd._create_lease("default")
+        cmd._recreate_lease()
+
+        assert any("Failed to create lease" in message for message in cmd.stdout.messages)
+        assert any("Failed to recreate lease" in message for message in cmd.stdout.messages)
 
     def test_process_cancellations_clears_tracking_and_finalizes(self, monkeypatch) -> None:
         cmd = _make_command(worker_id="cancel-worker")

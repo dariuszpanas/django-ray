@@ -86,6 +86,23 @@ make k8s-urls-kong K8S_KONG_WEB_URL=https://app.example.com K8S_KONG_RAY_DASHBOA
 ## KubeRay Operator (Kind Recommended)
 
 For local multi-node clusters (like kind with 5 nodes), use the KubeRay-managed path.
+The example RayCluster uses the upstream `rayproject/ray` image. The Django task
+manager sends project code and dependencies through the persisted RuntimeEnv
+profile, so changing a Python dependency does not require rebuilding Ray head and
+worker images. See [Runtime Environments](../runtime-environments.md).
+The local example builds an immutable source ZIP during `django-setup`, stores it
+on `runtime-env-pvc`, and mounts that volume at `/runtime-env` in every Ray pod.
+The task manager selects its `file:///runtime-env/django-ray-source.zip` URI while
+continuing to use Ray Client. Production deployments should use an immutable
+HTTPS, S3, or GCS archive on storage reachable from every Ray node.
+
+> **Storage requirement**: `runtime-env-pvc` uses `ReadWriteMany` (RWX) because
+> the setup job, Django workers, and every Ray pod must see the same archive.
+> Verify that the cluster has an RWX-capable StorageClass/provisioner before
+> deploying this example. A cluster whose available storage only supports
+> `ReadWriteOnce` will leave the PVC and dependent pods Pending. Install an RWX
+> provisioner, explicitly select an RWX-capable StorageClass, or use a shared
+> HTTPS/S3/GCS archive instead.
 
 This keeps Django web/worker Deployments in this repo, but replaces static Ray
 Deployments with a `RayCluster` custom resource.

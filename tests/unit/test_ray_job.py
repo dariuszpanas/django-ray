@@ -32,7 +32,12 @@ class TestRayJobRunnerSubmit:
         runner = RayJobRunner()
         monkeypatch.setattr(runner, "_get_client", lambda: fake_client)
 
-        task_execution = SimpleNamespace(pk=123)
+        task_execution = SimpleNamespace(
+            pk=123,
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+        )
 
         handle = runner.submit(
             task_execution=task_execution,
@@ -59,9 +64,16 @@ class TestRayJobRunnerSubmit:
         assert payload["callable_path"] == "testproject.tasks.echo_task"
         assert json.loads(payload["serialized_args"]) == ["it's broken"]
         assert json.loads(payload["serialized_kwargs"]) == {"publisher": "O'Reilly"}
+        assert payload["task_execution_pk"] == 123
+        assert payload["runtime_env_profile"] is None
+        assert len(payload["runtime_env_hash"]) == 64
         assert submission["metadata"] == {
             "django_ray_task_id": "123",
             "callable_path": "testproject.tasks.echo_task",
+            "runtime_env_profile": "",
+            "runtime_env_hash": (
+                "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+            ),
         }
 
     def test_submit_uses_runtime_env_and_configured_ray_address(self, monkeypatch) -> None:
@@ -69,16 +81,18 @@ class TestRayJobRunnerSubmit:
         fake_client = FakeJobClient()
         monkeypatch.setattr(
             "django_ray.runner.ray_job.get_settings",
-            lambda: {
-                "RAY_ADDRESS": "ray://unit-test:10001",
-                "RAY_RUNTIME_ENV": {"env_vars": {"MY_ENV": "1"}},
-            },
+            lambda: {"RAY_ADDRESS": "ray://unit-test:10001"},
         )
         runner = RayJobRunner()
         monkeypatch.setattr(runner, "_get_client", lambda: fake_client)
 
         handle = runner.submit(
-            task_execution=SimpleNamespace(pk=55),
+            task_execution=SimpleNamespace(
+                pk=55,
+                runtime_env_profile="custom",
+                runtime_env_json='{"env_vars":{"MY_ENV":"1"}}',
+                runtime_env_hash="",
+            ),
             callable_path="testproject.tasks.add_numbers",
             args=(1, 2),
             kwargs={},

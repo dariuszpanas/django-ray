@@ -24,6 +24,8 @@ project resources, task stats, and a smoke-task trigger:
 - [Getting Started](getting-started.md) - Installation and basic setup
 - [Configuration](configuration.md) - All configuration options
 - [Worker Modes](worker-modes.md) - Understanding execution modes
+- [Performance](performance.md) - Choosing task boundaries, batching, and RuntimeEnv strategy
+- [Compatibility](compatibility.md) - Supported versions, CI policy, and platform limits
 - [Task Definition](tasks.md) - Defining and enqueueing tasks
 - [Queues](queues.md) - Working with task queues
 - [Retry & Error Handling](retry.md) - Configuring retries and handling failures

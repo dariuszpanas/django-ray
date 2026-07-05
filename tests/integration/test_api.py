@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 from django.db import connection
 from django.test import Client
@@ -204,6 +207,54 @@ class TestEnqueueAPI:
         task = RayTaskExecution.objects.get(task_id=data["task_id"])
         assert task.queue_name == "high-priority"
 
+    def test_enqueue_workflow_benchmark_creates_one_durable_task(self, client):
+        response = client.post("/api/cluster/workflow-benchmark?num_items=6&seconds_per_item=0.1")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "READY"
+        assert data["kwargs"] == {
+            "num_items": 6,
+            "seconds_per_item": 0.1,
+        }
+        execution = RayTaskExecution.objects.get(task_id=data["task_id"])
+        assert execution.callable_path == (
+            "testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"
+        )
+        assert RayTaskExecution.objects.count() == 1
+
+    def test_enqueue_complex_workflow_creates_one_durable_task(self, client):
+        response = client.post(
+            "/api/cluster/complex-workflow"
+            "?fast_items=3&slow_items=2&fast_seconds=0.01&slow_seconds=0.05"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        execution = RayTaskExecution.objects.get(task_id=data["task_id"])
+        assert execution.callable_path == (
+            "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"
+        )
+        assert RayTaskExecution.objects.count() == 1
+
+    def test_enqueue_runtime_env_benchmark_creates_one_durable_task(self, client):
+        response = client.post(
+            "/api/cluster/runtime-env/benchmark?profile=numpy-2-3&package=numpy&repeats=3"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        execution = RayTaskExecution.objects.get(task_id=data["task_id"])
+        assert execution.callable_path == (
+            "testproject.apps.cluster_tasks.tasks.runtime_env_benchmark"
+        )
+        assert json.loads(execution.kwargs_json) == {
+            "package": "numpy",
+            "profile": "numpy-2-3",
+            "repeats": 3,
+        }
+        assert RayTaskExecution.objects.count() == 1
+
 
 @pytest.mark.django_db
 class TestTasksAPI:
@@ -222,6 +273,196 @@ class TestTasksAPI:
         data = response.json()
         assert data["task_id"] == task_id
         assert data["args"] == [1, 1]
+
+    def test_get_workflow_benchmark_result(self, client):
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-result-001",
+            callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            result_data=(
+                '{"engine": "django-ray-workflow", "leaf_tasks": 4, "effective_parallelism": 3.5}'
+            ),
+            progress_data=(
+                '{"state": "SUCCEEDED", "total_nodes": 7, '
+                '"completed_nodes": 7, "progress_percent": 100.0}'
+            ),
+        )
+
+        response = client.get(f"/api/cluster/workflow-benchmark/{execution.task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == TaskState.SUCCEEDED
+        assert data["result"]["leaf_tasks"] == 4
+        assert data["result"]["effective_parallelism"] == 3.5
+        assert data["progress"]["completed_nodes"] == 7
+        assert data["progress"]["progress_percent"] == 100.0
+
+    def test_get_runtime_env_result_includes_environment_identity(self, client):
+        execution = RayTaskExecution.objects.create(
+            task_id="runtime-env-result-001",
+            callable_path=("testproject.apps.cluster_tasks.tasks.runtime_env_probe"),
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            runtime_env_profile="numpy-2-3",
+            runtime_env_hash="a" * 64,
+            runtime_env_json='{"pip":["numpy==2.3.5"]}',
+            result_data=(
+                '{"profile_marker": "numpy-2-3", "package": "numpy", "package_version": "2.3.5"}'
+            ),
+        )
+
+        response = client.get(f"/api/cluster/runtime-env/{execution.task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["runtime_env_profile"] == "numpy-2-3"
+        assert data["runtime_env_hash"] == "a" * 64
+        assert data["result"]["package_version"] == "2.3.5"
+
+    def test_get_workflow_benchmark_resolves_backend_result(self, client, monkeypatch):
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-result-002",
+            callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            runtime_env_profile="project",
+            runtime_env_hash="b" * 64,
+            result_data=None,
+            progress_data='{"state": "SUCCEEDED", "total_nodes": 1, "completed_nodes": 1}',
+        )
+
+        class _Backend:
+            def __init__(self, value):
+                self.value = value
+
+            def get_result(self, task_id):
+                assert task_id == "workflow-result-002"
+                return SimpleNamespace(return_value=self.value)
+
+        monkeypatch.setattr(
+            "testproject.api.task_backends",
+            {"default": _Backend({"leaf_tasks": 99})},
+        )
+
+        response = client.get(f"/api/cluster/workflow-benchmark/{execution.task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["result"]["leaf_tasks"] == 99
+
+    def test_get_runtime_env_result_resolves_profile_backend_result(self, client, monkeypatch):
+        execution = RayTaskExecution.objects.create(
+            task_id="runtime-env-result-002",
+            callable_path=("testproject.apps.cluster_tasks.tasks.runtime_env_probe"),
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            runtime_env_profile="numpy-2-3",
+            runtime_env_hash="c" * 64,
+            result_data=None,
+        )
+
+        class _Backend:
+            def __init__(self, value):
+                self.value = value
+
+            def get_result(self, task_id):
+                assert task_id == "runtime-env-result-002"
+                return SimpleNamespace(return_value=self.value)
+
+        monkeypatch.setattr(
+            "testproject.api.task_backends",
+            {
+                "default": _Backend({"source": "default"}),
+                "numpy-2-3": _Backend({"source": "numpy-2-3"}),
+            },
+        )
+
+        response = client.get(f"/api/cluster/runtime-env/{execution.task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["result"]["source"] == "numpy-2-3"
+
+    def test_get_workflow_graph_returns_ui_ready_nodes_and_edges(self, client):
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-graph-001",
+            callable_path=("testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"),
+            queue_name="default",
+            state=TaskState.RUNNING,
+            progress_data=json.dumps(
+                {
+                    "schema_version": 1,
+                    "revision": 8,
+                    "state": "RUNNING",
+                    "total_nodes": 2,
+                    "completed_nodes": 1,
+                    "failed_nodes": 0,
+                    "running_nodes": 1,
+                    "pending_nodes": 0,
+                    "progress_percent": 50.0,
+                    "updated_at": 123.5,
+                    "graph": {
+                        "nodes": [
+                            {
+                                "node_id": "0.0",
+                                "state": "SUCCEEDED",
+                                "dependencies": [],
+                                "execution": {"ray_task_id": "ray-1"},
+                            },
+                            {
+                                "node_id": "0.1",
+                                "state": "RUNNING",
+                                "dependencies": ["0.0"],
+                                "execution": {"ray_task_id": "ray-2"},
+                            },
+                        ],
+                        "edges": [{"source": "0.0", "target": "0.1"}],
+                    },
+                    "recent_events": [],
+                }
+            ),
+        )
+
+        response = client.get(f"/api/cluster/workflows/{execution.task_id}/graph")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["revision"] == 8
+        assert data["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]
+        assert data["graph"]["nodes"][1]["execution"]["ray_task_id"] == "ray-2"
+
+    def test_get_workflow_node_returns_durable_metadata_without_ray_id(self, client):
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-node-001",
+            callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
+            queue_name="default",
+            state=TaskState.RUNNING,
+            progress_data=json.dumps(
+                {
+                    "graph": {
+                        "nodes": [
+                            {
+                                "node_id": "0.0",
+                                "label": "prepare",
+                                "dependencies": [],
+                                "execution": {},
+                            }
+                        ],
+                        "edges": [],
+                    }
+                }
+            ),
+        )
+
+        response = client.get(f"/api/cluster/workflows/{execution.task_id}/nodes/0.0")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["node"]["label"] == "prepare"
+        assert data["ray_state"] is None
+        assert data["logs"] is None
 
 
 @pytest.mark.django_db

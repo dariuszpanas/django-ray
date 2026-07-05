@@ -10,6 +10,7 @@ import base64
 import json
 import os
 import traceback
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,6 +56,9 @@ def execute_task(
     callable_path: str,
     serialized_args: str,
     serialized_kwargs: str,
+    task_execution_pk: int | None = None,
+    runtime_env_profile: str | None = None,
+    runtime_env_hash: str = "",
 ) -> str:
     """Execute a Django Task and return JSON result.
 
@@ -76,7 +80,20 @@ def execute_task(
         args = deserialize_args(serialized_args)
         kwargs = deserialize_args(serialized_kwargs)
 
-        result = callable_obj(*args, **kwargs)
+        if task_execution_pk is None:
+            execution_context = nullcontext()
+        else:
+            from django_ray.runtime.context import durable_task_execution
+
+            execution_context = durable_task_execution(
+                task_execution_pk,
+                runtime_env_profile=runtime_env_profile,
+                runtime_env_hash=runtime_env_hash,
+                ray_job_driver=True,
+            )
+
+        with execution_context:
+            result = callable_obj(*args, **kwargs)
 
         return json.dumps(
             {
@@ -111,6 +128,9 @@ def execute_task_from_payload(payload_b64: str) -> str:
             callable_path=payload["callable_path"],
             serialized_args=payload["serialized_args"],
             serialized_kwargs=payload["serialized_kwargs"],
+            task_execution_pk=payload.get("task_execution_pk"),
+            runtime_env_profile=payload.get("runtime_env_profile"),
+            runtime_env_hash=payload.get("runtime_env_hash", ""),
         )
     except Exception as e:
         return _serialize_error(e)

@@ -1,8 +1,8 @@
 # Ray cluster managed by KubeRay operator.
 # Requires CRDs from kuberay-operator to be installed.
 #
-# This manifest intentionally keeps the custom django-ray worker image for Ray
-# head and Ray workers so task callables and project dependencies are available.
+# Ray head and workers use the upstream image. django-ray code and Python
+# dependencies are supplied by the selected RuntimeEnv profile.
 ---
 apiVersion: ray.io/v1
 kind: RayCluster
@@ -13,7 +13,7 @@ metadata:
     app: ray
     component: cluster
 spec:
-  rayVersion: "2.53.0"
+  rayVersion: "2.56.0"
   enableInTreeAutoscaling: false
 
   headGroupSpec:
@@ -36,7 +36,7 @@ spec:
       spec:
         containers:
           - name: ray-head
-            image: django-ray-worker:latest
+            image: rayproject/ray:2.56.0-py312
             imagePullPolicy: IfNotPresent
             ports:
               - containerPort: 6379
@@ -75,8 +75,11 @@ spec:
             volumeMounts:
               - name: ray-tmp
                 mountPath: /tmp/ray
+              - name: runtime-env
+                mountPath: /runtime-env
+                readOnly: true
           - name: dashboard-importer
-            image: django-ray-worker:latest
+            image: python:3.12-slim
             imagePullPolicy: IfNotPresent
             command: ["python3", "/scripts/import_dashboards.py"]
             env:
@@ -101,6 +104,9 @@ spec:
             configMap:
               name: grafana-dashboard-import-script
               defaultMode: 0755
+          - name: runtime-env
+            persistentVolumeClaim:
+              claimName: runtime-env-pvc
 
   workerGroupSpecs:
     - groupName: worker-group
@@ -122,7 +128,7 @@ spec:
         spec:
           containers:
             - name: ray-worker
-              image: django-ray-worker:latest
+              image: rayproject/ray:2.56.0-py312
               imagePullPolicy: IfNotPresent
               ports:
                 - containerPort: 8080
@@ -144,6 +150,14 @@ spec:
                 limits:
                   memory: "3Gi"
                   cpu: "2"
+              volumeMounts:
+                - name: runtime-env
+                  mountPath: /runtime-env
+                  readOnly: true
+          volumes:
+            - name: runtime-env
+              persistentVolumeClaim:
+                claimName: runtime-env-pvc
 
 ---
 # Stable dashboard NodePort for local development access.

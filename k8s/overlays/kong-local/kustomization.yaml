@@ -3,8 +3,6 @@ kind: Kustomization
 
 resources:
   - ../kuberay-kind
-  - worker-ml.yaml
-  - worker-sync.yaml
   - dashboard-ingresses.yaml
 
 patches:

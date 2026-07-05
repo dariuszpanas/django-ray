@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-04
+
+### Added
+
+- Performance, compatibility, and `llms.txt` guidance.
+- Python 3.14, minimum-direct dependency, and latest dependency CI coverage.
+- Ray-native workflow signatures with `step`, `chain`, `group`, and dynamic
+  `map_step` primitives.
+- Local workflow execution fallback for sync workers and unit tests.
+- Per-step Django bootstrap opt-in and Ray resource options.
+- Live workflow progress snapshots with node states, counts, and recent events.
+- Test-project endpoints for simple fan-out and nested fast/slow workflow examples.
+- `TASK_MONITOR_HEARTBEAT_SECONDS` setting for controlling in-flight task
+  heartbeat persistence.
+- Named RuntimeEnv profiles with inheritance, startup validation, and backend-alias
+  selection through Django Tasks.
+- Immutable RuntimeEnv JSON and SHA-256 identity persisted on each task execution.
+- Per-workflow-step RuntimeEnv profile and inline environment overrides.
+- Test-project RuntimeEnv probe and cold-versus-cached benchmark endpoints.
+- UI-ready workflow graph snapshots containing stable nodes, dependency edges,
+  runtime environment identity, and Ray execution identifiers.
+- Application-level `report_progress()` for long-running workflow leaves.
+- Workflow graph, node-state, and bounded Ray log-tail example endpoints.
+- Ray Job workflow drivers now carry durable task context and lazily initialize
+  Ray so they produce the same graph/progress snapshots as Ray Core workflows.
+
+### Changed
+
+- Documentation examples are now complete, file-scoped, and aligned with the public
+  result refresh, queue priority, workflow, and RuntimeEnv APIs.
+- Ray Core durable tasks now use a module-level remote executor instead of defining
+  and serializing a nested remote function for every submission.
+- Ray Core monitor heartbeats are written in one batch at a configurable interval
+  instead of on every 100 ms polling iteration.
+- The KubeRay example now uses the upstream Ray image for head and worker
+  containers; project code and Python dependencies arrive through RuntimeEnv.
+- Workflow progress persistence now follows coordinator revisions instead of
+  writing an unchanged snapshot every polling interval.
+- Workflow leaf output now uses structured, correlation-friendly logging.
+- Ray Core converts trusted local RuntimeEnv code paths into content-addressed
+  GCS package URIs before per-task submission; local uploads now fail early with
+  a clear message when attempted through Ray Client.
+- Ray Client submissions serialize the outer bootstrap executor by value, allowing
+  generic Ray head images to apply the task RuntimeEnv before importing django-ray.
+
 ## [0.2.0] - 2026-05-15
 
 ### Added
@@ -103,7 +148,8 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dariuszpanas/django-ray/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dariuszpanas/django-ray/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/dariuszpanas/django-ray/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/dariuszpanas/django-ray/releases/tag/v0.1.0

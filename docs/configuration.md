@@ -6,8 +6,16 @@ django-ray is configured through the `DJANGO_RAY` setting in your Django setting
 
 ```python
 # settings.py
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+    },
+}
+
 DJANGO_RAY = {
     "RAY_ADDRESS": "auto",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 10,
     "MAX_TASK_ATTEMPTS": 3,
 }
@@ -21,6 +29,10 @@ DJANGO_RAY = {
 |---------|------|---------|-------------|
 | `RAY_ADDRESS` | `str` | `None` | Ray cluster address. Use `"auto"` for local, or `"ray://host:port"` for cluster |
 | `RAY_RUNTIME_ENV` | `dict` | `{}` | Ray runtime environment configuration |
+| `RAY_STATE_API_ADDRESS` | `str \| None` | `None` | Ray dashboard URL used for live task state and log lookup |
+| `RAY_STATE_API_TIMEOUT_SECONDS` | `int` | `5` | Timeout for optional Ray state and log queries |
+| `RUNTIME_ENV_PROFILES` | `dict` | `{}` | Named, validated Ray RuntimeEnv definitions |
+| `DEFAULT_RUNTIME_ENV_PROFILE` | `str \| None` | `None` | Profile used when a backend does not select one |
 | `RUNNER` | `str` | `"ray_job"` | Default runner when no mode flag is passed: `"ray_job"` or `"ray_core"` |
 
 ### Concurrency
@@ -44,11 +56,21 @@ DJANGO_RAY = {
 | `STUCK_TASK_TIMEOUT_SECONDS` | `int` | `300` | Time before a running task with no worker or monitor heartbeat is considered stuck |
 | `WORKER_LEASE_SECONDS` | `int` | `60` | Worker lease duration for distributed coordination |
 | `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval for worker lease health checks |
+| `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |
+| `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between workflow progress snapshot writes |
 
 `django-ray` uses worker lease heartbeats to track worker liveness and task monitor
 heartbeats to show that a worker is still actively reconciling in-flight work. For
 persisted Ray Job handles from inactive workers, another worker will first try to
 reconcile or adopt the existing job before timeout-based stuck recovery marks it lost.
+Task monitor heartbeats are batched into one update for all in-flight tasks and
+throttled by `TASK_MONITOR_HEARTBEAT_SECONDS`.
+Ray-native workflow node events are collected in memory and written as one compact
+snapshot at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
+
+RuntimeEnv profiles are resolved and stored when a task is enqueued. See
+[Runtime Environments](runtime-environments.md) for inheritance, backend aliases,
+workflow leaf overrides, and cache behavior.
 
 ### Results
 
@@ -102,6 +124,7 @@ not available yet.
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "auto",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 5,
     "MAX_TASK_ATTEMPTS": 1,  # Fail fast during development
     "STUCK_TASK_TIMEOUT_SECONDS": 60,
@@ -113,20 +136,23 @@ DJANGO_RAY = {
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 50,
     "MAX_TASK_ATTEMPTS": 3,
     "RETRY_BACKOFF_SECONDS": 120,
     "STUCK_TASK_TIMEOUT_SECONDS": 600,
     "WORKER_LEASE_SECONDS": 120,
     "WORKER_HEARTBEAT_SECONDS": 30,
+    "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
 }
 ```
 
-### High-Throughput
+### High-Throughput Starting Point
 
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 100,
     "MAX_TASK_ATTEMPTS": 5,
     "RETRY_BACKOFF_SECONDS": 30,
@@ -161,8 +187,30 @@ TASKS = {
 }
 ```
 
+`DEFAULT_CONCURRENCY=100` is not a universal recommendation. It controls how many
+durable tasks one task manager can keep active; Ray resources, database capacity, and
+external API limits may require a much lower value. See [Performance](performance.md).
+
+Backend `OPTIONS` may select a named environment. This is a complete second alias:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {"RUNTIME_ENV_PROFILE": "project"},
+    },
+    "numpy": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {"RUNTIME_ENV_PROFILE": "numpy-2-3"},
+    },
+}
+```
+
 ## See Also
 
 - [Worker Modes](worker-modes.md) - How different modes affect configuration
+- [Runtime Environments](runtime-environments.md) - Per-task dependencies and code
 - [Retry & Error Handling](retry.md) - Detailed retry configuration
 

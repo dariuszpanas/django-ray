@@ -46,19 +46,84 @@ requires this setting unless `DJANGO_RAY_SKIP_VALIDATION` is used for a maintena
 "RAY_ADDRESS": "ray://ray-head-svc:10001"
 ```
 
+Short examples in this reference are individual dictionary entries to place inside
+`DJANGO_RAY`; they are intentionally not standalone Python modules. Longer examples
+show the complete dictionary.
+
+### RAY_STATE_API_ADDRESS
+
+- **Type**: `str | None`
+- **Default**: `None`
+
+Ray dashboard address used by the optional workflow-node state and log helpers.
+Processes already initialized with Ray can leave this unset. A separate Django web
+process normally needs the internal dashboard URL:
+
+```python
+"RAY_STATE_API_ADDRESS": "http://ray-head-svc:8265"
+```
+
+Ray's State API is live operational data rather than durable state. Queries may be
+partial or stale, and logs from dead nodes are unavailable.
+
+### RAY_STATE_API_TIMEOUT_SECONDS
+
+- **Type**: `int`
+- **Default**: `5`
+- **Range**: `1` to `60`
+
+Timeout applied independently to optional Ray state and log API requests.
+
 ### RAY_RUNTIME_ENV
 
 - **Type**: `dict`
 - **Default**: `{}`
 
-Ray runtime environment configuration. Passed to Ray when initializing.
+Unnamed default Ray runtime environment. It is resolved and stored on each task
+when no named profile is selected.
 
 ```python
-"RAY_RUNTIME_ENV": {
-    "pip": ["pandas", "numpy"],
-    "env_vars": {"MY_VAR": "value"},
+DJANGO_RAY = {
+    "RAY_ADDRESS": "auto",
+    "RAY_RUNTIME_ENV": {
+        "pip": ["pandas", "numpy"],
+        "env_vars": {"MY_VAR": "value"},
+    },
 }
 ```
+
+### RUNTIME_ENV_PROFILES
+
+- **Type**: `dict`
+- **Default**: `{}`
+
+Named Ray RuntimeEnv definitions. A direct profile is a RuntimeEnv dictionary. A
+composed profile has `extends` and `runtime_env` keys. Profile inheritance merges
+dictionaries and appends the `pip`, `uv`, `py_modules`, and `excludes` lists.
+
+```python
+DJANGO_RAY = {
+    "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNTIME_ENV_PROFILES": {
+        "project": {
+            "working_dir": "s3://deployments/myapp/7f3a2c1.zip",
+            "pip": ["django>=6.0"],
+        },
+        "numpy": {
+            "extends": "project",
+            "runtime_env": {"pip": ["numpy==2.3.5"]},
+        },
+    },
+}
+```
+
+### DEFAULT_RUNTIME_ENV_PROFILE
+
+- **Type**: `str | None`
+- **Default**: `None`
+
+Profile selected when the task backend does not specify
+`OPTIONS["RUNTIME_ENV_PROFILE"]`. The named profile must exist.
 
 ## Concurrency
 
@@ -177,6 +242,36 @@ actively reconciled in-flight work are updated separately.
 
 ```python
 "WORKER_HEARTBEAT_SECONDS": 30
+```
+
+### TASK_MONITOR_HEARTBEAT_SECONDS
+
+- **Type**: `int`
+- **Default**: `15`
+- **Allowed**: `1` to `300`
+
+Minimum interval between database heartbeat updates for in-flight Ray Core tasks.
+Each update covers all tasks currently monitored by that worker. Status polling remains
+non-blocking and frequent; this setting only throttles persistence writes.
+
+Keep this value comfortably below `STUCK_TASK_TIMEOUT_SECONDS`.
+
+```python
+"TASK_MONITOR_HEARTBEAT_SECONDS": 15
+```
+
+### WORKFLOW_PROGRESS_FLUSH_SECONDS
+
+- **Type**: `int`
+- **Default**: `1`
+- **Allowed**: `1` to `300`
+
+Minimum interval between database writes of the active Ray-native workflow's
+progress snapshot. Leaf events are collected by a per-workflow Ray actor; this
+setting bounds database traffic independently of workflow fan-out size.
+
+```python
+"WORKFLOW_PROGRESS_FLUSH_SECONDS": 1
 ```
 
 ## Results
@@ -343,6 +438,8 @@ DJANGO_RAY = {
     "STUCK_TASK_TIMEOUT_SECONDS": 300,
     "WORKER_LEASE_SECONDS": 60,
     "WORKER_HEARTBEAT_SECONDS": 15,
+    "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
+    "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
 }
 ```
 

@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import ray
 
+pytestmark = pytest.mark.real_ray
+
 # Get project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -188,8 +190,9 @@ class TestModelIntegration:
     def task_execution(self, django_settings_env):
         """Create a RayTaskExecution model instance."""
         import django
+        from django.apps import apps
 
-        if not django.apps.apps.ready:
+        if not apps.ready:
             django.setup()
 
         from django_ray.models import RayTaskExecution, TaskState

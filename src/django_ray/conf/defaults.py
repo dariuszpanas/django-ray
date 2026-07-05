@@ -8,6 +8,10 @@ DEFAULTS: dict[str, Any] = {
     # Ray connection
     "RAY_ADDRESS": None,  # Required - e.g., "ray://localhost:10001"
     "RAY_RUNTIME_ENV": {},
+    "RAY_STATE_API_ADDRESS": None,
+    "RAY_STATE_API_TIMEOUT_SECONDS": 5,
+    "RUNTIME_ENV_PROFILES": {},
+    "DEFAULT_RUNTIME_ENV_PROFILE": None,
     # Runner configuration
     "RUNNER": "ray_job",  # "ray_job" or "ray_core"
     # Concurrency
@@ -20,6 +24,8 @@ DEFAULTS: dict[str, Any] = {
     "STUCK_TASK_TIMEOUT_SECONDS": 300,
     "WORKER_LEASE_SECONDS": 60,
     "WORKER_HEARTBEAT_SECONDS": 15,
+    "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
+    "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
     # Results
     "MAX_RESULT_SIZE_BYTES": 1024 * 1024,  # 1MB
     "RESULT_STORAGE_BACKEND": "digest",  # "digest", "filesystem", "s3", "gcs"

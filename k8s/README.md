@@ -92,7 +92,8 @@ This path requires `helm` and `kind` on your PATH. The default Docker Desktop
 Kubernetes path above does not require either tool.
 
 ```bash
-# Build images, load into kind, install operator, deploy KubeRay overlay
+# Build app images, load them into kind, install operator, deploy KubeRay overlay.
+# Ray head/workers use the upstream image; RuntimeEnv supplies project code.
 make k8s-deploy-kuberay-kind
 
 # Check status (includes RayCluster list)
