@@ -21,6 +21,7 @@ from django_ray.workflows import (
     _callable_path,
     _Executor,
     _get_executor,
+    _LocalExecutor,
     _RayExecutor,
     chain,
     group,
@@ -303,6 +304,10 @@ def test_with_options_copies_signature_metadata() -> None:
 
 
 def test_callable_path_supports_wrappers_and_rejects_invalid_shapes() -> None:
+    assert (
+        _callable_path("tests.unit.test_workflows.increment")
+        == "tests.unit.test_workflows.increment"
+    )
     wrapper = SimpleNamespace(module_path="tests.unit.test_workflows.increment")
 
     assert _callable_path(wrapper) == "tests.unit.test_workflows.increment"
@@ -399,6 +404,60 @@ def test_ray_executor_progress_flush_handles_unavailable_actor() -> None:
     )
     assert executor._flush_progress() is None
     assert executor.progress_actor is None
+
+
+def test_finish_progress_returns_when_snapshot_is_unavailable(monkeypatch) -> None:
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    monkeypatch.setattr(executor, "_flush_progress", lambda **kwargs: None)
+
+    executor.finish_progress()
+
+
+def test_finish_progress_waits_for_terminal_snapshot(monkeypatch) -> None:
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    snapshots = iter(
+        [
+            {"completed_nodes": 0, "failed_nodes": 0, "total_nodes": 1},
+            {"completed_nodes": 1, "failed_nodes": 0, "total_nodes": 1},
+        ]
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(executor, "_flush_progress", lambda **kwargs: next(snapshots))
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
+
+    executor.finish_progress()
+
+    assert sleeps == [0.05]
+
+
+def test_ray_executor_submit_ignores_missing_ray_task_id() -> None:
+    class _BadRef:
+        def task_id(self):
+            raise RuntimeError("task id unavailable")
+
+    class _RemoteStep:
+        def options(self, **kwargs):
+            return self
+
+        def remote(self, *args, **kwargs):
+            return _BadRef()
+
+    class _RemoteMethod:
+        def remote(self, *args):
+            del args
+
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = None
+    executor.task_execution_pk = None
+    executor.progress_actor = SimpleNamespace(
+        register=_RemoteMethod(),
+        submitted=_RemoteMethod(),
+    )
+    executor.remote_step = _RemoteStep()
+
+    executor.submit_step(step(increment), (), {}, "0.0", ())
 
 
 @pytest.mark.django_db
@@ -562,3 +621,26 @@ def test_report_progress_validates_values_and_metrics() -> None:
             report_progress(-1, 1)
         with pytest.raises(ValueError, match="progress metrics must be JSON-serializable"):
             report_progress(1, 2, metrics={"bad": object()})
+
+
+def test_map_accepts_existing_signature() -> None:
+    signature = step(increment)
+
+    mapped = map_step(signature)
+
+    assert mapped.signature is signature
+
+
+def test_get_executor_uses_local_executor_when_ray_is_unavailable(monkeypatch) -> None:
+    import builtins
+
+    original_import = builtins.__import__
+
+    def fail_ray_import(name, *args, **kwargs):
+        if name == "ray":
+            raise ImportError("ray unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_ray_import)
+
+    assert isinstance(_get_executor(None), _LocalExecutor)

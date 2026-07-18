@@ -142,6 +142,26 @@ class TestRayTaskBackend:
         assert result.status.name == "SUCCESSFUL"
         assert result.return_value is None
 
+    def test_get_result_warns_when_stored_reference_payload_is_invalid(self, monkeypatch) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="backend-result-ref-invalid-json",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            result_reference="resultfs://sha256/invalid?rel=a/b.json&bytes=8",
+        )
+
+        monkeypatch.setattr(
+            "django_ray.result_storage.load_result_reference",
+            lambda reference: "not-json",
+        )
+
+        result = _make_backend().get_result(execution.task_id)
+
+        assert result.return_value is None
+
     def test_get_result_raises_for_missing_execution(self) -> None:
         with pytest.raises(TaskResultDoesNotExist):
             _make_backend().get_result("missing-task-id")
@@ -162,3 +182,9 @@ class TestRayTaskBackend:
 
         assert len(errors) == 1
         assert errors[0].id == "django_ray.E001"
+
+    def test_check_allows_uninitialized_ray(self, monkeypatch) -> None:
+        backend = _make_backend()
+        monkeypatch.setitem(sys.modules, "ray", type("Ray", (), {"is_initialized": lambda: False}))
+
+        assert backend.check() == []

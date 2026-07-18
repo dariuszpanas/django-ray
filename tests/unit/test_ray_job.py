@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -101,6 +102,22 @@ class TestRayJobRunnerSubmit:
         assert handle.ray_address == "ray://unit-test:10001"
         submission = fake_client.submissions[0]
         assert submission["runtime_env"] == {"env_vars": {"MY_ENV": "1"}}
+
+    def test_get_client_uses_configured_address(self, monkeypatch) -> None:
+        created: list[str] = []
+
+        class FakeClient:
+            def __init__(self, address: str) -> None:
+                created.append(address)
+
+        monkeypatch.setitem(
+            sys.modules, "ray.job_submission", SimpleNamespace(JobSubmissionClient=FakeClient)
+        )
+        runner = RayJobRunner()
+
+        runner._get_client()
+
+        assert created == [runner.ray_address]
 
 
 class TestRayJobRunnerStatusAndControl:

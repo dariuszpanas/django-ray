@@ -27,6 +27,15 @@ def test_model_string_representations() -> None:
     assert str(lease) == "Worker worker-1... on host (inactive)"
 
 
+def test_release_lease_returns_false_when_database_update_fails(monkeypatch) -> None:
+    def fail_filter(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(TaskWorkerLease.objects, "filter", fail_filter)
+
+    assert release_lease("worker-failure") is False
+
+
 class TestWorkerIdGeneration:
     """Tests for worker ID generation."""
 

@@ -7,7 +7,11 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from django_ray.runner.base import JobStatus, SubmissionHandle
-from django_ray.runner.ray_core import RayCoreHandle, RayCoreRunner
+from django_ray.runner.ray_core import RayCoreHandle, RayCoreRunner, _ray_id_to_string
+
+
+def test_ray_id_to_string_handles_none() -> None:
+    assert _ray_id_to_string(None) == ""
 
 
 def _make_runner(monkeypatch) -> RayCoreRunner:
@@ -121,6 +125,21 @@ class TestRayCoreHandleFormats:
         assert ok is True
         assert cancelled == [(obj_ref, False)]
         assert 9 not in runner._pending_tasks
+
+    def test_cancel_returns_false_for_invalid_handle(self, monkeypatch) -> None:
+        _install_fake_ray(monkeypatch, results={})
+        runner = _make_runner(monkeypatch)
+
+        assert (
+            runner.cancel(
+                SubmissionHandle(
+                    ray_job_id="invalid-format",
+                    ray_address="auto",
+                    submitted_at=datetime.now(UTC),
+                )
+            )
+            is False
+        )
 
     def test_get_status_rejects_unrecognized_handle(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch, results={})

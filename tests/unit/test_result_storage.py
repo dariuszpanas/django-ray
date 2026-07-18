@@ -460,3 +460,15 @@ class TestResultStorageFactory:
             lambda reference, config=None: DigestResultStorage(),
         )
         assert load_result_reference("oversize://sha256/abc?bytes=1") is None
+
+    def test_reference_factory_uses_settings_when_config_is_omitted(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            result_storage_module,
+            "get_settings",
+            lambda: {"RESULT_STORAGE_BACKEND": "digest"},
+        )
+
+        assert isinstance(
+            get_result_storage_backend_for_reference("oversize://sha256/abc?bytes=1"),
+            DigestResultStorage,
+        )
