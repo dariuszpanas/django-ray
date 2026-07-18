@@ -137,6 +137,73 @@ class TestWorkerCommandRuntime:
         cmd.handle_shutdown_signal(signal.SIGTERM, None)
 
         assert cmd.shutdown_requested is True
+        assert cmd.shutdown_signal == signal.SIGTERM
+        assert cmd.shutdown_exit_code == 143
+
+    def test_worker_startup_output_respects_django_verbosity(self) -> None:
+        cmd = _make_command()
+        cmd.verbosity = 0
+        cmd._write_worker_output("hidden")
+        assert cmd.stdout.messages == []
+
+        cmd.verbosity = 1
+        cmd._write_worker_output("visible")
+        assert cmd.stdout.messages == ["visible\n"]
+
+    def test_run_loop_does_not_claim_after_signal_during_poll(self, monkeypatch) -> None:
+        cmd = _make_command()
+        cmd.execution_mode = "local"
+        cmd.ray_core_runner = cast(Any, SimpleNamespace())
+        calls: list[str] = []
+
+        monkeypatch.setattr(cmd, "send_heartbeat", lambda: calls.append("heartbeat"))
+
+        def stop_during_poll() -> None:
+            calls.append("poll")
+            cmd.handle_shutdown_signal(signal.SIGTERM, None)
+
+        monkeypatch.setattr(cmd, "poll_ray_core_tasks", stop_during_poll)
+        monkeypatch.setattr(cmd, "claim_and_process_tasks", lambda *_: calls.append("claim"))
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.time", lambda: 100.0
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.sleep", lambda *_: None
+        )
+
+        cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=1)
+
+        assert calls == ["heartbeat", "poll"]
+
+    def test_cli_signal_shutdown_uses_documented_exit_code(self, monkeypatch) -> None:
+        cmd = _make_command()
+        cmd._called_from_command_line = True
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"DEFAULT_CONCURRENCY": 1},
+        )
+        monkeypatch.setattr(cmd, "_create_lease", lambda _queue: None)
+        monkeypatch.setattr(
+            cmd,
+            "run_loop",
+            lambda **_kwargs: cmd.handle_shutdown_signal(signal.SIGINT, None),
+        )
+        monkeypatch.setattr(cmd, "shutdown", lambda: None)
+        monkeypatch.setattr(cmd, "setup_signal_handlers", lambda: None)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd.handle(
+                queue="default",
+                queues=None,
+                all_queues=False,
+                concurrency=1,
+                sync=True,
+                local=False,
+                cluster=None,
+                verbosity=1,
+            )
+
+        assert exc_info.value.code == 130
 
     def test_run_loop_executes_reconciliation_cycle_once(self, monkeypatch) -> None:
         cmd = _make_command()
@@ -613,6 +680,101 @@ class TestWorkerCommandRuntimeDb:
         assert (
             task.cancellation_error == "Ray Core runner unavailable while recovering cancellation"
         )
+
+    def test_shutdown_hands_off_active_ray_job(self) -> None:
+        cmd = _make_command(worker_id="handoff-worker")
+        cmd.execution_mode = "ray"
+        task = RayTaskExecution.objects.create(
+            task_id="handoff-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 5}',
+            started_at=datetime.now(UTC),
+            claimed_by_worker=cmd.worker_id,
+            ray_job_id="raysubmit_handoff",
+            ray_address="ray://cluster:10001",
+        )
+        cmd.active_tasks = {task.pk: "raysubmit_handoff"}
+
+        cmd._prepare_shutdown_handoff()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.claimed_by_worker is None
+        assert cmd.active_tasks == {}
+
+    def test_shutdown_during_submission_hands_off_claimed_task(self) -> None:
+        cmd = _make_command(worker_id="submission-shutdown-worker")
+        cmd.execution_mode = "ray"
+        task = RayTaskExecution.objects.create(
+            task_id="submission-shutdown-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        processed: list[int] = []
+        cmd.shutdown_requested = True
+        cmd.process_task = lambda claimed: processed.append(claimed.pk)  # type: ignore[method-assign]
+
+        cmd.claim_and_process_tasks(["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert processed == []
+        assert task.state == TaskState.QUEUED
+        assert task.claimed_by_worker is None
+
+    def test_sync_active_task_is_allowed_to_finish_after_signal(self) -> None:
+        cmd = _make_command(worker_id="sync-shutdown-worker")
+        cmd.execution_mode = "sync"
+        task = RayTaskExecution.objects.create(
+            task_id="sync-shutdown-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            claimed_by_worker=cmd.worker_id,
+        )
+        finished: list[int] = []
+        cmd.handle_shutdown_signal(signal.SIGTERM, None)
+        cmd.execute_task_sync = lambda active: finished.append(active.pk)  # type: ignore[method-assign]
+
+        cmd.process_task(task)
+
+        assert finished == [task.pk]
+
+    def test_shutdown_cancels_and_persists_active_ray_core(self) -> None:
+        cmd = _make_command(worker_id="core-shutdown-worker")
+        cmd.execution_mode = "local"
+        task = RayTaskExecution.objects.create(
+            task_id="core-shutdown-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 5}',
+            started_at=datetime.now(UTC),
+            claimed_by_worker=cmd.worker_id,
+        )
+        cancel_calls: list[str] = []
+        cmd.ray_core_runner = cast(
+            Any,
+            SimpleNamespace(
+                _pending_tasks={task.pk: object()},
+                cancel=lambda _handle: cancel_calls.append("cancel") or True,
+            ),
+        )
+
+        cmd._prepare_shutdown_handoff()
+
+        task.refresh_from_db()
+        assert cancel_calls == ["cancel"]
+        assert task.state == TaskState.CANCELLING
+        assert task.cancellation_status == "REQUESTED"
 
     def test_cleanup_expired_leases_logs_and_handles_errors(self, monkeypatch) -> None:
         cmd = _make_command(worker_id="cleanup-worker")

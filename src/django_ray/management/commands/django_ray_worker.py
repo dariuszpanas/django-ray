@@ -55,6 +55,15 @@ class Command(BaseCommand):
         self.tasks_processed_count = 0  # Total tasks processed
         self.task_monitor_heartbeat_interval = 15.0
         self.last_task_monitor_heartbeat = 0.0
+        # A signal requests a graceful handoff.  Keep the signal number so the
+        # command-line entrypoint can preserve the conventional 128+N status.
+        self.shutdown_signal: int | None = None
+        self.shutdown_exit_code: int | None = None
+        self.verbosity = 1
+        self.execution_mode = "sync"
+        self.sync_mode = False
+        self.local_mode = False
+        self.cluster_address: str | None = None
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add command arguments."""
@@ -105,6 +114,7 @@ class Command(BaseCommand):
         queues = self._parse_queues(options)
 
         settings = get_settings()
+        self.verbosity = int(options.get("verbosity", 1))
         concurrency = options.get("concurrency")
         self.sync_mode = options.get("sync", False)
         self.local_mode = options.get("local", False)
@@ -161,10 +171,12 @@ class Command(BaseCommand):
 
         self.setup_signal_handlers()
 
-        self.stdout.write(self.style.SUCCESS(f"Starting django-ray worker {self.worker_id}"))
-        self.stdout.write(f"  Queues: {', '.join(queues)}")
-        self.stdout.write(f"  Concurrency: {concurrency}")
-        self.stdout.write(f"  Mode: {self.execution_mode}")
+        self._write_worker_output(
+            self.style.SUCCESS(f"Starting django-ray worker {self.worker_id}")
+        )
+        self._write_worker_output(f"  Queues: {', '.join(queues)}")
+        self._write_worker_output(f"  Concurrency: {concurrency}")
+        self._write_worker_output(f"  Mode: {self.execution_mode}")
 
         heartbeat_interval = get_heartbeat_interval().total_seconds()
 
@@ -178,9 +190,20 @@ class Command(BaseCommand):
                 heartbeat_interval=heartbeat_interval,
             )
         except KeyboardInterrupt:
+            self.shutdown_signal = signal.SIGINT
+            self.shutdown_exit_code = 128 + signal.SIGINT
+            self.shutdown_requested = True
             self.stdout.write("\nShutdown requested via keyboard interrupt")
         finally:
             self.shutdown()
+
+        # ``BaseCommand.run_from_argv`` does not use the return value from
+        # ``handle``.  Raise only for the real CLI path so direct ``handle``
+        # calls (and ``call_command`` users) retain normal Python semantics.
+        if self.shutdown_exit_code is not None and getattr(
+            self, "_called_from_command_line", False
+        ):
+            raise SystemExit(self.shutdown_exit_code)
 
     def _get_default_execution_mode(self, settings: dict[str, Any]) -> tuple[str, str | None]:
         """Resolve default worker mode from settings when no CLI mode flag is set.
@@ -346,10 +369,20 @@ class Command(BaseCommand):
         signal.signal(signal.SIGTERM, self.handle_shutdown_signal)
         signal.signal(signal.SIGINT, self.handle_shutdown_signal)
 
+    def _write_worker_output(self, message: str, *, minimum_verbosity: int = 1) -> None:
+        """Write informational worker output when Django verbosity permits it."""
+        if self.verbosity >= minimum_verbosity:
+            self.stdout.write(message)
+
     def handle_shutdown_signal(self, signum: int, frame: FrameType | None) -> None:
         """Handle shutdown signals."""
+        del frame
+        if self.shutdown_requested:
+            return
         self.stdout.write(self.style.WARNING(f"\nReceived signal {signum}, shutting down..."))
         self.shutdown_requested = True
+        self.shutdown_signal = signum
+        self.shutdown_exit_code = 128 + signum
 
     def run_loop(
         self,
@@ -377,6 +410,11 @@ class Command(BaseCommand):
             # Poll for completed Ray Core tasks (local/cluster modes)
             if self.execution_mode in ("local", "cluster") and self.ray_core_runner:
                 self.poll_ray_core_tasks()
+
+            # A signal may arrive while heartbeat/polling is in progress.  Do
+            # not claim another task once shutdown has begun.
+            if self.shutdown_requested:
+                break
 
             # Claim and process tasks from all queues
             self.claim_and_process_tasks(queues, concurrency)
@@ -702,6 +740,9 @@ class Command(BaseCommand):
             queues: Sequence of queue names to process (not modified).
             concurrency: Maximum concurrent tasks.
         """
+        if self.shutdown_requested:
+            return
+
         # Check how many slots are available
         ray_core_pending = self.ray_core_runner.pending_count if self.ray_core_runner else 0
         active_count = len(self.active_tasks) + ray_core_pending
@@ -781,7 +822,29 @@ class Command(BaseCommand):
 
         # Process each claimed task
         for task in tasks:
+            if self.shutdown_requested and self.execution_mode != "sync":
+                self._handoff_unsubmitted_task(task)
+                continue
             self.process_task(task)
+
+    def _handoff_unsubmitted_task(self, task: RayTaskExecution) -> None:
+        """Return a just-claimed task to durable reconciliation on shutdown."""
+        updated = RayTaskExecution.objects.filter(
+            pk=task.pk,
+            state=TaskState.RUNNING,
+            claimed_by_worker=self.worker_id,
+        ).update(
+            state=TaskState.QUEUED,
+            started_at=None,
+            claimed_by_worker=None,
+            last_heartbeat_at=None,
+            ray_job_id=None,
+            ray_address=None,
+        )
+        if updated:
+            self.stdout.write(
+                self.style.NOTICE(f"  Task {task.pk} handed off before remote submission")
+            )
 
     def process_task(self, task: RayTaskExecution) -> None:
         """Process a single task."""
@@ -1784,8 +1847,83 @@ class Command(BaseCommand):
             if finalized:
                 self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} cancelled"))
 
+    def _prepare_shutdown_handoff(self) -> None:
+        """Make in-flight work safe for the next worker before disconnecting.
+
+        Synchronous execution is allowed to finish because it is already
+        running in this process.  Ray Job submissions are durable by ID, so
+        they remain running and are released for another worker to reconcile.
+        Ray Core ObjectRefs belong to this driver; request cancellation and
+        persist ``CANCELLING`` so a subsequent worker can finalize the row.
+        """
+        if self.execution_mode == "sync":
+            return
+
+        now = datetime.now(UTC)
+
+        # Ray Core work cannot be recovered after this driver's Ray connection
+        # is closed.  Ask Ray to stop it, then persist the cancellation intent.
+        if self.execution_mode in ("local", "cluster") and self.ray_core_runner:
+            for task_pk in list(self.ray_core_runner._pending_tasks):
+                try:
+                    task = RayTaskExecution.objects.get(pk=task_pk)
+                except RayTaskExecution.DoesNotExist:
+                    continue
+                if task.state != TaskState.RUNNING:
+                    continue
+                outcome = CancellationOutcome(CancellationOutcomeStatus.INDETERMINATE)
+                try:
+                    accepted = self.ray_core_runner.cancel(
+                        SubmissionHandle(
+                            ray_job_id=f"ray_core:{task.pk}",
+                            ray_address="",
+                            submitted_at=task.started_at or now,
+                        )
+                    )
+                    outcome = CancellationOutcome(
+                        CancellationOutcomeStatus.REQUESTED
+                        if accepted
+                        else CancellationOutcomeStatus.FAILED
+                    )
+                except Exception as exc:
+                    outcome = CancellationOutcome(
+                        CancellationOutcomeStatus.INDETERMINATE,
+                        f"Ray Core shutdown cancellation failed: {exc}",
+                    )
+                RayTaskExecution.objects.filter(
+                    pk=task.pk,
+                    state=TaskState.RUNNING,
+                    claimed_by_worker=self.worker_id,
+                ).update(
+                    state=TaskState.CANCELLING,
+                    cancellation_status=CancellationStatus(outcome.status.value),
+                    cancellation_error=outcome.message,
+                )
+                self.stdout.write(
+                    self.style.WARNING(f"  Task {task.pk} marked CANCELLING during shutdown")
+                )
+
+        # Ray Jobs continue independently of this process.  Drop ownership so
+        # another worker can adopt and reconcile their persisted job IDs.
+        if self.execution_mode == "ray":
+            for task_pk, ray_job_id in list(self.active_tasks.items()):
+                updated = RayTaskExecution.objects.filter(
+                    pk=task_pk,
+                    state=TaskState.RUNNING,
+                    claimed_by_worker=self.worker_id,
+                    ray_job_id=ray_job_id,
+                ).update(claimed_by_worker=None, last_heartbeat_at=now)
+                if updated:
+                    self.stdout.write(
+                        self.style.NOTICE(
+                            f"  Ray Job task {task_pk} handed off for continued monitoring"
+                        )
+                    )
+                self.active_tasks.pop(task_pk, None)
+
     def shutdown(self) -> None:
         """Perform graceful shutdown."""
+        self._prepare_shutdown_handoff()
         # Mark worker lease as inactive to signal we're gone
         if self.lease is not None:
             try:
