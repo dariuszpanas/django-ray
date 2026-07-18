@@ -18,8 +18,8 @@ from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
 from django.tasks.exceptions import InvalidTaskBackend
 from ninja import NinjaAPI, Schema
-from pydantic import field_validator
 from ninja.security import HttpBearer
+from pydantic import field_validator
 
 from django_ray import __version__ as django_ray_version
 from django_ray.models import RayTaskExecution, TaskState
