@@ -97,3 +97,12 @@ def _clear_django_ray_remote_caches():
         workflows._workflow_progress_actor_cached = None
     except ImportError:
         pass
+
+    try:
+        import django_ray.runtime.distributed as distributed
+
+        distributed._parallel_map_remote_cached = None
+        distributed._parallel_starmap_remote_cached = None
+        distributed._scatter_gather_remote_cached = None
+    except ImportError:
+        pass

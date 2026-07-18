@@ -160,6 +160,16 @@ class TestDistributedWithRay:
 
         assert results == [x * x for x in items]
 
+    def test_parallel_map_repeated_calls_reuse_cached_remote(self) -> None:
+        """Repeated fan-outs should succeed without registering nested remotes."""
+        from django_ray.runtime.distributed import parallel_map
+
+        for offset in range(20):
+            assert parallel_map(_square, [offset, offset + 1], max_concurrency=1) == [
+                offset * offset,
+                (offset + 1) * (offset + 1),
+            ]
+
     def test_get_ray_resources_with_ray(self) -> None:
         """Test get_ray_resources returns actual resources."""
         from django_ray.runtime.distributed import get_ray_resources, is_ray_available

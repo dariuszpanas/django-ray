@@ -29,23 +29,31 @@ class _FakeRay:
         self.remote_options: list[dict[str, Any]] = []
         self.resources: dict[str, float] = {"CPU": 8.0}
 
-    def remote(self, **options: Any):
+    def remote(self, *args: Any, **options: Any):
         self.remote_options.append(options)
 
         def _decorator(fn):
             class _RemoteCallable:
+                def options(self, **options: Any):
+                    fake_options = _RemoteCallable()
+                    fake_options._options = options
+                    return fake_options
+
                 @staticmethod
                 def remote(*args: Any, **kwargs: Any) -> _DistRef:
                     return _DistRef(fn(*args, **kwargs))
 
             return _RemoteCallable()
 
-        return _decorator
+        return _decorator(args[0]) if args else _decorator
 
     def get(self, refs: Any) -> Any:
         if isinstance(refs, list):
             return [ref.value for ref in refs]
         return refs.value
+
+    def wait(self, refs: list[_DistRef], num_returns: int = 1):
+        return refs[:num_returns], refs[num_returns:]
 
     def cluster_resources(self) -> dict[str, float]:
         return self.resources
@@ -118,11 +126,13 @@ class TestDistributedMocked:
         assert len(bootstrap_calls) == 3
 
     def test_parallel_map_uses_single_ray_batch_when_unbounded(self, monkeypatch) -> None:
-        _install_fake_ray(monkeypatch)
+        fake = _install_fake_ray(monkeypatch)
         monkeypatch.setattr(distributed, "is_ray_available", lambda: True)
         monkeypatch.setattr(distributed, "_bootstrap_django_if_needed", lambda: None)
 
         assert distributed.parallel_map(_mul, [1, 2], factor=3) == [3, 6]
+        assert distributed.parallel_map(_mul, [3, 4], factor=3) == [9, 12]
+        assert len(fake.remote_options) == 1
 
     def test_parallel_starmap_uses_ray_batch_mode(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
@@ -180,3 +190,23 @@ class TestDistributedMocked:
         monkeypatch.setattr(distributed, "is_ray_available", lambda: True)
 
         assert distributed.get_total_cpus() == 1.0
+
+    def test_helpers_reject_invalid_limits_and_resources(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="max_concurrency"):
+            distributed.parallel_map(_mul, [1], max_concurrency=0)
+        with pytest.raises(ValueError, match="num_cpus"):
+            distributed.parallel_map(_mul, [1], num_cpus=-1)
+        with pytest.raises(ValueError, match="num_gpus"):
+            distributed.parallel_starmap(_add, [(1, 2)], num_gpus=-1)
+
+    def test_helpers_reject_unsupported_shapes(self) -> None:
+        import pytest
+
+        with pytest.raises(TypeError, match="items must"):
+            distributed.parallel_map(_mul, 1)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match=r"items\[0\]"):
+            distributed.parallel_starmap(_add, [[1, 2]])  # type: ignore[list-item]
+        with pytest.raises(TypeError, match=r"tasks\[0\]"):
+            distributed.scatter_gather([(_add, (1, 2))])  # type: ignore[list-item]

@@ -22,8 +22,9 @@ Example:
 
 from __future__ import annotations
 
+import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -31,6 +32,126 @@ R = TypeVar("R")
 
 # Track if Django has been bootstrapped in this process
 _django_bootstrapped = False
+
+# Keep one remote function definition per helper process.  Re-decorating a nested
+# function for every invocation causes Ray's GCS to retain a new definition each
+# time, which is particularly expensive for tasks that fan out repeatedly.
+_parallel_map_remote_cached: Any = None
+_parallel_starmap_remote_cached: Any = None
+_scatter_gather_remote_cached: Any = None
+
+
+def _validate_resources(num_cpus: float, num_gpus: float) -> None:
+    """Validate Ray resource requests before trying to submit work."""
+    for name, value in (("num_cpus", num_cpus), ("num_gpus", num_gpus)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be a finite non-negative number")
+        if not math.isfinite(float(value)) or value < 0:
+            raise ValueError(f"{name} must be a finite non-negative number")
+
+
+def _validate_max_concurrency(max_concurrency: int | None) -> None:
+    """Validate an optional bounded submission window."""
+    if max_concurrency is None:
+        return
+    if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int):
+        raise TypeError("max_concurrency must be an integer or None")
+    if max_concurrency < 1:
+        raise ValueError("max_concurrency must be at least 1")
+
+
+def _materialize_items(items: object, name: str) -> list[Any]:
+    """Accept list/tuple inputs while rejecting scalar and string values."""
+    if isinstance(items, (str, bytes)) or not isinstance(items, Sequence):
+        raise TypeError(f"{name} must be a list or tuple")
+    return list(items)
+
+
+def _validate_callable(func: object, name: str = "func") -> None:
+    if not callable(func):
+        raise TypeError(f"{name} must be callable")
+
+
+def _parallel_map_remote(pickled_func: bytes, item: Any, kwargs: dict[str, Any]) -> Any:
+    """Execute one ``parallel_map`` item on a Ray worker."""
+    import pickle
+
+    _bootstrap_django_if_needed()
+    fn = pickle.loads(pickled_func)
+    return fn(item, **kwargs)
+
+
+def _parallel_starmap_remote(pickled_func: bytes, args: tuple[Any, ...]) -> Any:
+    """Execute one ``parallel_starmap`` item on a Ray worker."""
+    import pickle
+
+    _bootstrap_django_if_needed()
+    fn = pickle.loads(pickled_func)
+    return fn(*args)
+
+
+def _scatter_gather_remote(
+    pickled_func: bytes, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Any:
+    """Execute one ``scatter_gather`` item on a Ray worker."""
+    import pickle
+
+    _bootstrap_django_if_needed()
+    fn = pickle.loads(pickled_func)
+    return fn(*args, **kwargs)
+
+
+def _get_cached_remote(kind: str) -> Any:
+    """Return a cached Ray wrapper for one of the distributed helpers."""
+    global _parallel_map_remote_cached
+    global _parallel_starmap_remote_cached
+    global _scatter_gather_remote_cached
+
+    import ray
+
+    if kind == "map":
+        if _parallel_map_remote_cached is None:
+            _parallel_map_remote_cached = ray.remote(_parallel_map_remote)
+        return _parallel_map_remote_cached
+    if kind == "starmap":
+        if _parallel_starmap_remote_cached is None:
+            _parallel_starmap_remote_cached = ray.remote(_parallel_starmap_remote)
+        return _parallel_starmap_remote_cached
+    if kind == "scatter_gather":
+        if _scatter_gather_remote_cached is None:
+            _scatter_gather_remote_cached = ray.remote(_scatter_gather_remote)
+        return _scatter_gather_remote_cached
+    raise ValueError(f"unknown distributed helper: {kind}")
+
+
+def _collect_remote_results(
+    ray: Any,
+    remote: Any,
+    calls: list[tuple[Any, ...]],
+    max_concurrency: int | None,
+) -> list[Any]:
+    """Submit calls with an optional sliding window and preserve input order."""
+    if max_concurrency is None or max_concurrency >= len(calls):
+        return list(ray.get([remote.remote(*call) for call in calls]))
+
+    results: list[Any] = [None] * len(calls)
+    pending: list[tuple[int, Any]] = []
+    next_index = 0
+    for index in range(min(max_concurrency, len(calls))):
+        pending.append((index, remote.remote(*calls[index])))
+        next_index = index + 1
+
+    while pending:
+        ready, _ = ray.wait([ref for _, ref in pending], num_returns=1)
+        ready_ref = ready[0]
+        ready_index = next(index for index, ref in pending if ref == ready_ref)
+        pending = [(index, ref) for index, ref in pending if index != ready_index]
+        results[ready_index] = ray.get(ready_ref)
+        if next_index < len(calls):
+            pending.append((next_index, remote.remote(*calls[next_index])))
+            next_index += 1
+
+    return results
 
 
 def _bootstrap_django_if_needed() -> None:
@@ -115,43 +236,26 @@ def parallel_map[T, R](
         results = parallel_map(process_item, [1, 2, 3, 4, 5], multiplier=10)
         # Returns [10, 20, 30, 40, 50]
     """
-    if not items:
+    _validate_callable(func)
+    _validate_resources(num_cpus, num_gpus)
+    _validate_max_concurrency(max_concurrency)
+    materialized_items = _materialize_items(items, "items")
+    if not materialized_items:
         return []
 
     if not is_ray_available():
         # Fallback to sequential execution
-        return [func(item, **kwargs) for item in items]
-
-    import ray
-
-    # Create a Ray remote function that bootstraps Django
-    @ray.remote(num_cpus=num_cpus, num_gpus=num_gpus)
-    def _remote_func(pickled_func: bytes, item: T, **kw: Any) -> R:
-        import pickle
-
-        # Bootstrap Django before running the function
-        _bootstrap_django_if_needed()
-        fn = pickle.loads(pickled_func)
-        return fn(item, **kw)
+        return [func(item, **kwargs) for item in materialized_items]
 
     # Pickle the function once to send to workers
     import pickle
 
-    pickled_func = pickle.dumps(func)
+    import ray
 
-    # Submit all tasks
-    if max_concurrency and max_concurrency < len(items):
-        # Process in batches to limit concurrency
-        results = []
-        for i in range(0, len(items), max_concurrency):
-            batch = items[i : i + max_concurrency]
-            refs = [_remote_func.remote(pickled_func, item, **kwargs) for item in batch]
-            results.extend(ray.get(refs))
-        return results
-    else:
-        # Submit all at once
-        refs = [_remote_func.remote(pickled_func, item, **kwargs) for item in items]
-        return ray.get(refs)
+    pickled_func = pickle.dumps(func)
+    remote = _get_cached_remote("map").options(num_cpus=num_cpus, num_gpus=num_gpus)
+    calls = [(pickled_func, item, kwargs) for item in materialized_items]
+    return _collect_remote_results(ray, remote, calls, max_concurrency)
 
 
 def parallel_starmap[R](
@@ -183,36 +287,28 @@ def parallel_starmap[R](
         results = parallel_starmap(add, [(1, 2), (3, 4), (5, 6)])
         # Returns [3, 7, 11]
     """
-    if not items:
+    _validate_callable(func)
+    _validate_resources(num_cpus, num_gpus)
+    _validate_max_concurrency(max_concurrency)
+    materialized_items = _materialize_items(items, "items")
+    for index, args in enumerate(materialized_items):
+        if not isinstance(args, tuple):
+            raise TypeError(f"items[{index}] must be a tuple of positional arguments")
+    if not materialized_items:
         return []
 
     if not is_ray_available():
-        return [func(*args) for args in items]
+        return [func(*args) for args in materialized_items]
 
     import pickle
 
     import ray
 
-    @ray.remote(num_cpus=num_cpus, num_gpus=num_gpus)
-    def _remote_func(pickled_func: bytes, *args: Any) -> R:
-        # Bootstrap Django before running the function
-        _bootstrap_django_if_needed()
-        fn = pickle.loads(pickled_func)
-        return fn(*args)
-
     # Pickle the function once
     pickled_func = pickle.dumps(func)
-
-    if max_concurrency and max_concurrency < len(items):
-        results = []
-        for i in range(0, len(items), max_concurrency):
-            batch = items[i : i + max_concurrency]
-            refs = [_remote_func.remote(pickled_func, *args) for args in batch]
-            results.extend(ray.get(refs))
-        return results
-    else:
-        refs = [_remote_func.remote(pickled_func, *args) for args in items]
-        return ray.get(refs)
+    remote = _get_cached_remote("starmap").options(num_cpus=num_cpus, num_gpus=num_gpus)
+    calls = [(pickled_func, args) for args in materialized_items]
+    return _collect_remote_results(ray, remote, calls, max_concurrency)
 
 
 def scatter_gather[R](
@@ -244,26 +340,30 @@ def scatter_gather[R](
             (fetch_products, (), {}),
         ])
     """
-    if not tasks:
+    _validate_resources(num_cpus, num_gpus)
+    materialized_tasks = _materialize_items(tasks, "tasks")
+    for index, task in enumerate(materialized_tasks):
+        if not isinstance(task, tuple) or len(task) != 3:
+            raise TypeError(f"tasks[{index}] must be a (callable, tuple, dict) tuple")
+        func, args, kwargs = task
+        _validate_callable(func, f"tasks[{index}][0]")
+        if not isinstance(args, tuple):
+            raise TypeError(f"tasks[{index}][1] must be a tuple of positional arguments")
+        if not isinstance(kwargs, dict):
+            raise TypeError(f"tasks[{index}][2] must be a dictionary of keyword arguments")
+    if not materialized_tasks:
         return []
 
     if not is_ray_available():
-        return [func(*args, **kwargs) for func, args, kwargs in tasks]
+        return [func(*args, **kwargs) for func, args, kwargs in materialized_tasks]
 
     import pickle
 
     import ray
 
-    @ray.remote(num_cpus=num_cpus, num_gpus=num_gpus)
-    def _run_task(pickled_func: bytes, args: tuple, kwargs: dict) -> R:
-        # Bootstrap Django before running the function
-        _bootstrap_django_if_needed()
-        func = pickle.loads(pickled_func)
-        return func(*args, **kwargs)
-
-    # Pickle each function and submit
-    refs = [_run_task.remote(pickle.dumps(func), args, kwargs) for func, args, kwargs in tasks]
-    return ray.get(refs)
+    remote = _get_cached_remote("scatter_gather").options(num_cpus=num_cpus, num_gpus=num_gpus)
+    calls = [(pickle.dumps(func), args, kwargs) for func, args, kwargs in materialized_tasks]
+    return _collect_remote_results(ray, remote, calls, None)
 
 
 def get_num_workers() -> int:
