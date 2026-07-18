@@ -43,6 +43,26 @@ class TestRayTaskBackend:
         assert json.loads(execution.runtime_env_json) == {}
         assert len(execution.runtime_env_hash) == 64
 
+    def test_enqueue_persists_address_for_each_backend_alias(self) -> None:
+        """Backend aliases retain their own Ray cluster for worker submission."""
+        from testproject.tasks import add_numbers
+
+        task = add_numbers.using(queue_name="default")
+        backend_a = RayTaskBackend(
+            "cluster_a",
+            {"QUEUES": ["default"], "OPTIONS": {"RAY_ADDRESS": "ray://a:10001"}},
+        )
+        backend_b = RayTaskBackend(
+            "cluster_b",
+            {"QUEUES": ["default"], "OPTIONS": {"RAY_ADDRESS": "ray://b:10001"}},
+        )
+
+        result_a = backend_a.enqueue(task, args=(1, 2), kwargs={})
+        result_b = backend_b.enqueue(task, args=(3, 4), kwargs={})
+
+        assert RayTaskExecution.objects.get(task_id=result_a.id).ray_address == "ray://a:10001"
+        assert RayTaskExecution.objects.get(task_id=result_b.id).ray_address == "ray://b:10001"
+
     def test_enqueue_snapshots_named_runtime_env_profile(self, settings) -> None:
         from testproject.tasks import add_numbers
 
