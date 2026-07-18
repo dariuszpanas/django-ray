@@ -165,6 +165,8 @@ class TestRayCoreRunnerRuntime:
         fake = _install_fake_ray(monkeypatch)
         registered: list[object] = []
         fake.cloudpickle = SimpleNamespace(register_pickle_by_value=registered.append)
+        import django_ray.runtime.remote as remote_module
+
         monkeypatch.setattr(
             "django_ray.runtime.entrypoint.execute_task",
             lambda callable_path, args_json, kwargs_json: json.dumps(
@@ -180,7 +182,7 @@ class TestRayCoreRunnerRuntime:
             kwargs={},
         )
 
-        assert registered
+        assert registered == [remote_module]
 
     def test_submit_applies_persisted_runtime_env(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)

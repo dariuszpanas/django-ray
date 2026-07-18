@@ -461,14 +461,21 @@ class TestResultStorageFactory:
         )
         assert load_result_reference("oversize://sha256/abc?bytes=1") is None
 
-    def test_reference_factory_uses_settings_when_config_is_omitted(self, monkeypatch) -> None:
+    def test_reference_factory_uses_settings_when_config_is_omitted(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
         monkeypatch.setattr(
             result_storage_module,
             "get_settings",
-            lambda: {"RESULT_STORAGE_BACKEND": "digest"},
+            lambda: {
+                "RESULT_STORAGE_BACKEND": "filesystem",
+                "RESULT_STORAGE_FILESYSTEM_PATH": tmp_path,
+            },
         )
 
-        assert isinstance(
-            get_result_storage_backend_for_reference("oversize://sha256/abc?bytes=1"),
-            DigestResultStorage,
+        backend = get_result_storage_backend_for_reference(
+            "resultfs://sha256/abc?rel=aa/bb/abc.json&bytes=1"
         )
+
+        assert isinstance(backend, FilesystemResultStorage)
+        assert backend.root_path == tmp_path

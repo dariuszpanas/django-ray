@@ -142,7 +142,9 @@ class TestRayTaskBackend:
         assert result.status.name == "SUCCESSFUL"
         assert result.return_value is None
 
-    def test_get_result_warns_when_stored_reference_payload_is_invalid(self, monkeypatch) -> None:
+    def test_get_result_warns_when_stored_reference_payload_is_invalid(
+        self, monkeypatch, caplog
+    ) -> None:
         execution = RayTaskExecution.objects.create(
             task_id="backend-result-ref-invalid-json",
             callable_path="testproject.tasks.add_numbers",
@@ -161,6 +163,10 @@ class TestRayTaskBackend:
         result = _make_backend().get_result(execution.task_id)
 
         assert result.return_value is None
+        assert any(
+            "Failed to decode stored task result payload" in record.getMessage()
+            for record in caplog.records
+        )
 
     def test_get_result_raises_for_missing_execution(self) -> None:
         with pytest.raises(TaskResultDoesNotExist):
