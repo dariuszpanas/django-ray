@@ -93,6 +93,13 @@ Available helpers:
 - `get_num_workers()` reports the current Ray worker-node count.
 - `get_ray_resources()` reports cluster resources.
 
+Distributed helper remote wrappers are cached per process, so repeated calls do not
+register a new Ray function definition. `max_concurrency` must be at least `1` when
+provided, and resource requests (`num_cpus`/`num_gpus`) must be finite and non-negative.
+`parallel_starmap()` requires argument tuples, while `scatter_gather()` requires
+`(callable, args_tuple, kwargs_dict)` entries. Bounded calls use a sliding submission
+window and still return results in input order.
+
 For dependent stages and UI-visible graphs, prefer
 [Ray-native workflows](workflows.md).
 
