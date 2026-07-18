@@ -32,7 +32,7 @@ class TestRayJobRunnerSubmit:
         """Task payload should be transported as base64, not interpolated source."""
         fake_client = FakeJobClient()
         runner = RayJobRunner()
-        monkeypatch.setattr(runner, "_get_client", lambda: fake_client)
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
 
         task_execution = SimpleNamespace(
             pk=123,
@@ -92,7 +92,7 @@ class TestRayJobRunnerSubmit:
             lambda: {"RAY_ADDRESS": "ray://unit-test:10001"},
         )
         runner = RayJobRunner()
-        monkeypatch.setattr(runner, "_get_client", lambda: fake_client)
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
 
         handle = runner.submit(
             task_execution=SimpleNamespace(
@@ -128,6 +128,39 @@ class TestRayJobRunnerSubmit:
 
         assert created == [runner.ray_address]
 
+    def test_submit_uses_persisted_backend_address(self, monkeypatch) -> None:
+        """Each backend alias must submit against its persisted Ray cluster."""
+        addresses: list[str | None] = []
+        fake_client = FakeJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(
+            runner,
+            "_get_client",
+            lambda ray_address=None: addresses.append(ray_address) or fake_client,
+        )
+
+        for index, address in enumerate(
+            ("ray://alias-a:10001", "ray://alias-b:10001"),
+            start=1,
+        ):
+            handle = runner.submit(
+                task_execution=SimpleNamespace(
+                    pk=index,
+                    ray_address=address,
+                    runtime_env_profile=None,
+                    runtime_env_json="{}",
+                    runtime_env_hash="",
+                    attempt_number=1,
+                    execution_generation=0,
+                ),
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+            assert handle.ray_address == address
+
+        assert addresses == ["ray://alias-a:10001", "ray://alias-b:10001"]
+
 
 class TestRayJobRunnerStatusAndControl:
     """Tests for get_status/cancel/get_logs behavior."""
@@ -161,7 +194,9 @@ class TestRayJobRunnerStatusAndControl:
                     end_time=456,
                 ),
             )
-            monkeypatch.setattr(runner, "_get_client", lambda client=client: client)
+            monkeypatch.setattr(
+                runner, "_get_client", lambda _ray_address=None, client=client: client
+            )
 
             info = runner.get_status(self._make_handle())
 
@@ -176,7 +211,7 @@ class TestRayJobRunnerStatusAndControl:
             get_job_status=lambda _job_id: "MYSTERY",
             get_job_info=lambda _job_id: SimpleNamespace(message="mystery"),
         )
-        monkeypatch.setattr(runner, "_get_client", lambda: client)
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: client)
 
         info = runner.get_status(self._make_handle())
 
@@ -190,13 +225,43 @@ class TestRayJobRunnerStatusAndControl:
             def get_job_status(self, _job_id):
                 raise RuntimeError("ray api unavailable")
 
-        monkeypatch.setattr(runner, "_get_client", lambda: FailingClient())
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: FailingClient())
 
         info = runner.get_status(self._make_handle("raysubmit_fail_001"))
 
         assert info.status == JobStatus.UNKNOWN
         assert info.job_id == "raysubmit_fail_001"
         assert "ray api unavailable" in (info.message or "")
+
+    def test_status_logs_and_cancellation_use_handle_address(self, monkeypatch) -> None:
+        """Control-plane calls must stay on the cluster recorded in the handle."""
+        addresses: list[str | None] = []
+
+        class Client:
+            def get_job_status(self, _job_id: str) -> str:
+                return "RUNNING"
+
+            def get_job_info(self, _job_id: str) -> SimpleNamespace:
+                return SimpleNamespace(message=None)
+
+            def get_job_logs(self, _job_id: str) -> str:
+                return "logs"
+
+            def stop_job(self, _job_id: str) -> None:
+                return None
+
+        runner = RayJobRunner()
+        monkeypatch.setattr(
+            runner,
+            "_get_client",
+            lambda ray_address=None: addresses.append(ray_address) or Client(),
+        )
+        handle = self._make_handle()
+
+        assert runner.get_status(handle).status == JobStatus.RUNNING
+        assert runner.get_logs(handle) == "logs"
+        assert runner.cancel(handle) is True
+        assert addresses == ["ray://test:10001"] * 3
 
     def test_cancel_returns_true_on_success(self, monkeypatch) -> None:
         stopped: list[str] = []
@@ -206,7 +271,7 @@ class TestRayJobRunnerStatusAndControl:
                 stopped.append(job_id)
 
         runner = RayJobRunner()
-        monkeypatch.setattr(runner, "_get_client", lambda: Client())
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: Client())
 
         ok = runner.cancel(self._make_handle("raysubmit_cancel_001"))
 
@@ -219,7 +284,7 @@ class TestRayJobRunnerStatusAndControl:
                 raise RuntimeError("cannot stop")
 
         runner = RayJobRunner()
-        monkeypatch.setattr(runner, "_get_client", lambda: Client())
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: Client())
 
         ok = runner.cancel(self._make_handle("raysubmit_cancel_002"))
 
@@ -231,7 +296,7 @@ class TestRayJobRunnerStatusAndControl:
                 raise RuntimeError("cannot stop")
 
         runner = RayJobRunner()
-        monkeypatch.setattr(runner, "_get_client", lambda: Client())
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: Client())
 
         outcome = runner.cancel_with_status(self._make_handle("raysubmit_cancel_003"))
 
@@ -244,7 +309,7 @@ class TestRayJobRunnerStatusAndControl:
                 raise RuntimeError("logs unavailable")
 
         runner = RayJobRunner()
-        monkeypatch.setattr(runner, "_get_client", lambda: Client())
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: Client())
 
         logs = runner.get_logs(self._make_handle("raysubmit_logs_001"))
 
@@ -255,7 +320,9 @@ class TestRayJobRunnerStatusAndControl:
         monkeypatch.setattr(
             runner,
             "_get_client",
-            lambda: SimpleNamespace(get_job_logs=lambda _job_id: "line-1\nline-2"),
+            lambda _ray_address=None: SimpleNamespace(
+                get_job_logs=lambda _job_id: "line-1\nline-2"
+            ),
         )
 
         logs = runner.get_logs(self._make_handle("raysubmit_logs_002"))

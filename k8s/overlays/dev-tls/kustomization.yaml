@@ -11,6 +11,24 @@ resources:
 
 # Patch Ray head for TLS
 patches:
+  # This overlay is a local development example; production must provide
+  # external secrets and use the base production mode explicitly.
+  - target:
+      kind: ConfigMap
+      name: django-ray-config
+    patch: |
+      - op: replace
+        path: /data/DJANGO_DEPLOYMENT_MODE
+        value: "demo"
+
+  - target:
+      kind: ConfigMap
+      name: django-ray-config
+    patch: |
+      - op: replace
+        path: /data/DJANGO_ALLOWED_HOSTS
+        value: "localhost,127.0.0.1,django-ray.localhost"
+
   # Ray Head TLS configuration
   - target:
       kind: Deployment

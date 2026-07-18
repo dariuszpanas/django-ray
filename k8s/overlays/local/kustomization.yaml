@@ -24,6 +24,24 @@ resources:
   - ../../base
 
 patches:
+  # This overlay is intentionally local-demo-only. Production must use the base
+  # mode with externalized secrets and explicit allowed hosts.
+  - patch: |-
+      - op: replace
+        path: /data/DJANGO_DEPLOYMENT_MODE
+        value: "demo"
+    target:
+      kind: ConfigMap
+      name: django-ray-config
+
+  - patch: |-
+      - op: replace
+        path: /data/DJANGO_ALLOWED_HOSTS
+        value: "localhost,127.0.0.1,django-ray.localhost"
+    target:
+      kind: ConfigMap
+      name: django-ray-config
+
   # Enable Django DEBUG mode
   - patch: |-
       - op: replace
