@@ -26,22 +26,55 @@ make test
 
 ## Development Workflow
 
+### Repository Conventions
+
+Create branches from an up-to-date `main` and use lowercase kebab-case names:
+
+| Change | Branch prefix | Example |
+|---|---|---|
+| Feature or enhancement | `feat/` | `feat/issues-25-33-contributor-qol` |
+| Bug fix | `fix/` | `fix/ray-job-timeout-race` |
+| Documentation only | `docs/` | `docs/worker-mode-selection` |
+| Maintenance, tooling, or dependencies | `chore/` | `chore/ruff-upgrade` |
+| Test-only change | `test/` | `test/worker-reconnect-coverage` |
+
+`feat/` is the default for feature work. Repository guidance overrides generic tool defaults, so
+automated agents must not replace it with an unrelated `agent/`, `codex/`, or similar prefix. An
+explicit maintainer-requested name still takes precedence.
+
+Use Conventional Commit syntax for commits and PR titles:
+
+```text
+feat: add runtime environment cache metrics
+fix(worker): preserve completion during timeout cancellation
+docs: clarify Ray Job worker selection
+chore(deps): update Ruff
+```
+
+Before editing, inspect `git status --short`, the current branch, and `HEAD`. Preserve unrelated work,
+stage explicit paths instead of `git add .`, and review both the working and staged diffs. Repository
+automation follows the root `AGENTS.md`, including the optional Obsidian project-memory workflow when
+a local vault is available.
+
 ### Code Style
 
 We use automated tools to maintain consistent code style:
 
 ```bash
 # Format code
-make format
+uv run make format
 
-# Lint code
-make lint
+# Format and apply safe lint fixes
+uv run make fix
+
+# Check lint without changing files
+uv run make lint
 
 # Type check
-make typecheck
+uv run make typecheck
 
-# Run all checks
-make check
+# Check formatting, lint, and types without changing files
+uv run make check
 ```
 
 ### Running Tests
@@ -57,14 +90,18 @@ make test-unit
 make test-integration
 
 # With coverage
-make test-cov
+uv run make test-cov
 ```
 
-CI enforces coverage floors:
+`test-cov` and `ci` enforce the same coverage floors as CI:
 
-- global coverage: `>= 55%`
+- global coverage: `>= 95%`
 - `src/django_ray/management/commands/django_ray_worker.py`: `>= 50%`
 - `src/django_ray/runner/ray_job.py`: `>= 55%`
+
+`uv run make ci` runs the required format, lint, type, coverage, strict-documentation, and package-build
+checks for the current interpreter. GitHub Actions additionally repeats tests across supported Python
+versions and minimum/latest dependency resolutions.
 
 ### Live Cluster Fault Tests (Opt-In)
 
@@ -112,12 +149,13 @@ Test via the API at http://127.0.0.1:8000/api/docs
 2. **Make your changes** with clear, focused commits
 3. **Add tests** for new functionality
 4. **Update documentation** if needed
-5. **Run all checks**: `make ci`
-6. **Submit a pull request** with a clear description
+5. **Run all checks**: `uv run make ci`
+6. **Submit a pull request** with a Conventional Commit title, clear description, validation results,
+   and `Closes #<number>` when applicable
 
-### Commit Messages
+### Commit and PR Titles
 
-Use clear, descriptive commit messages:
+Use Conventional Commit syntax for both commits and PR titles:
 
 ```
 feat: add support for task priorities
@@ -128,11 +166,11 @@ test: add unit tests for retry logic
 
 ### PR Checklist
 
-- [ ] Tests pass (`make test`)
-- [ ] Linting passes (`make lint`)
-- [ ] Type checking passes (`make typecheck`)
+- [ ] CI-equivalent checks pass (`uv run make ci`)
+- [ ] Packaging builds when packaging or release metadata changed (`uv build`)
 - [ ] Documentation updated (if needed)
 - [ ] Changelog updated (for user-facing changes)
+- [ ] Exact validation commands and results included in the PR description
 
 ## Code Organization
 

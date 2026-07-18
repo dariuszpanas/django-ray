@@ -20,6 +20,9 @@ site/
 .idea/
 .vscode/
 
+# Local shared Obsidian project memory
+.vault/
+
 # Django development database
 db.sqlite3
 *.sqlite3

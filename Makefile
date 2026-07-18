@@ -5,7 +5,7 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install format lint typecheck test test-unit test-integration test-cov check ci build clean help
+.PHONY: all install format fix lint typecheck test test-unit test-integration test-cov check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
@@ -16,12 +16,16 @@
 -include mk/tls.mk
 -include mk/loadtest.mk
 
+COVERAGE_GLOBAL_MIN ?= 95
+COVERAGE_WORKER_MIN ?= 50
+COVERAGE_RAY_JOB_MIN ?= 55
+
 # =============================================================================
 # Development
 # =============================================================================
 
-# Default target - run all checks
-all: format lint typecheck test
+# Default target - run non-mutating checks and tests
+all: check test
 
 # Install dependencies
 install:
@@ -31,9 +35,14 @@ install:
 format:
 	ruff format .
 
-# Lint code with Ruff (with auto-fix)
-lint:
+# Apply formatting and safe lint fixes
+fix:
+	ruff format .
 	ruff check . --fix
+
+# Lint code with Ruff without modifying files
+lint:
+	ruff check .
 
 # Type check with ty
 typecheck:
@@ -53,19 +62,27 @@ test-integration:
 
 # Run tests with coverage
 test-cov:
-	pytest --cov=src --cov-report=html --cov-report=term
+	pytest -m "not live_cluster" --cov=src --cov-report=html --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
+	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
+	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
 
-# Run lint and typecheck (no formatting)
+# Run formatting, lint, and type checks without modifying files
 check:
+	ruff format --check .
 	ruff check .
 	ty check
 
-# CI check - all validations without modifications
+# CI check - current-interpreter equivalents of required CI jobs, without modifications.
+# Invoke as `uv run make ci` so Ray inherits one uv-managed environment.
 ci:
 	ruff format --check .
 	ruff check .
 	ty check
-	pytest
+	pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
+	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
+	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
+	zensical build --strict
+	uv build
 	@echo "All CI checks passed!"
 
 # Build the package
@@ -146,9 +163,10 @@ help:
 	@echo ""
 	@echo "Development:"
 	@echo "  format         - Format code with Ruff"
-	@echo "  lint           - Lint code with Ruff (auto-fix)"
+	@echo "  fix            - Format code and apply safe Ruff fixes"
+	@echo "  lint           - Lint code with Ruff (no modifications)"
 	@echo "  typecheck      - Type check with ty"
-	@echo "  check          - Run lint + typecheck (no formatting)"
+	@echo "  check          - Check formatting, lint, and types (no modifications)"
 	@echo ""
 	@echo "Testing:"
 	@echo "  test           - Run all tests"
@@ -173,8 +191,8 @@ help:
 	@echo "  worker-cluster - Connect to ray://localhost:10001"
 	@echo ""
 	@echo "CI/CD:"
-	@echo "  all            - Run format, lint, typecheck, test"
-	@echo "  ci             - Run all checks (no modifications)"
+	@echo "  all            - Run non-mutating checks and tests"
+	@echo "  ci             - Run current-interpreter CI checks, coverage, docs, and build"
 	@echo "  build          - Build the package"
 	@echo "  clean          - Clean cache and build files"
 	@echo ""

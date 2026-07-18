@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Repository contribution and automated-agent guidance for branch naming, Conventional Commits,
+  worktree safety, validation reporting, and optional local Obsidian project memory.
+- Explicit `make fix` and CI-equivalent `make ci` developer targets.
+
+### Changed
+
+- Local coverage now enforces the same 95% global floor and targeted module floors as CI.
+- `make all`, `make lint`, and `make check` are non-mutating; formatting and automatic fixes require
+  explicit targets.
+
 ## [0.3.0] - 2026-07-04
 
 ### Added

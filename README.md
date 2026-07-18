@@ -160,17 +160,22 @@ uv sync
 
 ### Development Commands
 
+Run development targets through `uv run` unless the virtual environment is already active. Targets
+named `lint`, `check`, and `ci` are non-mutating; use `format` or `fix` when files should change.
+
 ```bash
-make install     # Install dependencies
-make format      # Format code with Ruff
-make lint        # Lint code with Ruff
-make typecheck   # Type check with ty
-make test        # Run tests
-make check       # Run lint + typecheck
-make ci          # Run all CI checks
-make docs-build  # Build docs (Zensical)
+make install          # Install dependencies
+uv run make format    # Format code with Ruff
+uv run make fix       # Format and apply safe Ruff lint fixes
+uv run make lint      # Check lint without modifying files
+uv run make typecheck # Type check with ty
+uv run make test      # Run tests
+uv run make test-cov  # Run tests with CI coverage floors
+uv run make check     # Check formatting, lint, and types without changes
+uv run make ci        # Check coverage, docs, and package build for this interpreter
+make docs-build       # Build docs (Zensical)
 make docs-build-strict # Build docs in strict mode
-make docs-serve  # Serve docs locally
+make docs-serve       # Serve docs locally
 ```
 
 ### Django Commands
@@ -321,6 +326,11 @@ Source docs remain in the [`docs/`](https://github.com/dariuszpanas/django-ray/t
 - [CLI Reference](https://github.com/dariuszpanas/django-ray/blob/main/docs/reference/cli.md) - Command-line options
 - [Settings Reference](https://github.com/dariuszpanas/django-ray/blob/main/docs/reference/settings.md) - All settings
 - [API Reference](https://github.com/dariuszpanas/django-ray/blob/main/docs/reference/api.md) - REST API endpoints
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for branch, commit, pull request, staging, and validation
+conventions. Automated contributors must also follow [`AGENTS.md`](AGENTS.md).
 
 ## License
 
