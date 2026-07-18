@@ -821,6 +821,8 @@ class Command(BaseCommand):
             now = datetime.now(UTC)
             if result["success"]:
                 task.state = TaskState.SUCCEEDED
+                task.error_message = None
+                task.error_traceback = None
                 self._store_task_result(task, result["result"])
                 task.finished_at = now
                 self.stdout.write(
@@ -831,6 +833,8 @@ class Command(BaseCommand):
                         "state",
                         "result_data",
                         "result_reference",
+                        "error_message",
+                        "error_traceback",
                         "finished_at",
                     ]
                 )
@@ -1104,6 +1108,8 @@ class Command(BaseCommand):
                 now = datetime.now(UTC)
                 if result.get("success"):
                     task.state = TaskState.SUCCEEDED
+                    task.error_message = None
+                    task.error_traceback = None
                     self._store_task_result(task, result.get("result"))
                     task.finished_at = now
                     task.save(
@@ -1111,6 +1117,8 @@ class Command(BaseCommand):
                             "state",
                             "result_data",
                             "result_reference",
+                            "error_message",
+                            "error_traceback",
                             "finished_at",
                         ]
                     )
@@ -1334,6 +1342,8 @@ class Command(BaseCommand):
                     finished_at=task.finished_at,
                     result_data=task.result_data,
                     result_reference=task.result_reference,
+                    error_message=None,
+                    error_traceback=None,
                 )
                 if not updated:
                     return
@@ -1661,36 +1671,118 @@ class Command(BaseCommand):
             # Don't fail on lease cleanup errors
             self.logger.warning(f"Failed to cleanup expired leases: {e}")
 
-    def process_cancellations(self) -> None:
-        """Process tasks that have been requested for cancellation.
+    def _claim_orphaned_cancellation(
+        self,
+        task: RayTaskExecution,
+        *,
+        active_worker_ids: set[str],
+        now: datetime,
+    ) -> bool:
+        """Conditionally take ownership of a cancellation from a dead worker."""
+        owner = str(task.claimed_by_worker) if task.claimed_by_worker else None
+        if owner == self.worker_id:
+            return True
+        if owner and owner in active_worker_ids:
+            return False
 
-        This checks for tasks in CANCELLING state and finalizes their cancellation.
-        """
-        cancelling_tasks = RayTaskExecution.objects.filter(
-            state=TaskState.CANCELLING,
+        filters: dict[str, object] = {
+            "pk": task.pk,
+            "state": TaskState.CANCELLING,
+        }
+        if owner:
+            filters["claimed_by_worker"] = owner
+        else:
+            filters["claimed_by_worker__isnull"] = True
+
+        updated = RayTaskExecution.objects.filter(**filters).update(
             claimed_by_worker=self.worker_id,
+            last_heartbeat_at=now,
+        )
+        if not updated:
+            return False
+
+        task.claimed_by_worker = self.worker_id
+        task.last_heartbeat_at = now
+        return True
+
+    def _request_cancellation_for_task(self, task: RayTaskExecution) -> CancellationOutcome:
+        """Best-effort cancellation using the backend recorded on the task."""
+        ray_job_id = str(task.ray_job_id or "")
+        handle = SubmissionHandle(
+            ray_job_id=ray_job_id or f"ray_core:{task.pk}",
+            ray_address=str(task.ray_address or ""),
+            submitted_at=task.started_at or datetime.now(UTC),
         )
 
-        for task in cancelling_tasks:
-            self.stdout.write(self.style.WARNING(f"\nFinalizing cancellation for task {task.pk}"))
+        if ray_job_id.startswith("raysubmit_"):
+            try:
+                from django_ray.runner.ray_job import RayJobRunner
 
-            # Remove from our tracking if present
-            if self.ray_core_runner and task.pk in self.ray_core_runner._pending_tasks:
-                # Try to cancel the Ray task
-                self.ray_core_runner.cancel(
-                    SubmissionHandle(
-                        ray_job_id=f"ray_core:{task.pk}",
-                        ray_address="",
-                        submitted_at=task.started_at or datetime.now(UTC),
-                    )
+                return request_remote_cancellation(RayJobRunner(), handle)
+            except Exception as exc:
+                return CancellationOutcome(
+                    CancellationOutcomeStatus.INDETERMINATE,
+                    f"Could not cancel Ray Job: {exc}",
                 )
 
+        if self.ray_core_runner is not None and (
+            ray_job_id or task.pk in self.ray_core_runner._pending_tasks
+        ):
+            try:
+                accepted = self.ray_core_runner.cancel(handle)
+            except Exception as exc:
+                return CancellationOutcome(
+                    CancellationOutcomeStatus.INDETERMINATE,
+                    f"Could not cancel Ray Core task: {exc}",
+                )
+            if accepted:
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+            return CancellationOutcome(
+                CancellationOutcomeStatus.FAILED,
+                "Ray Core cancellation API rejected the stop request",
+            )
+
+        if ray_job_id:
+            return CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                "Ray Core runner unavailable while recovering cancellation",
+            )
+
+        return CancellationOutcome(CancellationOutcomeStatus.NOT_APPLICABLE)
+
+    def process_cancellations(self) -> None:
+        """Adopt and finalize cancellation requests left by dead workers."""
+        from django_ray.runner.leasing import get_active_workers
+
+        active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
+        cancelling_tasks = RayTaskExecution.objects.filter(state=TaskState.CANCELLING)
+
+        for task in cancelling_tasks:
+            now = datetime.now(UTC)
+            if not self._claim_orphaned_cancellation(
+                task,
+                active_worker_ids=active_worker_ids,
+                now=now,
+            ):
+                continue
+
+            self.stdout.write(self.style.WARNING(f"\nFinalizing cancellation for task {task.pk}"))
+            cancellation = self._request_cancellation_for_task(task)
+
+            # Remove from our tracking if present. A stale completion callback
+            # cannot overwrite this row because finalization is conditional on
+            # both CANCELLING state and this worker's ownership.
             if task.pk in self.active_tasks:
                 del self.active_tasks[task.pk]
 
-            # Finalize the cancellation
-            finalize_cancellation(task)
-            self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} cancelled"))
+            finalized = finalize_cancellation(
+                task,
+                expected_worker_id=self.worker_id,
+                cancellation_status=CancellationStatus(cancellation.status.value),
+                cancellation_error=cancellation.message,
+            )
+            if finalized:
+                self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} cancelled"))
 
     def shutdown(self) -> None:
         """Perform graceful shutdown."""

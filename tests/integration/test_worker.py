@@ -69,6 +69,34 @@ class TestWorkerSync:
         assert task.finished_at is not None
         assert task.claimed_by_worker == "test-worker"
 
+    def test_worker_success_clears_previous_attempt_failure_metadata(self, setup_django_env):
+        """A successful retry must not expose the previous attempt's diagnostics."""
+        from django_ray.management.commands.django_ray_worker import Command
+
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-success-after-failure-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+            error_message="transient failure",
+            error_traceback="RuntimeError: transient failure",
+        )
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+
+        cmd.execute_task_sync(task)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data == "8"
+        assert task.error_message is None
+        assert task.error_traceback is None
+
     def test_worker_processes_failing_task(self, setup_django_env):
         """Test that the worker handles failing tasks correctly."""
         # Create a failing task

@@ -98,6 +98,24 @@ class TestRayTaskBackend:
         assert result.worker_ids == ["worker-a"]
         assert result.errors[0].exception_class_path == "builtins.ValueError"
 
+    def test_get_result_does_not_expose_stale_errors_for_success(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="backend-success-stale-error-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            result_data="3",
+            error_message="transient failure from an earlier attempt",
+            error_traceback="Traceback...\nRuntimeError: transient failure",
+        )
+
+        result = _make_backend().get_result(execution.task_id)
+
+        assert result.return_value == 3
+        assert result.errors == []
+
     def test_get_result_loads_return_value_from_result_reference(self, monkeypatch) -> None:
         execution = RayTaskExecution.objects.create(
             task_id="backend-result-ref-001",

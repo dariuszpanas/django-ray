@@ -436,6 +436,8 @@ class TestWorkerReconnectPollReconcile:
             state=TaskState.RUNNING,
             args_json="[1, 2]",
             kwargs_json="{}",
+            error_message="transient failure",
+            error_traceback="RuntimeError: transient failure",
         )
         failure_task = RayTaskExecution.objects.create(
             task_id="poll-failure-001",
@@ -494,6 +496,8 @@ class TestWorkerReconnectPollReconcile:
 
         assert success_task.state == TaskState.SUCCEEDED
         assert success_task.result_data == "3"
+        assert success_task.error_message is None
+        assert success_task.error_traceback is None
         assert success_task.finished_at is not None
         assert failures and failures[0]["error_message"] == "boom"
         assert bad_json_task.state == TaskState.RUNNING
@@ -639,6 +643,8 @@ class TestWorkerReconnectPollReconcile:
             args_json="[1, 2]",
             kwargs_json="{}",
             ray_job_id="raysubmit_result_reference_001",
+            error_message="transient failure",
+            error_traceback="RuntimeError: transient failure",
             completion_data=json.dumps(
                 {
                     "success": True,
@@ -664,6 +670,8 @@ class TestWorkerReconnectPollReconcile:
             task.result_reference
             == "oversize://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?bytes=256"
         )
+        assert task.error_message is None
+        assert task.error_traceback is None
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_refreshes_envelope_after_terminal_status_rpc(

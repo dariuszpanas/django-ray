@@ -100,6 +100,21 @@ class TestCancellationHelpers:
         assert task.state == TaskState.CANCELLED
         assert task.finished_at is not None
 
+    def test_finalize_cancellation_does_not_overwrite_race(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-race-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.CANCELLING,
+            claimed_by_worker="worker-a",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        RayTaskExecution.objects.filter(pk=task.pk).update(state=TaskState.SUCCEEDED)
+
+        assert finalize_cancellation(task, expected_worker_id="worker-a") is False
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+
     def test_request_remote_cancellation_uses_status_aware_runner(self) -> None:
         expected = CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
 
