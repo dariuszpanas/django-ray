@@ -33,6 +33,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from django.core.exceptions import ImproperlyConfigured
 from django.tasks import TaskResult, TaskResultStatus
 from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.exceptions import TaskResultDoesNotExist
@@ -76,6 +77,7 @@ class RayTaskBackend(BaseTaskBackend):
     Configuration options (in OPTIONS dict):
         - RAY_ADDRESS: Ray cluster address (default: "auto")
         - RAY_RUNTIME_ENV: Runtime environment for Ray workers
+        - TIMEOUT_SECONDS: Optional positive per-task execution timeout
     """
 
     # Backend capabilities
@@ -100,6 +102,15 @@ class RayTaskBackend(BaseTaskBackend):
         self.inline_runtime_env = (
             options["RAY_RUNTIME_ENV"] if "RAY_RUNTIME_ENV" in options else None
         )
+        self.timeout_seconds = options.get("TIMEOUT_SECONDS")
+        if self.timeout_seconds is not None and (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, int)
+            or self.timeout_seconds <= 0
+        ):
+            raise ImproperlyConfigured(
+                "django-ray: TASKS backend OPTIONS['TIMEOUT_SECONDS'] must be a positive integer"
+            )
 
     def enqueue(
         self,
@@ -149,6 +160,7 @@ class RayTaskBackend(BaseTaskBackend):
             runtime_env_profile=runtime_env.profile,
             runtime_env_json=runtime_env.serialized,
             runtime_env_hash=runtime_env.digest,
+            timeout_seconds=self.timeout_seconds,
             created_at=now,
         )
 
@@ -161,6 +173,7 @@ class RayTaskBackend(BaseTaskBackend):
                 "run_after": str(task.run_after) if task.run_after else None,
                 "runtime_env_profile": runtime_env.profile,
                 "runtime_env_hash": runtime_env.digest,
+                "timeout_seconds": self.timeout_seconds,
             },
         )
 

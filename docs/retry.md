@@ -168,15 +168,19 @@ Usually permanent:
 - permission denial that requires human intervention;
 - unsupported file or protocol versions.
 
-Usually retryable:
+Usually retryable when routed through the normal exception handler:
 
-- timeouts and temporary network failures;
+- application-level timeouts and temporary network failures;
 - rate limits with a suitable backoff;
 - transient database or object-store availability;
 - Ray node loss.
 
 Do not denylist broad classes such as every `TypeError` unless application behavior
 makes that classification intentional.
+
+The worker's configured per-task timeout is different: once the reconciliation loop
+marks a running task timed out, it is a terminal `FAILED` state. Retry it explicitly
+after investigating the timeout.
 
 ## See Also
 

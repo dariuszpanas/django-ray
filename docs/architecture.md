@@ -74,8 +74,14 @@ Primary execution record for one task attempt chain.
 | `ray_job_id`, `ray_address` | Runner-specific execution handle metadata |
 | `claimed_by_worker` | Worker lease owner that currently owns the task |
 | `run_after` | Delayed/retry scheduling timestamp |
-| `timeout_seconds` | Per-task timeout override |
+| `timeout_seconds` | Optional timeout from the selected backend's `OPTIONS["TIMEOUT_SECONDS"]` |
 | `created_at`, `started_at`, `finished_at`, `last_heartbeat_at` | Lifecycle timestamps |
+
+The worker evaluates `timeout_seconds` during periodic reconciliation, so timeout
+enforcement is approximate. A timeout is terminal `FAILED` state (manual retry is
+required). Ray Core cancellation uses the tracked object reference, Ray Job cancellation
+uses the Job API, and synchronous execution can only be finalized after the worker
+regains control.
 
 ### `TaskWorkerLease`
 
