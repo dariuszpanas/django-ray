@@ -207,7 +207,7 @@ class RayTaskBackend(BaseTaskBackend):
 
         # Parse errors if task failed
         errors: list[TaskError] = []
-        if execution.error_message:
+        if execution.state in (TaskState.FAILED, TaskState.LOST) and execution.error_message:
             # Extract exception class from traceback or use generic Exception
             exception_class_path = "builtins.Exception"
             if execution.error_traceback:

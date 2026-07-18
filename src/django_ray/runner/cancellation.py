@@ -94,12 +94,47 @@ def request_cancellation(
     return True
 
 
-def finalize_cancellation(task_execution: RayTaskExecution) -> None:
+def finalize_cancellation(
+    task_execution: RayTaskExecution,
+    *,
+    expected_worker_id: str | None = None,
+    cancellation_status: str | None = None,
+    cancellation_error: str | None = None,
+) -> bool:
     """Finalize a cancelled task execution.
 
     Args:
         task_execution: The task execution to finalize.
+
+    Returns:
+        True when this call transitioned the row to ``CANCELLED``. False when
+        another worker or completion path changed the row first.
     """
+    finished_at = datetime.now(UTC)
+    filters: dict[str, object] = {
+        "pk": task_execution.pk,
+        "state": "CANCELLING",
+    }
+    if expected_worker_id is not None:
+        filters["claimed_by_worker"] = expected_worker_id
+
+    update_values: dict[str, object] = {
+        "state": "CANCELLED",
+        "finished_at": finished_at,
+    }
+    if cancellation_status is not None:
+        update_values["cancellation_status"] = cancellation_status
+    if cancellation_error is not None or cancellation_status is not None:
+        update_values["cancellation_error"] = cancellation_error
+
+    updated = type(task_execution).objects.filter(**filters).update(**update_values)
+    if not updated:
+        return False
+
     task_execution.state = "CANCELLED"
-    task_execution.finished_at = datetime.now(UTC)
-    task_execution.save(update_fields=["state", "finished_at"])
+    task_execution.finished_at = finished_at
+    if cancellation_status is not None:
+        task_execution.cancellation_status = cancellation_status
+    if cancellation_error is not None or cancellation_status is not None:
+        task_execution.cancellation_error = cancellation_error
+    return True

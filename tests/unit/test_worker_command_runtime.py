@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -14,7 +14,7 @@ from django.conf import settings as django_settings
 from django.core.management.base import CommandParser
 
 from django_ray.management.commands.django_ray_worker import Command
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 
 
 class CapturingStdout:
@@ -454,11 +454,12 @@ class TestWorkerCommandRuntimeDb:
 
         finalized: list[int] = []
 
-        def fake_finalize(t: RayTaskExecution) -> None:
+        def fake_finalize(t: RayTaskExecution, **_kwargs: Any) -> bool:
             finalized.append(t.pk)
             t.state = TaskState.CANCELLED
             t.finished_at = datetime.now(UTC)
             t.save(update_fields=["state", "finished_at"])
+            return True
 
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.finalize_cancellation",
@@ -472,6 +473,146 @@ class TestWorkerCommandRuntimeDb:
         assert finalized == [task.pk]
         assert cancel_calls == ["ray-cancel"]
         assert task.pk not in cmd.active_tasks
+
+    def test_process_cancellations_adopts_inactive_owner(self) -> None:
+        TaskWorkerLease.objects.create(
+            worker_id="dead-cancel-worker",
+            hostname="host",
+            pid=123,
+            is_active=False,
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-orphan-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.CANCELLING,
+            claimed_by_worker="dead-cancel-worker",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="recovery-worker")
+
+        cmd.process_cancellations()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLED
+        assert task.claimed_by_worker == "recovery-worker"
+        assert task.cancellation_status == "NOT_APPLICABLE"
+
+    def test_process_cancellations_adopts_missing_owner(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-orphan-002",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.CANCELLING,
+            claimed_by_worker=None,
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="recovery-worker")
+
+        cmd.process_cancellations()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLED
+        assert task.claimed_by_worker == "recovery-worker"
+
+    def test_process_cancellations_adopts_expired_lease_owner(self) -> None:
+        TaskWorkerLease.objects.create(
+            worker_id="expired-cancel-worker",
+            hostname="host",
+            pid=123,
+            is_active=True,
+            last_heartbeat_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-orphan-003",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.CANCELLING,
+            claimed_by_worker="expired-cancel-worker",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="recovery-worker")
+
+        cmd.process_cancellations()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLED
+        assert task.claimed_by_worker == "recovery-worker"
+
+    def test_process_cancellations_skips_active_owner(self) -> None:
+        TaskWorkerLease.objects.create(
+            worker_id="active-cancel-worker",
+            hostname="host",
+            pid=123,
+            is_active=True,
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-active-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.CANCELLING,
+            claimed_by_worker="active-cancel-worker",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="recovery-worker")
+
+        cmd.process_cancellations()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLING
+        assert task.claimed_by_worker == "active-cancel-worker"
+
+    def test_process_cancellations_uses_ray_job_cancellation(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-ray-job-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.CANCELLING,
+            ray_job_id="raysubmit_cancel_orphan_001",
+            ray_address="ray://cluster:10001",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        calls: list[str] = []
+
+        class FakeRunner:
+            def cancel_with_status(self, handle):
+                calls.append(handle.ray_job_id)
+                from django_ray.runner.cancellation import (
+                    CancellationOutcome,
+                    CancellationOutcomeStatus,
+                )
+
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        cmd = _make_command(worker_id="recovery-worker")
+
+        cmd.process_cancellations()
+
+        task.refresh_from_db()
+        assert calls == ["raysubmit_cancel_orphan_001"]
+        assert task.state == TaskState.CANCELLED
+        assert task.cancellation_status == "REQUESTED"
+
+    def test_process_cancellations_records_indeterminate_without_ray_core_runner(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-ray-core-unavailable-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.CANCELLING,
+            ray_job_id="ray_core:123",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="recovery-worker")
+
+        cmd.process_cancellations()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLED
+        assert task.cancellation_status == "INDETERMINATE"
+        assert (
+            task.cancellation_error == "Ray Core runner unavailable while recovering cancellation"
+        )
 
     def test_cleanup_expired_leases_logs_and_handles_errors(self, monkeypatch) -> None:
         cmd = _make_command(worker_id="cleanup-worker")
