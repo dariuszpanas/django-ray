@@ -496,6 +496,10 @@ class TestWorkerRayJobFailureHandling:
             attempt_number=1,
             ray_job_id="raysubmit_retry_002",
             ray_address="ray://cluster:10001",
+            completion_data=(
+                '{"success": false, "result": null, "error": "task failed", '
+                '"traceback": "tb", "exception_type": "builtins.ValueError"}'
+            ),
         )
 
         class FakeRunner:
@@ -509,11 +513,7 @@ class TestWorkerRayJobFailureHandling:
                 )
 
             def get_logs(self, handle):
-                return (
-                    "prefix line\n"
-                    '{"success": false, "result": null, "error": "task failed", '
-                    '"traceback": "tb", "exception_type": "builtins.ValueError"}'
-                )
+                return "arbitrary application stdout"
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
@@ -879,9 +879,14 @@ class TestWorkerResultStorage:
             attempt_number=1,
             ray_job_id="raysubmit_result_003",
             ray_address="ray://cluster:10001",
+            completion_data=json.dumps(
+                {
+                    "success": True,
+                    "result": None,
+                    "result_reference": "oversize://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?bytes=256",
+                }
+            ),
         )
-
-        large_result = {"message": "x" * 256}
 
         class FakeRunner:
             def get_status(self, handle):
@@ -894,7 +899,7 @@ class TestWorkerResultStorage:
                 )
 
             def get_logs(self, handle):
-                return "prefix\n" + json.dumps({"success": True, "result": large_result})
+                return "prefix\nnot-a-completion-payload"
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
@@ -905,6 +910,8 @@ class TestWorkerResultStorage:
         task.refresh_from_db()
         assert task.state == TaskState.SUCCEEDED
         assert task.result_data is None
-        assert task.result_reference is not None
-        assert str(task.result_reference).startswith("oversize://sha256/")
+        assert (
+            task.result_reference
+            == "oversize://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?bytes=256"
+        )
         assert task.pk not in cmd.active_tasks

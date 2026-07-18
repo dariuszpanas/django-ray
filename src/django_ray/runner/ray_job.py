@@ -50,6 +50,8 @@ class RayJobRunner(BaseRunner):
             "serialized_args": serialized_args,
             "serialized_kwargs": serialized_kwargs,
             "task_execution_pk": task_execution.pk,
+            "attempt_number": task_execution.attempt_number,
+            "execution_generation": task_execution.execution_generation,
             "runtime_env_profile": runtime_env.profile,
             "runtime_env_hash": runtime_env.digest,
         }
@@ -63,6 +65,8 @@ class RayJobRunner(BaseRunner):
             runtime_env=runtime_env.spec,
             metadata={
                 "django_ray_task_id": str(task_execution.pk),
+                "django_ray_attempt_number": str(task_execution.attempt_number),
+                "django_ray_execution_generation": str(task_execution.execution_generation),
                 "callable_path": callable_path,
                 "runtime_env_profile": runtime_env.profile or "",
                 "runtime_env_hash": runtime_env.digest,

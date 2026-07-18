@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, datetime, timedelta
 from io import StringIO
@@ -561,7 +562,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.finished_at is not None
         assert task.pk not in cmd.active_tasks
 
-    def test_reconcile_tasks_success_with_non_json_logs_uses_fallback_store(
+    def test_reconcile_tasks_success_with_non_json_logs_waits_for_completion_envelope(
         self, monkeypatch
     ) -> None:
         task = RayTaskExecution.objects.create(
@@ -585,20 +586,16 @@ class TestWorkerReconnectPollReconcile:
                 return "plain-text-log"
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
-        monkeypatch.setattr(
-            cmd,
-            "_store_task_result",
-            lambda t, result: setattr(t, "result_data", str(result)),
-        )
-
         cmd.reconcile_tasks()
 
         task.refresh_from_db()
-        assert task.state == TaskState.SUCCEEDED
-        assert task.result_data == "plain-text-log"
-        assert task.pk not in cmd.active_tasks
+        assert task.state == TaskState.RUNNING
+        assert task.result_data is None
+        assert task.pk in cmd.active_tasks
 
-    def test_reconcile_tasks_success_with_no_logs_clears_result_fields(self, monkeypatch) -> None:
+    def test_reconcile_tasks_success_with_no_logs_waits_for_completion_envelope(
+        self, monkeypatch
+    ) -> None:
         task = RayTaskExecution.objects.create(
             task_id="reconcile-no-logs-001",
             callable_path="testproject.tasks.add_numbers",
@@ -625,9 +622,309 @@ class TestWorkerReconnectPollReconcile:
         cmd.reconcile_tasks()
 
         task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.result_data == "stale"
+        assert task.result_reference == "resultfs://sha256/stale?rel=a/b&bytes=5"
+        assert task.pk in cmd.active_tasks
+
+    def test_reconcile_tasks_uses_result_reference_from_completion_envelope(
+        self, monkeypatch
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-result-reference-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_result_reference_001",
+            completion_data=json.dumps(
+                {
+                    "success": True,
+                    "result": None,
+                    "result_reference": "oversize://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?bytes=256",
+                }
+            ),
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=task.ray_job_id or "", status=JobStatus.SUCCEEDED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
         assert task.state == TaskState.SUCCEEDED
         assert task.result_data is None
-        assert task.result_reference is None
+        assert (
+            task.result_reference
+            == "oversize://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?bytes=256"
+        )
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_tasks_refreshes_envelope_after_terminal_status_rpc(
+        self, monkeypatch
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-envelope-race-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_envelope_race_001",
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                RayTaskExecution.objects.filter(pk=task.pk).update(
+                    completion_data=json.dumps({"success": True, "result": 3})
+                )
+                return JobInfo(job_id=task.ray_job_id or "", status=JobStatus.SUCCEEDED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda current_task, result: setattr(current_task, "result_data", str(result)),
+        )
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data == "3"
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_tasks_uses_valid_envelope_when_ray_reports_failed(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-envelope-authoritative-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_envelope_authoritative_001",
+            completion_data=json.dumps({"success": True, "result": 3}),
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=task.ray_job_id or "",
+                    status=JobStatus.FAILED,
+                    message="driver exited after writing completion envelope",
+                )
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda current_task, result: setattr(current_task, "result_data", str(result)),
+        )
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data == "3"
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_tasks_ignores_status_for_replaced_ray_job(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-replaced-ray-job-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_old_001",
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: "raysubmit_old_001"}
+        failures: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            cmd,
+            "_handle_task_failure",
+            lambda _task, **kwargs: failures.append(kwargs),
+        )
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                RayTaskExecution.objects.filter(pk=task.pk).update(
+                    ray_job_id="raysubmit_new_001",
+                    execution_generation=2,
+                )
+                return JobInfo(
+                    job_id="raysubmit_old_001",
+                    status=JobStatus.FAILED,
+                    message="old Ray job failed",
+                )
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert failures == []
+        assert task.pk not in cmd.active_tasks
+
+    def test_claim_clears_previous_ray_job_identity_before_submission(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="claim-clears-ray-job-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_previous_001",
+            ray_address="ray://previous:10001",
+            execution_generation=4,
+        )
+        cmd = _make_command()
+        cmd.execution_mode = "ray"
+        claimed: list[RayTaskExecution] = []
+        monkeypatch.setattr(cmd, "process_task", lambda current_task: claimed.append(current_task))
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert claimed and claimed[0].pk == task.pk
+        assert task.execution_generation == 5
+        assert task.ray_job_id is None
+        assert task.ray_address is None
+
+    def test_reconcile_tasks_missing_completion_eventually_retries(self, monkeypatch) -> None:
+        stale_time = datetime.now(UTC) - timedelta(minutes=10)
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-missing-completion-stale-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_missing_completion_stale_001",
+            started_at=stale_time,
+            last_heartbeat_at=stale_time,
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=task.ray_job_id or "", status=JobStatus.SUCCEEDED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.QUEUED
+        assert task.attempt_number == 2
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_tasks_malformed_completion_envelope_remains_active(
+        self, monkeypatch
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-malformed-completion-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_malformed_completion_001",
+            completion_data="{not-json",
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=task.ray_job_id or "", status=JobStatus.SUCCEEDED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.pk in cmd.active_tasks
+
+    def test_reconcile_tasks_incomplete_completion_envelope_remains_active(
+        self, monkeypatch
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-incomplete-completion-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_incomplete_completion_001",
+            completion_data='{"success": true}',
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=task.ray_job_id or "", status=JobStatus.SUCCEEDED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.pk in cmd.active_tasks
+
+    def test_reconcile_tasks_failure_envelope_uses_retry_policy(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-failure-envelope-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_failure_envelope_001",
+            completion_data=json.dumps(
+                {
+                    "success": False,
+                    "result": None,
+                    "error": "task exploded",
+                    "traceback": "trace",
+                    "exception_type": "ValueError",
+                }
+            ),
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+        failures: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            cmd,
+            "_handle_task_failure",
+            lambda _task, **kwargs: failures.append(kwargs),
+        )
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=task.ray_job_id or "", status=JobStatus.SUCCEEDED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        cmd.reconcile_tasks()
+
+        assert failures == [
+            {
+                "error_message": "task exploded",
+                "error_traceback": "trace",
+                "exception_type": "ValueError",
+                "expected_ray_job_id": "raysubmit_failure_envelope_001",
+                "expected_execution_generation": 0,
+            }
+        ]
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_handles_missing_task_and_runner_exception(self, monkeypatch) -> None:
@@ -707,6 +1004,7 @@ class TestWorkerReconnectPollReconcile:
             ray_address="ray://cluster:10001",
             claimed_by_worker="dead-worker",
             started_at=datetime.now(UTC),
+            completion_data='{"success": true, "result": 3}',
         )
         cmd = _make_command(worker_id="adopting-worker")
 
@@ -717,7 +1015,7 @@ class TestWorkerReconnectPollReconcile:
                 return JobInfo(job_id=orphan.ray_job_id or "", status=JobStatus.SUCCEEDED)
 
             def get_logs(self, _handle):
-                return '{"success": true, "result": 3}'
+                return "arbitrary application stdout"
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
         monkeypatch.setattr(

@@ -17,6 +17,7 @@ from django_ray.result_storage import (
     S3ResultStorage,
     get_result_storage_backend,
     get_result_storage_backend_for_reference,
+    is_valid_result_reference,
     load_result_reference,
 )
 
@@ -285,6 +286,33 @@ class TestGCSResultStorage:
 
 class TestResultStorageFactory:
     """Tests for backend factory resolution."""
+
+    @pytest.mark.parametrize(
+        ("reference", "expected"),
+        [
+            (
+                "oversize://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?bytes=1",
+                True,
+            ),
+            (
+                "resultfs://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?rel=aa/bb.json&bytes=1",
+                True,
+            ),
+            ("s3://bucket/results/a.json?bytes=1", True),
+            ("gs://bucket/results/a.json?bytes=1", True),
+            ("s3://bucket/?bytes=1", False),
+            ("s3://[::1/?bytes=1", False),
+            (
+                "resultfs://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?rel=.&bytes=1",
+                False,
+            ),
+            ("oversize://sha256/unknown?bytes=1", False),
+            ("unknown://bucket/result?bytes=1", False),
+            ("s3://bucket/result?bytes=nope", False),
+        ],
+    )
+    def test_result_reference_validation(self, reference: str, expected: bool) -> None:
+        assert is_valid_result_reference(reference) is expected
 
     def test_default_backend_is_digest(self) -> None:
         backend = get_result_storage_backend({})

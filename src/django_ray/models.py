@@ -52,6 +52,10 @@ class RayTaskExecution(models.Model):
         default=1,
         help_text="Current attempt number",
     )
+    execution_generation = models.PositiveBigIntegerField(
+        default=0,
+        help_text="Monotonic token identifying the current execution generation",
+    )
 
     # Ray job tracking
     ray_job_id = models.CharField(
@@ -147,6 +151,11 @@ class RayTaskExecution(models.Model):
         null=True,
         blank=True,
         help_text="JSON workflow progress snapshot for the durable outer task",
+    )
+    completion_data = models.TextField(
+        null=True,
+        blank=True,
+        help_text="JSON completion envelope durably written by the Ray Job driver",
     )
 
     # Error tracking

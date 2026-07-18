@@ -150,10 +150,14 @@ while running:
 - Uses Ray Job Submission API.
 - Worker submits a payload transport command:
   - `python -m django_ray.runtime.entrypoint --payload-b64 <...>`
-- Payload is URL-safe base64 JSON containing callable path and serialized args/kwargs.
+- Payload is URL-safe base64 JSON containing callable path, serialized args/kwargs,
+  attempt number, and execution generation.
 - Applies the same persisted RuntimeEnv snapshot to the submitted Ray Job.
 - Carries durable task identity into the driver and initializes Ray lazily for
   nested workflows, giving Ray Job and Ray Core the same graph/progress protocol.
+- The driver persists a structured completion envelope on `RayTaskExecution` before
+  exiting. Reconciliation uses this durable channel for success/failure and treats
+  missing or malformed envelopes as non-terminal; Ray stdout/stderr is diagnostic only.
 - Workers can adopt orphaned persisted Ray Job handles from inactive workers and continue reconciliation
   instead of immediately retrying duplicate work.
 
@@ -167,9 +171,24 @@ while running:
 - Returns JSON result envelope:
   - `success`
   - `result`
+  - `result_reference` (for oversized results)
   - `error`
   - `traceback`
   - `exception_type`
+
+For Ray Job mode, this envelope is also written to the task's `completion_data`
+field. It is the authoritative completion channel; logs may be unavailable or
+contain arbitrary application output.
+
+### Rolling upgrades
+
+The completion envelope and `execution_generation` fields are part of the Ray
+Job protocol. Drain Ray Job workers before deploying a version that introduces
+or changes this protocol: let submitted jobs finish (or explicitly mark them
+for retry), stop the old workers, apply database migrations, and then start the
+new workers. Do not leave old and new workers reconciling the same in-flight
+jobs, because an old driver may not write the envelope or generation metadata
+required for the new worker to prove which execution produced a terminal state.
 
 ## Reliability Controls
 

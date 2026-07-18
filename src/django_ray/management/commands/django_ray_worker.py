@@ -21,6 +21,7 @@ from django_ray.runner.cancellation import finalize_cancellation
 from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
 from django_ray.runner.ray_core import RayCoreRunner
 from django_ray.runner.reconciliation import (
+    get_stuck_timeout,
     is_task_stuck,
     is_task_timed_out,
     mark_task_lost,
@@ -493,15 +494,56 @@ class Command(BaseCommand):
         task: RayTaskExecution,
         *,
         now: datetime | None = None,
+        ray_job_id: str | None = None,
+        execution_generation: int | None = None,
     ) -> None:
         """Record that a running task is still being actively monitored."""
         heartbeat_time = now or datetime.now(UTC)
-        updated = RayTaskExecution.objects.filter(
-            pk=task.pk,
-            state=TaskState.RUNNING,
-        ).update(last_heartbeat_at=heartbeat_time)
+        filters: dict[str, Any] = {"pk": task.pk, "state": TaskState.RUNNING}
+        if ray_job_id is not None:
+            filters["ray_job_id"] = ray_job_id
+        if execution_generation is not None:
+            filters["execution_generation"] = execution_generation
+        updated = RayTaskExecution.objects.filter(**filters).update(
+            last_heartbeat_at=heartbeat_time
+        )
         if updated:
             task.last_heartbeat_at = heartbeat_time
+
+    def _completion_envelope_grace_expired(
+        self,
+        task: RayTaskExecution,
+        *,
+        now: datetime,
+    ) -> bool:
+        """Return whether a terminal Ray Job has waited too long for its envelope."""
+        last_activity = task.last_heartbeat_at or task.started_at or task.created_at
+        last_activity_dt: datetime = last_activity  # type: ignore[assignment]
+        return now - last_activity_dt > get_stuck_timeout()
+
+    @staticmethod
+    def _is_valid_completion_envelope(result: Any) -> bool:
+        """Validate the required shape before applying a completion envelope."""
+        if not isinstance(result, dict) or not isinstance(result.get("success"), bool):
+            return False
+        if "result" not in result:
+            return False
+
+        if result["success"]:
+            result_reference = result.get("result_reference")
+            if result_reference is None:
+                return True
+            from django_ray.result_storage import is_valid_result_reference
+
+            return is_valid_result_reference(result_reference)
+
+        if not isinstance(result.get("error"), str):
+            return False
+        return all(
+            value is None or isinstance(value, str)
+            for key in ("traceback", "exception_type")
+            for value in [result.get(key)]
+        )
 
     def _get_ray_cluster_resources_with_timeout(
         self, timeout_seconds: float
@@ -715,8 +757,21 @@ class Command(BaseCommand):
                 task.started_at = now
                 task.last_heartbeat_at = now
                 task.claimed_by_worker = self.worker_id
+                task.execution_generation = int(task.execution_generation) + 1
+                task.completion_data = None
+                task.ray_job_id = None
+                task.ray_address = None
                 task.save(
-                    update_fields=["state", "started_at", "last_heartbeat_at", "claimed_by_worker"]
+                    update_fields=[
+                        "state",
+                        "started_at",
+                        "last_heartbeat_at",
+                        "claimed_by_worker",
+                        "execution_generation",
+                        "completion_data",
+                        "ray_job_id",
+                        "ray_address",
+                    ]
                 )
 
         # Process each claimed task
@@ -842,7 +897,10 @@ class Command(BaseCommand):
         error_message: str,
         error_traceback: str | None = None,
         exception_type: str | None = None,
-    ) -> None:
+        *,
+        expected_ray_job_id: str | None = None,
+        expected_execution_generation: int | None = None,
+    ) -> bool:
         """Handle a failed task, potentially scheduling a retry.
 
         Args:
@@ -865,19 +923,26 @@ class Command(BaseCommand):
             task.finished_at = None
             task.claimed_by_worker = None
             task.progress_data = None
-            task.save(
-                update_fields=[
-                    "state",
-                    "attempt_number",
-                    "run_after",
-                    "error_message",
-                    "error_traceback",
-                    "started_at",
-                    "finished_at",
-                    "claimed_by_worker",
-                    "progress_data",
-                ]
+            task.completion_data = None
+            filters: dict[str, Any] = {"pk": task.pk, "state": TaskState.RUNNING}
+            if expected_ray_job_id is not None:
+                filters["ray_job_id"] = expected_ray_job_id
+            if expected_execution_generation is not None:
+                filters["execution_generation"] = expected_execution_generation
+            updated = RayTaskExecution.objects.filter(**filters).update(
+                state=task.state,
+                attempt_number=task.attempt_number,
+                run_after=task.run_after,
+                error_message=task.error_message,
+                error_traceback=task.error_traceback,
+                started_at=task.started_at,
+                finished_at=task.finished_at,
+                claimed_by_worker=task.claimed_by_worker,
+                progress_data=task.progress_data,
+                completion_data=task.completion_data,
             )
+            if not updated:
+                return False
             self.stdout.write(
                 self.style.WARNING(
                     f"  Task {task.pk} failed, scheduling retry #{task.attempt_number} "
@@ -890,18 +955,24 @@ class Command(BaseCommand):
             task.error_message = error_message
             task.error_traceback = error_traceback
             task.finished_at = datetime.now(UTC)
-            task.save(
-                update_fields=[
-                    "state",
-                    "error_message",
-                    "error_traceback",
-                    "finished_at",
-                ]
+            filters = {"pk": task.pk, "state": TaskState.RUNNING}
+            if expected_ray_job_id is not None:
+                filters["ray_job_id"] = expected_ray_job_id
+            if expected_execution_generation is not None:
+                filters["execution_generation"] = expected_execution_generation
+            updated = RayTaskExecution.objects.filter(**filters).update(
+                state=task.state,
+                error_message=task.error_message,
+                error_traceback=task.error_traceback,
+                finished_at=task.finished_at,
             )
+            if not updated:
+                return False
             reason = retry_decision.reason or "No retry configured"
             self.stdout.write(
                 self.style.ERROR(f"  Task {task.pk} failed permanently ({reason}): {error_message}")
             )
+        return True
 
     def submit_task_to_ray_core(self, task: RayTaskExecution) -> None:
         """Submit a task to Ray via @ray.remote (RayCoreRunner).
@@ -1158,8 +1229,29 @@ class Command(BaseCommand):
         job_info = runner.get_status(handle)
         now = datetime.now(UTC)
 
+        # Refresh after the status RPC: the execution may have been retried or
+        # claimed elsewhere while the RPC was in flight.
+        try:
+            task.refresh_from_db(
+                fields=["state", "completion_data", "ray_job_id", "execution_generation"]
+            )
+        except RayTaskExecution.DoesNotExist:
+            completed_tasks.append(task.pk)
+            return
+
+        # Never reconcile an old Ray Job against a replacement execution.
+        if str(task.ray_job_id or "") != ray_job_id:
+            if self.active_tasks.get(task.pk) == ray_job_id:
+                self.active_tasks.pop(task.pk, None)
+            return
+
         if job_info.status in (JobStatus.PENDING, JobStatus.RUNNING):
-            self._mark_task_monitor_heartbeat(task, now=now)
+            self._mark_task_monitor_heartbeat(
+                task,
+                now=now,
+                ray_job_id=ray_job_id,
+                execution_generation=task.execution_generation,
+            )
             if orphaned and self._adopt_orphaned_ray_job_task(task, now=now):
                 self.stdout.write(
                     self.style.NOTICE(
@@ -1168,65 +1260,152 @@ class Command(BaseCommand):
                 )
             return
 
-        if job_info.status == JobStatus.SUCCEEDED:
-            logs = runner.get_logs(handle)
-            task_succeeded = True
-
-            if logs:
-                try:
-                    lines = logs.strip().split("\n")
-                    result = json.loads(lines[-1])
-                    if result.get("success"):
-                        task.state = TaskState.SUCCEEDED
-                        task.finished_at = now
-                        self._store_task_result(task, result.get("result"))
-                    else:
-                        task_succeeded = False
-                        self._handle_task_failure(
-                            task,
-                            error_message=result.get("error", "Task failed"),
-                            error_traceback=result.get("traceback"),
-                            exception_type=result.get("exception_type"),
-                        )
-                except (json.JSONDecodeError, IndexError):
-                    task.state = TaskState.SUCCEEDED
+        completion_data: str | None = None
+        if job_info.status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.STOPPED):
+            if task.state in (TaskState.CANCELLED, TaskState.CANCELLING):
+                if task.state == TaskState.CANCELLING:
+                    task.state = TaskState.CANCELLED
                     task.finished_at = now
-                    self._store_task_result(task, logs)
-            else:
-                # Job succeeded but no logs available; still mark as succeeded.
+                    task.save(update_fields=["state", "finished_at"])
+                completed_tasks.append(task.pk)
+                return
+            if task.state != TaskState.RUNNING:
+                completed_tasks.append(task.pk)
+                return
+
+            completion_data = task.completion_data
+
+        if completion_data:
+            completion_error: str | None = None
+            try:
+                result = json.loads(completion_data)
+            except (TypeError, json.JSONDecodeError):
+                completion_error = "malformed"
+
+            if completion_error is None and not self._is_valid_completion_envelope(result):
+                completion_error = "invalid"
+
+            if completion_error is not None:
+                if self._completion_envelope_grace_expired(task, now=now):
+                    handled = self._handle_task_failure(
+                        task,
+                        error_message=f"Ray Job produced a {completion_error} completion envelope",
+                        exception_type="RayCompletionMalformed",
+                        expected_ray_job_id=ray_job_id,
+                        expected_execution_generation=task.execution_generation,
+                    )
+                    if handled is False:
+                        return
+                    completed_tasks.append(task.pk)
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"\nTask {task.pk} exceeded the completion envelope grace period"
+                        )
+                    )
+                else:
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"\nTask {task.pk} has a {completion_error} completion envelope; "
+                            "waiting for a valid update"
+                        )
+                    )
+                return
+
+            if result["success"]:
                 task.state = TaskState.SUCCEEDED
                 task.finished_at = now
-                task.result_data = None
-                task.result_reference = None
-
-            if task_succeeded:
-                task.save()
+                if result.get("result_reference"):
+                    task.result_data = None
+                    task.result_reference = result["result_reference"]
+                else:
+                    self._store_task_result(task, result.get("result"))
+                updated = RayTaskExecution.objects.filter(
+                    pk=task.pk,
+                    state=TaskState.RUNNING,
+                    ray_job_id=ray_job_id,
+                    execution_generation=task.execution_generation,
+                ).update(
+                    state=task.state,
+                    finished_at=task.finished_at,
+                    result_data=task.result_data,
+                    result_reference=task.result_reference,
+                )
+                if not updated:
+                    return
                 self.stdout.write(self.style.SUCCESS(f"\nTask {task.pk} completed"))
             else:
+                handled = self._handle_task_failure(
+                    task,
+                    error_message=result["error"],
+                    error_traceback=result.get("traceback"),
+                    exception_type=result.get("exception_type"),
+                    expected_ray_job_id=ray_job_id,
+                    expected_execution_generation=task.execution_generation,
+                )
+                if handled is False:
+                    return
                 self.stdout.write(
                     self.style.WARNING(
-                        f"\nTask {task.pk} returned failure payload, handling via retry policy"
+                        f"\nTask {task.pk} returned failure envelope, handling via retry policy"
                     )
                 )
             completed_tasks.append(task.pk)
             return
 
+        if job_info.status == JobStatus.SUCCEEDED:
+            # Ray Job logs are diagnostic only. Missing envelopes remain
+            # non-terminal until the bounded grace period expires.
+            if self._completion_envelope_grace_expired(task, now=now):
+                handled = self._handle_task_failure(
+                    task,
+                    error_message="Ray Job completed without a completion envelope",
+                    exception_type="RayCompletionUnknown",
+                    expected_ray_job_id=ray_job_id,
+                    expected_execution_generation=task.execution_generation,
+                )
+                if handled is False:
+                    return
+                completed_tasks.append(task.pk)
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"\nTask {task.pk} exceeded the completion envelope grace period"
+                    )
+                )
+                return
+            self.stdout.write(
+                self.style.NOTICE(
+                    f"\nTask {task.pk} Ray job succeeded; waiting for completion envelope"
+                )
+            )
+            return
+
         if job_info.status == JobStatus.FAILED:
             logs = runner.get_logs(handle)
-            self._handle_task_failure(
+            handled = self._handle_task_failure(
                 task,
                 error_message=job_info.message or "Ray job failed",
                 error_traceback=logs,
                 exception_type="RayJobFailed",
+                expected_ray_job_id=ray_job_id,
+                expected_execution_generation=task.execution_generation,
             )
+            if handled is False:
+                return
             completed_tasks.append(task.pk)
             self.stdout.write(self.style.ERROR(f"\nTask {task.pk} failed: {job_info.message}"))
             return
 
         if job_info.status == JobStatus.STOPPED:
+            updated = RayTaskExecution.objects.filter(
+                pk=task.pk,
+                state=TaskState.RUNNING,
+                ray_job_id=ray_job_id,
+                execution_generation=task.execution_generation,
+            ).update(state=TaskState.CANCELLED, finished_at=now)
+            if not updated:
+                return
             task.state = TaskState.CANCELLED
             task.finished_at = now
-            task.save()
             completed_tasks.append(task.pk)
             self.stdout.write(self.style.WARNING(f"\nTask {task.pk} was stopped"))
             return
@@ -1295,7 +1474,16 @@ class Command(BaseCommand):
 
         # Remove completed tasks from active list
         for task_pk in completed_tasks:
-            self.active_tasks.pop(task_pk, None)
+            tracked_ray_job_id = self.active_tasks.get(task_pk)
+            if tracked_ray_job_id is None:
+                continue
+            current = (
+                RayTaskExecution.objects.filter(pk=task_pk).values("state", "ray_job_id").first()
+            )
+            if current is None or current["state"] != TaskState.RUNNING:
+                self.active_tasks.pop(task_pk, None)
+            elif str(current["ray_job_id"] or "") == tracked_ray_job_id:
+                self.active_tasks.pop(task_pk, None)
 
     def detect_stuck_tasks(self) -> None:
         """Detect and mark stuck tasks as LOST.

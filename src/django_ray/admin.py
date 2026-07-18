@@ -3,7 +3,7 @@
 from typing import Any
 
 from django.contrib import admin
-from django.db.models import QuerySet
+from django.db.models import F, QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.safestring import mark_safe
@@ -24,6 +24,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "state_display",
         "queue_name",
         "attempt_number",
+        "execution_generation",
         "ray_dashboard_link",
         "created_at",
         "started_at",
@@ -56,6 +57,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "result_data",
         "result_reference",
         "progress_data",
+        "completion_data",
         "error_message",
         "error_traceback",
     ]
@@ -63,7 +65,14 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         (
             "Task Info",
             {
-                "fields": ("task_id", "callable_path", "queue_name", "state", "attempt_number"),
+                "fields": (
+                    "task_id",
+                    "callable_path",
+                    "queue_name",
+                    "state",
+                    "attempt_number",
+                    "execution_generation",
+                ),
             },
         ),
         (
@@ -80,6 +89,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
                     "result_data",
                     "result_reference",
                     "progress_data",
+                    "completion_data",
                     "error_message",
                     "error_traceback",
                 ),
@@ -209,8 +219,10 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         tasks_to_retry.update(
             state=TaskState.QUEUED,
             attempt_number=0,
+            execution_generation=F("execution_generation") + 1,
             result_data=None,
             progress_data=None,
+            completion_data=None,
             error_message=None,
             error_traceback=None,
             started_at=None,

@@ -91,9 +91,11 @@ class TestRayTaskExecutionAdmin:
             callable_path="testproject.tasks.failing_task",
             state=TaskState.FAILED,
             attempt_number=3,
+            execution_generation=8,
             error_message="boom",
             args_json="[]",
             kwargs_json="{}",
+            completion_data='{"success": false}',
         )
         lost = RayTaskExecution.objects.create(
             task_id="admin-retry-002",
@@ -121,6 +123,8 @@ class TestRayTaskExecutionAdmin:
 
         assert failed.state == TaskState.QUEUED
         assert failed.attempt_number == 0
+        assert failed.execution_generation == 9
+        assert failed.completion_data is None
         assert lost.state == TaskState.QUEUED
         assert lost.attempt_number == 0
         assert running.state == TaskState.RUNNING
