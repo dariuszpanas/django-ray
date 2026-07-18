@@ -546,6 +546,30 @@ class TestExecutionsAPI:
         assert data["id"] == task.pk
         assert data["callable_path"] == "testproject.tasks.add_numbers"
 
+    def test_execution_payload_redacts_sensitive_fields(self, client, settings):
+        """Operator-facing execution details must not echo stored secrets."""
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
+        task = RayTaskExecution.objects.create(
+            task_id="test-redacted-api",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.FAILED,
+            args_json='[{"password":"api-secret"}]',
+            kwargs_json='{"safe":"visible"}',
+            result_data='{"password":"result-secret","safe":1}',
+            progress_data='{"safe":"visible"}',
+            error_message="password=error-secret",
+        )
+
+        response = client.get(f"/api/executions/{task.pk}")
+
+        assert response.status_code == 200
+        payload = response.json()
+        serialized = str(payload)
+        assert "api-secret" not in serialized
+        assert "result-secret" not in serialized
+        assert "error-secret" not in serialized
+        assert "[REDACTED]" in serialized
+
     def test_get_execution_not_found(self, client):
         """Test getting a non-existent execution."""
         response = client.get("/api/executions/99999")

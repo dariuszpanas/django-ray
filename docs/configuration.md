@@ -104,6 +104,34 @@ Optional install extras:
 - `pip install "django-ray[gcs]"` for GCS backend dependencies.
 - `pip install "django-ray[object-storage]"` for both.
 
+### Redaction and operational output
+
+`REDACT_PATTERNS` is an optional sequence of regular expressions used for
+worker logs, structured log fields, Ray State API/log responses, the sample
+operational API, and the Django admin task detail view. When it is `None`, the
+built-in patterns cover common names such as `password`, `secret`, `token`,
+`authorization`, `cookie`, and `private_key`. A matching mapping key redacts
+its value; a matching string is replaced with `[REDACTED]`.
+
+```python
+DJANGO_RAY = {
+    "RAY_ADDRESS": "auto",
+    "REDACT_PATTERNS": [
+        r"password",
+        r"access[_-]?token",
+        r"customer[_-]?email",
+    ],
+}
+```
+
+Successful task logs contain only result type and serialized size, never the
+complete return value. Ray Job completion envelopes are persisted through the
+database channel and are not printed to Ray stdout. Redaction is a safety
+boundary for operational output, not encryption: task results and arguments
+remain in the database/result backend for authorized readers, and application
+code that prints directly to stdout bypasses this policy. Protect the API,
+admin, Ray dashboard, and result storage with the appropriate access controls.
+
 ## Startup Validation
 
 django-ray validates `DJANGO_RAY` at Django app startup (`AppConfig.ready()`).

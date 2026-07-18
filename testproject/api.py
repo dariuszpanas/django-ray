@@ -19,6 +19,7 @@ from django.tasks import task_backends
 from django.tasks.exceptions import InvalidTaskBackend
 from ninja import NinjaAPI, Schema
 from ninja.security import HttpBearer
+from pydantic import field_validator
 
 from django_ray import __version__ as django_ray_version
 from django_ray.models import RayTaskExecution, TaskState
@@ -29,6 +30,7 @@ from django_ray.observability import (
     get_workflow_node,
     get_workflow_progress,
 )
+from django_ray.redaction import redact_text, redact_value, safe_json_dumps
 
 # Import tasks that use Django 6's @task decorator
 from testproject import tasks
@@ -80,6 +82,16 @@ class TaskResultSchema(Schema):
     args: list
     kwargs: dict
 
+    @field_validator("args", mode="before")
+    @classmethod
+    def redact_args(cls, value):
+        return redact_value(value)
+
+    @field_validator("kwargs", mode="before")
+    @classmethod
+    def redact_kwargs(cls, value):
+        return redact_value(value)
+
 
 class TaskExecutionSchema(Schema):
     """Schema for task execution details (internal model)."""
@@ -98,6 +110,21 @@ class TaskExecutionSchema(Schema):
     runtime_env_profile: str | None
     runtime_env_hash: str
     error_message: str | None
+
+    @field_validator("result_data", "progress_data", mode="before")
+    @classmethod
+    def redact_json_fields(cls, value):
+        if value is None:
+            return None
+        try:
+            return safe_json_dumps(json.loads(value))
+        except (TypeError, json.JSONDecodeError):
+            return redact_text(value)
+
+    @field_validator("error_message", mode="before")
+    @classmethod
+    def redact_error(cls, value):
+        return redact_text(value) if value is not None else None
 
 
 class TaskListResponseSchema(Schema):
@@ -156,6 +183,16 @@ class WorkflowResultSchema(Schema):
     result: dict | None
     error: str | None
 
+    @field_validator("progress", "result", mode="before")
+    @classmethod
+    def redact_workflow_payload(cls, value):
+        return redact_value(value)
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def redact_workflow_error(cls, value):
+        return redact_text(value) if value is not None else None
+
 
 class WorkflowGraphSchema(Schema):
     """UI-ready durable workflow graph and aggregate state."""
@@ -175,6 +212,11 @@ class WorkflowGraphSchema(Schema):
     graph: dict
     recent_events: list[dict]
 
+    @field_validator("graph", "recent_events", mode="before")
+    @classmethod
+    def redact_graph_payload(cls, value):
+        return redact_value(value)
+
 
 class WorkflowNodeSchema(Schema):
     """Durable node metadata enriched with optional live Ray data."""
@@ -184,6 +226,21 @@ class WorkflowNodeSchema(Schema):
     ray_state: list[dict] | None
     logs: dict[str, str] | None
     observability_error: str | None
+
+    @field_validator("node", "ray_state", mode="before")
+    @classmethod
+    def redact_node_payload(cls, value):
+        return redact_value(value)
+
+    @field_validator("logs", mode="before")
+    @classmethod
+    def redact_logs(cls, value):
+        return redact_value(value)
+
+    @field_validator("observability_error", mode="before")
+    @classmethod
+    def redact_observability_error(cls, value):
+        return redact_text(value) if value is not None else None
 
 
 class RuntimeEnvResultSchema(Schema):
@@ -198,6 +255,16 @@ class RuntimeEnvResultSchema(Schema):
     finished_at: datetime | None
     result: dict | None
     error: str | None
+
+    @field_validator("result", mode="before")
+    @classmethod
+    def redact_result(cls, value):
+        return redact_value(value)
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def redact_error(cls, value):
+        return redact_text(value) if value is not None else None
 
 
 # ============================================================================

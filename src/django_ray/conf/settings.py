@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from typing import Any
 
 from django.conf import settings
@@ -98,3 +100,25 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
         raise ImproperlyConfigured(
             "django-ray: RESULT_STORAGE_GCS_BUCKET is required when RESULT_STORAGE_BACKEND='gcs'"
         )
+
+    redact_patterns = config.get("REDACT_PATTERNS")
+    if redact_patterns is not None:
+        if isinstance(redact_patterns, str):
+            redact_patterns = (redact_patterns,)
+        elif not isinstance(redact_patterns, Sequence) or isinstance(
+            redact_patterns, bytes | bytearray
+        ):
+            raise ImproperlyConfigured(
+                "django-ray: REDACT_PATTERNS must be a string or a sequence of regex strings"
+            )
+        for pattern in redact_patterns:
+            if not isinstance(pattern, str) or not pattern:
+                raise ImproperlyConfigured(
+                    "django-ray: REDACT_PATTERNS entries must be non-empty strings"
+                )
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                raise ImproperlyConfigured(
+                    f"django-ray: REDACT_PATTERNS contains invalid regex {pattern!r}: {error}"
+                ) from error

@@ -61,15 +61,18 @@ class TestEntrypointPayload:
         assert result["error"] is not None
         assert isinstance(result["exception_type"], str)
 
-    def test_main_prints_payload_execution_result(self, monkeypatch, capsys) -> None:
-        """CLI main should print execution JSON and return zero."""
-        monkeypatch.setattr(entrypoint, "execute_task_from_payload", lambda _: '{"ok":1}')
+    def test_main_does_not_print_payload_execution_result(self, monkeypatch, capsys) -> None:
+        """CLI main should keep the completion envelope out of Ray logs."""
+        monkeypatch.setattr(
+            entrypoint, "execute_task_from_payload", lambda _: '{"success":true,"result":"secret"}'
+        )
 
         exit_code = entrypoint.main(["--payload-b64", "abc"])
         output = capsys.readouterr().out.strip()
 
         assert exit_code == 0
-        assert output == '{"ok":1}'
+        assert output == "django-ray task completed successfully"
+        assert "secret" not in output
 
     def test_bootstrap_requires_settings_module(self, monkeypatch) -> None:
         monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)

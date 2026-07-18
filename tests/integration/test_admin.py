@@ -61,6 +61,32 @@ class TestRayTaskExecutionAdmin:
         link = admin_obj.ray_dashboard_link(task)
         assert "/#/jobs/raysubmit_abc123" in link
 
+    @pytest.mark.django_db
+    def test_sensitive_task_fields_are_redacted(self, settings) -> None:
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
+        admin_obj = _task_admin()
+        task = RayTaskExecution.objects.create(
+            task_id="admin-redacted-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.FAILED,
+            args_json='[{"password":"admin-secret"}]',
+            result_data='{"password":"result-secret"}',
+            error_message="password=error-secret",
+        )
+
+        rendered = " ".join(
+            (
+                admin_obj.args_json_display(task),
+                admin_obj.result_data_display(task),
+                admin_obj.error_message_display(task),
+            )
+        )
+
+        assert "admin-secret" not in rendered
+        assert "result-secret" not in rendered
+        assert "error-secret" not in rendered
+        assert "[REDACTED]" in rendered
+
     @override_settings(RAY_DASHBOARD_URL="http://ray.localhost:30080")
     def test_dashboard_links_respect_configured_dashboard_url(self) -> None:
         admin_obj = _task_admin()

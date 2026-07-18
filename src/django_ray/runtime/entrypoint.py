@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+import sys
 import traceback
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ import django
 from django.apps import apps
 
 from django_ray.conf.settings import get_settings
+from django_ray.redaction import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -254,7 +256,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    print(execute_task_from_payload(args.payload_b64))
+    # The durable completion envelope is persisted in the database by
+    # ``execute_task``.  Do not print it: Ray Job logs are operational output
+    # and must not become an accidental copy of a task's return value.
+    result_json = execute_task_from_payload(args.payload_b64)
+    try:
+        result = json.loads(result_json)
+    except (TypeError, json.JSONDecodeError):
+        print("django-ray task produced an invalid completion envelope", file=sys.stderr)
+    else:
+        if not isinstance(result, dict):
+            print("django-ray task produced an invalid completion envelope", file=sys.stderr)
+        elif result.get("success"):
+            print("django-ray task completed successfully")
+        else:
+            print(
+                f"django-ray task failed: {redact_text(result.get('error'))}",
+                file=sys.stderr,
+            )
     return 0
 
 

@@ -51,6 +51,18 @@ def test_execute_django_task_remote_logs_failure(monkeypatch, capsys) -> None:
     assert "[Task 12] FAILED: boom" in captured.err
 
 
+def test_execute_django_task_remote_logs_bounded_success_metadata(monkeypatch, capsys) -> None:
+    payload = json.dumps({"success": True, "result": {"password": "secret-value"}})
+    monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", lambda *args: payload)
+
+    execute_django_task_remote("tests.fake", "[]", "{}", 13)
+
+    captured = capsys.readouterr()
+    assert "SUCCESS" in captured.out
+    assert "secret-value" not in captured.out
+    assert "result_type" in captured.out
+
+
 def test_execute_workflow_step_bootstraps_and_reports_completion(monkeypatch) -> None:
     bootstrapped: list[bool] = []
     monkeypatch.setattr(

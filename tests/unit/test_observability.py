@@ -94,6 +94,24 @@ def test_get_ray_task_logs_returns_bounded_streams(monkeypatch, settings) -> Non
     }
 
 
+def test_observability_redacts_state_and_log_payloads(monkeypatch, settings) -> None:
+    settings.DJANGO_RAY = {
+        "RAY_ADDRESS": "auto",
+        "RAY_STATE_API_ADDRESS": "http://ray-dashboard:8265",
+        "REDACT_PATTERNS": [r"access[_-]?token"],
+    }
+    fake_state = SimpleNamespace(
+        get_task=lambda **kwargs: [
+            SimpleNamespace(asdict=lambda: {"metadata": {"access_token": "secret-value"}})
+        ],
+        get_log=lambda **kwargs: iter(["access-token=secret-value\n"]),
+    )
+    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+
+    assert "secret-value" not in str(get_ray_task_state("ray-task-1"))
+    assert "secret-value" not in str(get_ray_task_logs("ray-task-1"))
+
+
 def test_get_ray_task_state_wraps_state_api_errors(monkeypatch, settings) -> None:
     settings.DJANGO_RAY = {
         "RAY_ADDRESS": "auto",

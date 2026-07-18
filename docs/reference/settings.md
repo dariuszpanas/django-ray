@@ -397,6 +397,32 @@ Object key prefix used by GCS backend.
 "RESULT_STORAGE_GCS_PREFIX": "prod/django-ray/results"
 ```
 
+## Operational Redaction
+
+### REDACT_PATTERNS
+
+- **Type**: `str | sequence[str] | None`
+- **Default**: `None` (built-in patterns are enabled)
+
+Regular expressions used to redact sensitive mapping keys and matching string
+values in structured logs, Ray observability responses, the sample operational
+API, and Django admin task details. A configured string or sequence extends the
+built-in patterns for common names such as `password`, `secret`, `token`,
+`authorization`, and `private_key`.
+
+```python
+DJANGO_RAY = {
+    "RAY_ADDRESS": "auto",
+    "REDACT_PATTERNS": [r"customer[_-]?email", r"access[_-]?token"],
+}
+```
+
+Successful task logs expose only result type and serialized size. The completion
+envelope is persisted through the database channel and is not printed to Ray
+stdout. Redaction does not encrypt task data or protect direct application
+`print()` calls; secure the database, result backend, admin, API, and Ray
+dashboard separately.
+
 ## Django Settings
 
 These settings are configured directly in Django settings, not in `DJANGO_RAY`:
