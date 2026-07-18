@@ -811,6 +811,43 @@ class TestWorkerOrphanRecovery:
         assert task.state == TaskState.SUCCEEDED
         assert task.cancellation_status is None
 
+    def test_timeout_cancels_ray_core_task_without_ray_job_request(self):
+        """Ray Core timeout handling must not call the Ray Job API."""
+        from datetime import datetime, timedelta
+
+        task = RayTaskExecution.objects.create(
+            task_id="test-timeout-ray-core-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 60}',
+            timeout_seconds=5,
+            started_at=datetime.now(UTC) - timedelta(seconds=10),
+            claimed_by_worker="recovery-worker",
+            ray_job_id="02000000:01000000",
+        )
+        cancelled: list[str] = []
+
+        class FakeCoreRunner:
+            _pending_tasks = {task.pk: object()}
+
+            def cancel(self, handle):
+                cancelled.append(handle.ray_job_id)
+                return True
+
+        cmd = self._make_command()
+        cmd.ray_core_runner = FakeCoreRunner()
+        cmd.active_tasks = {task.pk: "02000000:01000000"}
+
+        cmd.detect_stuck_tasks()
+
+        task.refresh_from_db()
+        assert cancelled == [f"ray_core:{task.pk}"]
+        assert task.state == TaskState.FAILED
+        assert task.cancellation_status == CancellationStatus.NOT_APPLICABLE
+        assert task.pk not in cmd.active_tasks
+
 
 @pytest.mark.django_db
 class TestWorkerResultStorage:
