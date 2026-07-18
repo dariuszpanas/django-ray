@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
+from types import SimpleNamespace
+
+import pytest
 
 import django_ray.runtime.entrypoint as entrypoint
 
@@ -64,3 +67,19 @@ class TestEntrypointPayload:
 
         assert exit_code == 0
         assert output == '{"ok":1}'
+
+    def test_bootstrap_requires_settings_module(self, monkeypatch) -> None:
+        monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+
+        with pytest.raises(RuntimeError, match="DJANGO_SETTINGS_MODULE"):
+            entrypoint.bootstrap_django()
+
+    def test_bootstrap_initializes_django_when_apps_are_not_ready(self, monkeypatch) -> None:
+        monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings")
+        monkeypatch.setattr(entrypoint, "apps", SimpleNamespace(ready=False))
+        setup_calls: list[bool] = []
+        monkeypatch.setattr(entrypoint.django, "setup", lambda: setup_calls.append(True))
+
+        entrypoint.bootstrap_django()
+
+        assert setup_calls == [True]

@@ -546,3 +546,19 @@ def test_report_progress_uses_current_workflow_context() -> None:
         assert report_progress(1, 2, message="half", metrics={"rows": 5}) is True
 
     assert calls == [("0.1", 1.0, 2.0, "half", {"rows": 5})]
+
+
+def test_report_progress_validates_values_and_metrics() -> None:
+    class _RemoteMethod:
+        def remote(self, *args):
+            del args
+
+    actor = type("_Actor", (), {"progress": _RemoteMethod()})()
+
+    with workflow_step_execution(actor, "0.1"):
+        with pytest.raises(ValueError, match="total must be greater than zero"):
+            report_progress(0, 0)
+        with pytest.raises(ValueError, match="current must be between zero and total"):
+            report_progress(-1, 1)
+        with pytest.raises(ValueError, match="progress metrics must be JSON-serializable"):
+            report_progress(1, 2, metrics={"bad": object()})
