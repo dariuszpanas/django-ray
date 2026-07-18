@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import pytest
 from django.conf import settings as django_settings
+from django.core.management import CommandError
 from django.core.management.base import CommandParser
 
 from django_ray.management.commands.django_ray_worker import Command
@@ -438,6 +439,31 @@ class TestWorkerCommandRuntime:
         )
 
         assert any("Shutdown requested via keyboard interrupt" in m for m in cmd.stdout.messages)
+
+    @pytest.mark.parametrize("concurrency", [0, -1, True, 1001])
+    def test_handle_rejects_invalid_cli_concurrency_before_ray_init(
+        self, monkeypatch, concurrency
+    ) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"DEFAULT_CONCURRENCY": 2},
+        )
+        init_calls: list[bool] = []
+        monkeypatch.setattr(cmd, "_init_local_ray", lambda: init_calls.append(True))
+
+        with pytest.raises(CommandError, match="--concurrency"):
+            cmd.handle(
+                queue="default",
+                queues=None,
+                all_queues=False,
+                concurrency=concurrency,
+                sync=False,
+                local=True,
+                cluster=None,
+            )
+
+        assert init_calls == []
 
 
 @pytest.mark.django_db

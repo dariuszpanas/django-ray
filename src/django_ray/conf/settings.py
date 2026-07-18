@@ -38,9 +38,10 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
         config = get_settings()
 
     # Required settings
-    if not config.get("RAY_ADDRESS"):
+    ray_address = config.get("RAY_ADDRESS")
+    if not isinstance(ray_address, str) or not ray_address.strip():
         raise ImproperlyConfigured(
-            "django-ray: RAY_ADDRESS is required in DJANGO_RAY settings. "
+            "django-ray: RAY_ADDRESS is required and must be a non-empty string in DJANGO_RAY settings. "
             "Example: DJANGO_RAY = {'RAY_ADDRESS': 'ray://localhost:10001'}"
         )
 
@@ -51,7 +52,7 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
     # Validate runner choice
     valid_runners = ("ray_job", "ray_core")
     runner = config.get("RUNNER", "ray_job")
-    if runner not in valid_runners:
+    if not isinstance(runner, str) or runner not in valid_runners:
         raise ImproperlyConfigured(
             f"django-ray: RUNNER must be one of {valid_runners}, got '{runner}'"
         )
@@ -64,7 +65,10 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
     numeric_settings = [
         ("DEFAULT_CONCURRENCY", 1, 1000),
         ("MAX_TASK_ATTEMPTS", 1, 100),
+        ("RETRY_BACKOFF_SECONDS", 0, 3600),
         ("STUCK_TASK_TIMEOUT_SECONDS", 30, 86400),
+        ("WORKER_LEASE_SECONDS", 1, 86400),
+        ("WORKER_HEARTBEAT_SECONDS", 1, 86400),
         ("TASK_MONITOR_HEARTBEAT_SECONDS", 1, 300),
         ("WORKFLOW_PROGRESS_FLUSH_SECONDS", 1, 300),
         ("RAY_STATE_API_TIMEOUT_SECONDS", 1, 60),
@@ -72,20 +76,66 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
     ]
 
     for name, min_val, max_val in numeric_settings:
-        value = config.get(name)
-        if value is not None:
-            if not isinstance(value, int) or value < min_val or value > max_val:
-                raise ImproperlyConfigured(
-                    f"django-ray: {name} must be an integer between {min_val} and {max_val}"
-                )
+        if name not in config:
+            continue
+        value = config[name]
+        if type(value) is not int or value < min_val or value > max_val:
+            raise ImproperlyConfigured(
+                f"django-ray: {name} must be an integer between {min_val} and {max_val}"
+            )
+
+    # Heartbeats must occur before the lease or stuck-task windows expire. Use
+    # defaults for omitted values so partial test/config dictionaries receive
+    # the same relationship checks as the merged runtime settings.
+    worker_lease_seconds = config.get("WORKER_LEASE_SECONDS", DEFAULTS["WORKER_LEASE_SECONDS"])
+    worker_heartbeat_seconds = config.get(
+        "WORKER_HEARTBEAT_SECONDS", DEFAULTS["WORKER_HEARTBEAT_SECONDS"]
+    )
+    if worker_heartbeat_seconds >= worker_lease_seconds:
+        raise ImproperlyConfigured(
+            "django-ray: WORKER_HEARTBEAT_SECONDS must be less than WORKER_LEASE_SECONDS"
+        )
+
+    stuck_timeout_seconds = config.get(
+        "STUCK_TASK_TIMEOUT_SECONDS", DEFAULTS["STUCK_TASK_TIMEOUT_SECONDS"]
+    )
+    task_monitor_heartbeat_seconds = config.get(
+        "TASK_MONITOR_HEARTBEAT_SECONDS", DEFAULTS["TASK_MONITOR_HEARTBEAT_SECONDS"]
+    )
+    if task_monitor_heartbeat_seconds >= stuck_timeout_seconds:
+        raise ImproperlyConfigured(
+            "django-ray: TASK_MONITOR_HEARTBEAT_SECONDS must be less than "
+            "STUCK_TASK_TIMEOUT_SECONDS"
+        )
+
+    denylist = config.get("RETRY_EXCEPTION_DENYLIST", [])
+    if not isinstance(denylist, list) or any(not isinstance(entry, str) for entry in denylist):
+        raise ImproperlyConfigured("django-ray: RETRY_EXCEPTION_DENYLIST must be a list of strings")
 
     result_storage_backend = config.get("RESULT_STORAGE_BACKEND", "digest")
     valid_result_storage_backends = ("digest", "filesystem", "s3", "gcs")
-    if result_storage_backend not in valid_result_storage_backends:
+    if (
+        not isinstance(result_storage_backend, str)
+        or result_storage_backend not in valid_result_storage_backends
+    ):
         raise ImproperlyConfigured(
             "django-ray: RESULT_STORAGE_BACKEND must be one of "
             f"{valid_result_storage_backends}, got '{result_storage_backend}'"
         )
+
+    optional_string_settings = (
+        "RESULT_STORAGE_FILESYSTEM_PATH",
+        "RESULT_STORAGE_S3_BUCKET",
+        "RESULT_STORAGE_S3_PREFIX",
+        "RESULT_STORAGE_S3_REGION",
+        "RESULT_STORAGE_S3_ENDPOINT_URL",
+        "RESULT_STORAGE_GCS_BUCKET",
+        "RESULT_STORAGE_GCS_PREFIX",
+    )
+    for name in optional_string_settings:
+        value = config.get(name)
+        if value is not None and not isinstance(value, str):
+            raise ImproperlyConfigured(f"django-ray: {name} must be a string or None")
 
     if result_storage_backend == "filesystem" and not config.get("RESULT_STORAGE_FILESYSTEM_PATH"):
         raise ImproperlyConfigured(

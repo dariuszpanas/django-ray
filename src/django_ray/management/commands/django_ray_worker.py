@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from types import FrameType
 from typing import Any
 
-from django.core.management.base import BaseCommand, CommandParser
+from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import transaction
 
 from django_ray.conf.settings import get_settings
@@ -116,6 +116,10 @@ class Command(BaseCommand):
         settings = get_settings()
         self.verbosity = int(options.get("verbosity", 1))
         concurrency = options.get("concurrency")
+        if concurrency is not None and (
+            type(concurrency) is not int or not 1 <= concurrency <= 1000
+        ):
+            raise CommandError("--concurrency must be an integer between 1 and 1000")
         self.sync_mode = options.get("sync", False)
         self.local_mode = options.get("local", False)
         self.cluster_address = options.get("cluster")

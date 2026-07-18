@@ -172,6 +172,7 @@ Maximum number of attempts before marking a task as failed. Includes the initial
 
 - **Type**: `int`
 - **Default**: `60`
+- **Allowed**: `0` to `3600`
 
 Base delay in seconds between retry attempts. Uses exponential backoff:
 - Attempt 2: `RETRY_BACKOFF_SECONDS * 1`
@@ -223,8 +224,10 @@ through retry handling.
 
 - **Type**: `int`
 - **Default**: `60`
+- **Allowed**: `1` to `86400`
 
 Duration of worker lease for distributed coordination. Workers must renew their lease within this period.
+`WORKER_HEARTBEAT_SECONDS` must be lower than this value.
 
 ```python
 "WORKER_LEASE_SECONDS": 120
@@ -234,6 +237,7 @@ Duration of worker lease for distributed coordination. Workers must renew their 
 
 - **Type**: `int`
 - **Default**: `15`
+- **Allowed**: `1` to `86400`, and less than `WORKER_LEASE_SECONDS`
 
 Interval between worker heartbeats. Should be less than `WORKER_LEASE_SECONDS`.
 
@@ -255,6 +259,7 @@ Each update covers all tasks currently monitored by that worker. Status polling 
 non-blocking and frequent; this setting only throttles persistence writes.
 
 Keep this value comfortably below `STUCK_TASK_TIMEOUT_SECONDS`.
+Validation requires it to be strictly less than `STUCK_TASK_TIMEOUT_SECONDS`.
 
 ```python
 "TASK_MONITOR_HEARTBEAT_SECONDS": 15

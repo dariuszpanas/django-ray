@@ -63,6 +63,74 @@ class TestValidateSettings:
                 }
             )
 
+    @pytest.mark.parametrize(
+        "setting",
+        [
+            "DEFAULT_CONCURRENCY",
+            "MAX_TASK_ATTEMPTS",
+            "RETRY_BACKOFF_SECONDS",
+            "STUCK_TASK_TIMEOUT_SECONDS",
+            "WORKER_LEASE_SECONDS",
+            "WORKER_HEARTBEAT_SECONDS",
+            "TASK_MONITOR_HEARTBEAT_SECONDS",
+            "WORKFLOW_PROGRESS_FLUSH_SECONDS",
+            "RAY_STATE_API_TIMEOUT_SECONDS",
+            "MAX_RESULT_SIZE_BYTES",
+        ],
+    )
+    def test_validate_numeric_settings_reject_booleans(self, setting: str) -> None:
+        with pytest.raises(ImproperlyConfigured, match=setting):
+            validate_settings({"RAY_ADDRESS": "ray://localhost:10001", setting: True})
+
+    @pytest.mark.parametrize("ray_address", [None, "", "   ", 123, True])
+    def test_validate_ray_address_requires_non_empty_string(self, ray_address) -> None:
+        with pytest.raises(ImproperlyConfigured, match="RAY_ADDRESS"):
+            validate_settings({"RAY_ADDRESS": ray_address})
+
+    def test_validate_retry_backoff_boundaries(self) -> None:
+        validate_settings({"RAY_ADDRESS": "ray://localhost:10001", "RETRY_BACKOFF_SECONDS": 0})
+        validate_settings({"RAY_ADDRESS": "ray://localhost:10001", "RETRY_BACKOFF_SECONDS": 3600})
+        with pytest.raises(ImproperlyConfigured, match="RETRY_BACKOFF_SECONDS"):
+            validate_settings(
+                {"RAY_ADDRESS": "ray://localhost:10001", "RETRY_BACKOFF_SECONDS": 3601}
+            )
+
+    def test_validate_worker_heartbeat_must_be_less_than_lease(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="WORKER_HEARTBEAT_SECONDS"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "WORKER_LEASE_SECONDS": 30,
+                    "WORKER_HEARTBEAT_SECONDS": 30,
+                }
+            )
+
+    def test_validate_task_monitor_heartbeat_must_be_less_than_stuck_timeout(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="TASK_MONITOR_HEARTBEAT_SECONDS"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "STUCK_TASK_TIMEOUT_SECONDS": 30,
+                    "TASK_MONITOR_HEARTBEAT_SECONDS": 30,
+                }
+            )
+
+    @pytest.mark.parametrize("denylist", ["ValueError", [ValueError], {"ValueError"}])
+    def test_validate_retry_denylist_requires_list_of_strings(self, denylist) -> None:
+        with pytest.raises(ImproperlyConfigured, match="RETRY_EXCEPTION_DENYLIST"):
+            validate_settings(
+                {"RAY_ADDRESS": "ray://localhost:10001", "RETRY_EXCEPTION_DENYLIST": denylist}
+            )
+
+    def test_validate_result_storage_scalars(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="RESULT_STORAGE_S3_PREFIX"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "RESULT_STORAGE_S3_PREFIX": 123,
+                }
+            )
+
     def test_validate_runtime_env_profiles(self) -> None:
         validate_settings(
             {
