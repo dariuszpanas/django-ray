@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from django_ray.conf.settings import get_settings
+from django_ray.models import CancellationStatus
 
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
@@ -88,14 +89,47 @@ def mark_task_lost(task_execution: RayTaskExecution) -> None:
     task_execution.save(update_fields=["state", "finished_at", "error_message"])
 
 
-def mark_task_timed_out(task_execution: RayTaskExecution) -> None:
+def mark_task_timed_out(
+    task_execution: RayTaskExecution,
+    *,
+    cancellation_status: str | None = None,
+    cancellation_error: str | None = None,
+    expected_ray_job_id: str | None = None,
+    expected_execution_generation: int | None = None,
+) -> bool:
     """Mark a task execution as FAILED due to timeout.
 
     Args:
         task_execution: The task execution to mark as timed out.
     """
     timeout = task_execution.timeout_seconds or 0
+    error_message = f"Task timed out after {timeout} seconds"
+    if cancellation_status == CancellationStatus.FAILED:
+        error_message += "; remote cancellation failed"
+    elif cancellation_status == CancellationStatus.INDETERMINATE:
+        error_message += "; remote cancellation status is indeterminate"
+
+    finished_at = datetime.now(UTC)
+    filters: dict[str, object] = {"pk": task_execution.pk, "state": "RUNNING"}
+    if expected_ray_job_id is not None:
+        filters["ray_job_id"] = expected_ray_job_id
+    if expected_execution_generation is not None:
+        filters["execution_generation"] = expected_execution_generation
+
+    update_values: dict[str, object] = {
+        "state": "FAILED",
+        "finished_at": finished_at,
+        "error_message": error_message,
+        "cancellation_status": cancellation_status,
+        "cancellation_error": cancellation_error,
+    }
+    updated = type(task_execution).objects.filter(**filters).update(**update_values)
+    if not updated:
+        return False
+
     task_execution.state = "FAILED"
-    task_execution.finished_at = datetime.now(UTC)
-    task_execution.error_message = f"Task timed out after {timeout} seconds"
-    task_execution.save(update_fields=["state", "finished_at", "error_message"])
+    task_execution.finished_at = finished_at
+    task_execution.error_message = error_message
+    task_execution.cancellation_status = cancellation_status
+    task_execution.cancellation_error = cancellation_error
+    return True

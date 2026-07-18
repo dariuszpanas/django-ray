@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
 
 
 @pytest.fixture(autouse=True)
@@ -712,6 +712,104 @@ class TestWorkerOrphanRecovery:
         task.refresh_from_db()
         assert task.state == TaskState.FAILED
         assert "timed out" in (task.error_message or "").lower()
+
+    def test_timeout_requests_remote_ray_job_stop_before_failure(self, monkeypatch):
+        """A timed-out Ray Job is stopped before the timeout is persisted."""
+        from datetime import datetime, timedelta
+
+        task = RayTaskExecution.objects.create(
+            task_id="test-timeout-ray-job-success-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 60}',
+            timeout_seconds=5,
+            started_at=datetime.now(UTC) - timedelta(seconds=10),
+            claimed_by_worker="recovery-worker",
+            ray_job_id="raysubmit_timeout_success_001",
+            ray_address="ray://cluster:10001",
+        )
+        stop_calls: list[str] = []
+
+        class FakeRunner:
+            def cancel(self, handle):
+                stop_calls.append(handle.ray_job_id)
+                return True
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        self._make_command().detect_stuck_tasks()
+
+        task.refresh_from_db()
+        assert stop_calls == ["raysubmit_timeout_success_001"]
+        assert task.state == TaskState.FAILED
+        assert task.cancellation_status == CancellationStatus.REQUESTED
+
+    def test_timeout_records_remote_ray_job_cancellation_failure(self, monkeypatch):
+        """A rejected stop request remains visible on the timed-out task."""
+        from datetime import datetime, timedelta
+
+        task = RayTaskExecution.objects.create(
+            task_id="test-timeout-ray-job-failure-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 60}',
+            timeout_seconds=5,
+            started_at=datetime.now(UTC) - timedelta(seconds=10),
+            claimed_by_worker="recovery-worker",
+            ray_job_id="raysubmit_timeout_failure_001",
+        )
+
+        class FakeRunner:
+            def cancel(self, _handle):
+                return False
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        self._make_command().detect_stuck_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.cancellation_status == CancellationStatus.FAILED
+        assert "cancellation failed" in (task.error_message or "").lower()
+        assert task.cancellation_error == "Cancellation API rejected the stop request"
+
+    def test_timeout_does_not_overwrite_completion_race(self, monkeypatch):
+        """A completion winning during stop is not replaced by timeout failure."""
+        from datetime import datetime, timedelta
+
+        task = RayTaskExecution.objects.create(
+            task_id="test-timeout-ray-job-race-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 60}',
+            timeout_seconds=5,
+            started_at=datetime.now(UTC) - timedelta(seconds=10),
+            claimed_by_worker="recovery-worker",
+            ray_job_id="raysubmit_timeout_race_001",
+        )
+
+        class FakeRunner:
+            def cancel(self, _handle):
+                RayTaskExecution.objects.filter(pk=task.pk).update(
+                    state=TaskState.SUCCEEDED,
+                    finished_at=datetime.now(UTC),
+                    completion_data='{"success": true, "result": 42}',
+                )
+                return True
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        self._make_command().detect_stuck_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.cancellation_status is None
 
 
 @pytest.mark.django_db

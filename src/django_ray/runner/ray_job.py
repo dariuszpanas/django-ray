@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from django_ray.conf.settings import get_settings
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
+from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
 from django_ray.runtime.runtime_env import runtime_env_for_execution
 from django_ray.runtime.serialization import serialize_args
 
@@ -111,13 +112,20 @@ class RayJobRunner(BaseRunner):
 
     def cancel(self, handle: SubmissionHandle) -> bool:
         """Cancel a Ray job."""
+        return self.cancel_with_status(handle).status == CancellationOutcomeStatus.REQUESTED
+
+    def cancel_with_status(self, handle: SubmissionHandle) -> CancellationOutcome:
+        """Request a Ray Job stop while preserving an indeterminate API result."""
         client = self._get_client()
 
         try:
             client.stop_job(handle.ray_job_id)
-            return True
-        except Exception:
-            return False
+            return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+        except Exception as exc:
+            return CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                f"Ray Job stop request raised {type(exc).__name__}: {exc}",
+            )
 
     def get_logs(self, handle: SubmissionHandle) -> str | None:
         """Get logs from a Ray job."""

@@ -15,9 +15,14 @@ from django.db import transaction
 
 from django_ray.conf.settings import get_settings
 from django_ray.logging import get_worker_logger
-from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.runner.base import SubmissionHandle
-from django_ray.runner.cancellation import finalize_cancellation
+from django_ray.runner.cancellation import (
+    CancellationOutcome,
+    CancellationOutcomeStatus,
+    finalize_cancellation,
+    request_remote_cancellation,
+)
 from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
 from django_ray.runner.ray_core import RayCoreRunner
 from django_ray.runner.reconciliation import (
@@ -1417,6 +1422,24 @@ class Command(BaseCommand):
             )
         )
 
+    def _request_timeout_cancellation(self, task: RayTaskExecution) -> CancellationOutcome:
+        """Stop a timed-out remote Ray Job before making its row terminal."""
+        ray_job_id = str(task.ray_job_id or "")
+        if not ray_job_id or not ray_job_id.startswith("raysubmit_"):
+            return CancellationOutcome(CancellationOutcomeStatus.NOT_APPLICABLE)
+
+        try:
+            from django_ray.runner.ray_job import RayJobRunner
+
+            runner = RayJobRunner()
+            handle = self._build_submission_handle(task, ray_job_id)
+            return request_remote_cancellation(runner, handle)
+        except Exception as exc:
+            return CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                f"Could not create or call the Ray Job cancellation client: {exc}",
+            )
+
     def reconcile_tasks(self) -> None:
         """Reconcile task states with Ray."""
         if self.sync_mode:
@@ -1528,13 +1551,30 @@ class Command(BaseCommand):
                             submitted_at=task.started_at or datetime.now(UTC),
                         )
                     )
-                if task.pk in self.active_tasks:
-                    del self.active_tasks[task.pk]
 
-                mark_task_timed_out(task)
-                timeout_count += 1
-                if not claimed_by_this_worker:
-                    orphan_recovered_count += 1
+                # A Ray Job is not represented in ray_core_runner. Request its
+                # remote stop first, then conditionally finalize the timeout so
+                # a concurrent completion cannot be overwritten.
+                cancellation = self._request_timeout_cancellation(task)
+                marked_timed_out = mark_task_timed_out(
+                    task,
+                    cancellation_status=CancellationStatus(cancellation.status.value),
+                    cancellation_error=cancellation.message,
+                    expected_ray_job_id=str(task.ray_job_id) if task.ray_job_id else None,
+                    expected_execution_generation=task.execution_generation,
+                )
+                if marked_timed_out:
+                    if task.pk in self.active_tasks:
+                        del self.active_tasks[task.pk]
+                    timeout_count += 1
+                    if not claimed_by_this_worker:
+                        orphan_recovered_count += 1
+                else:
+                    self.stdout.write(
+                        self.style.NOTICE(
+                            f"\nTask {task.pk} completed while timeout cancellation was in flight"
+                        )
+                    )
                 continue
 
             tracked_by_this_worker = claimed_by_this_worker and (

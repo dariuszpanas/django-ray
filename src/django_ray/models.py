@@ -18,6 +18,15 @@ class TaskState(models.TextChoices):
     LOST = "LOST", "Lost"
 
 
+class CancellationStatus(models.TextChoices):
+    """Outcome of a remote cancellation request."""
+
+    REQUESTED = "REQUESTED", "Stop requested"
+    FAILED = "FAILED", "Stop request failed"
+    INDETERMINATE = "INDETERMINATE", "Stop request indeterminate"
+    NOT_APPLICABLE = "NOT_APPLICABLE", "No remote job to stop"
+
+
 class RayTaskExecution(models.Model):
     """Tracks the execution of a Django Task on Ray.
 
@@ -156,6 +165,20 @@ class RayTaskExecution(models.Model):
         null=True,
         blank=True,
         help_text="JSON completion envelope durably written by the Ray Job driver",
+    )
+
+    # Cancellation tracking
+    cancellation_status = models.CharField(
+        max_length=20,
+        choices=CancellationStatus.choices,
+        null=True,
+        blank=True,
+        help_text="Outcome of the most recent remote cancellation request",
+    )
+    cancellation_error = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Details when remote cancellation failed or was indeterminate",
     )
 
     # Error tracking

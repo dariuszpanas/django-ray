@@ -58,6 +58,8 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "result_reference",
         "progress_data",
         "completion_data",
+        "cancellation_status",
+        "cancellation_error",
         "error_message",
         "error_traceback",
     ]
@@ -90,6 +92,8 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
                     "result_reference",
                     "progress_data",
                     "completion_data",
+                    "cancellation_status",
+                    "cancellation_error",
                     "error_message",
                     "error_traceback",
                 ),
