@@ -46,7 +46,7 @@ DJANGO_RAY = {
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `MAX_TASK_ATTEMPTS` | `int` | `3` | Maximum number of attempts before marking as failed |
-| `RETRY_BACKOFF_SECONDS` | `int` | `60` | Base delay between retries (exponential backoff) |
+| `RETRY_BACKOFF_SECONDS` | `int` | `60` | Base delay between retries (exponential backoff), from `0` to `3600` seconds |
 | `RETRY_EXCEPTION_DENYLIST` | `list[str]` | `[]` | Exception types that should not be retried |
 
 ### Reliability
@@ -54,11 +54,13 @@ DJANGO_RAY = {
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `STUCK_TASK_TIMEOUT_SECONDS` | `int` | `300` | Time before a running task with no worker or monitor heartbeat is considered stuck |
-| `WORKER_LEASE_SECONDS` | `int` | `60` | Worker lease duration for distributed coordination |
-| `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval for worker lease health checks |
+| `WORKER_LEASE_SECONDS` | `int` | `60` | Worker lease duration (`1`-`86400` seconds) for distributed coordination |
+| `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval (`1`-`86400` seconds), which must be below the lease duration |
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |
 | `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between workflow progress snapshot writes |
 
+`django-ray` validates numeric settings at startup, rejects booleans passed as integers, and enforces
+that worker/task-monitor heartbeats are shorter than their lease/stuck-task windows.
 `django-ray` uses worker lease heartbeats to track worker liveness and task monitor
 heartbeats to show that a worker is still actively reconciling in-flight work. For
 persisted Ray Job handles from inactive workers, another worker will first try to
