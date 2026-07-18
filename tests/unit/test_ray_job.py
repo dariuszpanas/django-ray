@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from django_ray.runner.base import JobStatus, SubmissionHandle
+from django_ray.runner.cancellation import CancellationOutcomeStatus
 from django_ray.runner.ray_job import RayJobRunner
 
 
@@ -223,6 +224,19 @@ class TestRayJobRunnerStatusAndControl:
         ok = runner.cancel(self._make_handle("raysubmit_cancel_002"))
 
         assert ok is False
+
+    def test_cancel_with_status_preserves_indeterminate_api_failure(self, monkeypatch) -> None:
+        class Client:
+            def stop_job(self, _job_id: str) -> None:
+                raise RuntimeError("cannot stop")
+
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda: Client())
+
+        outcome = runner.cancel_with_status(self._make_handle("raysubmit_cancel_003"))
+
+        assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+        assert "cannot stop" in (outcome.message or "")
 
     def test_get_logs_returns_none_on_exception(self, monkeypatch) -> None:
         class Client:

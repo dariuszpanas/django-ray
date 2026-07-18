@@ -2,12 +2,53 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
     from django_ray.runner.base import BaseRunner
+
+
+class CancellationOutcomeStatus(StrEnum):
+    """Result of asking the remote execution backend to stop a task."""
+
+    REQUESTED = "REQUESTED"
+    FAILED = "FAILED"
+    INDETERMINATE = "INDETERMINATE"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+@dataclass(frozen=True)
+class CancellationOutcome:
+    """Observable result of a remote cancellation request."""
+
+    status: CancellationOutcomeStatus
+    message: str | None = None
+
+
+def request_remote_cancellation(runner: BaseRunner, handle: object) -> CancellationOutcome:
+    """Request a remote stop and preserve whether the result is known."""
+    cancel_with_status = getattr(runner, "cancel_with_status", None)
+    if callable(cancel_with_status):
+        return cancel_with_status(handle)
+
+    try:
+        accepted = runner.cancel(handle)  # type: ignore[arg-type]
+    except Exception as exc:  # pragma: no cover - exercised by backend implementations
+        return CancellationOutcome(
+            CancellationOutcomeStatus.INDETERMINATE,
+            f"Cancellation request raised {type(exc).__name__}: {exc}",
+        )
+
+    if accepted:
+        return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+    return CancellationOutcome(
+        CancellationOutcomeStatus.FAILED,
+        "Cancellation API rejected the stop request",
+    )
 
 
 def request_cancellation(
