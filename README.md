@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/images/django-ray.svg" alt="django-ray logo" width="96" height="96">
+  <img src="https://raw.githubusercontent.com/dariuszpanas/django-ray/main/docs/assets/images/django-ray.svg" alt="django-ray logo" width="96" height="96">
 </p>
 
 <h1 align="center">django-ray</h1>
