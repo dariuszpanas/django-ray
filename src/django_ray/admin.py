@@ -1,5 +1,6 @@
 """Django admin configuration for django-ray."""
 
+import json
 from typing import Any
 
 from django.contrib import admin
@@ -9,6 +10,7 @@ from django.utils import timezone
 from django.utils.safestring import mark_safe
 
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.redaction import redact_text, safe_json_dumps
 
 # Ray Dashboard URL fallback for local Ray.
 RAY_DASHBOARD_URL = "http://localhost:8265"
@@ -52,16 +54,16 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "started_at",
         "finished_at",
         "last_heartbeat_at",
-        "args_json",
-        "kwargs_json",
-        "result_data",
+        "args_json_display",
+        "kwargs_json_display",
+        "result_data_display",
         "result_reference",
-        "progress_data",
-        "completion_data",
+        "progress_data_display",
+        "completion_data_display",
         "cancellation_status",
         "cancellation_error",
-        "error_message",
-        "error_traceback",
+        "error_message_display",
+        "error_traceback_display",
     ]
     fieldsets = (
         (
@@ -80,7 +82,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         (
             "Arguments",
             {
-                "fields": ("args_json", "kwargs_json"),
+                "fields": ("args_json_display", "kwargs_json_display"),
                 "classes": ("collapse",),
             },
         ),
@@ -88,14 +90,14 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             "Result",
             {
                 "fields": (
-                    "result_data",
+                    "result_data_display",
                     "result_reference",
-                    "progress_data",
-                    "completion_data",
+                    "progress_data_display",
+                    "completion_data_display",
                     "cancellation_status",
                     "cancellation_error",
-                    "error_message",
-                    "error_traceback",
+                    "error_message_display",
+                    "error_traceback_display",
                 ),
             },
         ),
@@ -122,6 +124,44 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
     )
     ordering = ["-created_at"]
     actions = ["retry_tasks", "cancel_tasks"]
+
+    @staticmethod
+    def _redacted_json(value: str | None) -> str:
+        """Render stored JSON with the same policy used by operational logs."""
+        if not value:
+            return "-"
+        try:
+            return safe_json_dumps(json.loads(value))
+        except (TypeError, json.JSONDecodeError):
+            return redact_text(value)
+
+    @admin.display(description="Arguments")
+    def args_json_display(self, obj: RayTaskExecution) -> str:
+        return self._redacted_json(obj.args_json)
+
+    @admin.display(description="Keyword arguments")
+    def kwargs_json_display(self, obj: RayTaskExecution) -> str:
+        return self._redacted_json(obj.kwargs_json)
+
+    @admin.display(description="Result")
+    def result_data_display(self, obj: RayTaskExecution) -> str:
+        return self._redacted_json(obj.result_data)
+
+    @admin.display(description="Progress")
+    def progress_data_display(self, obj: RayTaskExecution) -> str:
+        return self._redacted_json(obj.progress_data)
+
+    @admin.display(description="Completion envelope")
+    def completion_data_display(self, obj: RayTaskExecution) -> str:
+        return self._redacted_json(obj.completion_data)
+
+    @admin.display(description="Error")
+    def error_message_display(self, obj: RayTaskExecution) -> str:
+        return redact_text(obj.error_message) if obj.error_message else "-"
+
+    @admin.display(description="Traceback")
+    def error_traceback_display(self, obj: RayTaskExecution) -> str:
+        return redact_text(obj.error_traceback) if obj.error_traceback else "-"
 
     @admin.display(description="Ray Job ID")
     def ray_job_id_display(self, obj: RayTaskExecution) -> str:

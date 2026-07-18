@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from django.core.exceptions import ImproperlyConfigured
 
 from django_ray.conf.settings import get_settings
+from django_ray.redaction import redact_text, redact_value
 
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
@@ -31,7 +32,7 @@ def get_workflow_progress(execution: RayTaskExecution) -> dict[str, Any] | None:
         raise WorkflowObservabilityError(
             f"Task {execution.task_id} workflow progress must be a JSON object"
         )
-    return progress
+    return redact_value(progress)
 
 
 def get_workflow_graph(execution: RayTaskExecution) -> dict[str, Any] | None:
@@ -99,7 +100,7 @@ def get_ray_task_state(
         return []
     attempts = result if isinstance(result, list) else [result]
     return [
-        attempt.asdict() if hasattr(attempt, "asdict") else _attempt_to_dict(attempt)
+        redact_value(attempt.asdict() if hasattr(attempt, "asdict") else _attempt_to_dict(attempt))
         for attempt in attempts
     ]
 
@@ -125,14 +126,16 @@ def get_ray_task_logs(
 
         state_address = _state_api_address(address)
         return {
-            suffix: "".join(
-                get_log(
-                    address=state_address,
-                    task_id=ray_task_id,
-                    tail=tail,
-                    suffix=suffix,
-                    timeout=_state_api_timeout(),
-                    filter_ansi_code=True,
+            suffix: redact_text(
+                "".join(
+                    get_log(
+                        address=state_address,
+                        task_id=ray_task_id,
+                        tail=tail,
+                        suffix=suffix,
+                        timeout=_state_api_timeout(),
+                        filter_ansi_code=True,
+                    )
                 )
             )
             for suffix in ("out", "err")

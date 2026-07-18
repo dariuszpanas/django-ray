@@ -97,3 +97,37 @@ class TestStructuredLogAdapter:
 
         assert message == "Fallback message | {'key': 'value'}"
         assert kwargs["extra"] == {"key": "value"}
+
+    def test_redacts_nested_extra_and_format_arguments(self, caplog, settings):
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"customer[_-]?email", r"api[_-]?key"]}
+        logger = get_logger("test.redaction")
+
+        with caplog.at_level(logging.INFO):
+            logger.info(
+                "Task metadata",
+                extra={
+                    "payload": {
+                        "customer_email": "ada@example.test",
+                        "safe": "visible",
+                    }
+                },
+            )
+            logger.info("credential=%s", "api-key=secret")
+
+        assert "ada@example.test" not in caplog.text
+        assert "api-key=secret" not in caplog.text
+        assert "[REDACTED]" in caplog.text
+
+    def test_exception_logs_keep_redacted_description_without_traceback(self, caplog, settings):
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"access-token"]}
+        logger = get_logger("test.redacted-exception")
+
+        with caplog.at_level(logging.ERROR):
+            try:
+                raise RuntimeError("access-token=secret-value")
+            except RuntimeError:
+                logger.exception("Task failed")
+
+        assert "secret-value" not in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert "Traceback" not in caplog.text

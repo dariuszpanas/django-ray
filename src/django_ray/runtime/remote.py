@@ -7,6 +7,8 @@ import sys
 import time
 from typing import Any
 
+from django_ray.redaction import redact_text, result_metadata
+
 
 def execute_django_task_remote(
     callable_path: str,
@@ -30,10 +32,11 @@ def execute_django_task_remote(
 
     parsed = json.loads(result)
     if parsed.get("success"):
-        print(f"[Task {task_id}] SUCCESS: {parsed.get('result')}", flush=True)
+        metadata = result_metadata(parsed.get("result"))
+        print(f"[Task {task_id}] SUCCESS: {metadata}", flush=True)
     else:
         print(
-            f"[Task {task_id}] FAILED: {parsed.get('error')}",
+            f"[Task {task_id}] FAILED: {redact_text(parsed.get('error'))}",
             file=sys.stderr,
             flush=True,
         )
