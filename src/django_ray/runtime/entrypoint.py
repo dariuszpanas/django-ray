@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import os
 import traceback
 from contextlib import nullcontext
@@ -17,6 +18,10 @@ from typing import Any
 import django
 from django.apps import apps
 
+from django_ray.conf.settings import get_settings
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class TaskResult:
@@ -24,6 +29,7 @@ class TaskResult:
 
     success: bool
     result: Any | None = None
+    result_reference: str | None = None
     error: str | None = None
     traceback: str | None = None
     exception_type: str | None = None
@@ -52,11 +58,89 @@ def bootstrap_django() -> None:
         django.setup()
 
 
+def _persist_task_completion(
+    task_execution_pk: int | None,
+    attempt_number: int | None,
+    execution_generation: int | None,
+    completion_data: str,
+) -> None:
+    """Persist the structured completion envelope for Ray Job reconciliation.
+
+    The update is conditional on the task still being RUNNING (and, when
+    available, on the attempt number) so a stale Ray Job cannot overwrite a
+    newer retry. Failure to write the channel is intentionally logged only;
+    the worker will keep the task non-terminal when the envelope is absent.
+    """
+    if task_execution_pk is None or attempt_number is None or execution_generation is None:
+        return
+
+    try:
+        from django_ray.models import RayTaskExecution, TaskState
+
+        filters: dict[str, Any] = {
+            "pk": task_execution_pk,
+            "state": TaskState.RUNNING,
+        }
+        if attempt_number is not None:
+            filters["attempt_number"] = attempt_number
+        filters["execution_generation"] = execution_generation
+        updated = RayTaskExecution.objects.filter(**filters).update(
+            completion_data=completion_data,
+        )
+        if not updated:
+            logger.warning(
+                "Could not persist completion envelope for task %s (stale or non-running attempt)",
+                task_execution_pk,
+            )
+    except Exception:
+        logger.exception("Failed to persist completion envelope for task %s", task_execution_pk)
+
+
+def _prepare_completion_result(
+    result: Any,
+    *,
+    task_execution_pk: int | None,
+    attempt_number: int | None,
+    execution_generation: int | None,
+) -> tuple[Any | None, str | None]:
+    """Keep the durable completion envelope bounded for oversized results."""
+    if task_execution_pk is None or attempt_number is None or execution_generation is None:
+        return result, None
+
+    serialized_result = json.dumps(result)
+    settings = get_settings()
+    max_result_size = int(settings.get("MAX_RESULT_SIZE_BYTES", 1024 * 1024))
+    if len(serialized_result.encode("utf-8")) <= max_result_size:
+        return result, None
+
+    from django_ray.result_storage import (
+        DigestResultStorage,
+        ResultStorageError,
+        get_result_storage_backend,
+    )
+
+    try:
+        result_reference = get_result_storage_backend(settings).store(
+            serialized_result=serialized_result
+        )
+    except ResultStorageError as error:
+        logger.warning(
+            "Result storage backend failed for task %s (%s); using digest-only reference",
+            task_execution_pk,
+            error,
+        )
+        result_reference = DigestResultStorage().store(serialized_result=serialized_result)
+
+    return None, result_reference
+
+
 def execute_task(
     callable_path: str,
     serialized_args: str,
     serialized_kwargs: str,
     task_execution_pk: int | None = None,
+    attempt_number: int | None = None,
+    execution_generation: int | None = None,
     runtime_env_profile: str | None = None,
     runtime_env_hash: str = "",
 ) -> str:
@@ -66,6 +150,10 @@ def execute_task(
         callable_path: Dotted path to the task callable.
         serialized_args: JSON-serialized positional arguments.
         serialized_kwargs: JSON-serialized keyword arguments.
+        task_execution_pk: Durable task execution primary key, when running via
+            the Ray Job API.
+        attempt_number: Current retry attempt, used to prevent stale writes.
+        execution_generation: Monotonic execution token, used to isolate manual retries.
 
     Returns:
         JSON-serialized TaskResult.
@@ -95,10 +183,17 @@ def execute_task(
         with execution_context:
             result = callable_obj(*args, **kwargs)
 
-        return json.dumps(
+        result_value, result_reference = _prepare_completion_result(
+            result,
+            task_execution_pk=task_execution_pk,
+            attempt_number=attempt_number,
+            execution_generation=execution_generation,
+        )
+        result_json = json.dumps(
             {
                 "success": True,
-                "result": result,
+                "result": result_value,
+                "result_reference": result_reference,
                 "error": None,
                 "traceback": None,
                 "exception_type": None,
@@ -106,7 +201,15 @@ def execute_task(
         )
 
     except Exception as e:
-        return _serialize_error(e)
+        result_json = _serialize_error(e)
+
+    _persist_task_completion(
+        task_execution_pk,
+        attempt_number,
+        execution_generation,
+        result_json,
+    )
+    return result_json
 
 
 def execute_task_from_payload(payload_b64: str) -> str:
@@ -117,6 +220,9 @@ def execute_task_from_payload(payload_b64: str) -> str:
             - callable_path
             - serialized_args
             - serialized_kwargs
+            - task_execution_pk (optional)
+            - attempt_number (optional)
+            - execution_generation (optional)
 
     Returns:
         JSON-serialized TaskResult.
@@ -129,6 +235,8 @@ def execute_task_from_payload(payload_b64: str) -> str:
             serialized_args=payload["serialized_args"],
             serialized_kwargs=payload["serialized_kwargs"],
             task_execution_pk=payload.get("task_execution_pk"),
+            attempt_number=payload.get("attempt_number"),
+            execution_generation=payload.get("execution_generation"),
             runtime_env_profile=payload.get("runtime_env_profile"),
             runtime_env_hash=payload.get("runtime_env_hash", ""),
         )

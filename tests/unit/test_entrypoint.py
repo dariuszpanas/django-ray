@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import django_ray.runtime.entrypoint as entrypoint
+from django_ray.models import RayTaskExecution, TaskState
 
 
 class TestEntrypointPayload:
@@ -45,6 +46,8 @@ class TestEntrypointPayload:
         assert captured == {
             **payload,
             "task_execution_pk": None,
+            "attempt_number": None,
+            "execution_generation": None,
             "runtime_env_profile": None,
             "runtime_env_hash": "",
         }
@@ -125,3 +128,139 @@ class TestEntrypointPayload:
             "runtime_env_hash": "abc123",
             "ray_job_driver": True,
         }
+
+    @pytest.mark.django_db
+    def test_execute_task_persists_completion_envelope_for_current_attempt(
+        self, monkeypatch
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="entrypoint-completion-001",
+            callable_path="testproject.tasks.echo_task",
+            state=TaskState.RUNNING,
+            attempt_number=3,
+            execution_generation=7,
+        )
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: lambda: {"value": 7},
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.serialization.deserialize_args",
+            lambda value: {} if value == "{}" else [],
+        )
+
+        result = json.loads(
+            entrypoint.execute_task(
+                task.callable_path,
+                "[]",
+                "{}",
+                task_execution_pk=task.pk,
+                attempt_number=3,
+                execution_generation=7,
+            )
+        )
+
+        task.refresh_from_db()
+        assert result["success"] is True
+        assert json.loads(task.completion_data or "{}") == result
+
+    @pytest.mark.django_db
+    def test_execute_task_does_not_overwrite_newer_generation_completion(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="entrypoint-completion-stale-001",
+            callable_path="testproject.tasks.echo_task",
+            state=TaskState.RUNNING,
+            attempt_number=2,
+            execution_generation=2,
+            completion_data='{"success": true, "result": "newer"}',
+        )
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: lambda: "stale",
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.serialization.deserialize_args",
+            lambda value: {} if value == "{}" else [],
+        )
+
+        entrypoint.execute_task(
+            task.callable_path,
+            "[]",
+            "{}",
+            task_execution_pk=task.pk,
+            attempt_number=2,
+            execution_generation=1,
+        )
+
+        task.refresh_from_db()
+        assert json.loads(task.completion_data or "{}")["result"] == "newer"
+
+    @pytest.mark.django_db
+    def test_execute_task_does_not_persist_without_attempt_number(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="entrypoint-completion-missing-attempt-001",
+            callable_path="testproject.tasks.echo_task",
+            state=TaskState.RUNNING,
+            attempt_number=1,
+            execution_generation=1,
+        )
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: lambda: "legacy",
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.serialization.deserialize_args",
+            lambda value: {} if value == "{}" else [],
+        )
+
+        entrypoint.execute_task(
+            task.callable_path,
+            "[]",
+            "{}",
+            task_execution_pk=task.pk,
+        )
+
+        task.refresh_from_db()
+        assert task.completion_data is None
+
+    @pytest.mark.django_db
+    def test_execute_task_uses_result_reference_for_oversized_completion(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="entrypoint-completion-oversized-001",
+            callable_path="testproject.tasks.echo_task",
+            state=TaskState.RUNNING,
+            attempt_number=1,
+            execution_generation=1,
+        )
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: lambda: {"message": "x" * 256},
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.serialization.deserialize_args",
+            lambda value: {} if value == "{}" else [],
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.get_settings",
+            lambda: {"MAX_RESULT_SIZE_BYTES": 64, "RESULT_STORAGE_BACKEND": "digest"},
+        )
+
+        result = json.loads(
+            entrypoint.execute_task(
+                task.callable_path,
+                "[]",
+                "{}",
+                task_execution_pk=task.pk,
+                attempt_number=1,
+                execution_generation=1,
+            )
+        )
+
+        task.refresh_from_db()
+        assert result["result"] is None
+        assert result["result_reference"].startswith("oversize://sha256/")
+        assert len(task.completion_data or "") < 256

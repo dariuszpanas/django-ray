@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import re
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
@@ -13,6 +14,45 @@ from django_ray.conf.settings import get_settings
 
 class ResultStorageError(RuntimeError):
     """Raised when result storage operations fail."""
+
+
+def is_valid_result_reference(reference: str) -> bool:
+    """Validate the shape of a result reference without loading its backend."""
+    if not isinstance(reference, str) or not reference or len(reference) > 500:
+        return False
+
+    try:
+        parsed = urlparse(reference)
+    except ValueError:
+        return False
+    if parsed.scheme in {"oversize", "resultfs"}:
+        if parsed.netloc != "sha256" or not re.fullmatch(r"/[0-9a-f]{64}", parsed.path):
+            return False
+        if parsed.scheme == "resultfs":
+            relative_values = parse_qs(parsed.query).get("rel")
+            if not relative_values:
+                return False
+            relative_path = Path(relative_values[0])
+            if (
+                not relative_path.parts
+                or relative_path.is_absolute()
+                or ".." in relative_path.parts
+            ):
+                return False
+    elif parsed.scheme in {"s3", "gs"}:
+        object_key = parsed.path.lstrip("/")
+        if not parsed.netloc or not object_key or ".." in Path(object_key).parts:
+            return False
+    else:
+        return False
+
+    byte_values = parse_qs(parsed.query).get("bytes")
+    if not byte_values:
+        return False
+    try:
+        return int(byte_values[0]) >= 0
+    except ValueError:
+        return False
 
 
 class ResultStorageBackend(Protocol):

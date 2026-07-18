@@ -38,6 +38,8 @@ class TestRayJobRunnerSubmit:
             runtime_env_profile=None,
             runtime_env_json="{}",
             runtime_env_hash="",
+            attempt_number=2,
+            execution_generation=11,
         )
 
         handle = runner.submit(
@@ -66,10 +68,14 @@ class TestRayJobRunnerSubmit:
         assert json.loads(payload["serialized_args"]) == ["it's broken"]
         assert json.loads(payload["serialized_kwargs"]) == {"publisher": "O'Reilly"}
         assert payload["task_execution_pk"] == 123
+        assert payload["attempt_number"] == 2
+        assert payload["execution_generation"] == 11
         assert payload["runtime_env_profile"] is None
         assert len(payload["runtime_env_hash"]) == 64
         assert submission["metadata"] == {
             "django_ray_task_id": "123",
+            "django_ray_attempt_number": "2",
+            "django_ray_execution_generation": "11",
             "callable_path": "testproject.tasks.echo_task",
             "runtime_env_profile": "",
             "runtime_env_hash": (
@@ -93,6 +99,8 @@ class TestRayJobRunnerSubmit:
                 runtime_env_profile="custom",
                 runtime_env_json='{"env_vars":{"MY_ENV":"1"}}',
                 runtime_env_hash="",
+                attempt_number=1,
+                execution_generation=4,
             ),
             callable_path="testproject.tasks.add_numbers",
             args=(1, 2),
