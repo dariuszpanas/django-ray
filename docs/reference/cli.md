@@ -34,15 +34,6 @@ python manage.py django_ray_worker [options]
 |--------|-------------|
 | `--concurrency=N` | Maximum concurrent tasks (default: `DJANGO_RAY["DEFAULT_CONCURRENCY"]`, which defaults to `10`) |
 
-#### Verbosity
-
-| Option | Description |
-|--------|-------------|
-| `-v 0` | Minimal output |
-| `-v 1` | Normal output (default) |
-| `-v 2` | Verbose output |
-| `-v 3` | Debug output |
-
 ### Examples
 
 ```bash
@@ -60,19 +51,20 @@ python manage.py django_ray_worker --queue=default --cluster=ray://ray-head:1000
 
 # Sync mode for testing
 python manage.py django_ray_worker --queue=default --sync
-
-# Verbose output
-python manage.py django_ray_worker --queue=default --local -v 2
 ```
 
 ### Signals
 
-The worker explicitly handles these signals for graceful shutdown:
+The worker explicitly handles these signals. Shutdown is a durable handoff:
+new tasks are not claimed after the signal; synchronous work already running
+is allowed to finish; Ray Job submissions are released for another worker to
+reconcile; and in-flight Ray Core tasks receive a cancellation request and are
+persisted as `CANCELLING` before the Ray connection closes.
 
 | Signal | Behavior |
 |--------|----------|
-| `SIGTERM` | Graceful shutdown - finish current tasks |
-| `SIGINT` | Graceful shutdown (Ctrl+C) |
+| `SIGTERM` | Graceful handoff; exit with `143` |
+| `SIGINT` | Graceful handoff (Ctrl+C); exit with `130` |
 
 ### Environment Variables
 
