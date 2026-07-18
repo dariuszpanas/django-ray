@@ -25,11 +25,17 @@ class RayJobRunner(BaseRunner):
         settings = get_settings()
         self.ray_address = settings["RAY_ADDRESS"]
 
-    def _get_client(self) -> Any:
-        """Get Ray JobSubmissionClient."""
+    def _get_client(self, ray_address: str | None = None) -> Any:
+        """Get a Ray JobSubmissionClient for the requested cluster.
+
+        ``RayTaskExecution.ray_address`` is persisted when a task is queued so
+        backend aliases can target different Ray clusters.  Keep the process
+        setting as a fallback for callers that do not have a persisted address
+        (for example, direct runner usage and older records).
+        """
         from ray.job_submission import JobSubmissionClient
 
-        return JobSubmissionClient(self.ray_address)
+        return JobSubmissionClient(ray_address or self.ray_address)
 
     def submit(
         self,
@@ -39,7 +45,8 @@ class RayJobRunner(BaseRunner):
         kwargs: dict[str, Any],
     ) -> SubmissionHandle:
         """Submit a task via Ray Job Submission API."""
-        client = self._get_client()
+        ray_address = getattr(task_execution, "ray_address", None) or self.ray_address
+        client = self._get_client(ray_address)
 
         serialized_args = serialize_args(list(args))
         serialized_kwargs = serialize_args(kwargs)
@@ -76,13 +83,13 @@ class RayJobRunner(BaseRunner):
 
         return SubmissionHandle(
             ray_job_id=job_id,
-            ray_address=self.ray_address,
+            ray_address=ray_address,
             submitted_at=datetime.now(UTC),
         )
 
     def get_status(self, handle: SubmissionHandle) -> JobInfo:
         """Get status of a Ray job."""
-        client = self._get_client()
+        client = self._get_client(handle.ray_address)
 
         try:
             status = client.get_job_status(handle.ray_job_id)
@@ -116,7 +123,7 @@ class RayJobRunner(BaseRunner):
 
     def cancel_with_status(self, handle: SubmissionHandle) -> CancellationOutcome:
         """Request a Ray Job stop while preserving an indeterminate API result."""
-        client = self._get_client()
+        client = self._get_client(handle.ray_address)
 
         try:
             client.stop_job(handle.ray_job_id)
@@ -129,7 +136,7 @@ class RayJobRunner(BaseRunner):
 
     def get_logs(self, handle: SubmissionHandle) -> str | None:
         """Get logs from a Ray job."""
-        client = self._get_client()
+        client = self._get_client(handle.ray_address)
 
         try:
             return client.get_job_logs(handle.ray_job_id)
