@@ -37,6 +37,12 @@ def test_normalization_is_canonical_and_content_addressed() -> None:
     assert len(first.digest) == 64
 
 
+def test_runtime_env_merge_overrides_scalar_values() -> None:
+    from django_ray.runtime.runtime_env import _merge_runtime_envs
+
+    assert _merge_runtime_envs({"image_uri": "old"}, {"image_uri": "new"}) == {"image_uri": "new"}
+
+
 def test_normalization_accepts_none() -> None:
     assert normalize_runtime_env(None).spec == {}
 

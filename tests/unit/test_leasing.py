@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from django_ray.models import TaskWorkerLease
+from django_ray.models import RayTaskExecution, TaskWorkerLease
 from django_ray.runner.leasing import (
     cleanup_expired_leases,
     generate_worker_id,
@@ -17,6 +17,23 @@ from django_ray.runner.leasing import (
     is_lease_expired,
     release_lease,
 )
+
+
+def test_model_string_representations() -> None:
+    execution = RayTaskExecution(callable_path="tests.tasks.run", state="RUNNING")
+    lease = TaskWorkerLease(worker_id="worker-123456789", hostname="host", is_active=False)
+
+    assert str(execution) == "tests.tasks.run (RUNNING)"
+    assert str(lease) == "Worker worker-1... on host (inactive)"
+
+
+def test_release_lease_returns_false_when_database_update_fails(monkeypatch) -> None:
+    def fail_filter(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(TaskWorkerLease.objects, "filter", fail_filter)
+
+    assert release_lease("worker-failure") is False
 
 
 class TestWorkerIdGeneration:

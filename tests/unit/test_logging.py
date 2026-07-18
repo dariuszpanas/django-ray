@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+import django_ray.logging as logging_module
 from django_ray.logging import (
     get_backend_logger,
     get_logger,
@@ -82,3 +83,17 @@ class TestStructuredLogAdapter:
         assert "With None" in caplog.text
         # none_key should not appear
         assert "none_key" not in caplog.text
+
+    def test_json_serialization_failure_uses_fallback(self, monkeypatch):
+        """Unserializable structured context should still produce a log message."""
+        logger = get_logger("test.serialization")
+
+        def fail_json(*args, **kwargs):
+            raise TypeError("cannot serialize")
+
+        monkeypatch.setattr(logging_module.json, "dumps", fail_json)
+
+        message, kwargs = logger.process("Fallback message", {"extra": {"key": "value"}})
+
+        assert message == "Fallback message | {'key': 'value'}"
+        assert kwargs["extra"] == {"key": "value"}

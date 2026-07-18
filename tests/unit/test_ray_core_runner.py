@@ -161,6 +161,29 @@ class TestRayCoreRunnerRuntime:
         assert pending.ray_job_id == "02000000"
         assert pending.ray_task_id == fake.default_hex[:48]
 
+    def test_submit_registers_remote_module_for_ray_cloudpickle(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        registered: list[object] = []
+        fake.cloudpickle = SimpleNamespace(register_pickle_by_value=registered.append)
+        import django_ray.runtime.remote as remote_module
+
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda callable_path, args_json, kwargs_json: json.dumps(
+                {"success": True, "result": callable_path}
+            ),
+        )
+
+        runner = RayCoreRunner()
+        runner.submit(
+            task_execution=SimpleNamespace(pk=23),
+            callable_path="testproject.tasks.echo_task",
+            args=("hello",),
+            kwargs={},
+        )
+
+        assert registered == [remote_module]
+
     def test_submit_applies_persisted_runtime_env(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         monkeypatch.setattr(

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
+from types import SimpleNamespace
+
+import pytest
 
 import django_ray.runtime.entrypoint as entrypoint
 
@@ -64,3 +67,61 @@ class TestEntrypointPayload:
 
         assert exit_code == 0
         assert output == '{"ok":1}'
+
+    def test_bootstrap_requires_settings_module(self, monkeypatch) -> None:
+        monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+
+        with pytest.raises(RuntimeError, match="DJANGO_SETTINGS_MODULE"):
+            entrypoint.bootstrap_django()
+
+    def test_bootstrap_initializes_django_when_apps_are_not_ready(self, monkeypatch) -> None:
+        monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings")
+        monkeypatch.setattr(entrypoint, "apps", SimpleNamespace(ready=False))
+        setup_calls: list[bool] = []
+        monkeypatch.setattr(entrypoint.django, "setup", lambda: setup_calls.append(True))
+
+        entrypoint.bootstrap_django()
+
+        assert setup_calls == [True]
+
+    def test_execute_task_exposes_durable_task_context(self, monkeypatch) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+
+        def read_context() -> dict[str, object]:
+            from django_ray.runtime.context import get_current_task_context
+
+            context = get_current_task_context()
+            assert context is not None
+            return {
+                "task_pk": context.task_pk,
+                "runtime_env_profile": context.runtime_env_profile,
+                "runtime_env_hash": context.runtime_env_hash,
+                "ray_job_driver": context.ray_job_driver,
+            }
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda path: read_context,
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.serialization.deserialize_args",
+            lambda value: {} if value == "{}" else [],
+        )
+
+        result_json = entrypoint.execute_task(
+            "testproject.tasks.echo_task",
+            "[]",
+            "{}",
+            task_execution_pk=42,
+            runtime_env_profile="thin",
+            runtime_env_hash="abc123",
+        )
+
+        result = json.loads(result_json)
+        assert result["success"] is True, result
+        assert result["result"] == {
+            "task_pk": 42,
+            "runtime_env_profile": "thin",
+            "runtime_env_hash": "abc123",
+            "ray_job_driver": True,
+        }

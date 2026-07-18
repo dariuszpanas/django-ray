@@ -73,3 +73,9 @@ class TestRetryDenylistNormalization:
 
         assert decision.should_retry is False
         assert decision.reason == "Max attempts (3) reached"
+
+    def test_empty_exception_name_has_no_variants(self) -> None:
+        assert retry_module._normalize_exception_name("   ") == set()
+
+    def test_non_string_denylist_entries_are_ignored(self) -> None:
+        assert retry_module._match_denylist_entry("ValueError", [None, 42]) is None

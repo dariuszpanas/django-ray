@@ -84,6 +84,13 @@ class TestDistributedMocked:
         assert calls == []
         assert distributed._django_bootstrapped is True
 
+    def test_bootstrap_returns_when_already_complete(self, monkeypatch) -> None:
+        monkeypatch.setattr(distributed, "_django_bootstrapped", True)
+
+        distributed._bootstrap_django_if_needed()
+
+        assert distributed._django_bootstrapped is True
+
     def test_is_ray_available_handles_import_error(self, monkeypatch) -> None:
         original_import = builtins.__import__
 
@@ -110,6 +117,13 @@ class TestDistributedMocked:
         assert results == [10, 20, 30]
         assert len(bootstrap_calls) == 3
 
+    def test_parallel_map_uses_single_ray_batch_when_unbounded(self, monkeypatch) -> None:
+        _install_fake_ray(monkeypatch)
+        monkeypatch.setattr(distributed, "is_ray_available", lambda: True)
+        monkeypatch.setattr(distributed, "_bootstrap_django_if_needed", lambda: None)
+
+        assert distributed.parallel_map(_mul, [1, 2], factor=3) == [3, 6]
+
     def test_parallel_starmap_uses_ray_batch_mode(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
         bootstrap_calls: list[str] = []
@@ -122,6 +136,13 @@ class TestDistributedMocked:
 
         assert results == [3, 7, 11]
         assert len(bootstrap_calls) == 3
+
+    def test_parallel_starmap_submits_all_items_without_limit(self, monkeypatch) -> None:
+        _install_fake_ray(monkeypatch)
+        monkeypatch.setattr(distributed, "is_ray_available", lambda: True)
+        monkeypatch.setattr(distributed, "_bootstrap_django_if_needed", lambda: None)
+
+        assert distributed.parallel_starmap(_add, [(1, 2), (3, 4)]) == [3, 7]
 
     def test_scatter_gather_uses_ray_mode(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
