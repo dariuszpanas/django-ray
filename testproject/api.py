@@ -7,15 +7,18 @@ Tasks are defined using @task decorator and enqueued using .enqueue().
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import datetime
 from typing import Literal
 
+from django.conf import settings
 from django.db.models import Count
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
 from django.tasks.exceptions import InvalidTaskBackend
 from ninja import NinjaAPI, Schema
+from ninja.security import HttpBearer
 
 from django_ray import __version__ as django_ray_version
 from django_ray.models import RayTaskExecution, TaskState
@@ -34,10 +37,22 @@ from testproject.apps.local_ray import tasks as local_tasks
 from testproject.apps.ml_pipeline import tasks as ml_tasks
 from testproject.apps.sync_tasks import tasks as sync_tasks
 
+
+class ApiTokenAuth(HttpBearer):
+    """Require the configured bearer token for every operational API endpoint."""
+
+    def authenticate(self, request, token: str):
+        expected = getattr(settings, "DJANGO_API_TOKEN", None)
+        if expected and secrets.compare_digest(token, expected):
+            return token
+        return None
+
+
 api = NinjaAPI(
     title="Django Ray API",
     version=django_ray_version,
     description="API for managing Ray tasks using Django 6's native task framework",
+    auth=ApiTokenAuth(),
 )
 
 
@@ -208,7 +223,7 @@ def _database_health_payload() -> dict[str, str]:
     }
 
 
-@api.get("/livez", response=LivenessSchema, tags=["Health"])
+@api.get("/livez", response=LivenessSchema, tags=["Health"], auth=None)
 def liveness_check(request):
     """Cheap liveness endpoint for kubelet probes."""
     return {
@@ -217,13 +232,13 @@ def liveness_check(request):
     }
 
 
-@api.get("/readyz", response=HealthSchema, tags=["Health"])
+@api.get("/readyz", response=HealthSchema, tags=["Health"], auth=None)
 def readiness_check(request):
     """Readiness endpoint that verifies database access."""
     return _database_health_payload()
 
 
-@api.get("/health", response=HealthSchema, tags=["Health"])
+@api.get("/health", response=HealthSchema, tags=["Health"], auth=None)
 def health_check(request):
     """Backward-compatible health endpoint for external checks."""
     return _database_health_payload()

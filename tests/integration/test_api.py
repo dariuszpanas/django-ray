@@ -17,7 +17,7 @@ from django_ray.models import RayTaskExecution, TaskState
 @pytest.fixture
 def client():
     """Django test client."""
-    return Client()
+    return Client(HTTP_AUTHORIZATION="Bearer test-api-token-for-pytest")
 
 
 @pytest.mark.django_db
@@ -145,6 +145,19 @@ class TestHealthAPI:
 
         assert response.status_code == 200
         assert len(queries) <= 2
+
+    def test_operational_routes_require_bearer_token(self):
+        """Only health probes are public; task/metrics data needs explicit auth."""
+        unauthenticated_client = Client()
+
+        response = unauthenticated_client.get("/api/executions/stats")
+        assert response.status_code == 401
+
+        response = unauthenticated_client.get("/api/metrics")
+        assert response.status_code == 401
+
+        response = unauthenticated_client.get("/api/health")
+        assert response.status_code == 200
 
 
 @pytest.mark.django_db

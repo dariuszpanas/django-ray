@@ -72,6 +72,9 @@ def pytest_configure(config: object) -> None:
                 },
             },
             DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
+            # Operational API routes are authenticated in the sample project. Keep
+            # the fixture token deterministic and send it with every API test request.
+            DJANGO_API_TOKEN="test-api-token-for-pytest",
         )
 
     django.setup()

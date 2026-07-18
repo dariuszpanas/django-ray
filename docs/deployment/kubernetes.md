@@ -54,6 +54,20 @@ The Django Web URL opens the bundled testproject landing page:
 
 ![django-ray testproject landing page](../assets/images/testproject-landing.png)
 
+The `dev`, `local`, `dev-tls`, `kuberay-kind`, and `kong-local` overlays are local-demo
+examples. Their health probes are public, but all other API routes require the bearer token
+from `DJANGO_API_TOKEN`:
+
+```bash
+curl -H "Authorization: Bearer $DJANGO_API_TOKEN" \
+  http://localhost:30080/api/executions/stats
+```
+
+For a production deployment, start from `k8s/base` (or copy it into an environment overlay),
+replace the placeholder Secret through an external secret manager, and set an explicit host in
+`DJANGO_ALLOWED_HOSTS`. The production mode rejects missing or weak Django/API secrets,
+`DEBUG=True`, and wildcard hosts before Gunicorn starts.
+
 When using the Kong local overlay on Docker Desktop's managed kind cluster, use:
 
 ```bash
@@ -279,8 +293,9 @@ Set via ConfigMap:
 ```yaml
 # k8s/base/configmap.yaml
 data:
+  DJANGO_DEPLOYMENT_MODE: "production"
   DJANGO_DEBUG: "False"
-  DJANGO_ALLOWED_HOSTS: "*"
+  DJANGO_ALLOWED_HOSTS: "app.example.com"
   DATABASE_ENGINE: "django.db.backends.postgresql"
   DATABASE_HOST: "postgres-svc"
 ```
@@ -292,9 +307,22 @@ Set via Secret:
 ```yaml
 # k8s/base/secret.yaml
 data:
-  DJANGO_SECRET_KEY: <base64-encoded>
+  DJANGO_SECRET_KEY: <base64-encoded-random-value-at-least-50-characters>
+  DJANGO_API_TOKEN: <base64-encoded-random-value-at-least-32-characters>
   DATABASE_PASSWORD: <base64-encoded>
 ```
+
+Before routing traffic to the service, run Django's deployment checks with the same ConfigMap
+and Secret values used by the web pod:
+
+```bash
+kubectl exec -n django-ray deploy/django-web -- \
+  python testproject/manage.py check --deploy
+```
+
+The `/api/livez`, `/api/readyz`, and `/api/health` endpoints intentionally do not require a
+token, so the Kubernetes probes can remain unauthenticated. `/api/metrics`, task submission,
+task results, logs, arguments, and workflow-observability routes are protected.
 
 ## Overlays
 

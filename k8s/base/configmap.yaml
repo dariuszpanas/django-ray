@@ -6,8 +6,10 @@ metadata:
   namespace: django-ray
 data:
   DJANGO_SETTINGS_MODULE: "testproject.settings"
+  # The base manifests are production-capable. Local overlays switch this to demo.
+  DJANGO_DEPLOYMENT_MODE: "production"
   DJANGO_DEBUG: "False"
-  DJANGO_ALLOWED_HOSTS: "*"
+  DJANGO_ALLOWED_HOSTS: "django-ray.example.com"
   # Ray configuration
   RAY_ADDRESS: "ray://ray-head-svc:10001"
   DJANGO_RAY_WORKING_DIR_URI: "file:///runtime-env/django-ray-source.zip"

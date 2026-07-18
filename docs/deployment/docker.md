@@ -37,11 +37,32 @@ docker build -f Dockerfile.ray -t django-ray-worker:latest .
 ### Django Web Server
 
 ```bash
-# Production (gunicorn)
-docker run -p 8000:8000 django-ray:latest web
+# Production (gunicorn). Set all production variables from a secret manager.
+docker run -p 8000:8000 \
+  -e DJANGO_DEPLOYMENT_MODE=production \
+  -e DJANGO_SECRET_KEY="$(openssl rand -base64 48)" \
+  -e DJANGO_API_TOKEN="$(openssl rand -base64 32)" \
+  -e DJANGO_ALLOWED_HOSTS=app.example.com \
+  -e DATABASE_ENGINE=django.db.backends.postgresql \
+  django-ray:latest web
 
-# Development
+# Local demo (not suitable for a shared or internet-facing deployment)
 docker run -p 8000:8000 django-ray:latest web-dev
+```
+
+The image is production-capable only when `DJANGO_DEPLOYMENT_MODE=production` is set and
+the required secret, API token, and explicit host allow-list are supplied. The health
+endpoints (`/api/livez`, `/api/readyz`, and `/api/health`) remain unauthenticated so that
+container and Kubernetes probes can run. Every other API route, including task arguments,
+results, logs, and workflow observability, requires `Authorization: Bearer <DJANGO_API_TOKEN>`.
+
+For a local demo, provide a token even when using the development server:
+
+```bash
+docker run -p 8000:8000 \
+  -e DJANGO_DEBUG=True \
+  -e DJANGO_API_TOKEN=local-demo-token \
+  django-ray:latest web-dev
 ```
 
 ### Django-Ray Worker
@@ -78,6 +99,11 @@ services:
     ports:
       - "8000:8000"
     environment:
+      DJANGO_DEPLOYMENT_MODE: demo
+      DJANGO_DEBUG: "True"
+      DJANGO_SECRET_KEY: local-compose-only-secret
+      DJANGO_API_TOKEN: local-compose-api-token
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
       DATABASE_HOST: postgres
       DATABASE_PASSWORD: secret
     depends_on:
@@ -106,9 +132,11 @@ docker compose up
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DJANGO_SECRET_KEY` | Django secret key | (required) |
+| `DJANGO_DEPLOYMENT_MODE` | `demo` for local examples or `production` for fail-closed deployment checks | `demo` |
+| `DJANGO_SECRET_KEY` | Django secret key; production requires a random value of at least 50 characters | local demo placeholder |
+| `DJANGO_API_TOKEN` | Bearer token for all non-health API routes; production requires a random value of at least 32 characters | unset (all protected routes return 401) |
 | `DJANGO_DEBUG` | Enable debug mode | `False` |
-| `DJANGO_ALLOWED_HOSTS` | Allowed hosts | `*` |
+| `DJANGO_ALLOWED_HOSTS` | Comma-separated allowed hosts; production rejects `*` | `localhost,127.0.0.1` |
 | `DATABASE_ENGINE` | Database backend | `sqlite3` |
 | `DATABASE_NAME` | Database name | `django_ray` |
 | `DATABASE_USER` | Database user | `django_ray` |
@@ -163,7 +191,18 @@ docker run \
 ```dockerfile
 # In Dockerfile
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:8000/api/health || exit 1
+```
+
+Validate a production container before exposing it:
+
+```bash
+docker run --rm \
+  -e DJANGO_DEPLOYMENT_MODE=production \
+  -e DJANGO_SECRET_KEY="$DJANGO_SECRET_KEY" \
+  -e DJANGO_API_TOKEN="$DJANGO_API_TOKEN" \
+  -e DJANGO_ALLOWED_HOSTS=app.example.com \
+  django-ray:latest python testproject/manage.py check --deploy
 ```
 
 ## See Also

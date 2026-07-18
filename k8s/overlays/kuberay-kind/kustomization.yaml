@@ -13,6 +13,23 @@ resources:
   - worker-sync.yaml
 
 patches:
+  # This overlay targets a local kind cluster, not production.
+  - patch: |-
+      - op: replace
+        path: /data/DJANGO_DEPLOYMENT_MODE
+        value: "demo"
+    target:
+      kind: ConfigMap
+      name: django-ray-config
+
+  - patch: |-
+      - op: replace
+        path: /data/DJANGO_ALLOWED_HOSTS
+        value: "localhost,127.0.0.1,django-ray.localhost"
+    target:
+      kind: ConfigMap
+      name: django-ray-config
+
   # Remove legacy static Ray resources from base.
   - patch: |-
       $patch: delete

@@ -410,9 +410,11 @@ For more details, see the [Ray TLS documentation](https://docs.ray.io/en/latest/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DJANGO_SECRET_KEY` | insecure-key | Django secret key |
-| `DJANGO_DEBUG` | True | Debug mode |
-| `DJANGO_ALLOWED_HOSTS` | * | Allowed hosts (comma-separated) |
+| `DJANGO_DEPLOYMENT_MODE` | production in base, demo in local overlays | Fail-closed production checks or local demo mode |
+| `DJANGO_SECRET_KEY` | placeholder in base Secret | Random value of at least 50 characters in production |
+| `DJANGO_API_TOKEN` | placeholder in base Secret | Bearer token for non-health API routes; at least 32 characters in production |
+| `DJANGO_DEBUG` | False | Debug mode; production rejects True |
+| `DJANGO_ALLOWED_HOSTS` | `django-ray.example.com` | Explicit comma-separated hosts; production rejects `*` |
 
 ### Database Configuration
 
@@ -436,6 +438,12 @@ For more details, see the [Ray TLS documentation](https://docs.ray.io/en/latest/
 | `DJANGO_RAY_CONCURRENCY` | 10 | Worker concurrency used by Docker worker entrypoint modes |
 | `RAY_MAX_RETRIES` | 3 | Sample project max task attempts |
 | `RAY_RETRY_DELAY_SECONDS` | 5 | Sample project retry backoff seconds |
+
+The base manifests are production-capable templates and must receive real Secret values before
+deployment. The `dev`, `local`, `dev-tls`, `kuberay-kind`, and `kong-local` overlays explicitly
+switch to `DJANGO_DEPLOYMENT_MODE=demo` for local use. Only `/api/livez`, `/api/readyz`, and
+`/api/health` are public; send `Authorization: Bearer $DJANGO_API_TOKEN` for all other API
+requests, including metrics and workflow/log observability.
 
 ## Local Kubernetes Options
 
