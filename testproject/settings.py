@@ -3,16 +3,69 @@
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-test-key-not-for-production")
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment variable without treating typos as truthy."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    """Reject common sample values that are never safe deployment credentials."""
+    lowered = value.lower()
+    return any(
+        marker in lowered
+        for marker in ("change-me", "replace-with", "placeholder", "example", "insecure")
+    )
+
+
+# The sample is safe by default for a local container, while the explicitly selected
+# production mode fails closed when required deployment secrets are absent.
+DEPLOYMENT_MODE = os.environ.get("DJANGO_DEPLOYMENT_MODE", "demo").strip().lower()
+if DEPLOYMENT_MODE not in {"demo", "production"}:
+    raise ImproperlyConfigured("DJANGO_DEPLOYMENT_MODE must be 'demo' or 'production'.")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() in ("true", "1", "yes")
+DEBUG = _env_bool("DJANGO_DEBUG", default=False)
 
-ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = os.environ.get(
+    "DJANGO_SECRET_KEY",
+    "django-insecure-local-demo-key-do-not-use-in-production",
+)
+
+_allowed_hosts_value = os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
+ALLOWED_HOSTS = [host.strip() for host in _allowed_hosts_value.split(",") if host.strip()]
+
+if DEPLOYMENT_MODE == "production":
+    if DEBUG:
+        raise ImproperlyConfigured("DJANGO_DEBUG must be false in production mode.")
+    if len(SECRET_KEY) < 50 or len(set(SECRET_KEY)) < 5 or _looks_like_placeholder(SECRET_KEY):
+        raise ImproperlyConfigured(
+            "DJANGO_SECRET_KEY must be a random value of at least 50 characters in production."
+        )
+    if not ALLOWED_HOSTS or "*" in ALLOWED_HOSTS:
+        raise ImproperlyConfigured(
+            "DJANGO_ALLOWED_HOSTS must contain explicit hostnames in production mode."
+        )
+
+DJANGO_API_TOKEN = os.environ.get("DJANGO_API_TOKEN")
+if DEPLOYMENT_MODE == "production" and (
+    not DJANGO_API_TOKEN
+    or len(DJANGO_API_TOKEN) < 32
+    or len(set(DJANGO_API_TOKEN)) < 5
+    or _looks_like_placeholder(DJANGO_API_TOKEN)
+):
+    raise ImproperlyConfigured(
+        "DJANGO_API_TOKEN must be a random value of at least 32 characters in production."
+    )
 
 # Application definition
 INSTALLED_APPS = [
