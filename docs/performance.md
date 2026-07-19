@@ -198,9 +198,12 @@ task count, enqueue interval, both polling intervals, schema version, and seed w
 result. Use the same seed when comparing policies; repeat runs still capture scheduler
 and database variance.
 
-The PostgreSQL CI gate runs a warm-up and five recorded repetitions for each worker
-count. Download its `polling-benchmark-json` artifact for the exact environment metadata
-and individual measurements. Performance varies with shared CI capacity, so the gate
+The manually dispatched **Polling Benchmark** workflow runs a warm-up and five recorded
+repetitions for each worker count. Launch it from GitHub Actions when polling behavior or
+its operating environment changes, then download the `polling-benchmark-json` artifact
+for exact environment metadata and individual measurements. Normal pull-request CI keeps
+the PostgreSQL coordination and polling correctness tests but does not run this
+time-based matrix. Performance varies with shared runner capacity, so the benchmark
 checks claim integrity and finite metrics rather than imposing noisy latency or
 throughput thresholds. Do not substitute SQLite or simulated timings.
 

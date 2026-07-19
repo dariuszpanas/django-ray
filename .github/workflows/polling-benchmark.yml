@@ -1,0 +1,121 @@
+name: Polling Benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: PostgreSQL Polling Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DJANGO_SETTINGS_MODULE: tests.postgres_settings
+      DATABASE_NAME: django_ray
+      DATABASE_TEST_NAME: test_django_ray
+      DATABASE_USER: django_ray
+      DATABASE_PASSWORD: django_ray
+      DATABASE_HOST: 127.0.0.1
+      DATABASE_PORT: "5432"
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: django_ray
+          POSTGRES_USER: django_ray
+          POSTGRES_PASSWORD: django_ray
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U django_ray -d django_ray"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Set up minimum supported Python
+        run: uv python install 3.12
+
+      - name: Install dependencies with PostgreSQL support
+        run: |
+          uv sync --frozen --extra postgres --python 3.12
+          uv pip install --python .venv/bin/python "django==6.0"
+
+      - name: Report benchmark versions
+        run: >-
+          uv run --no-sync --python 3.12 python -c
+          "import django, psycopg, sys; print(sys.version); print('Django', django.get_version()); print('psycopg', psycopg.__version__)"
+
+      - name: Migrate benchmark database
+        run: uv run --no-sync --python 3.12 python testproject/manage.py migrate --noinput
+
+      - name: Record polling benchmark scaling series
+        run: |
+          mkdir -p benchmark-results
+          for workers in 1 4 8; do
+            echo "::group::Warm-up with ${workers} worker(s)"
+            date --iso-8601=seconds
+            uv run --no-sync --python 3.12 python testproject/manage.py django_ray_benchmark_polling \
+              --workers="$workers" --tasks=20 --idle-seconds=0.25 \
+              --enqueue-interval-seconds=0.02 --base-interval-seconds=0.1 \
+              --max-interval-seconds=0.5 --seed=53 --json > /dev/null
+            echo "::endgroup::"
+            for repetition in 1 2 3 4 5; do
+              final_path="benchmark-results/workers-${workers}-run-${repetition}.json"
+              pending_path="${final_path}.pending"
+              echo "::group::Workers ${workers}, repetition ${repetition}/5"
+              date --iso-8601=seconds
+              uv run --no-sync --python 3.12 python testproject/manage.py django_ray_benchmark_polling \
+                --workers="$workers" --tasks=100 --idle-seconds=2 \
+                --enqueue-interval-seconds=0.05 --base-interval-seconds=0.1 \
+                --max-interval-seconds=0.5 --seed=53 --json \
+                > "$pending_path"
+              uv run --no-sync --python 3.12 python -m json.tool "$pending_path" > /dev/null
+              mv "$pending_path" "$final_path"
+              echo "Completed ${final_path}"
+              echo "::endgroup::"
+            done
+          done
+
+      - name: Upload polling benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: polling-benchmark-json
+          path: benchmark-results/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Show PostgreSQL diagnostics
+        if: failure()
+        run: |
+          uv run --no-sync --python 3.12 python - <<'PY'
+          import os
+          import psycopg
+
+          try:
+              with psycopg.connect(
+                  dbname=os.environ["DATABASE_NAME"],
+                  user=os.environ["DATABASE_USER"],
+                  password=os.environ["DATABASE_PASSWORD"],
+                  host=os.environ["DATABASE_HOST"],
+                  port=os.environ["DATABASE_PORT"],
+              ) as connection:
+                  with connection.cursor() as cursor:
+                      cursor.execute(
+                          "SELECT state, COUNT(*) FROM django_ray_raytaskexecution "
+                          "GROUP BY state ORDER BY state"
+                      )
+                      print("task states:", cursor.fetchall())
+          except Exception as error:
+              print("diagnostics unavailable:", error)
+          PY
