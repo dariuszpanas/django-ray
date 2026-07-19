@@ -66,6 +66,7 @@ test-postgres:
 	python -m pytest \
 		tests/integration/test_postgresql_coordination.py \
 		tests/integration/test_postgresql_polling.py \
+		tests/integration/test_postgresql_metrics.py \
 		-m postgresql -vv --durations=20
 
 # Validate the bundled sample project's user-facing boundary

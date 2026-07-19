@@ -59,6 +59,9 @@ data:
         static_configs:
           - targets: ['django-web-svc:80']
         metrics_path: /api/metrics
+        authorization:
+          type: Bearer
+          credentials_file: /etc/prometheus-secrets/DJANGO_API_TOKEN
 
       # Django-Ray worker metrics
       - job_name: 'django-ray-worker'
@@ -108,6 +111,9 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus
+            - name: django-api-token
+              mountPath: /etc/prometheus-secrets
+              readOnly: true
             - name: data
               mountPath: /prometheus
           resources:
@@ -133,6 +139,12 @@ spec:
         - name: config
           configMap:
             name: prometheus-config
+        - name: django-api-token
+          secret:
+            secretName: django-ray-secret
+            items:
+              - key: DJANGO_API_TOKEN
+                path: DJANGO_API_TOKEN
         - name: data
           emptyDir: {}
 ---

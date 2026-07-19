@@ -105,7 +105,7 @@ class TestHealthAPI:
 
         response = client.get("/api/metrics")
         assert response.status_code == 200
-        assert response["Content-Type"] == "text/plain; charset=utf-8"
+        assert response["Content-Type"] == "text/plain; version=0.0.4; charset=utf-8"
 
         content = response.content.decode("utf-8")
         # Check for expected metric names
@@ -113,6 +113,8 @@ class TestHealthAPI:
         assert "django_ray_tasks_queued" in content
         assert "django_ray_tasks_running" in content
         assert "django_ray_queue_depth" in content
+        assert "django_ray_queue_wait_seconds_count" in content
+        assert "django_ray_worker_leases" in content
         # Check for state labels
         assert 'state="QUEUED"' in content
         assert 'state="RUNNING"' in content
@@ -120,8 +122,8 @@ class TestHealthAPI:
         assert 'queue="default"' in content
         assert 'queue="high-priority"' in content
 
-    def test_prometheus_metrics_uses_grouped_queries(self, client):
-        """Metrics endpoint should not issue one count query per state/queue."""
+    def test_prometheus_metrics_query_count_is_bounded(self, client):
+        """Metrics scrape cost stays constant as states and queues grow."""
         RayTaskExecution.objects.create(
             task_id="metrics-query-test-1",
             callable_path="test.task",
@@ -145,7 +147,7 @@ class TestHealthAPI:
             response = client.get("/api/metrics")
 
         assert response.status_code == 200
-        assert len(queries) <= 2
+        assert len(queries) <= 8
 
     def test_operational_routes_require_bearer_token(self):
         """Only health probes are public; task/metrics data needs explicit auth."""
