@@ -5,7 +5,7 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install format fix lint typecheck test test-unit test-integration test-testproject test-cov check ci build clean help
+.PHONY: all install format fix lint typecheck test test-unit test-integration test-postgres test-testproject test-cov check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
@@ -60,6 +60,10 @@ test-unit:
 # Run integration tests only
 test-integration:
 	pytest tests/integration/ -v
+
+# Exercise database coordination against a real PostgreSQL server.
+test-postgres:
+	pytest tests/integration/test_postgresql_coordination.py -m postgresql -vv --durations=20
 
 # Validate the bundled sample project's user-facing boundary
 test-testproject:
@@ -186,6 +190,7 @@ help:
 	@echo "  test           - Run all tests"
 	@echo "  test-unit      - Run unit tests only"
 	@echo "  test-integration - Run integration tests only"
+	@echo "  test-postgres  - Run PostgreSQL coordination tests"
 	@echo "  test-testproject - Validate the bundled sample project"
 	@echo "  test-cov       - Run tests with coverage"
 	@echo "  docs-build     - Build Zensical site"

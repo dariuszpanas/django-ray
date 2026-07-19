@@ -123,6 +123,7 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short"
 markers = [
     "live_cluster: Requires DJANGO_RAY_LIVE_CLUSTER_TESTS and a real Ray cluster",
+    "postgresql: Requires the PostgreSQL coordination test database",
     "real_ray: Starts a real local Ray runtime (ray.init/ray.shutdown)",
 ]
 filterwarnings = [
