@@ -481,9 +481,15 @@ class TestWorkerCommandRuntimeDb:
             kwargs_json="{}",
             claimed_by_worker=cmd.worker_id,
         )
+        pending = {task.pk: object()}
         cmd.ray_core_runner = cast(
             Any,
-            SimpleNamespace(_pending_tasks={task.pk: object()}, pending_count=1),
+            SimpleNamespace(
+                _pending_tasks=pending,
+                pending_count=1,
+                pending_task_ids=tuple(pending),
+                clear_pending_tasks=pending.clear,
+            ),
         )
 
         cmd._mark_stale_ray_core_tasks_as_lost()
@@ -540,6 +546,7 @@ class TestWorkerCommandRuntimeDb:
             Any,
             SimpleNamespace(
                 _pending_tasks={task.pk: object()},
+                pending_task_ids=(task.pk,),
                 cancel=lambda _handle: cancel_calls.append("ray-cancel"),
             ),
         )
@@ -791,6 +798,7 @@ class TestWorkerCommandRuntimeDb:
             Any,
             SimpleNamespace(
                 _pending_tasks={task.pk: object()},
+                pending_task_ids=(task.pk,),
                 cancel=lambda _handle: cancel_calls.append("cancel") or True,
             ),
         )

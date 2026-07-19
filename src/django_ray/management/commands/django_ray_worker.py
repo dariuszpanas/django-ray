@@ -715,7 +715,7 @@ class Command(BaseCommand):
         if not self.ray_core_runner or self.ray_core_runner.pending_count == 0:
             return
 
-        task_ids = list(self.ray_core_runner._pending_tasks.keys())
+        task_ids = list(self.ray_core_runner.pending_task_ids)
         count = 0
         for task in RayTaskExecution.objects.filter(
             pk__in=task_ids,
@@ -729,7 +729,7 @@ class Command(BaseCommand):
             count += 1
 
         # Clear the runner's pending tasks
-        self.ray_core_runner._pending_tasks.clear()
+        self.ray_core_runner.clear_pending_tasks()
 
         if count > 0:
             self.stdout.write(
@@ -1078,7 +1078,7 @@ class Command(BaseCommand):
         if not ray.is_initialized():
             self.stdout.write(self.style.WARNING("\nRay disconnected, clearing pending tasks..."))
             # Mark all pending tasks as needing retry
-            for task_pk in list(self.ray_core_runner._pending_tasks.keys()):
+            for task_pk in self.ray_core_runner.pending_task_ids:
                 try:
                     task = RayTaskExecution.objects.get(pk=task_pk)
                     self._handle_task_failure(
@@ -1088,10 +1088,10 @@ class Command(BaseCommand):
                     )
                 except RayTaskExecution.DoesNotExist:
                     pass
-            self.ray_core_runner._pending_tasks.clear()
+            self.ray_core_runner.clear_pending_tasks()
             return
 
-        monitored_task_ids = list(self.ray_core_runner._pending_tasks.keys())
+        monitored_task_ids = list(self.ray_core_runner.pending_task_ids)
         monitor_time = time.monotonic()
         if (
             monitored_task_ids
@@ -1537,7 +1537,9 @@ class Command(BaseCommand):
         )
 
         active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
-        ray_core_pending = self.ray_core_runner._pending_tasks if self.ray_core_runner else {}
+        ray_core_pending = (
+            set(self.ray_core_runner.pending_task_ids) if self.ray_core_runner else set()
+        )
 
         stuck_count = 0
         timeout_count = 0
@@ -1557,7 +1559,7 @@ class Command(BaseCommand):
                     self.style.WARNING(f"\nTask {task.pk} timed out after {task.timeout_seconds}s")
                 )
                 # Cancel the running task if we're tracking it
-                if self.ray_core_runner and task.pk in self.ray_core_runner._pending_tasks:
+                if self.ray_core_runner and task.pk in self.ray_core_runner.pending_task_ids:
                     self.ray_core_runner.cancel(
                         SubmissionHandle(
                             ray_job_id=f"ray_core:{task.pk}",
@@ -1730,7 +1732,7 @@ class Command(BaseCommand):
                 )
 
         if self.ray_core_runner is not None and (
-            ray_job_id or task.pk in self.ray_core_runner._pending_tasks
+            ray_job_id or task.pk in self.ray_core_runner.pending_task_ids
         ):
             try:
                 accepted = self.ray_core_runner.cancel(handle)
@@ -1805,7 +1807,7 @@ class Command(BaseCommand):
         # Ray Core work cannot be recovered after this driver's Ray connection
         # is closed.  Ask Ray to stop it, then persist the cancellation intent.
         if self.execution_mode in ("local", "cluster") and self.ray_core_runner:
-            for task_pk in list(self.ray_core_runner._pending_tasks):
+            for task_pk in self.ray_core_runner.pending_task_ids:
                 try:
                     task = RayTaskExecution.objects.get(pk=task_pk)
                 except RayTaskExecution.DoesNotExist:

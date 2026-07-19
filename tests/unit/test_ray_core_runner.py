@@ -373,3 +373,20 @@ class TestRayCoreRunnerRuntime:
         assert 20 in completed_map
         assert "task crashed" in completed_map[20]
         assert runner.pending_count == 0
+
+    def test_pending_tracking_api_returns_snapshot_and_clears(self, monkeypatch) -> None:
+        _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        runner._pending_tasks[10] = RayCoreHandle(
+            task_pk=10,
+            object_ref=object(),
+            submitted_at=datetime.now(UTC),
+            task_name="task",
+        )
+
+        pending_ids = runner.pending_task_ids
+        runner.clear_pending_tasks()
+
+        assert pending_ids == (10,)
+        assert runner.pending_task_ids == ()
+        assert runner.pending_count == 0
