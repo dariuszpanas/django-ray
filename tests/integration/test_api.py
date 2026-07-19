@@ -38,6 +38,7 @@ class TestLandingPage:
 
         content = response.content.decode("utf-8")
         assert "django-ray" in content
+        assert f"v{django_ray_version} / debug" in content
         assert "/static/testproject/django-ray.svg" in content
         assert "/static/testproject/landing-graph-bg.png" in content
         assert "bundled testproject" in content
