@@ -26,6 +26,77 @@ def square(value: int) -> int:
 The example is runnable as written. Comments explicitly mark the one integration point
 an application would replace.
 
+## Coroutine Tasks
+
+Django coroutine tasks use the same decorator and enqueue API. django-ray awaits them in
+sync, Ray Core, and Ray Job execution modes:
+
+```python
+import asyncio
+
+from django.tasks import task
+
+
+@task(queue_name="default")
+async def fetch_pair(left: int, right: int) -> dict[str, int]:
+    await asyncio.sleep(0)  # Replace with an async client operation.
+    return {"left": left, "right": right, "total": left + right}
+```
+
+Each coroutine invocation runs in a fresh event loop owned by that task. The loop is
+closed before django-ray records success or failure, so event-loop state does not leak
+between reused Ray workers. Synchronous callables keep the direct execution path and do
+not pay event-loop startup cost.
+
+The low-level synchronous `execute_task()` entrypoint must not be called from a thread
+that already has a running event loop. Enqueue the task normally, or move that direct
+test/debug call to a synchronous thread. django-ray does not nest or patch event loops.
+
+Do not launch detached work with `asyncio.create_task()` and then return. Child tasks
+must be awaited, normally with `asyncio.gather()` or `asyncio.TaskGroup`, before the
+durable task finishes. A detached child has no independent Django task record, retry,
+result, or cancellation boundary and cannot outlive the per-task loop reliably.
+
+### Django ORM from a coroutine
+
+Use Django's async ORM methods and async iteration inside coroutine tasks:
+
+```python
+from django.contrib.auth import get_user_model
+from django.tasks import task
+
+
+@task(queue_name="default")
+async def user_email_async(user_id: int) -> dict[str, str]:
+    user = await get_user_model().objects.aget(pk=user_id)
+    return {"email": user.email}
+```
+
+Calling synchronous ORM methods such as `.get()` directly from an async task raises
+Django's `SynchronousOnlyOperation`. When an operation has no async ORM equivalent,
+move the complete synchronous unit behind `sync_to_async`; use `thread_sensitive=True`
+for database work:
+
+```python
+from asgiref.sync import sync_to_async
+from django.db import transaction
+
+
+@sync_to_async(thread_sensitive=True)
+def update_account(account_id: int) -> None:
+    with transaction.atomic():
+        # Keep the whole transaction inside this synchronous function.
+        Account.objects.filter(pk=account_id).update(active=True)
+```
+
+`transaction.atomic()` is a synchronous context manager, so do not spread one database
+transaction across `await` points.
+
+The internal `django_ray.runtime.context.get_current_task_context()` API identifies the
+durable django-ray execution and remains available across `await` points. It is not
+Django's separate `@task(takes_context=True)` `TaskContext` feature; django-ray does not
+currently reconstruct that standard task context for workers.
+
 ## Enqueueing
 
 ```python
@@ -105,9 +176,12 @@ initialization. The timeout is checked by the worker's periodic reconciliation l
 so enforcement is approximate and can lag by one worker iteration. A timed-out task is
 marked `FAILED` permanently; it does not automatically consume a retry attempt, but
 operators can retry it through the admin or operational API after reviewing the cause.
-Ray Core tasks are cancelled through their object reference, Ray Job tasks are stopped
-through the Ray Job API, and synchronous tasks cannot be interrupted while Python is
-executing; sync timeout handling occurs when the worker regains control.
+Ray Core tasks are cancelled through their object reference, and Ray Job tasks are
+stopped through the Ray Job API. Synchronous tasks cannot be interrupted while Python
+is executing. This includes a coroutine running in sync worker mode: its per-task loop
+owns the worker thread until the coroutine returns. Sync cancellation and timeout
+handling therefore occur only when the worker regains control. Application code should
+still use bounded client timeouts and cancellation-safe cleanup.
 
 ## Reading Current Status
 
