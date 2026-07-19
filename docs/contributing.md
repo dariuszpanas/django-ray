@@ -51,6 +51,17 @@ docs: clarify Ray Job worker selection
 chore(deps): update Ruff
 ```
 
+The required `Commit Messages` GitHub Actions check validates the PR title and every commit in the PR.
+Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, or
+`test`; an optional scope and `!` are allowed:
+
+```text
+<type>[optional scope][!]: <imperative summary>
+```
+
+For example, `fix(worker): preserve task ownership` passes. Invalid titles or commit headers fail with
+the exact offending value and the expected format.
+
 Before editing, inspect `git status --short`, the current branch, and `HEAD`. Preserve unrelated work,
 stage explicit paths instead of `git add .`, and review both the working and staged diffs. Repository
 automation follows the root `AGENTS.md`, including the optional Obsidian project-memory workflow when
@@ -145,13 +156,32 @@ Test via the API at http://127.0.0.1:8000/api/docs
 
 ## Pull Request Process
 
-1. **Fork the repository** and create a branch from `main`
+1. **Create a branch from the latest `main`**
 2. **Make your changes** with clear, focused commits
 3. **Add tests** for new functionality
 4. **Update documentation** if needed
 5. **Run all checks**: `uv run make ci`
 6. **Submit a pull request** with a Conventional Commit title, clear description, validation results,
    and `Closes #<number>` when applicable
+
+### Rebase auto-merge
+
+Pull requests are the unit of review and delivery, but their individual commits should remain visible.
+Keep commits focused and do not squash the PR. Once the required checks pass, enable rebase auto-merge:
+
+```bash
+gh pr merge --auto --rebase <PR-number>
+```
+
+The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and every commit
+header, and reports a required status check without needing secrets from the PR. This repository
+is private, so use rebase auto-merge rather than merge queue: auto-merge waits for the protected checks
+and then applies the rebase method.
+
+If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
+conflicts, run `uv run make ci`, and push. Auto-merge will recalculate the required checks. Maintainers
+must enable rebase merging and auto-merge in the `main` ruleset, require the `Commit Messages` and CI
+checks, and disable approval requirements when the repository is operated by a sole developer.
 
 ### Commit and PR Titles
 
