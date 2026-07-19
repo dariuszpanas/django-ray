@@ -63,7 +63,7 @@ test-integration:
 
 # Exercise database coordination against a real PostgreSQL server.
 test-postgres:
-	pytest tests/integration/test_postgresql_coordination.py -m postgresql -vv --durations=20
+	python -m pytest tests/integration/test_postgresql_coordination.py -m postgresql -vv --durations=20
 
 # Validate the bundled sample project's user-facing boundary
 test-testproject:
