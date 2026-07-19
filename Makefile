@@ -17,8 +17,8 @@
 -include mk/loadtest.mk
 
 COVERAGE_GLOBAL_MIN ?= 95
-COVERAGE_WORKER_MIN ?= 50
-COVERAGE_RAY_JOB_MIN ?= 55
+COVERAGE_WORKER_MIN ?= 90
+COVERAGE_RAY_JOB_MIN ?= 90
 
 # =============================================================================
 # Development
