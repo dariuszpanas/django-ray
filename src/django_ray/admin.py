@@ -4,10 +4,14 @@ import json
 from typing import Any
 
 from django.contrib import admin
+from django.core.exceptions import PermissionDenied
 from django.db.models import QuerySet
-from django.http import HttpRequest
+from django.http import Http404, HttpRequest, HttpResponse, HttpResponseNotAllowed, JsonResponse
+from django.urls import path, reverse
 from django.utils import timezone
-from django.utils.safestring import mark_safe
+from django.utils.html import format_html
+from django.utils.http import quote, unquote
+from django.utils.text import Truncator
 
 from django_ray.lifecycle import retry_task
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
@@ -15,11 +19,35 @@ from django_ray.redaction import redact_text, safe_json_dumps
 
 # Ray Dashboard URL fallback for local Ray.
 RAY_DASHBOARD_URL = "http://localhost:8265"
+ADMIN_DIAGNOSTIC_MAX_CHARS = 4096
+
+
+def _bounded_redacted_text(value: Any, *, max_chars: int = ADMIN_DIAGNOSTIC_MAX_CHARS) -> str:
+    """Return redacted operator text with a hard display-size limit."""
+    if value in (None, ""):
+        return "-"
+    return Truncator(redact_text(value)).chars(max_chars, truncate="... [truncated]")
+
+
+def _bounded_redacted_json(value: str | None) -> str:
+    """Return bounded, redacted JSON without exposing malformed raw payloads."""
+    if not value:
+        return "-"
+    try:
+        rendered = safe_json_dumps(json.loads(value))
+    except (TypeError, json.JSONDecodeError):
+        rendered = redact_text(value)
+    return Truncator(rendered).chars(
+        ADMIN_DIAGNOSTIC_MAX_CHARS,
+        truncate="... [truncated]",
+    )
 
 
 @admin.register(RayTaskExecution)
 class RayTaskExecutionAdmin(admin.ModelAdmin):
     """Admin for RayTaskExecution model."""
+
+    change_form_template = "admin/django_ray/raytaskexecution/change_form.html"
 
     list_display = [
         "id",
@@ -130,15 +158,79 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
     ordering = ["-created_at"]
     actions = ["retry_tasks", "cancel_tasks"]
 
+    def get_urls(self) -> list[Any]:
+        """Add the authenticated durable-summary endpoint used by the change form."""
+        opts = self.model._meta
+        custom_urls = [
+            path(
+                "<path:object_id>/observability/",
+                self.admin_site.admin_view(self.observability_view),
+                name=f"{opts.app_label}_{opts.model_name}_observability",
+            )
+        ]
+        return custom_urls + super().get_urls()
+
+    def change_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+        form_url: str = "",
+        extra_context: dict[str, Any] | None = None,
+    ) -> HttpResponse:
+        """Provide the package-owned polling URL to the custom change form."""
+        opts = self.model._meta
+        context = {
+            **(extra_context or {}),
+            "django_ray_observability_url": reverse(
+                f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_observability",
+                args=[quote(object_id)],
+                current_app=self.admin_site.name,
+            ),
+        }
+        return super().change_view(request, object_id, form_url, context)
+
+    def observability_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
+        """Return a versioned durable summary without querying Ray or task logs."""
+        if request.method != "GET":
+            return HttpResponseNotAllowed(["GET"])
+        execution = self.get_object(request, unquote(object_id))
+        if execution is None:
+            raise Http404("Ray task execution was not found")
+        if not self.has_view_permission(request, execution):
+            raise PermissionDenied
+
+        from django_ray import observability
+
+        summary = observability.get_task_summary(execution)
+        if summary.get("error_message") is not None:
+            summary["error_message"] = _bounded_redacted_text(summary["error_message"])
+        try:
+            progress = observability.get_workflow_progress(execution)
+        except observability.WorkflowObservabilityError as error:
+            progress = None
+            summary["workflow_error"] = _bounded_redacted_text(error)
+        summary["workflow"] = (
+            {
+                "revision": progress.get("revision", 0),
+                "state": progress.get("state", "RUNNING"),
+                "total_nodes": progress.get("total_nodes", 0),
+                "completed_nodes": progress.get("completed_nodes", 0),
+                "failed_nodes": progress.get("failed_nodes", 0),
+                "running_nodes": progress.get("running_nodes", 0),
+                "pending_nodes": progress.get("pending_nodes", 0),
+                "progress_percent": progress.get("progress_percent", 0.0),
+            }
+            if progress is not None
+            else None
+        )
+        response = JsonResponse(summary)
+        response["Cache-Control"] = "no-store"
+        return response
+
     @staticmethod
     def _redacted_json(value: str | None) -> str:
         """Render stored JSON with the same policy used by operational logs."""
-        if not value:
-            return "-"
-        try:
-            return safe_json_dumps(json.loads(value))
-        except (TypeError, json.JSONDecodeError):
-            return redact_text(value)
+        return _bounded_redacted_json(value)
 
     @admin.display(description="Arguments")
     def args_json_display(self, obj: RayTaskExecution) -> str:
@@ -190,14 +282,21 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             ray_job = parts[0]
             ray_task = parts[1]
             url = f"{dashboard_url}/#/jobs/{ray_job}/tasks/{ray_task}"
-            return mark_safe(
-                f"Job: {ray_job}, Task: {ray_task[:16]}... "
-                f'<a href="{url}" target="_blank">[Open in Dashboard]</a>'
+            return format_html(
+                'Job: {}, Task: {}... <a href="{}" target="_blank" '
+                'rel="noopener noreferrer">[Open in Dashboard]</a>',
+                ray_job,
+                ray_task[:16],
+                url,
             )
 
         # Ray Job API format
         url = f"{dashboard_url}/#/jobs/{job_id}"
-        return mark_safe(f'{job_id} <a href="{url}" target="_blank">[Open in Dashboard]</a>')
+        return format_html(
+            '{} <a href="{}" target="_blank" rel="noopener noreferrer">[Open in Dashboard]</a>',
+            job_id,
+            url,
+        )
 
     @admin.display(description="State", ordering="state")
     def state_display(self, obj: RayTaskExecution) -> str:
@@ -213,8 +312,11 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         }
         state = str(obj.state)
         color = colors.get(state, "#6c757d")
-        # state is from TaskState constants, not user input, so mark_safe is appropriate
-        return mark_safe(f'<span style="color: {color}; font-weight: bold;">{state}</span>')
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            state,
+        )
 
     @admin.display(description="Ray Dashboard")
     def ray_dashboard_link(self, obj: RayTaskExecution) -> str:
@@ -233,7 +335,10 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         # Old format: ray_core:pk - no useful link
         if job_id.startswith("ray_core:"):
             url = f"{dashboard_url}/#/jobs"
-            return mark_safe(f'<a href="{url}" target="_blank">Jobs</a>')
+            return format_html(
+                '<a href="{}" target="_blank" rel="noopener noreferrer">Jobs</a>',
+                url,
+            )
 
         # New format: job_id:task_id (e.g., "02000000:67a2e8cfa5...")
         if ":" in job_id and not job_id.startswith("raysubmit_"):
@@ -242,11 +347,18 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             ray_task = parts[1]
             # Link directly to the task in the Ray Dashboard
             url = f"{dashboard_url}/#/jobs/{ray_job}/tasks/{ray_task}"
-            return mark_safe(f'<a href="{url}" target="_blank">Task</a>')
+            return format_html(
+                '<a href="{}" target="_blank" rel="noopener noreferrer">Task</a>',
+                url,
+            )
 
         # Ray Job API - link to the job
         url = f"{dashboard_url}/#/jobs/{job_id}"
-        return mark_safe(f'<a href="{url}" target="_blank">{job_id[:8]}...</a>')
+        return format_html(
+            '<a href="{}" target="_blank" rel="noopener noreferrer">{}...</a>',
+            url,
+            job_id[:8],
+        )
 
     @admin.action(description="Retry selected tasks")
     def retry_tasks(self, request: HttpRequest, queryset: QuerySet[RayTaskExecution]) -> None:
@@ -344,18 +456,52 @@ class TaskAttemptAdmin(admin.ModelAdmin):
 
     list_display = ["execution", "attempt_number", "state", "started_at", "finished_at"]
     list_filter = ["state"]
-    readonly_fields = [
+    fields = [
         "execution",
         "attempt_number",
         "state",
         "started_at",
         "finished_at",
-        "error_message",
-        "error_traceback",
-        "result_data",
-        "result_reference",
+        "error_message_display",
+        "error_traceback_display",
+        "result_data_display",
+        "result_reference_display",
         "created_at",
     ]
+    readonly_fields = fields
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        return False
+
+    def has_change_permission(
+        self,
+        request: HttpRequest,
+        obj: TaskAttempt | None = None,
+    ) -> bool:
+        return False
+
+    def has_delete_permission(
+        self,
+        request: HttpRequest,
+        obj: TaskAttempt | None = None,
+    ) -> bool:
+        return False
+
+    @admin.display(description="Error")
+    def error_message_display(self, obj: TaskAttempt) -> str:
+        return _bounded_redacted_text(obj.error_message)
+
+    @admin.display(description="Traceback")
+    def error_traceback_display(self, obj: TaskAttempt) -> str:
+        return _bounded_redacted_text(obj.error_traceback)
+
+    @admin.display(description="Result")
+    def result_data_display(self, obj: TaskAttempt) -> str:
+        return _bounded_redacted_json(obj.result_data)
+
+    @admin.display(description="Result reference")
+    def result_reference_display(self, obj: TaskAttempt) -> str:
+        return _bounded_redacted_text(obj.result_reference)
 
 
 class ActiveWorkerFilter(admin.SimpleListFilter):
