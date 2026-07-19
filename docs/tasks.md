@@ -170,8 +170,11 @@ def user_email(user_id: int) -> dict[str, str]:
     return {"email": user.email}
 ```
 
-Large results should use django-ray's configured result storage instead of hand-written
-upload helpers. See [Result Storage](reference/result-storage.md).
+Occasionally oversized JSON arguments can use django-ray's opt-in
+[Durable Input Storage](reference/input-storage.md). For independently managed large
+datasets, pass an application-owned S3, GCS, or database URI instead of copying the
+dataset into the task envelope. Large results should use django-ray's configured
+[Result Storage](reference/result-storage.md).
 
 ## Errors and Retries
 

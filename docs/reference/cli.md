@@ -108,3 +108,28 @@ startup-barrier timeout.
 refuses SQLite and other database engines because their locking behavior is not
 representative.
 
+## django_ray_purge_inputs
+
+Report retained external input payloads whose references are all terminal and older
+than the selected retention window:
+
+```bash
+python manage.py django_ray_purge_inputs --retention-days=30
+```
+
+The command is a dry run unless `--delete` is supplied. Deletion keeps the execution
+references and marks the registry entry `PURGED` for audit:
+
+```bash
+python manage.py django_ray_purge_inputs --retention-days=30 --delete
+```
+
+| Option | Description |
+|--------|-------------|
+| `--retention-days=N` | Require registry use and every terminal finish to be at least `N` days old; default `30` |
+| `--delete` | Delete eligible objects after row-locking all references |
+
+Storage failures are recorded in `TaskInputPayload.cleanup_error` and make the command
+exit with an error. See [Durable Input Storage](input-storage.md#retries-and-retention)
+before scheduling cleanup.
+

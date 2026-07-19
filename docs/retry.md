@@ -76,6 +76,14 @@ The admin action, operational retry endpoint, and worker retry path use the same
 row-locked transition service, so a racing retry request is rejected rather than
 applied twice.
 
+Tasks with durable external inputs keep the same immutable `input_reference` across
+automatic and manual retries; a retry does not upload a replacement. Corrupt,
+unauthorized, or unsupported input envelopes fail before user code and are marked
+non-retryable. Retrieval/storage errors follow normal retry policy because an outage may
+be transient. Restore a missing object or correct storage configuration before a manual
+retry. Purged historical inputs cannot be retried unless the same content is restored
+or reactivated; choose cleanup retention accordingly.
+
 ## Make Side Effects Idempotent
 
 Use an application-level operation key with a uniqueness constraint. The example below

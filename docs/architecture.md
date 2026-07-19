@@ -77,7 +77,8 @@ Primary execution record for one task attempt chain.
 | `priority` | Django priority from `-100` to `100`; larger values are claimed sooner |
 | `state` | `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `CANCELLING`, `LOST` |
 | `attempt_number` | Current attempt counter |
-| `args_json`, `kwargs_json` | Serialized call arguments |
+| `args_json`, `kwargs_json` | Serialized arguments, or JSON `null` placeholders for external input |
+| `input_reference` | Optional durable pointer to a versioned combined input envelope |
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
 | `progress_data` | Latest JSON progress snapshot for a Ray-native workflow |
@@ -108,6 +109,14 @@ Worker coordination record used to detect dead/inactive workers.
 | `queue_name` | Informational queue assignment |
 | `started_at`, `last_heartbeat_at`, `stopped_at` | Lease timing |
 | `is_active` | Active/inactive lease state |
+
+### `TaskInputPayload`
+
+Registry and cleanup tombstone for content-addressed external inputs. It records the
+reference, backend, digest, byte size, envelope version, last-use time, cleanup state,
+and cleanup error. Execution rows retain `input_reference` after cleanup for audit.
+Row locks on the registry and referencing executions prevent cleanup from deleting a
+payload while another enqueue is registering the same content.
 
 ### `TaskAttempt`
 
@@ -222,6 +231,12 @@ new workers. Do not leave old and new workers reconciling the same in-flight
 jobs, because an old driver may not write the envelope or generation metadata
 required for the new worker to prove which execution produced a terminal state.
 
+Durable input transport has a separate opt-in boundary. Apply its additive migration
+and deploy the new code everywhere while `MAX_INLINE_INPUT_SIZE_BYTES` remains `None`.
+Drain old Ray Job drivers before enabling spillover. Existing inline rows remain valid;
+referenced Ray Jobs use transport version 2 and contain only `input_reference`. Before
+rolling back, disable spillover and drain all tasks that already have a reference.
+
 ## Reliability Controls
 
 - Unified retry policy with denylist support (short and fully-qualified exception names).
@@ -235,6 +250,7 @@ required for the new worker to prove which execution produced a terminal state.
 - Startup settings validation fail-fast by default, with migration/bootstrap bypass controls.
 - Result size enforcement with configurable oversized-result backends (`digest`, `filesystem`, `s3`, `gcs`).
 - Backend result retrieval rehydrates `result_reference` payloads for retrievable backends.
+- Versioned, content-addressed input envelopes with retrievable filesystem, S3, and GCS backends.
 
 ## Observability Surfaces
 

@@ -13,6 +13,7 @@ It focuses on:
 This covers the `django-ray` library runtime:
 
 - `RayTaskExecution` task lifecycle rows,
+- `TaskInputPayload` durable-input registry and cleanup tombstones,
 - `TaskWorkerLease` worker heartbeat/coordination rows,
 - `django_ray_worker` process behavior.
 
@@ -25,6 +26,7 @@ It does not cover custom business task logic internals.
 3. Check active worker leases and heartbeat freshness.
 4. Check Ray connectivity from workers.
 5. Check whether failures are retrying or already terminal.
+6. For input failures, verify the configured backend, object access, and registry state.
 
 ## Primary Signals
 
@@ -163,7 +165,35 @@ Recovery:
 2. Fix configuration or task code root cause.
 3. Requeue failed tasks in controlled batches after fix.
 
-## 4) Ray Connection Loss
+## 4) Durable Input Retrieval or Cleanup Failure
+
+Symptoms:
+
+- task errors report a missing, malformed, unauthorized, or corrupt input reference;
+- the task fails before application logs appear;
+- `django_ray_purge_inputs` records `cleanup_error` or exits non-zero.
+
+Checks:
+
+1. Inspect `input_reference` and the matching `TaskInputPayload` state without copying
+   the payload into tickets or logs.
+2. Confirm every enqueueing and worker process uses the same input backend, filesystem
+   root, bucket, prefix, and credentials.
+3. Verify the object exists and its access policy has not changed.
+4. If cleanup failed, inspect `cleanup_error` and fix storage access before rerunning.
+
+Recovery:
+
+1. Restore the exact content-addressed object or correct storage configuration.
+2. Use a controlled manual retry only after retrieval succeeds. Validation failures do
+   not auto-retry; storage retrieval failures may already follow normal retry policy.
+3. Preview retention with `django_ray_purge_inputs --retention-days=30` before using
+   `--delete`. Increase retention when historical manual retry or audit access is needed.
+
+Do not edit `input_reference`, digest metadata, or JSON placeholders by hand. Successful
+cleanup retains a `PURGED` tombstone and execution references for audit.
+
+## 5) Ray Connection Loss
 
 Symptoms:
 
@@ -182,7 +212,7 @@ Recovery:
 2. Restart workers after Ray is healthy.
 3. Verify pending tasks move back to `QUEUED`/`RUNNING`.
 
-## 5) Cancellation Stuck In CANCELLING
+## 6) Cancellation Stuck In CANCELLING
 
 Symptoms:
 
@@ -198,7 +228,7 @@ Recovery:
 1. Restart worker if cancellation loop is stalled.
 2. After restart, verify `CANCELLING -> CANCELLED` transitions complete.
 
-## 6) Oversized Results
+## 7) Oversized Results
 
 Symptoms:
 

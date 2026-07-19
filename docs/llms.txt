@@ -31,6 +31,7 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Queues](https://django-ray.readthedocs.io/en/latest/queues/)
 - [Configuration](https://django-ray.readthedocs.io/en/latest/configuration/)
 - [Settings reference](https://django-ray.readthedocs.io/en/latest/reference/settings/)
+- [Durable input storage](https://django-ray.readthedocs.io/en/latest/reference/input-storage/)
 - [API and UI integration](https://django-ray.readthedocs.io/en/latest/reference/api/)
 - [Kubernetes](https://django-ray.readthedocs.io/en/latest/deployment/kubernetes/)
 - [Operator runbook](https://django-ray.readthedocs.io/en/latest/runbook/)
@@ -39,6 +40,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 ## Source map
 
 - `src/django_ray/backends.py`: Django Tasks backend and result reconstruction.
+- `src/django_ray/input_storage.py`: versioned input envelopes, storage references,
+  integrity validation, and retention registration.
 - `src/django_ray/management/commands/django_ray_worker.py`: claims, leases, retries,
   mode selection, and reconciliation.
 - `src/django_ray/workflows.py`: workflow signature construction and execution.

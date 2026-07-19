@@ -310,6 +310,90 @@ setting bounds database traffic independently of workflow fan-out size.
 "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1
 ```
 
+## Durable Inputs
+
+### MAX_INLINE_INPUT_SIZE_BYTES
+
+- **Type**: `int | None`
+- **Default**: `None`
+- **Allowed**: `1024` through `104857600` bytes, or `None`
+
+Maximum UTF-8 byte size of the combined, versioned input envelope to keep inline.
+`None` disables spillover and preserves the legacy `args_json`/`kwargs_json` behavior.
+Enabling a threshold requires a retrievable `INPUT_STORAGE_BACKEND`.
+
+```python
+"MAX_INLINE_INPUT_SIZE_BYTES": 1024 * 1024
+```
+
+### INPUT_STORAGE_BACKEND
+
+- **Type**: `str | None`
+- **Default**: `None`
+- **Allowed**: `"filesystem"`, `"s3"`, `"gcs"`, or `None`
+
+Backend used for inputs larger than `MAX_INLINE_INPUT_SIZE_BYTES`. Digest-only storage
+is not supported because the worker must recover the original arguments.
+
+### INPUT_STORAGE_FILESYSTEM_PATH
+
+- **Type**: `str | None`
+- **Default**: `None`
+- **Required when**: `INPUT_STORAGE_BACKEND == "filesystem"`
+
+Root for content-addressed input envelopes. Use a shared volume for multi-host workers.
+
+```python
+"INPUT_STORAGE_FILESYSTEM_PATH": "/var/lib/django-ray/inputs"
+```
+
+### INPUT_STORAGE_S3_BUCKET
+
+- **Type**: `str | None`
+- **Default**: `None`
+- **Required when**: `INPUT_STORAGE_BACKEND == "s3"`
+
+S3 or S3-compatible bucket for durable input envelopes.
+
+### INPUT_STORAGE_S3_PREFIX
+
+- **Type**: `str`
+- **Default**: `"django-ray/inputs"`
+
+Authorized object-key prefix for S3 input payloads.
+
+### INPUT_STORAGE_S3_REGION
+
+- **Type**: `str | None`
+- **Default**: `None`
+
+Optional region passed to the S3 client.
+
+### INPUT_STORAGE_S3_ENDPOINT_URL
+
+- **Type**: `str | None`
+- **Default**: `None`
+
+Optional endpoint for an S3-compatible provider such as MinIO.
+
+### INPUT_STORAGE_GCS_BUCKET
+
+- **Type**: `str | None`
+- **Default**: `None`
+- **Required when**: `INPUT_STORAGE_BACKEND == "gcs"`
+
+Google Cloud Storage bucket for durable input envelopes.
+
+### INPUT_STORAGE_GCS_PREFIX
+
+- **Type**: `str`
+- **Default**: `"django-ray/inputs"`
+
+Authorized object-key prefix for GCS input payloads.
+
+See [Durable Input Storage](input-storage.md) for backend dependencies, execution
+validation, rollout ordering, retry behavior, and safe cleanup.
+
 ## Results
 
 ### MAX_RESULT_SIZE_BYTES
