@@ -17,6 +17,7 @@ nav = [
     { "Configuration" = "configuration.md" },
     { "Worker Modes" = "worker-modes.md" },
     { "Performance" = "performance.md" },
+    { "Observability" = "observability.md" },
     { "Compatibility" = "compatibility.md" },
     { "Tasks" = "tasks.md" },
     { "Ray-Native Workflows" = "workflows.md" },

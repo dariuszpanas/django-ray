@@ -42,6 +42,8 @@ django-ray bridges Django's built-in Tasks framework with Ray's distributed comp
   generic Ray cluster, with immutable environment identity per durable task
 - **Observable workflow graphs**: Track dependency edges, node progress, Ray
   execution identifiers, and correlated logs for custom monitoring UIs
+- **Operational observability**: Use versioned task services, bounded-cardinality
+  Prometheus metrics, and authenticated live updates in Django admin
 
 The repository includes a sample `testproject/` with a small landing page for exploring the bundled API,
 task stats, project links, and smoke-task trigger:

@@ -25,6 +25,7 @@ project resources, task stats, and a smoke-task trigger:
 - [Configuration](configuration.md) - All configuration options
 - [Worker Modes](worker-modes.md) - Understanding execution modes
 - [Performance](performance.md) - Choosing task boundaries, batching, and RuntimeEnv strategy
+- [Observability](observability.md) - Versioned services, metrics, and live admin updates
 - [Compatibility](compatibility.md) - Supported versions, CI policy, and platform limits
 - [Task Definition](tasks.md) - Defining and enqueueing tasks
 - [Queues](queues.md) - Working with task queues
