@@ -8,6 +8,7 @@ from django_ray.redaction import (
     redact_text,
     redact_value,
     result_metadata,
+    safe_json_dumps,
 )
 
 
@@ -56,3 +57,54 @@ def test_result_metadata_is_bounded() -> None:
     assert metadata["result_type"] == "builtins.dict"
     assert isinstance(metadata["result_size_bytes"], int)
     assert "value" not in str(metadata)
+
+
+def test_redaction_handles_depth_binary_values_and_exception_text() -> None:
+    nested: object = "leaf"
+    for _ in range(22):
+        nested = [nested]
+
+    redacted_nested = redact_value(nested)
+    while isinstance(redacted_nested, list):
+        redacted_nested = redacted_nested[0]
+    assert redacted_nested == "<max-depth>"
+    assert redact_value(b"binary-value").endswith(".bytes>")
+    assert redact_text(ValueError("password=secret")) == REDACTED
+    assert safe_json_dumps({"token": "secret", "number": 3}) == (
+        '{"token": "[REDACTED]", "number": 3}'
+    )
+
+
+def test_result_metadata_handles_unserializable_values(monkeypatch) -> None:
+    import django_ray.redaction as redaction
+
+    monkeypatch.setattr(
+        redaction.json, "dumps", lambda *_args, **_kwargs: (_ for _ in ()).throw(TypeError)
+    )
+
+    metadata = result_metadata(object())
+
+    assert metadata["result_type"] == "builtins.object"
+    assert metadata["result_size_bytes"] is None
+
+
+def test_configured_patterns_use_django_settings_and_accept_custom_string(monkeypatch) -> None:
+    import django_ray.conf.settings as ray_settings
+
+    monkeypatch.setattr(ray_settings, "get_settings", lambda: {"REDACT_PATTERNS": [r"private"]})
+
+    assert redact_text("private message") == REDACTED
+    assert redact_text("customer-id=42", patterns=r"customer-id") == REDACTED
+
+
+def test_configured_patterns_fall_back_when_settings_are_unavailable(monkeypatch) -> None:
+    import django_ray.conf.settings as ray_settings
+
+    monkeypatch.setattr(
+        ray_settings,
+        "get_settings",
+        lambda: (_ for _ in ()).throw(RuntimeError("settings unavailable")),
+    )
+
+    assert redact_text("password=secret") == REDACTED
+    assert redact_text(42) == "42"

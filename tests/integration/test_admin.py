@@ -9,7 +9,7 @@ import pytest
 from django.contrib import admin
 from django.test import RequestFactory, override_settings
 
-from django_ray.admin import RayTaskExecutionAdmin, TaskWorkerLeaseAdmin
+from django_ray.admin import ActiveWorkerFilter, RayTaskExecutionAdmin, TaskWorkerLeaseAdmin
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 
 
@@ -86,6 +86,60 @@ class TestRayTaskExecutionAdmin:
         assert "result-secret" not in rendered
         assert "error-secret" not in rendered
         assert "[REDACTED]" in rendered
+
+    def test_display_helpers_handle_empty_invalid_and_complete_values(self) -> None:
+        admin_obj = _task_admin()
+        task = RayTaskExecution.objects.create(
+            task_id="admin-display-helpers-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.SUCCEEDED,
+            args_json="",
+            kwargs_json='{"value": 1}',
+            result_data="not-json password=secret",
+            progress_data='{"step": 1}',
+            completion_data='{"success": true}',
+            error_message="password=error-secret",
+            error_traceback="password=traceback-secret",
+        )
+
+        assert admin_obj.args_json_display(task) == "-"
+        assert admin_obj.kwargs_json_display(task) == '{"value": 1}'
+        assert admin_obj.result_data_display(task) == "[REDACTED]"
+        assert admin_obj.progress_data_display(task) == '{"step": 1}'
+        assert admin_obj.completion_data_display(task) == '{"success": true}'
+        assert admin_obj.error_message_display(task) == "[REDACTED]"
+        assert admin_obj.error_traceback_display(task) == "[REDACTED]"
+
+        task.error_message = None
+        task.error_traceback = None
+        assert admin_obj.error_message_display(task) == "-"
+        assert admin_obj.error_traceback_display(task) == "-"
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            TaskState.QUEUED,
+            TaskState.RUNNING,
+            TaskState.SUCCEEDED,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+            TaskState.CANCELLING,
+            TaskState.LOST,
+        ],
+    )
+    def test_state_display_formats_each_known_state(self, state: str) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id=f"admin-state-{state}",
+            callable_path="testproject.tasks.add_numbers",
+            state=state,
+            args_json="[]",
+            kwargs_json="{}",
+        )
+
+        rendered = _task_admin().state_display(task)
+
+        assert state in rendered
+        assert "font-weight: bold" in rendered
 
     @override_settings(RAY_DASHBOARD_URL="http://ray.localhost:30080")
     def test_dashboard_links_respect_configured_dashboard_url(self) -> None:
@@ -253,6 +307,33 @@ class TestRayTaskExecutionAdmin:
         admin_obj.cancel_tasks(_request(), RayTaskExecution.objects.filter(pk=failed.pk))
         assert messages[-1] == "No queued or running tasks found in selection."
 
+    def test_cancel_tasks_continues_when_ray_job_cancellation_fails(self, monkeypatch) -> None:
+        admin_obj = _task_admin()
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj, "message_user", lambda request, msg: messages.append(str(msg))
+        )
+
+        task = RayTaskExecution.objects.create(
+            task_id="admin-cancel-failure-001",
+            callable_path="testproject.tasks.slow_task",
+            state=TaskState.RUNNING,
+            ray_job_id="raysubmit_cancel_failure",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+
+        class FailingRunner:
+            def cancel(self, handle) -> bool:
+                raise RuntimeError("Ray is unavailable")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FailingRunner)
+        admin_obj.cancel_tasks(_request(), RayTaskExecution.objects.filter(pk=task.pk))
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLING
+        assert messages[-1] == "Marked 1 task(s) for cancellation."
+
 
 @pytest.mark.django_db
 class TestTaskWorkerLeaseAdmin:
@@ -315,3 +396,51 @@ class TestTaskWorkerLeaseAdmin:
 
         assert admin_obj.has_add_permission(request) is False
         assert admin_obj.has_change_permission(request) is False
+
+    def test_lease_displays_actions_and_filter_variants(self, monkeypatch) -> None:
+        admin_obj = _lease_admin()
+        lease = TaskWorkerLease.objects.create(
+            worker_id="lease-display-worker",
+            hostname="host-d",
+            pid=4444,
+            queue_name="default",
+            last_heartbeat_at=datetime.now(UTC) - timedelta(hours=2, minutes=3),
+            is_active=True,
+        )
+        monkeypatch.setattr(admin_obj, "_is_heartbeat_expired", lambda _: False)
+        assert admin_obj.is_active_display_list(lease) is True
+        assert admin_obj.time_since_heartbeat(lease).endswith("h 3m ago")
+
+        inactive = TaskWorkerLease.objects.create(
+            worker_id="lease-inactive-worker",
+            hostname="host-e",
+            pid=5555,
+            queue_name="default",
+            is_active=False,
+        )
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj, "message_user", lambda request, msg: messages.append(str(msg))
+        )
+        admin_obj.mark_inactive(_request(), TaskWorkerLease.objects.filter(pk=inactive.pk))
+        admin_obj.delete_inactive(_request(), TaskWorkerLease.objects.filter(pk=lease.pk))
+        assert messages == [
+            "No active leases found in selection.",
+            "No inactive leases found in selection.",
+        ]
+
+        filter_obj = object.__new__(ActiveWorkerFilter)
+        monkeypatch.setattr(filter_obj, "value", lambda: "inactive")
+        assert list(filter_obj.lookups(_request(), admin_obj)) == [
+            ("active", "Active"),
+            ("inactive", "Inactive"),
+            ("all", "All"),
+        ]
+        assert list(filter_obj.queryset(_request(), TaskWorkerLease.objects.all())) == [inactive]
+        monkeypatch.setattr(filter_obj, "value", lambda: "all")
+        assert list(filter_obj.queryset(_request(), TaskWorkerLease.objects.all())) == [
+            lease,
+            inactive,
+        ]
+        monkeypatch.setattr(filter_obj, "value", lambda: None)
+        assert list(filter_obj.queryset(_request(), TaskWorkerLease.objects.all())) == [lease]
