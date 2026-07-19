@@ -32,6 +32,11 @@ Build:
 docker build -f Dockerfile.ray -t django-ray-worker:latest .
 ```
 
+The repository Dockerfiles use the committed `uv.lock` and pin the uv tool image to
+`0.9.18`. Production dependencies for the sample application (Gunicorn, Django Ninja,
+and WhiteNoise) come from the named `sample` project extra, so they are included in the
+locked dependency graph rather than installed ad hoc.
+
 ## Running Containers
 
 ### Django Web Server

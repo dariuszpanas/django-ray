@@ -264,8 +264,17 @@ generated `site/` directory into `$READTHEDOCS_OUTPUT/html`.
 
 Releases are automated via GitHub Actions:
 
-1. Update version in `pyproject.toml` and `src/django_ray/__init__.py`
-2. Update `docs/changelog.md`
+1. Update the same version in `pyproject.toml` and `src/django_ray/__init__.py`.
+2. Update `docs/changelog.md` and run the release checks locally:
+
+```bash
+uv run python scripts/validate_release.py vX.Y.Z
+uv build
+uv venv --clear
+uv pip install dist/*.whl
+uv run --no-sync python scripts/verify_wheel.py --version X.Y.Z
+```
+
 3. Create and push a tag:
 
 ```bash
@@ -273,11 +282,25 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-The release workflow will:
-- Build the package
-- Run tests
-- Publish to PyPI
-- Create GitHub release
+The workflow validates that the tag (or the manual `version` input) matches both
+package version sources before building. It then tests the installed wheel's metadata,
+migrations, management-command discovery, and expected package contents on every
+supported Python version before publishing.
+
+For a manual dispatch, enter the exact version already committed to the branch. Manual
+dispatches publish to TestPyPI; versioned tag pushes publish to PyPI and create the
+GitHub release.
+
+### Release failure recovery
+
+- If validation or build fails, fix the source or workflow and push a new commit; do not
+  move a tag to a different commit.
+- If a tag build fails before publishing, re-run the failed workflow after the fix or
+  push a new patch-version tag once the commit is ready.
+- PyPI versions are immutable. If publishing succeeds but a later test or GitHub release
+  step fails, keep the published version, re-run the failed downstream job, and use a
+  new version for any corrected artifacts. Never upload a replacement wheel under the
+  same version.
 
 ## Getting Help
 

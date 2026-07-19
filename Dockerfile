@@ -18,7 +18,7 @@ ARG PYTHON_VERSION=3.12
 FROM python:${PYTHON_VERSION}-slim AS builder
 
 # Install uv for fast dependency management
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -34,7 +34,7 @@ COPY pyproject.toml uv.lock ./
 # Install dependencies with postgres support
 # Note: We include dev dependencies because testproject requires django-ninja and whitenoise
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --extra postgres
+    uv sync --frozen --no-install-project --no-dev --extra postgres --extra sample
 
 # Copy source code
 COPY src/ src/
@@ -43,11 +43,7 @@ COPY README.md ./
 
 # Install the project itself
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --extra postgres
-
-# Install gunicorn for production
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install gunicorn
+    uv sync --frozen --no-dev --extra postgres --extra sample
 
 # =============================================================================
 # Stage 2: Runtime stage - minimal production image
