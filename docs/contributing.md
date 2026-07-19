@@ -42,32 +42,55 @@ Create branches from an up-to-date `main` and use lowercase kebab-case names:
 automated agents must not replace it with an unrelated `agent/`, `codex/`, or similar prefix. An
 explicit maintainer-requested name still takes precedence.
 
-Use Conventional Commit syntax for commits and PR titles:
+Use Conventional Commit syntax for commits and PR titles. Every commit also uses the canonical
+structured body:
 
 ```text
-feat: add runtime environment cache metrics
-fix(worker): preserve completion during timeout cancellation
-docs: clarify Ray Job worker selection
-chore(deps): update Ruff
+<type>[optional scope][!]: <imperative summary>
+
+## Summary
+
+- Describe the concrete durable change.
+- Explain the problem, invariant, or outcome that motivates it.
+
+## Validation
+
+- `<command>`: result
 ```
 
-Each commit must include a non-empty body explaining what changed and why. One-line commits are
-rejected so rebase-merged history remains descriptive. Wrap each commit-message line at 72 characters
-so history remains readable in narrow terminals.
+`## Summary` must be the first section and `## Validation` the last. Add focused sections such as
+`## Rationale`, `## Migration`, `## Compatibility`, or `## Release decision` between them when the
+commit needs that context. Every section must contain meaningful content. An unstructured bare body,
+template placeholder, iteration label, or development-only note such as "address review feedback"
+fails validation. When the header uses `!`, add a non-empty `BREAKING CHANGE:` footer below the
+Validation section. Wrap commit-message lines at 72 characters.
+
+Install the tracked template in each checkout or worktree:
+
+```bash
+git config extensions.worktreeConfig true
+git config --worktree commit.template "$(git rev-parse --show-toplevel)/.gitmessage"
+git config --worktree core.commentChar ";"
+```
+
+Worktree-specific configuration keeps linked worktrees pointed at their own tracked template. Git
+normally removes lines beginning with `#` as comments. Setting the comment character to `;` preserves
+the required `##` headings; the template uses `;` for instructions that Git should remove.
 
 The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
-every commit in the PR, including the body. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`,
-`perf`, `refactor`, `revert`, `style`, or
-`test`; an optional scope and `!` are allowed:
+every commit in the PR. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`,
+`revert`, `style`, or `test`; an optional scope and `!` are allowed:
 
 ```text
 <type>[optional scope][!]: <imperative summary>
 ```
 
-Commit-message lines may not exceed 72 characters. The check reports the offending commit and line.
+The check enforces the structured sections, meaningful content, and 72-character line limit. It
+reports the offending commit, section, or line.
 
-For example, `fix(worker): preserve task ownership` passes. Invalid titles or commit headers fail with
-the exact offending value and the expected format.
+For example, `fix(worker): preserve task ownership` is a valid header, but its commit still needs the
+structured Summary and Validation body. Invalid titles or commit headers fail with the exact offending
+value and the expected format.
 
 Before editing, inspect `git status --short`, the current branch, and `HEAD`. Preserve unrelated work,
 stage explicit paths instead of `git add .`, and review both the working and staged diffs. Repository
@@ -236,6 +259,21 @@ The `Commit Messages` workflow runs on `pull_request_target`, validates the PR t
 commit message, and reports a required status check without needing secrets from the PR. This repository
 is private, so use rebase auto-merge rather than merge queue: auto-merge waits for the protected checks
 and then applies the rebase method.
+
+Before each push and again before enabling auto-merge, inspect and validate the exact commit range that
+will be retained:
+
+```bash
+git fetch origin
+git log --format=fuller origin/main..HEAD
+uv run python scripts/check_conventional_commits.py --range origin/main..HEAD
+```
+
+Use `git rebase -i origin/main` to fold `fixup!`/`squash!` commits, CI repairs, review repairs,
+formatting-only follow-ups, and other development iterations into the logical commit they correct.
+After rewriting, push with `--force-with-lease`. Preserve genuinely independent changes as separate,
+focused commits with their own Summary and Validation sections. Validate the final PR title together
+with the range before enabling auto-merge.
 
 If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
 conflicts, run `uv run make ci`, and push. Auto-merge will recalculate the required checks. Maintainers

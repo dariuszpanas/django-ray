@@ -1,0 +1,16 @@
+<type>[optional scope][!]: <imperative summary>
+
+## Summary
+
+- <Describe the concrete durable change.>
+- <Explain the problem, invariant, or outcome that motivates it.>
+
+; Optional focused sections belong between Summary and Validation.
+; Examples: Rationale, Migration, Compatibility, or Release decision.
+
+## Validation
+
+- `<command>`: <result>
+
+; Add `BREAKING CHANGE: <impact and migration>` below Validation when
+; the header uses `!`. Add issue trailers such as `Closes #60` last.

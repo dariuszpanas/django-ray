@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No unreleased changes.
+### Changed
+
+- Commit-history validation now requires canonical Summary and Validation sections, rejects
+  development placeholders, and documents the final history review required before rebase merges.
 
 ## [0.3.1] - 2026-07-18
 
