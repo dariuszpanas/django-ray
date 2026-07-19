@@ -16,6 +16,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   complete backend configuration, task definition, worker startup, and result lookup.
 - [Performance](https://django-ray.readthedocs.io/en/latest/performance/): choose
   durable task boundaries, Ray Core versus Ray Job, batching, and RuntimeEnv strategy.
+- [Observability](https://django-ray.readthedocs.io/en/latest/observability/): use
+  versioned task services, bounded metrics, live admin updates, and optional Ray data.
 - [Compatibility](https://django-ray.readthedocs.io/en/latest/compatibility/):
   supported Python, Django, Ray, CI, and platform policy.
 - [Tasks](https://django-ray.readthedocs.io/en/latest/tasks/): Django task arguments,
@@ -49,7 +51,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   and local-path preparation.
 - `src/django_ray/runner/ray_core.py`: low-overhead Ray Core submission.
 - `src/django_ray/runner/ray_job.py`: Ray Job submission and reconciliation.
-- `src/django_ray/observability.py`: graph, Ray state, and bounded log helpers.
+- `src/django_ray/observability.py`: versioned durable and optional live-Ray services.
+- `src/django_ray/metrics.py`: bounded-cardinality Prometheus rendering.
 - `testproject/apps/cluster_tasks/`: executable workflow and RuntimeEnv examples.
 
 ## Semantic constraints

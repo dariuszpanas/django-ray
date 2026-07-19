@@ -392,8 +392,13 @@ for state in TaskState:
 Metrics are available at `/api/metrics`:
 
 ```bash
-curl http://localhost:30080/api/metrics
+curl -H "Authorization: Bearer $DJANGO_API_TOKEN" \
+  http://localhost:30080/api/metrics
 ```
+
+The bundled Prometheus deployment mounts only `DJANGO_API_TOKEN` from the application
+Secret and uses it as a bearer credential for this scrape. Replace the base placeholder
+before deployment and rotate it with the same care as other service credentials.
 
 ## Troubleshooting
 

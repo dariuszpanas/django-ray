@@ -36,6 +36,17 @@ From `/api/metrics` in the example project:
 - `django_ray_tasks_queued`
 - `django_ray_tasks_running`
 - `django_ray_queue_depth{queue="..."}`
+- `django_ray_queue_wait_seconds_*`
+- `django_ray_claim_latency_seconds_*`
+- `django_ray_execution_duration_seconds_*`
+- `django_ray_retries_recorded`
+- `django_ray_failures_recorded`
+- `django_ray_timeouts_recorded`
+- `django_ray_worker_leases{status="..."}`
+
+The example endpoint requires its bearer token. Production deployments should use a
+dedicated authenticated scrape identity or a network-restricted adapter. Queue series
+appear only for the application's explicit allowlist.
 
 Expected behavior:
 
@@ -43,6 +54,7 @@ Expected behavior:
 - incident signal: `queued` rises while `running` stays near zero.
 - incident signal: `running` grows and does not drain.
 - incident signal: `failed`/`lost` rises quickly with the same callable path.
+- incident signal: stale leases rise while claim latency and queue depth increase.
 
 ## Safety Model
 

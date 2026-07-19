@@ -132,7 +132,8 @@ for depth in depths:
     print(f"{depth['queue_name']}: {depth['count']}")
 ```
 
-The bundled testproject also exposes Prometheus queue-depth metrics. Those HTTP
+The package Prometheus renderer exposes allowlisted queue-depth metrics. The bundled
+testproject mounts those metrics behind its bearer-authenticated HTTP adapter. Those HTTP
 endpoints belong to the example project, not the reusable django-ray package.
 
 ## Choosing Queue Boundaries

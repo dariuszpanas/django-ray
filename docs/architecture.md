@@ -255,10 +255,13 @@ rolling back, disable spillover and drain all tasks that already have a referenc
 ## Observability Surfaces
 
 - Django admin for task/lease inspection and operations.
+- Authenticated, polling-based live task state and workflow progress in the task admin.
+- Versioned package services for task, queue, attempt, workflow, and bounded live-Ray data.
+- Package-owned Prometheus rendering with explicit queue-label allowlists and fixed labels.
 - Worker logs for claim/submit/reconcile/retry events.
 - Structured workflow-leaf logs correlated by durable task, workflow node, and Ray IDs.
 - Optional Ray State API lookup for live task attempts and bounded stdout/stderr tails.
-- Optional metrics/API surfaces in `testproject` example app.
+- Optional authenticated HTTP adapters in the `testproject` example app.
 
 ## See Also
 

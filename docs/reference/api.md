@@ -1,6 +1,9 @@
 # API Reference
 
-django-ray is a library that provides a Django Tasks backend - it does **not** include a REST API. The API endpoints described below are part of the **testproject** included in this repository for demonstration purposes.
+django-ray is a library that provides a Django Tasks backend and supported, versioned
+Python observability services. It does **not** prescribe a REST framework or mount a
+general REST API. The HTTP endpoints below are part of the **testproject** and adapt the
+package services with Django Ninja and bearer authentication.
 
 ## What django-ray Provides
 
@@ -11,6 +14,8 @@ django-ray provides:
 - `TaskWorkerLease` model - Worker coordination
 - `django_ray_worker` management command - Task processing
 - Django Admin integration - Task monitoring
+- Versioned task, queue, attempt, workflow, and live-Ray observability services
+- Reusable bounded-cardinality Prometheus rendering
 
 ## testproject API (Example Only)
 
@@ -77,10 +82,14 @@ def request_cancellation(execution_id: int) -> None:
 
 For a complete REST API example, see `testproject/api.py` in the repository.
 
-The reusable library helpers in `django_ray.observability` decode durable graph
-snapshots, locate nodes, and optionally query Ray's live State and Log APIs.
-Treat node logs as sensitive operational data and protect these example endpoints
-with the same authorization used for task arguments and results.
+The reusable library helpers in `django_ray.observability` expose schema-versioned task,
+queue, attempt, and workflow snapshots, then optionally query Ray's live State and Log
+APIs. `django_ray.metrics.render_prometheus_metrics()` supplies the package-owned text
+format used by the sample endpoint. Treat node logs and operational metadata as
+sensitive and protect every adapter with authorization appropriate to the deployment.
+
+See [Observability Services](../observability.md) for the supported Python schemas,
+metrics, degradation behavior, and security boundary.
 
 ## See Also
 

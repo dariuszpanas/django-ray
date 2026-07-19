@@ -20,6 +20,7 @@ django-ray is a **library** that provides:
 - [Configuration](configuration.md) - All configuration options
 - [Worker Modes](worker-modes.md) - Understanding execution modes
 - [Performance](performance.md) - Choosing execution and batching strategies
+- [Observability](observability.md) - Versioned services, metrics, and live admin updates
 - [Compatibility](compatibility.md) - Supported versions and dependency policy
 - [Task Definition](tasks.md) - Defining and enqueueing tasks
 - [Queues](queues.md) - Working with task queues
