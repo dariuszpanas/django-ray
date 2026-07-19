@@ -69,6 +69,106 @@ class TestWorkerSync:
         assert task.finished_at is not None
         assert task.claimed_by_worker == "test-worker"
 
+    def test_worker_processes_async_task_with_normal_lifecycle(self, setup_django_env):
+        """Sync mode awaits a coroutine before persisting its successful result."""
+        from django_ray.management.commands.django_ray_worker import Command
+
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-async-success-001",
+            callable_path="testproject.tasks.async_add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[8, 13]",
+            kwargs_json="{}",
+        )
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data == "21"
+        assert task.error_message is None
+        assert task.finished_at is not None
+
+    def test_worker_retries_underlying_async_exception(
+        self,
+        setup_django_env,
+        settings,
+    ):
+        """The coroutine's ValueError reaches the ordinary retry policy."""
+        from django_ray.management.commands.django_ray_worker import Command
+        from django_ray.models import TaskAttempt
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "MAX_TASK_ATTEMPTS": 3,
+            "RETRY_BACKOFF_SECONDS": 0,
+            "RETRY_EXCEPTION_DENYLIST": ["testproject.tasks.NoRetryError"],
+        }
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-async-retry-001",
+            callable_path="testproject.tasks.async_failing_task",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.QUEUED
+        assert task.attempt_number == 2
+        attempt = TaskAttempt.objects.get(execution=task, attempt_number=1)
+        assert attempt.state == TaskState.FAILED
+        assert attempt.error_message == "Async task requested a retryable failure"
+
+    def test_worker_denylist_uses_underlying_async_exception(
+        self,
+        setup_django_env,
+        settings,
+    ):
+        """A denylisted exception raised after await remains permanently failed."""
+        from django_ray.management.commands.django_ray_worker import Command
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "MAX_TASK_ATTEMPTS": 3,
+            "RETRY_BACKOFF_SECONDS": 0,
+            "RETRY_EXCEPTION_DENYLIST": ["testproject.tasks.NoRetryError"],
+        }
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-async-no-retry-001",
+            callable_path="testproject.tasks.async_failing_task",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[]",
+            kwargs_json='{"no_retry": true}',
+        )
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.error_message == "Async task requested a permanent failure"
+        assert task.finished_at is not None
+
     def test_worker_executes_external_input_without_rewriting_payload(
         self, setup_django_env, settings, tmp_path
     ):
