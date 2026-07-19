@@ -5,7 +5,7 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install format fix lint typecheck test test-unit test-integration test-cov check ci build clean help
+.PHONY: all install format fix lint typecheck test test-unit test-integration test-testproject test-cov check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
@@ -19,6 +19,7 @@
 COVERAGE_GLOBAL_MIN ?= 95
 COVERAGE_WORKER_MIN ?= 90
 COVERAGE_RAY_JOB_MIN ?= 90
+COVERAGE_TESTPROJECT_MIN ?= 80
 
 # =============================================================================
 # Development
@@ -60,6 +61,18 @@ test-unit:
 test-integration:
 	pytest tests/integration/ -v
 
+# Validate the bundled sample project's user-facing boundary
+test-testproject:
+	python testproject/manage.py check
+	pytest tests/integration/test_api.py \
+		tests/unit/test_sample_security.py \
+		tests/unit/test_testproject_workflows.py \
+		--cov=testproject.api \
+		--cov=testproject.views \
+		--cov=testproject.urls \
+		--cov-report=term \
+		--cov-fail-under=$(COVERAGE_TESTPROJECT_MIN)
+
 # Run tests with coverage
 test-cov:
 	pytest -m "not live_cluster" --cov=src --cov-report=html --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
@@ -81,6 +94,7 @@ ci:
 	pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
+	$(MAKE) test-testproject
 	zensical build --strict --clean
 	uv build
 	@echo "All CI checks passed!"
@@ -172,6 +186,7 @@ help:
 	@echo "  test           - Run all tests"
 	@echo "  test-unit      - Run unit tests only"
 	@echo "  test-integration - Run integration tests only"
+	@echo "  test-testproject - Validate the bundled sample project"
 	@echo "  test-cov       - Run tests with coverage"
 	@echo "  docs-build     - Build Zensical site"
 	@echo "  docs-build-strict - Build Zensical site (strict mode)"

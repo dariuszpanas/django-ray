@@ -121,6 +121,18 @@ uv run make test-cov
 checks for the current interpreter. GitHub Actions additionally repeats tests across supported Python
 versions and minimum/latest dependency resolutions.
 
+### Testproject Smoke Test
+
+The bundled `testproject` is validated as an application boundary rather than only as task fixtures:
+
+```bash
+uv run make test-testproject
+```
+
+This runs Django's system checks, the sample API/security/workflow tests, and requires at least 80%
+coverage across the user-facing API, landing view, and URL configuration. CI runs it as the
+`Testproject Smoke` job before building the package.
+
 ### Live Cluster Fault Tests (Opt-In)
 
 `tests/integration/test_live_failure_injection.py` runs against a real Ray cluster and is skipped by default.
