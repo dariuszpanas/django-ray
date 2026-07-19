@@ -42,6 +42,7 @@ nav = [
   { "Development" = [
     { "Contributing" = "contributing.md" },
     { "Architecture" = "architecture.md" },
+    { "Ray Serve Boundary" = "design/ray-serve-boundary.md" },
     { "Changelog" = "changelog.md" },
   ] },
 ]
