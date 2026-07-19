@@ -105,9 +105,13 @@ class RayCoreRunner(BaseRunner):
 
         from django_ray.runtime.serialization import serialize_args
 
-        # Serialize arguments
-        args_json = serialize_args(list(args))
-        kwargs_json = serialize_args(kwargs)
+        input_reference = getattr(task_execution, "input_reference", None)
+        if input_reference:
+            args_json = task_execution.args_json
+            kwargs_json = task_execution.kwargs_json
+        else:
+            args_json = serialize_args(list(args))
+            kwargs_json = serialize_args(kwargs)
 
         # Extract task name for Ray dashboard visibility
         task_name = callable_path.split(".")[-1] if callable_path else "task"
@@ -145,6 +149,7 @@ class RayCoreRunner(BaseRunner):
             task_execution.pk,
             runtime_env.profile,
             runtime_env.digest,
+            input_reference,
         )
 
         # Get Ray job ID (the worker's client connection job ID)

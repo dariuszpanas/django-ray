@@ -67,7 +67,7 @@ def failing_task_no_retry() -> None:
 
 
 @task
-def intermittent_task(execution_id: int, fail_until_attempt: int = 3) -> dict:
+def intermittent_task(fail_until_attempt: int = 3) -> dict:
     """Task that fails until a certain attempt number, then succeeds.
 
     NOTE: This task will auto-retry based on MAX_TASK_ATTEMPTS setting.
@@ -75,15 +75,18 @@ def intermittent_task(execution_id: int, fail_until_attempt: int = 3) -> dict:
     MAX_TASK_ATTEMPTS=1 in your settings.
 
     Args:
-        execution_id: The RayTaskExecution.pk to look up attempt number
         fail_until_attempt: Succeed on this attempt number (default: 3)
 
     Returns:
         dict with attempt info on success
     """
     from django_ray.models import RayTaskExecution
+    from django_ray.runtime.context import get_current_task_execution_pk
 
     # Get current attempt from database
+    execution_id = get_current_task_execution_pk()
+    if execution_id is None:
+        raise RuntimeError("intermittent_task requires a durable task execution context")
     execution = RayTaskExecution.objects.get(pk=execution_id)
     current_attempt = execution.attempt_number
 

@@ -85,6 +85,17 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
                 f"django-ray: {name} must be an integer between {min_val} and {max_val}"
             )
 
+    max_inline_input_size = config.get("MAX_INLINE_INPUT_SIZE_BYTES")
+    if max_inline_input_size is not None and (
+        type(max_inline_input_size) is not int
+        or max_inline_input_size < 1024
+        or max_inline_input_size > 100 * 1024 * 1024
+    ):
+        raise ImproperlyConfigured(
+            "django-ray: MAX_INLINE_INPUT_SIZE_BYTES must be None or an integer "
+            "between 1024 and 104857600"
+        )
+
     polling_settings = [
         ("WORKER_POLL_INTERVAL_SECONDS", 0.01, 10.0),
         ("WORKER_POLL_MAX_INTERVAL_SECONDS", 0.01, 60.0),
@@ -181,6 +192,47 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
     if result_storage_backend == "gcs" and not config.get("RESULT_STORAGE_GCS_BUCKET"):
         raise ImproperlyConfigured(
             "django-ray: RESULT_STORAGE_GCS_BUCKET is required when RESULT_STORAGE_BACKEND='gcs'"
+        )
+
+    input_storage_backend = config.get("INPUT_STORAGE_BACKEND")
+    valid_input_storage_backends = (None, "filesystem", "s3", "gcs")
+    if input_storage_backend not in valid_input_storage_backends:
+        raise ImproperlyConfigured(
+            "django-ray: INPUT_STORAGE_BACKEND must be None or one of "
+            "('filesystem', 's3', 'gcs'); digest-only storage cannot recover task inputs"
+        )
+    if max_inline_input_size is not None and input_storage_backend is None:
+        raise ImproperlyConfigured(
+            "django-ray: INPUT_STORAGE_BACKEND must be configured when "
+            "MAX_INLINE_INPUT_SIZE_BYTES enables spillover"
+        )
+
+    input_string_settings = (
+        "INPUT_STORAGE_FILESYSTEM_PATH",
+        "INPUT_STORAGE_S3_BUCKET",
+        "INPUT_STORAGE_S3_PREFIX",
+        "INPUT_STORAGE_S3_REGION",
+        "INPUT_STORAGE_S3_ENDPOINT_URL",
+        "INPUT_STORAGE_GCS_BUCKET",
+        "INPUT_STORAGE_GCS_PREFIX",
+    )
+    for name in input_string_settings:
+        value = config.get(name)
+        if value is not None and not isinstance(value, str):
+            raise ImproperlyConfigured(f"django-ray: {name} must be a string or None")
+
+    if input_storage_backend == "filesystem" and not config.get("INPUT_STORAGE_FILESYSTEM_PATH"):
+        raise ImproperlyConfigured(
+            "django-ray: INPUT_STORAGE_FILESYSTEM_PATH is required when "
+            "INPUT_STORAGE_BACKEND='filesystem'"
+        )
+    if input_storage_backend == "s3" and not config.get("INPUT_STORAGE_S3_BUCKET"):
+        raise ImproperlyConfigured(
+            "django-ray: INPUT_STORAGE_S3_BUCKET is required when INPUT_STORAGE_BACKEND='s3'"
+        )
+    if input_storage_backend == "gcs" and not config.get("INPUT_STORAGE_GCS_BUCKET"):
+        raise ImproperlyConfigured(
+            "django-ray: INPUT_STORAGE_GCS_BUCKET is required when INPUT_STORAGE_BACKEND='gcs'"
         )
 
     redact_patterns = config.get("REDACT_PATTERNS")

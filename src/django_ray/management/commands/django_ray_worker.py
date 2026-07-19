@@ -35,7 +35,7 @@ from django_ray.runner.reconciliation import (
     mark_task_lost,
     mark_task_timed_out,
 )
-from django_ray.runner.retry import should_retry
+from django_ray.runner.retry import RetryDecision, should_retry
 
 
 class Command(BaseCommand):
@@ -653,6 +653,9 @@ class Command(BaseCommand):
 
         if not isinstance(result.get("error"), str):
             return False
+        retryable = result.get("retryable")
+        if retryable is not None and not isinstance(retryable, bool):
+            return False
         return all(
             value is None or isinstance(value, str)
             for key in ("traceback", "exception_type")
@@ -921,6 +924,9 @@ class Command(BaseCommand):
                 callable_path=task.callable_path,
                 serialized_args=task.args_json,
                 serialized_kwargs=task.kwargs_json,
+                task_execution_pk=task.pk,
+                input_reference=getattr(task, "input_reference", None),
+                ray_job_driver=False,
             )
             result = json.loads(result_json)
 
@@ -942,6 +948,7 @@ class Command(BaseCommand):
                     error_message=result["error"],
                     error_traceback=result.get("traceback"),
                     exception_type=result.get("exception_type"),
+                    retryable=result.get("retryable"),
                 )
 
         except Exception as e:
@@ -1003,6 +1010,7 @@ class Command(BaseCommand):
         error_message: str,
         error_traceback: str | None = None,
         exception_type: str | None = None,
+        retryable: bool | None = None,
         *,
         expected_ray_job_id: str | None = None,
         expected_execution_generation: int | None = None,
@@ -1014,9 +1022,14 @@ class Command(BaseCommand):
             error_message: The error message.
             error_traceback: The full traceback (optional).
             exception_type: The exception class name (optional).
+            retryable: Explicit executor decision for permanent input failures.
         """
         # Check if we should retry
-        retry_decision = should_retry(task, exception_type)
+        retry_decision = (
+            RetryDecision(should_retry=False, reason="Executor marked failure non-retryable")
+            if retryable is False
+            else should_retry(task, exception_type)
+        )
 
         handled = record_failure(
             task,
@@ -1075,8 +1088,12 @@ class Command(BaseCommand):
             self.ray_core_runner = RayCoreRunner()
 
         try:
-            args = deserialize_args(task.args_json)
-            kwargs = deserialize_args(task.kwargs_json)
+            if task.input_reference:
+                args: Any = ()
+                kwargs: Any = {}
+            else:
+                args = deserialize_args(task.args_json)
+                kwargs = deserialize_args(task.kwargs_json)
 
             handle = self.ray_core_runner.submit(
                 task_execution=task,
@@ -1183,6 +1200,7 @@ class Command(BaseCommand):
                         error_message=result.get("error", "Unknown error"),
                         error_traceback=result.get("traceback"),
                         exception_type=result.get("exception_type"),
+                        retryable=result.get("retryable"),
                     )
 
             except RayTaskExecution.DoesNotExist:
@@ -1201,8 +1219,12 @@ class Command(BaseCommand):
 
         try:
             runner = RayJobRunner()
-            args = deserialize_args(task.args_json)
-            kwargs = deserialize_args(task.kwargs_json)
+            if task.input_reference:
+                args: Any = ()
+                kwargs: Any = {}
+            else:
+                args = deserialize_args(task.args_json)
+                kwargs = deserialize_args(task.kwargs_json)
 
             handle = runner.submit(
                 task_execution=task,
@@ -1399,6 +1421,7 @@ class Command(BaseCommand):
                     error_message=result["error"],
                     error_traceback=result.get("traceback"),
                     exception_type=result.get("exception_type"),
+                    retryable=result.get("retryable"),
                     expected_ray_job_id=ray_job_id,
                     expected_execution_generation=task.execution_generation,
                 )

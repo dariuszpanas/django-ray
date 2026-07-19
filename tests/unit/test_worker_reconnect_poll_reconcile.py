@@ -289,6 +289,37 @@ class TestWorkerReconnectPollReconcile:
         assert task.ray_job_id == "ray_core:1"
         assert task.ray_address == "ray://cluster:10001"
 
+    def test_submit_task_to_ray_core_preserves_external_input_reference(self, monkeypatch) -> None:
+        reference = "resultfs://sha256/" + "a" * 64 + "?rel=aa/input.json&bytes=4"
+        task = RayTaskExecution.objects.create(
+            task_id="reconnect-core-reference-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="null",
+            kwargs_json="null",
+            input_reference=reference,
+        )
+        cmd = _make_command()
+        captured: dict[str, Any] = {}
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+
+        def submit(**kwargs: Any) -> SubmissionHandle:
+            captured.update(kwargs)
+            return SubmissionHandle(
+                ray_job_id="ray_core:reference",
+                ray_address="ray://cluster:10001",
+                submitted_at=datetime.now(UTC),
+            )
+
+        cmd.ray_core_runner = cast(Any, SimpleNamespace(submit=submit))
+
+        cmd.submit_task_to_ray_core(task)
+
+        assert captured["args"] == ()
+        assert captured["kwargs"] == {}
+        assert captured["task_execution"].input_reference == reference
+
     def test_submit_task_to_ray_core_submit_exception_routes_failure(self, monkeypatch) -> None:
         task = RayTaskExecution.objects.create(
             task_id="reconnect-core-submit-failure-001",
@@ -555,6 +586,37 @@ class TestWorkerReconnectPollReconcile:
         assert task.ray_job_id == "raysubmit_coverage_001"
         assert task.ray_address == "ray://cluster:10001"
         assert cmd.active_tasks[task.pk] == "raysubmit_coverage_001"
+
+    def test_submit_task_to_ray_preserves_external_input_reference(self, monkeypatch) -> None:
+        reference = "s3://inputs/django-ray/inputs/aa/input.json?bytes=4"
+        task = RayTaskExecution.objects.create(
+            task_id="ray-job-submit-reference-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="null",
+            kwargs_json="null",
+            input_reference=reference,
+        )
+        cmd = _make_command()
+        captured: dict[str, Any] = {}
+
+        class FakeRunner:
+            def submit(self, **kwargs: Any) -> SubmissionHandle:
+                captured.update(kwargs)
+                return SubmissionHandle(
+                    ray_job_id="raysubmit_reference_001",
+                    ray_address="ray://cluster:10001",
+                    submitted_at=datetime.now(UTC),
+                )
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        cmd.submit_task_to_ray(task)
+
+        assert captured["args"] == ()
+        assert captured["kwargs"] == {}
+        assert captured["task_execution"].input_reference == reference
 
     def test_reconcile_tasks_returns_early_for_sync_or_empty(self) -> None:
         cmd = _make_command()
@@ -1014,6 +1076,7 @@ class TestWorkerReconnectPollReconcile:
                 "error_message": "task exploded",
                 "error_traceback": "trace",
                 "exception_type": "ValueError",
+                "retryable": None,
                 "expected_ray_job_id": "raysubmit_failure_envelope_001",
                 "expected_execution_generation": 0,
             }

@@ -63,6 +63,27 @@ def test_execute_django_task_remote_logs_bounded_success_metadata(monkeypatch, c
     assert "result_type" in captured.out
 
 
+def test_execute_django_task_remote_forwards_input_reference(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_execute(*args, **kwargs) -> str:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return json.dumps({"success": True, "result": None})
+
+    monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", fake_execute)
+
+    execute_django_task_remote(
+        "tests.fake",
+        "null",
+        "null",
+        14,
+        input_reference="resultfs://input",
+    )
+
+    assert captured["kwargs"] == {"input_reference": "resultfs://input"}
+
+
 def test_execute_workflow_step_bootstraps_and_reports_completion(monkeypatch) -> None:
     bootstrapped: list[bool] = []
     monkeypatch.setattr(

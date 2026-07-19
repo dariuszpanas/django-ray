@@ -19,6 +19,13 @@ class TaskState(models.TextChoices):
     LOST = "LOST", "Lost"
 
 
+class InputPayloadState(models.TextChoices):
+    """Retention state for one durable external task-input payload."""
+
+    ACTIVE = "ACTIVE", "Active"
+    PURGED = "PURGED", "Purged"
+
+
 class CancellationStatus(models.TextChoices):
     """Outcome of a remote cancellation request."""
 
@@ -149,6 +156,13 @@ class RayTaskExecution(models.Model):
         default="{}",
         help_text="JSON-serialized keyword arguments",
     )
+    input_reference = models.CharField(
+        max_length=500,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Reference to a durable external task-input envelope",
+    )
 
     # Results
     result_data = models.TextField(
@@ -220,6 +234,40 @@ class RayTaskExecution(models.Model):
 
     def __str__(self) -> str:
         return f"{self.callable_path} ({self.state})"
+
+
+class TaskInputPayload(models.Model):
+    """Durable registry and cleanup tombstone for a shared input payload."""
+
+    reference = models.CharField(max_length=500, primary_key=True)
+    backend = models.CharField(max_length=32)
+    digest = models.CharField(max_length=64, db_index=True)
+    size_bytes = models.PositiveBigIntegerField()
+    envelope_version = models.PositiveSmallIntegerField()
+    state = models.CharField(
+        max_length=20,
+        choices=InputPayloadState.choices,
+        default=InputPayloadState.ACTIVE,
+        db_index=True,
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+    last_used_at = models.DateTimeField(default=timezone.now, db_index=True)
+    purged_at = models.DateTimeField(null=True, blank=True)
+    cleanup_error = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["created_at", "reference"]
+        indexes = [
+            models.Index(
+                fields=["state", "last_used_at"],
+                name="ray_input_cleanup_idx",
+            )
+        ]
+        verbose_name = "Task Input Payload"
+        verbose_name_plural = "Task Input Payloads"
+
+    def __str__(self) -> str:
+        return f"{self.backend} input {str(self.digest)[:12]} ({self.state})"
 
 
 class TaskAttempt(models.Model):

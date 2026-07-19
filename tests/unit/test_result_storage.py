@@ -39,6 +39,7 @@ class TestDigestResultStorage:
     def test_load_returns_none(self) -> None:
         storage = DigestResultStorage()
         assert storage.load(reference="oversize://sha256/abc?bytes=1") is None
+        assert storage.delete(reference="oversize://sha256/abc?bytes=1") is None
 
 
 @pytest.mark.parametrize(
@@ -74,6 +75,21 @@ class TestFilesystemResultStorage:
 
         assert reference_one == reference_two
         assert len(list(tmp_path.rglob("*.json"))) == 1
+
+    def test_delete_removes_payload_and_wraps_errors(self, monkeypatch, tmp_path) -> None:
+        storage = FilesystemResultStorage(tmp_path)
+        reference = storage.store(serialized_result="payload")
+
+        storage.delete(reference=reference)
+        assert list(tmp_path.rglob("*.json")) == []
+
+        monkeypatch.setattr(
+            Path,
+            "unlink",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("locked")),
+        )
+        with pytest.raises(ResultStorageError, match="Failed to delete filesystem"):
+            storage.delete(reference=reference)
 
     def test_load_rejects_unsafe_reference(self, tmp_path) -> None:
         storage = FilesystemResultStorage(tmp_path)
@@ -126,6 +142,9 @@ class TestS3ResultStorage:
             def get_object(self, **kwargs):
                 data = objects[(kwargs["Bucket"], kwargs["Key"])]
                 return {"Body": SimpleNamespace(read=lambda: data)}
+
+            def delete_object(self, **kwargs):
+                objects.pop((kwargs["Bucket"], kwargs["Key"]), None)
 
         return Client()
 
@@ -202,6 +221,19 @@ class TestS3ResultStorage:
         assert reference.startswith("s3://bucket/")
         assert "django-ray/results" not in reference
 
+    def test_delete_removes_object_and_wraps_errors(self) -> None:
+        storage = S3ResultStorage(bucket="bucket", client=self._make_client())
+        reference = storage.store(serialized_result="payload")
+        storage.delete(reference=reference)
+        with pytest.raises(ResultStorageError, match="Failed to load"):
+            storage.load(reference=reference)
+
+        storage.client = SimpleNamespace(
+            delete_object=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("denied"))
+        )
+        with pytest.raises(ResultStorageError, match="Failed to delete payload from S3"):
+            storage.delete(reference=reference)
+
 
 class TestGCSResultStorage:
     """Tests for GCS-backed result storage."""
@@ -220,6 +252,9 @@ class TestGCSResultStorage:
 
             def download_as_bytes(self) -> bytes:
                 return objects[(self.bucket_name, self.key)]
+
+            def delete(self) -> None:
+                objects.pop((self.bucket_name, self.key), None)
 
         class Bucket:
             def __init__(self, name: str) -> None:
@@ -294,6 +329,18 @@ class TestGCSResultStorage:
 
         with pytest.raises(ResultStorageError, match="Unsupported GCS"):
             storage.load(reference="https://example.com/result")
+
+    def test_delete_removes_object_and_wraps_errors(self) -> None:
+        storage = GCSResultStorage(bucket="bucket", client=self._make_client())
+        reference = storage.store(serialized_result="payload")
+        storage.delete(reference=reference)
+        with pytest.raises(ResultStorageError, match="Failed to load"):
+            storage.load(reference=reference)
+
+        blob = SimpleNamespace(delete=lambda: (_ for _ in ()).throw(RuntimeError("denied")))
+        storage.client = SimpleNamespace(bucket=lambda name: SimpleNamespace(blob=lambda key: blob))
+        with pytest.raises(ResultStorageError, match="Failed to delete payload from GCS"):
+            storage.delete(reference=reference)
 
 
 class TestResultStorageFactory:

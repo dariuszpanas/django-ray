@@ -69,6 +69,48 @@ class TestWorkerSync:
         assert task.finished_at is not None
         assert task.claimed_by_worker == "test-worker"
 
+    def test_worker_executes_external_input_without_rewriting_payload(
+        self, setup_django_env, settings, tmp_path
+    ):
+        from django_ray.backends import RayTaskBackend
+        from django_ray.management.commands.django_ray_worker import Command
+        from django_ray.models import TaskInputPayload
+        from testproject.tasks import echo_task
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "MAX_INLINE_INPUT_SIZE_BYTES": 1024,
+            "INPUT_STORAGE_BACKEND": "filesystem",
+            "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+        }
+        backend = RayTaskBackend(
+            "default",
+            {"QUEUES": ["default"], "OPTIONS": {"RAY_ADDRESS": "auto"}},
+        )
+        large_value = "x" * 2048
+        result = backend.enqueue(echo_task, args=(large_value,), kwargs={"key": "value"})
+        task = RayTaskExecution.objects.get(task_id=result.id)
+        reference = task.input_reference
+
+        assert reference is not None
+        assert task.args_json == task.kwargs_json == "null"
+        assert TaskInputPayload.objects.filter(reference=reference).exists()
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.input_reference == reference
+        assert backend.get_result(result.id).return_value == {
+            "args": [large_value],
+            "kwargs": {"key": "value"},
+        }
+
     def test_worker_success_clears_previous_attempt_failure_metadata(self, setup_django_env):
         """A successful retry must not expose the previous attempt's diagnostics."""
         from django_ray.management.commands.django_ray_worker import Command

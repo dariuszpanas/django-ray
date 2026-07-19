@@ -286,6 +286,66 @@ class TestValidateSettings:
         )
 
     @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"MAX_INLINE_INPUT_SIZE_BYTES": 100}, "MAX_INLINE_INPUT_SIZE_BYTES"),
+            ({"MAX_INLINE_INPUT_SIZE_BYTES": 1024}, "INPUT_STORAGE_BACKEND"),
+            ({"INPUT_STORAGE_BACKEND": "digest"}, "digest-only"),
+            (
+                {
+                    "INPUT_STORAGE_BACKEND": "filesystem",
+                    "INPUT_STORAGE_FILESYSTEM_PATH": 123,
+                },
+                "must be a string or None",
+            ),
+            ({"INPUT_STORAGE_BACKEND": "filesystem"}, "INPUT_STORAGE_FILESYSTEM_PATH"),
+            ({"INPUT_STORAGE_BACKEND": "s3"}, "INPUT_STORAGE_S3_BUCKET"),
+            ({"INPUT_STORAGE_BACKEND": "gcs"}, "INPUT_STORAGE_GCS_BUCKET"),
+        ],
+    )
+    def test_validate_input_storage_rejects_incomplete_configuration(
+        self,
+        overrides: dict[str, object],
+        message: str,
+    ) -> None:
+        with pytest.raises(ImproperlyConfigured, match=message):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    **overrides,
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {
+                "INPUT_STORAGE_BACKEND": "filesystem",
+                "INPUT_STORAGE_FILESYSTEM_PATH": "/var/lib/django-ray/inputs",
+            },
+            {
+                "MAX_INLINE_INPUT_SIZE_BYTES": 1024,
+                "INPUT_STORAGE_BACKEND": "s3",
+                "INPUT_STORAGE_S3_BUCKET": "inputs",
+            },
+            {
+                "INPUT_STORAGE_BACKEND": "gcs",
+                "INPUT_STORAGE_GCS_BUCKET": "inputs",
+            },
+        ],
+    )
+    def test_validate_input_storage_accepts_retrievable_backends(
+        self,
+        config: dict[str, object],
+    ) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                **config,
+            }
+        )
+
+    @pytest.mark.parametrize(
         "patterns, message",
         [
             (b"password", "must be a string or a sequence"),

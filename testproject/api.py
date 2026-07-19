@@ -491,26 +491,8 @@ def enqueue_intermittent(request, fail_until_attempt: int = 3, queue: str = "def
         fail_until_attempt: Number of attempts before success (default: 3)
         queue: Queue name (default: "default")
     """
-    import json
-
-    from django_ray.models import RayTaskExecution
-
     task_obj = tasks.intermittent_task.using(queue_name=queue)
-    # Enqueue with placeholder execution_id=0
-    result = task_obj.enqueue(execution_id=0, fail_until_attempt=fail_until_attempt)
-
-    # Update kwargs_json with the actual execution_id
-    try:
-        execution = RayTaskExecution.objects.get(task_id=result.id)
-        execution.kwargs_json = json.dumps(
-            {
-                "execution_id": execution.pk,
-                "fail_until_attempt": fail_until_attempt,
-            }
-        )
-        execution.save(update_fields=["kwargs_json"])
-    except RayTaskExecution.DoesNotExist:
-        pass
+    result = task_obj.enqueue(fail_until_attempt=fail_until_attempt)
 
     return {
         "task_id": result.id,
