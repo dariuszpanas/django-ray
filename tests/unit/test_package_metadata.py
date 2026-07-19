@@ -1,6 +1,7 @@
 """Packaging metadata regression tests."""
 
 import re
+import tomllib
 from pathlib import Path
 
 
@@ -24,3 +25,31 @@ def test_readme_logo_uses_pypi_compatible_absolute_url() -> None:
         "https://raw.githubusercontent.com/dariuszpanas/django-ray/main/"
         "docs/assets/images/django-ray.svg"
     ) in readme_text
+
+
+def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
+    """Hatch includes the admin template and script through the package selector."""
+    project_root = Path(__file__).parents[2]
+    config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    packages = config["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
+
+    assert packages == ["src/django_ray"]
+    package_root = project_root / packages[0]
+    expected_assets = [
+        package_root
+        / "templates"
+        / "admin"
+        / "django_ray"
+        / "raytaskexecution"
+        / "change_form.html",
+        package_root / "static" / "django_ray" / "admin" / "task_live.js",
+    ]
+    assert all(asset.is_file() and asset.is_relative_to(package_root) for asset in expected_assets)
+
+    script = expected_assets[1].read_text(encoding="utf-8")
+    assert "setTimeout(refresh, 3000)" in script
+    assert "document.hidden" in script
+    assert 'credentials: "same-origin"' in script
+    assert "textContent" in script
+    assert "innerHTML" not in script
+    assert all(state in script for state in ("SUCCEEDED", "FAILED", "CANCELLED", "LOST"))

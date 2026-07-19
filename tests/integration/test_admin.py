@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from django.contrib import admin
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser, Permission
+from django.core.exceptions import PermissionDenied
+from django.http import Http404
 from django.test import RequestFactory, override_settings
+from django.urls import reverse
 
-from django_ray.admin import ActiveWorkerFilter, RayTaskExecutionAdmin, TaskWorkerLeaseAdmin
+from django_ray.admin import (
+    ADMIN_DIAGNOSTIC_MAX_CHARS,
+    ActiveWorkerFilter,
+    RayTaskExecutionAdmin,
+    TaskAttemptAdmin,
+    TaskWorkerLeaseAdmin,
+)
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 
 
@@ -23,6 +35,10 @@ def _task_admin() -> RayTaskExecutionAdmin:
 
 def _lease_admin() -> TaskWorkerLeaseAdmin:
     return TaskWorkerLeaseAdmin(TaskWorkerLease, admin.site)
+
+
+def _attempt_admin() -> TaskAttemptAdmin:
+    return TaskAttemptAdmin(TaskAttempt, admin.site)
 
 
 @pytest.mark.django_db
@@ -158,6 +174,215 @@ class TestRayTaskExecutionAdmin:
 
         assert 'href="http://ray.localhost:30080/#/jobs/02000000/tasks/abcdef1234567890"' in display
         assert 'href="http://ray.localhost:30080/#/jobs/02000000/tasks/abcdef1234567890"' in link
+
+    def test_dashboard_links_escape_untrusted_ray_identifiers(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="admin-display-escaped",
+            callable_path="testproject.tasks.add_numbers",
+            ray_job_id='job:<img src=x onerror="alert(1)">',
+        )
+
+        rendered = str(_task_admin().ray_job_id_display(task))
+        link = str(_task_admin().ray_dashboard_link(task))
+
+        assert "<img" not in rendered
+        assert "<img" not in link
+        assert "&lt;img" in rendered
+        assert "%3Cimg" not in link
+
+    def test_observability_endpoint_requires_admin_access(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-live-auth-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        endpoint = reverse(
+            "admin:django_ray_raytaskexecution_observability",
+            args=[execution.pk],
+        )
+
+        admin_obj = _task_admin()
+        wrapped_view = admin_obj.admin_site.admin_view(admin_obj.observability_view)
+        user_model = get_user_model()
+        ordinary_user = user_model.objects.create_user(username="observability-ordinary-user")
+        staff_user = user_model.objects.create_user(
+            username="observability-staff-no-permission",
+            is_staff=True,
+        )
+        anonymous_request = RequestFactory().get(endpoint)
+        anonymous_request.user = AnonymousUser()
+        nonstaff_request = RequestFactory().get(endpoint)
+        nonstaff_request.user = ordinary_user
+        denied_request = RequestFactory().get(endpoint)
+        denied_request.user = staff_user
+
+        anonymous_response = wrapped_view(anonymous_request, str(execution.pk))
+        nonstaff_response = wrapped_view(nonstaff_request, str(execution.pk))
+
+        assert anonymous_response.status_code == 302
+        assert "/admin/login/" in anonymous_response.url
+        assert nonstaff_response.status_code == 302
+        with pytest.raises(PermissionDenied):
+            wrapped_view(denied_request, str(execution.pk))
+
+    def test_observability_endpoint_returns_bounded_durable_summary(self, settings) -> None:
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-live-summary-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.SUCCEEDED,
+            attempt_number=2,
+            error_message="password=admin-live-secret",
+        )
+        user_model = get_user_model()
+        staff_user = user_model.objects.create_user(
+            username="observability-staff-viewer",
+            is_staff=True,
+        )
+        staff_user.user_permissions.add(
+            Permission.objects.get(
+                content_type__app_label="django_ray",
+                codename="view_raytaskexecution",
+            )
+        )
+        endpoint = reverse(
+            "admin:django_ray_raytaskexecution_observability",
+            args=[execution.pk],
+        )
+
+        request = RequestFactory().get(endpoint)
+        request.user = staff_user
+        admin_obj = _task_admin()
+        response = admin_obj.admin_site.admin_view(admin_obj.observability_view)(
+            request,
+            str(execution.pk),
+        )
+
+        assert response.status_code == 200
+        assert "no-store" in response["Cache-Control"]
+        payload = json.loads(response.content)
+        assert payload["schema_version"] == 1
+        assert payload["id"] == execution.pk
+        assert payload["state"] == TaskState.SUCCEEDED
+        assert payload["attempt_number"] == 2
+        assert payload["error_message"] == "[REDACTED]"
+        assert payload["workflow"] is None
+        assert "admin-live-secret" not in response.content.decode("utf-8")
+        post_request = RequestFactory().post(endpoint)
+        post_request.user = staff_user
+        assert admin_obj.observability_view(post_request, str(execution.pk)).status_code == 405
+
+    def test_observability_endpoint_returns_not_found_for_missing_object(
+        self,
+    ) -> None:
+        user_model = get_user_model()
+        superuser = user_model.objects.create_superuser(
+            username="observability-missing-superuser",
+        )
+        endpoint = reverse(
+            "admin:django_ray_raytaskexecution_observability",
+            args=[999_999],
+        )
+
+        request = RequestFactory().get(endpoint)
+        request.user = superuser
+
+        with pytest.raises(Http404):
+            _task_admin().observability_view(request, "999999")
+
+    def test_observability_endpoint_keeps_task_state_when_workflow_is_invalid(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-invalid-workflow-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            progress_data="not-json password=workflow-secret",
+        )
+        user_model = get_user_model()
+        superuser = user_model.objects.create_superuser(
+            username="observability-invalid-workflow-superuser",
+        )
+        request = RequestFactory().get("/admin/live/")
+        request.user = superuser
+
+        response = _task_admin().observability_view(request, str(execution.pk))
+        payload = json.loads(response.content)
+
+        assert response.status_code == 200
+        assert payload["state"] == TaskState.RUNNING
+        assert payload["workflow"] is None
+        assert "workflow_error" in payload
+        assert "workflow-secret" not in payload["workflow_error"]
+
+    def test_observability_endpoint_returns_only_workflow_aggregates(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-summary-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            progress_data=json.dumps(
+                {
+                    "schema_version": 1,
+                    "revision": 4,
+                    "state": "RUNNING",
+                    "total_nodes": 2,
+                    "completed_nodes": 1,
+                    "failed_nodes": 0,
+                    "running_nodes": 1,
+                    "pending_nodes": 0,
+                    "progress_percent": 50.0,
+                    "graph": {"nodes": [{"secret": "node-secret"}], "edges": []},
+                    "recent_events": [{"secret": "event-secret"}],
+                    "runtime_env": {"secret": "runtime-secret"},
+                }
+            ),
+        )
+        user = get_user_model().objects.create_superuser(username="workflow-summary-admin")
+        request = RequestFactory().get("/admin/live/")
+        request.user = user
+
+        payload = json.loads(_task_admin().observability_view(request, str(execution.pk)).content)
+
+        assert payload["workflow"] == {
+            "revision": 4,
+            "state": "RUNNING",
+            "total_nodes": 2,
+            "completed_nodes": 1,
+            "failed_nodes": 0,
+            "running_nodes": 1,
+            "pending_nodes": 0,
+            "progress_percent": 50.0,
+        }
+        assert "secret" not in json.dumps(payload)
+
+    def test_change_form_loads_live_status_panel_and_package_script(
+        self,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-live-form-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+        )
+        user_model = get_user_model()
+        superuser = user_model.objects.create_superuser(
+            username="observability-form-superuser",
+        )
+        change_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[execution.pk],
+        )
+        request = RequestFactory().get(change_url)
+        request.user = superuser
+        response = _task_admin().change_view(request, str(execution.pk))
+        response.render()
+
+        content = response.content.decode("utf-8")
+        endpoint = reverse(
+            "admin:django_ray_raytaskexecution_observability",
+            args=[execution.pk],
+        )
+        assert response.status_code == 200
+        assert 'id="django-ray-live-observability"' in content
+        assert f'data-observability-url="{endpoint}"' in content
+        assert 'src="/static/django_ray/admin/task_live.js"' in content
+        assert 'aria-live="polite"' in content
 
     def test_retry_tasks_requeues_failed_and_lost(self, monkeypatch) -> None:
         admin_obj = _task_admin()
@@ -333,6 +558,68 @@ class TestRayTaskExecutionAdmin:
         task.refresh_from_db()
         assert task.state == TaskState.CANCELLING
         assert messages[-1] == "Marked 1 task(s) for cancellation."
+
+
+@pytest.mark.django_db
+class TestTaskAttemptAdmin:
+    def test_attempt_history_cannot_be_added_changed_or_deleted(self) -> None:
+        admin_obj = _attempt_admin()
+        request = _request()
+
+        assert admin_obj.has_add_permission(request) is False
+        assert admin_obj.has_change_permission(request) is False
+        assert admin_obj.has_delete_permission(request) is False
+
+    def test_diagnostics_are_redacted_bounded_and_not_raw_model_fields(self, settings) -> None:
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-redaction-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        attempt = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.FAILED,
+            error_message="password=error-secret",
+            error_traceback="safe trace " + ("x" * (ADMIN_DIAGNOSTIC_MAX_CHARS + 100)),
+            result_data='{"password":"result-secret"}',
+            result_reference="password=result-reference-secret",
+        )
+        admin_obj = _attempt_admin()
+
+        rendered = [
+            admin_obj.error_message_display(attempt),
+            admin_obj.error_traceback_display(attempt),
+            admin_obj.result_data_display(attempt),
+            admin_obj.result_reference_display(attempt),
+        ]
+
+        assert "error-secret" not in rendered[0]
+        assert "result-secret" not in rendered[2]
+        assert "result-reference-secret" not in rendered[3]
+        assert all(len(value) <= ADMIN_DIAGNOSTIC_MAX_CHARS for value in rendered)
+        assert rendered[1].endswith("... [truncated]")
+        assert "error_message" not in admin_obj.fields
+        assert "error_traceback" not in admin_obj.fields
+        assert "result_data" not in admin_obj.fields
+        assert "result_reference" not in admin_obj.fields
+
+    def test_empty_attempt_diagnostics_render_as_placeholders(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-empty-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        attempt = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.SUCCEEDED,
+        )
+        admin_obj = _attempt_admin()
+
+        assert admin_obj.error_message_display(attempt) == "-"
+        assert admin_obj.error_traceback_display(attempt) == "-"
+        assert admin_obj.result_data_display(attempt) == "-"
+        assert admin_obj.result_reference_display(attempt) == "-"
 
 
 @pytest.mark.django_db

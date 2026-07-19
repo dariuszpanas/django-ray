@@ -1,0 +1,42 @@
+{% extends "admin/change_form.html" %}
+{% load static %}
+
+{% block extrahead %}
+  {{ block.super }}
+  {% if django_ray_observability_url %}
+    <script defer src="{% static 'django_ray/admin/task_live.js' %}"></script>
+  {% endif %}
+{% endblock %}
+
+{% block after_field_sets %}
+  {{ block.super }}
+  {% if django_ray_observability_url %}
+    <fieldset
+      class="module aligned"
+      id="django-ray-live-observability"
+      data-observability-url="{{ django_ray_observability_url }}"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <h2>Live task status</h2>
+      <div data-field="status">
+        Waiting for the first durable status update.
+      </div>
+      <dl>
+        <div class="form-row">
+          <dt>State:</dt>
+          <dd data-field="state">{{ original.state }}</dd>
+        </div>
+        <div class="form-row">
+          <dt>Attempt:</dt>
+          <dd data-field="attempt">{{ original.attempt_number }}</dd>
+        </div>
+        <div class="form-row">
+          <dt>Workflow:</dt>
+          <dd data-field="workflow">No workflow progress available.</dd>
+        </div>
+      </dl>
+    </fieldset>
+  {% endif %}
+{% endblock %}
