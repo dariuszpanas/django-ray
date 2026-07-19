@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Conventional Commit headers for pull requests and rebase auto-merge."""
+"""Validate descriptive Conventional Commits for pull requests and rebase auto-merge."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ _ALLOWED_TYPES = frozenset(
         "test",
     }
 )
+_MAX_LINE_LENGTH = 72
 
 
 def validate_header(header: str, *, label: str) -> str | None:
@@ -45,10 +46,32 @@ def validate_header(header: str, *, label: str) -> str | None:
     return None
 
 
+def validate_message(message: str, *, label: str) -> list[str]:
+    """Validate a full commit message, including its explanatory body."""
+    lines = message.strip().splitlines()
+    if not lines:
+        return [f"{label} is empty; provide a Conventional Commit header and descriptive body."]
+
+    errors: list[str] = []
+    if error := validate_header(lines[0], label=label):
+        errors.append(error)
+    if not "\n".join(lines[1:]).strip():
+        errors.append(
+            f"{label} must include a descriptive body after the Conventional Commit header."
+        )
+    for line_number, line in enumerate(lines, start=1):
+        if len(line) > _MAX_LINE_LENGTH:
+            errors.append(
+                f"{label} line {line_number} exceeds {_MAX_LINE_LENGTH} characters "
+                f"({len(line)}). Wrap commit-message lines for narrow terminals."
+            )
+    return errors
+
+
 def _messages_from_git(commit_range: str) -> list[str]:
     try:
         result = subprocess.run(
-            ["git", "log", "--format=%s", "--no-merges", commit_range],
+            ["git", "log", "--format=%B%x1e", "--no-merges", commit_range],
             check=True,
             capture_output=True,
             text=True,
@@ -56,26 +79,27 @@ def _messages_from_git(commit_range: str) -> list[str]:
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.strip() or "git log failed"
         raise RuntimeError(f"Unable to inspect commit range {commit_range!r}: {detail}") from exc
-    return [message for message in result.stdout.splitlines() if message.strip()]
+    return [message.strip() for message in result.stdout.split("\x1e") if message.strip()]
 
 
 def _messages_from_file(path: str) -> list[str]:
-    """Read one commit subject per line from a file produced by the GitHub API."""
+    """Read one full commit message from a file."""
     try:
         contents = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
-        raise RuntimeError(f"Unable to read commit subject file {path!r}: {exc}") from exc
-    return [line.strip() for line in contents.splitlines() if line.strip()]
+        raise RuntimeError(f"Unable to read commit message file {path!r}: {exc}") from exc
+    message = contents.strip()
+    return [message] if message else []
 
 
 def _messages_from_json_file(path: str) -> list[str]:
-    """Read a JSON array of commit subjects for callers that need newline-safe transport."""
+    """Read a JSON array of full commit messages for newline-safe transport."""
     try:
         values = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Unable to read commit subject file {path!r}: {exc}") from exc
+        raise RuntimeError(f"Unable to read commit message file {path!r}: {exc}") from exc
     if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
-        raise RuntimeError(f"Commit subject file {path!r} must contain a JSON string array")
+        raise RuntimeError(f"Commit message file {path!r} must contain a JSON string array")
     return [value for value in values if value.strip()]
 
 
@@ -103,8 +127,7 @@ def validate(
     if not messages:
         errors.append("No commit headers were found to validate.")
     for index, message in enumerate(messages, start=1):
-        if error := validate_header(message, label=f"Commit {index}"):
-            errors.append(error)
+        errors.extend(validate_message(message, label=f"Commit {index}"))
     return errors
 
 
@@ -115,20 +138,20 @@ def _parser() -> argparse.ArgumentParser:
         "--commit",
         action="append",
         default=[],
-        help="Commit subject to validate; may be supplied multiple times.",
+        help="Full commit message to validate; may be supplied multiple times.",
     )
     parser.add_argument(
         "--range",
         dest="commit_range",
-        help="Git revision range whose non-merge commit subjects should be validated.",
+        help="Git revision range whose non-merge commit messages should be validated.",
     )
     parser.add_argument(
         "--commit-file",
-        help="File containing one commit subject per line.",
+        help="File containing one full commit message.",
     )
     parser.add_argument(
         "--commit-json-file",
-        help="JSON file containing an array of commit subjects.",
+        help="JSON file containing an array of full commit messages.",
     )
     return parser
 

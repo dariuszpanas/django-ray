@@ -30,6 +30,9 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) for commit mess
 
 Common types are `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, and `chore`. Keep
 commits focused and use `!` plus a `BREAKING CHANGE:` footer for an intentional breaking change.
+Every commit must also include a non-empty body explaining what changed and why; a one-line commit is
+not descriptive enough for rebase-merged history. Wrap each commit-message line at 72 characters so
+history remains readable in narrow terminals.
 
 Examples:
 
@@ -44,10 +47,11 @@ A PR should explain the problem and approach, call out migrations or persisted-p
 validation results, and link the issue with `Closes #<number>` when appropriate. Prefer a few focused
 commits over unrelated cleanup in the same PR.
 
-The required `Commit Messages` GitHub Actions check validates the PR title and every commit in the PR.
-Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, or
-`test`, optionally add a scope and `!`, and include a summary after `:`. A failed check prints the
-offending title or commit and the expected format.
+The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
+every commit in the PR, including the required body. Use one of `build`, `chore`, `ci`, `docs`,
+`feat`, `fix`, `perf`, `refactor`, `revert`, `style`, or `test`, optionally add a scope and `!`, and
+include a summary after `:`. Commit-message lines may not exceed 72 characters. A failed check prints
+the offending title or commit and the expected format.
 
 ## Rebase auto-merge
 

@@ -23,7 +23,7 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           GH_TOKEN: ${{ github.token }}
-          COMMIT_JSON_FILE: ${{ runner.temp }}/commit-subjects.json
+          COMMIT_JSON_FILE: ${{ runner.temp }}/commit-messages.json
           COMMIT_PAGES_FILE: ${{ runner.temp }}/commit-pages.json
         run: |
           gh api --paginate --slurp \
@@ -35,12 +35,12 @@ jobs:
           from pathlib import Path
 
           pages = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          subjects = [
-              commit["commit"]["message"].splitlines()[0]
+          messages = [
+              commit["commit"]["message"]
               for page in pages
               for commit in page
           ]
-          Path(sys.argv[2]).write_text(json.dumps(subjects), encoding="utf-8")
+          Path(sys.argv[2]).write_text(json.dumps(messages), encoding="utf-8")
           PY
           python scripts/check_conventional_commits.py \
             --title "$PR_TITLE" \
