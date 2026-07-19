@@ -14,6 +14,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import transaction
 
 from django_ray.conf.settings import get_settings
+from django_ray.lifecycle import record_failure, succeed_task
 from django_ray.logging import get_worker_logger
 from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.runner.base import SubmissionHandle
@@ -885,26 +886,17 @@ class Command(BaseCommand):
             )
             result = json.loads(result_json)
 
-            now = datetime.now(UTC)
             if result["success"]:
-                task.state = TaskState.SUCCEEDED
-                task.error_message = None
-                task.error_traceback = None
                 self._store_task_result(task, result["result"])
-                task.finished_at = now
                 self.stdout.write(
                     self.style.SUCCESS(f"  Task {task.pk} succeeded: {result['result']}")
                 )
-                task.save(
-                    update_fields=[
-                        "state",
-                        "result_data",
-                        "result_reference",
-                        "error_message",
-                        "error_traceback",
-                        "finished_at",
-                    ]
-                )
+                if not succeed_task(
+                    task,
+                    result_data=task.result_data,
+                    result_reference=task.result_reference,
+                ):
+                    return
             else:
                 # Task failed - check if we should retry
                 self._handle_task_failure(
@@ -988,62 +980,25 @@ class Command(BaseCommand):
         # Check if we should retry
         retry_decision = should_retry(task, exception_type)
 
+        handled = record_failure(
+            task,
+            error_message=error_message,
+            error_traceback=error_traceback,
+            retry=retry_decision.should_retry,
+            next_attempt_at=retry_decision.next_attempt_at,
+            expected_ray_job_id=expected_ray_job_id,
+            expected_execution_generation=expected_execution_generation,
+        )
+        if not handled:
+            return False
         if retry_decision.should_retry:
-            # Schedule retry
-            task.state = TaskState.QUEUED
-            task.attempt_number = int(task.attempt_number) + 1
-            task.run_after = retry_decision.next_attempt_at
-            task.error_message = error_message
-            task.error_traceback = error_traceback
-            task.started_at = None
-            task.finished_at = None
-            task.claimed_by_worker = None
-            task.progress_data = None
-            task.completion_data = None
-            filters: dict[str, Any] = {"pk": task.pk, "state": TaskState.RUNNING}
-            if expected_ray_job_id is not None:
-                filters["ray_job_id"] = expected_ray_job_id
-            if expected_execution_generation is not None:
-                filters["execution_generation"] = expected_execution_generation
-            updated = RayTaskExecution.objects.filter(**filters).update(
-                state=task.state,
-                attempt_number=task.attempt_number,
-                run_after=task.run_after,
-                error_message=task.error_message,
-                error_traceback=task.error_traceback,
-                started_at=task.started_at,
-                finished_at=task.finished_at,
-                claimed_by_worker=task.claimed_by_worker,
-                progress_data=task.progress_data,
-                completion_data=task.completion_data,
-            )
-            if not updated:
-                return False
             self.stdout.write(
                 self.style.WARNING(
-                    f"  Task {task.pk} failed, scheduling retry #{task.attempt_number} "
+                    f"  Task {task.pk} failed, scheduling retry "
                     f"at {retry_decision.next_attempt_at}: {error_message}"
                 )
             )
         else:
-            # Final failure
-            task.state = TaskState.FAILED
-            task.error_message = error_message
-            task.error_traceback = error_traceback
-            task.finished_at = datetime.now(UTC)
-            filters = {"pk": task.pk, "state": TaskState.RUNNING}
-            if expected_ray_job_id is not None:
-                filters["ray_job_id"] = expected_ray_job_id
-            if expected_execution_generation is not None:
-                filters["execution_generation"] = expected_execution_generation
-            updated = RayTaskExecution.objects.filter(**filters).update(
-                state=task.state,
-                error_message=task.error_message,
-                error_traceback=task.error_traceback,
-                finished_at=task.finished_at,
-            )
-            if not updated:
-                return False
             reason = retry_decision.reason or "No retry configured"
             self.stdout.write(
                 self.style.ERROR(f"  Task {task.pk} failed permanently ({reason}): {error_message}")
@@ -1172,23 +1127,14 @@ class Command(BaseCommand):
 
                 result = json.loads(result_json)
 
-                now = datetime.now(UTC)
                 if result.get("success"):
-                    task.state = TaskState.SUCCEEDED
-                    task.error_message = None
-                    task.error_traceback = None
                     self._store_task_result(task, result.get("result"))
-                    task.finished_at = now
-                    task.save(
-                        update_fields=[
-                            "state",
-                            "result_data",
-                            "result_reference",
-                            "error_message",
-                            "error_traceback",
-                            "finished_at",
-                        ]
-                    )
+                    if not succeed_task(
+                        task,
+                        result_data=task.result_data,
+                        result_reference=task.result_reference,
+                    ):
+                        return
                     self.stdout.write(
                         self.style.SUCCESS(f"\n  Task {task.pk} completed: {result.get('result')}")
                     )
@@ -1392,27 +1338,18 @@ class Command(BaseCommand):
                 return
 
             if result["success"]:
-                task.state = TaskState.SUCCEEDED
-                task.finished_at = now
                 if result.get("result_reference"):
                     task.result_data = None
                     task.result_reference = result["result_reference"]
                 else:
                     self._store_task_result(task, result.get("result"))
-                updated = RayTaskExecution.objects.filter(
-                    pk=task.pk,
-                    state=TaskState.RUNNING,
-                    ray_job_id=ray_job_id,
-                    execution_generation=task.execution_generation,
-                ).update(
-                    state=task.state,
-                    finished_at=task.finished_at,
+                if not succeed_task(
+                    task,
                     result_data=task.result_data,
                     result_reference=task.result_reference,
-                    error_message=None,
-                    error_traceback=None,
-                )
-                if not updated:
+                    expected_ray_job_id=ray_job_id,
+                    expected_execution_generation=task.execution_generation,
+                ):
                     return
                 self.stdout.write(self.style.SUCCESS(f"\nTask {task.pk} completed"))
             else:

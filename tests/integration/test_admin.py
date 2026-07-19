@@ -10,7 +10,7 @@ from django.contrib import admin
 from django.test import RequestFactory, override_settings
 
 from django_ray.admin import RayTaskExecutionAdmin, TaskWorkerLeaseAdmin
-from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 
 
 def _request() -> Any:
@@ -148,13 +148,15 @@ class TestRayTaskExecutionAdmin:
         running.refresh_from_db()
 
         assert failed.state == TaskState.QUEUED
-        assert failed.attempt_number == 0
+        assert failed.attempt_number == 4
         assert failed.execution_generation == 9
         assert failed.completion_data is None
         assert lost.state == TaskState.QUEUED
-        assert lost.attempt_number == 0
+        assert lost.attempt_number == 3
         assert running.state == TaskState.RUNNING
         assert messages[-1] == "Queued 2 task(s) for retry."
+        assert TaskAttempt.objects.get(execution=failed, attempt_number=3).error_message == "boom"
+        assert TaskAttempt.objects.get(execution=lost, attempt_number=2).error_message == "lost"
 
     def test_retry_tasks_noop_when_nothing_retryable(self, monkeypatch) -> None:
         admin_obj = _task_admin()

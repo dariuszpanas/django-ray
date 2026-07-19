@@ -22,6 +22,7 @@ from ninja.security import HttpBearer
 from pydantic import field_validator
 
 from django_ray import __version__ as django_ray_version
+from django_ray.lifecycle import retry_task
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.observability import (
     WorkflowObservabilityError,
@@ -696,20 +697,7 @@ def cancel_execution(request, execution_id: int):
 def retry_execution(request, execution_id: int):
     """Retry a failed task execution."""
     task = get_object_or_404(RayTaskExecution, pk=execution_id)
-
-    if task.state in [TaskState.FAILED, TaskState.CANCELLED, TaskState.LOST]:
-        task.state = TaskState.QUEUED
-        task.attempt_number += 1
-        task.started_at = None
-        task.finished_at = None
-        task.error_message = None
-        task.error_traceback = None
-        task.ray_job_id = None
-        task.claimed_by_worker = None
-        task.progress_data = None
-        task.save()
-
-    return task
+    return retry_task(task) or task
 
 
 # ============================================================================

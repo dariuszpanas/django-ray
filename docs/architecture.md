@@ -95,6 +95,15 @@ Worker coordination record used to detect dead/inactive workers.
 | `started_at`, `last_heartbeat_at`, `stopped_at` | Lease timing |
 | `is_active` | Active/inactive lease state |
 
+### `TaskAttempt`
+
+Each terminal transition records the one-based attempt number, state, result
+references, and failure diagnostics in `TaskAttempt`. The current
+`RayTaskExecution` row remains the source of truth for scheduling, while this
+history makes retries auditable after the current row is reset for its next
+attempt. Admin retries, the operational retry API, and automatic worker retries
+all use the same row-locked lifecycle service and increment the attempt counter.
+
 ## Task State Model
 
 ```text

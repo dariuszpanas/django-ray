@@ -210,6 +210,43 @@ class RayTaskExecution(models.Model):
         return f"{self.callable_path} ({self.state})"
 
 
+class TaskAttempt(models.Model):
+    """Immutable-ish diagnostics for one execution attempt.
+
+    ``RayTaskExecution`` remains the current durable snapshot while this model
+    preserves the terminal outcome and diagnostics of each completed attempt.
+    Rows are keyed by execution and the one-based attempt number.
+    """
+
+    execution = models.ForeignKey(
+        RayTaskExecution,
+        on_delete=models.CASCADE,
+        related_name="attempts",
+    )
+    attempt_number = models.PositiveIntegerField()
+    state = models.CharField(max_length=20, choices=TaskState.choices)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+    error_traceback = models.TextField(null=True, blank=True)
+    result_data = models.TextField(null=True, blank=True)
+    result_reference = models.CharField(max_length=500, null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["attempt_number"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["execution", "attempt_number"],
+                name="ray_task_attempt_unique_number",
+            )
+        ]
+        indexes = [models.Index(fields=["execution", "attempt_number"])]
+
+    def __str__(self) -> str:
+        return f"{self.execution_id} attempt {self.attempt_number} ({self.state})"
+
+
 class TaskWorkerLease(models.Model):
     """Tracks active Django task worker processes for coordination.
 

@@ -4,12 +4,13 @@ import json
 from typing import Any
 
 from django.contrib import admin
-from django.db.models import F, QuerySet
+from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.safestring import mark_safe
 
-from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.lifecycle import retry_task
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.redaction import redact_text, safe_json_dumps
 
 # Ray Dashboard URL fallback for local Ray.
@@ -248,33 +249,14 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         """Retry failed or lost tasks by resetting them to QUEUED state."""
         retryable_states = [TaskState.FAILED, TaskState.LOST]
         tasks_to_retry = queryset.filter(state__in=retryable_states)
-        count = tasks_to_retry.count()
-
-        if count == 0:
+        if not tasks_to_retry.exists():
             self.message_user(
                 request,
                 "No failed or lost tasks found in selection.",
             )
             return
 
-        # Reset tasks to QUEUED state for retry
-        # TODO: In the future, we could preserve attempt history in a separate model
-        # to track each run's result/error instead of overwriting
-        tasks_to_retry.update(
-            state=TaskState.QUEUED,
-            attempt_number=0,
-            execution_generation=F("execution_generation") + 1,
-            result_data=None,
-            progress_data=None,
-            completion_data=None,
-            error_message=None,
-            error_traceback=None,
-            started_at=None,
-            finished_at=None,
-            last_heartbeat_at=None,
-            claimed_by_worker=None,
-            ray_job_id=None,
-        )
+        count = sum(1 for task in tasks_to_retry.only("pk") if retry_task(task))
 
         self.message_user(
             request,
@@ -350,6 +332,26 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             message += f" Attempted to stop {ray_job_cancel_attempted} Ray job(s)."
 
         self.message_user(request, message)
+
+
+@admin.register(TaskAttempt)
+class TaskAttemptAdmin(admin.ModelAdmin):
+    """Read-only historical attempt diagnostics."""
+
+    list_display = ["execution", "attempt_number", "state", "started_at", "finished_at"]
+    list_filter = ["state"]
+    readonly_fields = [
+        "execution",
+        "attempt_number",
+        "state",
+        "started_at",
+        "finished_at",
+        "error_message",
+        "error_traceback",
+        "result_data",
+        "result_reference",
+        "created_at",
+    ]
 
 
 class ActiveWorkerFilter(admin.SimpleListFilter):

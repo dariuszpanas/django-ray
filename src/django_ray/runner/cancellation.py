@@ -110,31 +110,11 @@ def finalize_cancellation(
         True when this call transitioned the row to ``CANCELLED``. False when
         another worker or completion path changed the row first.
     """
-    finished_at = datetime.now(UTC)
-    filters: dict[str, object] = {
-        "pk": task_execution.pk,
-        "state": "CANCELLING",
-    }
-    if expected_worker_id is not None:
-        filters["claimed_by_worker"] = expected_worker_id
+    from django_ray.lifecycle import cancel_task
 
-    update_values: dict[str, object] = {
-        "state": "CANCELLED",
-        "finished_at": finished_at,
-    }
-    if cancellation_status is not None:
-        update_values["cancellation_status"] = cancellation_status
-    if cancellation_error is not None or cancellation_status is not None:
-        update_values["cancellation_error"] = cancellation_error
-
-    updated = type(task_execution).objects.filter(**filters).update(**update_values)
-    if not updated:
-        return False
-
-    task_execution.state = "CANCELLED"
-    task_execution.finished_at = finished_at
-    if cancellation_status is not None:
-        task_execution.cancellation_status = cancellation_status
-    if cancellation_error is not None or cancellation_status is not None:
-        task_execution.cancellation_error = cancellation_error
-    return True
+    return cancel_task(
+        task_execution,
+        expected_worker_id=expected_worker_id,
+        cancellation_status=cancellation_status,
+        cancellation_error=cancellation_error,
+    )

@@ -68,6 +68,14 @@ Uncaught exception type, message, and traceback are stored on `RayTaskExecution`
 A retry transitions a failed attempt back to `QUEUED` with `run_after` set to the
 calculated backoff time.
 
+Attempt numbers are one-based and increase for both automatic and manual retries;
+manual retry never resets the counter or consumes a separate budget. Each terminal
+attempt is copied to `TaskAttempt`, preserving its state, result reference, and
+failure diagnostics while the current execution row is prepared for the next run.
+The admin action, operational retry endpoint, and worker retry path use the same
+row-locked transition service, so a racing retry request is rejected rather than
+applied twice.
+
 ## Make Side Effects Idempotent
 
 Use an application-level operation key with a uniqueness constraint. The example below
