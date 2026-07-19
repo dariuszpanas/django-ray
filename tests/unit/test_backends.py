@@ -7,6 +7,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 from django.tasks.exceptions import TaskResultDoesNotExist
 
 from django_ray.backends import RayTaskBackend
@@ -14,12 +15,16 @@ from django_ray.models import RayTaskExecution, TaskState
 from django_ray.result_storage import ResultStorageError
 
 
-def _make_backend() -> RayTaskBackend:
+def _make_backend(*, timeout_seconds: int | None = None) -> RayTaskBackend:
+    options = {
+        "RAY_ADDRESS": "auto",
+        "TIMEOUT_SECONDS": timeout_seconds,
+    }
     return RayTaskBackend(
         "default",
         {
             "QUEUES": ["default"],
-            "OPTIONS": {"RAY_ADDRESS": "auto"},
+            "OPTIONS": options,
         },
     )
 
@@ -42,6 +47,31 @@ class TestRayTaskBackend:
         assert json.loads(execution.kwargs_json) == {}
         assert json.loads(execution.runtime_env_json) == {}
         assert len(execution.runtime_env_hash) == 64
+        assert execution.timeout_seconds is None
+
+    def test_enqueue_persists_backend_timeout(self) -> None:
+        from testproject.tasks import add_numbers
+
+        task = add_numbers.using(queue_name="default")
+
+        result = _make_backend(timeout_seconds=45).enqueue(task, args=(2, 3), kwargs={})
+        execution = RayTaskExecution.objects.get(task_id=result.id)
+
+        assert execution.timeout_seconds == 45
+
+    @pytest.mark.parametrize("timeout_seconds", [0, -1, True, False, 1.5, "30"])
+    def test_backend_rejects_invalid_timeout(self, timeout_seconds: object) -> None:
+        with pytest.raises(ImproperlyConfigured, match="TIMEOUT_SECONDS"):
+            RayTaskBackend(
+                "default",
+                {
+                    "QUEUES": ["default"],
+                    "OPTIONS": {
+                        "RAY_ADDRESS": "auto",
+                        "TIMEOUT_SECONDS": timeout_seconds,
+                    },
+                },
+            )
 
     def test_enqueue_persists_address_for_each_backend_alias(self) -> None:
         """Backend aliases retain their own Ray cluster for worker submission."""

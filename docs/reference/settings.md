@@ -2,6 +2,10 @@
 
 Complete reference for all django-ray settings.
 
+Per-task execution timeouts are configured on the Django `TASKS` backend, not in
+`DJANGO_RAY`. See [Defining Tasks](../tasks.md#per-task-timeouts) for the backend
+option and mode-specific timeout behavior.
+
 ## DJANGO_RAY
 
 All settings are configured under the `DJANGO_RAY` dictionary in your Django settings:

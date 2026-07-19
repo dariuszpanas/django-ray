@@ -52,6 +52,42 @@ enqueued = send_email.using(queue_name="email").enqueue(
 The `email` queue must appear in the selected backend's `TASKS[alias]["QUEUES"]`
 configuration and a worker must consume it.
 
+## Per-task timeouts
+
+Set `TIMEOUT_SECONDS` in a Ray backend's `OPTIONS` to apply a positive timeout to every
+task that uses that backend. Use separate backend aliases when tasks need different
+deadlines, then select the alias with Django's standard `.using(backend=...)` API:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {"RAY_ADDRESS": "auto"},
+    },
+    "quick": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {"RAY_ADDRESS": "auto", "TIMEOUT_SECONDS": 30},
+    },
+}
+
+enqueued = send_email.using(backend="quick").enqueue(
+    to="user@example.com",
+    subject="Hello",
+    body="Your report is ready.",
+)
+```
+
+`TIMEOUT_SECONDS` must be a positive integer; invalid values fail during backend
+initialization. The timeout is checked by the worker's periodic reconciliation loop,
+so enforcement is approximate and can lag by one worker iteration. A timed-out task is
+marked `FAILED` permanently; it does not automatically consume a retry attempt, but
+operators can retry it through the admin or operational API after reviewing the cause.
+Ray Core tasks are cancelled through their object reference, Ray Job tasks are stopped
+through the Ray Job API, and synchronous tasks cannot be interrupted while Python is
+executing; sync timeout handling occurs when the worker regains control.
+
 ## Reading Current Status
 
 The object returned by `enqueue()` is an enqueue-time snapshot. Fetch it again to see
