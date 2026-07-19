@@ -143,11 +143,10 @@ Environment variables:
 
 CI strategy:
 
-- Default CI (`.github/workflows/ci.yml`) excludes `live_cluster` tests to keep PR checks deterministic.
-- The dedicated `.github/workflows/live-cluster.yml` workflow starts a disposable two-node Ray
-  cluster with Docker and runs these tests for relevant pull requests and pushes to `main`.
-- The workflow is also available through `workflow_dispatch` for a manual rerun; it does not need
-  a repository variable or an externally reachable Ray cluster.
+- The default test matrix excludes `live_cluster` tests to keep its coverage runs deterministic.
+- The CI workflow runs these tests separately against a disposable two-node Docker Ray cluster.
+- CI also supports `workflow_dispatch` for a manual rerun; it does not need a repository variable
+  or an externally reachable Ray cluster.
 
 ### Local Testing
 

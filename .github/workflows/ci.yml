@@ -5,9 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   lint:
+    if: github.event_name != 'pull_request_target'
     name: Lint & Format
     runs-on: ubuntu-latest
     steps:
@@ -32,6 +34,7 @@ jobs:
         run: uv run ruff check .
 
   docs:
+    if: github.event_name != 'pull_request_target'
     name: Docs Build
     runs-on: ubuntu-latest
     steps:
@@ -53,6 +56,7 @@ jobs:
         run: make docs-build-strict
 
   typecheck:
+    if: github.event_name != 'pull_request_target'
     name: Type Check
     runs-on: ubuntu-latest
     steps:
@@ -74,6 +78,7 @@ jobs:
         run: uv run ty check
 
   test:
+    if: github.event_name != 'pull_request_target'
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     env:
@@ -119,7 +124,83 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  live-cluster:
+    if: github.event_name != 'pull_request_target'
+    name: Live Cluster Fault Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: live-cluster-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    env:
+      DJANGO_RAY_LIVE_CLUSTER_TESTS: "1"
+      DJANGO_RAY_LIVE_RAY_ADDRESS: ray://127.0.0.1:10001
+      DJANGO_RAY_LIVE_MIN_NODES: "2"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Start a two-node Ray cluster
+        run: |
+          docker network create django-ray-live-cluster
+          docker run --detach --name ray-head \
+            --network django-ray-live-cluster \
+            --shm-size=1g \
+            --publish 127.0.0.1:10001:10001 \
+            rayproject/ray:2.56.0-py312 \
+            bash -lc 'ray start --head --port=6379 \
+              --ray-client-server-port=10001 --num-cpus=0 \
+              --disable-usage-stats --block'
+          docker run --detach --name ray-worker \
+            --network django-ray-live-cluster \
+            --shm-size=1g \
+            rayproject/ray:2.56.0-py312 \
+            bash -lc 'ray start --address=ray-head:6379 --num-cpus=1 \
+              --disable-usage-stats --block'
+
+      - name: Wait for two live Ray nodes
+        run: |
+          for attempt in $(seq 1 60); do
+            live_nodes="$(docker exec ray-head python -c 'import logging; import ray; ray.init(address="ray-head:6379", logging_level=logging.ERROR); print(sum(node["Alive"] for node in ray.nodes()))' 2>/dev/null || true)"
+            if [[ "$live_nodes" =~ ^[0-9]+$ && "$live_nodes" -ge 2 ]]; then
+              echo "Ray cluster is ready with $live_nodes live nodes."
+              exit 0
+            fi
+            echo "Waiting for two live Ray nodes (attempt $attempt/60; observed ${live_nodes:-0})."
+            sleep 2
+          done
+          docker logs ray-head
+          docker logs ray-worker
+          exit 1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run live cluster fault tests
+        run: uv run pytest tests/integration/test_live_failure_injection.py -m live_cluster -v
+
+      - name: Show Ray container logs
+        if: always()
+        run: |
+          docker logs ray-head || true
+          docker logs ray-worker || true
+
+      - name: Remove Ray containers
+        if: always()
+        run: |
+          docker rm --force ray-worker ray-head || true
+          docker network rm django-ray-live-cluster || true
+
   dependency-compatibility:
+    if: github.event_name != 'pull_request_target'
     name: Dependencies (${{ matrix.resolution }}, Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -169,9 +250,10 @@ jobs:
           pytest -m "not live_cluster and not real_ray" -q
 
   build:
+    if: github.event_name != 'pull_request_target'
     name: Build Package
     runs-on: ubuntu-latest
-    needs: [lint, docs, typecheck, test, dependency-compatibility]
+    needs: [lint, docs, typecheck, test, live-cluster, dependency-compatibility]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
