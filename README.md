@@ -153,7 +153,7 @@ execution modes, and useful fan-out granularity.
 ### Installation
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/dariuszpanas/django-ray.git
 cd django-ray
 uv sync
 ```
