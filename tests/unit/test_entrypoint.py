@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
+import runpy
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -73,6 +75,31 @@ class TestEntrypointPayload:
         assert exit_code == 0
         assert output == "django-ray task completed successfully"
         assert "secret" not in output
+
+    @pytest.mark.parametrize(
+        "result_json",
+        [
+            "not json",
+            "[]",
+        ],
+    )
+    def test_main_reports_invalid_completion_envelopes(
+        self, monkeypatch, capsys, result_json: str
+    ) -> None:
+        monkeypatch.setattr(entrypoint, "execute_task_from_payload", lambda _: result_json)
+
+        assert entrypoint.main(["--payload-b64", "abc"]) == 0
+        assert "invalid completion envelope" in capsys.readouterr().err
+
+    def test_main_redacts_failed_completion_errors(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(
+            entrypoint,
+            "execute_task_from_payload",
+            lambda _: '{"success": false, "error": "password=secret"}',
+        )
+
+        assert entrypoint.main(["--payload-b64", "abc"]) == 0
+        assert capsys.readouterr().err.strip() == "django-ray task failed: [REDACTED]"
 
     def test_bootstrap_requires_settings_module(self, monkeypatch) -> None:
         monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
@@ -267,3 +294,50 @@ class TestEntrypointPayload:
         assert result["result"] is None
         assert result["result_reference"].startswith("oversize://sha256/")
         assert len(task.completion_data or "") < 256
+
+    @pytest.mark.django_db
+    def test_completion_persistence_logs_database_errors(self, monkeypatch, caplog) -> None:
+        monkeypatch.setattr(
+            RayTaskExecution.objects,
+            "filter",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+        )
+
+        entrypoint._persist_task_completion(1, 1, 1, '{"success": true}')
+
+        assert "Failed to persist completion envelope for task 1" in caplog.text
+
+    def test_prepare_completion_falls_back_to_digest_storage(self, monkeypatch, caplog) -> None:
+        from django_ray.result_storage import ResultStorageError
+
+        class FailingStorage:
+            def store(self, *, serialized_result: str) -> str:
+                raise ResultStorageError("object storage unavailable")
+
+        monkeypatch.setattr(
+            entrypoint,
+            "get_settings",
+            lambda: {"MAX_RESULT_SIZE_BYTES": 1, "RESULT_STORAGE_BACKEND": "digest"},
+        )
+        monkeypatch.setattr(
+            "django_ray.result_storage.get_result_storage_backend",
+            lambda _settings: FailingStorage(),
+        )
+
+        result, reference = entrypoint._prepare_completion_result(
+            {"large": "value"},
+            task_execution_pk=1,
+            attempt_number=1,
+            execution_generation=1,
+        )
+
+        assert result is None
+        assert reference is not None and reference.startswith("oversize://sha256/")
+        assert "using digest-only reference" in caplog.text
+
+    def test_module_main_guard_invokes_cli_entrypoint(self, monkeypatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["entrypoint", "--payload-b64", "abc"])
+        monkeypatch.delitem(sys.modules, "django_ray.runtime.entrypoint")
+
+        with pytest.raises(SystemExit, match="0"):
+            runpy.run_module("django_ray.runtime.entrypoint", run_name="__main__")

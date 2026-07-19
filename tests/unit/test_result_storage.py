@@ -41,6 +41,18 @@ class TestDigestResultStorage:
         assert storage.load(reference="oversize://sha256/abc?bytes=1") is None
 
 
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "",
+        "resultfs://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef?bytes=0",
+        "oversize://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    ],
+)
+def test_result_reference_validation_rejects_missing_required_parts(reference: str) -> None:
+    assert is_valid_result_reference(reference) is False
+
+
 class TestFilesystemResultStorage:
     """Tests for filesystem-backed result storage."""
 

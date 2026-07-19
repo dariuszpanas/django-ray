@@ -230,3 +230,35 @@ class TestValidateSettings:
                 "RESULT_STORAGE_GCS_BUCKET": "django-ray-results",
             }
         )
+
+    @pytest.mark.parametrize(
+        "patterns, message",
+        [
+            (b"password", "must be a string or a sequence"),
+            ([""], "entries must be non-empty strings"),
+            ([123], "entries must be non-empty strings"),
+            (["["], "contains invalid regex"),
+        ],
+    )
+    def test_validate_redact_patterns_rejects_invalid_values(self, patterns, message: str) -> None:
+        with pytest.raises(ImproperlyConfigured, match=message):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "REDACT_PATTERNS": patterns,
+                }
+            )
+
+    def test_validate_redact_patterns_accepts_a_string_or_sequence(self) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "REDACT_PATTERNS": r"access[_-]?token",
+            }
+        )
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "REDACT_PATTERNS": [r"password", r"api[_-]?key"],
+            }
+        )
