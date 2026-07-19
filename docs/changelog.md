@@ -7,17 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No unreleased changes.
+
+## [0.3.1] - 2026-07-18
+
 ### Added
 
 - Repository contribution and automated-agent guidance for branch naming, Conventional Commits,
   worktree safety, validation reporting, and optional local Obsidian project memory.
 - Explicit `make fix` and CI-equivalent `make ci` developer targets.
+- Per-task timeout configuration through the Django Tasks backend.
+- Durable execution-generation, completion-envelope, cancellation, and per-attempt history fields,
+  with additive migrations and admin visibility.
+- Runtime validation for worker scheduling, retry, result-storage, and redaction settings.
+- Redaction of sensitive operational data in logs, task metadata, admin views, and sample endpoints.
+- Release-version and installed-wheel validation for reproducible package releases.
 
 ### Changed
 
 - Local coverage now enforces the same 95% global floor and targeted module floors as CI.
 - `make all`, `make lint`, and `make check` are non-mutating; formatting and automatic fixes require
   explicit targets.
+- Ray Job completion now uses a durable completion envelope rather than task logs, and timed-out jobs
+  receive a best-effort remote stop request before a fenced terminal update.
+- Ray Core distributed helpers cache remote definitions, validate inputs, and support bounded
+  in-flight submissions while preserving result order.
+- Worker shutdown, runner control boundaries, persisted Ray addresses, and stale-task reconciliation
+  are more durable across restarts and retries.
+- Sample Docker and Kubernetes deployments now use safer defaults and explicit migration/setup flows;
+  the sample dependencies are available through the `sample` extra.
+- CI pins the release tooling and enforces descriptive Conventional Commit history, including a
+  non-empty body and a 72-character line limit for every PR commit.
+
+### Fixed
+
+- Recover task lifecycle edge cases without allowing stale attempts to overwrite newer execution state.
+- Keep Ray Job outcomes independent of operational log output.
+- Avoid leaking credentials, tokens, and large result payloads through operator-facing output.
+- Use an absolute README logo URL so the PyPI-rendered project page resolves the SVG correctly.
+
+Applications upgrading from 0.3.0 must run the new Django migrations before starting 0.3.1 workers.
+No public API or legacy Ray Core handle format was removed in this release; legacy-format removal is
+deferred to a future release with explicit migration guidance.
 
 ## [0.3.0] - 2026-07-04
 
@@ -160,7 +191,8 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dariuszpanas/django-ray/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dariuszpanas/django-ray/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/dariuszpanas/django-ray/compare/v0.1.0...v0.1.1

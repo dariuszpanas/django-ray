@@ -22,7 +22,7 @@ def test_normalize_version_rejects_unversioned_refs() -> None:
 
 
 def test_release_versions_match_repository_sources() -> None:
-    assert validate_release_version(ROOT, "v0.3.0") == "0.3.0"
+    assert validate_release_version(ROOT, "v0.3.1") == "0.3.1"
 
 
 def test_release_version_mismatch_is_actionable(tmp_path: Path) -> None:
