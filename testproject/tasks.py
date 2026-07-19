@@ -19,6 +19,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from django.tasks import task
@@ -64,6 +65,66 @@ def failing_task_no_retry() -> None:
     Use this to test manual retry via admin.
     """
     raise NoRetryError("This task failed and won't auto-retry. Use admin to retry manually.")
+
+
+@task
+async def async_add_numbers(a: int, b: int) -> int:
+    """Add two numbers after crossing a real coroutine scheduling point."""
+    await asyncio.sleep(0)
+    return a + b
+
+
+@task
+async def async_context_probe(
+    value: str,
+    *,
+    load_execution: bool = False,
+) -> dict[str, int | str | bool | None]:
+    """Demonstrate durable context propagation and optional async ORM access."""
+    from django_ray.runtime.context import get_current_task_context, get_current_task_execution_pk
+
+    context_before = get_current_task_context()
+    execution_id_before = get_current_task_execution_pk()
+    await asyncio.sleep(0)
+    context_after = get_current_task_context()
+    execution_id_after = get_current_task_execution_pk()
+    task_id = None
+    if load_execution:
+        if execution_id_after is None:
+            raise RuntimeError("async_context_probe requires a durable task execution context")
+        from django_ray.models import RayTaskExecution
+
+        execution = await RayTaskExecution.objects.only("task_id").aget(pk=execution_id_after)
+        task_id = execution.task_id
+
+    return {
+        "value": value,
+        "execution_id_before": execution_id_before,
+        "execution_id_after": execution_id_after,
+        "ray_job_driver_before": (
+            context_before.ray_job_driver if context_before is not None else None
+        ),
+        "ray_job_driver_after": context_after.ray_job_driver if context_after is not None else None,
+        "task_id": task_id,
+        "active_task_count": len(asyncio.all_tasks()),
+        "loop_running": asyncio.get_running_loop().is_running(),
+    }
+
+
+@task
+async def async_failing_task(*, no_retry: bool = False) -> None:
+    """Raise a retryable or denylisted exception from inside a coroutine."""
+    await asyncio.sleep(0)
+    if no_retry:
+        raise NoRetryError("Async task requested a permanent failure")
+    raise ValueError("Async task requested a retryable failure")
+
+
+@task
+async def async_slow_task(seconds: float = 0.01) -> str:
+    """Wait without blocking the task's event loop."""
+    await asyncio.sleep(seconds)
+    return f"Awaited for {seconds} seconds"
 
 
 @task
