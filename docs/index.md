@@ -51,5 +51,7 @@ project resources, task stats, and a smoke-task trigger:
 
 - [Contributing](contributing.md) - How to contribute
 - [Architecture](architecture.md) - System design overview
+- [Ray Serve Integration Boundary](design/ray-serve-boundary.md) - Deferred ownership,
+  lifecycle, security, and packaging decision
 - [Changelog](changelog.md) - Release history
 

@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte-bounded live Ray logs, and authenticated live task updates in Django admin.
 - Coroutine-based Django tasks across sync, Ray Core, and Ray Job modes, with
   per-invocation event loops and preserved retry exception classification.
+- A Ray Serve integration boundary that defers package orchestration, keeps deployment
+  state separate from durable tasks, and records adoption gates for a companion package.
 
 ### Changed
 

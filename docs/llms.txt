@@ -26,6 +26,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   `step`, `chain`, `group`, `map_step`, progress, and graph semantics.
 - [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
   named profiles, code delivery, cache behavior, and security boundaries.
+- [Ray Serve integration boundary](https://django-ray.readthedocs.io/en/latest/design/ray-serve-boundary/):
+  deferred ownership, lifecycle, security, and packaging decision.
 
 ## Operations and reference
 
