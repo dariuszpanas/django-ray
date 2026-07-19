@@ -4,20 +4,28 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
 import django_ray.observability as observability_module
-from django_ray.models import RayTaskExecution
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.observability import (
+    DEFAULT_DIAGNOSTIC_MAX_CHARS,
+    MAX_RAY_LOG_MAX_BYTES,
     WorkflowObservabilityError,
+    get_attempt_history,
+    get_queue_depths,
     get_ray_task_logs,
     get_ray_task_state,
+    get_task_summary,
     get_workflow_graph,
     get_workflow_node,
+    get_workflow_node_snapshot,
     get_workflow_progress,
+    get_workflow_snapshot,
 )
 
 
@@ -61,6 +69,196 @@ def test_get_workflow_graph_and_node(workflow_execution) -> None:
     assert get_workflow_node(workflow_execution, "missing") is None
 
 
+def test_versioned_task_summary_omits_sensitive_payloads(db, settings) -> None:
+    settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"customer[_-]?email"]}
+    generated_at = datetime(2026, 7, 19, 12, tzinfo=UTC)
+    execution = RayTaskExecution.objects.create(
+        task_id="task-summary-1",
+        callable_path="testproject.tasks.echo",
+        queue_name="critical",
+        priority=75,
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=4,
+        started_at=generated_at - timedelta(seconds=3),
+        last_heartbeat_at=generated_at - timedelta(seconds=1),
+        claimed_by_worker="worker-1",
+        ray_job_id="ray-job-1",
+        ray_address="ray://private-host:10001",
+        runtime_env_profile="numpy",
+        runtime_env_hash="abc123",
+        runtime_env_json='{"password":"secret"}',
+        args_json='["secret"]',
+        kwargs_json='{"token":"secret"}',
+        result_data='{"private":"secret"}',
+        input_reference="s3://private/input",
+        result_reference="s3://private/result",
+        error_message="customer_email=private@example.com",
+        error_traceback="private traceback",
+        progress_data=json.dumps({"revision": 7}),
+    )
+
+    summary = get_task_summary(execution, generated_at=generated_at)
+
+    assert summary["schema"] == "django-ray.task-summary"
+    assert summary["schema_version"] == 1
+    assert summary["generated_at"] == "2026-07-19T12:00:00Z"
+    assert summary["workflow_revision"] == 7
+    assert summary["error_message"] == "[REDACTED]"
+    assert summary["error_message_truncated"] is False
+    assert summary["started_at"] == "2026-07-19T11:59:57Z"
+    assert {
+        "args_json",
+        "kwargs_json",
+        "result_data",
+        "error_traceback",
+        "ray_address",
+        "runtime_env_json",
+        "input_reference",
+        "result_reference",
+    }.isdisjoint(summary)
+
+    execution.progress_data = "{"
+    execution.error_message = None
+    assert get_task_summary(execution)["workflow_revision"] is None
+    execution.progress_data = json.dumps({"revision": "not-an-integer"})
+    assert get_task_summary(execution)["workflow_revision"] is None
+
+
+def test_queue_depths_distinguish_ready_delayed_and_running(db) -> None:
+    observed_at = datetime(2026, 7, 19, 12, tzinfo=UTC)
+    RayTaskExecution.objects.bulk_create(
+        [
+            RayTaskExecution(
+                task_id="ready-1",
+                callable_path="tasks.echo",
+                queue_name="alpha",
+                state=TaskState.QUEUED,
+            ),
+            RayTaskExecution(
+                task_id="delayed-1",
+                callable_path="tasks.echo",
+                queue_name="alpha",
+                state=TaskState.QUEUED,
+                run_after=observed_at + timedelta(minutes=5),
+            ),
+            RayTaskExecution(
+                task_id="running-1",
+                callable_path="tasks.echo",
+                queue_name="alpha",
+                state=TaskState.RUNNING,
+            ),
+            RayTaskExecution(
+                task_id="ready-2",
+                callable_path="tasks.echo",
+                queue_name="beta",
+                state=TaskState.QUEUED,
+                run_after=observed_at,
+            ),
+            RayTaskExecution(
+                task_id="ignored",
+                callable_path="tasks.echo",
+                queue_name="beta",
+                state=TaskState.SUCCEEDED,
+            ),
+        ]
+    )
+
+    snapshot = get_queue_depths(generated_at=observed_at)
+
+    assert snapshot["schema"] == "django-ray.queue-depths"
+    assert snapshot["queues"] == [
+        {
+            "queue_name": "alpha",
+            "queued": 2,
+            "ready": 1,
+            "delayed": 1,
+            "running": 1,
+            "oldest_queued_at": snapshot["queues"][0]["oldest_queued_at"],
+        },
+        {
+            "queue_name": "beta",
+            "queued": 1,
+            "ready": 1,
+            "delayed": 0,
+            "running": 0,
+            "oldest_queued_at": snapshot["queues"][1]["oldest_queued_at"],
+        },
+    ]
+    assert all(queue["oldest_queued_at"].endswith("Z") for queue in snapshot["queues"])
+
+
+def test_attempt_history_adds_current_snapshot_and_deduplicates_archive(db, settings) -> None:
+    settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"access[_-]?token"]}
+    started_at = datetime(2026, 7, 19, 12, tzinfo=UTC)
+    execution = RayTaskExecution.objects.create(
+        task_id="attempt-history-1",
+        callable_path="tasks.echo",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        started_at=started_at,
+    )
+    TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=1,
+        state=TaskState.FAILED,
+        started_at=started_at - timedelta(seconds=10),
+        finished_at=started_at - timedelta(seconds=15),
+        error_message="access_token=secret-value",
+    )
+
+    history = get_attempt_history(execution, generated_at=started_at)
+
+    assert history["schema"] == "django-ray.attempt-history"
+    assert [attempt["attempt_number"] for attempt in history["attempts"]] == [1, 2]
+    assert history["attempts"][0]["duration_seconds"] == 0.0
+    assert history["attempts"][0]["error_message"] == "[REDACTED]"
+    assert history["attempts"][0]["error_message_truncated"] is False
+    assert history["attempts"][1]["current"] is True
+    assert history["attempts"][1]["duration_seconds"] is None
+
+    TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=2,
+        state=TaskState.SUCCEEDED,
+        started_at=started_at,
+        finished_at=started_at + timedelta(seconds=2),
+    )
+    history = get_attempt_history(execution)
+    assert len(history["attempts"]) == 2
+    assert history["attempts"][1]["current"] is False
+    assert history["attempts"][1]["duration_seconds"] == 2.0
+
+
+def test_diagnostic_messages_are_bounded_with_explicit_metadata(db) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="bounded-diagnostics-1",
+        callable_path="tasks.fail",
+        state=TaskState.FAILED,
+        error_message="x" * (DEFAULT_DIAGNOSTIC_MAX_CHARS + 100),
+    )
+
+    summary = get_task_summary(execution)
+    history = get_attempt_history(execution)
+
+    assert len(summary["error_message"]) == DEFAULT_DIAGNOSTIC_MAX_CHARS
+    assert summary["error_message"].endswith("... [truncated]")
+    assert summary["error_message_truncated"] is True
+    assert history["attempts"][0]["error_message_truncated"] is True
+
+
+def test_workflow_snapshot_wraps_present_and_absent_progress(workflow_execution, db) -> None:
+    snapshot = get_workflow_snapshot(workflow_execution)
+    assert snapshot["schema"] == "django-ray.workflow-snapshot"
+    assert snapshot["workflow"]["revision"] == 3
+
+    execution = RayTaskExecution.objects.create(
+        task_id="no-workflow",
+        callable_path="tasks.echo",
+    )
+    assert get_workflow_snapshot(execution)["workflow"] is None
+
+
 def test_get_ray_task_state_serializes_attempts(monkeypatch, settings) -> None:
     settings.DJANGO_RAY = {
         "RAY_ADDRESS": "auto",
@@ -94,6 +292,42 @@ def test_get_ray_task_logs_returns_bounded_streams(monkeypatch, settings) -> Non
     }
 
 
+def test_get_ray_task_logs_enforces_utf8_byte_limit(monkeypatch, settings) -> None:
+    settings.DJANGO_RAY = {"RAY_STATE_API_ADDRESS": "http://ray-dashboard:8265"}
+    fake_state = SimpleNamespace(
+        get_task=lambda **kwargs: None,
+        get_log=lambda **kwargs: iter(["ab", "cdef"]),
+    )
+    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+
+    assert get_ray_task_logs("ray-task-1", max_bytes=4) == {"out": "[TRU", "err": "[TRU"}
+
+    fake_state.get_log = lambda **kwargs: iter(["abcd"])
+    logs, truncated = observability_module._get_ray_task_logs_with_metadata(
+        "ray-task-1",
+        address=None,
+        tail=10,
+        max_bytes=4,
+    )
+    assert logs == {"out": "abcd", "err": "abcd"}
+    assert truncated == {"out": False, "err": False}
+
+
+def test_bounded_log_text_caps_redaction_expansion(settings) -> None:
+    settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"token"]}
+    text, truncated = observability_module._bounded_log_text(["token"], max_bytes=1)
+    assert text == "["
+    assert truncated is True
+
+    text, truncated = observability_module._bounded_log_text(["abcde"], max_bytes=4)
+    assert text == "[TRU"
+    assert truncated is True
+
+
+def test_isoformat_treats_naive_model_timestamp_as_utc() -> None:
+    assert observability_module._isoformat(datetime(2026, 7, 19, 12)) == ("2026-07-19T12:00:00Z")
+
+
 def test_observability_redacts_state_and_log_payloads(monkeypatch, settings) -> None:
     settings.DJANGO_RAY = {
         "RAY_ADDRESS": "auto",
@@ -123,7 +357,7 @@ def test_get_ray_task_state_wraps_state_api_errors(monkeypatch, settings) -> Non
     )
     monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
 
-    with pytest.raises(WorkflowObservabilityError, match="offline"):
+    with pytest.raises(WorkflowObservabilityError, match="State API is unavailable"):
         get_ray_task_state("ray-task-1")
 
 
@@ -170,6 +404,28 @@ def test_get_workflow_graph_builds_legacy_edges() -> None:
     execution.progress_data = json.dumps({"nodes": "not-a-list"})
     assert get_workflow_graph(execution) == {"nodes": [], "edges": []}
 
+    execution.progress_data = json.dumps({"nodes": [{"node_id": "0.0", "dependencies": None}]})
+    graph = get_workflow_graph(execution)
+    assert graph is not None
+    assert graph["edges"] == []
+
+
+@pytest.mark.parametrize(
+    "graph",
+    [
+        {"nodes": None, "edges": []},
+        {"nodes": [], "edges": "invalid"},
+    ],
+)
+def test_get_workflow_graph_rejects_malformed_nested_shapes(graph) -> None:
+    execution = SimpleNamespace(
+        task_id="task-malformed-graph",
+        progress_data=json.dumps({"graph": graph}),
+    )
+
+    with pytest.raises(WorkflowObservabilityError, match="node and edge lists"):
+        get_workflow_graph(execution)
+
 
 def test_get_ray_task_state_handles_none_and_object_shapes(monkeypatch, settings) -> None:
     settings.DJANGO_RAY = {"RAY_STATE_API_ADDRESS": "http://ray-dashboard:8265"}
@@ -192,13 +448,37 @@ def test_get_ray_task_state_handles_none_and_object_shapes(monkeypatch, settings
 
     assert attempts[0] == {"state": "RUNNING"}
     assert attempts[1] == {"state": "FAILED"}
-    assert attempts[2]["raw"].startswith("<object object at ")
+    assert attempts[2] == {"record": "unsupported"}
+
+
+def test_get_ray_task_state_does_not_render_unknown_objects(monkeypatch, settings) -> None:
+    settings.DJANGO_RAY = {"RAY_STATE_API_ADDRESS": "http://ray-dashboard:8265"}
+
+    class HostileRecord:
+        __slots__ = ()
+
+        def __str__(self) -> str:
+            raise AssertionError("unknown records must not be rendered")
+
+    fake_state = SimpleNamespace(
+        get_task=lambda **kwargs: HostileRecord(),
+        get_log=lambda **kwargs: [],
+    )
+    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+
+    assert get_ray_task_state("ray-task-1") == [{"record": "unsupported"}]
 
 
 @pytest.mark.parametrize("tail", [0, 1001])
 def test_get_ray_task_logs_validates_tail(tail) -> None:
     with pytest.raises(ValueError, match="between 1 and 1000"):
         get_ray_task_logs("ray-task-1", tail=tail)
+
+
+@pytest.mark.parametrize("max_bytes", [0, MAX_RAY_LOG_MAX_BYTES + 1])
+def test_get_ray_task_logs_validates_byte_limit(max_bytes) -> None:
+    with pytest.raises(ValueError, match="max_bytes must be between"):
+        get_ray_task_logs("ray-task-1", max_bytes=max_bytes)
 
 
 def test_get_ray_task_logs_wraps_state_api_errors(monkeypatch, settings) -> None:
@@ -209,7 +489,7 @@ def test_get_ray_task_logs_wraps_state_api_errors(monkeypatch, settings) -> None
     )
     monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
 
-    with pytest.raises(WorkflowObservabilityError, match="logs offline"):
+    with pytest.raises(WorkflowObservabilityError, match="Log API is unavailable"):
         get_ray_task_logs("ray-task-1")
 
 
@@ -230,3 +510,128 @@ def test_state_api_address_is_required_without_ray(monkeypatch, settings) -> Non
 
     with pytest.raises(ImproperlyConfigured, match="RAY_STATE_API_ADDRESS is required"):
         observability_module._state_api_address(None)
+
+
+def test_workflow_node_snapshot_is_durable_first(workflow_execution) -> None:
+    snapshot = get_workflow_node_snapshot(workflow_execution, "0.0")
+
+    assert snapshot is not None
+    assert snapshot["schema"] == "django-ray.workflow-node-snapshot"
+    assert snapshot["workflow_revision"] == 3
+    assert snapshot["node"]["node_id"] == "0.0"
+    assert snapshot["live"] == {
+        "status": "not_requested",
+        "reason": None,
+        "ray_state": None,
+        "logs": None,
+        "logs_truncated": None,
+    }
+    assert get_workflow_node_snapshot(workflow_execution, "missing") is None
+
+
+def test_workflow_node_snapshot_handles_invalid_execution_metadata(db) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-invalid-execution",
+        callable_path="tasks.workflow",
+        progress_data=json.dumps(
+            {
+                "graph": {
+                    "nodes": [{"node_id": "0.0", "execution": "invalid"}],
+                    "edges": [],
+                }
+            }
+        ),
+    )
+
+    snapshot = get_workflow_node_snapshot(execution, "0.0", include_live=True)
+
+    assert snapshot is not None
+    assert snapshot["live"]["status"] == "unavailable"
+    assert snapshot["live"]["reason"] == "ray_task_id_unavailable"
+
+
+def test_workflow_node_snapshot_reports_missing_ray_id(workflow_execution) -> None:
+    snapshot = get_workflow_node_snapshot(workflow_execution, "0.1", include_live=True)
+
+    assert snapshot is not None
+    assert snapshot["live"]["status"] == "unavailable"
+    assert snapshot["live"]["reason"] == "ray_task_id_unavailable"
+
+
+def test_workflow_node_snapshot_degrades_when_ray_state_is_unavailable(
+    workflow_execution,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        observability_module,
+        "get_ray_task_state",
+        lambda _task_id: (_ for _ in ()).throw(RuntimeError("private topology")),
+    )
+
+    snapshot = get_workflow_node_snapshot(workflow_execution, "0.0", include_live=True)
+
+    assert snapshot is not None
+    assert snapshot["node"]["node_id"] == "0.0"
+    assert snapshot["live"]["status"] == "unavailable"
+    assert snapshot["live"]["reason"] == "state_api_unavailable"
+    assert "private topology" not in str(snapshot)
+
+
+def test_workflow_node_snapshot_adds_bounded_live_logs(
+    workflow_execution,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        observability_module,
+        "get_ray_task_state",
+        lambda _task_id: [{"state": "RUNNING"}],
+    )
+    monkeypatch.setattr(
+        observability_module,
+        "_get_ray_task_logs_with_metadata",
+        lambda *_args, **_kwargs: (
+            {"out": "line", "err": ""},
+            {"out": True, "err": False},
+        ),
+    )
+
+    snapshot = get_workflow_node_snapshot(
+        workflow_execution,
+        "0.0",
+        include_logs=True,
+        tail=20,
+        max_log_bytes=100,
+    )
+
+    assert snapshot is not None
+    assert snapshot["live"] == {
+        "status": "available",
+        "reason": None,
+        "ray_state": [{"state": "RUNNING"}],
+        "logs": {"out": "line", "err": ""},
+        "logs_truncated": {"out": True, "err": False},
+    }
+
+
+def test_workflow_node_snapshot_reports_log_api_failure(
+    workflow_execution,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(observability_module, "get_ray_task_state", lambda _task_id: [])
+    monkeypatch.setattr(
+        observability_module,
+        "_get_ray_task_logs_with_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("secret host")),
+    )
+
+    snapshot = get_workflow_node_snapshot(workflow_execution, "0.0", include_logs=True)
+
+    assert snapshot is not None
+    assert snapshot["live"]["status"] == "partial"
+    assert snapshot["live"]["reason"] == "log_api_unavailable"
+    assert "secret host" not in str(snapshot)
+
+
+def test_workflow_node_snapshot_validates_log_bounds(workflow_execution) -> None:
+    with pytest.raises(ValueError, match="tail must be between"):
+        get_workflow_node_snapshot(workflow_execution, "0.0", include_logs=True, tail=0)

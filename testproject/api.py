@@ -13,7 +13,7 @@ from typing import Literal
 
 from django.conf import settings
 from django.db.models import Count
-from django.http import Http404
+from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
 from django.tasks.exceptions import InvalidTaskBackend
@@ -23,12 +23,11 @@ from pydantic import field_validator
 
 from django_ray import __version__ as django_ray_version
 from django_ray.lifecycle import retry_task
+from django_ray.metrics import render_prometheus_metrics
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.observability import (
     WorkflowObservabilityError,
-    get_ray_task_logs,
-    get_ray_task_state,
-    get_workflow_node,
+    get_workflow_node_snapshot,
     get_workflow_progress,
 )
 from django_ray.redaction import redact_text, redact_value, safe_json_dumps
@@ -65,6 +64,19 @@ def _task_state_counts() -> dict[str, int]:
         row["state"]: row["count"]
         for row in RayTaskExecution.objects.values("state").annotate(count=Count("id"))
     }
+
+
+def _configured_task_queues() -> tuple[str, ...]:
+    """Return the testproject's explicit queue allowlist for metrics labels."""
+    return tuple(
+        sorted(
+            {
+                queue_name
+                for backend in settings.TASKS.values()
+                for queue_name in backend.get("QUEUES", ())
+            }
+        )
+    )
 
 
 # ============================================================================
@@ -314,63 +326,10 @@ def health_check(request):
 
 @api.get("/metrics", tags=["Health"])
 def prometheus_metrics(request):
-    """Prometheus metrics endpoint.
-
-    Returns metrics in Prometheus text format for scraping.
-    """
-    from django.http import HttpResponse
-
-    from django_ray.models import RayTaskExecution, TaskState
-
-    task_counts = _task_state_counts()
-    queued_depths = {
-        row["queue_name"]: row["count"]
-        for row in (
-            RayTaskExecution.objects.filter(state=TaskState.QUEUED)
-            .values("queue_name")
-            .annotate(count=Count("id"))
-            .order_by()
-        )
-    }
-
-    # Build metrics from database state
-    lines = [
-        "# HELP django_ray_tasks_total Total tasks by state",
-        "# TYPE django_ray_tasks_total gauge",
-    ]
-
-    # Count tasks by state
-    for state in TaskState:
-        count = task_counts.get(state, 0)
-        lines.append(f'django_ray_tasks_total{{state="{state}"}} {count}')
-
-    lines.extend(
-        [
-            "",
-            "# HELP django_ray_tasks_queued Current queued tasks",
-            "# TYPE django_ray_tasks_queued gauge",
-            f"django_ray_tasks_queued {task_counts.get(TaskState.QUEUED, 0)}",
-            "",
-            "# HELP django_ray_tasks_running Current running tasks",
-            "# TYPE django_ray_tasks_running gauge",
-            f"django_ray_tasks_running {task_counts.get(TaskState.RUNNING, 0)}",
-        ]
-    )
-
-    if queued_depths:
-        lines.extend(
-            [
-                "",
-                "# HELP django_ray_queue_depth Tasks queued per queue",
-                "# TYPE django_ray_queue_depth gauge",
-            ]
-        )
-        for queue, depth in sorted(queued_depths.items()):
-            lines.append(f'django_ray_queue_depth{{queue="{queue}"}} {depth}')
-
+    """Adapt the package metrics renderer behind testproject bearer auth."""
     return HttpResponse(
-        "\n".join(lines) + "\n",
-        content_type="text/plain; charset=utf-8",
+        render_prometheus_metrics(queue_names=_configured_task_queues()),
+        content_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
 
@@ -1196,28 +1155,24 @@ def get_cluster_workflow_node(
 ):
     """Return durable node metadata plus live Ray state and optional log tails."""
     execution = get_object_or_404(RayTaskExecution, task_id=task_id)
-    node = get_workflow_node(execution, node_id)
-    if node is None:
+    snapshot = get_workflow_node_snapshot(
+        execution,
+        node_id,
+        include_live=True,
+        include_logs=include_logs,
+        tail=tail,
+    )
+    if snapshot is None:
         raise Http404("Workflow node was not found")
 
-    ray_state = None
-    logs = None
-    observability_error = None
-    ray_task_id = node.get("execution", {}).get("ray_task_id")
-    if ray_task_id:
-        try:
-            ray_state = get_ray_task_state(ray_task_id)
-            if include_logs:
-                logs = get_ray_task_logs(ray_task_id, tail=tail)
-        except Exception as error:
-            observability_error = str(error)
+    live = snapshot["live"]
 
     return {
         "task_id": execution.task_id,
-        "node": node,
-        "ray_state": ray_state,
-        "logs": logs,
-        "observability_error": observability_error,
+        "node": snapshot["node"],
+        "ray_state": live["ray_state"],
+        "logs": live["logs"],
+        "observability_error": live["reason"],
     }
 
 
