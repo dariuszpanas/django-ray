@@ -76,6 +76,8 @@ class TestValidateSettings:
             "WORKFLOW_PROGRESS_FLUSH_SECONDS",
             "RAY_STATE_API_TIMEOUT_SECONDS",
             "MAX_RESULT_SIZE_BYTES",
+            "WORKER_POLL_INTERVAL_SECONDS",
+            "WORKER_POLL_MAX_INTERVAL_SECONDS",
         ],
     )
     def test_validate_numeric_settings_reject_booleans(self, setting: str) -> None:
@@ -93,6 +95,58 @@ class TestValidateSettings:
         with pytest.raises(ImproperlyConfigured, match="RETRY_BACKOFF_SECONDS"):
             validate_settings(
                 {"RAY_ADDRESS": "ray://localhost:10001", "RETRY_BACKOFF_SECONDS": 3601}
+            )
+
+    @pytest.mark.parametrize(
+        "setting,value",
+        [
+            ("WORKER_POLL_INTERVAL_SECONDS", "0.1"),
+            ("WORKER_POLL_INTERVAL_SECONDS", 0.009),
+            ("WORKER_POLL_INTERVAL_SECONDS", 10.01),
+            ("WORKER_POLL_INTERVAL_SECONDS", float("nan")),
+            ("WORKER_POLL_MAX_INTERVAL_SECONDS", "1.0"),
+            ("WORKER_POLL_MAX_INTERVAL_SECONDS", 0.009),
+            ("WORKER_POLL_MAX_INTERVAL_SECONDS", 60.01),
+            ("WORKER_POLL_MAX_INTERVAL_SECONDS", float("inf")),
+        ],
+    )
+    def test_validate_polling_settings_reject_unsafe_values(
+        self, setting: str, value: object
+    ) -> None:
+        with pytest.raises(ImproperlyConfigured, match=setting):
+            validate_settings({"RAY_ADDRESS": "ray://localhost:10001", setting: value})
+
+    def test_validate_polling_settings_accept_boundaries(self) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "WORKER_POLL_INTERVAL_SECONDS": 0.01,
+                "WORKER_POLL_MAX_INTERVAL_SECONDS": 60,
+            }
+        )
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "WORKER_POLL_INTERVAL_SECONDS": 0.05,
+                "WORKER_POLL_MAX_INTERVAL_SECONDS": 0.05,
+            }
+        )
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "WORKER_POLL_INTERVAL_SECONDS": 10,
+                "WORKER_POLL_MAX_INTERVAL_SECONDS": 10.0,
+            }
+        )
+
+    def test_validate_polling_maximum_must_not_be_below_base(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="must be greater than or equal"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "WORKER_POLL_INTERVAL_SECONDS": 2.0,
+                    "WORKER_POLL_MAX_INTERVAL_SECONDS": 1.0,
+                }
             )
 
     def test_validate_worker_heartbeat_must_be_less_than_lease(self) -> None:

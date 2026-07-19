@@ -142,6 +142,33 @@ Maximum number of concurrent tasks per worker.
 "DEFAULT_CONCURRENCY": 50
 ```
 
+## Worker Polling
+
+### WORKER_POLL_INTERVAL_SECONDS
+
+- **Type**: `int | float` (booleans are rejected)
+- **Default**: `0.1`
+- **Allowed**: `0.01` to `10`
+
+Base claim-query interval. Activity resets adaptive backoff to this value.
+
+### WORKER_POLL_MAX_INTERVAL_SECONDS
+
+- **Type**: `int | float` (booleans are rejected)
+- **Default**: `0.1`
+- **Allowed**: `0.01` to `60`, and greater than or equal to the base interval
+
+Maximum delay between claim queries after consecutive empty polls. Bounded jitter can
+shorten a particular delay but never extends it beyond this maximum. This setting does
+not change Ray completion polling, heartbeat, reconciliation, timeout, or cancellation
+schedules. The default equals the base interval, so increasing it is an explicit
+idle-backoff tuning choice.
+
+```python
+"WORKER_POLL_INTERVAL_SECONDS": 0.1,
+"WORKER_POLL_MAX_INTERVAL_SECONDS": 0.5,
+```
+
 ## Runner Selection
 
 ### RUNNER

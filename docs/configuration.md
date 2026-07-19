@@ -41,6 +41,24 @@ DJANGO_RAY = {
 |---------|------|---------|-------------|
 | `DEFAULT_CONCURRENCY` | `int` | `10` | Maximum concurrent tasks per worker |
 
+### Worker Polling
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `WORKER_POLL_INTERVAL_SECONDS` | `int \| float` | `0.1` | Base delay between claim queries (`0.01`-`10` seconds) |
+| `WORKER_POLL_MAX_INTERVAL_SECONDS` | `int \| float` | `0.1` | Maximum idle claim delay (`0.01`-`60` seconds and not below the base) |
+
+The default maximum equals the 100 ms base, preserving the existing polling cadence.
+Set a larger maximum to opt into exponential idle backoff with bounded jitter, which
+keeps multiple idle workers from repeatedly querying in lockstep. A claim, completion,
+cancellation, timeout/recovery transition, or other lifecycle activity resets an
+opted-in backoff immediately.
+
+The maximum bounds how long an idle, available worker waits between observations of its
+queue; it is not an end-to-end task-start guarantee. Heartbeats, Ray completion polling,
+reconciliation, timeout checks, cancellation recovery, and lease cleanup use independent
+monotonic schedules; idle claim backoff does not postpone them.
+
 ### Retry Policy
 
 | Setting | Type | Default | Description |
@@ -174,6 +192,8 @@ DJANGO_RAY = {
     "WORKER_LEASE_SECONDS": 120,
     "WORKER_HEARTBEAT_SECONDS": 30,
     "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
+    "WORKER_POLL_INTERVAL_SECONDS": 0.1,
+    "WORKER_POLL_MAX_INTERVAL_SECONDS": 0.5,
 }
 ```
 

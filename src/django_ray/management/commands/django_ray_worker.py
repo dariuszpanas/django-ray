@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import signal
 import time
 from collections.abc import Sequence
@@ -25,6 +26,7 @@ from django_ray.runner.cancellation import (
     request_remote_cancellation,
 )
 from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
+from django_ray.runner.polling import AdaptivePollingPolicy
 from django_ray.runner.ray_core import RayCoreRunner
 from django_ray.runner.reconciliation import (
     get_stuck_timeout,
@@ -50,12 +52,21 @@ class Command(BaseCommand):
         self.ray_core_runner: RayCoreRunner | None = None  # For local/cluster modes
         self.last_reconciliation = 0.0  # Last time we ran stuck task detection
         self.reconciliation_interval = 30.0  # Check for stuck tasks every 30 seconds
+        self.timeout_check_interval = 30.0
+        self.cancellation_interval = 30.0
+        self.lease_cleanup_interval = 30.0
         self.lease: TaskWorkerLease | None = None  # Worker lease for coordination
         self.lease_queue_name: str = "default"  # Queue name for lease recreation
         self.last_task_processed = 0.0  # Last time we processed a task
         self.tasks_processed_count = 0  # Total tasks processed
         self.task_monitor_heartbeat_interval = 15.0
         self.last_task_monitor_heartbeat = 0.0
+        self.completion_poll_interval = 0.1
+        self.polling_policy = AdaptivePollingPolicy(
+            base_interval_seconds=0.1,
+            max_interval_seconds=0.1,
+            random_value=random.Random(self.worker_id).random,
+        )
         # A signal requests a graceful handoff.  Keep the signal number so the
         # command-line entrypoint can preserve the conventional 128+N status.
         self.shutdown_signal: int | None = None
@@ -174,6 +185,13 @@ class Command(BaseCommand):
         self.task_monitor_heartbeat_interval = float(
             settings.get("TASK_MONITOR_HEARTBEAT_SECONDS", 15)
         )
+        poll_interval = float(settings.get("WORKER_POLL_INTERVAL_SECONDS", 0.1))
+        poll_max_interval = float(settings.get("WORKER_POLL_MAX_INTERVAL_SECONDS", 0.1))
+        self.polling_policy = AdaptivePollingPolicy(
+            base_interval_seconds=poll_interval,
+            max_interval_seconds=poll_max_interval,
+            random_value=random.Random(self.worker_id).random,
+        )
 
         self.setup_signal_handlers()
 
@@ -183,6 +201,9 @@ class Command(BaseCommand):
         self._write_worker_output(f"  Queues: {', '.join(queues)}")
         self._write_worker_output(f"  Concurrency: {concurrency}")
         self._write_worker_output(f"  Mode: {self.execution_mode}")
+        self._write_worker_output(
+            f"  Polling: {poll_interval:g}s base, {poll_max_interval:g}s maximum"
+        )
 
         heartbeat_interval = get_heartbeat_interval().total_seconds()
 
@@ -403,38 +424,82 @@ class Command(BaseCommand):
             concurrency: Maximum concurrent tasks.
             heartbeat_interval: Seconds between heartbeats.
         """
-        last_heartbeat = 0.0
+        now = time.monotonic()
+        next_heartbeat = now
+        next_completion_poll = now
+        next_claim = now
+        next_reconciliation = now
+        next_timeout_check = now
+        next_cancellation = now
+        next_lease_cleanup = now
 
         while not self.shutdown_requested:
-            current_time = time.time()
+            current_time = time.monotonic()
+            activity = False
+            claim_due = current_time >= next_claim
 
-            # Heartbeat
-            if current_time - last_heartbeat >= heartbeat_interval:
+            if current_time >= next_heartbeat:
                 self.send_heartbeat()
-                last_heartbeat = current_time
+                next_heartbeat = current_time + heartbeat_interval
 
-            # Poll for completed Ray Core tasks (local/cluster modes)
-            if self.execution_mode in ("local", "cluster") and self.ray_core_runner:
-                self.poll_ray_core_tasks()
+            if (
+                current_time >= next_completion_poll
+                and self.execution_mode in ("local", "cluster")
+                and self.ray_core_runner
+            ):
+                activity = bool(self.poll_ray_core_tasks()) or activity
+                next_completion_poll = current_time + self.completion_poll_interval
 
             # A signal may arrive while heartbeat/polling is in progress.  Do
             # not claim another task once shutdown has begun.
             if self.shutdown_requested:
                 break
 
-            # Claim and process tasks from all queues
-            self.claim_and_process_tasks(queues, concurrency)
+            if claim_due:
+                activity = bool(self.claim_and_process_tasks(queues, concurrency)) or activity
 
-            # Reconcile stuck tasks (periodically)
-            if current_time - self.last_reconciliation >= self.reconciliation_interval:
-                self.reconcile_tasks()
-                self.detect_stuck_tasks()
-                self.process_cancellations()
-                self.cleanup_expired_leases()
+            if current_time >= next_reconciliation:
+                activity = bool(self.reconcile_tasks()) or activity
                 self.last_reconciliation = current_time
+                next_reconciliation = current_time + self.reconciliation_interval
 
-            # Sleep briefly to avoid busy-waiting
-            time.sleep(0.1)
+            if current_time >= next_timeout_check:
+                activity = bool(self.detect_stuck_tasks()) or activity
+                next_timeout_check = current_time + self.timeout_check_interval
+
+            if current_time >= next_cancellation:
+                activity = bool(self.process_cancellations()) or activity
+                next_cancellation = current_time + self.cancellation_interval
+
+            if current_time >= next_lease_cleanup:
+                activity = bool(self.cleanup_expired_leases()) or activity
+                next_lease_cleanup = current_time + self.lease_cleanup_interval
+
+            if claim_due:
+                next_claim = current_time + self.polling_policy.next_delay(activity=activity)
+            elif activity:
+                next_claim = min(
+                    next_claim,
+                    current_time + self.polling_policy.next_delay(activity=True),
+                )
+
+            deadlines = [
+                next_heartbeat,
+                next_claim,
+                next_reconciliation,
+                next_timeout_check,
+                next_cancellation,
+                next_lease_cleanup,
+            ]
+            if (
+                self.execution_mode in ("local", "cluster")
+                and self.ray_core_runner
+                and getattr(self.ray_core_runner, "pending_count", 0) > 0
+            ):
+                deadlines.append(next_completion_poll)
+
+            sleep_seconds = max(0.0, min(deadlines) - time.monotonic())
+            time.sleep(sleep_seconds)
 
     def send_heartbeat(self) -> None:
         """Send worker heartbeat, update lease, and check Ray connection."""
@@ -739,7 +804,7 @@ class Command(BaseCommand):
                 )
             )
 
-    def claim_and_process_tasks(self, queues: Sequence[str], concurrency: int) -> None:
+    def claim_and_process_tasks(self, queues: Sequence[str], concurrency: int) -> int:
         """Claim and submit tasks for execution.
 
         Args:
@@ -747,14 +812,14 @@ class Command(BaseCommand):
             concurrency: Maximum concurrent tasks.
         """
         if self.shutdown_requested:
-            return
+            return 0
 
         # Check how many slots are available
         ray_core_pending = self.ray_core_runner.pending_count if self.ray_core_runner else 0
         active_count = len(self.active_tasks) + ray_core_pending
         available_slots = concurrency - active_count
         if available_slots <= 0:
-            return
+            return 0
 
         # Claim tasks from any of the specified queues
         now = datetime.now(UTC)
@@ -802,6 +867,8 @@ class Command(BaseCommand):
                 self._handoff_unsubmitted_task(task)
                 continue
             self.process_task(task)
+
+        return len(tasks)
 
     def _handoff_unsubmitted_task(self, task: RayTaskExecution) -> None:
         """Return a just-claimed task to durable reconciliation on shutdown."""
@@ -1035,13 +1102,13 @@ class Command(BaseCommand):
                 exception_type=type(e).__name__,
             )
 
-    def poll_ray_core_tasks(self) -> None:
+    def poll_ray_core_tasks(self) -> int:
         """Poll for completed Ray Core tasks and update their status.
 
         Uses RayCoreRunner.poll_completed() for efficient batch polling.
         """
         if self.ray_core_runner is None or self.ray_core_runner.pending_count == 0:
-            return
+            return 0
 
         import ray
 
@@ -1049,7 +1116,8 @@ class Command(BaseCommand):
         if not ray.is_initialized():
             self.stdout.write(self.style.WARNING("\nRay disconnected, clearing pending tasks..."))
             # Mark all pending tasks as needing retry
-            for task_pk in self.ray_core_runner.pending_task_ids:
+            pending_task_ids = list(self.ray_core_runner.pending_task_ids)
+            for task_pk in pending_task_ids:
                 try:
                     task = RayTaskExecution.objects.get(pk=task_pk)
                     self._handle_task_failure(
@@ -1060,7 +1128,7 @@ class Command(BaseCommand):
                 except RayTaskExecution.DoesNotExist:
                     pass
             self.ray_core_runner.clear_pending_tasks()
-            return
+            return len(pending_task_ids)
 
         monitored_task_ids = list(self.ray_core_runner.pending_task_ids)
         monitor_time = time.monotonic()
@@ -1081,7 +1149,7 @@ class Command(BaseCommand):
             completed = self.ray_core_runner.poll_completed()
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"\nError polling Ray Core tasks: {e}"))
-            return
+            return 0
 
         for task_pk, result_json in completed:
             try:
@@ -1105,7 +1173,7 @@ class Command(BaseCommand):
                         result_data=task.result_data,
                         result_reference=task.result_reference,
                     ):
-                        return
+                        return len(completed)
                     self.stdout.write(
                         self.style.SUCCESS(f"\n  Task {task.pk} completed: {result.get('result')}")
                     )
@@ -1123,6 +1191,8 @@ class Command(BaseCommand):
                 self.stdout.write(
                     self.style.ERROR(f"\n  Error processing task {task_pk} result: {e}")
                 )
+
+        return len(completed)
 
     def submit_task_to_ray(self, task: RayTaskExecution) -> None:
         """Submit a task to Ray for execution."""
@@ -1425,10 +1495,10 @@ class Command(BaseCommand):
                 f"Could not create or call the Ray Job cancellation client: {exc}",
             )
 
-    def reconcile_tasks(self) -> None:
+    def reconcile_tasks(self) -> int:
         """Reconcile task states with Ray."""
         if self.sync_mode:
-            return
+            return 0
 
         from django_ray.runner.leasing import get_active_workers
         from django_ray.runner.ray_job import RayJobRunner
@@ -1436,6 +1506,7 @@ class Command(BaseCommand):
         runner = RayJobRunner()
         completed_tasks: list[int] = []
         reconciled_task_ids: set[int] = set()
+        active_task_ids_before = set(self.active_tasks)
 
         for task_pk, ray_job_id in list(self.active_tasks.items()):
             try:
@@ -1493,7 +1564,10 @@ class Command(BaseCommand):
             elif str(current["ray_job_id"] or "") == tracked_ray_job_id:
                 self.active_tasks.pop(task_pk, None)
 
-    def detect_stuck_tasks(self) -> None:
+        adopted_count = len(set(self.active_tasks) - active_task_ids_before)
+        return len(completed_tasks) + adopted_count
+
+    def detect_stuck_tasks(self) -> int:
         """Detect and mark stuck tasks as LOST.
 
         This checks for tasks that have been RUNNING for too long without
@@ -1630,7 +1704,9 @@ class Command(BaseCommand):
                 )
             )
 
-    def cleanup_expired_leases(self) -> None:
+        return stuck_count + timeout_count
+
+    def cleanup_expired_leases(self) -> int:
         """Clean up expired worker leases from other workers.
 
         This helps keep the TaskWorkerLease table clean by removing
@@ -1644,9 +1720,11 @@ class Command(BaseCommand):
                 self.stdout.write(
                     self.style.NOTICE(f"\nCleaned up {deleted_count} expired worker lease(s)")
                 )
+            return deleted_count
         except Exception as e:
             # Don't fail on lease cleanup errors
             self.logger.warning(f"Failed to cleanup expired leases: {e}")
+            return 0
 
     def _claim_orphaned_cancellation(
         self,
@@ -1727,12 +1805,13 @@ class Command(BaseCommand):
 
         return CancellationOutcome(CancellationOutcomeStatus.NOT_APPLICABLE)
 
-    def process_cancellations(self) -> None:
+    def process_cancellations(self) -> int:
         """Adopt and finalize cancellation requests left by dead workers."""
         from django_ray.runner.leasing import get_active_workers
 
         active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
         cancelling_tasks = RayTaskExecution.objects.filter(state=TaskState.CANCELLING)
+        finalized_count = 0
 
         for task in cancelling_tasks:
             now = datetime.now(UTC)
@@ -1759,7 +1838,10 @@ class Command(BaseCommand):
                 cancellation_error=cancellation.message,
             )
             if finalized:
+                finalized_count += 1
                 self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} cancelled"))
+
+        return finalized_count
 
     def _prepare_shutdown_handoff(self) -> None:
         """Make in-flight work safe for the next worker before disconnecting.

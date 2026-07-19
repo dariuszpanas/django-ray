@@ -16,6 +16,7 @@ from django.core.management.base import CommandParser
 
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.runner.polling import AdaptivePollingPolicy
 
 
 class CapturingStdout:
@@ -43,6 +44,21 @@ def _make_command(*, worker_id: str = "unit-worker") -> Command:
     cmd.cluster_address = None
     cmd.ray_core_runner = None
     return cmd
+
+
+class FakeClock:
+    """Monotonic test clock advanced only by worker sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
 
 
 class TestWorkerCommandRuntime:
@@ -238,6 +254,201 @@ class TestWorkerCommandRuntime:
 
         assert calls == ["heartbeat", "poll", "claim", "reconcile", "stuck", "cancel", "cleanup"]
 
+    def test_idle_claim_backoff_does_not_delay_cancellation_schedule(self, monkeypatch) -> None:
+        cmd = _make_command()
+        clock = FakeClock()
+        cmd.polling_policy = AdaptivePollingPolicy(
+            base_interval_seconds=0.1,
+            max_interval_seconds=0.8,
+            random_value=lambda: 0.0,
+        )
+        cmd.reconciliation_interval = 10.0
+        cmd.timeout_check_interval = 10.0
+        cmd.cancellation_interval = 0.15
+        cmd.lease_cleanup_interval = 10.0
+        claims: list[float] = []
+        cancellations: list[float] = []
+
+        monkeypatch.setattr(cmd, "send_heartbeat", lambda: None)
+
+        def claim(_queues, _concurrency):
+            claims.append(clock.now)
+            if len(claims) == 4:
+                cmd.shutdown_requested = True
+            return 0
+
+        def cancel() -> int:
+            cancellations.append(clock.now)
+            return int(len(cancellations) == 2)
+
+        monkeypatch.setattr(cmd, "claim_and_process_tasks", claim)
+        monkeypatch.setattr(cmd, "reconcile_tasks", lambda: 0)
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda: 0)
+        monkeypatch.setattr(cmd, "process_cancellations", cancel)
+        monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: 0)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.monotonic",
+            clock.monotonic,
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.sleep",
+            clock.sleep,
+        )
+
+        cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=10.0)
+
+        assert cancellations[:3] == pytest.approx([0.0, 0.15, 0.3])
+        assert claims == pytest.approx([0.0, 0.1, 0.25, 0.35])
+
+    def test_heartbeat_deadline_interrupts_maximum_idle_claim_delay(self, monkeypatch) -> None:
+        cmd = _make_command()
+        clock = FakeClock()
+        cmd.polling_policy = AdaptivePollingPolicy(
+            base_interval_seconds=0.1,
+            max_interval_seconds=1.0,
+            random_value=lambda: 0.0,
+        )
+        cmd.reconciliation_interval = 10.0
+        cmd.timeout_check_interval = 10.0
+        cmd.cancellation_interval = 10.0
+        cmd.lease_cleanup_interval = 10.0
+        heartbeats: list[float] = []
+        claims: list[float] = []
+
+        monkeypatch.setattr(cmd, "send_heartbeat", lambda: heartbeats.append(clock.now))
+
+        def claim(_queues, _concurrency):
+            claims.append(clock.now)
+            if clock.now >= 0.7:
+                cmd.shutdown_requested = True
+            return 0
+
+        monkeypatch.setattr(cmd, "claim_and_process_tasks", claim)
+        monkeypatch.setattr(cmd, "reconcile_tasks", lambda: 0)
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda: 0)
+        monkeypatch.setattr(cmd, "process_cancellations", lambda: 0)
+        monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: 0)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.monotonic",
+            clock.monotonic,
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.sleep",
+            clock.sleep,
+        )
+
+        cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=0.25)
+
+        assert claims == pytest.approx([0.0, 0.1, 0.3, 0.7])
+        assert heartbeats == pytest.approx([0.0, 0.25, 0.5])
+
+    def test_pending_ray_core_work_keeps_independent_completion_cadence(self, monkeypatch) -> None:
+        cmd = _make_command()
+        clock = FakeClock()
+        cmd.execution_mode = "local"
+        cmd.ray_core_runner = cast(Any, SimpleNamespace(pending_count=1))
+        cmd.completion_poll_interval = 0.1
+        cmd.polling_policy = AdaptivePollingPolicy(
+            base_interval_seconds=0.5,
+            max_interval_seconds=1.0,
+            random_value=lambda: 0.0,
+        )
+        cmd.reconciliation_interval = 10.0
+        cmd.timeout_check_interval = 10.0
+        cmd.cancellation_interval = 10.0
+        cmd.lease_cleanup_interval = 10.0
+        polls: list[float] = []
+        claims: list[float] = []
+
+        monkeypatch.setattr(cmd, "send_heartbeat", lambda: None)
+
+        def poll() -> int:
+            polls.append(clock.now)
+            if len(polls) == 4:
+                cmd.shutdown_requested = True
+            return 0
+
+        monkeypatch.setattr(cmd, "poll_ray_core_tasks", poll)
+        monkeypatch.setattr(
+            cmd,
+            "claim_and_process_tasks",
+            lambda _queues, _concurrency: claims.append(clock.now) or 0,
+        )
+        monkeypatch.setattr(cmd, "reconcile_tasks", lambda: 0)
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda: 0)
+        monkeypatch.setattr(cmd, "process_cancellations", lambda: 0)
+        monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: 0)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.monotonic",
+            clock.monotonic,
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.sleep",
+            clock.sleep,
+        )
+
+        cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=10.0)
+
+        assert polls == pytest.approx([0.0, 0.1, 0.2, 0.3])
+        assert claims == [0.0]
+
+    def test_reconciliation_timeout_and_cleanup_have_independent_deadlines(
+        self, monkeypatch
+    ) -> None:
+        cmd = _make_command()
+        clock = FakeClock()
+        cmd.polling_policy = AdaptivePollingPolicy(
+            base_interval_seconds=0.1,
+            max_interval_seconds=1.0,
+            random_value=lambda: 0.0,
+        )
+        cmd.reconciliation_interval = 0.2
+        cmd.timeout_check_interval = 0.3
+        cmd.cancellation_interval = 10.0
+        cmd.lease_cleanup_interval = 0.5
+        reconciliations: list[float] = []
+        timeout_checks: list[float] = []
+        cleanups: list[float] = []
+
+        monkeypatch.setattr(cmd, "send_heartbeat", lambda: None)
+
+        def claim(_queues, _concurrency):
+            if clock.now >= 0.7:
+                cmd.shutdown_requested = True
+            return 0
+
+        monkeypatch.setattr(cmd, "claim_and_process_tasks", claim)
+        monkeypatch.setattr(
+            cmd,
+            "reconcile_tasks",
+            lambda: reconciliations.append(clock.now) or 0,
+        )
+        monkeypatch.setattr(
+            cmd,
+            "detect_stuck_tasks",
+            lambda: timeout_checks.append(clock.now) or 0,
+        )
+        monkeypatch.setattr(cmd, "process_cancellations", lambda: 0)
+        monkeypatch.setattr(
+            cmd,
+            "cleanup_expired_leases",
+            lambda: cleanups.append(clock.now) or 0,
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.monotonic",
+            clock.monotonic,
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.sleep",
+            clock.sleep,
+        )
+
+        cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=10.0)
+
+        assert reconciliations == pytest.approx([0.0, 0.2, 0.4, 0.6])
+        assert timeout_checks == pytest.approx([0.0, 0.3, 0.6])
+        assert cleanups == pytest.approx([0.0, 0.5])
+
     def test_send_heartbeat_recreates_missing_lease(self, monkeypatch) -> None:
         cmd = _make_command()
         cmd.lease = None
@@ -384,6 +595,38 @@ class TestWorkerCommandRuntime:
         )
 
         assert cmd.execution_mode == "local"
+
+    def test_handle_configures_adaptive_polling_from_settings(self, monkeypatch) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {
+                "DEFAULT_CONCURRENCY": 2,
+                "RUNNER": "ray_job",
+                "WORKER_POLL_INTERVAL_SECONDS": 0.25,
+                "WORKER_POLL_MAX_INTERVAL_SECONDS": 2.0,
+            },
+        )
+        monkeypatch.setattr(cmd, "_create_lease", lambda _queue: None)
+        monkeypatch.setattr(cmd, "run_loop", lambda **_kwargs: None)
+        monkeypatch.setattr(cmd, "shutdown", lambda: None)
+        monkeypatch.setattr(cmd, "setup_signal_handlers", lambda: None)
+
+        cmd.handle(
+            queue="default",
+            queues=None,
+            all_queues=False,
+            concurrency=None,
+            sync=False,
+            local=False,
+            cluster=None,
+            verbosity=1,
+        )
+
+        assert cmd.completion_poll_interval == 0.1
+        assert cmd.polling_policy.base_interval_seconds == 0.25
+        assert cmd.polling_policy.max_interval_seconds == 2.0
+        assert any("0.25s base, 2s maximum" in message for message in cmd.stdout.messages)
 
     def test_handle_cluster_mode_init_failure_continues_startup(self, monkeypatch) -> None:
         cmd = _make_command()

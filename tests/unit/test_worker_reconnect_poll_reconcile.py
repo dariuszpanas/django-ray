@@ -1078,12 +1078,13 @@ class TestWorkerReconnectPollReconcile:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        cmd.reconcile_tasks()
+        activity_count = cmd.reconcile_tasks()
 
         orphan.refresh_from_db()
         assert orphan.claimed_by_worker == "adopting-worker"
         assert orphan.last_heartbeat_at is not None
         assert cmd.active_tasks[orphan.pk] == "raysubmit_orphan_running_001"
+        assert activity_count == 1
 
     def test_reconcile_tasks_completes_orphaned_succeeded_ray_job(self, monkeypatch) -> None:
         orphan = RayTaskExecution.objects.create(
