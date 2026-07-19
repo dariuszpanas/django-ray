@@ -238,6 +238,14 @@ class TestWorkerCommandCoverage:
         assert not Command._is_valid_completion_envelope(
             {"success": False, "result": None, "error": None}
         )
+        assert not Command._is_valid_completion_envelope(
+            {
+                "success": False,
+                "result": None,
+                "error": "task failed",
+                "retryable": "sometimes",
+            }
+        )
         assert Command._is_valid_completion_envelope(
             {
                 "success": False,

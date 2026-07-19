@@ -55,8 +55,21 @@ def is_valid_result_reference(reference: str) -> bool:
         return False
 
 
-class ResultStorageBackend(Protocol):
-    """Storage backend contract for oversized serialized task results."""
+class PayloadStorageBackend(Protocol):
+    """Internal storage contract for durable serialized JSON payloads."""
+
+    def store_payload(self, *, serialized_payload: str) -> str:
+        """Persist a serialized payload and return a reference string."""
+
+    def load(self, *, reference: str) -> str | None:
+        """Load a serialized payload from a reference if supported."""
+
+    def delete(self, *, reference: str) -> None:
+        """Delete a serialized payload when the backend supports cleanup."""
+
+
+class ResultStorageBackend(PayloadStorageBackend, Protocol):
+    """Backward-compatible result storage contract."""
 
     def store(self, *, serialized_result: str) -> str:
         """Persist serialized result and return a reference string."""
@@ -69,11 +82,17 @@ class DigestResultStorage:
     """Digest-only reference backend (no external persistence)."""
 
     def store(self, *, serialized_result: str) -> str:
-        payload = serialized_result.encode("utf-8")
+        return self.store_payload(serialized_payload=serialized_result)
+
+    def store_payload(self, *, serialized_payload: str) -> str:
+        payload = serialized_payload.encode("utf-8")
         digest = hashlib.sha256(payload).hexdigest()
         return f"oversize://sha256/{digest}?bytes={len(payload)}"
 
     def load(self, *, reference: str) -> str | None:  # noqa: ARG002
+        return None
+
+    def delete(self, *, reference: str) -> None:  # noqa: ARG002
         return None
 
 
@@ -97,13 +116,16 @@ class FilesystemResultStorage:
         self.root_path = Path(root_path)
 
     def store(self, *, serialized_result: str) -> str:
-        digest, payload_size = _build_digest_and_bytes(serialized_result)
+        return self.store_payload(serialized_payload=serialized_result)
+
+    def store_payload(self, *, serialized_payload: str) -> str:
+        digest, payload_size = _build_digest_and_bytes(serialized_payload)
         relative_path = Path(digest[:2]) / digest[2:4] / f"{digest}.json"
         full_path = self.root_path / relative_path
         try:
             full_path.parent.mkdir(parents=True, exist_ok=True)
             if not full_path.exists():
-                full_path.write_text(serialized_result, encoding="utf-8")
+                full_path.write_text(serialized_payload, encoding="utf-8")
         except OSError as e:
             raise ResultStorageError(f"Failed to persist result to filesystem: {e}") from e
 
@@ -119,6 +141,16 @@ class FilesystemResultStorage:
         except OSError as e:
             raise ResultStorageError(
                 f"Failed to read result payload for reference: {reference}"
+            ) from e
+
+    def delete(self, *, reference: str) -> None:
+        relative_path = self._relative_path_from_reference(reference)
+        full_path = self.root_path / relative_path
+        try:
+            full_path.unlink(missing_ok=True)
+        except OSError as e:
+            raise ResultStorageError(
+                f"Failed to delete filesystem payload for reference: {reference}"
             ) from e
 
     def _relative_path_from_reference(self, reference: str) -> Path:
@@ -167,13 +199,16 @@ class S3ResultStorage:
         )
 
     def store(self, *, serialized_result: str) -> str:
-        digest, payload_size = _build_digest_and_bytes(serialized_result)
+        return self.store_payload(serialized_payload=serialized_result)
+
+    def store_payload(self, *, serialized_payload: str) -> str:
+        digest, payload_size = _build_digest_and_bytes(serialized_payload)
         key = _build_object_key(self.prefix, digest)
         try:
             self.client.put_object(
                 Bucket=self.bucket,
                 Key=key,
-                Body=serialized_result.encode("utf-8"),
+                Body=serialized_payload.encode("utf-8"),
                 ContentType="application/json",
             )
         except Exception as e:
@@ -192,6 +227,13 @@ class S3ResultStorage:
         if isinstance(body, str):
             return body
         raise ResultStorageError("Unexpected S3 response body type")
+
+    def delete(self, *, reference: str) -> None:
+        bucket, key = self._parse_reference(reference)
+        try:
+            self.client.delete_object(Bucket=bucket, Key=key)
+        except Exception as e:
+            raise ResultStorageError(f"Failed to delete payload from S3: {e}") from e
 
     def _parse_reference(self, reference: str) -> tuple[str, str]:
         parsed = urlparse(reference)
@@ -229,11 +271,14 @@ class GCSResultStorage:
         self.client = storage_module.Client()
 
     def store(self, *, serialized_result: str) -> str:
-        digest, payload_size = _build_digest_and_bytes(serialized_result)
+        return self.store_payload(serialized_payload=serialized_result)
+
+    def store_payload(self, *, serialized_payload: str) -> str:
+        digest, payload_size = _build_digest_and_bytes(serialized_payload)
         key = _build_object_key(self.prefix, digest)
         try:
             blob = self.client.bucket(self.bucket).blob(key)
-            blob.upload_from_string(serialized_result, content_type="application/json")
+            blob.upload_from_string(serialized_payload, content_type="application/json")
         except Exception as e:
             raise ResultStorageError(f"Failed to persist result to GCS: {e}") from e
         return f"gs://{self.bucket}/{key}?bytes={payload_size}"
@@ -246,6 +291,13 @@ class GCSResultStorage:
         except Exception as e:
             raise ResultStorageError(f"Failed to load result from GCS: {e}") from e
         return data.decode("utf-8")
+
+    def delete(self, *, reference: str) -> None:
+        bucket, key = self._parse_reference(reference)
+        try:
+            self.client.bucket(bucket).blob(key).delete()
+        except Exception as e:
+            raise ResultStorageError(f"Failed to delete payload from GCS: {e}") from e
 
     def _parse_reference(self, reference: str) -> tuple[str, str]:
         parsed = urlparse(reference)

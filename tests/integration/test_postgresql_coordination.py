@@ -10,9 +10,18 @@ from threading import Barrier, Event
 
 import pytest
 from django.db import close_old_connections, connection, transaction
+from django.utils import timezone
 
+from django_ray.input_storage import load_task_input, prepare_task_input, register_task_input
 from django_ray.lifecycle import record_failure, succeed_task
-from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.management.commands.django_ray_purge_inputs import Command as PurgeInputsCommand
+from django_ray.models import (
+    InputPayloadState,
+    RayTaskExecution,
+    TaskInputPayload,
+    TaskState,
+    TaskWorkerLease,
+)
 from django_ray.runner.cancellation import finalize_cancellation, request_cancellation
 from django_ray.runner.leasing import get_active_workers
 from django_ray.runner.reconciliation import mark_task_timed_out
@@ -352,3 +361,63 @@ def test_stale_generation_cannot_write_over_replacement_execution() -> None:
     assert stale.execution_generation == 5
     assert stale.ray_job_id == "raysubmit_new"
     assert stale.result_data is None
+
+
+def test_input_cleanup_racing_reenqueue_preserves_shared_payload(settings, tmp_path) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "MAX_INLINE_INPUT_SIZE_BYTES": 1024,
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    large_value = "x" * 2048
+    prepared = prepare_task_input((large_value,), {})
+    assert prepared.input_reference is not None
+
+    with transaction.atomic():
+        payload = register_task_input(prepared)
+        assert payload is not None
+        old_execution = _execution(
+            "postgres-input-cleanup-race-old",
+            state=TaskState.SUCCEEDED,
+            args_json=prepared.args_json,
+            kwargs_json=prepared.kwargs_json,
+            input_reference=prepared.input_reference,
+            finished_at=timezone.now() - timedelta(days=60),
+        )
+
+    old_timestamp = timezone.now() - timedelta(days=60)
+    TaskInputPayload.objects.filter(pk=payload.pk).update(last_used_at=old_timestamp)
+    cutoff = timezone.now() - timedelta(days=30)
+
+    def purge() -> object:
+        return PurgeInputsCommand()._process_reference(
+            prepared.input_reference,
+            cutoff=cutoff,
+            delete=True,
+        )
+
+    def reenqueue() -> object:
+        with transaction.atomic():
+            register_task_input(prepared)
+            return _execution(
+                "postgres-input-cleanup-race-new",
+                args_json=prepared.args_json,
+                kwargs_json=prepared.kwargs_json,
+                input_reference=prepared.input_reference,
+            ).pk
+
+    _run_concurrently(purge, reenqueue)
+
+    payload.refresh_from_db()
+    old_execution.refresh_from_db()
+    replacement = RayTaskExecution.objects.get(task_id="postgres-input-cleanup-race-new")
+    assert payload.state == InputPayloadState.ACTIVE
+    assert replacement.state == TaskState.QUEUED
+    assert replacement.input_reference == prepared.input_reference
+    assert old_execution.input_reference == prepared.input_reference
+    assert load_task_input(
+        args_json=replacement.args_json,
+        kwargs_json=replacement.kwargs_json,
+        input_reference=replacement.input_reference,
+    ) == ([large_value], {})

@@ -34,14 +34,20 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ImproperlyConfigured
+from django.db import transaction
 from django.tasks import TaskResult, TaskResultStatus
 from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.exceptions import TaskResultDoesNotExist
 
+from django_ray.input_storage import (
+    InputPayloadError,
+    load_task_input,
+    prepare_task_input,
+    register_task_input,
+)
 from django_ray.logging import get_backend_logger
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.runtime.runtime_env import resolve_runtime_env_profile
-from django_ray.runtime.serialization import serialize_args
 
 if TYPE_CHECKING:
     from django.tasks.base import Task
@@ -138,9 +144,7 @@ class RayTaskBackend(BaseTaskBackend):
         # Get the callable path for the task function
         callable_path = task.module_path
 
-        # Serialize arguments
-        args_json = serialize_args(list(args))
-        kwargs_json = serialize_args(kwargs)
+        prepared_input = prepare_task_input(list(args), kwargs)
         runtime_env = resolve_runtime_env_profile(
             self.runtime_env_profile,
             inline_spec=self.inline_runtime_env,
@@ -148,22 +152,25 @@ class RayTaskBackend(BaseTaskBackend):
 
         # Create the task execution record
         now = datetime.now(UTC)
-        execution = RayTaskExecution.objects.create(
-            task_id=task_id,
-            callable_path=callable_path,
-            queue_name=task.queue_name,
-            priority=task.priority,
-            state=TaskState.QUEUED,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            run_after=task.run_after,
-            ray_address=self.ray_address,
-            runtime_env_profile=runtime_env.profile,
-            runtime_env_json=runtime_env.serialized,
-            runtime_env_hash=runtime_env.digest,
-            timeout_seconds=self.timeout_seconds,
-            created_at=now,
-        )
+        with transaction.atomic():
+            register_task_input(prepared_input)
+            execution = RayTaskExecution.objects.create(
+                task_id=task_id,
+                callable_path=callable_path,
+                queue_name=task.queue_name,
+                priority=task.priority,
+                state=TaskState.QUEUED,
+                args_json=prepared_input.args_json,
+                kwargs_json=prepared_input.kwargs_json,
+                input_reference=prepared_input.input_reference,
+                run_after=task.run_after,
+                ray_address=self.ray_address,
+                runtime_env_profile=runtime_env.profile,
+                runtime_env_json=runtime_env.serialized,
+                runtime_env_hash=runtime_env.digest,
+                timeout_seconds=self.timeout_seconds,
+                created_at=now,
+            )
 
         logger.info(
             "Task enqueued",
@@ -176,6 +183,8 @@ class RayTaskBackend(BaseTaskBackend):
                 "runtime_env_profile": runtime_env.profile,
                 "runtime_env_hash": runtime_env.digest,
                 "timeout_seconds": self.timeout_seconds,
+                "input_external": prepared_input.input_reference is not None,
+                "input_size_bytes": prepared_input.size_bytes,
             },
         )
 
@@ -243,15 +252,22 @@ class RayTaskBackend(BaseTaskBackend):
                 )
             )
 
-        # Parse args/kwargs from JSON
         try:
-            args = json.loads(execution.args_json)
-        except (json.JSONDecodeError, TypeError):
+            args, kwargs = load_task_input(
+                args_json=execution.args_json,
+                kwargs_json=execution.kwargs_json,
+                input_reference=execution.input_reference,
+            )
+        except InputPayloadError as error:
+            logger.warning(
+                "Failed to load durable task input",
+                extra={
+                    "task_id": execution.task_id,
+                    "input_external": execution.input_reference is not None,
+                    "error": str(error),
+                },
+            )
             args = []
-
-        try:
-            kwargs = json.loads(execution.kwargs_json)
-        except (json.JSONDecodeError, TypeError):
             kwargs = {}
 
         # Get worker IDs

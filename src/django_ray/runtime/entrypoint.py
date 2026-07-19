@@ -20,6 +20,7 @@ import django
 from django.apps import apps
 
 from django_ray.conf.settings import get_settings
+from django_ray.input_storage import InputPayloadValidationError, load_task_input
 from django_ray.redaction import redact_text
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ def _serialize_error(e: Exception) -> str:
             "error": str(e),
             "traceback": traceback.format_exc(),
             "exception_type": type(e).__module__ + "." + type(e).__name__,
+            "retryable": not isinstance(e, InputPayloadValidationError),
         }
     )
 
@@ -145,6 +147,8 @@ def execute_task(
     execution_generation: int | None = None,
     runtime_env_profile: str | None = None,
     runtime_env_hash: str = "",
+    input_reference: str | None = None,
+    ray_job_driver: bool | None = None,
 ) -> str:
     """Execute a Django Task and return JSON result.
 
@@ -156,19 +160,23 @@ def execute_task(
             the Ray Job API.
         attempt_number: Current retry attempt, used to prevent stale writes.
         execution_generation: Monotonic execution token, used to isolate manual retries.
+        input_reference: Durable combined-input reference for external payloads.
+        ray_job_driver: Override execution-context mode for synchronous workers.
 
     Returns:
         JSON-serialized TaskResult.
     """
     from django_ray.runtime.import_utils import import_callable
-    from django_ray.runtime.serialization import deserialize_args
 
     try:
         bootstrap_django()
 
+        args, kwargs = load_task_input(
+            args_json=serialized_args,
+            kwargs_json=serialized_kwargs,
+            input_reference=input_reference,
+        )
         callable_obj = import_callable(callable_path)
-        args = deserialize_args(serialized_args)
-        kwargs = deserialize_args(serialized_kwargs)
 
         if task_execution_pk is None:
             execution_context = nullcontext()
@@ -179,7 +187,7 @@ def execute_task(
                 task_execution_pk,
                 runtime_env_profile=runtime_env_profile,
                 runtime_env_hash=runtime_env_hash,
-                ray_job_driver=True,
+                ray_job_driver=True if ray_job_driver is None else ray_job_driver,
             )
 
         with execution_context:
@@ -199,6 +207,7 @@ def execute_task(
                 "error": None,
                 "traceback": None,
                 "exception_type": None,
+                "retryable": None,
             }
         )
 
@@ -232,15 +241,25 @@ def execute_task_from_payload(payload_b64: str) -> str:
     try:
         payload_json = base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8")
         payload = json.loads(payload_json)
+        transport_version = payload.get("transport_version", 1)
+        if transport_version not in (1, 2):
+            raise InputPayloadValidationError(
+                f"Unsupported Ray Job input transport version: {transport_version}"
+            )
+        if transport_version == 2 and not payload.get("input_reference"):
+            raise InputPayloadValidationError(
+                "Ray Job input transport version 2 requires input_reference"
+            )
         return execute_task(
             callable_path=payload["callable_path"],
-            serialized_args=payload["serialized_args"],
-            serialized_kwargs=payload["serialized_kwargs"],
+            serialized_args=payload.get("serialized_args", "null"),
+            serialized_kwargs=payload.get("serialized_kwargs", "null"),
             task_execution_pk=payload.get("task_execution_pk"),
             attempt_number=payload.get("attempt_number"),
             execution_generation=payload.get("execution_generation"),
             runtime_env_profile=payload.get("runtime_env_profile"),
             runtime_env_hash=payload.get("runtime_env_hash", ""),
+            input_reference=payload.get("input_reference"),
         )
     except Exception as e:
         return _serialize_error(e)

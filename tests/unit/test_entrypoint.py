@@ -52,6 +52,7 @@ class TestEntrypointPayload:
             "execution_generation": None,
             "runtime_env_profile": None,
             "runtime_env_hash": "",
+            "input_reference": None,
         }
 
     def test_execute_task_from_payload_invalid_payload_returns_error_result(self) -> None:
@@ -62,6 +63,25 @@ class TestEntrypointPayload:
         assert result["success"] is False
         assert result["error"] is not None
         assert isinstance(result["exception_type"], str)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"transport_version": 99, "callable_path": "tests.fake"},
+            {"transport_version": 2, "callable_path": "tests.fake"},
+        ],
+    )
+    def test_execute_task_from_payload_rejects_invalid_reference_transport(
+        self,
+        payload: dict[str, object],
+    ) -> None:
+        payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+        result = json.loads(entrypoint.execute_task_from_payload(payload_b64))
+
+        assert result["success"] is False
+        assert result["retryable"] is False
+        assert "transport" in result["error"]
 
     def test_main_does_not_print_payload_execution_result(self, monkeypatch, capsys) -> None:
         """CLI main should keep the completion envelope out of Ray logs."""

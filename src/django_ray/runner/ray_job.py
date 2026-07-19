@@ -48,21 +48,33 @@ class RayJobRunner(BaseRunner):
         ray_address = getattr(task_execution, "ray_address", None) or self.ray_address
         client = self._get_client(ray_address)
 
-        serialized_args = serialize_args(list(args))
-        serialized_kwargs = serialize_args(kwargs)
         runtime_env = runtime_env_for_execution(task_execution)
 
-        # Transport payload as urlsafe base64 to avoid shell quoting/injection issues.
-        payload = {
+        # Inline tasks retain the unversioned v1 transport during rolling
+        # upgrades. Referenced tasks use v2 so the command line remains small.
+        payload: dict[str, Any] = {
             "callable_path": callable_path,
-            "serialized_args": serialized_args,
-            "serialized_kwargs": serialized_kwargs,
             "task_execution_pk": task_execution.pk,
             "attempt_number": task_execution.attempt_number,
             "execution_generation": task_execution.execution_generation,
             "runtime_env_profile": runtime_env.profile,
             "runtime_env_hash": runtime_env.digest,
         }
+        input_reference = getattr(task_execution, "input_reference", None)
+        if input_reference:
+            payload.update(
+                {
+                    "transport_version": 2,
+                    "input_reference": input_reference,
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "serialized_args": serialize_args(list(args)),
+                    "serialized_kwargs": serialize_args(kwargs),
+                }
+            )
         payload_json = json.dumps(payload, separators=(",", ":"))
         payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
 

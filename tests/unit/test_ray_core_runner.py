@@ -161,6 +161,51 @@ class TestRayCoreRunnerRuntime:
         assert pending.ray_job_id == "02000000"
         assert pending.ray_task_id == fake.default_hex[:48]
 
+    def test_submit_transports_external_input_by_reference(self, monkeypatch) -> None:
+        _install_fake_ray(monkeypatch)
+        captured: dict[str, object] = {}
+
+        def fake_execute(
+            callable_path: str,
+            args_json: str,
+            kwargs_json: str,
+            *,
+            input_reference: str | None = None,
+        ) -> str:
+            captured.update(
+                callable_path=callable_path,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                input_reference=input_reference,
+            )
+            return json.dumps({"success": True, "result": None})
+
+        monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", fake_execute)
+        reference = "resultfs://sha256/" + "a" * 64 + "?rel=aa/aa/" + "a" * 64 + ".json&bytes=4"
+        task_execution = SimpleNamespace(
+            pk=14,
+            input_reference=reference,
+            args_json="null",
+            kwargs_json="null",
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+        )
+
+        RayCoreRunner().submit(
+            task_execution=task_execution,
+            callable_path="testproject.tasks.echo_task",
+            args=(),
+            kwargs={},
+        )
+
+        assert captured == {
+            "callable_path": "testproject.tasks.echo_task",
+            "args_json": "null",
+            "kwargs_json": "null",
+            "input_reference": reference,
+        }
+
     def test_submit_registers_remote_module_for_ray_cloudpickle(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         registered: list[object] = []

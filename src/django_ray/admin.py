@@ -59,6 +59,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "last_heartbeat_at",
         "args_json_display",
         "kwargs_json_display",
+        "input_reference",
         "result_data_display",
         "result_reference",
         "progress_data_display",
@@ -86,7 +87,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         (
             "Arguments",
             {
-                "fields": ("args_json_display", "kwargs_json_display"),
+                "fields": ("args_json_display", "kwargs_json_display", "input_reference"),
                 "classes": ("collapse",),
             },
         ),

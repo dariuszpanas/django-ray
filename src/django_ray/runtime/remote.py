@@ -17,6 +17,7 @@ def execute_django_task_remote(
     task_id: int,
     runtime_env_profile: str | None = None,
     runtime_env_hash: str = "",
+    input_reference: str | None = None,
 ) -> str:
     """Execute one durable django-ray task on a Ray worker."""
     from django_ray.runtime.context import durable_task_execution
@@ -28,7 +29,15 @@ def execute_django_task_remote(
         runtime_env_profile=runtime_env_profile,
         runtime_env_hash=runtime_env_hash,
     ):
-        result = execute_task(callable_path, args_json, kwargs_json)
+        if input_reference is None:
+            result = execute_task(callable_path, args_json, kwargs_json)
+        else:
+            result = execute_task(
+                callable_path,
+                args_json,
+                kwargs_json,
+                input_reference=input_reference,
+            )
 
     parsed = json.loads(result)
     if parsed.get("success"):

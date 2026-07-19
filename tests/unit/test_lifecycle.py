@@ -16,6 +16,7 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
         state=TaskState.FAILED,
         attempt_number=2,
         execution_generation=4,
+        input_reference="s3://inputs/django-ray/inputs/immutable.json?bytes=42",
         error_message="boom",
         error_traceback="RuntimeError: boom",
     )
@@ -27,6 +28,7 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     assert task.state == TaskState.QUEUED
     assert task.attempt_number == 3
     assert task.execution_generation == 5
+    assert task.input_reference == "s3://inputs/django-ray/inputs/immutable.json?bytes=42"
     assert task.error_message is None
     history = TaskAttempt.objects.get(execution=task, attempt_number=2)
     assert history.state == TaskState.FAILED

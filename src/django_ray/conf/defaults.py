@@ -29,6 +29,18 @@ DEFAULTS: dict[str, Any] = {
     "WORKER_HEARTBEAT_SECONDS": 15,
     "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
     "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
+    # Inputs
+    # ``None`` preserves legacy inline args/kwargs storage. Configure a
+    # retrievable input backend before setting a spill threshold.
+    "MAX_INLINE_INPUT_SIZE_BYTES": None,
+    "INPUT_STORAGE_BACKEND": None,  # "filesystem", "s3", or "gcs"
+    "INPUT_STORAGE_FILESYSTEM_PATH": None,
+    "INPUT_STORAGE_S3_BUCKET": None,
+    "INPUT_STORAGE_S3_PREFIX": "django-ray/inputs",
+    "INPUT_STORAGE_S3_REGION": None,
+    "INPUT_STORAGE_S3_ENDPOINT_URL": None,
+    "INPUT_STORAGE_GCS_BUCKET": None,
+    "INPUT_STORAGE_GCS_PREFIX": "django-ray/inputs",
     # Results
     "MAX_RESULT_SIZE_BYTES": 1024 * 1024,  # 1MB
     "RESULT_STORAGE_BACKEND": "digest",  # "digest", "filesystem", "s3", "gcs"

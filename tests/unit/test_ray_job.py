@@ -84,6 +84,38 @@ class TestRayJobRunnerSubmit:
             ),
         }
 
+    def test_submit_transports_external_input_by_reference_only(self, monkeypatch) -> None:
+        fake_client = FakeJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        reference = "s3://inputs/django-ray/inputs/aa/bb/" + "a" * 64 + ".json?bytes=4"
+        task_execution = SimpleNamespace(
+            pk=124,
+            input_reference=reference,
+            args_json="null",
+            kwargs_json="null",
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+            attempt_number=1,
+            execution_generation=2,
+        )
+
+        runner.submit(
+            task_execution=task_execution,
+            callable_path="testproject.tasks.echo_task",
+            args=(),
+            kwargs={},
+        )
+
+        entrypoint_value = str(fake_client.submissions[0]["entrypoint"])
+        encoded = entrypoint_value.rsplit(" ", 1)[-1]
+        payload = json.loads(base64.urlsafe_b64decode(encoded).decode())
+        assert payload["transport_version"] == 2
+        assert payload["input_reference"] == reference
+        assert "serialized_args" not in payload
+        assert "serialized_kwargs" not in payload
+
     def test_submit_uses_runtime_env_and_configured_ray_address(self, monkeypatch) -> None:
         """Submit should pass configured runtime_env and keep configured ray_address."""
         fake_client = FakeJobClient()
