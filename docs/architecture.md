@@ -37,18 +37,16 @@ This document describes the runtime architecture of `django-ray` and how work mo
 - Submits and reconciles execution in sync/Ray Core/Ray Job modes.
 - Applies retry policy and stuck-task/orphan recovery.
 
-The command is an orchestration layer over smaller control-plane boundaries:
+The command currently orchestrates the existing leasing, runner, reconciliation, and
+cancellation helpers. The runner classes own mode-specific submission and polling, while
+the command coordinates when to claim, reconcile, or hand off work. Broader extraction
+of those orchestration paths into separate services remains future work.
 
-- leasing helpers own worker heartbeats, ownership, and orphan adoption;
-- runner implementations own mode-specific submission, polling, and cancellation;
-- reconciliation/cancellation helpers own conditional database transitions;
-- the command coordinates these services and decides when to claim, reconcile, or
-  hand off work.
-
-`RayCoreRunner.pending_task_ids` and `clear_pending_tasks()` are the explicit tracking
-API used by orchestration. The command does not reach into the runner's private object
-reference registry, so connection loss and shutdown can snapshot or clear local state
-without coupling lifecycle code to runner storage.
+This boundary is explicit for Ray Core tracking: `RayCoreRunner.pending_task_ids` returns
+a stable task-ID snapshot and `clear_pending_tasks()` clears local tracking. The command
+does not reach into the runner's private object-reference registry, so connection-loss
+and shutdown paths can manage local state without coupling lifecycle code to runner
+storage.
 
 ### Ray Runtime
 
