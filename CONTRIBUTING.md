@@ -44,6 +44,30 @@ A PR should explain the problem and approach, call out migrations or persisted-p
 validation results, and link the issue with `Closes #<number>` when appropriate. Prefer a few focused
 commits over unrelated cleanup in the same PR.
 
+The required `Commit Messages` GitHub Actions check validates the PR title and every commit in the PR.
+Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, or
+`test`, optionally add a scope and `!`, and include a summary after `:`. A failed check prints the
+offending title or commit and the expected format.
+
+## Rebase auto-merge
+
+The repository uses pull requests for every change, but merges should preserve the descriptive commits
+inside the PR. Do not squash a PR. After CI is green, enable auto-merge with the rebase method:
+
+```bash
+gh pr merge --auto --rebase <PR-number>
+```
+
+Auto-merge waits for the required checks on the pull request and then applies the rebase merge method,
+so each descriptive commit remains visible on `main`. The `Commit Messages` workflow validates the PR
+title and each commit through the read-only `pull_request_target` event.
+
+If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
+conflicts, run `uv run make ci`, and push. Auto-merge will wait for the new checks. A maintainer must
+configure the `main` ruleset to require the `Commit Messages` check and CI checks, enable rebase
+merging and auto-merge, and leave approval requirements disabled when the repository's sole-developer
+workflow does not need them.
+
 ## Worktree and staging safety
 
 Inspect the worktree before editing:

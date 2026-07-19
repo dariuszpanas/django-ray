@@ -81,7 +81,7 @@ ci:
 	pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
-	zensical build --strict
+	zensical build --strict --clean
 	uv build
 	@echo "All CI checks passed!"
 
@@ -95,7 +95,7 @@ docs-build:
 
 # Build docs in strict mode (CI)
 docs-build-strict:
-	uv run zensical build --strict
+	uv run zensical build --strict --clean
 
 # Serve docs locally at http://127.0.0.1:8000
 docs-serve:
