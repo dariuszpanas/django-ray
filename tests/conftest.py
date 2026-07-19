@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -17,7 +18,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 def pytest_configure(config: object) -> None:
     """Configure Django for testing."""
-    if not settings.configured:
+    settings_module = os.environ.get("DJANGO_SETTINGS_MODULE")
+    if not settings.configured and not settings_module:
         settings.configure(
             DEBUG=True,
             DATABASES={

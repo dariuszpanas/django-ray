@@ -37,6 +37,58 @@ class TestCancellationHelpers:
         assert ok is False
         assert task.state == TaskState.SUCCEEDED
 
+    def test_request_cancellation_does_not_overwrite_stale_terminal_state(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-stale-terminal-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        RayTaskExecution.objects.filter(pk=task.pk).update(state=TaskState.SUCCEEDED)
+
+        seen: list[object] = []
+        ok = request_cancellation(
+            task,
+            runner=SimpleNamespace(cancel=lambda handle: seen.append(handle) or True),
+        )
+
+        task.refresh_from_db()
+        assert ok is False
+        assert task.state == TaskState.SUCCEEDED
+        assert seen == []
+
+    def test_request_cancellation_does_not_overwrite_newer_generation(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-stale-generation-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            execution_generation=4,
+            claimed_by_worker="old-worker",
+            ray_job_id="raysubmit_old",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        RayTaskExecution.objects.filter(pk=task.pk).update(
+            execution_generation=5,
+            claimed_by_worker="new-worker",
+            ray_job_id="raysubmit_new",
+        )
+
+        seen: list[object] = []
+        ok = request_cancellation(
+            task,
+            runner=SimpleNamespace(cancel=lambda handle: seen.append(handle) or True),
+        )
+
+        task.refresh_from_db()
+        assert ok is False
+        assert task.state == TaskState.RUNNING
+        assert task.execution_generation == 5
+        assert task.claimed_by_worker == "new-worker"
+        assert task.ray_job_id == "raysubmit_new"
+        assert seen == []
+
     def test_request_cancellation_marks_state_and_calls_runner(self) -> None:
         task = RayTaskExecution.objects.create(
             task_id="cancel-002",

@@ -160,6 +160,45 @@ CI strategy:
 - CI also supports `workflow_dispatch` for a manual rerun; it does not need a repository variable
   or an externally reachable Ray cluster.
 
+### PostgreSQL Coordination Tests
+
+The fast default suite continues to use SQLite. A separate integration gate runs the worker's
+database coordination paths against PostgreSQL using `tests.postgres_settings`:
+
+```bash
+docker run --detach --name django-ray-postgres-tests \
+  --publish 127.0.0.1:5432:5432 \
+  --env POSTGRES_DB=django_ray \
+  --env POSTGRES_USER=django_ray \
+  --env POSTGRES_PASSWORD=django_ray \
+  postgres:17
+uv sync --extra postgres
+```
+
+Set the test settings and connection variables, then run the focused gate. In PowerShell:
+
+```powershell
+$env:DJANGO_SETTINGS_MODULE = "tests.postgres_settings"
+$env:DATABASE_NAME = "django_ray"
+$env:DATABASE_TEST_NAME = "test_django_ray"
+$env:DATABASE_USER = "django_ray"
+$env:DATABASE_PASSWORD = "django_ray"
+$env:DATABASE_HOST = "127.0.0.1"
+$env:DATABASE_PORT = "5432"
+uv run make test-postgres
+```
+
+On POSIX shells, export the same variables before running `uv run make test-postgres`. The database
+user must be allowed to create and drop `DATABASE_TEST_NAME`; the disposable container above has the
+required permission. These credentials are local-only examples. Remove the container when finished:
+
+```bash
+docker rm --force django-ray-postgres-tests
+```
+
+CI runs this gate on Python 3.12 and Django 6.0, keeps it separate from coverage, and prints server
+version and connection activity when the gate fails.
+
 ### Local Testing
 
 Start the development server and worker:

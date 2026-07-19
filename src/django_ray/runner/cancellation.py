@@ -70,9 +70,21 @@ def request_cancellation(
     if task_execution.state not in ("QUEUED", "RUNNING"):
         return False
 
-    # Mark as cancellation requested
+    # Make the state transition conditional in the database. The caller's model
+    # instance may be stale while a completion or timeout is committing in another
+    # worker, and an unconditional save would overwrite that newer terminal state.
+    updated = (
+        type(task_execution)
+        .objects.filter(
+            pk=task_execution.pk,
+            state__in=("QUEUED", "RUNNING"),
+            execution_generation=task_execution.execution_generation,
+        )
+        .update(state="CANCELLING")
+    )
+    if not updated:
+        return False
     task_execution.state = "CANCELLING"
-    task_execution.save(update_fields=["state"])
 
     # If we have a Ray job ID, try to stop it
     if task_execution.ray_job_id:
