@@ -56,9 +56,12 @@ jobs:
       - name: Wait for two live Ray nodes
         run: |
           for attempt in $(seq 1 60); do
-            if docker exec ray-head python -c 'import logging; import ray; ray.init(address="ray-head:6379", logging_level=logging.ERROR); assert sum(node["Alive"] for node in ray.nodes()) >= 2'; then
+            live_nodes="$(docker exec ray-head python -c 'import logging; import ray; ray.init(address="ray-head:6379", logging_level=logging.ERROR); print(sum(node["Alive"] for node in ray.nodes()))' 2>/dev/null || true)"
+            if [[ "$live_nodes" =~ ^[0-9]+$ && "$live_nodes" -ge 2 ]]; then
+              echo "Ray cluster is ready with $live_nodes live nodes."
               exit 0
             fi
+            echo "Waiting for two live Ray nodes (attempt $attempt/60; observed ${live_nodes:-0})."
             sleep 2
           done
           docker logs ray-head
