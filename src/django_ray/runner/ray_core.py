@@ -358,3 +358,17 @@ class RayCoreRunner(BaseRunner):
     def pending_count(self) -> int:
         """Get the number of pending tasks."""
         return len(self._pending_tasks)
+
+    @property
+    def pending_task_ids(self) -> tuple[int, ...]:
+        """Return a stable snapshot of task IDs currently owned by this runner.
+
+        Worker orchestration must not depend on the runner's private tracking
+        dictionary.  This read-only snapshot is intentionally detached so a
+        poll or shutdown operation can safely mutate the runner afterward.
+        """
+        return tuple(self._pending_tasks)
+
+    def clear_pending_tasks(self) -> None:
+        """Forget all locally tracked tasks after a connection loss or handoff."""
+        self._pending_tasks.clear()

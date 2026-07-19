@@ -46,6 +46,8 @@ class TestFailureInjection:
         runner = SimpleNamespace(
             _pending_tasks=pending,
             pending_count=len(pending),
+            pending_task_ids=tuple(pending),
+            clear_pending_tasks=pending.clear,
         )
 
         cmd = self._make_command()
@@ -120,6 +122,10 @@ class TestFailureInjection:
             @property
             def pending_count(self) -> int:
                 return len(self._pending_tasks)
+
+            @property
+            def pending_task_ids(self):
+                return tuple(self._pending_tasks)
 
             def poll_completed(self):
                 self._pending_tasks.clear()

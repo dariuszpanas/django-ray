@@ -343,6 +343,10 @@ class TestWorkerReconnectPollReconcile:
             _pending_tasks = {task.pk: object()}
             pending_count = 1
 
+            @property
+            def pending_task_ids(self):
+                return tuple(self._pending_tasks)
+
             def poll_completed(self):
                 return []
 
@@ -388,6 +392,13 @@ class TestWorkerReconnectPollReconcile:
                 self._pending_tasks = {existing.pk: object(), 999999: object()}
 
             @property
+            def pending_task_ids(self):
+                return tuple(self._pending_tasks)
+
+            def clear_pending_tasks(self) -> None:
+                self._pending_tasks.clear()
+
+            @property
             def pending_count(self) -> int:
                 return len(self._pending_tasks)
 
@@ -412,6 +423,10 @@ class TestWorkerReconnectPollReconcile:
         class Runner:
             _pending_tasks = {1: object()}
             pending_count = 1
+
+            @property
+            def pending_task_ids(self):
+                return tuple(self._pending_tasks)
 
             def poll_completed(self):
                 raise RuntimeError("poll exploded")
@@ -459,6 +474,10 @@ class TestWorkerReconnectPollReconcile:
         class Runner:
             _pending_tasks = {1: object()}
             pending_count = 1
+
+            @property
+            def pending_task_ids(self):
+                return tuple(self._pending_tasks)
 
             def poll_completed(self):
                 return [

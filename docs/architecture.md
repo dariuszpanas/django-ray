@@ -37,6 +37,17 @@ This document describes the runtime architecture of `django-ray` and how work mo
 - Submits and reconciles execution in sync/Ray Core/Ray Job modes.
 - Applies retry policy and stuck-task/orphan recovery.
 
+The command currently orchestrates the existing leasing, runner, reconciliation, and
+cancellation helpers. The runner classes own mode-specific submission and polling, while
+the command coordinates when to claim, reconcile, or hand off work. Broader extraction
+of those orchestration paths into separate services remains future work.
+
+This boundary is explicit for Ray Core tracking: `RayCoreRunner.pending_task_ids` returns
+a stable task-ID snapshot and `clear_pending_tasks()` clears local tracking. The command
+does not reach into the runner's private object-reference registry, so connection-loss
+and shutdown paths can manage local state without coupling lifecycle code to runner
+storage.
+
 ### Ray Runtime
 
 - Executes submitted functions.

@@ -860,6 +860,10 @@ class TestWorkerOrphanRecovery:
         class FakeCoreRunner:
             _pending_tasks = {task.pk: object()}
 
+            @property
+            def pending_task_ids(self):
+                return tuple(self._pending_tasks)
+
             def cancel(self, handle):
                 cancelled.append(handle.ray_job_id)
                 return True
