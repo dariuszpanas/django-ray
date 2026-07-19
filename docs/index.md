@@ -41,6 +41,7 @@ project resources, task stats, and a smoke-task trigger:
 
 - [CLI Reference](reference/cli.md) - Command-line interface
 - [Settings Reference](reference/settings.md) - All settings
+- [Durable Input Storage](reference/input-storage.md) - Oversized JSON input storage and cleanup
 - [Result Storage](reference/result-storage.md) - Oversized result backends and retrieval
 - [Handle Compatibility](reference/handle-compatibility.md) - Ray Core handle formats and migration policy
 - [API Reference](reference/api.md) - How to build your own API (with testproject examples)

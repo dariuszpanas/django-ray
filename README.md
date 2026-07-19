@@ -136,6 +136,7 @@ python manage.py django_ray_worker --queue=default --sync
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `15` | Database heartbeat interval for in-flight Ray Core tasks |
 | `RUNTIME_ENV_PROFILES` | `{}` | Named Ray environments for code and dependencies |
 | `DEFAULT_RUNTIME_ENV_PROFILE` | `None` | Default named environment |
+| `MAX_INLINE_INPUT_SIZE_BYTES` | `None` | Opt-in durable input spillover threshold |
 
 See [Ray-Native Workflows](docs/workflows.md) for low-latency `chain`, `group`,
 and `map_step` execution.
@@ -143,6 +144,8 @@ See [Runtime Environments](docs/runtime-environments.md) for per-task profiles,
 workflow overrides, and generic KubeRay images.
 See [Performance](docs/performance.md) for choosing durable task boundaries,
 execution modes, and useful fan-out granularity.
+See [Durable Input Storage](docs/reference/input-storage.md) for oversized JSON
+arguments, storage backends, rollout, and retention.
 
 ## Development Setup
 

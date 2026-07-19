@@ -3,6 +3,10 @@
 `django-ray` can keep small task results inline in `RayTaskExecution.result_data`
 and move oversized results to `result_reference`.
 
+The filesystem, S3, and GCS implementations also provide the internal load/delete
+protocol used by [Durable Input Storage](input-storage.md). Input and result settings,
+prefixes, references, retention rules, and failure semantics remain separate.
+
 ## Size Threshold
 
 `MAX_RESULT_SIZE_BYTES` controls when inline storage is used.

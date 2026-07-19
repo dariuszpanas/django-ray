@@ -33,6 +33,7 @@ nav = [
   { "Reference" = [
     { "CLI" = "reference/cli.md" },
     { "Settings" = "reference/settings.md" },
+    { "Durable Input Storage" = "reference/input-storage.md" },
     { "Result Storage" = "reference/result-storage.md" },
     { "Handle Compatibility" = "reference/handle-compatibility.md" },
     { "API" = "reference/api.md" },

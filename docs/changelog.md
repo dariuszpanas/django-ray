@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   higher-value-first claims, and FIFO ordering within equal priorities.
 - Validated worker polling intervals, bounded jittered idle backoff, and a PostgreSQL
   fixed-versus-adaptive polling benchmark command.
+- Opt-in durable references for oversized JSON task inputs, with versioned envelopes,
+  filesystem/S3/GCS retrieval, immutable retry reuse, and retention-safe cleanup.
 
 ### Changed
 
