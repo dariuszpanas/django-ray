@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 from typing import Any
@@ -83,6 +84,37 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
             raise ImproperlyConfigured(
                 f"django-ray: {name} must be an integer between {min_val} and {max_val}"
             )
+
+    polling_settings = [
+        ("WORKER_POLL_INTERVAL_SECONDS", 0.01, 10.0),
+        ("WORKER_POLL_MAX_INTERVAL_SECONDS", 0.01, 60.0),
+    ]
+    for name, min_val, max_val in polling_settings:
+        if name not in config:
+            continue
+        value = config[name]
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(value)
+            or value < min_val
+            or value > max_val
+        ):
+            raise ImproperlyConfigured(
+                f"django-ray: {name} must be a finite number between {min_val} and {max_val}"
+            )
+
+    poll_interval = config.get(
+        "WORKER_POLL_INTERVAL_SECONDS", DEFAULTS["WORKER_POLL_INTERVAL_SECONDS"]
+    )
+    poll_max_interval = config.get(
+        "WORKER_POLL_MAX_INTERVAL_SECONDS",
+        DEFAULTS["WORKER_POLL_MAX_INTERVAL_SECONDS"],
+    )
+    if poll_max_interval < poll_interval:
+        raise ImproperlyConfigured(
+            "django-ray: WORKER_POLL_MAX_INTERVAL_SECONDS must be greater than or equal to "
+            "WORKER_POLL_INTERVAL_SECONDS"
+        )
 
     # Heartbeats must occur before the lease or stuck-task windows expire. Use
     # defaults for omitted values so partial test/config dictionaries receive

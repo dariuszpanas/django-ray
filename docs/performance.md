@@ -163,3 +163,65 @@ Run at least:
 
 Record queue wait, environment setup, leaf runtime, and total duration separately.
 Optimizing only the function body can miss the dominant cost.
+
+## Benchmark Worker Polling
+
+Run the polling benchmark against a disposable PostgreSQL database with no production
+workers consuming the generated benchmark queue:
+
+```bash
+python manage.py django_ray_benchmark_polling \
+  --workers=4 \
+  --tasks=100 \
+  --idle-seconds=2 \
+  --enqueue-interval-seconds=0.05 \
+  --base-interval-seconds=0.1 \
+  --max-interval-seconds=0.5 \
+  --seed=53 \
+  --json
+```
+
+The command runs fixed-100-ms and adaptive policies sequentially through the production
+worker claim loop. Both execute its real `SELECT ... FOR UPDATE SKIP LOCKED` query on
+isolated queues. Independent phases report idle claim and total SQL queries per
+worker-second, peak distinct-worker overlap and a sliding-window overlap ratio, spaced
+enqueue-to-claim p50/p95, and preloaded-burst claim throughput. The enqueue timestamp is
+captured before the task row is inserted, so latency includes enqueue database time.
+Generated rows are validated for exact, unique ownership before deletion. The command
+refuses non-PostgreSQL databases because SQLite cannot represent the multi-worker locking
+behavior being measured.
+
+For a scaling series, keep the database and task shape fixed and run `--workers=1`,
+`4`, and `8`. Repeat each case at least five times after a warm-up run. Record PostgreSQL
+version, host resources, connection-pool settings, database distance, worker count,
+task count, enqueue interval, both polling intervals, schema version, and seed with every
+result. Use the same seed when comparing policies; repeat runs still capture scheduler
+and database variance.
+
+The PostgreSQL CI gate runs a warm-up and five recorded repetitions for each worker
+count. Download its `polling-benchmark-json` artifact for the exact environment metadata
+and individual measurements. Performance varies with shared CI capacity, so the gate
+checks claim integrity and finite metrics rather than imposing noisy latency or
+throughput thresholds. Do not substitute SQLite or simulated timings.
+
+The following values are medians from five repetitions after warm-up in
+[GitHub Actions run 29703449242](https://github.com/dariuszpanas/django-ray/actions/runs/29703449242)
+on 2026-07-19. The environment was PostgreSQL `server_version_num=170010`, Python
+3.12.13, Django 6.0, and schema `0008_raytaskexecution_priority_constraint` on a shared
+Azure Linux runner. Each policy used 100 tasks per phase, a 50 ms enqueue interval, a
+2-second idle window, and a 25 ms overlap window.
+
+| Policy/workers | Claim p50 (ms) | Claim p95 (ms) | Idle queries/worker/s | Idle overlap | Throughput (claims/s) |
+|---|---:|---:|---:|---:|---:|
+| Fixed 100 ms / 1 | 2620.0 | 4931.5 | 9.99 | 0% | 9.7 |
+| Adaptive 100-500 ms / 1 | 2412.7 | 4283.8 | 3.50 | 0% | 10.7 |
+| Fixed 100 ms / 4 | 56.9 | 99.2 | 9.49 | 100% | 38.5 |
+| Adaptive 100-500 ms / 4 | 30.6 | 89.6 | 3.25 | 68.2% | 43.3 |
+| Fixed 100 ms / 8 | 50.9 | 104.8 | 9.49 | 100% | 73.4 |
+| Adaptive 100-500 ms / 8 | 15.7 | 51.9 | 3.19 | 93.0% | 85.1 |
+
+The single-worker latency phase deliberately offers 20 tasks per second to a worker that
+claims about 10 per second, so its growing queue produces multi-second latency. Treat that
+row as saturation behavior, not idle wake-up latency. In this run, adaptive polling cut
+idle claim queries by roughly two-thirds without reducing burst throughput. Shared-runner
+values are evidence for comparison and tuning, not service-level objectives.

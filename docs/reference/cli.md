@@ -87,3 +87,24 @@ in this repository maps these environment variables into command-line options:
 | `130` | Interrupted (SIGINT) |
 | `143` | Terminated (SIGTERM) |
 
+## django_ray_benchmark_polling
+
+Compare fixed and adaptive claim polling against the configured PostgreSQL database:
+
+```bash
+python manage.py django_ray_benchmark_polling \
+  --workers=4 --tasks=100 --idle-seconds=2 \
+  --base-interval-seconds=0.1 --max-interval-seconds=0.5 \
+  --seed=53 --json
+```
+
+The command starts the production worker claim loop on isolated temporary queues. It
+separately measures idle query load and poll de-synchronization, spaced enqueue-to-claim
+latency, and preloaded-burst claim throughput, then deletes its benchmark rows. Options
+control worker count, task count per active phase, idle duration, enqueue interval, base
+and maximum poll intervals, cross-worker overlap window, random seed, and
+startup-barrier timeout.
+`--json` records Django, Python, PostgreSQL, migration, timing, and seed metadata. It
+refuses SQLite and other database engines because their locking behavior is not
+representative.
+

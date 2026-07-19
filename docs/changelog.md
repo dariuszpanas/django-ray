@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Native Django task priority scheduling with durable `-100` through `100` priorities,
   higher-value-first claims, and FIFO ordering within equal priorities.
+- Validated worker polling intervals, bounded jittered idle backoff, and a PostgreSQL
+  fixed-versus-adaptive polling benchmark command.
 
 ### Changed
 
@@ -18,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduling precedence.
 - Commit-history validation now requires canonical Summary and Validation sections, rejects
   development placeholders, and documents the final history review required before rebase merges.
+- Worker heartbeat, completion, reconciliation, timeout, cancellation, and lease
+  cleanup schedules now remain independent from idle claim polling.
 
 ## [0.3.1] - 2026-07-18
 

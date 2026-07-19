@@ -16,6 +16,9 @@ DEFAULTS: dict[str, Any] = {
     "RUNNER": "ray_job",  # "ray_job" or "ray_core"
     # Concurrency
     "DEFAULT_CONCURRENCY": 10,
+    # Worker polling
+    "WORKER_POLL_INTERVAL_SECONDS": 0.1,
+    "WORKER_POLL_MAX_INTERVAL_SECONDS": 0.1,
     # Retry configuration
     "MAX_TASK_ATTEMPTS": 3,
     "RETRY_BACKOFF_SECONDS": 60,

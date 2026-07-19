@@ -99,6 +99,16 @@ Recovery:
 1. Restart unhealthy worker processes/pods.
 2. Confirm queue flags/settings match enqueue queue names.
 3. If tasks are delayed by retries, inspect `run_after` timestamps before forcing retries.
+4. Confirm `WORKER_POLL_INTERVAL_SECONDS` and
+   `WORKER_POLL_MAX_INTERVAL_SECONDS`. An idle worker may take up to the configured
+   maximum polling delay to observe newly enqueued work; this is not an end-to-end
+   task-start bound. Sustained activity resets it to the base.
+
+If database load is high while queues are empty, run the PostgreSQL polling benchmark
+from the [performance guide](performance.md#benchmark-worker-polling) before tuning.
+Increase the maximum gradually and compare idle queries per worker-second with p95
+claim latency. Do not lengthen heartbeat, timeout, or cancellation settings to reduce
+claim-query load; those schedules are independent safety controls.
 
 ## 2) Tasks Stuck In RUNNING
 

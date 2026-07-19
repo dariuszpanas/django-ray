@@ -126,7 +126,7 @@ jobs:
 
   postgresql-coordination:
     if: github.event_name != 'pull_request_target'
-    name: PostgreSQL Coordination
+    name: PostgreSQL Coordination & Polling
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -173,8 +173,49 @@ jobs:
           uv run --no-sync --python 3.12 python -c
           "import django, psycopg, sys; print(sys.version); print('Django', django.get_version()); print('psycopg', psycopg.__version__)"
 
-      - name: Run PostgreSQL coordination tests
+      - name: Run PostgreSQL coordination and polling tests
         run: uv run --no-sync --python 3.12 make test-postgres
+
+      - name: Migrate benchmark database
+        run: uv run --no-sync --python 3.12 python testproject/manage.py migrate --noinput
+
+      - name: Record polling benchmark scaling series
+        timeout-minutes: 15
+        run: |
+          mkdir -p benchmark-results
+          for workers in 1 4 8; do
+            echo "::group::Warm-up with ${workers} worker(s)"
+            date --iso-8601=seconds
+            uv run --no-sync --python 3.12 python testproject/manage.py django_ray_benchmark_polling \
+              --workers="$workers" --tasks=20 --idle-seconds=0.25 \
+              --enqueue-interval-seconds=0.02 --base-interval-seconds=0.1 \
+              --max-interval-seconds=0.5 --seed=53 --json > /dev/null
+            echo "::endgroup::"
+            for repetition in 1 2 3 4 5; do
+              final_path="benchmark-results/workers-${workers}-run-${repetition}.json"
+              pending_path="${final_path}.pending"
+              echo "::group::Workers ${workers}, repetition ${repetition}/5"
+              date --iso-8601=seconds
+              uv run --no-sync --python 3.12 python testproject/manage.py django_ray_benchmark_polling \
+                --workers="$workers" --tasks=100 --idle-seconds=2 \
+                --enqueue-interval-seconds=0.05 --base-interval-seconds=0.1 \
+                --max-interval-seconds=0.5 --seed=53 --json \
+                > "$pending_path"
+              uv run --no-sync --python 3.12 python -m json.tool "$pending_path" > /dev/null
+              mv "$pending_path" "$final_path"
+              echo "Completed ${final_path}"
+              echo "::endgroup::"
+            done
+          done
+
+      - name: Upload polling benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: polling-benchmark-json
+          path: benchmark-results/*.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Show PostgreSQL diagnostics
         if: failure()
