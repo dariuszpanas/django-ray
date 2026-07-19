@@ -88,7 +88,7 @@ class RayTaskBackend(BaseTaskBackend):
 
     # Backend capabilities
     supports_defer = True  # We support run_after via the database
-    supports_async_task = False  # Not yet implemented
+    supports_async_task = True
     supports_get_result = True  # We track results in the database
     supports_priority = True
 

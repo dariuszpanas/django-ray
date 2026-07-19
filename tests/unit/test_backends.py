@@ -16,6 +16,10 @@ from django_ray.models import RayTaskExecution, TaskState
 from django_ray.result_storage import ResultStorageError
 
 
+async def _async_backend_task(value: int) -> int:
+    return value + 1
+
+
 def _make_backend(*, timeout_seconds: int | None = None) -> RayTaskBackend:
     options = {
         "RAY_ADDRESS": "auto",
@@ -36,6 +40,24 @@ class TestRayTaskBackend:
 
     def test_backend_advertises_priority_support(self) -> None:
         assert _make_backend().supports_priority is True
+
+    def test_backend_advertises_and_accepts_coroutine_tasks(self) -> None:
+        from django.tasks.base import Task
+
+        backend = _make_backend()
+        task = Task(
+            priority=0,
+            func=_async_backend_task,
+            backend="default",
+            queue_name="default",
+            run_after=None,
+        )
+
+        result = backend.enqueue(task, args=(4,), kwargs={})
+
+        assert backend.supports_async_task is True
+        execution = RayTaskExecution.objects.get(task_id=result.id)
+        assert execution.callable_path == "tests.unit.test_backends._async_backend_task"
 
     @pytest.mark.parametrize("priority", [-100, 0, 100])
     def test_priority_boundaries_persist_and_round_trip(self, priority: int) -> None:

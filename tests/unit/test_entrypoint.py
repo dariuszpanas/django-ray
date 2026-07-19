@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import runpy
@@ -178,6 +179,152 @@ class TestEntrypointPayload:
             "runtime_env_hash": "abc123",
             "ray_job_driver": True,
         }
+
+    def test_execute_task_awaits_coroutine_and_closes_event_loop(self, monkeypatch) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        observed_loops: list[asyncio.AbstractEventLoop] = []
+
+        async def add_numbers(left: int, right: int) -> int:
+            observed_loops.append(asyncio.get_running_loop())
+            await asyncio.sleep(0)
+            return left + right
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: add_numbers,
+        )
+
+        result = json.loads(entrypoint.execute_task("tests.async_add", "[2, 3]", "{}"))
+
+        assert result["success"] is True
+        assert result["result"] == 5
+        assert len(observed_loops) == 1
+        assert observed_loops[0].is_closed()
+
+    def test_execute_task_preserves_coroutine_exception_type(self, monkeypatch) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+
+        async def fail() -> None:
+            await asyncio.sleep(0)
+            raise ValueError("async failure")
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: fail,
+        )
+
+        result = json.loads(entrypoint.execute_task("tests.async_fail", "[]", "{}"))
+
+        assert result["success"] is False
+        assert result["error"] == "async failure"
+        assert result["exception_type"] == "builtins.ValueError"
+        assert result["retryable"] is True
+
+    @pytest.mark.parametrize("exception_type", [asyncio.CancelledError, KeyboardInterrupt])
+    def test_execute_task_does_not_serialize_async_cancellation_base_exceptions(
+        self,
+        monkeypatch,
+        exception_type: type[BaseException],
+    ) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+
+        async def cancel() -> None:
+            raise exception_type()
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: cancel,
+        )
+
+        with pytest.raises(exception_type):
+            entrypoint.execute_task("tests.async_cancel", "[]", "{}")
+
+    def test_execute_task_cancels_child_tasks_before_closing_loop(self, monkeypatch) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        child_started = False
+        child_cancelled = False
+
+        async def child() -> None:
+            nonlocal child_started, child_cancelled
+            child_started = True
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                child_cancelled = True
+                raise
+
+        async def spawn_child() -> str:
+            asyncio.create_task(child())
+            await asyncio.sleep(0)
+            return "complete"
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: spawn_child,
+        )
+
+        result = json.loads(entrypoint.execute_task("tests.async_child", "[]", "{}"))
+
+        assert result["success"] is True
+        assert result["result"] == "complete"
+        assert child_started is True
+        assert child_cancelled is True
+
+    def test_execute_task_exposes_and_resets_context_for_coroutine(self, monkeypatch) -> None:
+        from django_ray.runtime.context import get_current_task_context
+
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+
+        async def read_context() -> dict[str, object]:
+            await asyncio.sleep(0)
+            context = get_current_task_context()
+            assert context is not None
+            return {
+                "task_pk": context.task_pk,
+                "ray_job_driver": context.ray_job_driver,
+            }
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: read_context,
+        )
+
+        result = json.loads(
+            entrypoint.execute_task(
+                "tests.async_context",
+                "[]",
+                "{}",
+                task_execution_pk=73,
+                ray_job_driver=False,
+            )
+        )
+
+        assert result["success"] is True
+        assert result["result"] == {"task_pk": 73, "ray_job_driver": False}
+        assert get_current_task_context() is None
+
+    def test_invoke_coroutine_rejects_an_existing_event_loop_without_calling_it(self) -> None:
+        called = False
+
+        async def coroutine_task() -> None:
+            nonlocal called
+            called = True
+
+        async def invoke() -> None:
+            with pytest.raises(RuntimeError, match="already has a running event loop"):
+                entrypoint._invoke_task_callable(coroutine_task, [], {})
+
+        asyncio.run(invoke())
+        assert called is False
+
+    def test_invoke_sync_task_does_not_create_an_event_loop(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            entrypoint.asyncio,
+            "run",
+            lambda _awaitable: (_ for _ in ()).throw(AssertionError("unexpected event loop")),
+        )
+
+        assert entrypoint._invoke_task_callable(lambda value: value + 1, [4], {}) == 5
 
     @pytest.mark.django_db
     def test_execute_task_persists_completion_envelope_for_current_attempt(

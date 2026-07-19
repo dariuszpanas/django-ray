@@ -6,6 +6,7 @@ This module bootstraps Django and executes the task callable.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import json
 import logging
@@ -14,6 +15,7 @@ import sys
 import traceback
 from contextlib import nullcontext
 from dataclasses import dataclass
+from inspect import iscoroutinefunction
 from typing import Any
 
 import django
@@ -60,6 +62,28 @@ def bootstrap_django() -> None:
 
     if not apps.ready:
         django.setup()
+
+
+def _invoke_task_callable(
+    callable_obj: Any,
+    args: list[Any],
+    kwargs: dict[str, Any],
+) -> Any:
+    """Invoke a task callable at the executor's synchronous boundary."""
+    if not iscoroutinefunction(callable_obj):
+        return callable_obj(*args, **kwargs)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "django-ray cannot execute a coroutine task from a thread "
+            "that already has a running event loop"
+        )
+
+    return asyncio.run(callable_obj(*args, **kwargs))
 
 
 def _persist_task_completion(
@@ -191,7 +215,7 @@ def execute_task(
             )
 
         with execution_context:
-            result = callable_obj(*args, **kwargs)
+            result = _invoke_task_callable(callable_obj, args, kwargs)
 
         result_value, result_reference = _prepare_completion_result(
             result,
