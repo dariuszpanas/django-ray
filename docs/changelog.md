@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Native Django task priority scheduling with durable `-100` through `100` priorities,
+  higher-value-first claims, and FIFO ordering within equal priorities.
+
 ### Changed
 
+- Queue names now serve only as workload-isolation boundaries and no longer imply
+  scheduling precedence.
 - Commit-history validation now requires canonical Summary and Validation sections, rejects
   development placeholders, and documents the final history review required before rebase merges.
 

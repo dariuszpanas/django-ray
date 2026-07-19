@@ -15,9 +15,11 @@ This document describes the runtime architecture of `django-ray` and how work mo
 ## Request-To-Execution Flow
 
 1. App code calls `.enqueue(...)` on a Django task.
-2. Backend stores a `RayTaskExecution` row in `QUEUED` state. The selected
-   RuntimeEnv profile is resolved into an immutable JSON snapshot.
-3. Worker claims eligible rows and marks them `RUNNING`.
+2. Backend stores a `RayTaskExecution` row in `QUEUED` state, including Django's
+   numeric priority. The selected RuntimeEnv profile is resolved into an immutable
+   JSON snapshot.
+3. Worker claims eligible rows by descending priority and FIFO creation time, then
+   marks them `RUNNING`.
 4. Worker submits task execution in the selected mode.
 5. Worker reconciles completion and stores success/failure details.
 6. Retry policy may requeue `FAILED` or `LOST` tasks until attempts are exhausted.
@@ -72,6 +74,7 @@ Primary execution record for one task attempt chain.
 | `task_id` | Django task identifier |
 | `callable_path` | Dotted import path for callable |
 | `queue_name` | Queue used for claim/execution |
+| `priority` | Django priority from `-100` to `100`; larger values are claimed sooner |
 | `state` | `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `CANCELLING`, `LOST` |
 | `attempt_number` | Current attempt counter |
 | `args_json`, `kwargs_json` | Serialized call arguments |
@@ -129,6 +132,9 @@ FAILED/LOST -> QUEUED (if retry policy allows)
 Notes:
 
 - Retries increment `attempt_number` and set `run_after` backoff.
+- Retries keep the persisted priority; due delayed/retry rows and immediate rows share
+  one descending-priority, FIFO claim order.
+- Queue names select workload boundaries and have no implicit scheduling precedence.
 - Terminal failure happens after retry policy exhaustion.
 
 ## Delivery Semantics

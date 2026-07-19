@@ -759,50 +759,20 @@ class Command(BaseCommand):
         # Claim tasks from any of the specified queues
         now = datetime.now(UTC)
 
-        # Build priority ordering: high-priority=0, default/normal=1, low-priority=2
-        # This ensures high-priority tasks are processed first, then default, then low
-        from django.db.models import Case, IntegerField, Value, When
-
-        priority_order = Case(
-            When(queue_name="high-priority", then=Value(0)),
-            When(queue_name="urgent", then=Value(0)),
-            When(queue_name="low-priority", then=Value(2)),
-            When(queue_name="background", then=Value(2)),
-            When(queue_name="batch", then=Value(2)),
-            default=Value(1),  # default, ml, sync, and others get normal priority
-            output_field=IntegerField(),
-        )
+        from django.db.models import Q
 
         with transaction.atomic():
-            # Find queued tasks that are ready to run (run_after is null)
-            # Order by priority first, then by created_at for FIFO within same priority
+            # A single query keeps immediate and delayed/retried work in the same
+            # priority order. Queue names only select workload-isolation boundaries.
             tasks = list(
                 RayTaskExecution.objects.select_for_update(skip_locked=True)
                 .filter(
                     state=TaskState.QUEUED,
                     queue_name__in=queues,
                 )
-                .filter(
-                    # run_after is null OR run_after <= now
-                    run_after__isnull=True,
-                )
-                .annotate(priority=priority_order)
-                .order_by("priority", "created_at")[:available_slots]
+                .filter(Q(run_after__isnull=True) | Q(run_after__lte=now))
+                .order_by("-priority", "created_at", "pk")[:available_slots]
             )
-
-            # Also get tasks with run_after <= now
-            if len(tasks) < available_slots:
-                more_tasks = list(
-                    RayTaskExecution.objects.select_for_update(skip_locked=True)
-                    .filter(
-                        state=TaskState.QUEUED,
-                        queue_name__in=queues,
-                        run_after__lte=now,
-                    )
-                    .annotate(priority=priority_order)
-                    .order_by("priority", "created_at")[: available_slots - len(tasks)]
-                )
-                tasks.extend(more_tasks)
 
             for task in tasks:
                 task.state = TaskState.RUNNING

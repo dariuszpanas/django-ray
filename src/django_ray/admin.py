@@ -26,6 +26,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "callable_path",
         "state_display",
         "queue_name",
+        "priority",
         "attempt_number",
         "execution_generation",
         "ray_dashboard_link",
@@ -36,6 +37,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
     list_filter = [
         "state",
         "queue_name",
+        "priority",
         "created_at",
     ]
     search_fields = [
@@ -73,6 +75,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
                 "fields": (
                     "task_id",
                     "callable_path",
+                    "priority",
                     "queue_name",
                     "state",
                     "attempt_number",

@@ -64,19 +64,29 @@ latency-sensitive and bulk queues together.
 
 ## Priority Semantics
 
-django-ray does **not** currently support Django's per-task numeric `priority` option;
-`RayTaskBackend.supports_priority` is `False`. Do not use
-`.using(priority=...)` and expect it to change claim order.
+Queues do not carry scheduling priority. Names such as `urgent`, `high-priority`,
+`background`, and `batch` have no special claim meaning; they remain workload-isolation
+boundaries selected by worker configuration.
 
-The task manager gives these conventional queue names different claim precedence when
-one process consumes several queues:
+Use Django's numeric priority for ordering work consumed by the same worker. Priorities
+range from `-100` through `100`, and larger values run sooner:
 
-| Claim first | Normal | Claim last |
-|---|---|---|
-| `high-priority`, `urgent` | all other names | `low-priority`, `background`, `batch` |
+```python
+from myapp.tasks import send_email
 
-Tasks are FIFO by creation time within one precedence tier. For strict isolation,
-dedicate workers to a queue rather than relying on precedence.
+send_email.using(queue_name="email", priority=80).enqueue(
+    to="on-call@example.com",
+    subject="Service alert",
+    body="The error budget threshold was crossed.",
+)
+```
+
+The default is `0`. Tasks at the same priority are FIFO by creation time, including
+tasks selected from several queues. Once a delayed task becomes eligible, it joins the
+same ordering; retries retain the priority stored at their original enqueue.
+
+Priority cannot make an unselected queue visible to a worker. For strict resource or
+latency isolation, dedicate workers to the relevant queue.
 
 ## Queue vs Ray Resources
 

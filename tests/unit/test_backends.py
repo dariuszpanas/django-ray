@@ -8,7 +8,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
-from django.tasks.exceptions import TaskResultDoesNotExist
+from django.db import IntegrityError, transaction
+from django.tasks.exceptions import InvalidTask, TaskResultDoesNotExist
 
 from django_ray.backends import RayTaskBackend
 from django_ray.models import RayTaskExecution, TaskState
@@ -33,6 +34,38 @@ def _make_backend(*, timeout_seconds: int | None = None) -> RayTaskBackend:
 class TestRayTaskBackend:
     """Backend result retrieval coverage."""
 
+    def test_backend_advertises_priority_support(self) -> None:
+        assert _make_backend().supports_priority is True
+
+    @pytest.mark.parametrize("priority", [-100, 0, 100])
+    def test_priority_boundaries_persist_and_round_trip(self, priority: int) -> None:
+        from testproject.tasks import add_numbers
+
+        backend = _make_backend()
+        task = add_numbers.using(priority=priority)
+
+        result = backend.enqueue(task, args=(2, 3), kwargs={})
+        execution = RayTaskExecution.objects.get(task_id=result.id)
+
+        assert execution.priority == priority
+        assert backend.get_result(result.id).task.priority == priority
+
+    @pytest.mark.parametrize("priority", [-101, 101, -1.5, 1.5])
+    def test_django_rejects_invalid_priority(self, priority: float) -> None:
+        from testproject.tasks import add_numbers
+
+        with pytest.raises(InvalidTask, match="whole number between -100 and 100"):
+            add_numbers.using(priority=priority)
+
+    @pytest.mark.parametrize("priority", [-101, 101])
+    def test_execution_constraint_rejects_out_of_range_priority(self, priority: int) -> None:
+        with pytest.raises(IntegrityError), transaction.atomic():
+            RayTaskExecution.objects.create(
+                task_id=f"invalid-priority-{priority}",
+                callable_path="testproject.tasks.add_numbers",
+                priority=priority,
+            )
+
     def test_enqueue_creates_execution_with_serialized_payload(self) -> None:
         from testproject.tasks import add_numbers
 
@@ -42,6 +75,7 @@ class TestRayTaskBackend:
         execution = RayTaskExecution.objects.get(task_id=result.id)
 
         assert execution.callable_path == "testproject.tasks.add_numbers"
+        assert execution.priority == 0
         assert execution.state == TaskState.QUEUED
         assert json.loads(execution.args_json) == [2, 3]
         assert json.loads(execution.kwargs_json) == {}

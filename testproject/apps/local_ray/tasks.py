@@ -185,11 +185,11 @@ def simulate_workload(iterations: int = 1000000, sleep_ms: int = 0) -> dict[str,
     }
 
 
-@task(queue_name="high-priority")
+@task(queue_name="high-priority", priority=100)
 def urgent_task(message: str) -> str:
-    """A high-priority task that should be processed quickly.
+    """A priority-100 task on the latency-sensitive queue.
 
-    Uses the 'high-priority' queue for faster processing.
+    The numeric priority controls claim order; the queue provides isolation.
 
     Args:
         message: Message to process
@@ -200,11 +200,11 @@ def urgent_task(message: str) -> str:
     return f"URGENT: {message.upper()}"
 
 
-@task(queue_name="low-priority")
+@task(queue_name="low-priority", priority=-100)
 def background_task(message: str) -> str:
-    """A low-priority background task.
+    """A priority-minus-100 task on the bulk-work queue.
 
-    Uses the 'low-priority' queue for batch processing.
+    The numeric priority controls claim order; the queue provides isolation.
 
     Args:
         message: Message to process

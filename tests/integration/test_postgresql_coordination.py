@@ -93,6 +93,56 @@ def test_two_workers_claim_each_execution_exactly_once() -> None:
     assert {owners[task_id] for task_id in claimed_b} == {"postgres-worker-b"}
 
 
+def test_two_workers_claim_global_priority_frontier_with_fifo_ties() -> None:
+    created_at = datetime.now(UTC) - timedelta(minutes=1)
+    highest = _execution(
+        "postgres-priority-highest",
+        priority=100,
+        created_at=created_at,
+    )
+    equal_priority = [
+        _execution(
+            f"postgres-priority-tie-{index}",
+            priority=90,
+            created_at=created_at + timedelta(seconds=index + 1),
+        )
+        for index in range(6)
+    ]
+    lower_priority = [
+        _execution(
+            f"postgres-priority-lower-{index}",
+            priority=priority,
+            created_at=created_at + timedelta(seconds=10 + index),
+        )
+        for index, priority in enumerate((80, 50, 0, -100))
+    ]
+    all_tasks = [highest, *equal_priority, *lower_priority]
+    expected_frontier = {highest.pk, *(task.pk for task in equal_priority[:5])}
+    claimed_a: list[int] = []
+    claimed_b: list[int] = []
+    worker_a = _claim_command("priority-worker-a", claimed_a)
+    worker_b = _claim_command("priority-worker-b", claimed_b)
+
+    _run_concurrently(
+        lambda: worker_a.claim_and_process_tasks(["default"], concurrency=3),
+        lambda: worker_b.claim_and_process_tasks(["default"], concurrency=3),
+    )
+
+    assert len(claimed_a) == len(claimed_b) == 3
+    assert set(claimed_a).isdisjoint(claimed_b)
+    assert set(claimed_a) | set(claimed_b) == expected_frontier
+
+    ordering = {task.pk: (-int(task.priority), task.created_at, task.pk) for task in all_tasks}
+    assert claimed_a == sorted(claimed_a, key=ordering.__getitem__)
+    assert claimed_b == sorted(claimed_b, key=ordering.__getitem__)
+
+    owners = dict(RayTaskExecution.objects.values_list("pk", "claimed_by_worker"))
+    assert {owners[task_id] for task_id in claimed_a} == {"priority-worker-a"}
+    assert {owners[task_id] for task_id in claimed_b} == {"priority-worker-b"}
+    assert owners[equal_priority[-1].pk] is None
+    assert {owners[task.pk] for task in lower_priority} == {None}
+
+
 def test_skip_locked_claims_available_row_then_locked_row_without_starvation() -> None:
     locked_task = _execution("postgres-skip-locked-001")
     available_task = _execution("postgres-skip-locked-002")
