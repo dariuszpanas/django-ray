@@ -160,7 +160,8 @@ class TestWorkerCommandCoverage:
             "django_ray.management.commands.django_ray_worker.RayCoreRunner",
             FakeRayCoreRunner,
         )
-        monkeypatch.setattr(cmd, "_init_cluster_ray", lambda _address: None)
+        initialized_addresses: list[str] = []
+        monkeypatch.setattr(cmd, "_init_cluster_ray", initialized_addresses.append)
         monkeypatch.setattr(cmd, "_create_lease", lambda _queue: None)
         monkeypatch.setattr(cmd, "run_loop", lambda **_kwargs: None)
         monkeypatch.setattr(cmd, "shutdown", lambda: None)
@@ -169,6 +170,7 @@ class TestWorkerCommandCoverage:
         cmd.handle(**_worker_options())
 
         assert cmd.execution_mode == "cluster"
+        assert initialized_addresses == ["ray://cluster:10001"]
         assert isinstance(cmd.ray_core_runner, FakeRayCoreRunner)
 
     def test_heartbeat_checks_ray_health_in_local_mode(self, monkeypatch) -> None:

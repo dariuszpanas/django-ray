@@ -158,10 +158,11 @@ class Command(BaseCommand):
                     self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {e}"))
                     self.stdout.write("Will retry connection during operation...")
             elif self.execution_mode == "cluster":
+                assert default_cluster_address is not None, (
+                    "_get_default_execution_mode() returns an address with cluster mode"
+                )
                 self.cluster_address = default_cluster_address
                 try:
-                    if not self.cluster_address:
-                        raise RuntimeError("RUNNER=ray_core requires RAY_ADDRESS for cluster mode")
                     self._init_cluster_ray(self.cluster_address)
                     self.ray_core_runner = RayCoreRunner()
                 except Exception as e:
