@@ -30,9 +30,41 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) for commit mess
 
 Common types are `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, and `chore`. Keep
 commits focused and use `!` plus a `BREAKING CHANGE:` footer for an intentional breaking change.
-Every commit must also include a non-empty body explaining what changed and why; a one-line commit is
-not descriptive enough for rebase-merged history. Wrap each commit-message line at 72 characters so
-history remains readable in narrow terminals.
+Every commit must use the repository's structured body so each retained commit reads like durable
+release history:
+
+```text
+<type>[optional scope][!]: <imperative summary>
+
+## Summary
+
+- Describe the concrete durable change.
+- Explain the problem, invariant, or outcome that motivates it.
+
+## Validation
+
+- `<command>`: result
+```
+
+`## Summary` must be first and `## Validation` must be last. Optional focused sections such as
+`## Rationale`, `## Migration`, `## Compatibility`, or `## Release decision` belong between them.
+Every section needs meaningful content; an unstructured bare body, template placeholders, iteration
+labels, and development-only prose such as "address review feedback" are rejected. Put a non-empty
+`BREAKING CHANGE:` footer after Validation when the header uses `!`. Wrap each commit-message line at
+72 characters so history remains readable in narrow terminals.
+
+Install the tracked template for this checkout:
+
+```bash
+git config extensions.worktreeConfig true
+git config --worktree commit.template "$(git rev-parse --show-toplevel)/.gitmessage"
+git config --worktree core.commentChar ";"
+```
+
+Worktree-specific configuration keeps each linked worktree pointed at its own tracked template. The
+comment-character setting is required: Git otherwise treats the `##` section headings as comments and
+removes them when the editor closes. Template guidance uses `;` comments, while the required Markdown
+headings remain in the commit message.
 
 Examples:
 
@@ -48,10 +80,10 @@ validation results, and link the issue with `Closes #<number>` when appropriate.
 commits over unrelated cleanup in the same PR.
 
 The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
-every commit in the PR, including the required body. Use one of `build`, `chore`, `ci`, `docs`,
-`feat`, `fix`, `perf`, `refactor`, `revert`, `style`, or `test`, optionally add a scope and `!`, and
-include a summary after `:`. Commit-message lines may not exceed 72 characters. A failed check prints
-the offending title or commit and the expected format.
+every commit in the PR. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`,
+`revert`, `style`, or `test`, optionally add a scope and `!`, and include a summary after `:`. The
+check enforces the required sections, meaningful content, and 72-character line limit. A failed check
+prints the offending title or commit and the expected correction.
 
 ## Rebase auto-merge
 
@@ -65,6 +97,21 @@ gh pr merge --auto --rebase <PR-number>
 Auto-merge waits for the required checks on the pull request and then applies the rebase merge method,
 so each descriptive commit remains visible on `main`. The `Commit Messages` workflow validates the PR
 title and each commit through the read-only `pull_request_target` event.
+
+Before every push and again before enabling auto-merge, fetch and inspect the exact history that the
+rebase merge will retain:
+
+```bash
+git fetch origin
+git log --format=fuller origin/main..HEAD
+uv run python scripts/check_conventional_commits.py --range origin/main..HEAD
+```
+
+Fold `fixup!`/`squash!` commits, CI repairs, review repairs, formatting-only follow-ups, and other
+development iterations into the logical commit they correct. Use an interactive rebase when needed,
+then push rewritten branches with `--force-with-lease`. Do not collapse genuinely independent changes:
+retain each one as a focused commit with its own Summary and Validation sections. Run the validator
+with the final PR title as well before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
 conflicts, run `uv run make ci`, and push. Auto-merge will wait for the new checks. A maintainer must

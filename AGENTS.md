@@ -35,10 +35,17 @@ When a task calls for a branch, start from current `main` and use the convention
 - Stage explicit paths; never default to `git add .` in a shared or dirty worktree.
 - Review `git diff` and `git diff --cached` before reporting completion.
 - Report the exact validation commands run, their results, and anything not run.
+- Before every push and before enabling auto-merge, fetch `origin` and inspect
+  `git log --format=fuller origin/main..HEAD`.
+- Fold fixup, CI-repair, review-repair, formatting follow-up, and other development-only commits into
+  the logical commit they correct. Preserve genuinely independent commits with their own structured
+  Summary and Validation sections.
+- Validate the retained range with
+  `uv run python scripts/check_conventional_commits.py --range origin/main..HEAD`.
 
 Use Conventional Commit syntax for commit messages and PR titles. See `CONTRIBUTING.md` for examples
-and the CI-equivalent validation sequence. Run the full local gate as `uv run make ci`; do not add
-nested `uv run` wrappers inside that target because real-Ray workers inherit the outer environment.
+and the canonical `.gitmessage` template. Run the full local gate as `uv run make ci`; do not add nested
+`uv run` wrappers inside that target because real-Ray workers inherit the outer environment.
 
 ## Optional Obsidian project memory
 
