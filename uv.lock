@@ -620,6 +620,11 @@ postgres = [
 s3 = [
     { name = "boto3" },
 ]
+sample = [
+    { name = "django-ninja" },
+    { name = "gunicorn" },
+    { name = "whitenoise" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -639,12 +644,15 @@ requires-dist = [
     { name = "boto3", marker = "extra == 'object-storage'", specifier = ">=1.34" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
     { name = "django", specifier = ">=6.0" },
+    { name = "django-ninja", marker = "extra == 'sample'", specifier = ">=1.5.1" },
     { name = "google-cloud-storage", marker = "extra == 'gcs'", specifier = ">=2.18" },
     { name = "google-cloud-storage", marker = "extra == 'object-storage'", specifier = ">=2.18" },
+    { name = "gunicorn", marker = "extra == 'sample'", specifier = ">=23.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
     { name = "ray", extras = ["default"], specifier = ">=2.53.0" },
+    { name = "whitenoise", marker = "extra == 'sample'", specifier = ">=6.6" },
 ]
-provides-extras = ["postgres", "s3", "gcs", "object-storage"]
+provides-extras = ["postgres", "s3", "gcs", "object-storage", "sample"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1108,6 +1116,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/da/df/c6717fef716e00d235ffb96123baf6dce76d6004f6233fa767c502861460/grpcio-1.81.1-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:b427c19380991a4eaab2f6144b64b99b412043314c6bf4ab544f97bb31ee4190", size = 7846681, upload-time = "2026-06-11T12:46:43.013Z" },
     { url = "https://files.pythonhosted.org/packages/36/84/3502e9f210a6a5c4438c8aca3f88edd2e04f6a27f3d41b26cf0a0024b096/grpcio-1.81.1-cp314-cp314-win32.whl", hash = "sha256:61233fe8951e5c85dff81c2458b6528624760166946b5b47ea150a589168411f", size = 4264615, upload-time = "2026-06-11T12:46:45.741Z" },
     { url = "https://files.pythonhosted.org/packages/ff/b0/4af731ff7492c68a96e4c71bfd0f4590acde92b31c6fe4894e6465c10ff6/grpcio-1.81.1-cp314-cp314-win_amd64.whl", hash = "sha256:3768a5ff1b2125e6f552e561b6b2dca0e64982d8949689b4df145cf8b98d7821", size = 5070275, upload-time = "2026-06-11T12:46:48.486Z" },
+]
+
+[[package]]
+name = "gunicorn"
+version = "26.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/b7/a4a3f632f823e432ce6bc65f62961b7980c898c77f075a2f7118cb3846fe/gunicorn-26.0.0.tar.gz", hash = "sha256:ca9346f85e3a4aeeb64d491045c16b9a35647abd37ea15efe53080eb8b090baf", size = 727286, upload-time = "2026-05-05T06:38:25.529Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e6/40/9c2384fc2be4ad25dd4a49decd5ad9ea5a3639814c11bd40ab77cb9f0a14/gunicorn-26.0.0-py3-none-any.whl", hash = "sha256:40233d26a5f0d1872916188c276e21641155111c2853f0c2cd55260aec0d24fc", size = 212009, upload-time = "2026-05-05T06:38:23.007Z" },
 ]
 
 [[package]]
