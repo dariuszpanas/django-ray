@@ -84,7 +84,7 @@ class RayTaskBackend(BaseTaskBackend):
     supports_defer = True  # We support run_after via the database
     supports_async_task = False  # Not yet implemented
     supports_get_result = True  # We track results in the database
-    supports_priority = False  # Not yet implemented
+    supports_priority = True
 
     def __init__(self, alias: str, params: dict[str, Any]) -> None:
         """Initialize the Ray task backend.
@@ -152,6 +152,7 @@ class RayTaskBackend(BaseTaskBackend):
             task_id=task_id,
             callable_path=callable_path,
             queue_name=task.queue_name,
+            priority=task.priority,
             state=TaskState.QUEUED,
             args_json=args_json,
             kwargs_json=kwargs_json,
@@ -170,6 +171,7 @@ class RayTaskBackend(BaseTaskBackend):
                 "task_id": task_id,
                 "callable_path": callable_path,
                 "queue_name": task.queue_name,
+                "priority": task.priority,
                 "run_after": str(task.run_after) if task.run_after else None,
                 "runtime_env_profile": runtime_env.profile,
                 "runtime_env_hash": runtime_env.digest,
@@ -318,7 +320,7 @@ class RayTaskBackend(BaseTaskBackend):
         Returns:
             Task object
         """
-        from django.tasks.base import DEFAULT_TASK_PRIORITY, Task
+        from django.tasks.base import Task
 
         # Import the function from the callable path
         from django_ray.runtime.import_utils import import_callable
@@ -326,7 +328,7 @@ class RayTaskBackend(BaseTaskBackend):
         func = import_callable(execution.callable_path)
 
         return Task(
-            priority=DEFAULT_TASK_PRIORITY,
+            priority=execution.priority,
             func=func,
             backend=self.alias,
             queue_name=execution.queue_name,

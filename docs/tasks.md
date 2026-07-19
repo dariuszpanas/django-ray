@@ -52,6 +52,27 @@ enqueued = send_email.using(queue_name="email").enqueue(
 The `email` queue must appear in the selected backend's `TASKS[alias]["QUEUES"]`
 configuration and a worker must consume it.
 
+## Priority
+
+Django priorities are whole numbers from `-100` through `100`. Larger values run
+sooner; `0` is the default. Select a priority for one enqueue with Django's standard
+`.using()` API:
+
+```python
+from myapp.tasks import send_email
+
+enqueued = send_email.using(priority=80).enqueue(
+    to="on-call@example.com",
+    subject="Service alert",
+    body="The error budget threshold was crossed.",
+)
+```
+
+django-ray stores the selected priority with the execution. Eligible tasks with a
+higher priority are claimed first, and tasks at the same priority remain FIFO by
+creation time. Delayed tasks and retries retain their original priority. Values outside
+the supported range, and non-whole-number values, are rejected by Django before enqueue.
+
 ## Per-task timeouts
 
 Set `TIMEOUT_SECONDS` in a Ray backend's `OPTIONS` to apply a positive timeout to every

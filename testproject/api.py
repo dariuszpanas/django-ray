@@ -783,7 +783,7 @@ def local_workload(request, iterations: int = 1000000, sleep_ms: int = 0):
 
 @api.post("/local/urgent", response=TaskResultSchema, tags=["Local Ray"])
 def local_urgent(request, message: str):
-    """High-priority urgent task (high-priority queue)."""
+    """Priority-100 urgent task on its workload-isolation queue."""
     result = local_tasks.urgent_task.enqueue(message)
     return {
         "task_id": result.id,

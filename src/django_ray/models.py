@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -48,6 +49,11 @@ class RayTaskExecution(models.Model):
         default="default",
         db_index=True,
         help_text="Queue this task belongs to",
+    )
+    priority = models.SmallIntegerField(
+        default=0,
+        validators=[MinValueValidator(-100), MaxValueValidator(100)],
+        help_text="Django task priority (-100 to 100; larger values run sooner)",
     )
 
     # State tracking
@@ -202,6 +208,12 @@ class RayTaskExecution(models.Model):
                 fields=["state", "last_heartbeat_at"],
                 name="ray_task_heartbeat_idx",
             ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(priority__gte=-100, priority__lte=100),
+                name="ray_task_priority_valid_range",
+            )
         ]
         verbose_name = "Ray Task Execution"
         verbose_name_plural = "Ray Task Executions"

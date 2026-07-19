@@ -55,8 +55,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   Django tasks.
 - The result returned by `enqueue()` is a snapshot. Fetch current state with
   `task_backends[alias].get_result(task_id)`.
-- Per-task numeric priority is not supported. Conventional queue names influence claim
-  order when one worker consumes multiple queues.
+- Per-task numeric priority is persisted from `-100` through `100`; larger values are
+  claimed first and equal priorities remain FIFO. Queue names provide workload
+  isolation and do not imply scheduling precedence.
 - Ray-native callables should be importable module-level functions.
 - Ray Client task-level RuntimeEnv code must use a remote/shared URI, not a Django-pod
   local directory.
