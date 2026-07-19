@@ -114,8 +114,8 @@ uv run make test-cov
 `test-cov` and `ci` enforce the same coverage floors as CI:
 
 - global coverage: `>= 95%`
-- `src/django_ray/management/commands/django_ray_worker.py`: `>= 50%`
-- `src/django_ray/runner/ray_job.py`: `>= 55%`
+- `src/django_ray/management/commands/django_ray_worker.py`: `>= 90%`
+- `src/django_ray/runner/ray_job.py`: `>= 90%`
 
 `uv run make ci` runs the required format, lint, type, coverage, strict-documentation, and package-build
 checks for the current interpreter. GitHub Actions additionally repeats tests across supported Python
@@ -144,8 +144,10 @@ Environment variables:
 CI strategy:
 
 - Default CI (`.github/workflows/ci.yml`) excludes `live_cluster` tests to keep PR checks deterministic.
-- Live cluster tests run in a dedicated manual workflow: `.github/workflows/live-cluster.yml`.
-- Trigger the workflow with `ray_address` input, or set repository variable `DJANGO_RAY_LIVE_RAY_ADDRESS`.
+- The dedicated `.github/workflows/live-cluster.yml` workflow starts a disposable two-node Ray
+  cluster with Docker and runs these tests for relevant pull requests and pushes to `main`.
+- The workflow is also available through `workflow_dispatch` for a manual rerun; it does not need
+  a repository variable or an externally reachable Ray cluster.
 
 ### Local Testing
 
