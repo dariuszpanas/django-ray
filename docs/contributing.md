@@ -51,13 +51,20 @@ docs: clarify Ray Job worker selection
 chore(deps): update Ruff
 ```
 
-The required `Commit Messages` GitHub Actions check validates the PR title and every commit in the PR.
-Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, or
+Each commit must include a non-empty body explaining what changed and why. One-line commits are
+rejected so rebase-merged history remains descriptive. Wrap each commit-message line at 72 characters
+so history remains readable in narrow terminals.
+
+The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
+every commit in the PR, including the body. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`,
+`perf`, `refactor`, `revert`, `style`, or
 `test`; an optional scope and `!` are allowed:
 
 ```text
 <type>[optional scope][!]: <imperative summary>
 ```
+
+Commit-message lines may not exceed 72 characters. The check reports the offending commit and line.
 
 For example, `fix(worker): preserve task ownership` passes. Invalid titles or commit headers fail with
 the exact offending value and the expected format.
@@ -173,8 +180,8 @@ Keep commits focused and do not squash the PR. Once the required checks pass, en
 gh pr merge --auto --rebase <PR-number>
 ```
 
-The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and every commit
-header, and reports a required status check without needing secrets from the PR. This repository
+The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and every full
+commit message, and reports a required status check without needing secrets from the PR. This repository
 is private, so use rebase auto-merge rather than merge queue: auto-merge waits for the protected checks
 and then applies the rebase method.
 
