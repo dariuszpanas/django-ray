@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem/S3/GCS retrieval, immutable retry reuse, and retention-safe cleanup.
 - Versioned package observability services, bounded-cardinality Prometheus metrics,
   byte-bounded live Ray logs, and authenticated live task updates in Django admin.
+- Coroutine-based Django tasks across sync, Ray Core, and Ray Job modes, with
+  per-invocation event loops and preserved retry exception classification.
 
 ### Changed
 

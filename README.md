@@ -33,6 +33,7 @@ django-ray bridges Django's built-in Tasks framework with Ray's distributed comp
 
 - **Database-backed reliability**: Task state is tracked in your Django database, ensuring no tasks are lost
 - **Multiple execution modes**: Sync, local Ray, Ray cluster, or Ray Job API
+- **Coroutine tasks**: Await Django async task functions consistently in every mode
 - **Automatic retries**: Failed tasks are retried with exponential backoff
 - **Admin visibility**: Monitor and manage tasks through Django admin
 - **Graceful shutdown**: Workers handle signals properly for clean shutdown
@@ -148,6 +149,8 @@ See [Performance](docs/performance.md) for choosing durable task boundaries,
 execution modes, and useful fan-out granularity.
 See [Durable Input Storage](docs/reference/input-storage.md) for oversized JSON
 arguments, storage backends, rollout, and retention.
+See [Defining Tasks](docs/tasks.md#coroutine-tasks) for async task and ORM safety
+guidance.
 
 ## Development Setup
 

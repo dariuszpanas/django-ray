@@ -15,6 +15,10 @@ execution mode determines how that work reaches Ray.
 If `RUNNER="ray_core"` and no mode flag is supplied, `RAY_ADDRESS="auto"` selects
 local mode and a cluster address selects cluster mode.
 
+Both synchronous and coroutine Django tasks are supported in every mode. A coroutine
+gets one fresh event loop for its invocation; the task manager itself remains
+synchronous and continues to own claims, heartbeats, retries, and reconciliation.
+
 ## Sync
 
 ```bash
@@ -26,6 +30,11 @@ a time, which makes breakpoints and deterministic tests straightforward. Ray-nat
 workflow signatures use their local fallback, so sync mode does not demonstrate
 parallel speedup or Ray failure behavior.
 
+Coroutine tasks are awaited to completion on their per-task loop. While that loop is
+running, the same sync worker cannot perform coordination work or interrupt the task.
+Cancellation and timeout decisions are applied after control returns, matching the
+existing limitation for long-running synchronous callables.
+
 ## Local Ray Core
 
 ```bash
@@ -35,6 +44,10 @@ python manage.py django_ray_worker --queue=default --local
 The task manager starts a local Ray runtime, and the dashboard is normally available at
 http://127.0.0.1:8265. Use this for development, workflow tests, and single-machine
 parallelism.
+
+Coroutine tasks run on the reused Ray worker but do not reuse an event loop from a
+previous task. Await all child work before returning; detached `asyncio` tasks are not
+durable Ray or Django tasks.
 
 ## Cluster Ray Core
 
@@ -62,6 +75,10 @@ leaves.
 
 Choose Ray Job when driver isolation, independent logs, or coarse job lifecycle is
 more valuable than startup latency. Avoid it for thousands of tiny tasks.
+
+Coroutine tasks use the same encoded entrypoint and completion envelope as synchronous
+tasks. The isolated driver owns the per-task loop, and a Ray Job stop request terminates
+that driver rather than preserving detached coroutine children.
 
 ## Distributed Utilities
 
