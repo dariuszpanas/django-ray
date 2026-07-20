@@ -46,5 +46,11 @@ django-ray is a **library** that provides:
 
 - [Contributing](contributing.md) - How to contribute
 - [Architecture](architecture.md) - System design overview
+- [Workflow Plan Contract](workflow-plans.md) - Versioned plan vocabulary,
+  classification, identity, and strategy eligibility
+- [ADR-0001: Workflow Plans](design/adr-0001-workflow-plan-contract.md) - Why
+  execution plans and strategies remain separate from Django task identity
+- [Ray Serve Integration Boundary](design/ray-serve-boundary.md) - Deferred ownership,
+  lifecycle, security, and packaging decision
 - [Changelog](changelog.md) - Release history
 

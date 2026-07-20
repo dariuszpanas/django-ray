@@ -8,6 +8,12 @@ values through Ray object references without creating a database row per step.
 This model is intended for fan-out workloads where database-backed dispatch would
 cost more than the individual units of work.
 
+`WorkflowSignature` objects are reusable definition builders. They are not durable
+execution plans, and a logically static `chain` or `group` is not automatically a
+compiled graph. The maintained [workflow-plan contract](workflow-plans.md) separates
+definitions, immutable plans, per-run invocations, logical work, physical actors, and
+execution strategies while preserving this public API.
+
 ## Requirements
 
 Ray Core is the lowest-latency production path. Ray Job mode also supports workflows:
@@ -263,6 +269,11 @@ The outer Django task is the durability and retry boundary:
 Ray Core tasks already run inside an initialized Ray worker. Ray Job drivers
 initialize their cluster connection lazily when a workflow first requests Ray, and
 use the same durable context and progress graph protocol.
+
+Future execution strategies must preserve this outer durability boundary. In
+particular, Compiled Graph is a possible engine for a validated static actor region,
+not a Django task type or a flag that makes data-dependent `map_step` expansion static.
+See [Workflow Plans and Execution Strategies](workflow-plans.md).
 
 Use idempotent steps when retries can repeat external side effects. Durable stage
 checkpoints remain a planned extension. Progress is observational rather than a

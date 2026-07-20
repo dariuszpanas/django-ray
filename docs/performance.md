@@ -141,6 +141,10 @@ and per-run graph metadata have different requirements. It may become useful for
 future reusable fixed-DAG execution mode, but it is not a switch that removes
 RuntimeEnv, database, or first-run costs.
 
+The [workflow-plan contract](workflow-plans.md) defines how static, dynamic, and
+fixed-width workloads are classified and which plan, invocation, ownership, and
+eligibility data a future strategy must use.
+
 ## Benchmark the Real Shape
 
 The testproject provides:
