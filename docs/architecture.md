@@ -105,6 +105,7 @@ Primary execution record for one task attempt chain.
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
 | `progress_data` | Latest JSON progress snapshot for a Ray-native workflow |
+| `workflow_run_id` | Current workflow invocation allowed to update `progress_data` |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
 | `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
 | `runtime_env_hash` | SHA-256 content identity used to correlate cache reuse |

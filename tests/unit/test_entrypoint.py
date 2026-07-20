@@ -148,6 +148,8 @@ class TestEntrypointPayload:
             assert context is not None
             return {
                 "task_pk": context.task_pk,
+                "attempt_number": context.attempt_number,
+                "execution_generation": context.execution_generation,
                 "runtime_env_profile": context.runtime_env_profile,
                 "runtime_env_hash": context.runtime_env_hash,
                 "ray_job_driver": context.ray_job_driver,
@@ -167,6 +169,8 @@ class TestEntrypointPayload:
             "[]",
             "{}",
             task_execution_pk=42,
+            attempt_number=3,
+            execution_generation=7,
             runtime_env_profile="thin",
             runtime_env_hash="abc123",
         )
@@ -175,6 +179,8 @@ class TestEntrypointPayload:
         assert result["success"] is True, result
         assert result["result"] == {
             "task_pk": 42,
+            "attempt_number": 3,
+            "execution_generation": 7,
             "runtime_env_profile": "thin",
             "runtime_env_hash": "abc123",
             "ray_job_driver": True,

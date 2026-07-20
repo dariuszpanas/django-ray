@@ -81,6 +81,9 @@ def get_task_summary(
         "state": execution.state,
         "attempt_number": execution.attempt_number,
         "execution_generation": execution.execution_generation,
+        "workflow_run_id": (
+            str(execution.workflow_run_id) if execution.workflow_run_id is not None else None
+        ),
         "created_at": _isoformat(execution.created_at),
         "run_after": _isoformat(execution.run_after),
         "started_at": _isoformat(execution.started_at),
@@ -191,6 +194,29 @@ def get_workflow_progress(execution: RayTaskExecution) -> dict[str, Any] | None:
         raise WorkflowObservabilityError(
             f"Task {execution.task_id} workflow progress must be a JSON object"
         )
+    schema_version = progress.get("schema_version", 1)
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow progress has an invalid schema version"
+        )
+    if schema_version >= 2:
+        identity = progress.get("run_identity")
+        if not isinstance(identity, dict):
+            raise WorkflowObservabilityError(
+                f"Task {execution.task_id} workflow progress must contain a run identity"
+            )
+        expected_identity = {
+            "run_id": (
+                str(execution.workflow_run_id) if execution.workflow_run_id is not None else None
+            ),
+            "task_execution_pk": execution.pk,
+            "attempt_number": execution.attempt_number,
+            "execution_generation": execution.execution_generation,
+        }
+        if any(identity.get(key) != value for key, value in expected_identity.items()):
+            raise WorkflowObservabilityError(
+                f"Task {execution.task_id} workflow progress belongs to another run"
+            )
     return redact_value(progress)
 
 
@@ -238,6 +264,11 @@ def get_workflow_snapshot(
         **_versioned("workflow-snapshot", generated_at=generated_at),
         "task_id": execution.task_id,
         "task_state": execution.state,
+        "attempt_number": execution.attempt_number,
+        "execution_generation": execution.execution_generation,
+        "workflow_run_id": (
+            str(execution.workflow_run_id) if execution.workflow_run_id is not None else None
+        ),
         "workflow": get_workflow_progress(execution),
     }
 
@@ -427,6 +458,11 @@ def get_workflow_node_snapshot(
         **_versioned("workflow-node-snapshot", generated_at=generated_at),
         "task_id": execution.task_id,
         "task_state": execution.state,
+        "attempt_number": execution.attempt_number,
+        "execution_generation": execution.execution_generation,
+        "workflow_run_id": (
+            str(execution.workflow_run_id) if execution.workflow_run_id is not None else None
+        ),
         "workflow_revision": progress.get("revision", 0),
         "node": node,
         "live": live,

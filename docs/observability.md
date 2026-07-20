@@ -27,7 +27,7 @@ version.
 The task summary intentionally omits task arguments, result contents, tracebacks,
 storage references, Ray addresses, and RuntimeEnv JSON. It includes durable identifiers,
 queue and priority, lifecycle state, attempt/generation, timestamps, bounded redacted
-errors, and workflow revision.
+errors, workflow run ID, and workflow revision.
 
 ```python
 from django_ray.models import RayTaskExecution
@@ -44,8 +44,14 @@ current attempt only when it has not already been archived.
 ## Durable Workflow and Live Ray Data
 
 `get_workflow_snapshot()` wraps the latest durable workflow progress while preserving
-the workflow's own stored schema version and revision. Legacy node-only progress remains
-readable.
+the workflow's own stored schema version, run identity, and revision. Its top-level
+attempt, execution generation, and workflow run ID remain available while a new run has
+claimed ownership but has not flushed its first snapshot. Legacy node-only progress
+remains readable.
+
+Workflow revisions are scoped to `workflow_run_id`, not to the durable task forever.
+Polling clients must discard a cached graph when that ID, the attempt number, or the
+execution generation changes before comparing revisions.
 
 `get_workflow_node_snapshot()` always returns durable node data first. Live Ray state
 and logs are opt-in:

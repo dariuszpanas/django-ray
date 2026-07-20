@@ -57,6 +57,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "priority",
         "attempt_number",
         "execution_generation",
+        "workflow_run_id",
         "ray_dashboard_link",
         "created_at",
         "started_at",
@@ -81,6 +82,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "runtime_env_profile",
         "runtime_env_json",
         "runtime_env_hash",
+        "workflow_run_id",
         "created_at",
         "started_at",
         "finished_at",
@@ -109,6 +111,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
                     "state",
                     "attempt_number",
                     "execution_generation",
+                    "workflow_run_id",
                 ),
             },
         ),
@@ -212,6 +215,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         summary["workflow"] = (
             {
                 "revision": progress.get("revision", 0),
+                "run_identity": progress.get("run_identity"),
                 "state": progress.get("state", "RUNNING"),
                 "total_nodes": progress.get("total_nodes", 0),
                 "completed_nodes": progress.get("completed_nodes", 0),

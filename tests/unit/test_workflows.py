@@ -11,6 +11,8 @@ from typing import Any
 import pytest
 
 from django_ray.runtime.context import (
+    WORKFLOW_PROGRESS_SCHEMA_VERSION,
+    WorkflowRunIdentity,
     durable_task_execution,
     get_current_task_execution_pk,
     workflow_step_execution,
@@ -390,11 +392,13 @@ def test_ray_executor_progress_flush_handles_unavailable_actor() -> None:
     executor = object.__new__(_RayExecutor)
     executor.progress_actor = None
     executor.task_execution_pk = 1
+    executor.workflow_run_identity = None
 
     assert executor._flush_progress() is None
 
     snapshot_ref = object()
     executor.progress_actor = SimpleNamespace(snapshot=SimpleNamespace(remote=lambda: snapshot_ref))
+    executor.workflow_run_identity = object()
     executor.ray = SimpleNamespace(wait=lambda refs, timeout: ([], refs))
     assert executor._flush_progress() is None
 
@@ -451,6 +455,7 @@ def test_ray_executor_submit_ignores_missing_ray_task_id() -> None:
     executor = object.__new__(_RayExecutor)
     executor.task_context = None
     executor.task_execution_pk = None
+    executor.workflow_run_identity = None
     executor.progress_actor = SimpleNamespace(
         register=_RemoteMethod(),
         submitted=_RemoteMethod(),
@@ -463,13 +468,26 @@ def test_ray_executor_submit_ignores_missing_ray_task_id() -> None:
 @pytest.mark.django_db
 def test_ray_executor_flushes_failed_progress_snapshot() -> None:
     from django_ray.models import RayTaskExecution
+    from django_ray.workflow_progress import claim_workflow_run
 
     execution = RayTaskExecution.objects.create(
         task_id="workflow-flush",
         callable_path="tests.unit.test_workflows.increment",
+        state="RUNNING",
+        attempt_number=2,
+        execution_generation=4,
     )
+    identity = WorkflowRunIdentity(
+        task_execution_pk=execution.pk,
+        attempt_number=2,
+        execution_generation=4,
+        run_id="00000000-0000-0000-0000-000000000008",
+    )
+    assert claim_workflow_run(identity) is True
     snapshot_ref = object()
     snapshot = {
+        "schema_version": WORKFLOW_PROGRESS_SCHEMA_VERSION,
+        "run_identity": identity.as_dict(),
         "revision": 2,
         "state": "RUNNING",
         "completed_nodes": 0,
@@ -479,6 +497,7 @@ def test_ray_executor_flushes_failed_progress_snapshot() -> None:
     executor = object.__new__(_RayExecutor)
     executor.progress_actor = SimpleNamespace(snapshot=SimpleNamespace(remote=lambda: snapshot_ref))
     executor.task_execution_pk = execution.pk
+    executor.workflow_run_identity = identity
     executor.last_progress_revision = -1
     executor.ray = SimpleNamespace(
         wait=lambda refs, timeout: (refs, []),
@@ -489,6 +508,57 @@ def test_ray_executor_flushes_failed_progress_snapshot() -> None:
 
     execution.refresh_from_db()
     assert json.loads(execution.progress_data)["state"] == "FAILED"
+
+
+@pytest.mark.django_db
+def test_ray_executor_disables_reporter_after_stale_write() -> None:
+    from django_ray.models import RayTaskExecution, TaskState
+    from django_ray.workflow_progress import claim_workflow_run
+
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-stale-flush",
+        callable_path="tests.unit.test_workflows.increment",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=2,
+    )
+    identity = WorkflowRunIdentity(
+        task_execution_pk=execution.pk,
+        attempt_number=1,
+        execution_generation=2,
+        run_id="00000000-0000-0000-0000-000000000009",
+    )
+    assert claim_workflow_run(identity) is True
+    RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.CANCELLED)
+
+    snapshot = {
+        "schema_version": WORKFLOW_PROGRESS_SCHEMA_VERSION,
+        "run_identity": identity.as_dict(),
+        "revision": 1,
+        "state": "RUNNING",
+        "completed_nodes": 0,
+        "failed_nodes": 0,
+        "total_nodes": 1,
+    }
+    disabled: list[bool] = []
+    snapshot_ref = object()
+    actor = SimpleNamespace(
+        snapshot=SimpleNamespace(remote=lambda: snapshot_ref),
+        disable=SimpleNamespace(remote=lambda: disabled.append(True)),
+    )
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = actor
+    executor.task_execution_pk = execution.pk
+    executor.workflow_run_identity = identity
+    executor.last_progress_revision = -1
+    executor.ray = SimpleNamespace(
+        wait=lambda refs, timeout: (refs, []),
+        get=lambda ref: snapshot,
+    )
+
+    assert executor._flush_progress() is None
+    assert executor.progress_actor is None
+    assert disabled == [True]
 
 
 @pytest.mark.real_ray
@@ -513,6 +583,8 @@ def test_real_ray_workflow_persists_graph_and_execution_metadata() -> None:
     execution = RayTaskExecution.objects.create(
         task_id="real-ray-workflow-graph",
         callable_path="tests.unit.test_workflows.run_nested_workflow",
+        state="RUNNING",
+        execution_generation=1,
     )
     workflow = chain(
         step(increment),
@@ -523,6 +595,8 @@ def test_real_ray_workflow_persists_graph_and_execution_metadata() -> None:
     try:
         with durable_task_execution(
             execution.pk,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
             runtime_env_profile="test",
             runtime_env_hash="abc123",
         ):
@@ -535,6 +609,9 @@ def test_real_ray_workflow_persists_graph_and_execution_metadata() -> None:
     nodes = progress["graph"]["nodes"]
 
     assert progress["state"] == "SUCCEEDED"
+    assert progress["schema_version"] == WORKFLOW_PROGRESS_SCHEMA_VERSION
+    assert progress["run_identity"]["attempt_number"] == 1
+    assert progress["run_identity"]["execution_generation"] == 1
     assert progress["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]
     assert nodes[0]["runtime_env"] == {
         "mode": "inherit",
@@ -553,7 +630,12 @@ def test_durable_task_context_is_scoped() -> None:
 
 
 def test_progress_actor_builds_node_snapshot() -> None:
-    progress = WorkflowProgressActor()
+    progress = WorkflowProgressActor(
+        task_execution_pk=42,
+        attempt_number=2,
+        execution_generation=5,
+        workflow_run_id="00000000-0000-0000-0000-000000000010",
+    )
     progress.register(
         "0.0",
         "prepare",
@@ -577,7 +659,14 @@ def test_progress_actor_builds_node_snapshot() -> None:
     snapshot = progress.snapshot()
     unchanged = progress.snapshot()
 
-    assert snapshot["schema_version"] == 1
+    assert snapshot["schema_version"] == WORKFLOW_PROGRESS_SCHEMA_VERSION
+    assert snapshot["run_identity"] == {
+        "schema_version": 1,
+        "run_id": "00000000-0000-0000-0000-000000000010",
+        "task_execution_pk": 42,
+        "attempt_number": 2,
+        "execution_generation": 5,
+    }
     assert snapshot["state"] == "RUNNING"
     assert snapshot["total_nodes"] == 2
     assert snapshot["completed_nodes"] == 1

@@ -209,6 +209,8 @@ def execute_task(
 
             execution_context = durable_task_execution(
                 task_execution_pk,
+                attempt_number=attempt_number,
+                execution_generation=execution_generation,
                 runtime_env_profile=runtime_env_profile,
                 runtime_env_hash=runtime_env_hash,
                 ray_job_driver=True if ray_job_driver is None else ray_job_driver,

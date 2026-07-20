@@ -164,5 +164,5 @@ def test_existing_executions_migrate_to_default_priority_without_reordering() ->
         ) == ["priority-migration-older", "priority-migration-newer"]
     finally:
         MigrationExecutor(connection).migrate(
-            [("django_ray", "0009_taskinputpayload_and_input_reference")]
+            [("django_ray", "0010_raytaskexecution_workflow_run_id")]
         )

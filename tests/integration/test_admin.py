@@ -342,6 +342,7 @@ class TestRayTaskExecutionAdmin:
 
         assert payload["workflow"] == {
             "revision": 4,
+            "run_identity": None,
             "state": "RUNNING",
             "total_nodes": 2,
             "completed_nodes": 1,

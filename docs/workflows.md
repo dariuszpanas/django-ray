@@ -202,8 +202,15 @@ Every snapshot is a versioned graph suitable for a custom task-tracking UI:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "workflow_id": "django-ray:42",
+  "run_identity": {
+    "schema_version": 1,
+    "run_id": "2eb22ff3-5fd2-43a0-834c-d920737b584c",
+    "task_execution_pk": 42,
+    "attempt_number": 2,
+    "execution_generation": 5
+  },
   "revision": 12,
   "state": "RUNNING",
   "progress_percent": 50.0,
@@ -233,8 +240,12 @@ Every snapshot is a versioned graph suitable for a custom task-tracking UI:
 
 Node IDs are stable for one workflow expansion. Dynamic map nodes appear after
 their input iterable resolves, so clients should redraw when `revision` changes.
-Database writes occur only when the coordinator revision changes; the independent
-task-monitor heartbeat still proves that the owning worker is alive.
+Revisions are monotonic only within one `run_identity.run_id` and restart when a
+new invocation claims progress ownership. Clients must reset their stored graph
+before applying a revision from a different run ID, attempt, or execution
+generation. Database writes occur only when the coordinator revision changes and
+the task is still `RUNNING` with that exact attempt, generation, and run ID. The
+independent task-monitor heartbeat still proves that the owning worker is alive.
 
 ## Local Execution
 
@@ -256,11 +267,17 @@ The outer Django task is the durability and retry boundary:
 - While a workflow runs, an in-memory Ray coordinator collects node events. The
   outer task writes a bounded progress snapshot to `RayTaskExecution.progress_data`
   at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
+- A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
+  timeout, LOST recovery, and a newer invocation prevent its old coordinator from
+  writing again; rejected reporters drain later leaf events without persisting them.
 - Progress includes node paths, callable labels, node states, completion counts,
   dependency edges, percent complete, explicit leaf progress, Ray execution IDs,
   runtime environment identity, and recent events.
 - A leaf failure fails the outer task.
 - Retrying the outer task reruns the workflow, including previously completed leaves.
+- `TaskAttempt` archives terminal task diagnostics, not workflow graphs. This keeps
+  retry history bounded; `progress_data` and `workflow_run_id` describe only the
+  current attempt or its latest terminal invocation.
 - Cancellation of a Ray Core outer task recursively cancels its child tasks through
   Ray's normal cancellation behavior.
 - The final workflow result must satisfy the same result-serialization rules as any
@@ -274,6 +291,13 @@ Future execution strategies must preserve this outer durability boundary. In
 particular, Compiled Graph is a possible engine for a validated static actor region,
 not a Django task type or a flag that makes data-dependent `map_step` expansion static.
 See [Workflow Plans and Execution Strategies](workflow-plans.md).
+
+Apply the database migration before starting upgraded workers, and drain workflow
+executions from older workers during a rolling deployment. Existing rows start with
+`workflow_run_id = NULL`; the first upgraded, fully identified workflow invocation
+claims a UUID. Custom uses of `durable_task_execution()` that omit the attempt or
+execution generation continue to run their Ray workflow but intentionally do not
+persist progress because their writes cannot be fenced safely.
 
 Use idempotent steps when retries can repeat external side effects. Durable stage
 checkpoints remain a planned extension. Progress is observational rather than a

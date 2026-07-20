@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -13,7 +14,7 @@ from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from django_ray.input_storage import load_task_input, prepare_task_input, register_task_input
-from django_ray.lifecycle import record_failure, succeed_task
+from django_ray.lifecycle import record_failure, retry_task, succeed_task
 from django_ray.management.commands.django_ray_purge_inputs import Command as PurgeInputsCommand
 from django_ray.models import (
     InputPayloadState,
@@ -24,7 +25,9 @@ from django_ray.models import (
 )
 from django_ray.runner.cancellation import finalize_cancellation, request_cancellation
 from django_ray.runner.leasing import get_active_workers
-from django_ray.runner.reconciliation import mark_task_timed_out
+from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
+from django_ray.runtime.context import WorkflowRunIdentity
+from django_ray.workflow_progress import claim_workflow_run, persist_workflow_progress
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.postgresql]
 
@@ -78,6 +81,31 @@ def _execution(task_id: str, **overrides: object) -> RayTaskExecution:
     }
     values.update(overrides)
     return RayTaskExecution.objects.create(**values)
+
+
+def _workflow_identity(
+    execution: RayTaskExecution,
+    run_id: str,
+) -> WorkflowRunIdentity:
+    return WorkflowRunIdentity(
+        task_execution_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+        run_id=run_id,
+    )
+
+
+def _workflow_snapshot(
+    identity: WorkflowRunIdentity,
+    revision: int,
+) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "workflow_id": f"django-ray:{identity.task_execution_pk}",
+        "run_identity": identity.as_dict(),
+        "revision": revision,
+        "state": "RUNNING",
+    }
 
 
 def test_two_workers_claim_each_execution_exactly_once() -> None:
@@ -361,6 +389,159 @@ def test_stale_generation_cannot_write_over_replacement_execution() -> None:
     assert stale.execution_generation == 5
     assert stale.ray_job_id == "raysubmit_new"
     assert stale.result_data is None
+
+
+def test_workflow_progress_retry_race_cannot_resurrect_cleared_snapshot() -> None:
+    task = _execution(
+        "postgres-workflow-retry-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=7,
+        started_at=datetime.now(UTC),
+    )
+    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000021")
+    assert claim_workflow_run(identity) is True
+    assert persist_workflow_progress(identity, _workflow_snapshot(identity, 1)) is True
+    retry = RayTaskExecution.objects.get(pk=task.pk)
+
+    results = _run_concurrently(
+        lambda: record_failure(
+            retry,
+            error_message="retry workflow",
+            retry=True,
+            next_attempt_at=datetime.now(UTC),
+            expected_execution_generation=7,
+        ),
+        lambda: persist_workflow_progress(identity, _workflow_snapshot(identity, 2)),
+    )
+
+    assert results[0] is True
+    task.refresh_from_db()
+    assert task.state == TaskState.QUEUED
+    assert task.attempt_number == 2
+    assert task.workflow_run_id is None
+    assert task.progress_data is None
+    assert persist_workflow_progress(identity, _workflow_snapshot(identity, 3)) is False
+
+
+def test_workflow_progress_cancellation_race_disables_late_writer() -> None:
+    task = _execution(
+        "postgres-workflow-cancel-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=4,
+        started_at=datetime.now(UTC),
+    )
+    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000022")
+    assert claim_workflow_run(identity) is True
+    cancellation = RayTaskExecution.objects.get(pk=task.pk)
+
+    class Runner:
+        def cancel(self, _handle: object) -> bool:
+            return True
+
+    results = _run_concurrently(
+        lambda: request_cancellation(cancellation, Runner()),
+        lambda: persist_workflow_progress(identity, _workflow_snapshot(identity, 1)),
+    )
+
+    assert results[0] is True
+    task.refresh_from_db()
+    assert task.state == TaskState.CANCELLING
+    assert persist_workflow_progress(identity, _workflow_snapshot(identity, 2)) is False
+
+
+def test_workflow_progress_timeout_race_cannot_write_after_terminal_state() -> None:
+    task = _execution(
+        "postgres-workflow-timeout-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=3,
+        execution_generation=8,
+        started_at=datetime.now(UTC) - timedelta(minutes=5),
+        timeout_seconds=1,
+    )
+    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000023")
+    assert claim_workflow_run(identity) is True
+    timeout = RayTaskExecution.objects.get(pk=task.pk)
+
+    results = _run_concurrently(
+        lambda: mark_task_timed_out(timeout, expected_execution_generation=8),
+        lambda: persist_workflow_progress(identity, _workflow_snapshot(identity, 1)),
+    )
+
+    assert results[0] is True
+    task.refresh_from_db()
+    assert task.state == TaskState.FAILED
+    assert persist_workflow_progress(identity, _workflow_snapshot(identity, 2)) is False
+
+
+def test_workflow_progress_lost_recovery_clears_obsolete_run() -> None:
+    task = _execution(
+        "postgres-workflow-lost-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=5,
+        started_at=datetime.now(UTC),
+    )
+    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000024")
+    assert claim_workflow_run(identity) is True
+    lost = RayTaskExecution.objects.get(pk=task.pk)
+
+    def recover_lost() -> bool:
+        mark_task_lost(lost)
+        return retry_task(lost, allowed_states=(TaskState.LOST,)) is not None
+
+    results = _run_concurrently(
+        recover_lost,
+        lambda: persist_workflow_progress(identity, _workflow_snapshot(identity, 1)),
+    )
+
+    assert results[0] is True
+    task.refresh_from_db()
+    assert task.state == TaskState.QUEUED
+    assert task.attempt_number == 2
+    assert task.execution_generation == 6
+    assert task.workflow_run_id is None
+    assert task.progress_data is None
+    assert persist_workflow_progress(identity, _workflow_snapshot(identity, 2)) is False
+
+
+def test_workflow_run_claim_is_consistent_for_concurrent_reader() -> None:
+    task = _execution(
+        "postgres-workflow-reader-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=2,
+    )
+    old = _workflow_identity(task, "00000000-0000-0000-0000-000000000025")
+    replacement = _workflow_identity(task, "00000000-0000-0000-0000-000000000026")
+    assert claim_workflow_run(old) is True
+    assert persist_workflow_progress(old, _workflow_snapshot(old, 1)) is True
+
+    def read_progress_pair() -> tuple[str | None, str | None]:
+        current = RayTaskExecution.objects.get(pk=task.pk)
+        current_run_id = (
+            str(current.workflow_run_id) if current.workflow_run_id is not None else None
+        )
+        if current.progress_data is None:
+            return current_run_id, None
+        snapshot_run_id = json.loads(current.progress_data)["run_identity"]["run_id"]
+        return current_run_id, snapshot_run_id
+
+    results = _run_concurrently(
+        lambda: claim_workflow_run(replacement),
+        read_progress_pair,
+    )
+
+    assert results[0] is True
+    reader_result = results[1]
+    assert isinstance(reader_result, tuple)
+    observed_run_id, snapshot_run_id = reader_result
+    assert snapshot_run_id is None or observed_run_id == snapshot_run_id
+    task.refresh_from_db()
+    assert str(task.workflow_run_id) == replacement.run_id
+    assert task.progress_data is None
+    assert persist_workflow_progress(old, _workflow_snapshot(old, 2)) is False
 
 
 def test_input_cleanup_racing_reenqueue_preserves_shared_payload(settings, tmp_path) -> None:
