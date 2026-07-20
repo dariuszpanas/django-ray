@@ -7,6 +7,7 @@ import pytest
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "check_conventional_commits.py"
 TEMPLATE = Path(__file__).parents[2] / ".gitmessage"
+WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "commit-messages.yml"
 SPEC = importlib.util.spec_from_file_location("check_conventional_commits", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 CHECKER = importlib.util.module_from_spec(SPEC)
@@ -391,3 +392,20 @@ def test_tracked_template_renders_as_a_valid_commit_message() -> None:
     rendered = "\n".join(line for line in rendered.splitlines() if not line.startswith(";"))
 
     assert CHECKER.validate_message(rendered, label="Commit 1") == []
+
+
+def test_commit_workflow_validates_the_fetched_pr_range_without_rest_api() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "pull_request_target:" in workflow
+    assert "contents: read" in workflow
+    assert "pull-requests: read" not in workflow
+    assert "gh api" not in workflow
+    assert "ref: ${{ github.event.repository.default_branch }}" in workflow
+    assert "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}" in workflow
+    assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in workflow
+    assert '"refs/pull/${PR_NUMBER}/head:${pr_ref}"' in workflow
+    assert 'fetched_head="$(git rev-parse "$pr_ref")"' in workflow
+    assert 'if [ "$fetched_head" != "$PR_HEAD_SHA" ]; then' in workflow
+    assert 'git cat-file -e "${PR_BASE_SHA}^{commit}"' in workflow
+    assert '--range "${PR_BASE_SHA}..${pr_ref}"' in workflow
