@@ -29,9 +29,10 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) for commit mess
 ```
 
 Common types are `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, and `chore`. Keep
-commits focused and use `!` plus a `BREAKING CHANGE:` footer for an intentional breaking change.
-Every commit must use the repository's structured body so each retained commit reads like durable
-release history:
+commits focused and use `!` for an intentional breaking change; add a `BREAKING CHANGE:` footer when
+the history needs additional migration detail.
+Every commit must include enough descriptive body context to understand the retained change without
+reconstructing intent from its diff. The tracked template recommends this useful layout:
 
 ```text
 <type>[optional scope][!]: <imperative summary>
@@ -46,12 +47,17 @@ release history:
 - `<command>`: result
 ```
 
-`## Summary` must be first and `## Validation` must be last. Optional focused sections such as
-`## Rationale`, `## Migration`, `## Compatibility`, or `## Release decision` belong between them.
-Every section needs meaningful content; an unstructured bare body, template placeholders, iteration
-labels, and development-only prose such as "address review feedback" are rejected. Put a non-empty
-`BREAKING CHANGE:` footer after Validation when the header uses `!`. Wrap each commit-message line at
-72 characters so history remains readable in narrow terminals.
+The headings are guidance, not a required format. Unstructured prose is equally valid when it
+provides meaningful context. The gate requires at least eight body words outside headings,
+validation evidence, generated metadata, and trailers, or structurally complete generated
+dependency context; rejects template placeholders, development-only prose such as "address
+review feedback," and bodies that merely repeat the header; and requires a blank line after the
+header. A non-empty `BREAKING CHANGE:` footer may follow the descriptive body; `!` in the header is
+sufficient to mark the change as breaking. Wrap ordinary prose at 72 characters so history remains
+readable in narrow terminals. URL destinations, complete Markdown tables, recognized Git trailers,
+and validated generated dependency metadata are not required to wrap. The same content standard
+applies to human and automated commits, so Dependabot's descriptive generated messages pass without
+a bot-wide bypass.
 
 Install the tracked template for this checkout:
 
@@ -82,8 +88,9 @@ commits over unrelated cleanup in the same PR.
 The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
 every commit in the PR. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`,
 `revert`, `style`, or `test`, optionally add a scope and `!`, and include a summary after `:`. The
-check enforces the required sections, meaningful content, and 72-character line limit. A failed check
-prints the offending title or commit and the expected correction.
+check enforces meaningful body context and the wrappable-prose line limit without prescribing
+section headings. A failed check prints the offending title, commit, or line and the expected
+correction.
 
 ## Rebase auto-merge
 
@@ -110,8 +117,8 @@ uv run python scripts/check_conventional_commits.py --range origin/main..HEAD
 Fold `fixup!`/`squash!` commits, CI repairs, review repairs, formatting-only follow-ups, and other
 development iterations into the logical commit they correct. Use an interactive rebase when needed,
 then push rewritten branches with `--force-with-lease`. Do not collapse genuinely independent changes:
-retain each one as a focused commit with its own Summary and Validation sections. Run the validator
-with the final PR title as well before enabling auto-merge.
+retain each one as a focused commit with its own descriptive body. Run the validator with the final
+PR title as well before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
 conflicts, run `uv run make ci`, and push. Auto-merge will wait for the new checks. The `main`

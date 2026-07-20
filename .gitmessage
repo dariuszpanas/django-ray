@@ -1,5 +1,6 @@
 <type>[optional scope][!]: <imperative summary>
 
+; Recommended layout; headings are guidance rather than a validation requirement.
 ## Summary
 
 - <Describe the concrete durable change.>
@@ -13,4 +14,4 @@
 - `<command>`: <result>
 
 ; Add `BREAKING CHANGE: <impact and migration>` below Validation when
-; the header uses `!`. Add issue trailers such as `Closes #60` last.
+; more migration detail is useful. Add issue trailers such as `Closes #60` last.
