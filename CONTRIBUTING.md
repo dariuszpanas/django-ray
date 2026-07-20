@@ -54,10 +54,10 @@ dependency context; rejects template placeholders, development-only prose such a
 review feedback," and bodies that merely repeat the header; and requires a blank line after the
 header. A non-empty `BREAKING CHANGE:` footer may follow the descriptive body; `!` in the header is
 sufficient to mark the change as breaking. Wrap ordinary prose at 72 characters so history remains
-readable in narrow terminals. URL destinations, complete Markdown tables, recognized Git trailers,
-and validated generated dependency metadata are not required to wrap. The same content standard
-applies to human and automated commits, so Dependabot's descriptive generated messages pass without
-a bot-wide bypass.
+readable in narrow terminals. Structurally validated generated dependency headers and metadata, URL
+destinations, complete Markdown tables, and recognized Git trailers are not required to wrap. The
+same content standard applies to human and automated commits, so Dependabot's descriptive generated
+messages pass without a bot-wide bypass.
 
 Install the tracked template for this checkout:
 
