@@ -263,7 +263,7 @@ def test_result_buffer_uses_versioned_actor_topology_extensibility_slots() -> No
         "maximum_items": 7,
         "maximum_in_flight_leaves": 2,
         "maximum_serialized_bytes": 8192,
-        "maximum_pending_actor_calls": 1,
+        "maximum_pending_actor_calls": 2,
     }
     assert contract["lifetime"]["kind"] == "non_detached"
     assert contract["restart"] == {"max_restarts": 0, "max_task_retries": 0}
