@@ -40,9 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes in a non-detached, resource-accounted Ray actor and forward one direct ordered
   payload reference to a downstream Ray step without coordinator decoding. Caller
   limits, the narrow placement/resource surface, actor lifetime/restart semantics,
-  and the two-return protocol are fingerprinted for durable retry drift. Terminal and
-  final-consumer memory remains O(total output); chunk/reducer transport and production
-  benchmarking remain tracked separately.
+  and the two-return protocol are fingerprinted for durable retry drift. Actor execution
+  remains serial and the coordinator resolves every acknowledgement before issuing the
+  next call; `max_pending_calls=2` only leaves one sender-side bookkeeping slot for Ray
+  to retire the prior completed call. Because this result-buffer work remains unreleased
+  and the exact bound is already fingerprinted, the change updates pre-release plan
+  identity without a plan- or protocol-format version bump. Terminal and final-consumer
+  memory remains O(total output); chunk/reducer transport and production benchmarking
+  remain tracked separately.
 - Bounded maps can now opt into a strict input-order `reduce()` contract backed by one
   resource-accounted Ray actor. Incorporation-based admission bounds out-of-order
   retention, the coordinator forwards mapped values without decoding them, and one

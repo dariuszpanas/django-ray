@@ -186,12 +186,15 @@ it is unavailable, the ready handshake intentionally remains pending while ordin
 progress flushing and cancellation stay live, and no map leaf effects begin.
 
 The non-detached actor has fixed `max_restarts=0`, `max_task_retries=0`,
-`max_concurrency=1`, and `max_pending_calls=1`. django-ray waits for its ready
+`max_concurrency=1`, and `max_pending_calls=2`. django-ray waits for its ready
 acknowledgement through normal progress-flushing resolution before admitting leaf
 side effects. The leaf admission window remains at `max_concurrency`, but the outer
 coordinator uses `ray.wait(..., fetch_local=False)` to select a ready leaf without
 decoding it. It then submits and completely resolves one small append acknowledgement
-before issuing another actor call. Map payloads are never resolved by the coordinator.
+before issuing another actor call. The second pending-call slot only gives Ray room to
+retire a completed prior call from the sender handle's bookkeeping before accepting its
+successor. It does not permit concurrent protocol transitions, multiple unacknowledged
+calls, or an extra retained result. Map payloads are never resolved by the coordinator.
 
 The byte limit counts bytes actually retained by the version 1 `ray.cloudpickle`
 codec using pickle protocol 5. An append serializes first, checks the prospective item

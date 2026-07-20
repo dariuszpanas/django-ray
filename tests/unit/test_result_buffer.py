@@ -148,6 +148,8 @@ def test_actor_options_are_canonical_resource_accounted_and_non_detached() -> No
         max_serialized_bytes=2048,
     )
 
+    assert options["max_concurrency"] == RESULT_BUFFER_ACTOR_MAX_CONCURRENCY == 1
+    assert options["max_pending_calls"] == RESULT_BUFFER_ACTOR_MAX_PENDING_CALLS == 2
     assert options == {
         "num_cpus": 0.25,
         "memory": 4096,
@@ -275,7 +277,7 @@ def test_plan_contract_versions_codec_bounds_and_fixed_actor_semantics() -> None
     )
 
     assert contract["protocol"] == RESULT_BUFFER_PROTOCOL
-    assert contract["protocol_version"] == RESULT_BUFFER_PROTOCOL_VERSION
+    assert contract["protocol_version"] == RESULT_BUFFER_PROTOCOL_VERSION == 1
     assert contract["codec"] == {
         "name": RESULT_BUFFER_CODEC,
         "version": RESULT_BUFFER_CODEC_VERSION,
@@ -286,8 +288,13 @@ def test_plan_contract_versions_codec_bounds_and_fixed_actor_semantics() -> None
         "maximum_items": 10,
         "maximum_in_flight_leaves": 3,
         "maximum_serialized_bytes": 2048,
-        "maximum_pending_actor_calls": 1,
+        "maximum_pending_actor_calls": 2,
     }
+    assert (
+        contract["bounds"]["maximum_pending_actor_calls"]
+        == RESULT_BUFFER_ACTOR_MAX_PENDING_CALLS
+        == 2
+    )
     assert contract["lifetime"]["kind"] == "non_detached"
     assert contract["lifetime"]["node_loss_recovery"] is False
     assert contract["restart"] == {"max_restarts": 0, "max_task_retries": 0}
@@ -562,7 +569,7 @@ def test_ray_protocol_never_decodes_leaf_or_final_payload_in_coordinator(
             "max_restarts": 0,
             "max_task_retries": 0,
             "max_concurrency": 1,
-            "max_pending_calls": 1,
+            "max_pending_calls": 2,
         }
     ]
     assert actor_cls.constructor_args == [(2, 2048)]
@@ -856,6 +863,8 @@ def test_real_ray_actor_resources_direct_returns_and_success_cleanup() -> None:
             },
             max_serialized_bytes=1024 * 1024,
         )
+        assert options["max_concurrency"] == RESULT_BUFFER_ACTOR_MAX_CONCURRENCY == 1
+        assert options["max_pending_calls"] == RESULT_BUFFER_ACTOR_MAX_PENDING_CALLS == 2
         executor = _RayExecutor()
         session = executor.start_result_buffer(
             max_items=2,
@@ -877,11 +886,19 @@ def test_real_ray_actor_resources_direct_returns_and_success_cleanup() -> None:
             index=0,
             value=ray.put({"namespace": "application-0"}),
         )
-        payload_ref = executor.finalize_result_buffer(session, expected_items=1)
+        executor.append_result_buffer(
+            session,
+            index=1,
+            value=ray.put({"namespace": "application-1"}),
+        )
+        payload_ref = executor.finalize_result_buffer(session, expected_items=2)
 
         assert isinstance(payload_ref, ray.ObjectRef)
         payload = ray.get(payload_ref)
-        assert payload == [{"namespace": "application-0"}]
+        assert payload == [
+            {"namespace": "application-0"},
+            {"namespace": "application-1"},
+        ]
         assert not isinstance(payload, ray.ObjectRef)
         deadline = time.monotonic() + 10
         while True:

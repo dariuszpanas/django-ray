@@ -369,6 +369,13 @@ fixed no-restart semantics, serial actor-call limits, direct two-return finaliza
 and best-effort cleanup contract. All of those fields are normative fingerprint
 inputs. A retry that changes any one of them is rejected before actor or leaf effects.
 
+Changing the result buffer's exact `maximum_pending_actor_calls` bound from `1` to `2`
+therefore changes its canonical effective-plan identity. It does not increment
+`plan_format_version` or the result-buffer protocol version: the result-buffer work in
+[GitHub issue #101](https://github.com/dariuszpanas/django-ray/issues/101) has not shipped
+in a release, and the version 1 actor contract already fingerprints the exact option and
+bound. No released persisted version 1 result-buffer plan is silently reinterpreted.
+
 ### Invalidation inputs
 
 A graph instance or prepared strategy state must be rejected and drained when any
