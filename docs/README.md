@@ -50,6 +50,9 @@ django-ray is a **library** that provides:
   classification, identity, and strategy eligibility
 - [ADR-0001: Workflow Plans](design/adr-0001-workflow-plan-contract.md) - Why
   execution plans and strategies remain separate from Django task identity
+- [ADR-0002: Compiled Sessions](design/adr-0002-compiled-session-ownership.md) -
+  Initial local/direct CPU-pilot owner, deferred production topology, within-run reuse,
+  admission, invalidation, and drain rules
 - [Ray Serve Integration Boundary](design/ray-serve-boundary.md) - Deferred ownership,
   lifecycle, security, and packaging decision
 - [Changelog](changelog.md) - Release history

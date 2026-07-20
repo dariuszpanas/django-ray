@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-invocation event loops and preserved retry exception classification.
 - A Ray Serve integration boundary that defers package orchestration, keeps deployment
   state separate from durable tasks, and records adoption gates for a companion package.
+- A Compiled Graph ownership ADR and opt-in raw-Ray topology probe that select one
+  Ray Core outer task as the initial local/direct within-run CPU-pilot owner without
+  claiming production Ray Client transport or cross-schedule reuse.
 
 ### Changed
 

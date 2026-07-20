@@ -78,7 +78,12 @@ identity, topology, physical layout, resolved RuntimeEnv identity, resources, bo
 transport, lifecycle, and compatibility inputs. Current inventory, task arguments,
 credentials, and other per-invocation values are bound separately. See
 [Workflow Plans and Execution Strategies](workflow-plans.md) and
-[ADR-0001](design/adr-0001-workflow-plan-contract.md).
+[ADR-0001](design/adr-0001-workflow-plan-contract.md). The first experimental
+Compiled Graph session is owned by one Ray Core outer-task process for one durable run;
+it does not survive a scheduled task. Current evidence is limited to a local/direct
+driver; django-ray's production Ray Client-submitted path still needs a live-cluster
+lifetime probe. See
+[ADR-0002](design/adr-0002-compiled-session-ownership.md).
 
 ### Database
 
@@ -294,5 +299,6 @@ rolling back, disable spillover and drain all tasks that already have a referenc
 - [Ray-Native Workflows](workflows.md)
 - [Workflow Plans and Execution Strategies](workflow-plans.md)
 - [ADR-0001: Workflow Plans and Execution Strategies](design/adr-0001-workflow-plan-contract.md)
+- [ADR-0002: Compiled Session Ownership and Reuse](design/adr-0002-compiled-session-ownership.md)
 - [Runtime Environments](runtime-environments.md)
 - [Retry & Error Handling](retry.md)
