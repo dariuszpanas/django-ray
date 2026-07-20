@@ -263,6 +263,47 @@ def test_actor_options_reject_unbounded_or_unsupported_values(
         )
 
 
+@pytest.mark.parametrize(
+    ("actor_options", "message"),
+    [
+        (_actor_options(resources={1: 1}), "must be a string"),
+        (_actor_options(resources={"": 1}), "must contain 1 to 256 characters"),
+        (_actor_options(num_cpus=float("inf")), "must be finite"),
+        (_actor_options(resources=[]), "resources must be a mapping"),
+        (
+            _actor_options(resources={f"resource-{index}": 1 for index in range(33)}),
+            "resources must contain at most 32 entries",
+        ),
+        (
+            _actor_options(**{f"option_{index}": 1 for index in range(15)}),
+            "actor_options must contain at most 16 entries",
+        ),
+    ],
+)
+def test_actor_options_reject_malformed_bounded_structures(
+    actor_options: dict[str, Any],
+    message: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        normalize_result_buffer_actor_options(
+            actor_options,
+            max_serialized_bytes=2048,
+        )
+
+
+def test_actor_options_reject_invalid_container_and_serialized_bound() -> None:
+    with pytest.raises(ValueError, match="max_serialized_bytes must be a positive integer"):
+        normalize_result_buffer_actor_options(
+            _actor_options(),
+            max_serialized_bytes=0,
+        )
+    with pytest.raises(TypeError, match="actor_options must be a mapping"):
+        normalize_result_buffer_actor_options(
+            [],  # type: ignore[arg-type]
+            max_serialized_bytes=2048,
+        )
+
+
 def test_plan_contract_versions_codec_bounds_and_fixed_actor_semantics() -> None:
     options = normalize_result_buffer_actor_options(
         _actor_options(),
@@ -352,6 +393,49 @@ def test_actor_rejects_duplicate_missing_and_post_finalize_appends() -> None:
         actor.append(0, "late")
 
 
+@pytest.mark.parametrize(
+    ("max_items", "max_serialized_bytes", "message"),
+    [
+        (0, 4096, "max_items must be a positive integer"),
+        (1, 0, "max_serialized_bytes must be a positive integer"),
+    ],
+)
+def test_actor_constructor_rejects_invalid_bounds(
+    max_items: int,
+    max_serialized_bytes: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        WorkflowMapResultBuffer(max_items, max_serialized_bytes)
+
+
+def test_actor_rejects_invalid_indices_and_final_count_then_discards_state() -> None:
+    actor = WorkflowMapResultBuffer(max_items=1, max_serialized_bytes=4096)
+
+    with pytest.raises(ResultBufferProtocolError, match="non-negative integer"):
+        actor.append(-1, "invalid")
+    with pytest.raises(ResultBufferOverflowError, match="exceeds max_items=1"):
+        actor.append(1, "overflow")
+    with pytest.raises(ResultBufferProtocolError, match="Invalid result-buffer final item count"):
+        actor.finalize(2)
+
+    retained = actor.append(0, "retained")
+    discarded = actor.discard()
+
+    assert discarded == {
+        "protocol": RESULT_BUFFER_PROTOCOL,
+        "protocol_version": RESULT_BUFFER_PROTOCOL_VERSION,
+        "codec": RESULT_BUFFER_CODEC,
+        "codec_version": RESULT_BUFFER_CODEC_VERSION,
+        "state": "discarded",
+        "item_count": 1,
+        "retained_bytes": retained["retained_bytes"],
+    }
+    assert actor.retained_bytes == 0
+    with pytest.raises(ResultBufferProtocolError, match="already finalized"):
+        actor.finalize(1)
+
+
 def test_ack_validation_rejects_payload_or_wrong_protocol() -> None:
     ready = WorkflowMapResultBuffer(1, 4096).ready()
 
@@ -361,6 +445,33 @@ def test_ack_validation_rejects_payload_or_wrong_protocol() -> None:
         validate_result_buffer_ack(
             {**ready, "protocol_version": RESULT_BUFFER_PROTOCOL_VERSION + 1},
             state="ready",
+        )
+
+
+def test_ack_validation_rejects_non_mapping_counts_and_indices() -> None:
+    actor = WorkflowMapResultBuffer(1, 4096)
+    retained = actor.append(0, "retained")
+
+    with pytest.raises(ResultBufferProtocolError, match="must be a mapping"):
+        validate_result_buffer_ack(None, state="ready")
+    with pytest.raises(ResultBufferProtocolError, match="must be a non-negative integer"):
+        validate_result_buffer_ack(
+            {**retained, "retained_bytes": -1},
+            state="retained",
+        )
+    with pytest.raises(ResultBufferProtocolError, match="index mismatch"):
+        validate_result_buffer_ack(
+            retained,
+            state="retained",
+            expected_index=1,
+        )
+
+    _, finalized = actor.finalize(1)
+    with pytest.raises(ResultBufferProtocolError, match="item count mismatch"):
+        validate_result_buffer_ack(
+            finalized,
+            state="finalized",
+            expected_items=0,
         )
 
 

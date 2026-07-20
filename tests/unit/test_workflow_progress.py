@@ -13,7 +13,11 @@ from django_ray.runtime.context import (
     DurableTaskContext,
     WorkflowRunIdentity,
 )
-from django_ray.workflow_progress import claim_workflow_run, persist_workflow_progress
+from django_ray.workflow_progress import (
+    claim_workflow_run,
+    persist_workflow_progress,
+    pin_workflow_plan,
+)
 
 
 def _identity(
@@ -62,6 +66,29 @@ def test_workflow_run_identity_requires_complete_durable_fence() -> None:
     assert identity.attempt_number == 2
     assert identity.execution_generation == 3
     assert identity.as_dict()["run_id"] == identity.run_id
+
+
+def test_claim_workflow_run_requires_plan_and_selection_together() -> None:
+    identity = WorkflowRunIdentity(
+        task_execution_pk=1,
+        attempt_number=1,
+        execution_generation=1,
+        run_id="00000000-0000-0000-0000-000000000010",
+    )
+
+    with pytest.raises(ValueError, match="must be supplied together"):
+        claim_workflow_run(identity, plan=object())  # type: ignore[arg-type]
+
+
+def test_pin_workflow_plan_requires_complete_durable_fence() -> None:
+    assert (
+        pin_workflow_plan(
+            DurableTaskContext(task_pk=1),
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+        )
+        is False
+    )
 
 
 @pytest.mark.django_db

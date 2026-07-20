@@ -1762,6 +1762,90 @@ def test_ray_run_rechecks_fence_after_preparation_before_actor_or_leaf(monkeypat
 
 
 @pytest.mark.django_db
+def test_plan_pinning_enforces_serialized_plan_and_selection_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-plan-persistence-bounds",
+        callable_path=f"{__name__}.increment",
+        state=TaskState.RUNNING,
+        execution_generation=2,
+    )
+    plan = _materialize(step(increment), 1).plan
+    selection = plan.eligibility.select("dynamic_tasks", requested_policy="auto")
+    identity = WorkflowRunIdentity(
+        execution.pk,
+        execution.attempt_number,
+        execution.execution_generation,
+        "00000000-0000-0000-0000-000000000091",
+    )
+    oversized_plan = replace(plan, canonical_json="x" * (MAX_PLAN_BYTES + 1))
+
+    with pytest.raises(ValueError, match="workflow plan exceeds persistence limit"):
+        claim_workflow_run(identity, plan=oversized_plan, selection=selection)
+
+    monkeypatch.setattr("django_ray.workflow_progress.MAX_PLAN_SELECTION_BYTES", 1)
+    with pytest.raises(ValueError, match="selection exceeds persistence limit"):
+        claim_workflow_run(identity, plan=plan, selection=selection)
+
+
+@pytest.mark.django_db
+def test_plan_pinning_rejects_same_fingerprint_with_different_manifest() -> None:
+    plan = _materialize(step(increment), 1).plan
+    selection = plan.eligibility.select("dynamic_tasks", requested_policy="auto")
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-plan-manifest-mismatch",
+        callable_path=f"{__name__}.increment",
+        state=TaskState.RUNNING,
+        execution_generation=2,
+        workflow_plan_fingerprint=plan.fingerprint,
+        workflow_plan_json="{}",
+    )
+    identity = WorkflowRunIdentity(
+        execution.pk,
+        execution.attempt_number,
+        execution.execution_generation,
+        "00000000-0000-0000-0000-000000000092",
+    )
+
+    with pytest.raises(WorkflowPlanMismatchError, match="manifest does not match"):
+        claim_workflow_run(identity, plan=plan, selection=selection)
+
+
+@pytest.mark.django_db
+def test_retry_unsafe_plan_message_reports_truncated_path_count() -> None:
+    plan = _materialize(step(increment), 1).plan
+    manifest = plan.as_dict()
+    manifest["retry_safety"] = {
+        "retry_safe": False,
+        "retry_unsafe_paths": [f"environments.by_node.{index}" for index in range(7)],
+        "total_retry_unsafe_paths": 7,
+        "retry_unsafe_paths_truncated": False,
+    }
+    unsafe_plan = replace(plan, manifest=manifest)
+    selection = plan.eligibility.select("dynamic_tasks", requested_policy="auto")
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-plan-truncated-retry-diagnostics",
+        callable_path=f"{__name__}.increment",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=2,
+        workflow_plan_fingerprint=plan.fingerprint,
+        workflow_plan_json=plan.canonical_json,
+        workflow_plan_pinned_attempt=1,
+    )
+    identity = WorkflowRunIdentity(
+        execution.pk,
+        execution.attempt_number,
+        execution.execution_generation,
+        "00000000-0000-0000-0000-000000000093",
+    )
+
+    with pytest.raises(WorkflowPlanMismatchError, match="and 2 more"):
+        claim_workflow_run(identity, plan=unsafe_plan, selection=selection)
+
+
+@pytest.mark.django_db
 def test_retry_must_match_the_plan_pinned_by_the_first_attempt() -> None:
     execution = RayTaskExecution.objects.create(
         task_id="workflow-plan-retry",
