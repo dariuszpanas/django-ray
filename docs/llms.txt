@@ -24,6 +24,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   results, errors, batching, and distributed utilities.
 - [Ray-native workflows](https://django-ray.readthedocs.io/en/latest/workflows/):
   `step`, `chain`, `group`, `map_step`, progress, and graph semantics.
+- [Workflow plan contract](https://django-ray.readthedocs.io/en/latest/workflow-plans/):
+  definitions versus immutable plans, workload classification, fingerprints, run
+  identity, and execution-strategy eligibility.
 - [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
   named profiles, code delivery, cache behavior, and security boundaries.
 - [Ray Serve integration boundary](https://django-ray.readthedocs.io/en/latest/design/ray-serve-boundary/):
@@ -61,6 +64,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 
 - One workflow is one durable `RayTaskExecution`; internal leaves are not independent
   Django tasks.
+- `WorkflowSignature` is a definition builder, not a persisted plan. Compiled Graph is
+  an execution strategy for eligible static actor regions, not a Django task type.
 - The result returned by `enqueue()` is a snapshot. Fetch current state with
   `task_backends[alias].get_result(task_id)`.
 - Per-task numeric priority is persisted from `-100` through `100`; larger values are

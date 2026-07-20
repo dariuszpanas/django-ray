@@ -57,6 +57,29 @@ storage.
 - Resolves workflow step dependencies through object references without a database
   round trip for each internal step.
 
+### Workflow definitions, plans, and strategies
+
+The public `WorkflowSignature` builders are reusable definitions, not persisted DAGs.
+The architecture separates four layers:
+
+1. a workflow definition built with `step`, `chain`, `group`, and `map_step`;
+2. a versioned, immutable effective execution plan with invocation values removed;
+3. one attempt- and generation-scoped durable run with one or more invocations; and
+4. an execution strategy such as local execution, dynamic Ray tasks, static actors, or
+   a future Compiled Graph adapter.
+
+One `RayTaskExecution` remains the durability and recovery boundary. Logical plan nodes,
+runtime map expansions, physical actors, and prepared graph instances do not create
+independent Django task identities. Compiled Graph is therefore an execution strategy
+for an eligible static actor region, not a new task type.
+
+The effective plan is canonical and secret-free. Its fingerprint covers callable/code
+identity, topology, physical layout, resolved RuntimeEnv identity, resources, bounds,
+transport, lifecycle, and compatibility inputs. Current inventory, task arguments,
+credentials, and other per-invocation values are bound separately. See
+[Workflow Plans and Execution Strategies](workflow-plans.md) and
+[ADR-0001](design/adr-0001-workflow-plan-contract.md).
+
 ### Database
 
 - Canonical source of truth for task lifecycle state.
@@ -268,5 +291,7 @@ rolling back, disable spillover and drain all tasks that already have a referenc
 - [Configuration](configuration.md)
 - [Worker Modes](worker-modes.md)
 - [Ray-Native Workflows](workflows.md)
+- [Workflow Plans and Execution Strategies](workflow-plans.md)
+- [ADR-0001: Workflow Plans and Execution Strategies](design/adr-0001-workflow-plan-contract.md)
 - [Runtime Environments](runtime-environments.md)
 - [Retry & Error Handling](retry.md)
