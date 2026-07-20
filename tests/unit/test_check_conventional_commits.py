@@ -67,6 +67,20 @@ updated-dependencies:
 Signed-off-by: dependabot[bot] <support@github.com>
 """
 
+DEPENDABOT_DIRECTORY_GROUP_MESSAGE = (
+    DEPENDABOT_GROUP_MESSAGE.replace(
+        "chore(deps): bump the python group with 2 updates",
+        "chore(deps): bump the python-minor-patch group across 1 directory with 2 updates",
+        1,
+    )
+    .replace(
+        "Bumps the python group with 2 updates:",
+        "Bumps the python-minor-patch group with 2 updates in the / directory:",
+        1,
+    )
+    .replace("dependency-group: python", "dependency-group: python-minor-patch")
+)
+
 
 def test_validate_accepts_structured_commits_and_optional_sections() -> None:
     assert (
@@ -200,10 +214,34 @@ Preserve active lease ownership so cleanup cannot race worker recovery.
     [
         ("chore(ci): bump example/action from 1.0.0 to 1.0.1", DEPENDABOT_MESSAGE),
         ("chore(deps): bump the python group with 2 updates", DEPENDABOT_GROUP_MESSAGE),
+        (
+            "chore(deps): bump the python-minor-patch group across 1 directory with 2 updates",
+            DEPENDABOT_DIRECTORY_GROUP_MESSAGE,
+        ),
     ],
 )
 def test_validate_accepts_descriptive_dependabot_generated_body(title: str, message: str) -> None:
     assert CHECKER.validate(title=title, commits=[message], commit_range=None) == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        DEPENDABOT_DIRECTORY_GROUP_MESSAGE.replace("with 2 updates", "with 3 updates", 1),
+        DEPENDABOT_DIRECTORY_GROUP_MESSAGE.replace(
+            "python-minor-patch group", "python-minor-patch-other group", 1
+        ),
+        DEPENDABOT_DIRECTORY_GROUP_MESSAGE.replace(
+            "Signed-off-by: dependabot[bot] <support@github.com>",
+            "Signed-off-by: unrecognized[bot] <support@example.com>",
+        ),
+    ],
+    ids=["count", "group", "metadata"],
+)
+def test_validate_generated_header_exemption_requires_matching_metadata(message: str) -> None:
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("line 1 exceeds 72 characters" in error for error in errors)
 
 
 def test_validate_dependabot_message_still_requires_valid_header() -> None:

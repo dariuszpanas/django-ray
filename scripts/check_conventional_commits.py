@@ -95,6 +95,15 @@ _DEPENDABOT_BUMP_RE = re.compile(
     r"^Bumps (?P<dependency>\S+) from (?P<old>\S+) to (?P<new>\S+?)\.?$",
     re.IGNORECASE,
 )
+_DEPENDABOT_SINGLE_SUMMARY_RE = re.compile(
+    r"^bump (?P<dependency>\S+) from (?P<old>\S+) to (?P<new>\S+)$",
+    re.IGNORECASE,
+)
+_DEPENDABOT_GROUP_SUMMARY_RE = re.compile(
+    r"^bump the (?P<group>\S+) group"
+    r"(?: across \d+ director(?:y|ies))? with (?P<count>\d+) updates$",
+    re.IGNORECASE,
+)
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+(?:\[[ xX]\]\s+)?")
 _ISSUE_TRAILER_RE = re.compile(
     r"^(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s+#\d+(?:\s*,\s*#\d+)*$",
@@ -486,6 +495,33 @@ def _has_generated_dependency_context(
     return "commits" in labels and ("release notes" in labels or "changelog" in labels)
 
 
+def _has_generated_dependency_header(header: str, records: Sequence[dict[str, str]] | None) -> bool:
+    """Recognize a canonical Dependabot header backed by validated metadata."""
+    if records is None or not records:
+        return False
+    header_match = _HEADER_RE.fullmatch(header.strip())
+    if header_match is None:
+        return False
+    summary = header_match.group("summary")
+
+    if single_match := _DEPENDABOT_SINGLE_SUMMARY_RE.fullmatch(summary):
+        if len(records) != 1:
+            return False
+        record = records[0]
+        return (
+            _normalized_prose([single_match.group("dependency")])
+            == _normalized_prose([record["dependency-name"]])
+            and single_match.group("new").casefold() == record["dependency-version"].casefold()
+        )
+
+    if group_match := _DEPENDABOT_GROUP_SUMMARY_RE.fullmatch(summary):
+        group = group_match.group("group").casefold()
+        return len(records) == int(group_match.group("count")) and all(
+            record.get("dependency-group", "").casefold() == group for record in records
+        )
+    return False
+
+
 def _validate_descriptive_body(
     lines: Sequence[str],
     *,
@@ -559,13 +595,19 @@ def _validate_descriptive_body(
 
 
 def _line_length_errors(
-    lines: Sequence[str], *, label: str, metadata_bounds: tuple[int, int] | None = None
+    lines: Sequence[str],
+    *,
+    label: str,
+    metadata_bounds: tuple[int, int] | None = None,
+    generated_header: bool = False,
 ) -> list[str]:
     """Validate wrappable prose while tolerating mechanical Markdown structures."""
     errors: list[str] = []
     table_lines = _markdown_table_lines(lines)
     for index, line in enumerate(lines):
         line_number = index + 1
+        if index == 0 and generated_header:
+            continue
         if metadata_bounds is not None and metadata_bounds[0] <= index <= metadata_bounds[1]:
             continue
 
@@ -614,7 +656,14 @@ def validate_message(message: str, *, label: str) -> list[str]:
             metadata_records=metadata_records,
         )
     )
-    errors.extend(_line_length_errors(lines, label=label, metadata_bounds=metadata_bounds))
+    errors.extend(
+        _line_length_errors(
+            lines,
+            label=label,
+            metadata_bounds=metadata_bounds,
+            generated_header=_has_generated_dependency_header(lines[0], metadata_records),
+        )
+    )
     return errors
 
 
