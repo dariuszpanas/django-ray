@@ -62,6 +62,40 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
 
     validate_runtime_env_profiles(config)
 
+    code_revision = config.get("WORKFLOW_PLAN_CODE_REVISION")
+    if code_revision is not None and (
+        not isinstance(code_revision, str) or not code_revision or len(code_revision) > 256
+    ):
+        raise ImproperlyConfigured(
+            "django-ray: WORKFLOW_PLAN_CODE_REVISION must be None or a non-empty "
+            "string of at most 256 characters"
+        )
+
+    trust_identity = config.get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
+    if not isinstance(trust_identity, dict):
+        raise ImproperlyConfigured("django-ray: WORKFLOW_PLAN_TRUST_IDENTITY must be a mapping")
+    allowed_trust_fields = {
+        "trust_domain",
+        "credential_provider",
+        "credential_profile",
+        "credential_revision",
+        "environment_revision",
+        "scheduling_revision",
+        "service_account_audience",
+    }
+    unknown_trust_fields = set(trust_identity) - allowed_trust_fields
+    if unknown_trust_fields:
+        fields = ", ".join(sorted(str(field) for field in unknown_trust_fields))
+        raise ImproperlyConfigured(
+            "django-ray: WORKFLOW_PLAN_TRUST_IDENTITY has unsupported fields: " + fields
+        )
+    for name, value in trust_identity.items():
+        if not isinstance(value, str) or not value or len(value) > 256:
+            raise ImproperlyConfigured(
+                f"django-ray: WORKFLOW_PLAN_TRUST_IDENTITY[{name!r}] must be a "
+                "non-empty string of at most 256 characters"
+            )
+
     # Validate numeric settings
     numeric_settings = [
         ("DEFAULT_CONCURRENCY", 1, 1000),

@@ -91,6 +91,7 @@ def test_versioned_task_summary_omits_sensitive_payloads(db, settings) -> None:
         ray_address="ray://private-host:10001",
         runtime_env_profile="numpy",
         runtime_env_hash="abc123",
+        workflow_plan_pinned_attempt=1,
         runtime_env_json='{"password":"secret"}',
         args_json='["secret"]',
         kwargs_json='{"token":"secret"}',
@@ -109,6 +110,7 @@ def test_versioned_task_summary_omits_sensitive_payloads(db, settings) -> None:
     assert summary["generated_at"] == "2026-07-19T12:00:00Z"
     assert summary["workflow_revision"] == 7
     assert summary["workflow_run_id"] == "00000000-0000-0000-0000-000000000032"
+    assert summary["workflow_plan_pinned_attempt"] == 1
     assert summary["error_message"] == "[REDACTED]"
     assert summary["error_message_truncated"] is False
     assert summary["started_at"] == "2026-07-19T11:59:57Z"

@@ -33,6 +33,8 @@ DJANGO_RAY = {
 | `RAY_STATE_API_TIMEOUT_SECONDS` | `int` | `5` | Timeout for optional Ray state and log queries |
 | `RUNTIME_ENV_PROFILES` | `dict` | `{}` | Named, validated Ray RuntimeEnv definitions |
 | `DEFAULT_RUNTIME_ENV_PROFILE` | `str \| None` | `None` | Profile used when a backend does not select one |
+| `WORKFLOW_PLAN_CODE_REVISION` | `str \| None` | `None` | Immutable non-secret application build, artifact, or image revision; required for reusable-plan eligibility |
+| `WORKFLOW_PLAN_TRUST_IDENTITY` | `dict` | `{}` | Bounded non-secret trust, credential-provider, and optional full-environment revision used to decide safe actor reuse |
 | `RUNNER` | `str` | `"ray_job"` | Default runner when no mode flag is passed: `"ray_job"` or `"ray_core"` |
 
 ### Concurrency

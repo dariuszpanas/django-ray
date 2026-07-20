@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any
 from django_ray.conf.settings import get_settings
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
-from django_ray.runtime.runtime_env import runtime_env_for_execution
+from django_ray.runtime.runtime_env import (
+    normalize_runtime_env,
+    runtime_env_for_execution,
+    snapshot_local_runtime_env,
+)
 from django_ray.runtime.serialization import serialize_args
 
 if TYPE_CHECKING:
@@ -49,49 +53,95 @@ class RayJobRunner(BaseRunner):
         client = self._get_client(ray_address)
 
         runtime_env = runtime_env_for_execution(task_execution)
+        from django_ray.conf.settings import get_settings
+        from django_ray.workflow_plans import runtime_env_plan_identity
 
-        # Inline tasks retain the unversioned v1 transport during rolling
-        # upgrades. Referenced tasks use v2 so the command line remains small.
-        payload: dict[str, Any] = {
-            "callable_path": callable_path,
-            "task_execution_pk": task_execution.pk,
-            "attempt_number": task_execution.attempt_number,
-            "execution_generation": task_execution.execution_generation,
-            "runtime_env_profile": runtime_env.profile,
-            "runtime_env_hash": runtime_env.digest,
-        }
-        input_reference = getattr(task_execution, "input_reference", None)
-        if input_reference:
-            payload.update(
-                {
-                    "transport_version": 2,
-                    "input_reference": input_reference,
-                }
-            )
-        else:
-            payload.update(
-                {
-                    "serialized_args": serialize_args(list(args)),
-                    "serialized_kwargs": serialize_args(kwargs),
-                }
-            )
-        payload_json = json.dumps(payload, separators=(",", ":"))
-        payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
-
-        entrypoint = f"python -m django_ray.runtime.entrypoint --payload-b64 {payload_b64}"
-
-        job_id = client.submit_job(
-            entrypoint=entrypoint,
-            runtime_env=runtime_env.spec,
-            metadata={
-                "django_ray_task_id": str(task_execution.pk),
-                "django_ray_attempt_number": str(task_execution.attempt_number),
-                "django_ray_execution_generation": str(task_execution.execution_generation),
-                "callable_path": callable_path,
-                "runtime_env_profile": runtime_env.profile or "",
-                "runtime_env_hash": runtime_env.digest,
-            },
+        trust_identity = get_settings().get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
+        source_runtime_env_identity = runtime_env_plan_identity(
+            runtime_env,
+            trust_identity=trust_identity,
         )
+        with snapshot_local_runtime_env(runtime_env) as immutable_snapshot:
+            snapshot_runtime_env_identity = runtime_env_plan_identity(
+                immutable_snapshot,
+                trust_identity=trust_identity,
+            )
+            if (
+                snapshot_runtime_env_identity.manifest["digest"]
+                != source_runtime_env_identity.manifest["digest"]
+            ):
+                from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+                raise WorkflowPlanMismatchError(
+                    "Outer RuntimeEnv immutable snapshot differs from its effective plan"
+                )
+            submitted_spec = json.loads(immutable_snapshot.serialized)
+            client._upload_working_dir_if_needed(submitted_spec)
+            client._upload_py_modules_if_needed(submitted_spec)
+            from ray.runtime_env import RuntimeEnv
+
+            submitted_runtime_env = normalize_runtime_env(
+                RuntimeEnv(**submitted_spec).to_dict(),
+                profile=runtime_env.profile,
+                source=f"prepared Ray Job RuntimeEnv for task {task_execution.pk}",
+            )
+            verified_source_identity = runtime_env_plan_identity(
+                runtime_env,
+                trust_identity=trust_identity,
+            )
+            if (
+                verified_source_identity.manifest["digest"]
+                != source_runtime_env_identity.manifest["digest"]
+            ):
+                from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+                raise WorkflowPlanMismatchError(
+                    "Outer RuntimeEnv local content changed while it was being snapshotted"
+                )
+
+            # Inline tasks retain the unversioned v1 transport during rolling
+            # upgrades. Referenced tasks use v2 so the command line remains small.
+            payload: dict[str, Any] = {
+                "callable_path": callable_path,
+                "task_execution_pk": task_execution.pk,
+                "attempt_number": task_execution.attempt_number,
+                "execution_generation": task_execution.execution_generation,
+                "runtime_env_profile": runtime_env.profile,
+                "runtime_env_hash": runtime_env.digest,
+                "runtime_env_plan_identity": snapshot_runtime_env_identity.as_transport_dict(),
+            }
+            input_reference = getattr(task_execution, "input_reference", None)
+            if input_reference:
+                payload.update(
+                    {
+                        "transport_version": 2,
+                        "input_reference": input_reference,
+                    }
+                )
+            else:
+                payload.update(
+                    {
+                        "serialized_args": serialize_args(list(args)),
+                        "serialized_kwargs": serialize_args(kwargs),
+                    }
+                )
+            payload_json = json.dumps(payload, separators=(",", ":"))
+            payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
+
+            entrypoint = f"python -m django_ray.runtime.entrypoint --payload-b64 {payload_b64}"
+
+            job_id = client.submit_job(
+                entrypoint=entrypoint,
+                runtime_env=submitted_runtime_env.spec,
+                metadata={
+                    "django_ray_task_id": str(task_execution.pk),
+                    "django_ray_attempt_number": str(task_execution.attempt_number),
+                    "django_ray_execution_generation": str(task_execution.execution_generation),
+                    "callable_path": callable_path,
+                    "runtime_env_profile": runtime_env.profile or "",
+                    "runtime_env_hash": runtime_env.digest,
+                },
+            )
 
         return SubmissionHandle(
             ray_job_id=job_id,

@@ -23,7 +23,9 @@ class DurableTaskContext:
     execution_generation: int | None = None
     runtime_env_profile: str | None = None
     runtime_env_hash: str = ""
+    runtime_env_plan_identity: dict[str, Any] | None = None
     ray_job_driver: bool = False
+    compiled_graph_submission_transport: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +106,9 @@ def durable_task_execution(
     execution_generation: int | None = None,
     runtime_env_profile: str | None = None,
     runtime_env_hash: str = "",
+    runtime_env_plan_identity: dict[str, Any] | None = None,
     ray_job_driver: bool = False,
+    compiled_graph_submission_transport: str | None = None,
 ) -> Iterator[None]:
     """Expose a durable task identity to nested workflow coordination."""
     token = _current_task.set(
@@ -114,7 +118,13 @@ def durable_task_execution(
             execution_generation=execution_generation,
             runtime_env_profile=runtime_env_profile,
             runtime_env_hash=runtime_env_hash,
+            runtime_env_plan_identity=(
+                json.loads(json.dumps(runtime_env_plan_identity))
+                if runtime_env_plan_identity is not None
+                else None
+            ),
             ray_job_driver=ray_job_driver,
+            compiled_graph_submission_transport=compiled_graph_submission_transport,
         )
     )
     try:

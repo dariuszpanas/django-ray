@@ -851,6 +851,7 @@ class Command(BaseCommand):
                 task.completion_data = None
                 task.progress_data = None
                 task.workflow_run_id = None
+                task.workflow_plan_selection = None
                 task.ray_job_id = None
                 task.ray_address = None
                 task.save(
@@ -863,6 +864,7 @@ class Command(BaseCommand):
                         "completion_data",
                         "progress_data",
                         "workflow_run_id",
+                        "workflow_plan_selection",
                         "ray_job_id",
                         "ray_address",
                     ]
@@ -921,14 +923,27 @@ class Command(BaseCommand):
 
     def execute_task_sync(self, task: RayTaskExecution) -> None:
         """Execute a task synchronously (without Ray)."""
+        from django_ray.conf.settings import get_settings
         from django_ray.runtime.entrypoint import execute_task
+        from django_ray.runtime.runtime_env import runtime_env_for_execution
+        from django_ray.workflow_plans import runtime_env_plan_identity
 
         try:
+            runtime_env = runtime_env_for_execution(task)
+            plan_runtime_env_identity = runtime_env_plan_identity(
+                runtime_env,
+                trust_identity=get_settings().get("WORKFLOW_PLAN_TRUST_IDENTITY", {}),
+            )
             result_json = execute_task(
                 callable_path=task.callable_path,
                 serialized_args=task.args_json,
                 serialized_kwargs=task.kwargs_json,
                 task_execution_pk=task.pk,
+                attempt_number=getattr(task, "attempt_number", None),
+                execution_generation=getattr(task, "execution_generation", None),
+                runtime_env_profile=runtime_env.profile,
+                runtime_env_hash=runtime_env.digest,
+                runtime_env_plan_identity=plan_runtime_env_identity.as_transport_dict(),
                 input_reference=getattr(task, "input_reference", None),
                 ray_job_driver=False,
             )
@@ -1116,11 +1131,14 @@ class Command(BaseCommand):
         except Exception as e:
             import traceback
 
+            from django_ray.workflow_plans import WorkflowPlanMismatchError
+
             self._handle_task_failure(
                 task,
                 error_message=f"Failed to submit to Ray Core: {e}",
                 error_traceback=traceback.format_exc(),
                 exception_type=type(e).__name__,
+                retryable=False if isinstance(e, WorkflowPlanMismatchError) else None,
             )
 
     def poll_ray_core_tasks(self) -> int:
@@ -1252,11 +1270,14 @@ class Command(BaseCommand):
         except Exception as e:
             import traceback
 
+            from django_ray.workflow_plans import WorkflowPlanMismatchError
+
             self._handle_task_failure(
                 task,
                 error_message=f"Failed to submit to Ray: {e}",
                 error_traceback=traceback.format_exc(),
                 exception_type=type(e).__name__,
+                retryable=False if isinstance(e, WorkflowPlanMismatchError) else None,
             )
 
     def _build_submission_handle(
@@ -1701,6 +1722,7 @@ class Command(BaseCommand):
                     task.claimed_by_worker = None
                     task.progress_data = None
                     task.workflow_run_id = None
+                    task.workflow_plan_selection = None
                     task.save(
                         update_fields=[
                             "state",
@@ -1711,6 +1733,7 @@ class Command(BaseCommand):
                             "claimed_by_worker",
                             "progress_data",
                             "workflow_run_id",
+                            "workflow_plan_selection",
                         ]
                     )
                     self.stdout.write(

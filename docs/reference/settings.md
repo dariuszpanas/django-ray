@@ -129,6 +129,62 @@ DJANGO_RAY = {
 Profile selected when the task backend does not specify
 `OPTIONS["RUNTIME_ENV_PROFILE"]`. The named profile must exist.
 
+### WORKFLOW_PLAN_CODE_REVISION
+
+- **Type**: `str | None`
+- **Default**: `None`
+
+Immutable, non-secret application build identity included in every effective workflow
+plan. It is optional for the current local and dynamic-task baseline but required
+before a future reusable strategy can accept the plan. Prefer a build revision,
+verified archive digest, or immutable source revision. django-ray also fingerprints
+directly imported callable module bytes; this setting supplies the deployment-wide and
+transitive-dependency dimension that one module path cannot express. Values are
+limited to 256 characters.
+
+When omitted, django-ray checks `DJANGO_RAY_BUILD_REVISION`, `GIT_COMMIT`,
+`SOURCE_VERSION`, and `K_REVISION` in that order. Independently, it reads
+`DJANGO_RAY_IMAGE_DIGEST` as a bare `sha256:<64 hexadecimal digits>` container identity.
+The build revision and container image digest are separate fingerprint inputs: finding
+one never suppresses or substitutes for the other. A non-empty malformed image digest
+fails plan materialization, and a digest that disagrees with an immutable Compiled Graph
+deployment profile rejects reusable strategies. A missing deployment-wide build
+revision does not block dynamic tasks, but adds
+`UNRESOLVED_CODE_IDENTITY` and rejects reusable strategies. Direct callable-module
+hashes alone cannot cover imported helpers, settings, templates, or other transitive
+application dependencies.
+
+### WORKFLOW_PLAN_TRUST_IDENTITY
+
+- **Type**: `dict`
+- **Default**: `{}`
+
+Bounded non-secret identity for trust and credential-provider behavior that affects
+safe actor or graph reuse. Only `trust_domain`, `credential_provider`,
+`credential_profile`, `credential_revision`, `environment_revision`,
+`scheduling_revision`, and `service_account_audience` are accepted; every value must
+be a non-empty string of at most 256 characters.
+
+Never put a token, password, private key, certificate, kubeconfig, or a digest of such
+material here. `credential_revision` names the provider/profile contract. Token
+rotation under the same contract is intentionally excluded from the plan, while a
+provider or revision change invalidates prepared state.
+`environment_revision` may cover ordinary environment or Conda variable values that
+must not be represented individually; change it whenever any covered value changes.
+`scheduling_revision` separately covers semantic Ray label selectors and fallback
+placement constraints. An environment revision does not cover scheduling.
+
+```python
+"WORKFLOW_PLAN_TRUST_IDENTITY": {
+    "trust_domain": "cluster:production",
+    "credential_provider": "workload-identity",
+    "credential_profile": "namespace-sync",
+    "credential_revision": "provider-v3",
+    "environment_revision": "namespace-sync-v8",
+    "scheduling_revision": "placement-v2",
+}
+```
+
 ## Concurrency
 
 ### DEFAULT_CONCURRENCY

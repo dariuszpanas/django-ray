@@ -13,6 +13,7 @@ import pytest
 
 import django_ray.runtime.entrypoint as entrypoint
 from django_ray.models import RayTaskExecution, TaskState
+from django_ray.workflow_plans import WorkflowPlanMismatchError
 
 
 class TestEntrypointPayload:
@@ -53,6 +54,7 @@ class TestEntrypointPayload:
             "execution_generation": None,
             "runtime_env_profile": None,
             "runtime_env_hash": "",
+            "runtime_env_plan_identity": None,
             "input_reference": None,
         }
 
@@ -153,6 +155,9 @@ class TestEntrypointPayload:
                 "runtime_env_profile": context.runtime_env_profile,
                 "runtime_env_hash": context.runtime_env_hash,
                 "ray_job_driver": context.ray_job_driver,
+                "compiled_graph_submission_transport": (
+                    context.compiled_graph_submission_transport
+                ),
             }
 
         monkeypatch.setattr(
@@ -184,6 +189,7 @@ class TestEntrypointPayload:
             "runtime_env_profile": "thin",
             "runtime_env_hash": "abc123",
             "ray_job_driver": True,
+            "compiled_graph_submission_transport": "ray-job",
         }
 
     def test_execute_task_awaits_coroutine_and_closes_event_loop(self, monkeypatch) -> None:
@@ -225,6 +231,23 @@ class TestEntrypointPayload:
         assert result["error"] == "async failure"
         assert result["exception_type"] == "builtins.ValueError"
         assert result["retryable"] is True
+
+    def test_execute_task_marks_pinned_plan_mismatch_non_retryable(self, monkeypatch) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+
+        def mismatch() -> None:
+            raise WorkflowPlanMismatchError("pinned plan changed")
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: mismatch,
+        )
+
+        result = json.loads(entrypoint.execute_task("tests.plan_mismatch", "[]", "{}"))
+
+        assert result["success"] is False
+        assert result["retryable"] is False
+        assert result["exception_type"].endswith("WorkflowPlanMismatchError")
 
     @pytest.mark.parametrize("exception_type", [asyncio.CancelledError, KeyboardInterrupt])
     def test_execute_task_does_not_serialize_async_cancellation_base_exceptions(
@@ -467,6 +490,43 @@ class TestEntrypointPayload:
         assert result["result"] is None
         assert result["result_reference"].startswith("oversize://sha256/")
         assert len(task.completion_data or "") < 256
+
+    @pytest.mark.django_db
+    def test_sync_execution_keeps_result_for_worker_storage(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="entrypoint-sync-oversized-001",
+            callable_path="testproject.tasks.echo_task",
+            state=TaskState.RUNNING,
+            attempt_number=1,
+            execution_generation=1,
+        )
+        expected = {"message": "x" * 256}
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: lambda: expected,
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.get_settings",
+            lambda: {"MAX_RESULT_SIZE_BYTES": 1, "RESULT_STORAGE_BACKEND": "digest"},
+        )
+
+        result = json.loads(
+            entrypoint.execute_task(
+                task.callable_path,
+                "[]",
+                "{}",
+                task_execution_pk=task.pk,
+                attempt_number=1,
+                execution_generation=1,
+                ray_job_driver=False,
+            )
+        )
+
+        task.refresh_from_db()
+        assert result["result"] == expected
+        assert result["result_reference"] is None
+        assert task.completion_data is None
 
     @pytest.mark.django_db
     def test_completion_persistence_logs_database_errors(self, monkeypatch, caplog) -> None:

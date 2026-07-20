@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
 from django_ray.runtime.runtime_env import (
+    _ray_runtime_env_default_excludes,
     normalize_runtime_env,
     prepare_runtime_env_for_ray_core,
     resolve_runtime_env_profile,
     runtime_env_for_execution,
+    snapshot_local_runtime_env,
     validate_runtime_env_profiles,
 )
 
@@ -283,6 +286,78 @@ def test_prepare_runtime_env_uploads_local_working_dir(monkeypatch, tmp_path) ->
 
     assert prepared["working_dir"] == "gcs://project.zip"
     assert resolved.spec["working_dir"] == str(tmp_path)
+
+
+def test_ray_runtime_env_default_excludes_falls_back_when_getter_is_missing(
+    monkeypatch,
+) -> None:
+    from ray._private import ray_constants
+
+    monkeypatch.delattr(
+        ray_constants,
+        "get_runtime_env_default_excludes",
+        raising=False,
+    )
+
+    assert _ray_runtime_env_default_excludes() == []
+
+
+def test_ray_runtime_env_default_excludes_delegates_each_call(monkeypatch) -> None:
+    from ray._private import ray_constants
+
+    values = iter((["first"], ["second"]))
+    monkeypatch.setattr(
+        ray_constants,
+        "get_runtime_env_default_excludes",
+        lambda: next(values),
+        raising=False,
+    )
+
+    assert _ray_runtime_env_default_excludes() == ["first"]
+    assert _ray_runtime_env_default_excludes() == ["second"]
+
+
+def test_local_snapshot_preserves_ray_exclusion_and_py_module_semantics(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from ray._private import ray_constants
+
+    monkeypatch.delenv("RAY_OVERRIDE_RUNTIME_ENV_DEFAULT_EXCLUDES", raising=False)
+    monkeypatch.setattr(
+        ray_constants,
+        "get_runtime_env_default_excludes",
+        lambda: ["venv"],
+        raising=False,
+    )
+    working_dir = tmp_path / "working-dir"
+    working_dir.mkdir()
+    (working_dir / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    virtualenv = working_dir / "venv"
+    virtualenv.mkdir()
+    (virtualenv / "ignored.py").write_text("VALUE = 2\n", encoding="utf-8")
+    mercurial = working_dir / ".hg"
+    mercurial.mkdir()
+    (mercurial / "included").write_text("revision\n", encoding="utf-8")
+    py_module = tmp_path / "shared_module"
+    py_module.mkdir()
+    (py_module / "__init__.py").write_text("VALUE = 3\n", encoding="utf-8")
+    resolved = normalize_runtime_env(
+        {
+            "working_dir": str(working_dir),
+            "py_modules": [str(py_module)],
+        }
+    )
+
+    with snapshot_local_runtime_env(resolved) as snapshot:
+        snapshotted_working_dir = Path(snapshot.spec["working_dir"])
+        snapshotted_py_module = snapshot.spec["py_modules"][0]
+
+        assert (snapshotted_working_dir / "app.py").is_file()
+        assert (snapshotted_working_dir / ".hg" / "included").is_file()
+        assert not (snapshotted_working_dir / "venv" / "ignored.py").exists()
+        assert snapshotted_py_module.endswith("shared_module")
+        assert (Path(snapshotted_py_module) / "__init__.py").is_file()
 
 
 def test_prepare_runtime_env_rejects_local_paths_over_ray_client(

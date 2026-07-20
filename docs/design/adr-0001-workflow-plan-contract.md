@@ -51,9 +51,10 @@ boundary between workflow definitions and executors.
 7. Strategy eligibility produces bounded structured rejection reasons before
    submission. Automatic fallback is permitted only before preparation or execution
    can create resources or application effects.
-8. The first effective-plan identity is pinned to the task's attempt chain. A retry
-   rematerializes and verifies that identity before submission; a mismatch fails closed
-   rather than silently running changed code or environments.
+8. The first effective-plan identity and pinning attempt are stored for the task's
+   attempt chain. A retry rematerializes and verifies that identity before submission;
+   a mismatch, or a matching secret-free identity with retry-unsafe RuntimeEnv
+   bindings, fails closed rather than silently running changed code or environments.
 9. Selected strategy, plan fingerprint, requested policy, and rejection summary are
    durable run metadata independent of optional node-level progress reporting.
 10. A future Compiled Graph adapter is only one execution strategy for eligible static

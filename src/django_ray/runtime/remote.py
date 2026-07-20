@@ -24,6 +24,8 @@ def execute_django_task_remote(
     input_reference: str | None = None,
     attempt_number: int | None = None,
     execution_generation: int | None = None,
+    runtime_env_plan_identity: dict[str, Any] | None = None,
+    compiled_graph_submission_transport: str | None = None,
 ) -> str:
     """Execute one durable django-ray task on a Ray worker."""
     from django_ray.runtime.context import durable_task_execution
@@ -36,6 +38,8 @@ def execute_django_task_remote(
         execution_generation=execution_generation,
         runtime_env_profile=runtime_env_profile,
         runtime_env_hash=runtime_env_hash,
+        runtime_env_plan_identity=runtime_env_plan_identity,
+        compiled_graph_submission_transport=compiled_graph_submission_transport,
     ):
         if input_reference is None:
             result = execute_task(callable_path, args_json, kwargs_json)
@@ -151,6 +155,7 @@ class WorkflowProgressActor:
         attempt_number: int | None = None,
         execution_generation: int | None = None,
         workflow_run_id: str | None = None,
+        plan_summary: dict[str, Any] | None = None,
     ) -> None:
         self.started_at = time.time()
         self.updated_at = self.started_at
@@ -170,6 +175,7 @@ class WorkflowProgressActor:
             else None
         )
         self.accepting_updates = True
+        self.plan_summary = json.loads(json.dumps(plan_summary)) if plan_summary else None
         self.revision = 0
         self.nodes: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
@@ -413,6 +419,7 @@ class WorkflowProgressActor:
                 else None
             ),
             "run_identity": self.run_identity,
+            "plan": self.plan_summary,
             "revision": self.revision,
             "state": "FAILED"
             if failed

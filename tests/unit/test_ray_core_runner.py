@@ -9,7 +9,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from django_ray.runner.base import JobStatus, SubmissionHandle
-from django_ray.runner.ray_core import RayCoreHandle, RayCoreRunner
+from django_ray.runner.ray_core import (
+    RayCoreHandle,
+    RayCoreRunner,
+    _compiled_graph_submission_transport,
+)
 
 
 class _FakeObjectRef:
@@ -41,6 +45,10 @@ class _FakeRay:
         self.runtime_context_error: Exception | None = None
         self.cancel_error: Exception | None = None
         self.default_hex = "abcdef0123456789" * 4
+        self.client_connected = False
+        self.util = SimpleNamespace(
+            client=SimpleNamespace(ray=SimpleNamespace(is_connected=lambda: self.client_connected))
+        )
 
         self.values: dict[_FakeObjectRef, Any] = {}
         self.ready_refs: set[_FakeObjectRef] = set()
@@ -219,6 +227,7 @@ class TestRayCoreRunnerRuntime:
                 task_pk=context.task_pk,
                 attempt_number=context.attempt_number,
                 execution_generation=context.execution_generation,
+                compiled_graph_submission_transport=(context.compiled_graph_submission_transport),
             )
             return json.dumps({"success": True, "result": None})
 
@@ -239,7 +248,36 @@ class TestRayCoreRunnerRuntime:
             "task_pk": 15,
             "attempt_number": 3,
             "execution_generation": 9,
+            "compiled_graph_submission_transport": "direct-ray-core",
         }
+
+    def test_submission_transport_uses_the_live_client_connection(self) -> None:
+        fake = _FakeRay()
+
+        assert _compiled_graph_submission_transport(fake) == "direct-ray-core"
+
+        fake.client_connected = True
+
+        assert _compiled_graph_submission_transport(fake) == "ray-client"
+
+    def test_submission_transport_fails_closed_when_client_state_is_indeterminate(
+        self,
+    ) -> None:
+        fake = _FakeRay()
+        initialized_checks: list[bool] = []
+        fake.util.client.ray.is_connected = lambda: None
+        fake.is_initialized = lambda: initialized_checks.append(True) or True
+
+        assert _compiled_graph_submission_transport(fake) is None
+        assert initialized_checks == []
+
+        def fail_client_check() -> bool:
+            raise RuntimeError("client state unavailable")
+
+        fake.util.client.ray.is_connected = fail_client_check
+
+        assert _compiled_graph_submission_transport(fake) is None
+        assert initialized_checks == []
 
     def test_submit_registers_remote_module_for_ray_cloudpickle(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)

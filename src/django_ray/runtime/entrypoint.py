@@ -42,6 +42,8 @@ class TaskResult:
 
 def _serialize_error(e: Exception) -> str:
     """Serialize an exception as a task result JSON string."""
+    from django_ray.workflow_plans import WorkflowPlanMismatchError
+
     return json.dumps(
         {
             "success": False,
@@ -49,7 +51,10 @@ def _serialize_error(e: Exception) -> str:
             "error": str(e),
             "traceback": traceback.format_exc(),
             "exception_type": type(e).__module__ + "." + type(e).__name__,
-            "retryable": not isinstance(e, InputPayloadValidationError),
+            "retryable": not isinstance(
+                e,
+                (InputPayloadValidationError, WorkflowPlanMismatchError),
+            ),
         }
     )
 
@@ -171,6 +176,7 @@ def execute_task(
     execution_generation: int | None = None,
     runtime_env_profile: str | None = None,
     runtime_env_hash: str = "",
+    runtime_env_plan_identity: dict[str, Any] | None = None,
     input_reference: str | None = None,
     ray_job_driver: bool | None = None,
 ) -> str:
@@ -192,6 +198,7 @@ def execute_task(
     """
     from django_ray.runtime.import_utils import import_callable
 
+    completion_task_execution_pk = task_execution_pk if ray_job_driver is not False else None
     try:
         bootstrap_django()
 
@@ -205,7 +212,12 @@ def execute_task(
         if task_execution_pk is None:
             execution_context = nullcontext()
         else:
+            from django_ray.runtime.compiled_graph import (
+                CompiledGraphSubmissionTransport,
+            )
             from django_ray.runtime.context import durable_task_execution
+
+            effective_ray_job_driver = True if ray_job_driver is None else ray_job_driver
 
             execution_context = durable_task_execution(
                 task_execution_pk,
@@ -213,7 +225,13 @@ def execute_task(
                 execution_generation=execution_generation,
                 runtime_env_profile=runtime_env_profile,
                 runtime_env_hash=runtime_env_hash,
-                ray_job_driver=True if ray_job_driver is None else ray_job_driver,
+                runtime_env_plan_identity=runtime_env_plan_identity,
+                ray_job_driver=effective_ray_job_driver,
+                compiled_graph_submission_transport=(
+                    CompiledGraphSubmissionTransport.RAY_JOB.value
+                    if effective_ray_job_driver
+                    else None
+                ),
             )
 
         with execution_context:
@@ -221,7 +239,7 @@ def execute_task(
 
         result_value, result_reference = _prepare_completion_result(
             result,
-            task_execution_pk=task_execution_pk,
+            task_execution_pk=completion_task_execution_pk,
             attempt_number=attempt_number,
             execution_generation=execution_generation,
         )
@@ -241,7 +259,7 @@ def execute_task(
         result_json = _serialize_error(e)
 
     _persist_task_completion(
-        task_execution_pk,
+        completion_task_execution_pk,
         attempt_number,
         execution_generation,
         result_json,
@@ -285,6 +303,7 @@ def execute_task_from_payload(payload_b64: str) -> str:
             execution_generation=payload.get("execution_generation"),
             runtime_env_profile=payload.get("runtime_env_profile"),
             runtime_env_hash=payload.get("runtime_env_hash", ""),
+            runtime_env_plan_identity=payload.get("runtime_env_plan_identity"),
             input_reference=payload.get("input_reference"),
         )
     except Exception as e:

@@ -376,3 +376,46 @@ class TestValidateSettings:
                 "REDACT_PATTERNS": [r"password", r"api[_-]?key"],
             }
         )
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"WORKFLOW_PLAN_CODE_REVISION": ""}, "WORKFLOW_PLAN_CODE_REVISION"),
+            ({"WORKFLOW_PLAN_TRUST_IDENTITY": []}, "must be a mapping"),
+            (
+                {"WORKFLOW_PLAN_TRUST_IDENTITY": {"token": "must-not-be-accepted"}},
+                "unsupported fields",
+            ),
+            (
+                {"WORKFLOW_PLAN_TRUST_IDENTITY": {"credential_revision": ""}},
+                "non-empty string",
+            ),
+        ],
+    )
+    def test_validate_workflow_plan_identity_rejects_ambiguous_values(
+        self,
+        overrides: dict[str, object],
+        message: str,
+    ) -> None:
+        with pytest.raises(ImproperlyConfigured, match=message):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    **overrides,
+                }
+            )
+
+    def test_validate_workflow_plan_identity_accepts_non_secret_revisions(self) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "WORKFLOW_PLAN_CODE_REVISION": "container:sha256:0123456789abcdef",
+                "WORKFLOW_PLAN_TRUST_IDENTITY": {
+                    "trust_domain": "cluster:production",
+                    "credential_provider": "workload-identity",
+                    "credential_revision": "provider-v3",
+                    "environment_revision": "namespace-sync-v8",
+                    "scheduling_revision": "placement-v2",
+                },
+            }
+        )

@@ -187,6 +187,28 @@ class RayTaskExecution(models.Model):
         editable=False,
         help_text="Current workflow invocation allowed to persist progress",
     )
+    workflow_plan_fingerprint = models.CharField(
+        max_length=71,
+        null=True,
+        blank=True,
+        help_text="Pinned secret-free effective workflow plan identity",
+    )
+    workflow_plan_pinned_attempt = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Attempt that first pinned the effective workflow plan identity",
+    )
+    workflow_plan_json = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Bounded canonical secret-free effective workflow plan",
+    )
+    workflow_plan_selection = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Bounded strategy eligibility and selection metadata",
+    )
     completion_data = models.TextField(
         null=True,
         blank=True,

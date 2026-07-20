@@ -362,6 +362,10 @@ The outer Django task is the durability and retry boundary:
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
+- Before the first leaf submission, the workflow stores a bounded, secret-free
+  effective-plan manifest, fingerprint, and strategy selection independently from
+  progress. A retry must reproduce the pinned fingerprint and have retry-safe
+  RuntimeEnv bindings, or it fails closed before submitting changed work.
 - Progress includes node paths, callable labels, node states, completion counts,
   dependency edges, percent complete, explicit leaf progress, Ray execution IDs,
   runtime environment identity, and recent events.
@@ -386,10 +390,21 @@ See [Workflow Plans and Execution Strategies](workflow-plans.md).
 
 Apply the database migration before starting upgraded workers, and drain workflow
 executions from older workers during a rolling deployment. Existing rows start with
-`workflow_run_id = NULL`; the first upgraded, fully identified workflow invocation
-claims a UUID. Custom uses of `durable_task_execution()` that omit the attempt or
-execution generation continue to run their Ray workflow but intentionally do not
-persist progress because their writes cannot be fenced safely.
+`workflow_run_id = NULL` and a nullable plan identity so an older writer can still
+insert during the rollout; the first upgraded, fully
+identified workflow invocation claims a UUID and pins its plan. Prepared actors or
+graphs in later strategies must drain when that fingerprint changes. Custom uses of
+`durable_task_execution()` that omit the attempt or execution generation continue to
+run their workflow but intentionally do not persist the plan or progress because their
+writes cannot be fenced safely.
+
+The drain statement is a contract for those later strategies. The current release
+provides fingerprint comparison and stale-owner helper functions but has no resident
+graph owner or prepared-graph cache to drain.
+
+An identified context whose attempt or execution generation is stale is different: its
+plan claim fails closed before local application code, progress actors, or Ray leaves
+can run.
 
 Use idempotent steps when retries can repeat external side effects. Durable stage
 checkpoints remain a planned extension. Progress is observational rather than a

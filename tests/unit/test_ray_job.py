@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from django_ray.runner.base import JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcomeStatus
 from django_ray.runner.ray_job import RayJobRunner
+from django_ray.runtime.runtime_env import normalize_runtime_env
+from django_ray.workflow_plans import WorkflowPlanMismatchError
 
 
 class FakeJobClient:
@@ -23,6 +29,32 @@ class FakeJobClient:
         """Record submit call and return deterministic job id."""
         self.submissions.append(kwargs)
         return "raysubmit_test_001"
+
+    @staticmethod
+    def _package_uri(value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        path = Path(value)
+        if path.is_dir():
+            digest = hashlib.sha256()
+            for candidate in sorted(path.rglob("*")):
+                if candidate.is_file():
+                    digest.update(candidate.relative_to(path).as_posix().encode())
+                    digest.update(candidate.read_bytes())
+            return f"gcs://_ray_pkg_{digest.hexdigest()[:16]}.zip"
+        if not path.is_file():
+            return value
+        digest = hashlib.sha1(path.read_bytes()).hexdigest()  # noqa: S324 - Ray contract
+        return f"gcs://_ray_pkg_{digest}.zip"
+
+    def _upload_working_dir_if_needed(self, runtime_env: dict[str, object]) -> None:
+        if "working_dir" in runtime_env:
+            runtime_env["working_dir"] = self._package_uri(runtime_env["working_dir"])
+
+    def _upload_py_modules_if_needed(self, runtime_env: dict[str, object]) -> None:
+        modules = runtime_env.get("py_modules")
+        if isinstance(modules, list):
+            runtime_env["py_modules"] = [self._package_uri(module) for module in modules]
 
 
 class TestRayJobRunnerSubmit:
@@ -73,6 +105,12 @@ class TestRayJobRunnerSubmit:
         assert payload["execution_generation"] == 11
         assert payload["runtime_env_profile"] is None
         assert len(payload["runtime_env_hash"]) == 64
+        assert payload["runtime_env_plan_identity"]["plan_format"] == (
+            "django-ray.runtime-env-plan"
+        )
+        assert payload["runtime_env_plan_identity"]["plan_format_version"] == 1
+        assert payload["runtime_env_plan_identity"]["reusable"] is True
+        assert payload["runtime_env_plan_identity"]["unresolved_paths"] == []
         assert submission["metadata"] == {
             "django_ray_task_id": "123",
             "django_ray_attempt_number": "2",
@@ -83,6 +121,147 @@ class TestRayJobRunnerSubmit:
                 "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
             ),
         }
+
+    def test_submit_keeps_runtime_env_secrets_out_of_plan_identity_payload(
+        self,
+        monkeypatch,
+    ) -> None:
+        fake_client = FakeJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        task_execution = SimpleNamespace(
+            pk=125,
+            runtime_env_profile="secret-profile",
+            runtime_env_json='{"env_vars":{"API_TOKEN":"do-not-persist"}}',
+            runtime_env_hash="",
+            attempt_number=1,
+            execution_generation=2,
+        )
+
+        runner.submit(
+            task_execution=task_execution,
+            callable_path="testproject.tasks.echo_task",
+            args=(),
+            kwargs={},
+        )
+
+        entrypoint = str(fake_client.submissions[0]["entrypoint"])
+        encoded = entrypoint.rsplit(" ", 1)[-1]
+        payload = json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
+        assert "do-not-persist" not in json.dumps(payload)
+        assert payload["runtime_env_plan_identity"]["reusable"] is False
+        assert payload["runtime_env_plan_identity"]["unresolved_paths"] == [
+            "spec.env_vars.API_TOKEN.value"
+        ]
+
+    def test_submit_keeps_large_runtime_env_identity_out_of_entrypoint(self, monkeypatch) -> None:
+        fake_client = FakeJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        runtime_env = normalize_runtime_env(
+            {"excludes": [f"{'x' * 2040}{index:04d}" for index in range(1024)]}
+        )
+        task_execution = SimpleNamespace(
+            pk=126,
+            runtime_env_profile=None,
+            runtime_env_json=runtime_env.serialized,
+            runtime_env_hash=runtime_env.digest,
+            attempt_number=1,
+            execution_generation=2,
+        )
+
+        runner.submit(
+            task_execution=task_execution,
+            callable_path="testproject.tasks.echo_task",
+            args=(),
+            kwargs={},
+        )
+
+        entrypoint = str(fake_client.submissions[0]["entrypoint"])
+        assert len(entrypoint.encode("utf-8")) < 32 * 1024
+
+    def test_submit_uploads_immutable_local_runtime_env_snapshots(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        working_dir = tmp_path / "working-dir"
+        working_dir.mkdir()
+        (working_dir / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        py_module = tmp_path / "shared_module"
+        py_module.mkdir()
+        (py_module / "__init__.py").write_text("VALUE = 2\n", encoding="utf-8")
+        runtime_env = normalize_runtime_env(
+            {
+                "working_dir": str(working_dir),
+                "py_modules": [str(py_module)],
+            }
+        )
+        fake_client = FakeJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        task_execution = SimpleNamespace(
+            pk=127,
+            runtime_env_profile=None,
+            runtime_env_json=runtime_env.serialized,
+            runtime_env_hash=runtime_env.digest,
+            attempt_number=1,
+            execution_generation=2,
+        )
+
+        runner.submit(
+            task_execution=task_execution,
+            callable_path="testproject.tasks.echo_task",
+            args=(),
+            kwargs={},
+        )
+
+        submitted_runtime_env = fake_client.submissions[0]["runtime_env"]
+        assert isinstance(submitted_runtime_env, dict)
+        assert str(submitted_runtime_env["working_dir"]).startswith("gcs://_ray_pkg_")
+        assert len(str(submitted_runtime_env["working_dir"]).split("_")[-1]) == 20
+        submitted_py_modules = submitted_runtime_env["py_modules"]
+        assert isinstance(submitted_py_modules, list)
+        assert str(submitted_py_modules[0]).startswith("gcs://_ray_pkg_")
+        assert len(str(submitted_py_modules[0]).split("_")[-1]) == 20
+
+    def test_submit_rejects_local_source_mutation_before_job_creation(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        working_dir = tmp_path / "working-dir"
+        working_dir.mkdir()
+        source = working_dir / "app.py"
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        runtime_env = normalize_runtime_env({"working_dir": str(working_dir)})
+
+        class MutatingJobClient(FakeJobClient):
+            def _upload_working_dir_if_needed(self, runtime_env: dict[str, object]) -> None:
+                source.write_text("VALUE = 2\n", encoding="utf-8")
+                super()._upload_working_dir_if_needed(runtime_env)
+
+        fake_client = MutatingJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        task_execution = SimpleNamespace(
+            pk=128,
+            runtime_env_profile=None,
+            runtime_env_json=runtime_env.serialized,
+            runtime_env_hash=runtime_env.digest,
+            attempt_number=1,
+            execution_generation=2,
+        )
+
+        with pytest.raises(WorkflowPlanMismatchError, match="changed"):
+            runner.submit(
+                task_execution=task_execution,
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+
+        assert fake_client.submissions == []
 
     def test_submit_transports_external_input_by_reference_only(self, monkeypatch) -> None:
         fake_client = FakeJobClient()

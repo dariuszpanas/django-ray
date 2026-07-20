@@ -11,7 +11,7 @@ import json
 import math
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator, Sequence, Sized
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Sized
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -23,6 +23,34 @@ from django_ray.runtime.import_utils import import_callable
 
 class WorkflowDefinitionError(ValueError):
     """Raised when a workflow signature cannot be constructed or executed."""
+
+
+class _FrozenMapping(Mapping[Any, Any]):
+    """Pickle-safe read-only mapping used by reusable workflow signatures."""
+
+    __slots__ = ("_values",)
+
+    def __init__(self, values: Mapping[Any, Any]) -> None:
+        self._values = dict(values)
+
+    def __getitem__(self, key: Any) -> Any:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __reduce__(self) -> tuple[Any, tuple[dict[Any, Any]]]:
+        return type(self), (dict(self._values),)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenMapping:
+        del memo
+        return self
+
+    def __repr__(self) -> str:
+        return f"_FrozenMapping({self._values!r})"
 
 
 @dataclass(frozen=True)
@@ -60,15 +88,32 @@ def _callable_path(callable_obj: Callable[..., Any] | str) -> str:
 
 def _json_safe(value: Any) -> Any:
     """Make scheduling metadata safe for the durable progress snapshot."""
-    return json.loads(json.dumps(value, default=str))
+    return json.loads(json.dumps(_thaw_definition_value(value), default=str))
 
 
 def _clone_runtime_env(
-    runtime_env: str | dict[str, Any] | None,
+    runtime_env: str | Mapping[str, Any] | None,
 ) -> str | dict[str, Any] | None:
-    if isinstance(runtime_env, dict):
-        return deepcopy(runtime_env)
+    if isinstance(runtime_env, Mapping):
+        return _thaw_definition_value(runtime_env)
     return runtime_env
+
+
+def _freeze_definition_value(value: Any) -> Any:
+    """Deep-freeze plan-relevant builder metadata."""
+    if isinstance(value, Mapping):
+        return _FrozenMapping({key: _freeze_definition_value(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_definition_value(item) for item in value)
+    return deepcopy(value)
+
+
+def _thaw_definition_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_definition_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_definition_value(item) for item in value]
+    return deepcopy(value)
 
 
 def report_progress(
@@ -90,6 +135,10 @@ def report_progress(
 
 
 class _Executor(ABC):
+    def bind_plan(self, materialized_plan: Any, *, requested_policy: str) -> None:
+        """Attach a pre-submit snapshot to an executor implementation."""
+        self.materialized_plan = materialized_plan
+
     @abstractmethod
     def submit_step(
         self,
@@ -199,6 +248,33 @@ class _Executor(ABC):
 
 
 class _LocalExecutor(_Executor):
+    def __init__(self, materialized_plan: Any | None = None) -> None:
+        self.materialized_plan = materialized_plan
+        if materialized_plan is not None:
+            self.bind_plan(materialized_plan, requested_policy="local")
+
+    def bind_plan(self, materialized_plan: Any, *, requested_policy: str) -> None:
+        super().bind_plan(materialized_plan, requested_policy=requested_policy)
+        from django_ray.runtime.context import get_current_task_context
+
+        task_context = get_current_task_context()
+        if task_context is None:
+            return
+        from django_ray.workflow_progress import pin_workflow_plan
+
+        selection = materialized_plan.plan.eligibility.select(
+            "local",
+            requested_policy=requested_policy,
+        )
+        if task_context.attempt_number is None or task_context.execution_generation is None:
+            return
+        if not pin_workflow_plan(task_context, materialized_plan.plan, selection):
+            from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+            raise WorkflowPlanMismatchError(
+                "The durable task attempt is stale; workflow plan pinning was rejected"
+            )
+
     def submit_step(
         self,
         signature: Step,
@@ -253,12 +329,13 @@ def _get_cached_workflow_remotes() -> tuple[Any, Any, Any]:
 
 
 class _RayExecutor(_Executor):
-    def __init__(self) -> None:
+    def __init__(self, materialized_plan: Any | None = None) -> None:
         import ray
 
         from django_ray.runtime.context import get_current_task_context
 
         self.ray = ray
+        self.materialized_plan = materialized_plan
 
         remote_step, remote_collect, progress_actor_cls = _get_cached_workflow_remotes()
         self.remote_step = remote_step
@@ -274,19 +351,55 @@ class _RayExecutor(_Executor):
         self.last_progress_flush_at = time.monotonic()
         self._progress_suppression_depth = 0
         self._map_progress_sent_at: dict[str, float] = {}
-        if self.task_context is not None:
-            identity = WorkflowRunIdentity.create(self.task_context)
-            if identity is not None:
-                from django_ray.workflow_progress import claim_workflow_run
+        self.progress_actor_cls = progress_actor_cls
+        if materialized_plan is not None:
+            self.bind_plan(materialized_plan, requested_policy="auto")
 
-                if claim_workflow_run(identity):
-                    self.workflow_run_identity = identity
-                    self.progress_actor = progress_actor_cls.remote(
-                        identity.task_execution_pk,
-                        identity.attempt_number,
-                        identity.execution_generation,
-                        identity.run_id,
-                    )
+    def bind_plan(self, materialized_plan: Any, *, requested_policy: str) -> None:
+        from django_ray.workflow_plans import prepare_materialized_plan_for_ray
+
+        super().bind_plan(materialized_plan, requested_policy=requested_policy)
+        if self.task_context is None:
+            self.materialized_plan = prepare_materialized_plan_for_ray(materialized_plan)
+            return
+        identity = WorkflowRunIdentity.create(self.task_context)
+        if identity is None:
+            self.materialized_plan = prepare_materialized_plan_for_ray(materialized_plan)
+            return
+        from django_ray.workflow_progress import claim_workflow_run
+
+        selection = materialized_plan.plan.eligibility.select(
+            "dynamic_tasks",
+            requested_policy=requested_policy,
+        )
+        if not claim_workflow_run(
+            identity,
+            plan=materialized_plan.plan,
+            selection=selection,
+        ):
+            from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+            raise WorkflowPlanMismatchError(
+                "The durable task attempt is stale; workflow plan claim was rejected"
+            )
+        prepared_plan = prepare_materialized_plan_for_ray(materialized_plan)
+        from django_ray.workflow_progress import workflow_run_is_current
+
+        if not workflow_run_is_current(identity):
+            from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+            raise WorkflowPlanMismatchError(
+                "The durable workflow run became stale during RuntimeEnv preparation"
+            )
+        self.materialized_plan = prepared_plan
+        self.workflow_run_identity = identity
+        self.progress_actor = self.progress_actor_cls.remote(
+            identity.task_execution_pk,
+            identity.attempt_number,
+            identity.execution_generation,
+            identity.run_id,
+            materialized_plan.plan.summary(),
+        )
 
     def submit_step(
         self,
@@ -297,16 +410,30 @@ class _RayExecutor(_Executor):
         dependencies: tuple[str, ...],
     ) -> Any:
         label = signature.callable_path.rsplit(".", 1)[-1]
+        materialized_plan = getattr(self, "materialized_plan", None)
+        binding = (
+            materialized_plan.binding_for_node(node_id) if materialized_plan is not None else None
+        )
         runtime_env_metadata: dict[str, Any] = {"mode": "inherit"}
         resolved_runtime_env = None
-        if self.task_context is not None:
+        if binding is not None:
+            runtime_env_metadata = dict(binding.runtime_env_metadata)
+            if binding.runtime_env_serialized is not None:
+                from django_ray.runtime.runtime_env import normalize_runtime_env
+
+                resolved_runtime_env = normalize_runtime_env(
+                    json.loads(binding.runtime_env_serialized),
+                    profile=binding.runtime_env_profile,
+                    source=f"materialized workflow step {node_id} RuntimeEnv",
+                )
+        elif self.task_context is not None:
             runtime_env_metadata.update(
                 {
                     "profile": self.task_context.runtime_env_profile,
                     "hash": self.task_context.runtime_env_hash,
                 }
             )
-        if signature.runtime_env is not None:
+        if binding is None and signature.runtime_env is not None:
             from django_ray.runtime.runtime_env import (
                 normalize_runtime_env,
                 prepare_runtime_env_for_ray_core,
@@ -317,7 +444,7 @@ class _RayExecutor(_Executor):
                 resolved_runtime_env = resolve_runtime_env_profile(signature.runtime_env)
             else:
                 resolved_runtime_env = normalize_runtime_env(
-                    signature.runtime_env,
+                    _thaw_definition_value(signature.runtime_env),
                     source=f"workflow step {label} RuntimeEnv",
                 )
             runtime_env_metadata = {
@@ -329,25 +456,34 @@ class _RayExecutor(_Executor):
             self.progress_actor if getattr(self, "_progress_suppression_depth", 0) == 0 else None
         )
         if progress_actor is not None:
+            plan_node = (
+                materialized_plan.node_for_id(node_id) if materialized_plan is not None else None
+            )
             progress_actor.register.remote(
                 node_id,
                 label,
                 signature.callable_path,
                 list(dependencies),
                 runtime_env_metadata,
-                _json_safe(signature.ray_options),
+                _json_safe(plan_node["ray_options"] if plan_node is not None else {}),
             )
         options = {
             "name": f"django_ray.workflow:{label}",
-            **signature.ray_options,
+            **(
+                binding.ray_options_dict()
+                if binding is not None
+                else _thaw_definition_value(signature.ray_options)
+            ),
         }
         if resolved_runtime_env is not None:
+            from django_ray.runtime.runtime_env import prepare_runtime_env_for_ray_core
+
             options["runtime_env"] = prepare_runtime_env_for_ray_core(resolved_runtime_env)
         object_ref = self.remote_step.options(**options).remote(
             signature.callable_path,
             signature.bootstrap_django,
             signature.bound_args,
-            signature.bound_kwargs,
+            dict(signature.bound_kwargs),
             input_kwargs,
             self.task_execution_pk,
             progress_actor,
@@ -629,7 +765,22 @@ class WorkflowSignature(ABC):
         ``use_ray=False`` provides a deterministic local fallback for sync
         workers and tests. ``use_ray=True`` requires an initialized Ray client.
         """
+        from django_ray.runtime.context import get_current_task_context
+        from django_ray.workflow_plans import materialize_workflow_plan
+
+        materialized_plan = materialize_workflow_plan(
+            self,
+            invocation_args=args,
+            invocation_kwargs=kwargs,
+            task_context=get_current_task_context(),
+        )
         executor = _get_executor(use_ray)
+        executor.bind_plan(
+            materialized_plan,
+            requested_policy=(
+                "local" if use_ray is False else ("dynamic_tasks" if use_ray is True else "auto")
+            ),
+        )
         try:
             submission = self._submit(executor, args, kwargs, "0", ())
             result = executor.resolve(submission.value)
@@ -646,10 +797,19 @@ class Step(WorkflowSignature):
 
     callable_path: str
     bound_args: tuple[Any, ...] = ()
-    bound_kwargs: dict[str, Any] = field(default_factory=dict)
+    bound_kwargs: Mapping[str, Any] = field(default_factory=dict)
     bootstrap_django: bool = False
-    ray_options: dict[str, Any] = field(default_factory=dict)
-    runtime_env: str | dict[str, Any] | None = None
+    ray_options: Mapping[str, Any] = field(default_factory=dict)
+    runtime_env: str | Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        # Bound values are invocation data, not plan metadata. Freeze only the
+        # outer keyword map so nested application dictionaries, lists, tuples,
+        # and custom objects retain their original execution types.
+        object.__setattr__(self, "bound_kwargs", _FrozenMapping(self.bound_kwargs))
+        object.__setattr__(self, "ray_options", _freeze_definition_value(self.ray_options))
+        if isinstance(self.runtime_env, Mapping):
+            object.__setattr__(self, "runtime_env", _freeze_definition_value(self.runtime_env))
 
     def _submit(
         self,
@@ -679,7 +839,7 @@ class Step(WorkflowSignature):
             bound_args=self.bound_args,
             bound_kwargs=dict(self.bound_kwargs),
             bootstrap_django=self.bootstrap_django,
-            ray_options={**self.ray_options, **ray_options},
+            ray_options={**_thaw_definition_value(self.ray_options), **ray_options},
             runtime_env=_clone_runtime_env(self.runtime_env),
         )
 
@@ -1073,7 +1233,11 @@ def map_step(
     return Map(signature)
 
 
-def _get_executor(use_ray: bool | None) -> _Executor:
+def _get_executor(
+    use_ray: bool | None,
+    *,
+    materialized_plan: Any | None = None,
+) -> _Executor:
     try:
         import ray
 
@@ -1092,8 +1256,8 @@ def _get_executor(use_ray: bool | None) -> _Executor:
     if use_ray is True and not ray_ready:
         raise RuntimeError("use_ray=True requires Ray to be installed and initialized")
     if use_ray is not False and ray_ready:
-        return _RayExecutor()
-    return _LocalExecutor()
+        return _RayExecutor() if materialized_plan is None else _RayExecutor(materialized_plan)
+    return _LocalExecutor() if materialized_plan is None else _LocalExecutor(materialized_plan)
 
 
 __all__ = [

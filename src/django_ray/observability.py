@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -11,6 +12,13 @@ from django.db.models import Count, Min, Q
 
 from django_ray.conf.settings import get_settings
 from django_ray.redaction import redact_text, redact_value
+from django_ray.workflow_plans import (
+    PLAN_DOMAIN_SEPARATOR,
+    PLAN_FORMAT,
+    PLAN_FORMAT_VERSION,
+    WorkflowPlanValidationError,
+    validate_plan_selection_manifest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -70,6 +78,10 @@ def get_task_summary(
     except WorkflowObservabilityError:
         pass
 
+    try:
+        plan_selection = _workflow_plan_selection(execution)
+    except WorkflowObservabilityError:
+        plan_selection = None
     error_message, error_message_truncated = _bounded_diagnostic(execution.error_message)
     return {
         **_versioned("task-summary", generated_at=generated_at),
@@ -93,10 +105,80 @@ def get_task_summary(
         "ray_job_id": execution.ray_job_id,
         "runtime_env_profile": execution.runtime_env_profile,
         "runtime_env_hash": execution.runtime_env_hash,
+        "workflow_plan_fingerprint": execution.workflow_plan_fingerprint or None,
+        "workflow_plan_pinned_attempt": execution.workflow_plan_pinned_attempt,
+        "workflow_selected_strategy": (
+            plan_selection.get("selected_strategy") if plan_selection is not None else None
+        ),
         "workflow_revision": workflow_revision,
         "error_message": error_message,
         "error_message_truncated": error_message_truncated,
     }
+
+
+def get_workflow_plan(execution: RayTaskExecution) -> dict[str, Any] | None:
+    """Return the verified, secret-free effective plan and selection metadata."""
+    fingerprint = execution.workflow_plan_fingerprint
+    serialized = execution.workflow_plan_json
+    if not fingerprint and not serialized:
+        return None
+    if not fingerprint or not serialized:
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} has an incomplete workflow plan snapshot"
+        )
+    expected = (
+        f"sha256:{hashlib.sha256(PLAN_DOMAIN_SEPARATOR + serialized.encode('utf-8')).hexdigest()}"
+    )
+    if fingerprint != expected:
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow plan fingerprint does not match its snapshot"
+        )
+    try:
+        manifest = json.loads(serialized)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} contains invalid workflow plan JSON"
+        ) from error
+    if not isinstance(manifest, dict):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow plan must be a JSON object"
+        )
+    if (
+        manifest.get("plan_format") != PLAN_FORMAT
+        or manifest.get("plan_format_version") != PLAN_FORMAT_VERSION
+    ):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow plan has an unsupported format version"
+        )
+    return redact_value(
+        {
+            "fingerprint": fingerprint,
+            "manifest": manifest,
+            "selection": _workflow_plan_selection(execution),
+        }
+    )
+
+
+def _workflow_plan_selection(execution: RayTaskExecution) -> dict[str, Any] | None:
+    if not execution.workflow_plan_selection:
+        return None
+    try:
+        selection = json.loads(execution.workflow_plan_selection)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} contains invalid workflow plan selection JSON"
+        ) from error
+    if not isinstance(selection, dict):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow plan selection must be a JSON object"
+        )
+    try:
+        validated = validate_plan_selection_manifest(selection)
+    except WorkflowPlanValidationError as error:
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow plan selection has an invalid schema"
+        ) from error
+    return redact_value(validated)
 
 
 def get_queue_depths(*, generated_at: datetime | None = None) -> dict[str, Any]:
@@ -269,6 +351,7 @@ def get_workflow_snapshot(
         "workflow_run_id": (
             str(execution.workflow_run_id) if execution.workflow_run_id is not None else None
         ),
+        "plan": get_workflow_plan(execution),
         "workflow": get_workflow_progress(execution),
     }
 
@@ -508,6 +591,7 @@ __all__ = [
     "get_workflow_graph",
     "get_workflow_node",
     "get_workflow_node_snapshot",
+    "get_workflow_plan",
     "get_workflow_progress",
     "get_workflow_snapshot",
 ]
