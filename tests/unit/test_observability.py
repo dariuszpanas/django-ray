@@ -34,6 +34,9 @@ def workflow_execution(db) -> RayTaskExecution:
     return RayTaskExecution.objects.create(
         task_id="workflow-observability-1",
         callable_path="testproject.tasks.workflow",
+        attempt_number=2,
+        execution_generation=4,
+        workflow_run_id="00000000-0000-0000-0000-000000000031",
         progress_data=json.dumps(
             {
                 "schema_version": 1,
@@ -80,6 +83,7 @@ def test_versioned_task_summary_omits_sensitive_payloads(db, settings) -> None:
         state=TaskState.RUNNING,
         attempt_number=2,
         execution_generation=4,
+        workflow_run_id="00000000-0000-0000-0000-000000000032",
         started_at=generated_at - timedelta(seconds=3),
         last_heartbeat_at=generated_at - timedelta(seconds=1),
         claimed_by_worker="worker-1",
@@ -104,6 +108,7 @@ def test_versioned_task_summary_omits_sensitive_payloads(db, settings) -> None:
     assert summary["schema_version"] == 1
     assert summary["generated_at"] == "2026-07-19T12:00:00Z"
     assert summary["workflow_revision"] == 7
+    assert summary["workflow_run_id"] == "00000000-0000-0000-0000-000000000032"
     assert summary["error_message"] == "[REDACTED]"
     assert summary["error_message_truncated"] is False
     assert summary["started_at"] == "2026-07-19T11:59:57Z"
@@ -250,6 +255,9 @@ def test_diagnostic_messages_are_bounded_with_explicit_metadata(db) -> None:
 def test_workflow_snapshot_wraps_present_and_absent_progress(workflow_execution, db) -> None:
     snapshot = get_workflow_snapshot(workflow_execution)
     assert snapshot["schema"] == "django-ray.workflow-snapshot"
+    assert snapshot["attempt_number"] == 2
+    assert snapshot["execution_generation"] == 4
+    assert snapshot["workflow_run_id"] == "00000000-0000-0000-0000-000000000031"
     assert snapshot["workflow"]["revision"] == 3
 
     execution = RayTaskExecution.objects.create(
@@ -375,6 +383,44 @@ def test_get_workflow_progress_rejects_invalid_snapshots(progress_data) -> None:
     execution = SimpleNamespace(progress_data=progress_data, task_id="task-1")
 
     with pytest.raises(WorkflowObservabilityError):
+        get_workflow_progress(execution)
+
+
+def test_get_workflow_progress_rejects_mismatched_versioned_run(db) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-mismatched-run",
+        callable_path="tasks.workflow",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=4,
+        workflow_run_id="00000000-0000-0000-0000-000000000034",
+    )
+    execution.progress_data = json.dumps(
+        {
+            "schema_version": 2,
+            "run_identity": {
+                "schema_version": 1,
+                "run_id": "00000000-0000-0000-0000-000000000035",
+                "task_execution_pk": execution.pk,
+                "attempt_number": 2,
+                "execution_generation": 4,
+            },
+            "revision": 1,
+        }
+    )
+
+    with pytest.raises(WorkflowObservabilityError, match="belongs to another run"):
+        get_workflow_progress(execution)
+
+
+@pytest.mark.parametrize("schema_version", [True, "2"])
+def test_get_workflow_progress_rejects_invalid_schema_version(schema_version) -> None:
+    execution = SimpleNamespace(
+        progress_data=json.dumps({"schema_version": schema_version}),
+        task_id="workflow-invalid-version",
+    )
+
+    with pytest.raises(WorkflowObservabilityError, match="invalid schema version"):
         get_workflow_progress(execution)
 
 
@@ -517,6 +563,9 @@ def test_workflow_node_snapshot_is_durable_first(workflow_execution) -> None:
 
     assert snapshot is not None
     assert snapshot["schema"] == "django-ray.workflow-node-snapshot"
+    assert snapshot["attempt_number"] == 2
+    assert snapshot["execution_generation"] == 4
+    assert snapshot["workflow_run_id"] == "00000000-0000-0000-0000-000000000031"
     assert snapshot["workflow_revision"] == 3
     assert snapshot["node"]["node_id"] == "0.0"
     assert snapshot["live"] == {

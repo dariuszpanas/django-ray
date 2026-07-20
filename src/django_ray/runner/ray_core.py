@@ -150,6 +150,8 @@ class RayCoreRunner(BaseRunner):
             runtime_env.profile,
             runtime_env.digest,
             input_reference,
+            attempt_number=getattr(task_execution, "attempt_number", None),
+            execution_generation=getattr(task_execution, "execution_generation", None),
         )
 
         # Get Ray job ID (the worker's client connection job ID)

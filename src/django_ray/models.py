@@ -181,6 +181,12 @@ class RayTaskExecution(models.Model):
         blank=True,
         help_text="JSON workflow progress snapshot for the durable outer task",
     )
+    workflow_run_id = models.UUIDField(
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Current workflow invocation allowed to persist progress",
+    )
     completion_data = models.TextField(
         null=True,
         blank=True,

@@ -8,6 +8,10 @@ import time
 from typing import Any
 
 from django_ray.redaction import redact_text, result_metadata
+from django_ray.runtime.context import (
+    WORKFLOW_PROGRESS_SCHEMA_VERSION,
+    WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION,
+)
 
 
 def execute_django_task_remote(
@@ -18,6 +22,8 @@ def execute_django_task_remote(
     runtime_env_profile: str | None = None,
     runtime_env_hash: str = "",
     input_reference: str | None = None,
+    attempt_number: int | None = None,
+    execution_generation: int | None = None,
 ) -> str:
     """Execute one durable django-ray task on a Ray worker."""
     from django_ray.runtime.context import durable_task_execution
@@ -26,6 +32,8 @@ def execute_django_task_remote(
     print(f"[Task {task_id}] Starting: {callable_path}", flush=True)
     with durable_task_execution(
         task_id,
+        attempt_number=attempt_number,
+        execution_generation=execution_generation,
         runtime_env_profile=runtime_env_profile,
         runtime_env_hash=runtime_env_hash,
     ):
@@ -63,6 +71,7 @@ def execute_workflow_step_remote(
     progress_actor: Any | None,
     node_id: str,
     *input_args: Any,
+    workflow_run_identity: dict[str, Any] | None = None,
 ) -> Any:
     """Execute a lightweight workflow step without database coordination."""
     if bootstrap_django:
@@ -85,13 +94,20 @@ def execute_workflow_step_remote(
         django_task_execution_pk=task_execution_pk,
         workflow_node_id=node_id,
         callable_path=callable_path,
+        workflow_run_id=(workflow_run_identity or {}).get("run_id"),
+        workflow_attempt_number=(workflow_run_identity or {}).get("attempt_number"),
+        workflow_execution_generation=(workflow_run_identity or {}).get("execution_generation"),
         **execution,
     )
     if progress_actor is not None:
         progress_actor.started.remote(node_id, label, execution)
     logger.info("Workflow step started")
     try:
-        with workflow_step_execution(progress_actor, node_id):
+        with workflow_step_execution(
+            progress_actor,
+            node_id,
+            workflow_run_identity,
+        ):
             result = callable_obj(*input_args, *bound_args, **kwargs)
     except BaseException as error:
         if progress_actor is not None:
@@ -129,10 +145,31 @@ def collect_workflow_results_remote(*values: Any) -> list[Any]:
 class WorkflowProgressActor:
     """In-memory progress collector for one active workflow."""
 
-    def __init__(self, task_execution_pk: int | None = None) -> None:
+    def __init__(
+        self,
+        task_execution_pk: int | None = None,
+        attempt_number: int | None = None,
+        execution_generation: int | None = None,
+        workflow_run_id: str | None = None,
+    ) -> None:
         self.started_at = time.time()
         self.updated_at = self.started_at
         self.task_execution_pk = task_execution_pk
+        self.run_identity = (
+            {
+                "schema_version": WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION,
+                "run_id": workflow_run_id,
+                "task_execution_pk": task_execution_pk,
+                "attempt_number": attempt_number,
+                "execution_generation": execution_generation,
+            }
+            if task_execution_pk is not None
+            and attempt_number is not None
+            and execution_generation is not None
+            and workflow_run_id is not None
+            else None
+        )
+        self.accepting_updates = True
         self.revision = 0
         self.nodes: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
@@ -170,6 +207,8 @@ class WorkflowProgressActor:
         runtime_env: dict[str, Any] | None = None,
         ray_options: dict[str, Any] | None = None,
     ) -> None:
+        if not self.accepting_updates:
+            return
         if node_id in self.nodes:
             node = self.nodes[node_id]
             changed = False
@@ -214,6 +253,8 @@ class WorkflowProgressActor:
         label: str,
         execution: dict[str, Any] | None = None,
     ) -> None:
+        if not self.accepting_updates:
+            return
         self.register(node_id, label)
         node = self.nodes[node_id]
         node["state"] = "RUNNING"
@@ -222,6 +263,8 @@ class WorkflowProgressActor:
         self._event(node_id, "STARTED", label, state="RUNNING")
 
     def submitted(self, node_id: str, label: str, ray_task_id: str) -> None:
+        if not self.accepting_updates:
+            return
         self.register(node_id, label)
         node = self.nodes[node_id]
         node["execution"] = {
@@ -231,6 +274,8 @@ class WorkflowProgressActor:
         self._event(node_id, "SUBMITTED", label, state=node["state"])
 
     def completed(self, node_id: str, label: str) -> None:
+        if not self.accepting_updates:
+            return
         self.register(node_id, label)
         node = self.nodes[node_id]
         node["state"] = "SUCCEEDED"
@@ -241,6 +286,8 @@ class WorkflowProgressActor:
         self._event(node_id, "COMPLETED", label, state="SUCCEEDED")
 
     def failed(self, node_id: str, label: str, error: str) -> None:
+        if not self.accepting_updates:
+            return
         self.register(node_id, label)
         node = self.nodes[node_id]
         node["state"] = "FAILED"
@@ -256,6 +303,8 @@ class WorkflowProgressActor:
         message: str | None,
         metrics: dict[str, Any],
     ) -> None:
+        if not self.accepting_updates:
+            return
         if node_id not in self.nodes:
             self.register(node_id, node_id)
         node = self.nodes[node_id]
@@ -268,6 +317,10 @@ class WorkflowProgressActor:
             "updated_at": time.time(),
         }
         self._event(node_id, "PROGRESS", node["label"], state=node["state"])
+
+    def disable(self) -> None:
+        """Drain future leaf reports without mutating this obsolete snapshot."""
+        self.accepting_updates = False
 
     def snapshot(self) -> dict[str, Any]:
         states = [node["state"] for node in self.nodes.values()]
@@ -282,12 +335,13 @@ class WorkflowProgressActor:
             for dependency in node["dependencies"]
         ]
         return {
-            "schema_version": 1,
+            "schema_version": WORKFLOW_PROGRESS_SCHEMA_VERSION,
             "workflow_id": (
                 f"django-ray:{self.task_execution_pk}"
                 if self.task_execution_pk is not None
                 else None
             ),
+            "run_identity": self.run_identity,
             "revision": self.revision,
             "state": "FAILED"
             if failed

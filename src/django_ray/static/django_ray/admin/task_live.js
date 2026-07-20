@@ -67,7 +67,13 @@
       attemptNode.textContent = String(task.attempt_number ?? "-");
       const workflowText = renderWorkflow(payload.workflow ?? null);
       workflowNode.textContent = workflowText;
-      const announcementKey = `${state}:${payload.workflow?.revision ?? "none"}`;
+      const announcementKey = [
+        state,
+        task.attempt_number ?? "none",
+        task.execution_generation ?? "none",
+        task.workflow_run_id ?? "none",
+        payload.workflow?.revision ?? "none",
+      ].join(":");
       if (announcementKey !== lastAnnouncementKey) {
         statusNode.textContent = `Durable status updated: ${state}. ${workflowText}`;
         lastAnnouncementKey = announcementKey;

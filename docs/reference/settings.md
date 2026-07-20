@@ -304,7 +304,9 @@ Validation requires it to be strictly less than `STUCK_TASK_TIMEOUT_SECONDS`.
 
 Minimum interval between database writes of the active Ray-native workflow's
 progress snapshot. Leaf events are collected by a per-workflow Ray actor; this
-setting bounds database traffic independently of workflow fan-out size.
+setting bounds database traffic independently of workflow fan-out size. Every
+write is conditional on the current task attempt, execution generation, lifecycle
+state, and workflow run ID.
 
 ```python
 "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1

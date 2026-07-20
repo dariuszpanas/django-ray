@@ -849,6 +849,8 @@ class Command(BaseCommand):
                 task.claimed_by_worker = self.worker_id
                 task.execution_generation = int(task.execution_generation) + 1
                 task.completion_data = None
+                task.progress_data = None
+                task.workflow_run_id = None
                 task.ray_job_id = None
                 task.ray_address = None
                 task.save(
@@ -859,6 +861,8 @@ class Command(BaseCommand):
                         "claimed_by_worker",
                         "execution_generation",
                         "completion_data",
+                        "progress_data",
+                        "workflow_run_id",
                         "ray_job_id",
                         "ray_address",
                     ]
@@ -1695,6 +1699,8 @@ class Command(BaseCommand):
                     task.started_at = None
                     task.finished_at = None
                     task.claimed_by_worker = None
+                    task.progress_data = None
+                    task.workflow_run_id = None
                     task.save(
                         update_fields=[
                             "state",
@@ -1703,6 +1709,8 @@ class Command(BaseCommand):
                             "started_at",
                             "finished_at",
                             "claimed_by_worker",
+                            "progress_data",
+                            "workflow_run_id",
                         ]
                     )
                     self.stdout.write(

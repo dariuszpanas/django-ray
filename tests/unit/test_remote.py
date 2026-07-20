@@ -39,6 +39,12 @@ def failing_workflow_target(value: int) -> int:
     raise RuntimeError(f"failed:{value}")
 
 
+def workflow_context_target() -> dict[str, object] | None:
+    from django_ray.runtime.context import get_current_workflow_run_identity
+
+    return get_current_workflow_run_identity()
+
+
 def test_execute_django_task_remote_logs_failure(monkeypatch, capsys) -> None:
     payload = json.dumps({"success": False, "error": "boom"})
     monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", lambda *args: payload)
@@ -84,6 +90,39 @@ def test_execute_django_task_remote_forwards_input_reference(monkeypatch) -> Non
     assert captured["kwargs"] == {"input_reference": "resultfs://input"}
 
 
+def test_execute_django_task_remote_propagates_attempt_and_generation(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_execute(*_args, **_kwargs) -> str:
+        from django_ray.runtime.context import get_current_task_context
+
+        context = get_current_task_context()
+        assert context is not None
+        captured.update(
+            task_pk=context.task_pk,
+            attempt_number=context.attempt_number,
+            execution_generation=context.execution_generation,
+        )
+        return json.dumps({"success": True, "result": None})
+
+    monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", fake_execute)
+
+    execute_django_task_remote(
+        "tests.fake",
+        "[]",
+        "{}",
+        15,
+        attempt_number=3,
+        execution_generation=9,
+    )
+
+    assert captured == {
+        "task_pk": 15,
+        "attempt_number": 3,
+        "execution_generation": 9,
+    }
+
+
 def test_execute_workflow_step_bootstraps_and_reports_completion(monkeypatch) -> None:
     bootstrapped: list[bool] = []
     monkeypatch.setattr(
@@ -92,6 +131,21 @@ def test_execute_workflow_step_bootstraps_and_reports_completion(monkeypatch) ->
     )
     monkeypatch.setattr(remote_module, "_ray_execution_metadata", lambda: {"ray_task_id": "1"})
     actor = _ProgressActor()
+    log_context: dict[str, object] = {}
+    monkeypatch.setattr(
+        "django_ray.logging.get_logger",
+        lambda _name, **kwargs: (
+            log_context.update(kwargs)
+            or SimpleNamespace(info=lambda *_args: None, exception=lambda *_args: None)
+        ),
+    )
+    run_identity = {
+        "schema_version": 1,
+        "run_id": "00000000-0000-0000-0000-000000000011",
+        "task_execution_pk": 9,
+        "attempt_number": 2,
+        "execution_generation": 6,
+    }
 
     result = execute_workflow_step_remote(
         "tests.unit.test_remote.workflow_target",
@@ -103,6 +157,7 @@ def test_execute_workflow_step_bootstraps_and_reports_completion(monkeypatch) ->
         actor,
         "0.0",
         3,
+        workflow_run_identity=run_identity,
     )
 
     assert result == 5
@@ -110,6 +165,37 @@ def test_execute_workflow_step_bootstraps_and_reports_completion(monkeypatch) ->
     assert actor.started.calls == [("0.0", "workflow_target", {"ray_task_id": "1"})]
     assert actor.completed.calls == [("0.0", "workflow_target")]
     assert actor.failed.calls == []
+    assert log_context["workflow_run_id"] == run_identity["run_id"]
+    assert log_context["workflow_attempt_number"] == 2
+    assert log_context["workflow_execution_generation"] == 6
+
+
+def test_execute_workflow_step_exposes_run_identity_to_leaf(monkeypatch) -> None:
+    from django_ray.runtime.context import get_current_workflow_run_identity
+
+    monkeypatch.setattr(remote_module, "_ray_execution_metadata", dict)
+    run_identity = {
+        "schema_version": 1,
+        "run_id": "00000000-0000-0000-0000-000000000012",
+        "task_execution_pk": 10,
+        "attempt_number": 4,
+        "execution_generation": 8,
+    }
+
+    result = execute_workflow_step_remote(
+        "tests.unit.test_remote.workflow_context_target",
+        False,
+        (),
+        {},
+        {},
+        10,
+        None,
+        "0.0",
+        workflow_run_identity=run_identity,
+    )
+
+    assert result == run_identity
+    assert get_current_workflow_run_identity() is None
 
 
 def test_execute_workflow_step_reports_failure() -> None:
@@ -212,3 +298,19 @@ def test_progress_actor_registers_unknown_progress_node() -> None:
 
     assert actor.nodes["dynamic"]["label"] == "dynamic"
     assert actor.nodes["dynamic"]["progress"]["percent"] == 25.0
+
+
+def test_progress_actor_drains_updates_after_disable() -> None:
+    actor = WorkflowProgressActor()
+    actor.register("0.0", "before")
+    revision = actor.revision
+
+    actor.disable()
+    actor.started("0.0", "after")
+    actor.progress("0.0", 1, 2, "late", {})
+    actor.completed("0.0", "after")
+    actor.failed("0.1", "late", "boom")
+
+    assert actor.revision == revision
+    assert actor.nodes["0.0"]["state"] == "PENDING"
+    assert "0.1" not in actor.nodes

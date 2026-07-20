@@ -8,6 +8,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
+
+WORKFLOW_PROGRESS_SCHEMA_VERSION = 2
+WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -15,17 +19,52 @@ class DurableTaskContext:
     """Identity inherited by workflows running inside one durable task."""
 
     task_pk: int
+    attempt_number: int | None = None
+    execution_generation: int | None = None
     runtime_env_profile: str | None = None
     runtime_env_hash: str = ""
     ray_job_driver: bool = False
 
 
 @dataclass(frozen=True)
+class WorkflowRunIdentity:
+    """Immutable identity for one workflow invocation in a durable task run."""
+
+    task_execution_pk: int
+    attempt_number: int
+    execution_generation: int
+    run_id: str
+
+    @classmethod
+    def create(cls, task_context: DurableTaskContext) -> WorkflowRunIdentity | None:
+        """Create an invocation identity when the durable context is fenceable."""
+        if task_context.attempt_number is None or task_context.execution_generation is None:
+            return None
+        return cls(
+            task_execution_pk=task_context.task_pk,
+            attempt_number=task_context.attempt_number,
+            execution_generation=task_context.execution_generation,
+            run_id=str(uuid4()),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the versioned JSON representation stored with snapshots."""
+        return {
+            "schema_version": WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "task_execution_pk": self.task_execution_pk,
+            "attempt_number": self.attempt_number,
+            "execution_generation": self.execution_generation,
+        }
+
+
+@dataclass(frozen=True)
 class WorkflowStepContext:
     """Progress channel available to a running workflow leaf."""
 
-    progress_actor: Any
+    progress_actor: Any | None
     node_id: str
+    run_identity: dict[str, Any] | None = None
 
 
 _current_task: ContextVar[DurableTaskContext | None] = ContextVar(
@@ -49,10 +88,20 @@ def get_current_task_context() -> DurableTaskContext | None:
     return _current_task.get()
 
 
+def get_current_workflow_run_identity() -> dict[str, Any] | None:
+    """Return a detached workflow-run identity inside a running leaf."""
+    context = _current_workflow_step.get()
+    if context is None or context.run_identity is None:
+        return None
+    return dict(context.run_identity)
+
+
 @contextmanager
 def durable_task_execution(
     task_pk: int,
     *,
+    attempt_number: int | None = None,
+    execution_generation: int | None = None,
     runtime_env_profile: str | None = None,
     runtime_env_hash: str = "",
     ray_job_driver: bool = False,
@@ -61,6 +110,8 @@ def durable_task_execution(
     token = _current_task.set(
         DurableTaskContext(
             task_pk=task_pk,
+            attempt_number=attempt_number,
+            execution_generation=execution_generation,
             runtime_env_profile=runtime_env_profile,
             runtime_env_hash=runtime_env_hash,
             ray_job_driver=ray_job_driver,
@@ -76,14 +127,19 @@ def durable_task_execution(
 def workflow_step_execution(
     progress_actor: Any | None,
     node_id: str,
+    run_identity: dict[str, Any] | None = None,
 ) -> Iterator[None]:
     """Expose the progress actor to code running inside one workflow step."""
-    if progress_actor is None:
+    if progress_actor is None and run_identity is None:
         yield
         return
 
     token = _current_workflow_step.set(
-        WorkflowStepContext(progress_actor=progress_actor, node_id=node_id)
+        WorkflowStepContext(
+            progress_actor=progress_actor,
+            node_id=node_id,
+            run_identity=run_identity,
+        )
     )
     try:
         yield
@@ -100,7 +156,7 @@ def report_workflow_progress(
 ) -> bool:
     """Report application-level progress from inside a workflow step."""
     context = _current_workflow_step.get()
-    if context is None:
+    if context is None or context.progress_actor is None:
         return False
     if total <= 0:
         raise ValueError("total must be greater than zero")

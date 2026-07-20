@@ -10,6 +10,7 @@ import json
 import secrets
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from django.conf import settings
 from django.db.models import Count
@@ -115,6 +116,8 @@ class TaskExecutionSchema(Schema):
     queue_name: str
     state: str
     attempt_number: int
+    execution_generation: int
+    workflow_run_id: UUID | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
@@ -213,6 +216,7 @@ class WorkflowGraphSchema(Schema):
     task_id: str
     task_state: str
     schema_version: int
+    run_identity: dict | None
     revision: int
     workflow_state: str
     total_nodes: int
@@ -599,6 +603,7 @@ def reset_executions(
         error_message=None,
         error_traceback=None,
         progress_data=None,
+        workflow_run_id=None,
     )
 
     return {"message": f"Reset {count} execution(s) to QUEUED state"}
@@ -1124,6 +1129,7 @@ def get_cluster_workflow_graph(request, task_id: str):
         "task_id": execution.task_id,
         "task_state": execution.state,
         "schema_version": progress.get("schema_version", 1),
+        "run_identity": progress.get("run_identity"),
         "revision": progress.get("revision", 0),
         "workflow_state": progress.get("state", "RUNNING"),
         "total_nodes": progress.get("total_nodes", 0),

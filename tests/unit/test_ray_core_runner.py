@@ -206,6 +206,41 @@ class TestRayCoreRunnerRuntime:
             "input_reference": reference,
         }
 
+    def test_submit_propagates_progress_fence_identity(self, monkeypatch) -> None:
+        _install_fake_ray(monkeypatch)
+        captured: dict[str, object] = {}
+
+        def fake_execute(*_args, **_kwargs) -> str:
+            from django_ray.runtime.context import get_current_task_context
+
+            context = get_current_task_context()
+            assert context is not None
+            captured.update(
+                task_pk=context.task_pk,
+                attempt_number=context.attempt_number,
+                execution_generation=context.execution_generation,
+            )
+            return json.dumps({"success": True, "result": None})
+
+        monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", fake_execute)
+
+        RayCoreRunner().submit(
+            task_execution=SimpleNamespace(
+                pk=15,
+                attempt_number=3,
+                execution_generation=9,
+            ),
+            callable_path="testproject.tasks.echo_task",
+            args=(),
+            kwargs={},
+        )
+
+        assert captured == {
+            "task_pk": 15,
+            "attempt_number": 3,
+            "execution_generation": 9,
+        }
+
     def test_submit_registers_remote_module_for_ray_cloudpickle(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         registered: list[object] = []

@@ -15,6 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.runtime.import_utils import import_callable
 
 
@@ -182,9 +183,21 @@ class _RayExecutor(_Executor):
             self.task_context.task_pk if self.task_context is not None else None
         )
         self.progress_actor = None
+        self.workflow_run_identity: WorkflowRunIdentity | None = None
         self.last_progress_revision = -1
-        if self.task_execution_pk is not None:
-            self.progress_actor = progress_actor_cls.remote(self.task_execution_pk)
+        if self.task_context is not None:
+            identity = WorkflowRunIdentity.create(self.task_context)
+            if identity is not None:
+                from django_ray.workflow_progress import claim_workflow_run
+
+                if claim_workflow_run(identity):
+                    self.workflow_run_identity = identity
+                    self.progress_actor = progress_actor_cls.remote(
+                        identity.task_execution_pk,
+                        identity.attempt_number,
+                        identity.execution_generation,
+                        identity.run_id,
+                    )
 
     def submit_step(
         self,
@@ -248,6 +261,11 @@ class _RayExecutor(_Executor):
             self.progress_actor,
             node_id,
             *input_args,
+            workflow_run_identity=(
+                self.workflow_run_identity.as_dict()
+                if self.workflow_run_identity is not None
+                else None
+            ),
         )
         if self.progress_actor is not None:
             try:
@@ -275,6 +293,20 @@ class _RayExecutor(_Executor):
             self._flush_progress()
             if ready:
                 return self.ray.get(value)
+            if self.progress_actor is None:
+                return self.ray.get(value)
+
+    def _disable_progress_reporting(self, *, notify_actor: bool = True) -> None:
+        """Stop local flushing and drain late reports in an obsolete actor."""
+        progress_actor = self.progress_actor
+        self.progress_actor = None
+        if not notify_actor or progress_actor is None:
+            return
+        try:
+            progress_actor.disable.remote()
+        except Exception:
+            # Reporting is best effort and must not fail the workflow itself.
+            return
 
     def _flush_progress(
         self,
@@ -282,7 +314,7 @@ class _RayExecutor(_Executor):
         force: bool = False,
         failed: bool = False,
     ) -> dict[str, Any] | None:
-        if self.progress_actor is None or self.task_execution_pk is None:
+        if self.progress_actor is None or self.workflow_run_identity is None:
             return None
 
         # Avoid blocking the caller indefinitely if the snapshot actor is unhealthy
@@ -297,18 +329,18 @@ class _RayExecutor(_Executor):
         except Exception:
             # If the actor died (e.g. OOM), disable further tracking attempts
             # so we don't crash the workflow or repeatedly timeout.
-            self.progress_actor = None
+            self._disable_progress_reporting(notify_actor=False)
             return None
 
         if failed:
             snapshot["state"] = "FAILED"
         revision = int(snapshot["revision"])
         if force or revision != self.last_progress_revision:
-            from django_ray.models import RayTaskExecution
+            from django_ray.workflow_progress import persist_workflow_progress
 
-            RayTaskExecution.objects.filter(pk=self.task_execution_pk).update(
-                progress_data=json.dumps(snapshot)
-            )
+            if not persist_workflow_progress(self.workflow_run_identity, snapshot):
+                self._disable_progress_reporting()
+                return None
             self.last_progress_revision = revision
         return snapshot
 
