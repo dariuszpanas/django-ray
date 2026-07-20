@@ -174,11 +174,16 @@ The first experimental ownership boundary is deliberately limited to compiling o
 and invoking repeatedly inside one Ray Core durable task. For a scheduled Kubernetes
 sync, one generic fixed-width kernel may process several namespaces during that one
 schedule. The graph is still rebuilt for the next schedule, so this is within-run reuse
-and has a zero cross-schedule graph-cache hit rate. The current probe covers a
-local/direct submitter; the production Ray Client-submitted nested owner remains gated
-on separate live-cluster lifetime evidence. See
+and has a zero cross-schedule graph-cache hit rate. The current probe covers the
+`direct-ray-core` submission transport; the production Ray Client-submitted nested
+owner has a distinct compatibility identity and remains gated on separate live-cluster
+lifetime evidence. See
 [ADR-0002](design/adr-0002-compiled-session-ownership.md) for the process matrix,
 resource budget, cancellation, and drain requirements.
+Compatibility evidence must also pin the specific container and immutable
+deployment/image identity and record explicit shared-memory and Ray object-store
+configuration. Measurements from a generic host, `docker`, or unresolved environment
+cannot be promoted as a native-capability row.
 
 ## Benchmark the Real Shape
 

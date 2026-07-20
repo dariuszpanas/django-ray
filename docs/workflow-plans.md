@@ -240,7 +240,7 @@ open client, file descriptor, coroutine, lock, or process-local identity.
 | Physical topology | Task/actor model, stages, replicas, actor roles, and placement relationships. Empty for plans that have no fixed physical layout. |
 | Capabilities | Cardinality, bounds, resources, RuntimeEnv behavior, transport, effects, failure, lifecycle, owner, durability, and result retention. |
 | Strategy requirements | Strategy-specific preparation settings expressed as stable values, without an engine-owned runtime object. |
-| Compatibility | django-ray plan API, Ray compatibility range or version, platform/capability identity, and any required optional dependency identities. |
+| Compatibility | django-ray plan API, exact Ray/Python ABI, owner and submission transports, channel transport, dependency identity, and kernel/libc/specific-container/immutable-deployment/shared-memory/object-store capability profiles. |
 
 ## Capability model
 
@@ -444,13 +444,14 @@ drain, and cleanup contract.
 | Local | Current definition shapes supported by the compatibility adapter | Unsupported plan version or callable import/argument binding failure |
 | Dynamic Ray tasks | Static groups/chains and bounded dynamic maps | Unsupported Ray options, unresolved environments, or noncanonical plan data |
 | Static actors | Static or fixed-width physical topology | Data-dependent node expansion, no actor layout, unbounded admission, unsafe state sharing, or owner mismatch |
-| Compiled Graph | Repeated static/fixed-width actor regions on a supported capability set | Task nodes, dynamic expansion, unsupported callable/transport/platform, no stable compiler owner, unbounded in-flight/results, or incompatible lifecycle |
+| Compiled Graph | Repeated static/fixed-width actor regions on a supported capability set | Task nodes, dynamic expansion, unsupported callable/transport/platform, unresolved or generic deployment/storage context, no stable compiler owner, unbounded in-flight/results, or incompatible lifecycle |
 
 Ray Compiled Graph is currently beta and optimizes repeated execution of a static graph.
 Its current ownership, actor, capacity, result-consumption, and teardown limitations are
 strategy capability checks, not new task semantics. See the upstream
 [Compiled Graph overview](https://docs.ray.io/en/latest/ray-core/compiled-graph/ray-compiled-graph.html)
-and [troubleshooting limitations](https://docs.ray.io/en/latest/ray-core/compiled-graph/troubleshooting.html).
+and [troubleshooting limitations](https://docs.ray.io/en/latest/ray-core/compiled-graph/troubleshooting.html),
+plus django-ray's fail-closed [Compiled Graph compatibility policy](compiled-graph-compatibility.md).
 
 ## Run, invocation, and observability identity
 

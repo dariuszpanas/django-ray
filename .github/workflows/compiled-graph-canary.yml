@@ -1,0 +1,92 @@
+name: Compiled Graph Canary
+
+on:
+  schedule:
+    - cron: "19 9 * * 3"
+  workflow_dispatch:
+    inputs:
+      ray-spec:
+        description: Exact ray[cgraph] requirement, optionally with an official wheel URL
+        required: true
+        default: "ray[cgraph]"
+        type: string
+      topology:
+        description: Compiler-owner topology to probe
+        required: true
+        default: nested-ray-task
+        type: choice
+        options:
+          - nested-ray-task
+          - direct-driver
+      unsafe-native:
+        description: Bypass only the runtime allowlist for deliberate investigation
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  latest-or-manual:
+    name: Non-blocking native compatibility signal
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    env:
+      RAY_SPEC: ${{ inputs['ray-spec'] || 'ray[cgraph]' }}
+      PROBE_TOPOLOGY: ${{ inputs.topology || 'nested-ray-task' }}
+      ALLOW_UNSAFE_NATIVE: ${{ github.event_name == 'schedule' || inputs['unsafe-native'] || false }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install requested Compiled Graph build
+        run: |
+          uv sync --frozen --python 3.12
+          uv pip install --python .venv/bin/python --upgrade "$RAY_SPEC"
+
+      - name: Record canary environment
+        run: |
+          mkdir -p compiled-graph-evidence
+          .venv/bin/python -c \
+            "import json, platform, ray, sys; print(json.dumps({'python': sys.version, 'ray': ray.__version__, 'platform': platform.platform(), 'machine': platform.machine()}, indent=2, sort_keys=True))" \
+            > compiled-graph-evidence/environment.json
+          uv pip freeze --python .venv/bin/python \
+            > compiled-graph-evidence/packages.txt
+
+      - name: Run hard-bounded canary
+        shell: bash
+        run: |
+          probe_args=(
+            --topology "$PROBE_TOPOLOGY"
+            --submission-transport direct-ray-core
+            --candidate-native
+            --require-success
+            --timeout-seconds 90
+          )
+          if [[ "$ALLOW_UNSAFE_NATIVE" == "true" ]]; then
+            export DJANGO_RAY_ALLOW_UNSAFE_COMPILED_GRAPH_PROBE=1
+            probe_args+=(--unsafe-native)
+          fi
+          .venv/bin/python -m \
+            django_ray.runtime.compiled_graph_probe "${probe_args[@]}" \
+            > compiled-graph-evidence/probe.json
+
+      - name: Show canary evidence
+        if: always()
+        run: |
+          cat compiled-graph-evidence/environment.json || true
+          cat compiled-graph-evidence/probe.json || true
+
+      - name: Upload canary evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compiled-graph-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: compiled-graph-evidence/

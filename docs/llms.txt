@@ -30,6 +30,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Compiled session ownership](https://django-ray.readthedocs.io/en/latest/design/adr-0002-compiled-session-ownership/):
   initial local/direct CPU-pilot process boundary, deferred Ray Client-submitted
   topology, within-run reuse, routing, admission, and drain.
+- [Compiled Graph compatibility](https://django-ray.readthedocs.io/en/latest/compiled-graph-compatibility/):
+  fail-closed candidate and verified tuples, native probe outcomes, topology,
+  transport, dependencies, and canary maintenance.
 - [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
   named profiles, code delivery, cache behavior, and security boundaries.
 - [Ray Serve integration boundary](https://django-ray.readthedocs.io/en/latest/design/ray-serve-boundary/):

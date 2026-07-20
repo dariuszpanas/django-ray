@@ -357,6 +357,65 @@ jobs:
           uv run --no-sync --python ${{ matrix.python-version }}
           pytest -m "not live_cluster and not real_ray" -q
 
+  compiled-graph-candidate-smoke:
+    if: github.event_name != 'pull_request_target'
+    name: Compiled Graph Candidate (Ray ${{ matrix.ray-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        ray-version: ["2.53.0", "2.56.0", "2.56.1"]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install candidate with Compiled Graph dependencies
+        run: |
+          uv sync --frozen --python 3.12
+          uv pip install --python .venv/bin/python "ray[cgraph]==${{ matrix.ray-version }}"
+
+      - name: Record candidate environment
+        run: |
+          mkdir -p compiled-graph-evidence
+          .venv/bin/python -c \
+            "import json, platform, ray, sys; print(json.dumps({'python': sys.version, 'ray': ray.__version__, 'platform': platform.platform(), 'machine': platform.machine()}, indent=2, sort_keys=True))" \
+            > compiled-graph-evidence/environment.json
+          uv pip freeze --python .venv/bin/python \
+            > compiled-graph-evidence/packages.txt
+
+      - name: Probe production-intended nested owner
+        run: >-
+          .venv/bin/python -m
+          django_ray.runtime.compiled_graph_probe
+          --topology nested-ray-task
+          --submission-transport direct-ray-core
+          --candidate-native
+          --require-success
+          --timeout-seconds 90
+          > compiled-graph-evidence/probe.json
+
+      - name: Show Compiled Graph evidence
+        if: always()
+        run: |
+          cat compiled-graph-evidence/environment.json || true
+          cat compiled-graph-evidence/probe.json || true
+
+      - name: Upload Compiled Graph evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compiled-graph-ray-${{ matrix.ray-version }}
+          path: compiled-graph-evidence/
+
   build:
     if: github.event_name != 'pull_request_target'
     name: Build Package
@@ -371,6 +430,7 @@ jobs:
         live-cluster,
         testproject,
         dependency-compatibility,
+        compiled-graph-candidate-smoke,
       ]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

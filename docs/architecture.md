@@ -80,10 +80,14 @@ credentials, and other per-invocation values are bound separately. See
 [Workflow Plans and Execution Strategies](workflow-plans.md) and
 [ADR-0001](design/adr-0001-workflow-plan-contract.md). The first experimental
 Compiled Graph session is owned by one Ray Core outer-task process for one durable run;
-it does not survive a scheduled task. Current evidence is limited to a local/direct
-driver; django-ray's production Ray Client-submitted path still needs a live-cluster
-lifetime probe. See
+it does not survive a scheduled task. Current evidence is limited to the
+`direct-ray-core` submission transport. The compatibility identity records submission
+transport separately, so django-ray's production Ray Client-submitted path cannot
+inherit that row and still needs a live-cluster lifetime probe. See
 [ADR-0002](design/adr-0002-compiled-session-ownership.md).
+That identity also fails closed unless it names a specific container, immutable
+deployment/image digest, and explicit shared-memory and object-store profiles; a
+generic host or container observation cannot authorize native compilation.
 
 ### Database
 

@@ -55,6 +55,11 @@ operational service boundary rather than a longer-lived form of the same task.
 The initial CPU-pilot evidence supports **repeated, serial invocations inside one Ray
 Core durable task submitted by a local or direct non-client driver**. This accepts the
 cluster-side owner relationship, not django-ray's production submission transport.
+The compatibility policy records submission transport as an exact capability
+dimension; a local/direct row can never authorize a Ray Client-submitted owner.
+Issue #99 must likewise review the specific container, immutable deployment/image,
+shared-memory, and object-store profiles for a row. Missing context and generic
+`host`, `container`, or `docker` labels cannot authorize this owner.
 
 The process running the Ray Core outer task is the sole session owner. It prepares one
 eligible fixed actor graph, invokes it repeatedly, consumes each result before the next
@@ -371,8 +376,9 @@ The artifact permits a direct non-client address for the same topology. It rejec
 `ray://` address or an already-active Ray Client session so its result cannot be
 misread as production-transport evidence. That rejection does not reject the proposed
 Ray Client-submitted nested owner; a dedicated live-cluster probe must test that
-variant. A successful local probe demonstrates the owner relationship only; benchmark
-and compatibility issues still decide whether the topology is safe and useful.
+variant and produce its own exact capability row. A successful local probe demonstrates
+the owner relationship only; benchmark and compatibility issues still decide whether
+the topology is safe and useful.
 
 ## Consequences
 

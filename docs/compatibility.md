@@ -16,6 +16,14 @@ Ray Client and cluster execution are most predictable when the task manager and 
 cluster use the same Ray version and Python minor version. Patch-version differences
 may produce a warning; different minor versions should not be treated as compatible.
 
+Ray Compiled Graph has a separate, exact, fail-closed capability policy because its
+native beta channels have narrower version, platform, transport, and process-owner
+constraints. The general Ray version range in this table does not enable compilation.
+Generic or unresolved host/container context is also insufficient: an eligible row
+requires an immutable deployment/image digest plus explicit shared-memory and Ray
+object-store profiles.
+See [Compiled Graph Compatibility](compiled-graph-compatibility.md).
+
 ## Dependency Policy
 
 `pyproject.toml` uses lower bounds so applications can resolve compatible updates
@@ -43,6 +51,11 @@ that Ray is available on every Python/platform combination.
   development and tests.
 - Ray publishes Linux aarch64 wheels for supported Python versions, but users must
   confirm their OS, architecture, and Python ABI match an available Ray wheel.
+
+Compiled Graph is more restrictive than ordinary Ray use: policy version 2 rejects
+Windows, aarch64, Ray Client, GPU transport, and every unverified native tuple before
+calling `experimental_compile()`. Dynamic workflows remain supported according to the
+general matrix above.
 
 ## piwheels
 
