@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from datetime import UTC, datetime, timedelta
@@ -24,9 +25,11 @@ from django_ray.observability import (
     get_workflow_graph,
     get_workflow_node,
     get_workflow_node_snapshot,
+    get_workflow_plan,
     get_workflow_progress,
     get_workflow_snapshot,
 )
+from django_ray.workflow_plans import PLAN_DOMAIN_SEPARATOR
 
 
 @pytest.fixture
@@ -59,6 +62,12 @@ def workflow_execution(db) -> RayTaskExecution:
             }
         ),
     )
+
+
+def _workflow_plan_fingerprint(serialized: str) -> str:
+    encoded = serialized.encode("utf-8")
+    digest = hashlib.sha256(PLAN_DOMAIN_SEPARATOR + encoded).hexdigest()
+    return f"sha256:{digest}"
 
 
 def test_get_workflow_graph_and_node(workflow_execution) -> None:
@@ -130,6 +139,62 @@ def test_versioned_task_summary_omits_sensitive_payloads(db, settings) -> None:
     assert get_task_summary(execution)["workflow_revision"] is None
     execution.progress_data = json.dumps({"revision": "not-an-integer"})
     assert get_task_summary(execution)["workflow_revision"] is None
+
+
+@pytest.mark.parametrize("selection", ["{", "[]"])
+def test_task_summary_omits_invalid_plan_selection(db, selection: str) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id=f"task-invalid-selection-{len(selection)}",
+        callable_path="testproject.tasks.echo",
+        workflow_plan_selection=selection,
+    )
+
+    summary = get_task_summary(execution)
+
+    assert summary["workflow_selected_strategy"] is None
+
+
+def test_get_workflow_plan_rejects_incomplete_snapshot(db) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-incomplete-plan",
+        callable_path="testproject.tasks.workflow",
+        workflow_plan_json="{}",
+    )
+
+    with pytest.raises(WorkflowObservabilityError, match="incomplete workflow plan snapshot"):
+        get_workflow_plan(execution)
+
+
+@pytest.mark.parametrize(
+    ("serialized", "message"),
+    [
+        ("{", "invalid workflow plan JSON"),
+        ("[]", "workflow plan must be a JSON object"),
+        (
+            json.dumps(
+                {
+                    "plan_format": "django-ray.workflow-plan",
+                    "plan_format_version": 999,
+                }
+            ),
+            "unsupported format version",
+        ),
+    ],
+)
+def test_get_workflow_plan_rejects_invalid_verified_manifest(
+    db,
+    serialized: str,
+    message: str,
+) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id=f"workflow-invalid-plan-{len(serialized)}",
+        callable_path="testproject.tasks.workflow",
+        workflow_plan_fingerprint=_workflow_plan_fingerprint(serialized),
+        workflow_plan_json=serialized,
+    )
+
+    with pytest.raises(WorkflowObservabilityError, match=message):
+        get_workflow_plan(execution)
 
 
 def test_queue_depths_distinguish_ready_delayed_and_running(db) -> None:
@@ -423,6 +488,16 @@ def test_get_workflow_progress_rejects_invalid_schema_version(schema_version) ->
     )
 
     with pytest.raises(WorkflowObservabilityError, match="invalid schema version"):
+        get_workflow_progress(execution)
+
+
+def test_get_workflow_progress_requires_identity_for_versioned_snapshot() -> None:
+    execution = SimpleNamespace(
+        progress_data=json.dumps({"schema_version": 2, "revision": 1}),
+        task_id="workflow-missing-run-identity",
+    )
+
+    with pytest.raises(WorkflowObservabilityError, match="must contain a run identity"):
         get_workflow_progress(execution)
 
 

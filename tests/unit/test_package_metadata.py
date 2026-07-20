@@ -4,6 +4,22 @@ import re
 import tomllib
 from pathlib import Path
 
+from coverage import Coverage
+from coverage.results import should_fail_under
+
+
+def test_coverage_floor_uses_central_two_decimal_precision() -> None:
+    """Coverage must enforce the configured floor at its displayed precision."""
+    project_root = Path(__file__).parents[2]
+    coverage_config = Coverage(config_file=str(project_root / "pyproject.toml"))
+    fail_under = coverage_config.get_option("report:fail_under")
+    precision = coverage_config.get_option("report:precision")
+
+    assert fail_under == 95
+    assert precision == 2
+    assert should_fail_under(94.91, fail_under, precision)
+    assert not should_fail_under(95.00, fail_under, precision)
+
 
 def test_readme_images_use_absolute_urls() -> None:
     """PyPI cannot resolve repository-relative image paths in the long description."""
