@@ -358,6 +358,17 @@ Two definitions that materialize to the same normative JSON must produce byte-fo
 equal canonical serialization and the same fingerprint. Non-semantic annotations may
 be stored beside the canonical plan, never inside the hashed payload.
 
+The opt-in bounded-map result buffer does not introduce a new top-level plan field or
+change `plan_format_version=1`. An unselected map retains byte-for-byte the existing
+map node and empty `physical_topology.actors`/`placement_relationships` slots. A
+selected map links its existing `actor_layout` field to one entry in
+`physical_topology.actors`; that actor entry contains the versioned result-buffer
+protocol and `ray.cloudpickle` codec, item/in-flight/serialized-byte bounds,
+scheduler-visible CPU/memory/custom resources, placement, non-detached lifetime,
+fixed no-restart semantics, serial actor-call limits, direct two-return finalization,
+and best-effort cleanup contract. All of those fields are normative fingerprint
+inputs. A retry that changes any one of them is rejected before actor or leaf effects.
+
 ### Invalidation inputs
 
 A graph instance or prepared strategy state must be rejected and drained when any
@@ -457,6 +468,12 @@ manifest, the attempt that first pinned it, and current-attempt selection are st
 The detailed and overflow forms both retain bounded `retry_safe` and
 `retry_unsafe_paths` metadata for environment bindings whose raw values cannot enter
 the secret-free fingerprint.
+
+When physical actor or placement detail contributes to the overflow, the persisted
+sentinel keeps empty detail arrays plus bounded actor, result-buffer, placement, and
+stage counts. `snapshot.source_digest` is computed from the complete secret-free
+manifest before compaction, so an omitted protocol, bound, resource, placement,
+lifetime, or restart change still changes the overflow fingerprint.
 
 The 64 KiB limit bounds the durable canonical artifact, not all transient memory used
 while materializing a Python definition. The materializer still walks the definition
@@ -591,6 +608,7 @@ The public API remains source compatible while the plan boundary is introduced:
 | `chain(a, b, ...)` | Ordered nodes/regions with the preceding result ports connected to the next expression's first input. |
 | `group(a, b, ...)` | Static branches that receive the same input bindings and produce an ordered collect result. |
 | `map_step(x)` | One dynamic-map operator in the plan. Runtime expansion nodes and inventory values are invocation state and do not enter the plan fingerprint. |
+| `bounded_map.with_result_buffer(...)` | Link the dynamic map's existing actor-layout slot to one versioned physical result-buffer actor contract. Local execution fingerprints the selection but does not create the actor or enforce its retained-byte measurement. |
 | `signature.run(*args, **kwargs)` | Materialize/validate a plan, create one invocation envelope, choose a strategy, execute, and return the same concrete result. |
 | `use_ray=False` | Select the local strategy for deterministic tests; it does not create a different task type. |
 
@@ -660,6 +678,11 @@ Issue #84 and later implementations can cite these stable requirements:
 14. **PLAN-14 -- Bounded persistence:** any stored plan manifest and diagnostic summary
     has explicit size/depth/count limits, redaction, and versioning. Runtime engine
     objects and unbounded node graphs are never persisted as plan metadata.
+15. **PLAN-15 -- Result-buffer identity:** selecting the bounded-map result buffer
+    populates only the version 1 physical-actor and actor-layout extensibility slots.
+    Its protocol, codec, bounds, resources, placement, lifetime, restart, actor-call,
+    finalization, and cleanup semantics are fingerprinted; an unselected map's
+    canonical manifest is unchanged.
 
 These requirements do not choose a database model, resident-owner topology, or compiled
 adapter. Those decisions remain in their focused issues.

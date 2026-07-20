@@ -152,6 +152,84 @@ in Ray, so coordinator memory remains proportional to total output size. A bound
 in-Ray reduction or aggregation path is tracked in
 [GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91).
 
+### Opt-in Ray result buffer
+
+When the next stage is a Ray step, a bounded map can keep its complete intermediate
+list out of the outer workflow coordinator:
+
+```python
+sync_resources = chain(
+    step(list_namespaces),
+    map_step(sync_namespace, ray_options={"num_cpus": 0.25})
+    .with_limits(max_concurrency=8, max_items=500)
+    .with_result_buffer(
+        max_serialized_bytes=64 * 1024 * 1024,
+        actor_options={
+            "num_cpus": 0.25,
+            "memory": 128 * 1024 * 1024,
+            "resources": {"workflow_result_buffer": 1},
+            "scheduling_strategy": "SPREAD",
+        },
+    ),
+    step(summarize_sync),
+)
+```
+
+This is an explicit transport selection. `max_concurrency`, `max_items`, and
+`max_serialized_bytes` must all be positive caller-declared limits. `actor_options`
+must explicitly set `num_cpus > 0` and an integer `memory` request at least as large
+as `max_serialized_bytes`. The only optional version 1 actor fields are a bounded
+positive `resources` mapping and `scheduling_strategy="DEFAULT"` or `"SPREAD"`;
+unknown fields are rejected instead of being forwarded to Ray.
+Every requested custom resource must be advertised by an eligible cluster node. If
+it is unavailable, the ready handshake intentionally remains pending while ordinary
+progress flushing and cancellation stay live, and no map leaf effects begin.
+
+The non-detached actor has fixed `max_restarts=0`, `max_task_retries=0`,
+`max_concurrency=1`, and `max_pending_calls=1`. django-ray waits for its ready
+acknowledgement through normal progress-flushing resolution before admitting leaf
+side effects. The leaf admission window remains at `max_concurrency`, but the outer
+coordinator uses `ray.wait(..., fetch_local=False)` to select a ready leaf without
+decoding it. It then submits and completely resolves one small append acknowledgement
+before issuing another actor call. Map payloads are never resolved by the coordinator.
+
+The byte limit counts bytes actually retained by the version 1 `ray.cloudpickle`
+codec using pickle protocol 5. An append serializes first, checks the prospective item
+and byte totals, and mutates retained state only when both remain within their bounds.
+This is not a limit on decoded Python heap size, transient serialization memory, Ray
+wire bytes, or object-store bytes. The scheduler `memory` request accounts for actor
+placement but is not a hard process-memory limit.
+
+Finalization returns the ordered Python list and a small acknowledgement as two direct
+Ray returns. It does not call `ray.put()` inside the actor and does not nest an
+`ObjectRef` inside another return. The coordinator proves both returns are materialized,
+resolves only the acknowledgement, kills the actor best effort, and passes the one
+unresolved payload reference to the downstream Ray step. Append and finalization waits
+continue flushing ordinary workflow progress.
+
+If the buffered map is terminal, `run()` necessarily resolves that final reference and
+the coordinator still uses O(total output) memory. A downstream step also materializes
+the complete ordered list and therefore uses O(total output) consumer memory, while the
+object store holds the final object. The actor itself transiently decodes the complete
+list during finalization. Chunked/reducer transport and total-independent object-store
+or consumer memory remain in [GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91),
+and production-shaped throughput and memory validation remain in
+[GitHub issue #87](https://github.com/dariuszpanas/django-ray/issues/87).
+
+A version 1 result-buffer map cannot be nested inside a dynamic map; plan
+materialization rejects that topology before actor or leaf effects so actor
+multiplication stays explicit. Local execution preserves input order, `max_items`, and
+ordinary leaf failure behavior without creating an actor. It validates and fingerprints
+the buffer selection but does not retain, cloudpickle, or measure results against
+`max_serialized_bytes`; that byte limit is specifically the Ray actor's retained-byte
+contract and is enforced only during Ray execution. Maps that do not call
+`with_result_buffer()` retain their existing bounded or eager transport exactly.
+Cleanup cancels pending or resolving leaf references plus their captured nested
+dependencies, then discards the serialized bytes retained by the actor and kills it
+best effort on failure or cancellation. Non-detached ownership also cleans the actor
+when its owner dies, but the protocol makes no cleanup, recovery, or durability
+guarantee after node loss.
+
 Calling `map_step()` without `with_limits()` retains the original eager behavior for
 compatibility. New dynamic workloads should normally choose an explicit window and an
 input cap. Local execution preserves inputs, ordered outputs, limits, and failures but
@@ -451,5 +529,6 @@ the timing/result tree after it completes.
 | `group(*signatures)` | Fan out the same input and gather ordered results |
 | `map_step(callable_or_signature, ...)` | Fan out over the preceding iterable; callable keyword arguments remain leaf arguments |
 | `map_signature.with_limits(max_concurrency=None, max_items=None, cancel_timeout_seconds=1.0)` | Add bounded admission, expansion, and failure-cleanup controls |
+| `bounded_map.with_result_buffer(max_serialized_bytes=..., actor_options=...)` | Opt into a resource-accounted Ray actor that forwards one ordered payload reference without coordinator decoding |
 | `report_progress(current, total, message=None, metrics=None)` | Report progress from a running leaf |
 | `signature.run(*args, use_ray=None, **kwargs)` | Execute with Ray when initialized, otherwise locally |

@@ -190,6 +190,38 @@ class _Executor(ABC):
         """Wait for one value and return its index in ``values``."""
         return 0
 
+    def start_result_buffer(
+        self,
+        *,
+        max_items: int,
+        max_serialized_bytes: int,
+        actor_options: Mapping[str, Any],
+    ) -> Any | None:
+        """Reserve a Ray result buffer, or return ``None`` for local execution."""
+        return None
+
+    def wait_result_buffer_leaf(self, values: Sequence[Any]) -> int:
+        """Select one ready leaf without resolving its payload in the coordinator."""
+        return self.wait_one(values)
+
+    def append_result_buffer(
+        self,
+        buffer: Any,
+        *,
+        index: int,
+        value: Any,
+    ) -> None:
+        """Append one leaf through the small-acknowledgement actor protocol."""
+        raise NotImplementedError
+
+    def finalize_result_buffer(self, buffer: Any, *, expected_items: int) -> Any:
+        """Return the unresolved ordered payload from a finalized Ray buffer."""
+        raise NotImplementedError
+
+    def discard_result_buffer(self, buffer: Any, *, timeout_seconds: float) -> None:
+        """Best-effort cleanup for a failed or cancelled result-buffer map."""
+        return None
+
     def cancel_and_drain(
         self,
         values: Sequence[Any],
@@ -301,6 +333,7 @@ class _LocalExecutor(_Executor):
 _execute_workflow_step_remote_cached = None
 _collect_workflow_results_remote_cached = None
 _workflow_progress_actor_cached = None
+_workflow_result_buffer_actor_cached = None
 
 
 def _get_cached_workflow_remotes() -> tuple[Any, Any, Any]:
@@ -326,6 +359,26 @@ def _get_cached_workflow_remotes() -> tuple[Any, Any, Any]:
         _collect_workflow_results_remote_cached,
         _workflow_progress_actor_cached,
     )
+
+
+def _get_cached_result_buffer_actor() -> Any:
+    global _workflow_result_buffer_actor_cached
+
+    if _workflow_result_buffer_actor_cached is None:
+        import ray
+
+        from django_ray.runtime.result_buffer import WorkflowMapResultBuffer
+
+        _workflow_result_buffer_actor_cached = ray.remote(WorkflowMapResultBuffer)
+    return _workflow_result_buffer_actor_cached
+
+
+@dataclass
+class _RayResultBufferSession:
+    """One live buffer actor owned by this workflow coordinator."""
+
+    actor: Any
+    closed: bool = False
 
 
 class _RayExecutor(_Executor):
@@ -559,6 +612,155 @@ class _RayExecutor(_Executor):
             self._flush_progress()
             if ready:
                 return values.index(ready[0])
+
+    def _wait_result_buffer_refs(
+        self,
+        values: Sequence[Any],
+        *,
+        num_returns: int,
+    ) -> list[Any]:
+        """Poll readiness without fetching large objects into the coordinator."""
+        from django_ray.conf.settings import get_settings
+
+        flush_seconds = float(get_settings().get("WORKFLOW_PROGRESS_FLUSH_SECONDS", 1))
+        while True:
+            ready, _ = self.ray.wait(
+                list(values),
+                num_returns=num_returns,
+                timeout=flush_seconds,
+                fetch_local=False,
+            )
+            self._flush_progress()
+            if len(ready) == num_returns:
+                return ready
+
+    def start_result_buffer(
+        self,
+        *,
+        max_items: int,
+        max_serialized_bytes: int,
+        actor_options: Mapping[str, Any],
+    ) -> _RayResultBufferSession:
+        from django_ray.runtime.result_buffer import (
+            result_buffer_ray_actor_options,
+            validate_result_buffer_ack,
+        )
+
+        actor_cls = _get_cached_result_buffer_actor()
+        actor = actor_cls.options(**result_buffer_ray_actor_options(actor_options)).remote(
+            max_items, max_serialized_bytes
+        )
+        session = _RayResultBufferSession(actor=actor)
+        ready_ref = None
+        try:
+            ready_ref = actor.ready.remote()
+            validate_result_buffer_ack(self.resolve(ready_ref), state="ready")
+        except BaseException:
+            if ready_ref is not None:
+                try:
+                    self.ray.cancel(ready_ref, force=False, recursive=True)
+                except BaseException:
+                    pass
+            self.discard_result_buffer(session, timeout_seconds=0)
+            raise
+        return session
+
+    def wait_result_buffer_leaf(self, values: Sequence[Any]) -> int:
+        ready = self._wait_result_buffer_refs(values, num_returns=1)
+        return values.index(ready[0])
+
+    def append_result_buffer(
+        self,
+        buffer: _RayResultBufferSession,
+        *,
+        index: int,
+        value: Any,
+    ) -> None:
+        from django_ray.runtime.result_buffer import validate_result_buffer_ack
+
+        ack_ref = buffer.actor.append.remote(index, value)
+        try:
+            ack = self.resolve(ack_ref)
+            validate_result_buffer_ack(
+                ack,
+                state="retained",
+                expected_index=index,
+            )
+        except BaseException:
+            try:
+                self.ray.cancel(ack_ref, force=False, recursive=True)
+            except BaseException:
+                pass
+            raise
+
+    def finalize_result_buffer(
+        self,
+        buffer: _RayResultBufferSession,
+        *,
+        expected_items: int,
+    ) -> Any:
+        from django_ray.runtime.result_buffer import validate_result_buffer_ack
+
+        # Ray stores these as two direct return objects. The first is intentionally
+        # never ray.get()'d here; only a downstream worker or the terminal caller
+        # materializes the ordered Python value.
+        payload_ref, ack_ref = buffer.actor.finalize.options(num_returns=2).remote(expected_items)
+        try:
+            self._wait_result_buffer_refs(
+                [payload_ref, ack_ref],
+                num_returns=2,
+            )
+            ack = self.resolve(ack_ref)
+            validate_result_buffer_ack(
+                ack,
+                state="finalized",
+                expected_items=expected_items,
+            )
+        except BaseException:
+            for value in (payload_ref, ack_ref):
+                try:
+                    self.ray.cancel(value, force=False, recursive=True)
+                except BaseException:
+                    pass
+            raise
+
+        try:
+            self.ray.kill(buffer.actor, no_restart=True)
+        except BaseException:
+            # Cleanup cannot replace a successfully materialized direct return.
+            pass
+        buffer.closed = True
+        return payload_ref
+
+    def discard_result_buffer(
+        self,
+        buffer: _RayResultBufferSession,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        if buffer.closed:
+            return
+        try:
+            discard_ref = buffer.actor.discard.remote()
+            ready, _ = self.ray.wait(
+                [discard_ref],
+                num_returns=1,
+                timeout=timeout_seconds,
+                fetch_local=False,
+            )
+            if ready:
+                try:
+                    self.ray.get(discard_ref)
+                except BaseException:
+                    pass
+        except BaseException:
+            pass
+        finally:
+            try:
+                self.ray.kill(buffer.actor, no_restart=True)
+            except BaseException:
+                pass
+            buffer.closed = True
 
     def cancel_and_drain(
         self,
@@ -927,6 +1129,17 @@ class Group(WorkflowSignature):
 
 
 @dataclass(frozen=True)
+class _MapResultBuffer:
+    """Immutable public-builder selection for the v1 Ray result buffer."""
+
+    max_serialized_bytes: int
+    actor_options: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "actor_options", _freeze_definition_value(self.actor_options))
+
+
+@dataclass(frozen=True)
 class Map(WorkflowSignature):
     """Fan out one signature over an iterable produced by an earlier stage."""
 
@@ -934,11 +1147,18 @@ class Map(WorkflowSignature):
     max_concurrency: int | None = None
     max_items: int | None = None
     cancel_timeout_seconds: float = 1.0
+    result_buffer: _MapResultBuffer | None = None
 
     def __post_init__(self) -> None:
         _validate_map_limit("max_concurrency", self.max_concurrency, minimum=1)
         _validate_map_limit("max_items", self.max_items, minimum=1)
         _validate_map_cancel_timeout(self.cancel_timeout_seconds)
+        if self.result_buffer is not None and (
+            self.max_concurrency is None or self.max_items is None
+        ):
+            raise ValueError(
+                "with_result_buffer requires positive max_concurrency and max_items limits"
+            )
 
     def with_limits(
         self,
@@ -955,6 +1175,39 @@ class Map(WorkflowSignature):
             max_concurrency=max_concurrency,
             max_items=max_items,
             cancel_timeout_seconds=cancel_timeout_seconds,
+            result_buffer=self.result_buffer,
+        )
+
+    def with_result_buffer(
+        self,
+        *,
+        max_serialized_bytes: int,
+        actor_options: Mapping[str, Any],
+    ) -> Map:
+        """Keep bounded Ray map results in a resource-accounted actor."""
+        if self.max_concurrency is None or self.max_items is None:
+            raise ValueError(
+                "with_result_buffer requires positive max_concurrency and max_items limits"
+            )
+        if isinstance(max_serialized_bytes, bool) or not isinstance(max_serialized_bytes, int):
+            raise TypeError("max_serialized_bytes must be an integer")
+        if max_serialized_bytes < 1:
+            raise ValueError("max_serialized_bytes must be at least 1")
+        from django_ray.runtime.result_buffer import normalize_result_buffer_actor_options
+
+        normalized_options = normalize_result_buffer_actor_options(
+            actor_options,
+            max_serialized_bytes=max_serialized_bytes,
+        )
+        return Map(
+            self.signature,
+            max_concurrency=self.max_concurrency,
+            max_items=self.max_items,
+            cancel_timeout_seconds=self.cancel_timeout_seconds,
+            result_buffer=_MapResultBuffer(
+                max_serialized_bytes=max_serialized_bytes,
+                actor_options=normalized_options,
+            ),
         )
 
     def _submit(
@@ -1016,12 +1269,13 @@ class Map(WorkflowSignature):
         iterator = iter(items)
         label = f"map:{_signature_label(self.signature)}"
         pending: list[tuple[int, _Submission, tuple[Any, ...]]] = []
-        ordered_results: list[Any] = []
+        ordered_results: list[Any] | None = None
         submitted = 0
         completed = 0
         input_exhausted = False
         resolving_cleanup: tuple[Any, ...] = ()
         admitting_cleanup: list[Any] | None = None
+        result_buffer = None
         executor.map_started(
             node_id,
             label,
@@ -1031,6 +1285,16 @@ class Map(WorkflowSignature):
         )
 
         try:
+            if self.result_buffer is not None:
+                assert self.max_items is not None
+                result_buffer = executor.start_result_buffer(
+                    max_items=self.max_items,
+                    max_serialized_bytes=self.result_buffer.max_serialized_bytes,
+                    actor_options=_thaw_definition_value(self.result_buffer.actor_options),
+                )
+            if result_buffer is None:
+                ordered_results = []
+
             while pending or not input_exhausted:
                 while not input_exhausted and (
                     self.max_concurrency is None or len(pending) < self.max_concurrency
@@ -1066,7 +1330,8 @@ class Map(WorkflowSignature):
                             f"{node_id}.m{submitted}",
                             dependencies,
                         )
-                    ordered_results.append(None)
+                    if ordered_results is not None:
+                        ordered_results.append(None)
                     pending.append((submitted, result, tuple(reversed(admitting_cleanup))))
                     admitting_cleanup = None
                     submitted += 1
@@ -1081,9 +1346,22 @@ class Map(WorkflowSignature):
                 if not pending:
                     continue
 
-                ready_index = executor.wait_one([result.value for _, result, _ in pending])
+                pending_values = [result.value for _, result, _ in pending]
+                ready_index = (
+                    executor.wait_result_buffer_leaf(pending_values)
+                    if result_buffer is not None
+                    else executor.wait_one(pending_values)
+                )
                 result_index, result, resolving_cleanup = pending.pop(ready_index)
-                ordered_results[result_index] = executor.resolve_ready(result.value)
+                if result_buffer is not None:
+                    executor.append_result_buffer(
+                        result_buffer,
+                        index=result_index,
+                        value=result.value,
+                    )
+                else:
+                    assert ordered_results is not None
+                    ordered_results[result_index] = executor.resolve_ready(result.value)
                 completed += 1
                 resolving_cleanup = ()
                 executor.map_progress(
@@ -1093,6 +1371,15 @@ class Map(WorkflowSignature):
                     completed=completed,
                     input_exhausted=input_exhausted,
                 )
+
+            if result_buffer is not None:
+                value = executor.finalize_result_buffer(
+                    result_buffer,
+                    expected_items=submitted,
+                )
+            else:
+                assert ordered_results is not None
+                value = executor.store(ordered_results)
         except BaseException as error:
             _close_iterator(iterator)
             cleanup_values = list(reversed(admitting_cleanup or ()))
@@ -1105,6 +1392,14 @@ class Map(WorkflowSignature):
                 )
             except BaseException:
                 pass
+            if result_buffer is not None:
+                try:
+                    executor.discard_result_buffer(
+                        result_buffer,
+                        timeout_seconds=self.cancel_timeout_seconds,
+                    )
+                except BaseException:
+                    pass
             try:
                 executor.map_finished(
                     node_id,
@@ -1126,7 +1421,6 @@ class Map(WorkflowSignature):
             completed=completed,
             input_exhausted=True,
         )
-        value = executor.store(ordered_results)
         return _Submission(
             value=value,
             terminal_node_ids=(node_id,),
