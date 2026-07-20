@@ -89,6 +89,22 @@ That identity also fails closed unless it names a specific container, immutable
 deployment/image digest, and explicit shared-memory and object-store profiles; a
 generic host or container observation cannot authorize native compilation.
 
+Compiled invocation lifecycle is a separate Ray-free boundary. The version 1 reducer
+keeps session preparation/health/teardown state independent from each invocation's
+admission/submission/output/outcome state. Session events carry the complete durable
+run identity; invocation events add `invocation_id`. It issues one deterministic action
+token at a time, applies distinct absolute deadlines capped by the outer task deadline,
+closes strategy fallback before preparation, and forbids same-invocation replay when
+submission starts.
+
+The reducer also accounts for every one-shot output before graph reuse and keeps
+primary outcome, effect certainty, graph health, future durable-retry disposition, and
+cleanup diagnostics separate. Its bounded snapshot contains no Ray handles or result
+values. The exact protocol version is a fingerprinted plan requirement at
+`strategy_requirements.compiled_graph.lifecycle_protocol_version`. See
+[ADR-0003](design/adr-0003-compiled-invocation-lifecycle.md). No native execution
+adapter or verified Compiled Graph capability is introduced by this state machine.
+
 ### Database
 
 - Canonical source of truth for task lifecycle state.
@@ -304,5 +320,6 @@ rolling back, disable spillover and drain all tasks that already have a referenc
 - [Workflow Plans and Execution Strategies](workflow-plans.md)
 - [ADR-0001: Workflow Plans and Execution Strategies](design/adr-0001-workflow-plan-contract.md)
 - [ADR-0002: Compiled Session Ownership and Reuse](design/adr-0002-compiled-session-ownership.md)
+- [ADR-0003: Compiled Invocation Lifecycle](design/adr-0003-compiled-invocation-lifecycle.md)
 - [Runtime Environments](runtime-environments.md)
 - [Retry & Error Handling](retry.md)

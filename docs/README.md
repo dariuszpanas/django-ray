@@ -55,6 +55,9 @@ django-ray is a **library** that provides:
 - [ADR-0002: Compiled Sessions](design/adr-0002-compiled-session-ownership.md) -
   Initial local/direct CPU-pilot owner, deferred production topology, within-run reuse,
   admission, invalidation, and drain rules
+- [ADR-0003: Compiled Invocation Lifecycle](design/adr-0003-compiled-invocation-lifecycle.md) -
+  Ray-free session/invocation reducer, absolute deadlines, fallback and replay cutoffs,
+  one-shot output ownership, and bounded cleanup diagnostics
 - [Ray Serve Integration Boundary](design/ray-serve-boundary.md) - Deferred ownership,
   lifecycle, security, and packaging decision
 - [Changelog](changelog.md) - Release history
