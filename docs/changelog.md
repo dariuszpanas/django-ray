@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
   capability identity includes immutable deployment, shared-memory, and object-store
   profiles; no native capability tuple is enabled yet.
+- A machine-readable review of fresh Linux Compiled Graph candidate artifacts, retaining
+  exact provenance and hashes while making an explicit no-promotion decision. Release
+  validation now enforces runtime/review parity and future evidence revalidation and
+  quarantine gates.
 
 ### Changed
 

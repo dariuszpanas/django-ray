@@ -12,9 +12,12 @@ ordinary local and dynamic Ray task execution remain available.
 ## Current support state
 
 Policy version 2 has **no verified native capability rows**. The rows below are canary
-candidates, not a support claim. `require_compiled_graph_support()` rejects them with
-`CANDIDATE_REQUIRES_SMOKE` until a real isolated smoke result for the exact tuple is
-reviewed and promoted in a later policy change.
+candidates, not a support claim. The required isolated canaries succeeded for all
+three releases, but the 2026-07-20 promotion review retained the empty verified set:
+the hosted runners did not provide the exact container, immutable deployment,
+shared-memory, and object-store profiles required by policy version 2. An incomplete
+candidate returns `INCOMPLETE_CAPABILITY_CONTEXT`; a complete but unpromoted exact
+tuple returns `CANDIDATE_REQUIRES_SMOKE`.
 
 | Ray | Python | OS and architecture | Status | Why it is listed |
 |---|---|---|---|---|
@@ -242,6 +245,29 @@ This is not evidence that nightly passes or fails. If issue #100 tests a nightly
 record must name the resolved wheel identity rather than treating it as a release
 neighbor; a nightly run is not a Linux/Kubernetes merge gate.
 
+### Reviewed Linux promotion decision
+
+The required PR #92 canaries ran the hardened policy-v2 probe again in GitHub Actions
+run [`29759326381`](https://github.com/dariuszpanas/django-ray/actions/runs/29759326381).
+Ray 2.53.0, 2.56.0, and 2.56.1 each completed the local nested owner smoke and verified
+its echo result. Those successes are discovery evidence, not permission to compile.
+Every decision remained ineligible because the generic hosted runner reported `host`
+as its container profile and left the immutable deployment, shared-memory, and object-
+store profiles unresolved.
+
+The [2026-07-20 capability review](investigations/compiled-graph-capability-review-2026-07-20.json)
+records `no_promotion`, an empty verified row list, the exact workflow/head/tested-tree
+identities, the mutable runner-image context, job and artifact IDs, GitHub archive
+digests, and SHA-256 plus byte size for every retained evidence file. The hosted runner
+was requested through `ubuntu-latest`; its `ubuntu-24.04` image is not an immutable
+production KubeRay image, so no exact production tuple can be inferred from it.
+
+GitHub expires these candidate artifacts on 2026-10-18. Expiry does not invalidate the
+safe no-promotion decision: an unavailable discovery artifact cannot make an empty
+verified set less fail-closed. It does mean the evidence must be collected again before
+any later promotion. Issue #102 owns a pinned Linux/KubeRay pilot with all four explicit
+policy profiles and immutable image identity.
+
 ## Evidence promotion and maintenance
 
 A candidate becomes verified only through a reviewed policy change with all of the
@@ -262,10 +288,12 @@ following evidence:
    wrapper context and may resolve their worker directory as a separate uv project.
 5. Unit tests prove exact-tuple matching and rejection of every neighboring unverified
    tuple. Dynamic workflow tests remain green without selecting Compiled Graph.
-6. Issue #99 reviews provenance, expiry, and quarantine policy before a reviewer adds
-   only the passing exact capability tuple to the verified set. No row may inherit an
-   image, deployment, shared-memory, or object-store profile from a near neighbor.
-   Changes to compatibility meaning bump the policy version.
+6. A dated machine-readable review records provenance, expiry, revalidation, and
+   quarantine policy before a reviewer adds only the passing exact capability tuple to
+   the verified set. No row may inherit an image, deployment, shared-memory, or
+   object-store profile from a near neighbor. Changes to compatibility meaning bump the
+   policy version. Issue #99 completed the first review with `no_promotion`; issue #102
+   owns the missing promotion-grade KubeRay evidence.
 
 The required CI smoke exercises the minimum, repository-lock, and reviewed-latest
 candidate releases against the local nested Ray task owner. The repository-controlled
@@ -280,6 +308,15 @@ Review the matrix whenever Ray, Python, operating-system images, channel APIs,
 `ray[cgraph]` dependencies, immutable deployment/image identity, shared-memory or
 object-store configuration, or the workflow owner contract changes. Never widen a
 range from version ordering alone.
+
+Release validation loads the newest dated capability-review record and compares its
+reviewed capability identities exactly with the runtime verified set. A future verified
+row must reference retained evidence IDs, carry matching review and revalidation dates,
+use artifacts that have not expired, and remain outside quarantine. A timeout, native
+crash, mismatched result, changed identity dimension, or relevant upstream regression
+quarantines the exact row; the dynamic strategy remains available while a fresh review
+is prepared. Artifact expiry is deliberately non-blocking only while both the review
+and runtime verified sets remain empty.
 
 ## Invocation and result constraints
 
