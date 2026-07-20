@@ -4,12 +4,47 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
+import json
 import re
 import sys
 import tomllib
+from datetime import date, datetime
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 _VERSION_RE = re.compile(r"^v?(?P<version>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$")
+_REVIEW_FILE_RE = re.compile(
+    r"^compiled-graph-capability-review-(?P<date>\d{4}-\d{2}-\d{2})\.json$"
+)
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_BARE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_OBJECT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_PROBE_STATUSES = frozenset(
+    {"success", "unsupported_guard", "python_failure", "timeout", "signal", "native_crash"}
+)
+_CAPABILITY_FIELDS = frozenset(
+    {
+        "ray_version",
+        "python_version",
+        "operating_system",
+        "architecture",
+        "python_implementation",
+        "python_abi",
+        "dependency_profile",
+        "platform_profile",
+        "libc_profile",
+        "container_profile",
+        "deployment_profile",
+        "shared_memory_profile",
+        "object_store_profile",
+        "topology",
+        "submission_transport",
+        "transport",
+    }
+)
+_EVIDENCE_FILES = frozenset({"environment.json", "packages.txt", "probe.json"})
 
 
 def _read_pyproject_version(root: Path) -> str:
@@ -38,6 +73,341 @@ def normalize_version(value: str) -> str:
     return match.group("version")
 
 
+def _load_runtime_policy(root: Path) -> tuple[int, int, list[dict[str, Any]]]:
+    source = root / "src" / "django_ray" / "runtime" / "compiled_graph.py"
+    module_name = "_django_ray_release_compiled_graph"
+    spec = importlib.util.spec_from_file_location(module_name, source)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load Compiled Graph policy from {source}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(module_name, None)
+    return _runtime_policy_snapshot(module)
+
+
+def _runtime_policy_snapshot(module: ModuleType) -> tuple[int, int, list[dict[str, Any]]]:
+    try:
+        policy_version = int(module.COMPILED_GRAPH_POLICY_VERSION)
+        schema_version = int(module.COMPILED_GRAPH_CAPABILITY_SCHEMA_VERSION)
+        rows = module.verified_compiled_graph_capability_rows()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("Compiled Graph policy does not expose a valid policy snapshot") from exc
+    if not isinstance(rows, tuple) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError("verified Compiled Graph capability rows must be a tuple of objects")
+    return policy_version, schema_version, [dict(row) for row in rows]
+
+
+def _parse_date(value: object, *, field: str) -> date:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be an ISO date")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO date") from exc
+
+
+def _parse_timestamp(value: object, *, field: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError(f"{field} must be an ISO UTC timestamp ending in Z")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO UTC timestamp ending in Z") from exc
+
+
+def _latest_compiled_graph_review(root: Path) -> tuple[Path, dict[str, Any], date]:
+    directory = root / "docs" / "investigations"
+    candidates: list[tuple[date, Path]] = []
+    for path in directory.glob("compiled-graph-capability-review-*.json"):
+        match = _REVIEW_FILE_RE.fullmatch(path.name)
+        if match is not None:
+            candidates.append((date.fromisoformat(match.group("date")), path))
+    if not candidates:
+        raise ValueError("no Compiled Graph capability review record exists")
+    review_date, path = max(candidates, key=lambda item: item[0])
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path.name} is not valid JSON") from exc
+    if not isinstance(record, dict):
+        raise ValueError(f"{path.name} must contain a JSON object")
+    if record.get("review_id") != path.stem:
+        raise ValueError(f"{path.name} review_id must match its filename")
+    if _parse_date(record.get("reviewed_on"), field="reviewed_on") != review_date:
+        raise ValueError(f"{path.name} reviewed_on must match its filename date")
+    return path, record, review_date
+
+
+def _validate_review_artifacts(
+    record: dict[str, Any],
+) -> tuple[
+    dict[str, datetime],
+    set[str],
+    dict[str, dict[str, Any] | None],
+    dict[str, dict[str, Any]],
+]:
+    workflow_run = record.get("workflow_run")
+    if not isinstance(workflow_run, dict) or not isinstance(workflow_run.get("run_id"), int):
+        raise ValueError("latest Compiled Graph review must identify its workflow run")
+    head_sha = workflow_run.get("head_sha")
+    if not isinstance(head_sha, str) or _GIT_OBJECT_RE.fullmatch(head_sha) is None:
+        raise ValueError("latest Compiled Graph review head_sha must be a full Git object ID")
+
+    artifacts = record.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ValueError("latest Compiled Graph review must retain at least one artifact")
+    expiries: dict[str, datetime] = {}
+    quarantined_artifacts: set[str] = set()
+    observed_capabilities: dict[str, dict[str, Any] | None] = {}
+    observations: dict[str, dict[str, Any]] = {}
+    run_id = workflow_run["run_id"]
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise ValueError("Compiled Graph review artifacts must be objects")
+        evidence_id = artifact.get("evidence_id")
+        if not isinstance(evidence_id, str) or not evidence_id:
+            raise ValueError("every Compiled Graph artifact requires an evidence_id")
+        if evidence_id in expiries:
+            raise ValueError(f"duplicate Compiled Graph evidence_id: {evidence_id}")
+        if not isinstance(artifact.get("quarantined"), bool):
+            raise ValueError(f"artifact {evidence_id} must record an explicit quarantine state")
+        if artifact["quarantined"]:
+            quarantined_artifacts.add(evidence_id)
+        artifact_id = artifact.get("artifact_id")
+        if not isinstance(artifact_id, int):
+            raise ValueError(f"artifact {evidence_id} requires a numeric artifact_id")
+        expected_evidence_id = f"github-actions:{run_id}:artifact:{artifact_id}"
+        if evidence_id != expected_evidence_id:
+            raise ValueError(f"artifact {evidence_id} does not match its run and artifact IDs")
+        if _SHA256_RE.fullmatch(str(artifact.get("archive_digest"))) is None:
+            raise ValueError(f"artifact {evidence_id} requires a SHA-256 archive digest")
+        archive_size = artifact.get("archive_size_bytes")
+        if not isinstance(archive_size, int) or archive_size <= 0:
+            raise ValueError(f"artifact {evidence_id} requires a positive archive byte size")
+        if not isinstance(artifact.get("job_id"), int):
+            raise ValueError(f"artifact {evidence_id} requires a numeric job_id")
+        artifact_url = artifact.get("artifact_url")
+        if not isinstance(artifact_url, str) or not artifact_url.endswith(
+            f"/artifacts/{artifact_id}"
+        ):
+            raise ValueError(f"artifact {evidence_id} requires its exact artifact URL")
+        expiries[evidence_id] = _parse_timestamp(
+            artifact.get("expires_at"), field=f"artifact {evidence_id} expires_at"
+        )
+        _parse_timestamp(artifact.get("created_at"), field=f"artifact {evidence_id} created_at")
+
+        observation = artifact.get("observation")
+        if not isinstance(observation, dict):
+            raise ValueError(f"artifact {evidence_id} requires a probe observation")
+        native_status = observation.get("native_probe_status")
+        if not isinstance(native_status, str) or native_status not in _PROBE_STATUSES:
+            raise ValueError(f"artifact {evidence_id} has an invalid native probe status")
+        if not isinstance(observation.get("result_verified"), bool):
+            raise ValueError(f"artifact {evidence_id} must record whether its result was verified")
+        if not isinstance(observation.get("adapter_eligible"), bool):
+            raise ValueError(f"artifact {evidence_id} must record adapter eligibility")
+        adapter_reason = observation.get("adapter_reason")
+        if not isinstance(adapter_reason, str) or not adapter_reason:
+            raise ValueError(f"artifact {evidence_id} must record an adapter reason")
+        missing_dimensions = observation.get("missing_dimensions")
+        if not isinstance(missing_dimensions, list) or any(
+            not isinstance(item, str) or not item for item in missing_dimensions
+        ):
+            raise ValueError(f"artifact {evidence_id} missing_dimensions must be a list of names")
+        if len(set(missing_dimensions)) != len(missing_dimensions):
+            raise ValueError(f"artifact {evidence_id} missing_dimensions cannot contain duplicates")
+        for field in ("topology", "submission_transport", "transport"):
+            if not isinstance(observation.get(field), str) or not observation[field]:
+                raise ValueError(f"artifact {evidence_id} must record observation {field}")
+        observations[evidence_id] = observation
+
+        observed_capability = artifact.get("observed_capability")
+        if observed_capability is not None:
+            if not isinstance(observed_capability, dict) or set(observed_capability) != (
+                _CAPABILITY_FIELDS
+            ):
+                raise ValueError(
+                    f"artifact {evidence_id} observed_capability must contain every exact dimension"
+                )
+            if any(
+                not isinstance(value, str) or not value for value in observed_capability.values()
+            ):
+                raise ValueError(
+                    f"artifact {evidence_id} observed capability dimensions must be non-empty"
+                )
+            expected_dimensions = {
+                "ray_version": artifact.get("ray_version"),
+                "topology": observation["topology"],
+                "submission_transport": observation["submission_transport"],
+                "transport": observation["transport"],
+            }
+            if any(
+                observed_capability[field] != expected
+                for field, expected in expected_dimensions.items()
+            ):
+                raise ValueError(
+                    f"artifact {evidence_id} observed capability conflicts with its observation"
+                )
+        observed_capabilities[evidence_id] = observed_capability
+
+        files = artifact.get("files")
+        if not isinstance(files, list):
+            raise ValueError(f"artifact {evidence_id} requires a file manifest")
+        paths: set[str] = set()
+        for retained_file in files:
+            if not isinstance(retained_file, dict):
+                raise ValueError(f"artifact {evidence_id} file entries must be objects")
+            file_path = retained_file.get("path")
+            if not isinstance(file_path, str):
+                raise ValueError(f"artifact {evidence_id} file paths must be strings")
+            if file_path in paths:
+                raise ValueError(f"artifact {evidence_id} contains a duplicate file path")
+            paths.add(file_path)
+            file_size = retained_file.get("size_bytes")
+            if not isinstance(file_size, int) or file_size < 0:
+                raise ValueError(f"artifact {evidence_id} file sizes must be integers")
+            if _BARE_SHA256_RE.fullmatch(str(retained_file.get("sha256"))) is None:
+                raise ValueError(f"artifact {evidence_id} files require SHA-256 hashes")
+        if paths != _EVIDENCE_FILES:
+            raise ValueError(
+                f"artifact {evidence_id} must retain environment.json, packages.txt, and probe.json"
+            )
+    return expiries, quarantined_artifacts, observed_capabilities, observations
+
+
+def _validate_maintenance_policy(record: dict[str, Any]) -> None:
+    maintenance = record.get("maintenance_policy")
+    if not isinstance(maintenance, dict) or maintenance.get("latest_review_wins") is not True:
+        raise ValueError("Compiled Graph review must declare that the latest review wins")
+    no_promotion = maintenance.get("no_promotion")
+    if (
+        not isinstance(no_promotion, dict)
+        or no_promotion.get("artifact_expiry_invalidates_policy") is not False
+    ):
+        raise ValueError("no-promotion reviews must remain safe after artifact expiry")
+    verified = maintenance.get("verified_rows")
+    required_true = {
+        "must_match_runtime_policy_exactly",
+        "evidence_ids_required",
+        "reviewed_on_required",
+        "revalidate_on_or_before_required",
+        "unexpired_artifacts_required",
+    }
+    if not isinstance(verified, dict) or any(
+        verified.get(field) is not True for field in required_true
+    ):
+        raise ValueError("verified Compiled Graph rows must retain strict maintenance gates")
+    if verified.get("quarantined_rows_allowed") is not False:
+        raise ValueError("quarantined Compiled Graph rows cannot remain verified")
+    triggers = maintenance.get("quarantine_triggers")
+    if not isinstance(triggers, list) or not triggers:
+        raise ValueError("Compiled Graph review must define quarantine triggers")
+
+
+def validate_compiled_graph_capability_review(root: Path, *, as_of: date | None = None) -> Path:
+    """Validate the latest review against the executable fail-closed policy."""
+    path, record, review_date = _latest_compiled_graph_review(root)
+    if record.get("schema_version") != 1:
+        raise ValueError(f"{path.name} has an unsupported schema version")
+    runtime_policy_version, runtime_schema_version, runtime_rows = _load_runtime_policy(root)
+    if record.get("policy_version") != runtime_policy_version:
+        raise ValueError("latest Compiled Graph review does not match the runtime policy version")
+    if record.get("capability_schema_version") != runtime_schema_version:
+        raise ValueError(
+            "latest Compiled Graph review does not match the capability schema version"
+        )
+    _validate_maintenance_policy(record)
+    (
+        artifact_expiries,
+        artifact_quarantines,
+        observed_capabilities,
+        observations,
+    ) = _validate_review_artifacts(record)
+
+    reviewed_rows = record.get("verified_capability_rows")
+    if not isinstance(reviewed_rows, list):
+        raise ValueError("verified_capability_rows must be a list")
+    capability_rows: list[dict[str, Any]] = []
+    today = as_of or date.today()
+    quarantined = record.get("quarantined_evidence_ids")
+    if not isinstance(quarantined, list) or any(not isinstance(item, str) for item in quarantined):
+        raise ValueError("quarantined_evidence_ids must be a list of evidence IDs")
+    if len(set(quarantined)) != len(quarantined):
+        raise ValueError("quarantined_evidence_ids cannot contain duplicates")
+    if set(quarantined) != artifact_quarantines:
+        raise ValueError("quarantined_evidence_ids must exactly match artifact quarantine states")
+
+    for row in reviewed_rows:
+        if not isinstance(row, dict):
+            raise ValueError("verified Compiled Graph rows must be objects")
+        capability = row.get("capability")
+        if not isinstance(capability, dict) or set(capability) != _CAPABILITY_FIELDS:
+            raise ValueError("each verified row must contain every exact capability dimension")
+        if any(not isinstance(value, str) or not value for value in capability.values()):
+            raise ValueError("verified capability dimensions must be non-empty strings")
+        capability_rows.append(capability)
+
+        evidence_ids = row.get("evidence_ids")
+        if not isinstance(evidence_ids, list) or not evidence_ids:
+            raise ValueError("every verified row requires at least one evidence ID")
+        if any(not isinstance(item, str) or item not in artifact_expiries for item in evidence_ids):
+            raise ValueError("verified row references unknown evidence")
+        if len(set(evidence_ids)) != len(evidence_ids):
+            raise ValueError("verified row evidence IDs cannot contain duplicates")
+        if any(observed_capabilities[item] != capability for item in evidence_ids):
+            raise ValueError("verified row does not exactly match its retained evidence")
+        if any(observations[item]["native_probe_status"] != "success" for item in evidence_ids):
+            raise ValueError("verified row evidence did not complete a successful native probe")
+        if any(observations[item]["result_verified"] is not True for item in evidence_ids):
+            raise ValueError("verified row evidence did not verify its native result")
+        if any(observations[item]["missing_dimensions"] for item in evidence_ids):
+            raise ValueError("verified row evidence has unresolved capability dimensions")
+        if any(
+            (
+                observation["adapter_eligible"] is True
+                and observation["adapter_reason"] != "ELIGIBLE"
+            )
+            or (
+                observation["adapter_eligible"] is False
+                and observation["adapter_reason"] != "CANDIDATE_REQUIRES_SMOKE"
+            )
+            for observation in (observations[item] for item in evidence_ids)
+        ):
+            raise ValueError(
+                "verified row evidence was neither eligible nor a complete unpromoted candidate"
+            )
+        row_reviewed_on = _parse_date(row.get("reviewed_on"), field="row reviewed_on")
+        if row_reviewed_on != review_date:
+            raise ValueError("verified row reviewed_on must match the latest review")
+        revalidate_on = _parse_date(
+            row.get("revalidate_on_or_before"), field="row revalidate_on_or_before"
+        )
+        if revalidate_on < review_date or today > revalidate_on:
+            raise ValueError("verified Compiled Graph evidence requires revalidation")
+        if row.get("quarantined") is not False:
+            raise ValueError("quarantined Compiled Graph rows cannot remain verified")
+        if any(item in quarantined for item in evidence_ids):
+            raise ValueError("verified row references quarantined evidence")
+        if any(artifact_expiries[item].date() <= today for item in evidence_ids):
+            raise ValueError("verified row references expired evidence")
+
+    canonical_review = sorted(
+        json.dumps(row, sort_keys=True, separators=(",", ":")) for row in capability_rows
+    )
+    canonical_runtime = sorted(
+        json.dumps(row, sort_keys=True, separators=(",", ":")) for row in runtime_rows
+    )
+    if canonical_review != canonical_runtime:
+        raise ValueError("reviewed capability rows do not exactly match the runtime policy")
+    expected_decision = "promote" if runtime_rows else "no_promotion"
+    if record.get("decision") != expected_decision:
+        raise ValueError(f"latest Compiled Graph review decision must be {expected_decision}")
+    return path
+
+
 def validate_release_version(root: Path, requested: str) -> str:
     """Validate a tag/manual input against pyproject and package versions."""
     requested_version = normalize_version(requested)
@@ -51,6 +421,7 @@ def validate_release_version(root: Path, requested: str) -> str:
     if len(set(versions.values())) != 1:
         details = ", ".join(f"{name}={version}" for name, version in versions.items())
         raise ValueError(f"release versions do not agree: {details}")
+    validate_compiled_graph_capability_review(root)
     return requested_version
 
 

@@ -636,6 +636,114 @@ def test_platform_investigation_retains_exact_measured_outcomes() -> None:
     assert record["nightly"]["run"] is False
 
 
+def test_capability_review_retains_exact_no_promotion_decision() -> None:
+    path = (
+        PROJECT_ROOT
+        / "docs"
+        / "investigations"
+        / "compiled-graph-capability-review-2026-07-20.json"
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+
+    assert record["schema_version"] == 1
+    assert record["policy_version"] == compiled_graph.COMPILED_GRAPH_POLICY_VERSION == 2
+    assert (
+        record["capability_schema_version"]
+        == compiled_graph.COMPILED_GRAPH_CAPABILITY_SCHEMA_VERSION
+        == 2
+    )
+    assert record["decision"] == "no_promotion"
+    assert record["verified_capability_rows"] == []
+    assert verified_compiled_graph_capability_rows() == ()
+    assert record["quarantined_evidence_ids"] == []
+
+    run = record["workflow_run"]
+    assert run["run_id"] == 29759326381
+    assert run["run_number"] == 182
+    assert run["run_attempt"] == 1
+    assert run["head_sha"] == "d54aa5d5e2d57a382e387bd0276e2dc16b61bd42"
+    assert run["synthetic_merge_sha"] == "776b2f69bfdc30763abfd466732fd58eae14e704"
+    assert run["tested_tree_sha"] == "e0820c5c07765d918476402f55446e8130b7923a"
+    assert run["repository_merge_sha"] == "90aba75696f39b4d77dd0ef39e604ad167b973c1"
+    assert run["runner"] == {
+        "requested_labels": ["ubuntu-latest"],
+        "image": "ubuntu-24.04",
+        "image_version": "20260714.240.1",
+        "immutable": False,
+    }
+
+    artifacts = {artifact["ray_version"]: artifact for artifact in record["artifacts"]}
+    expected = {
+        "2.53.0": {
+            "job_id": 88409701323,
+            "artifact_id": 8468065623,
+            "archive_size_bytes": 2545,
+            "archive_digest": (
+                "sha256:de17ac271b571a938400d81d42bc6ddbdcd27d6da928ceb7086e1c9488bb3c16"
+            ),
+            "files": {
+                "environment.json": "2f6486231cf05bdbc0b5ab456f24833b7f25d0e5102992a14e3f1c5a8bf3b24b",
+                "packages.txt": "9e77949e2eb08936433bb796a978f907d9cdf11bda60730c5721f8b88ae6631f",
+                "probe.json": "0edabddf2f9e6df27186bfc8a2c8135a748c7b22fd0fa88f3b94252d456b40db",
+            },
+        },
+        "2.56.0": {
+            "job_id": 88409701353,
+            "artifact_id": 8468066557,
+            "archive_size_bytes": 2304,
+            "archive_digest": (
+                "sha256:4430fefd13d1203cb2c84c9765da5eaa363fbdc0e30fc1117d323526966ccda9"
+            ),
+            "files": {
+                "environment.json": "9bf7206cc54ffdfbe7ecd9d2e34c6c063289e46520ffe5678d31cdd68a453722",
+                "packages.txt": "1644605ea4dff9ffa88ce1fa7a31b60f0f382318f23fce816134e0832bf6fa07",
+                "probe.json": "dafc55d392a4d1a823a256afe0f906e811421e10de434a99ec0f676c6f6e7c05",
+            },
+        },
+        "2.56.1": {
+            "job_id": 88409701415,
+            "artifact_id": 8468065248,
+            "archive_size_bytes": 2305,
+            "archive_digest": (
+                "sha256:e755fab0fe3b07ecf390fa193e2a409dc40232d3e83a8bc6db20e464a85d0bb5"
+            ),
+            "files": {
+                "environment.json": "a9a1dcdf11c2e6aeeefe7107e0467f25f6e74f77f64a263cf86ca7164191f228",
+                "packages.txt": "aa5255e36f5af57f33c05d1b8b43f01584bed9c296edd6b0d3c42857a2cdd6da",
+                "probe.json": "1319909b6b2ecb01c025b12005f4c59829921f2276c74d39e83e149ee2621da8",
+            },
+        },
+    }
+    assert set(artifacts) == set(expected)
+    for ray_version, expected_artifact in expected.items():
+        artifact = artifacts[ray_version]
+        assert artifact["job_id"] == expected_artifact["job_id"]
+        assert artifact["artifact_id"] == expected_artifact["artifact_id"]
+        assert artifact["archive_size_bytes"] == expected_artifact["archive_size_bytes"]
+        assert artifact["archive_digest"] == expected_artifact["archive_digest"]
+        assert artifact["artifact_url"].endswith(f"/artifacts/{artifact['artifact_id']}")
+        assert artifact["expires_at"] == "2026-10-18T16:22:37Z"
+        assert artifact["quarantined"] is False
+        assert {item["path"]: item["sha256"] for item in artifact["files"]} == (
+            expected_artifact["files"]
+        )
+        assert artifact["observation"]["native_probe_status"] == "success"
+        assert artifact["observation"]["adapter_eligible"] is False
+        assert artifact["observation"]["adapter_reason"] == "INCOMPLETE_CAPABILITY_CONTEXT"
+
+    maintenance = record["maintenance_policy"]
+    assert maintenance["no_promotion"]["artifact_expiry_invalidates_policy"] is False
+    assert maintenance["verified_rows"] == {
+        "must_match_runtime_policy_exactly": True,
+        "evidence_ids_required": True,
+        "reviewed_on_required": True,
+        "revalidate_on_or_before_required": True,
+        "unexpired_artifacts_required": True,
+        "quarantined_rows_allowed": False,
+    }
+    assert record["follow_up"]["issue"].endswith("/issues/102")
+
+
 def test_windows_reproducer_is_standalone_ray_only_python() -> None:
     path = PROJECT_ROOT / "docs" / "investigations" / "reproduce_ray_compiled_graph_windows.py"
     source = path.read_text(encoding="utf-8")
