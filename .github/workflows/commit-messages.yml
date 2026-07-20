@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   conventional-commits:
@@ -22,26 +21,21 @@ jobs:
         if: github.event_name == 'pull_request_target'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-          GH_TOKEN: ${{ github.token }}
-          COMMIT_JSON_FILE: ${{ runner.temp }}/commit-messages.json
-          COMMIT_PAGES_FILE: ${{ runner.temp }}/commit-pages.json
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          gh api --paginate --slurp \
-            "repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}/commits" \
-            > "$COMMIT_PAGES_FILE"
-          python - "$COMMIT_PAGES_FILE" "$COMMIT_JSON_FILE" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
+          pr_ref="refs/remotes/pull/${PR_NUMBER}/head"
+          git fetch --no-tags --force origin \
+            "refs/pull/${PR_NUMBER}/head:${pr_ref}"
 
-          pages = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          messages = [
-              commit["commit"]["message"]
-              for page in pages
-              for commit in page
-          ]
-          Path(sys.argv[2]).write_text(json.dumps(messages), encoding="utf-8")
-          PY
+          fetched_head="$(git rev-parse "$pr_ref")"
+          if [ "$fetched_head" != "$PR_HEAD_SHA" ]; then
+            echo "Fetched PR head does not match the event head SHA." >&2
+            exit 1
+          fi
+          git cat-file -e "${PR_BASE_SHA}^{commit}"
+
           python scripts/check_conventional_commits.py \
             --title "$PR_TITLE" \
-            --commit-json-file "$COMMIT_JSON_FILE"
+            --range "${PR_BASE_SHA}..${pr_ref}"
