@@ -438,13 +438,22 @@ benchmarks show that one in-flight call is the limiting factor.
 This decision changes documentation and adds only the opt-in topology probe. Product
 implementation remains split across the existing roadmap:
 
-1. #84 provides the effective-plan snapshot and graph identity.
-2. #70 provides strategy-neutral lifecycle hooks.
-3. #71 proves dedicated static actors and cross-invocation isolation without compiling.
-4. #85 defines compiled input/result/cancellation/drain semantics.
-5. #86 supplies the exact compatibility allowlist and subprocess isolation.
-6. #69/#87/#88 supply feasibility evidence and the adoption decision.
-7. #72 integrates an opt-in strategy only after those gates pass.
+1. [Issue #84](https://github.com/dariuszpanas/django-ray/issues/84) provides the
+   effective-plan snapshot and graph identity.
+2. [Issue #70](https://github.com/dariuszpanas/django-ray/issues/70) provides
+   strategy-neutral lifecycle hooks.
+3. [Issue #71](https://github.com/dariuszpanas/django-ray/issues/71) proves dedicated
+   static actors and cross-invocation isolation without compiling.
+4. [Issue #85](https://github.com/dariuszpanas/django-ray/issues/85) defines compiled
+   input/result/cancellation/drain semantics.
+5. [Issue #86](https://github.com/dariuszpanas/django-ray/issues/86) supplies the exact
+   compatibility allowlist and subprocess isolation.
+6. Issues [#69](https://github.com/dariuszpanas/django-ray/issues/69),
+   [#87](https://github.com/dariuszpanas/django-ray/issues/87), and
+   [#88](https://github.com/dariuszpanas/django-ray/issues/88) supply feasibility
+   evidence and the adoption decision.
+7. [Issue #72](https://github.com/dariuszpanas/django-ray/issues/72) integrates an
+   opt-in strategy only after those gates pass.
 
 Focused implementation child issues should separate the per-run owner controller,
 cluster-scoped admission budget, session observability, a live-cluster Ray
