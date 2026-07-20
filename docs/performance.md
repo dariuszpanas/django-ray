@@ -99,13 +99,38 @@ def process_one(item_id: int) -> int:
 fanout = map_step(
     process_one,
     ray_options={"num_cpus": 0.25},
+).with_limits(
+    max_concurrency=32,
+    max_items=10_000,
 )
 ```
+
+The map window limits submitted map items and retained result references. Results are
+collected incrementally but returned in input order. Nested groups can submit multiple
+physical tasks per item, so include their fixed branch count when sizing the window.
+Input admission starts only after `executor.resolve()`: an upstream Ray task still
+produces its complete list, which is transferred and deserialized into coordinator
+memory before fan-out begins. Only an iterator already available locally is pulled
+lazily. Remote or paged input materialization is tracked in
+[GitHub issue #94](https://github.com/dariuszpanas/django-ray/issues/94).
+
+The ordered result payload is still materialized in coordinator memory; a bounded
+in-Ray aggregation path is tracked in
+[GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91). Calling
+`map_step()` without `with_limits()` retains the legacy eager behavior.
 
 Use fractional CPUs only when a leaf is mostly waiting or deliberately shares a core.
 CPU-bound Python or native work should request realistic resources. An oversized
 concurrency value can increase memory pressure, API throttling, and retries without
 reducing wall-clock time.
+
+For an API-limited workload, map batches rather than individual tiny requests and keep
+the client's rate limiter enabled: a concurrency window bounds simultaneous batches,
+not requests per second. For Kubernetes synchronization, compare namespace-sized batches
+with `(namespace, resource_kind)` batches. Choose the smallest batch that still makes
+Ray scheduling overhead minor, and set `max_items` to reject accidental discovery
+explosions. See [Bound Dynamic Fan-Out](workflows.md#bound-dynamic-fan-out) for failure
+and cleanup semantics.
 
 Avoid passing large repeated values to every leaf. Put shared immutable data in Ray's
 object store once, or load it in a preceding workflow step and pass references through
