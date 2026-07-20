@@ -609,6 +609,7 @@ The public API remains source compatible while the plan boundary is introduced:
 | `group(a, b, ...)` | Static branches that receive the same input bindings and produce an ordered collect result. |
 | `map_step(x)` | One dynamic-map operator in the plan. Runtime expansion nodes and inventory values are invocation state and do not enter the plan fingerprint. |
 | `bounded_map.with_result_buffer(...)` | Link the dynamic map's existing actor-layout slot to one versioned physical result-buffer actor contract. Local execution fingerprints the selection but does not create the actor or enforce its retained-byte measurement. |
+| `bounded_map.reduce(step(...), initial=..., ...)` | Link the actor-layout slot to a versioned strict ordered-fold contract. The reducer callable/bootstrap/bound schema and resolved RuntimeEnv, actor resources and placement, serialized bounds, incorporation-credit ordering, lifetime/restart policy, and direct-return semantics are fingerprinted. The initial value remains invocation data and only its required binding schema is recorded. |
 | `signature.run(*args, **kwargs)` | Materialize/validate a plan, create one invocation envelope, choose a strategy, execute, and return the same concrete result. |
 | `use_ray=False` | Select the local strategy for deterministic tests; it does not create a different task type. |
 
@@ -619,6 +620,13 @@ at the attribute level and now deep-freeze plan-relevant RuntimeEnv and Ray-opti
 mappings. Bound application values remain invocation data and may contain ordinary
 mutable objects. The materialized plan, rather than the signature object, remains the
 durable immutable boundary.
+
+The ordered-fold actor uses the physical-topology and actor-contract extensibility slots
+introduced in plan format version 1, so adding it does not reinterpret any existing plan
+field and does not require a `PLAN_FORMAT_VERSION` increment. Its own protocol and codec
+versions are explicit inside the actor contract. Overflow snapshots omit expanded actor
+details, retain separate result-buffer and result-fold counts, and preserve the complete
+omitted identity through `snapshot.source_digest`.
 
 A dotted callable supplied only by a step RuntimeEnv does not need to import on the
 Django submitter. It materializes as worker-only code and remains dynamically

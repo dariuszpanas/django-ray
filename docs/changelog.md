@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the two-return protocol are fingerprinted for durable retry drift. Terminal and
   final-consumer memory remains O(total output); chunk/reducer transport and production
   benchmarking remain tracked separately.
+- Bounded maps can now opt into a strict input-order `reduce()` contract backed by one
+  resource-accounted Ray actor. Incorporation-based admission bounds out-of-order
+  retention, the coordinator forwards mapped values without decoding them, and one
+  direct accumulator reference replaces the complete intermediate list. Reducer
+  callable and RuntimeEnv identity, initial binding schema, byte and item bounds,
+  actor placement/lifetime, ordering, credits, and finalization semantics participate
+  in durable plan identity; local execution remains actor-free.
 - Native Django task priority scheduling with durable `-100` through `100` priorities,
   higher-value-first claims, and FIFO ordering within equal priorities.
 - Validated worker polling intervals, bounded jittered idle backoff, and a PostgreSQL

@@ -222,6 +222,91 @@ class _Executor(ABC):
         """Best-effort cleanup for a failed or cancelled result-buffer map."""
         return None
 
+    def start_result_fold(
+        self,
+        *,
+        max_items: int,
+        max_concurrency: int,
+        max_serialized_bytes: int,
+        actor_options: Mapping[str, Any],
+        reducer: Step,
+        reducer_node_id: str,
+        initial: Any,
+    ) -> Any | None:
+        """Reserve a Ray result-fold actor, or return ``None`` locally."""
+        del (
+            max_items,
+            max_concurrency,
+            max_serialized_bytes,
+            actor_options,
+            reducer_node_id,
+            initial,
+        )
+        if reducer.bootstrap_django:
+            from django_ray.runtime.entrypoint import bootstrap_django
+
+            bootstrap_django()
+        reducer_callable = import_callable(reducer.callable_path)
+        import inspect
+
+        if (
+            inspect.iscoroutinefunction(reducer_callable)
+            or inspect.isgeneratorfunction(reducer_callable)
+            or inspect.isasyncgenfunction(reducer_callable)
+        ):
+            raise WorkflowDefinitionError(
+                "reduce requires a synchronous non-generator reducer callable"
+            )
+        return None
+
+    def wait_result_fold_leaf(self, values: Sequence[Any]) -> int:
+        """Select a ready fold leaf without resolving it in the coordinator."""
+        return self.wait_one(values)
+
+    def append_result_fold(
+        self,
+        fold: Any,
+        *,
+        index: int,
+        value: Any,
+    ) -> int:
+        """Return the total number of items incorporated by the ordered fold."""
+        raise NotImplementedError
+
+    def finalize_result_fold(self, fold: Any, *, expected_items: int) -> Any:
+        """Return the unresolved accumulator from a finalized Ray fold."""
+        raise NotImplementedError
+
+    def discard_result_fold(self, fold: Any, *, timeout_seconds: float) -> None:
+        """Best-effort cleanup for a failed or cancelled result-fold map."""
+        return None
+
+    def reduce_local(self, signature: Step, accumulator: Any, item: Any) -> Any:
+        """Apply a reducer Step directly for actor-free local execution."""
+        if signature.bootstrap_django:
+            from django_ray.runtime.entrypoint import bootstrap_django
+
+            bootstrap_django()
+        callable_obj = import_callable(signature.callable_path)
+        value = callable_obj(
+            accumulator,
+            item,
+            *signature.bound_args,
+            **signature.bound_kwargs,
+        )
+        from django_ray.runtime.result_fold import validate_result_fold_value
+
+        return validate_result_fold_value(value)
+
+    def cancel_and_drain_fold_payloads(
+        self,
+        values: Sequence[Any],
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        """Best-effort payload-safe cleanup for failed result folds."""
+        return None
+
     def cancel_and_drain(
         self,
         values: Sequence[Any],
@@ -334,6 +419,7 @@ _execute_workflow_step_remote_cached = None
 _collect_workflow_results_remote_cached = None
 _workflow_progress_actor_cached = None
 _workflow_result_buffer_actor_cached = None
+_workflow_result_fold_actor_cached = None
 
 
 def _get_cached_workflow_remotes() -> tuple[Any, Any, Any]:
@@ -373,11 +459,36 @@ def _get_cached_result_buffer_actor() -> Any:
     return _workflow_result_buffer_actor_cached
 
 
+def _get_cached_result_fold_actor() -> Any:
+    global _workflow_result_fold_actor_cached
+
+    if _workflow_result_fold_actor_cached is None:
+        import ray
+
+        from django_ray.runtime.result_fold import WorkflowMapResultFold
+
+        _workflow_result_fold_actor_cached = ray.remote(WorkflowMapResultFold)
+    return _workflow_result_fold_actor_cached
+
+
 @dataclass
 class _RayResultBufferSession:
     """One live buffer actor owned by this workflow coordinator."""
 
     actor: Any
+    closed: bool = False
+
+
+@dataclass
+class _RayResultFoldSession:
+    """One live ordered-fold actor owned by this workflow coordinator."""
+
+    actor: Any
+    maximum_items: int
+    maximum_concurrency: int
+    maximum_out_of_order_items: int
+    maximum_serialized_bytes: int
+    folded_items: int = 0
     closed: bool = False
 
 
@@ -762,6 +873,256 @@ class _RayExecutor(_Executor):
                 pass
             buffer.closed = True
 
+    def _result_fold_runtime_env(self, reducer: Step, reducer_node_id: str) -> Any | None:
+        materialized_plan = getattr(self, "materialized_plan", None)
+        binding = (
+            materialized_plan.binding_for_node(reducer_node_id)
+            if materialized_plan is not None
+            else None
+        )
+        if binding is not None:
+            if binding.runtime_env_serialized is None:
+                return None
+            from django_ray.runtime.runtime_env import (
+                normalize_runtime_env,
+                prepare_runtime_env_for_ray_core,
+            )
+
+            resolved = normalize_runtime_env(
+                json.loads(binding.runtime_env_serialized),
+                profile=binding.runtime_env_profile,
+                source=f"materialized workflow reducer {reducer_node_id} RuntimeEnv",
+            )
+            return prepare_runtime_env_for_ray_core(resolved)
+
+        if reducer.runtime_env is None:
+            return None
+        from django_ray.runtime.runtime_env import (
+            normalize_runtime_env,
+            prepare_runtime_env_for_ray_core,
+            resolve_runtime_env_profile,
+        )
+
+        resolved = (
+            resolve_runtime_env_profile(reducer.runtime_env)
+            if isinstance(reducer.runtime_env, str)
+            else normalize_runtime_env(
+                _thaw_definition_value(reducer.runtime_env),
+                source=f"workflow reducer {reducer_node_id} RuntimeEnv",
+            )
+        )
+        return prepare_runtime_env_for_ray_core(resolved)
+
+    def start_result_fold(
+        self,
+        *,
+        max_items: int,
+        max_concurrency: int,
+        max_serialized_bytes: int,
+        actor_options: Mapping[str, Any],
+        reducer: Step,
+        reducer_node_id: str,
+        initial: Any,
+    ) -> _RayResultFoldSession:
+        from django_ray.runtime.result_fold import (
+            result_fold_ray_actor_options,
+            validate_result_fold_ack,
+        )
+
+        ray_options = result_fold_ray_actor_options(actor_options)
+        runtime_env = self._result_fold_runtime_env(reducer, reducer_node_id)
+        if runtime_env is not None:
+            ray_options["runtime_env"] = runtime_env
+        actor_cls = _get_cached_result_fold_actor()
+        actor = actor_cls.options(**ray_options).remote(
+            max_items,
+            max_concurrency,
+            max_serialized_bytes,
+            reducer.callable_path,
+            reducer.bootstrap_django,
+            reducer.bound_args,
+            dict(reducer.bound_kwargs),
+            initial,
+        )
+        session = _RayResultFoldSession(
+            actor=actor,
+            maximum_items=max_items,
+            maximum_concurrency=max_concurrency,
+            maximum_out_of_order_items=min(max_items - 1, max_concurrency - 1),
+            maximum_serialized_bytes=max_serialized_bytes,
+        )
+        ready_ref = None
+        try:
+            ready_ref = actor.ready.remote()
+            ready = validate_result_fold_ack(self.resolve(ready_ref), state="ready")
+            if (
+                ready["folded_items"] != 0
+                or ready["out_of_order_items"] != 0
+                or ready["retained_bytes"] > max_serialized_bytes
+            ):
+                from django_ray.runtime.result_fold import ResultFoldProtocolError
+
+                raise ResultFoldProtocolError(
+                    "Result-fold ready acknowledgement reported invalid initial state"
+                )
+        except BaseException:
+            if ready_ref is not None:
+                try:
+                    self.ray.cancel(ready_ref, force=False, recursive=True)
+                except BaseException:
+                    pass
+            self.discard_result_fold(session, timeout_seconds=0)
+            raise
+        return session
+
+    def wait_result_fold_leaf(self, values: Sequence[Any]) -> int:
+        ready = self._wait_result_buffer_refs(values, num_returns=1)
+        return values.index(ready[0])
+
+    def append_result_fold(
+        self,
+        fold: _RayResultFoldSession,
+        *,
+        index: int,
+        value: Any,
+    ) -> int:
+        from django_ray.runtime.result_fold import (
+            ResultFoldProtocolError,
+            validate_result_fold_ack,
+        )
+
+        ack_ref = fold.actor.append.remote(index, value)
+        try:
+            ack = self.resolve(ack_ref)
+            validated = validate_result_fold_ack(
+                ack,
+                state="folded",
+                expected_index=index,
+            )
+        except BaseException:
+            try:
+                self.ray.cancel(ack_ref, force=False, recursive=True)
+            except BaseException:
+                pass
+            raise
+        folded_items = int(validated["folded_items"])
+        released_credits = int(validated["released_credits"])
+        if released_credits != folded_items - fold.folded_items:
+            raise ResultFoldProtocolError(
+                "Result-fold acknowledgement released an invalid admission credit count"
+            )
+        if released_credits > fold.maximum_concurrency:
+            raise ResultFoldProtocolError(
+                "Result-fold acknowledgement released too many admission credits"
+            )
+        if folded_items > fold.maximum_items:
+            raise ResultFoldProtocolError(
+                "Result-fold acknowledgement exceeded the declared item bound"
+            )
+        if int(validated["out_of_order_items"]) > fold.maximum_out_of_order_items:
+            raise ResultFoldProtocolError(
+                "Result-fold acknowledgement exceeded the out-of-order retention bound"
+            )
+        if int(validated["retained_bytes"]) > fold.maximum_serialized_bytes:
+            raise ResultFoldProtocolError(
+                "Result-fold acknowledgement exceeded the serialized-byte bound"
+            )
+        fold.folded_items = folded_items
+        return folded_items
+
+    def cancel_and_drain_fold_payloads(
+        self,
+        values: Sequence[Any],
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        for value in values:
+            try:
+                self.ray.cancel(value, force=False, recursive=True)
+            except BaseException:
+                pass
+        if not values:
+            return
+        # Fold cleanup must not fetch or ray.get mapped payloads in the outer
+        # coordinator, including error paths.
+        self.ray.wait(
+            list(values),
+            num_returns=len(values),
+            timeout=timeout_seconds,
+            fetch_local=False,
+        )
+
+    def finalize_result_fold(
+        self,
+        fold: _RayResultFoldSession,
+        *,
+        expected_items: int,
+    ) -> Any:
+        from django_ray.runtime.result_fold import validate_result_fold_ack
+
+        payload_ref, ack_ref = fold.actor.finalize.options(num_returns=2).remote(expected_items)
+        try:
+            self._wait_result_buffer_refs(
+                [payload_ref, ack_ref],
+                num_returns=2,
+            )
+            ack = self.resolve(ack_ref)
+            validated = validate_result_fold_ack(
+                ack,
+                state="finalized",
+                expected_items=expected_items,
+            )
+            if int(validated["retained_bytes"]) > fold.maximum_serialized_bytes:
+                from django_ray.runtime.result_fold import ResultFoldProtocolError
+
+                raise ResultFoldProtocolError(
+                    "Result-fold final acknowledgement exceeded the serialized-byte bound"
+                )
+        except BaseException:
+            for value in (payload_ref, ack_ref):
+                try:
+                    self.ray.cancel(value, force=False, recursive=True)
+                except BaseException:
+                    pass
+            raise
+
+        try:
+            self.ray.kill(fold.actor, no_restart=True)
+        except BaseException:
+            pass
+        fold.closed = True
+        return payload_ref
+
+    def discard_result_fold(
+        self,
+        fold: _RayResultFoldSession,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        if fold.closed:
+            return
+        try:
+            discard_ref = fold.actor.discard.remote()
+            ready, _ = self.ray.wait(
+                [discard_ref],
+                num_returns=1,
+                timeout=timeout_seconds,
+                fetch_local=False,
+            )
+            if ready:
+                try:
+                    self.ray.get(discard_ref)
+                except BaseException:
+                    pass
+        except BaseException:
+            pass
+        finally:
+            try:
+                self.ray.kill(fold.actor, no_restart=True)
+            except BaseException:
+                pass
+            fold.closed = True
+
     def cancel_and_drain(
         self,
         values: Sequence[Any],
@@ -1140,6 +1501,19 @@ class _MapResultBuffer:
 
 
 @dataclass(frozen=True)
+class _MapResultFold:
+    """Immutable public-builder selection for the v1 ordered result fold."""
+
+    reducer: Step
+    initial: Any
+    max_serialized_bytes: int
+    actor_options: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "actor_options", _freeze_definition_value(self.actor_options))
+
+
+@dataclass(frozen=True)
 class Map(WorkflowSignature):
     """Fan out one signature over an iterable produced by an earlier stage."""
 
@@ -1148,16 +1522,19 @@ class Map(WorkflowSignature):
     max_items: int | None = None
     cancel_timeout_seconds: float = 1.0
     result_buffer: _MapResultBuffer | None = None
+    result_fold: _MapResultFold | None = None
 
     def __post_init__(self) -> None:
         _validate_map_limit("max_concurrency", self.max_concurrency, minimum=1)
         _validate_map_limit("max_items", self.max_items, minimum=1)
         _validate_map_cancel_timeout(self.cancel_timeout_seconds)
-        if self.result_buffer is not None and (
+        if self.result_buffer is not None and self.result_fold is not None:
+            raise ValueError("Result-buffer and result-fold modes are mutually exclusive")
+        if (self.result_buffer is not None or self.result_fold is not None) and (
             self.max_concurrency is None or self.max_items is None
         ):
             raise ValueError(
-                "with_result_buffer requires positive max_concurrency and max_items limits"
+                "Actor-backed map results require positive max_concurrency and max_items limits"
             )
 
     def with_limits(
@@ -1176,6 +1553,7 @@ class Map(WorkflowSignature):
             max_items=max_items,
             cancel_timeout_seconds=cancel_timeout_seconds,
             result_buffer=self.result_buffer,
+            result_fold=self.result_fold,
         )
 
     def with_result_buffer(
@@ -1185,6 +1563,8 @@ class Map(WorkflowSignature):
         actor_options: Mapping[str, Any],
     ) -> Map:
         """Keep bounded Ray map results in a resource-accounted actor."""
+        if self.result_fold is not None:
+            raise ValueError("Result-buffer and result-fold modes are mutually exclusive")
         if self.max_concurrency is None or self.max_items is None:
             raise ValueError(
                 "with_result_buffer requires positive max_concurrency and max_items limits"
@@ -1205,6 +1585,72 @@ class Map(WorkflowSignature):
             max_items=self.max_items,
             cancel_timeout_seconds=self.cancel_timeout_seconds,
             result_buffer=_MapResultBuffer(
+                max_serialized_bytes=max_serialized_bytes,
+                actor_options=normalized_options,
+            ),
+            result_fold=None,
+        )
+
+    def reduce(
+        self,
+        reducer: Step,
+        *,
+        initial: Any,
+        max_serialized_bytes: int,
+        actor_options: Mapping[str, Any],
+    ) -> Map:
+        """Fold bounded map results in strict input order inside one Ray actor."""
+        if self.result_buffer is not None:
+            raise ValueError("Result-buffer and result-fold modes are mutually exclusive")
+        if self.result_fold is not None:
+            raise ValueError("A result fold is already configured for this map")
+        if self.max_concurrency is None or self.max_items is None:
+            raise ValueError("reduce requires positive max_concurrency and max_items limits")
+        if not isinstance(reducer, Step):
+            raise TypeError("reduce requires one Step reducer")
+        if reducer.ray_options:
+            fields = ", ".join(sorted(str(field) for field in reducer.ray_options))
+            raise WorkflowDefinitionError(
+                "reduce does not support reducer Ray task options; configure actor_options "
+                f"instead (unsupported: {fields})"
+            )
+        import inspect
+
+        try:
+            reducer_callable = import_callable(reducer.callable_path)
+        except (ImportError, AttributeError):
+            # A reducer may be supplied only by its effective RuntimeEnv. The
+            # actor repeats this validation after that environment is installed
+            # and before its readiness acknowledgement admits mapper effects.
+            pass
+        else:
+            if (
+                inspect.iscoroutinefunction(reducer_callable)
+                or inspect.isgeneratorfunction(reducer_callable)
+                or inspect.isasyncgenfunction(reducer_callable)
+            ):
+                raise WorkflowDefinitionError(
+                    "reduce requires a synchronous non-generator reducer callable"
+                )
+        if isinstance(max_serialized_bytes, bool) or not isinstance(max_serialized_bytes, int):
+            raise TypeError("max_serialized_bytes must be an integer")
+        if max_serialized_bytes < 1:
+            raise ValueError("max_serialized_bytes must be at least 1")
+        from django_ray.runtime.result_fold import normalize_result_fold_actor_options
+
+        normalized_options = normalize_result_fold_actor_options(
+            actor_options,
+            max_serialized_bytes=max_serialized_bytes,
+        )
+        return Map(
+            self.signature,
+            max_concurrency=self.max_concurrency,
+            max_items=self.max_items,
+            cancel_timeout_seconds=self.cancel_timeout_seconds,
+            result_buffer=None,
+            result_fold=_MapResultFold(
+                reducer=reducer,
+                initial=initial,
                 max_serialized_bytes=max_serialized_bytes,
                 actor_options=normalized_options,
             ),
@@ -1270,12 +1716,15 @@ class Map(WorkflowSignature):
         label = f"map:{_signature_label(self.signature)}"
         pending: list[tuple[int, _Submission, tuple[Any, ...]]] = []
         ordered_results: list[Any] | None = None
+        fold_accumulator = None
+        fold_ready_results: dict[int, Any] = {}
         submitted = 0
         completed = 0
         input_exhausted = False
         resolving_cleanup: tuple[Any, ...] = ()
         admitting_cleanup: list[Any] | None = None
         result_buffer = None
+        result_fold = None
         executor.map_started(
             node_id,
             label,
@@ -1292,12 +1741,38 @@ class Map(WorkflowSignature):
                     max_serialized_bytes=self.result_buffer.max_serialized_bytes,
                     actor_options=_thaw_definition_value(self.result_buffer.actor_options),
                 )
-            if result_buffer is None:
+            elif self.result_fold is not None:
+                assert self.max_items is not None
+                assert self.max_concurrency is not None
+                result_fold = executor.start_result_fold(
+                    max_items=self.max_items,
+                    max_concurrency=self.max_concurrency,
+                    max_serialized_bytes=self.result_fold.max_serialized_bytes,
+                    actor_options=_thaw_definition_value(self.result_fold.actor_options),
+                    reducer=self.result_fold.reducer,
+                    reducer_node_id=f"{node_id}.reducer",
+                    initial=self.result_fold.initial,
+                )
+                if result_fold is None:
+                    from django_ray.runtime.result_fold import clone_result_fold_initial
+
+                    # Local mode deliberately skips the Ray retained-byte limit,
+                    # but validates and clones the invocation value before leaves.
+                    fold_accumulator = clone_result_fold_initial(self.result_fold.initial)
+            if result_buffer is None and self.result_fold is None:
                 ordered_results = []
 
             while pending or not input_exhausted:
                 while not input_exhausted and (
-                    self.max_concurrency is None or len(pending) < self.max_concurrency
+                    (
+                        self.result_fold is not None
+                        and self.max_concurrency is not None
+                        and submitted - completed < self.max_concurrency
+                    )
+                    or (
+                        self.result_fold is None
+                        and (self.max_concurrency is None or len(pending) < self.max_concurrency)
+                    )
                 ):
                     try:
                         item = next(iterator)
@@ -1348,21 +1823,48 @@ class Map(WorkflowSignature):
 
                 pending_values = [result.value for _, result, _ in pending]
                 ready_index = (
-                    executor.wait_result_buffer_leaf(pending_values)
-                    if result_buffer is not None
-                    else executor.wait_one(pending_values)
+                    executor.wait_result_fold_leaf(pending_values)
+                    if result_fold is not None
+                    else (
+                        executor.wait_result_buffer_leaf(pending_values)
+                        if result_buffer is not None
+                        else executor.wait_one(pending_values)
+                    )
                 )
                 result_index, result, resolving_cleanup = pending.pop(ready_index)
-                if result_buffer is not None:
+                if result_fold is not None:
+                    folded_items = executor.append_result_fold(
+                        result_fold,
+                        index=result_index,
+                        value=result.value,
+                    )
+                    if folded_items < completed or folded_items > submitted:
+                        from django_ray.runtime.result_fold import ResultFoldProtocolError
+
+                        raise ResultFoldProtocolError(
+                            "Result-fold acknowledgement reported an invalid incorporated count"
+                        )
+                    completed = folded_items
+                elif self.result_fold is not None:
+                    fold_ready_results[result_index] = executor.resolve_ready(result.value)
+                    while completed in fold_ready_results:
+                        fold_accumulator = executor.reduce_local(
+                            self.result_fold.reducer,
+                            fold_accumulator,
+                            fold_ready_results.pop(completed),
+                        )
+                        completed += 1
+                elif result_buffer is not None:
                     executor.append_result_buffer(
                         result_buffer,
                         index=result_index,
                         value=result.value,
                     )
+                    completed += 1
                 else:
                     assert ordered_results is not None
                     ordered_results[result_index] = executor.resolve_ready(result.value)
-                completed += 1
+                    completed += 1
                 resolving_cleanup = ()
                 executor.map_progress(
                     node_id,
@@ -1372,7 +1874,20 @@ class Map(WorkflowSignature):
                     input_exhausted=input_exhausted,
                 )
 
-            if result_buffer is not None:
+            if result_fold is not None:
+                value = executor.finalize_result_fold(
+                    result_fold,
+                    expected_items=submitted,
+                )
+            elif self.result_fold is not None:
+                if completed != submitted or fold_ready_results:
+                    from django_ray.runtime.result_fold import ResultFoldProtocolError
+
+                    raise ResultFoldProtocolError(
+                        "Local result-fold finalization found missing or unexpected item indices"
+                    )
+                value = executor.store(fold_accumulator)
+            elif result_buffer is not None:
                 value = executor.finalize_result_buffer(
                     result_buffer,
                     expected_items=submitted,
@@ -1386,16 +1901,30 @@ class Map(WorkflowSignature):
             cleanup_values.extend(resolving_cleanup)
             cleanup_values.extend(cleanup for _, _, values in pending for cleanup in values)
             try:
-                executor.cancel_and_drain(
-                    cleanup_values,
-                    timeout_seconds=self.cancel_timeout_seconds,
-                )
+                if self.result_fold is not None:
+                    executor.cancel_and_drain_fold_payloads(
+                        cleanup_values,
+                        timeout_seconds=self.cancel_timeout_seconds,
+                    )
+                else:
+                    executor.cancel_and_drain(
+                        cleanup_values,
+                        timeout_seconds=self.cancel_timeout_seconds,
+                    )
             except BaseException:
                 pass
             if result_buffer is not None:
                 try:
                     executor.discard_result_buffer(
                         result_buffer,
+                        timeout_seconds=self.cancel_timeout_seconds,
+                    )
+                except BaseException:
+                    pass
+            if result_fold is not None:
+                try:
+                    executor.discard_result_fold(
+                        result_fold,
                         timeout_seconds=self.cancel_timeout_seconds,
                     )
                 except BaseException:

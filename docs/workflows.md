@@ -230,6 +230,102 @@ best effort on failure or cancellation. Non-detached ownership also cleans the a
 when its owner dies, but the protocol makes no cleanup, recovery, or durability
 guarantee after node loss.
 
+### Opt-in ordered result fold
+
+When a workflow needs one compact summary rather than the complete mapped list, call
+`reduce()` on a bounded map:
+
+```python
+sync_resources = chain(
+    step(list_namespaces),
+    map_step(sync_namespace, ray_options={"num_cpus": 0.25})
+    .with_limits(max_concurrency=8, max_items=500)
+    .reduce(
+        step(
+            merge_sync_summary,
+            runtime_env="kubernetes-sync",
+        ),
+        initial=empty_sync_summary,
+        max_serialized_bytes=8 * 1024 * 1024,
+        actor_options={
+            "num_cpus": 0.25,
+            "memory": 16 * 1024 * 1024,
+            "scheduling_strategy": "SPREAD",
+        },
+    ),
+    step(store_sync_summary),
+)
+```
+
+`reduce()` changes the map result from `list[item]` to one accumulator. It requires
+positive `max_concurrency`, `max_items`, and `max_serialized_bytes` limits, an explicit
+`initial` value (including explicit `None` when appropriate), the same narrow
+resource-accounted `actor_options` accepted by `with_result_buffer()`, and exactly one
+`Step` reducer. The reducer contract is a strict input-order left fold:
+
+```python
+reducer(accumulator, item, *bound_args, **bound_kwargs) -> accumulator
+```
+
+The reducer must be synchronous and return a concrete non-generator value. Reducer Ray
+task options are rejected because it runs inside the fold actor, not as a separate Ray
+task. Its importable callable identity, Django bootstrap flag, bound-argument schema,
+and resolved effective RuntimeEnv are applied to and fingerprinted with that actor.
+Actor-internal calls do not create per-item progress nodes, and `report_progress()` or
+durable workflow task context inside the reducer is unsupported in version 1. Reducers
+should be pure: retries or failures do not provide exactly-once reducer side effects.
+
+The initial accumulator is invocation data. Its value is cloudpickled and validated by
+the actor before any mapper leaf is admitted, but it is never persisted in the effective
+plan or included in the plan fingerprint. The plan records only the required initial
+binding schema. Local execution also cloudpickle round-trips the initial value before
+leaves so every run receives a fresh decoded accumulator, and it imports and validates
+the reducer before mapper effects. A reducer supplied only by a RuntimeEnv is therefore
+Ray-only. Local mode does not create an actor or enforce the Ray retained-byte limit.
+
+Leaves may finish in any order, but the actor keeps its accumulator serialized and folds
+only the next contiguous input index. Admission credits are replenished only when items
+are incorporated. If the earliest item is slow, no more than
+`min(max_items - 1, max_concurrency - 1)` later results can be retained, and no more than
+`max_concurrency` mapper references remain admitted. This head-of-line backpressure is
+intentional: the reducer need not be associative or commutative, so a parallel tree
+reduction would change behavior.
+
+The actor still executes protocol transitions serially with `max_concurrency=1`, and the
+coordinator completely resolves each small acknowledgement before issuing the next
+transition. `max_pending_calls=2` leaves one per-handle bookkeeping slot for Ray to retire
+a completed prior call without rejecting its successor; it does not permit two
+fold transitions to execute concurrently.
+
+`max_serialized_bytes` covers the serialized accumulator plus serialized out-of-order
+items retained by the actor. Initial, individual item, resulting accumulator, and
+combined-state checks are transactional: state changes only after the complete
+contiguous fold candidate succeeds. Overflow can still be completion-order-sensitive.
+For example, an early large out-of-order result may fail the combined-state check before
+the missing earlier item can reduce the accumulator. A schedule-independent byte limit
+would require a different deferred/backpressure protocol. The limit does not hard-cap
+temporary decoded actor heap, reducer working memory, serialization scratch space, Ray
+wire bytes, or object-store bytes. Ray's scheduler `memory` request remains placement
+accounting rather than process enforcement.
+
+The coordinator waits for leaves with `ray.wait(..., fetch_local=False)`, resolves only
+small protocol acknowledgements, and never decodes mapped items or the intermediate
+accumulator. Finalization returns the accumulator and acknowledgement as two direct Ray
+returns; one unresolved accumulator reference becomes the single dependency of a
+downstream Ray step. A terminal fold necessarily resolves that one accumulator in
+`run()`, so its final size still matters, but no O(total item) list is constructed.
+
+Fold mode and `with_result_buffer()` are mutually exclusive. A version 1 fold cannot be
+nested inside a dynamic map, and its mapper cannot itself contain a dynamic map; plan
+materialization rejects both shapes before actor or leaf effects. Static `chain` and
+`group` mapper bodies remain supported. Mapper, reducer, actor, byte-limit, and
+cancellation failures stop admission, recursively cancel pending nested dependencies
+without fetching their payloads into the coordinator, discard actor state, and preserve
+the original exception. Non-detached ownership and fixed no-restart semantics match the
+result-buffer protocol. List-preserving chunk or hierarchical transport remains in
+[GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91), and production
+evidence remains in [GitHub issue #87](https://github.com/dariuszpanas/django-ray/issues/87).
+
 Calling `map_step()` without `with_limits()` retains the original eager behavior for
 compatibility. New dynamic workloads should normally choose an explicit window and an
 input cap. Local execution preserves inputs, ordered outputs, limits, and failures but
