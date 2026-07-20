@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "recorded_on": "2026-07-19",
+  "scope": "Compatibility observations only; this is not a support claim.",
+  "policy_effect": "none; policy version 2 remains fail-closed",
+  "completeness": {
+    "complete": false,
+    "promotion_eligible": false,
+    "fresh_windows_rerun_required_for_upstream_report": true,
+    "follow_up_owner": "#100",
+    "follow_up_due_on": "2026-07-27",
+    "blocks_issue_86_or_pr_92": false,
+    "blocks_linux_kubernetes_promotion": false,
+    "limitations": [
+      "Raw Windows stdout and stderr logs were not retained.",
+      "The exact Windows dependency inventory and v2 ABI, libc, specific-container, immutable-deployment, shared-memory, and object-store profiles were not retained.",
+      "The Windows observations cannot populate or promote a policy v2 verified capability row."
+    ]
+  },
+  "environments": [
+    {
+      "id": "linux-actions-29714241117",
+      "source": "GitHub Actions required candidate smoke",
+      "source_url": "https://github.com/dariuszpanas/django-ray/actions/runs/29714241117",
+      "source_commit": "7fc0071f7d06c2ffb0e37ba44f6f3029841873db",
+      "platform": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+      "architecture": "x86_64",
+      "python": "3.12.13 (main, Jun 23 2026, 15:18:55) [Clang 22.1.3 ]",
+      "transport": "cpu-shared-memory",
+      "parent_timeout_seconds": 90,
+      "shared_package_versions": {
+        "cupy-cuda12x": "14.1.1",
+        "numpy": "2.5.1"
+      }
+    },
+    {
+      "id": "windows-local",
+      "source": "Local subprocess-isolated investigation",
+      "platform": {
+        "operating_system": "Windows 11",
+        "os_build": "26200",
+        "architecture": "AMD64"
+      },
+      "python_version": "3.12.12",
+      "interpreter": ".venv\\Scripts\\python.exe",
+      "transport": "cpu-shared-memory",
+      "parent_timeout_seconds": 60,
+      "compile_api": "DAGNode.experimental_compile()",
+      "shared_failure_site": "ray.experimental.channel.shared_memory_channel.ensure_registered_as_writer"
+    }
+  ],
+  "outcomes": [
+    {
+      "environment_id": "linux-actions-29714241117",
+      "ray_version": "2.53.0",
+      "compiler_owner": "local-nested-owner",
+      "submission_path": "direct-ray-core-driver",
+      "probe_status": "success",
+      "duration_seconds": 4.463834,
+      "process_exit_code": 0,
+      "result_verified": true
+    },
+    {
+      "environment_id": "linux-actions-29714241117",
+      "ray_version": "2.56.0",
+      "compiler_owner": "local-nested-owner",
+      "submission_path": "direct-ray-core-driver",
+      "probe_status": "success",
+      "duration_seconds": 5.184917,
+      "process_exit_code": 0,
+      "result_verified": true
+    },
+    {
+      "environment_id": "linux-actions-29714241117",
+      "ray_version": "2.56.1",
+      "compiler_owner": "local-nested-owner",
+      "submission_path": "direct-ray-core-driver",
+      "probe_status": "success",
+      "duration_seconds": 5.613736,
+      "process_exit_code": 0,
+      "result_verified": true
+    },
+    {
+      "environment_id": "windows-local",
+      "ray_version": "2.53.0",
+      "compiler_owner": "direct-driver",
+      "submission_path": "direct-ray-core-driver",
+      "probe_status": "native_crash",
+      "process_exit_code": 3221225477,
+      "native_exit_code": "0xC0000005",
+      "observed": "Windows fatal exception: access violation"
+    },
+    {
+      "environment_id": "windows-local",
+      "ray_version": "2.53.0",
+      "compiler_owner": "local-nested-owner",
+      "submission_path": "direct-ray-core-driver",
+      "probe_status": "native_crash",
+      "error_type": "WorkerCrashedError",
+      "observed": "The compiler-owner Ray worker crashed."
+    },
+    {
+      "environment_id": "windows-local",
+      "ray_version": "2.56.0",
+      "compiler_owner": "direct-driver",
+      "submission_path": "direct-ray-core-driver",
+      "probe_status": "native_crash",
+      "process_exit_code": 3221225477,
+      "native_exit_code": "0xC0000005",
+      "observed": "Windows fatal exception: access violation"
+    },
+    {
+      "environment_id": "windows-local",
+      "ray_version": "2.56.0",
+      "compiler_owner": "local-nested-owner",
+      "submission_path": "direct-ray-core-driver",
+      "probe_status": "native_crash",
+      "error_type": "WorkerCrashedError",
+      "observed": "The compiler-owner Ray worker crashed."
+    },
+    {
+      "environment_id": "windows-local",
+      "ray_version": "2.56.1",
+      "compiler_owner": "direct-driver",
+      "submission_path": "direct-ray-core-driver",
+      "probe_status": "native_crash",
+      "process_exit_code": 3221225477,
+      "native_exit_code": "0xC0000005",
+      "observed": "Windows fatal exception: access violation"
+    },
+    {
+      "environment_id": "windows-local",
+      "ray_version": "2.56.1",
+      "compiler_owner": "local-nested-owner",
+      "submission_path": "direct-ray-core-driver",
+      "probe_status": "native_crash",
+      "error_type": "WorkerCrashedError",
+      "observed": "The compiler-owner Ray worker crashed."
+    }
+  ],
+  "unmeasured_capabilities": [
+    "direct-driver-linux",
+    "ray-client-driver",
+    "ray-client-submitted-nested-owner",
+    "ray-job-driver"
+  ],
+  "nightly": {
+    "run": false,
+    "reason": "A nightly wheel is a separate rotating tuple and cannot verify the exact published releases.",
+    "follow_up_owner": "#100",
+    "fresh_evidence_follow_up_on": "2026-07-27",
+    "linux_infrastructure_merge_gate": false
+  },
+  "upstream_issue_search": {
+    "repository": "ray-project/ray",
+    "searched_on": "2026-07-19",
+    "matching_issue_found": false,
+    "queries": [
+      "ensure_registered_as_writer",
+      "Compiled Graph Windows access violation",
+      "SharedMemoryChannel Windows"
+    ]
+  }
+}

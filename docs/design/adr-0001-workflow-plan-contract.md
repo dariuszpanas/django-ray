@@ -168,7 +168,9 @@ Implementation proceeds in separate changes:
 3. introduce the strategy interface with the current dynamic engine as default;
 4. benchmark and implement static actors only if evidence supports them;
 5. add a guarded Compiled Graph strategy only on validated platforms and ownership
-   topologies.
+   topologies, after issue #99 reviews an exact immutable deployment/image,
+   shared-memory, and object-store capability row rather than inferring one from a
+   generic host or container.
 
 During rollout, legacy progress snapshots and direct `WorkflowSignature` execution need
 an additive compatibility reader. No persisted beta reference is introduced.

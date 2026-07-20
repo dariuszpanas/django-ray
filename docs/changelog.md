@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Compiled Graph ownership ADR and opt-in raw-Ray topology probe that select one
   Ray Core outer task as the initial local/direct within-run CPU-pilot owner without
   claiming production Ray Client transport or cross-schedule reuse.
+- A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
+  with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
+  capability identity includes immutable deployment, shared-memory, and object-store
+  profiles; no native capability tuple is enabled yet.
 
 ### Changed
 
