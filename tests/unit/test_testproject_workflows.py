@@ -39,7 +39,11 @@ def test_complex_workflow_runs_nested_branches_locally() -> None:
     assert [branch["branch"] for branch in result["branches"]] == ["fast", "slow"]
 
 
-def test_runtime_env_cache_benchmark_has_local_fallback() -> None:
+def test_runtime_env_cache_benchmark_has_local_fallback(settings) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "RUNTIME_ENV_PROFILES": {"thin": {}},
+    }
     result = run_runtime_env_cache_benchmark(
         "thin",
         repeats=2,

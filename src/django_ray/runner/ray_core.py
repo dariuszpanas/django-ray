@@ -54,6 +54,27 @@ def _get_remote_execute_django_task() -> Any:
     return _execute_django_task_remote_cached
 
 
+def _compiled_graph_submission_transport(ray: Any) -> str | None:
+    """Describe the live Ray connection without trusting a configured address."""
+    from django_ray.runtime.compiled_graph import CompiledGraphSubmissionTransport
+
+    try:
+        client_connected = ray.util.client.ray.is_connected()
+    except Exception:
+        return None
+    if client_connected is True:
+        return CompiledGraphSubmissionTransport.RAY_CLIENT.value
+    if client_connected is not False:
+        return None
+    try:
+        ray_initialized = ray.is_initialized()
+    except Exception:
+        return None
+    if ray_initialized is True:
+        return CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value
+    return None
+
+
 class RayCoreRunner(BaseRunner):
     """Runner that uses Ray Core remote functions.
 
@@ -119,12 +140,48 @@ class RayCoreRunner(BaseRunner):
         from django_ray.runtime.runtime_env import (
             prepare_runtime_env_for_ray_core,
             runtime_env_for_execution,
+            snapshot_local_runtime_env,
         )
 
         # Keep the executor importable at module scope so Ray can reuse worker
         # processes without serializing a new nested function for every task.
         runtime_env = runtime_env_for_execution(task_execution)
-        submitted_runtime_env = prepare_runtime_env_for_ray_core(runtime_env)
+        from django_ray.conf.settings import get_settings
+        from django_ray.workflow_plans import runtime_env_plan_identity
+
+        trust_identity = get_settings().get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
+        plan_runtime_env_identity = runtime_env_plan_identity(
+            runtime_env,
+            trust_identity=trust_identity,
+        )
+        with snapshot_local_runtime_env(runtime_env) as immutable_snapshot:
+            snapshot_runtime_env_identity = runtime_env_plan_identity(
+                immutable_snapshot,
+                trust_identity=trust_identity,
+            )
+            if (
+                snapshot_runtime_env_identity.manifest["digest"]
+                != plan_runtime_env_identity.manifest["digest"]
+            ):
+                from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+                raise WorkflowPlanMismatchError(
+                    "Outer RuntimeEnv immutable snapshot differs from its effective plan"
+                )
+            submitted_runtime_env = prepare_runtime_env_for_ray_core(immutable_snapshot)
+        verified_runtime_env_identity = runtime_env_plan_identity(
+            runtime_env,
+            trust_identity=trust_identity,
+        )
+        if (
+            verified_runtime_env_identity.manifest["digest"]
+            != plan_runtime_env_identity.manifest["digest"]
+        ):
+            from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+            raise WorkflowPlanMismatchError(
+                "Outer RuntimeEnv local content changed while it was being packaged"
+            )
         # Ray Client deserializes the remote function on the server before its
         # task-level RuntimeEnv exists. Ship this small bootstrap function by
         # value so a generic Ray head does not need django-ray installed.
@@ -152,6 +209,8 @@ class RayCoreRunner(BaseRunner):
             input_reference,
             attempt_number=getattr(task_execution, "attempt_number", None),
             execution_generation=getattr(task_execution, "execution_generation", None),
+            runtime_env_plan_identity=snapshot_runtime_env_identity.as_transport_dict(),
+            compiled_graph_submission_transport=_compiled_graph_submission_transport(ray),
         )
 
         # Get Ray job ID (the worker's client connection job ID)

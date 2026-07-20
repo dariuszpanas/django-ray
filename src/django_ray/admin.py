@@ -58,6 +58,8 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "attempt_number",
         "execution_generation",
         "workflow_run_id",
+        "workflow_plan_fingerprint",
+        "workflow_plan_pinned_attempt",
         "ray_dashboard_link",
         "created_at",
         "started_at",
@@ -83,6 +85,10 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "runtime_env_json",
         "runtime_env_hash",
         "workflow_run_id",
+        "workflow_plan_fingerprint",
+        "workflow_plan_pinned_attempt",
+        "workflow_plan_display",
+        "workflow_plan_selection_display",
         "created_at",
         "started_at",
         "finished_at",
@@ -112,6 +118,10 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
                     "attempt_number",
                     "execution_generation",
                     "workflow_run_id",
+                    "workflow_plan_fingerprint",
+                    "workflow_plan_pinned_attempt",
+                    "workflow_plan_display",
+                    "workflow_plan_selection_display",
                 ),
             },
         ),
@@ -251,6 +261,14 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
     @admin.display(description="Progress")
     def progress_data_display(self, obj: RayTaskExecution) -> str:
         return self._redacted_json(obj.progress_data)
+
+    @admin.display(description="Effective workflow plan")
+    def workflow_plan_display(self, obj: RayTaskExecution) -> str:
+        return self._redacted_json(obj.workflow_plan_json)
+
+    @admin.display(description="Workflow strategy selection")
+    def workflow_plan_selection_display(self, obj: RayTaskExecution) -> str:
+        return self._redacted_json(obj.workflow_plan_selection)
 
     @admin.display(description="Completion envelope")
     def completion_data_display(self, obj: RayTaskExecution) -> str:

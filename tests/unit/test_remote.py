@@ -102,6 +102,7 @@ def test_execute_django_task_remote_propagates_attempt_and_generation(monkeypatc
             task_pk=context.task_pk,
             attempt_number=context.attempt_number,
             execution_generation=context.execution_generation,
+            compiled_graph_submission_transport=(context.compiled_graph_submission_transport),
         )
         return json.dumps({"success": True, "result": None})
 
@@ -114,12 +115,14 @@ def test_execute_django_task_remote_propagates_attempt_and_generation(monkeypatc
         15,
         attempt_number=3,
         execution_generation=9,
+        compiled_graph_submission_transport="ray-client",
     )
 
     assert captured == {
         "task_pk": 15,
         "attempt_number": 3,
         "execution_generation": 9,
+        "compiled_graph_submission_transport": "ray-client",
     }
 
 

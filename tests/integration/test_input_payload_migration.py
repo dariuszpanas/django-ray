@@ -70,5 +70,5 @@ def test_existing_inline_execution_round_trips_through_input_payload_migration()
         assert reverted.kwargs_json == '{"scale": 3}'
     finally:
         MigrationExecutor(connection).migrate(
-            [("django_ray", "0010_raytaskexecution_workflow_run_id")]
+            [("django_ray", "0011_raytaskexecution_workflow_plan")]
         )

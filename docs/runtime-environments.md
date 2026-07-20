@@ -129,6 +129,12 @@ Pin production dependencies and use immutable archive URIs for `working_dir` or
   into a remote RuntimeEnv. Use `https://`, `s3://`, or `gs://`, or a `file://` ZIP
   on storage mounted at the same path on every Ray node.
 
+Local `py_modules` directories and files remain available to dynamic Ray tasks, but
+version 1 rejects them for reusable strategies. Their import basename changes Python
+semantics, while Ray 2.56's package URI is not a strong identity for every such archive.
+The plan fingerprints the basename and content so retry pinning remains conservative;
+prefer an independently verified immutable artifact before enabling future reuse.
+
 Do not point a standalone Django pod at the head node's GCS port as a substitute for a
 Ray node. A direct Ray Core driver also expects a local raylet. The repository's
 KubeRay overlay demonstrates the shared `file:///runtime-env/django-ray-source.zip`
@@ -224,6 +230,67 @@ step(
 
 Use `signature.with_runtime_env("profile-name")` when constructing a workflow
 dynamically. The older `ray_options={"runtime_env": ...}` form remains compatible.
+
+### RuntimeEnv identity in effective workflow plans
+
+Named and inline step environments are resolved when `WorkflowSignature.run()` creates
+its effective plan, before the first workflow leaf is submitted. Changing a package,
+archive, image, working-directory snapshot, or named profile content therefore changes
+the plan identity or produces an explicit reusable-strategy rejection. Mutating Django
+settings after materialization cannot change the environment submitted by that run.
+
+Credential variable values and URI credentials never enter the plan and are never
+hashed into its fingerprint. Credential-looking names remain visible as schema
+metadata and are covered by a non-secret provider revision. Ordinary environment
+values such as `MODE` are also kept out of the fingerprint because a variable name is
+not proof that its value is non-secret. Reusable strategies require one declared
+`environment_revision` that covers the full non-secret configuration contract:
+
+```python
+DJANGO_RAY = {
+    "WORKFLOW_PLAN_CODE_REVISION": "container:sha256:0123456789abcdef",
+    "WORKFLOW_PLAN_TRUST_IDENTITY": {
+        "trust_domain": "cluster:production",
+        "credential_provider": "kubernetes-service-account",
+        "credential_revision": "provider-v3",
+        "environment_revision": "namespace-sync-v8",
+        "scheduling_revision": "placement-v2",
+        "service_account_audience": "kubernetes.default.svc",
+    },
+}
+```
+
+`credential_revision` identifies the provider contract, not a token. Rotating a token
+inside the same declared provider revision does not churn a plan or leak a secret-derived
+digest. `environment_revision` is an operator promise to change the revision whenever
+any covered ordinary runtime value changes. Changing either revision, the provider,
+trust domain, or audience invalidates the plan.
+If an environment has secret-dependent behavior but no safe provider revision, dynamic
+Ray tasks remain available and reusable strategies receive `UNRESOLVED_RUNTIME_ENV`.
+Ray label selectors use the separate `scheduling_revision`; dashboard names and task
+labels are execution-only annotations and never enter the plan fingerprint.
+
+The identity transported to a Ray worker is a strict versioned envelope containing only
+bounded diagnostics and digests of the safe projection. The full RuntimeEnv and its
+secret-bearing execution values travel only through Ray's execution channel. Local
+per-step code paths are snapshotted with Ray's packaging semantics and rebound before
+the first leaf is submitted; fenced durable plans are pinned before package upload so
+stale attempts cannot create artifacts. A source change during packaging fails before
+leaf submission. Ray's current local-package cache key is not a strong end-to-end
+verification of django-ray's SHA-256 snapshot, so local `working_dir` and `py_modules`
+inputs remain dynamic-only and receive `UNRESOLVED_RUNTIME_ENV` until a worker-verifiable
+artifact identity is available.
+
+Reusable-strategy eligibility and durable retry safety are separate decisions. A local
+file or tree snapshot is not reusable because Ray does not yet verify django-ray's
+content digest end to end, but it is safe to retry after django-ray rechecks the same
+content before packaging. Conversely, a mutable package pin or opaque URI remains valid
+for dynamic execution yet is retry-unsafe: its raw value is intentionally absent from
+the secret-free plan, so a later attempt cannot prove that the execution binding stayed
+the same. The effective plan persists bounded retry-safety paths and the attempt that
+first pinned it; later attempts fail before submission when any binding is unsafe.
+Provider and environment revisions restore retry safety only for the values their
+documented contracts cover, without hashing raw credentials.
 
 ## Caching and Performance
 

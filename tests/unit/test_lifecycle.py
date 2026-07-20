@@ -17,6 +17,7 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
         attempt_number=2,
         execution_generation=4,
         input_reference="s3://inputs/django-ray/inputs/immutable.json?bytes=42",
+        workflow_plan_selection='{"selected_strategy":"dynamic_tasks"}',
         error_message="boom",
         error_traceback="RuntimeError: boom",
     )
@@ -29,6 +30,7 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     assert task.attempt_number == 3
     assert task.execution_generation == 5
     assert task.input_reference == "s3://inputs/django-ray/inputs/immutable.json?bytes=42"
+    assert task.workflow_plan_selection is None
     assert task.error_message is None
     history = TaskAttempt.objects.get(execution=task, attempt_number=2)
     assert history.state == TaskState.FAILED
@@ -58,6 +60,22 @@ def test_record_failure_rejects_replaced_execution() -> None:
     task.refresh_from_db()
     assert task.state == TaskState.RUNNING
     assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+@pytest.mark.django_db
+def test_record_failure_clears_attempt_selection_when_retrying() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-retry-selection-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        workflow_plan_selection='{"selected_strategy":"dynamic_tasks"}',
+    )
+
+    assert record_failure(task, error_message="retry", retry=True)
+
+    task.refresh_from_db()
+    assert task.state == TaskState.QUEUED
+    assert task.workflow_plan_selection is None
 
 
 @pytest.mark.django_db

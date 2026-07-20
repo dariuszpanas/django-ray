@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from django_ray.workflows import (
     _callable_path,
     _Executor,
     _get_executor,
+    _json_safe,
     _LocalExecutor,
     _RayExecutor,
     chain,
@@ -53,6 +55,10 @@ def sum_values(values: list[int]) -> int:
 
 def identity(value: Any) -> Any:
     return value
+
+
+def return_bound_payload(*, payload: Any) -> Any:
+    return payload
 
 
 def fail_on_two(value: int) -> int:
@@ -711,6 +717,34 @@ def test_ray_chain_uses_native_submissions_and_resource_options(monkeypatch) -> 
     assert any(options.get("num_cpus") == 0.25 for options in fake_ray.options_seen)
 
 
+def test_bound_keyword_values_keep_nested_application_types(monkeypatch) -> None:
+    payload = {"items": [1, 2], "coordinates": (3, 4)}
+    signature = step(return_bound_payload, payload=payload)
+
+    local_result = signature.run(use_ray=False)
+    fake_ray = _FakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    ray_result = signature.run(use_ray=True)
+
+    for result in (local_result, ray_result):
+        assert isinstance(result, dict)
+        assert isinstance(result["items"], list)
+        assert isinstance(result["coordinates"], tuple)
+        assert result == payload
+
+
+def test_progress_metadata_thaws_frozen_option_mappings() -> None:
+    signature = step(
+        increment,
+        ray_options={"resources": {"database": 1}, "num_cpus": 0.5},
+    )
+
+    assert _json_safe(signature.ray_options) == {
+        "resources": {"database": 1},
+        "num_cpus": 0.5,
+    }
+
+
 def test_ray_bounded_map_uses_sliding_wait_without_collector(monkeypatch) -> None:
     fake_ray = _FakeRay()
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
@@ -848,8 +882,11 @@ def test_with_options_copies_signature_metadata() -> None:
     )
 
     updated = original.with_options(num_gpus=1)
-    assert isinstance(updated.runtime_env, dict)
-    updated.runtime_env["env_vars"]["MODE"] = "changed"
+    assert isinstance(updated.runtime_env, Mapping)
+    with pytest.raises(TypeError):
+        updated.runtime_env["env_vars"]["MODE"] = "changed"
+    with pytest.raises(TypeError):
+        updated.ray_options["num_cpus"] = 2
 
     assert updated.ray_options == {"num_cpus": 1, "num_gpus": 1}
     assert original.runtime_env == {"env_vars": {"MODE": "inline"}}
@@ -1452,11 +1489,9 @@ def test_real_ray_workflow_persists_graph_and_execution_metadata() -> None:
     assert progress["run_identity"]["attempt_number"] == 1
     assert progress["run_identity"]["execution_generation"] == 1
     assert progress["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]
-    assert nodes[0]["runtime_env"] == {
-        "mode": "inherit",
-        "profile": "test",
-        "hash": "abc123",
-    }
+    assert nodes[0]["runtime_env"]["mode"] == "inherit"
+    assert nodes[0]["runtime_env"]["profile"] == "test"
+    assert nodes[0]["runtime_env"]["hash"].startswith("sha256:")
     assert nodes[0]["execution"]["ray_task_id"]
     assert nodes[0]["execution"]["ray_node_id"]
 
@@ -1520,6 +1555,10 @@ def test_progress_actor_builds_node_snapshot() -> None:
         attempt_number=2,
         execution_generation=5,
         workflow_run_id="00000000-0000-0000-0000-000000000010",
+        plan_summary={
+            "fingerprint": "sha256:plan",
+            "definition_name": "workflow:prepare",
+        },
     )
     progress.register(
         "0.0",
@@ -1553,6 +1592,11 @@ def test_progress_actor_builds_node_snapshot() -> None:
         "execution_generation": 5,
     }
     assert snapshot["state"] == "RUNNING"
+    assert snapshot["plan"] == {
+        "fingerprint": "sha256:plan",
+        "definition_name": "workflow:prepare",
+    }
+    assert "selection" not in snapshot["plan"]
     assert snapshot["total_nodes"] == 2
     assert snapshot["completed_nodes"] == 1
     assert snapshot["running_nodes"] == 1

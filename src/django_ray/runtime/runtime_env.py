@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -300,6 +304,121 @@ def prepare_runtime_env_for_ray_core(
     return spec
 
 
+def _ray_runtime_env_default_excludes() -> list[str]:
+    """Return the default package exclusions supported by the installed Ray."""
+    from ray._private import ray_constants
+
+    get_default_excludes = getattr(
+        ray_constants,
+        "get_runtime_env_default_excludes",
+        None,
+    )
+    if get_default_excludes is None:
+        return []
+    # The Ray getter evaluates its environment override on each invocation.
+    return list(get_default_excludes())
+
+
+@contextmanager
+def snapshot_local_runtime_env(
+    runtime_env: ResolvedRuntimeEnv,
+) -> Iterator[ResolvedRuntimeEnv]:
+    """Yield an immutable temporary snapshot for every local code path.
+
+    Directory inputs are packaged with Ray's ignore/exclude semantics and then
+    re-extracted into private temporary directories. File inputs are copied
+    under their original filename. The caller keeps this context open until Ray
+    has uploaded or accepted the RuntimeEnv.
+    """
+    if not _contains_local_code_path(runtime_env.spec):
+        yield runtime_env
+        return
+
+    from ray._private.ray_constants import RAY_RUNTIME_ENV_IGNORE_GITIGNORE
+    from ray._private.runtime_env.packaging import create_package, unzip_package
+
+    include_gitignore = os.environ.get(RAY_RUNTIME_ENV_IGNORE_GITIGNORE, "0") != "1"
+    spec = deepcopy(runtime_env.spec)
+    excludes = spec.get("excludes")
+    if excludes is not None and (
+        not isinstance(excludes, list) or any(not isinstance(item, str) for item in excludes)
+    ):
+        raise ImproperlyConfigured(
+            "django-ray: RuntimeEnv excludes must be a list of string patterns"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="django-ray-runtime-env-snapshot-") as scratch:
+        scratch_path = Path(scratch)
+
+        def snapshot_path(
+            value: str,
+            *,
+            label: str,
+            include_parent_dir: bool,
+            package_excludes: list[str] | None,
+            preserve_directory: bool,
+        ) -> str:
+            source = Path(value)
+            if not source.exists():
+                return value
+            if source.is_dir():
+                target = scratch_path / f"{label}.zip"
+                create_package(
+                    str(source),
+                    target,
+                    include_gitignore=include_gitignore,
+                    include_parent_dir=include_parent_dir,
+                    excludes=package_excludes,
+                )
+                if preserve_directory:
+                    extracted = scratch_path / f"{label}-directory"
+                    unzip_package(
+                        str(target),
+                        str(extracted),
+                        remove_top_level_directory=False,
+                        unlink_zip=False,
+                    )
+                    snapshotted_directory = (
+                        extracted / source.name if include_parent_dir else extracted
+                    )
+                    snapshotted_directory.mkdir(exist_ok=True)
+                    return str(snapshotted_directory)
+                return str(target)
+            target_directory = scratch_path / label
+            target_directory.mkdir()
+            target = target_directory / source.name
+            shutil.copy2(source, target)
+            return str(target)
+
+        working_dir = spec.get("working_dir")
+        if isinstance(working_dir, str):
+            working_dir_excludes = _ray_runtime_env_default_excludes() + list(excludes or [])
+            spec["working_dir"] = snapshot_path(
+                working_dir,
+                label="working-dir",
+                include_parent_dir=False,
+                package_excludes=working_dir_excludes,
+                preserve_directory=True,
+            )
+        py_modules = spec.get("py_modules")
+        if isinstance(py_modules, list):
+            spec["py_modules"] = [
+                snapshot_path(
+                    module,
+                    label=f"py-module-{index}",
+                    include_parent_dir=True,
+                    package_excludes=excludes,
+                    preserve_directory=True,
+                )
+                for index, module in enumerate(py_modules)
+            ]
+        yield normalize_runtime_env(
+            spec,
+            profile=runtime_env.profile,
+            source="snapshotted RuntimeEnv",
+        )
+
+
 def _contains_local_code_path(spec: dict[str, Any]) -> bool:
     working_dir = spec.get("working_dir")
     if isinstance(working_dir, str) and Path(working_dir).exists():
@@ -316,5 +435,6 @@ __all__ = [
     "prepare_runtime_env_for_ray_core",
     "resolve_runtime_env_profile",
     "runtime_env_for_execution",
+    "snapshot_local_runtime_env",
     "validate_runtime_env_profiles",
 ]

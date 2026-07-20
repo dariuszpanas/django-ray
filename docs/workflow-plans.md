@@ -1,9 +1,10 @@
 # Workflow Plans and Execution Strategies
 
 This document defines the architecture contract between the public workflow builders,
-durable Django task execution, and current or future Ray execution engines. It is a
-design contract: the effective-plan materializer and strategy interface described here
-are not implemented yet.
+durable Django task execution, and current or future Ray execution engines. The version
+1 effective-plan materializer, identity pinning, dynamic/local selection metadata,
+and Compiled Graph compatibility adapter are implemented. Static actors, a Compiled
+Graph execution adapter, and a resident owner remain future strategy work.
 
 The governing plan decision is
 [ADR-0001](design/adr-0001-workflow-plan-contract.md). The first Compiled Graph
@@ -26,6 +27,45 @@ ownership and reuse boundary is fixed separately by
 - Strategy validation and selection complete before remote side effects begin. A
   strategy may fall back only before submission; post-start fallback could duplicate
   effects and is prohibited.
+
+## Version 1 implementation boundary
+
+Every `WorkflowSignature.run()` now materializes an effective plan before it submits a
+nested Ray task. The materializer resolves named per-step RuntimeEnv profiles once,
+freezes plan-relevant mappings, computes canonical JSON and a domain-separated SHA-256
+fingerprint, and records deterministic eligibility diagnostics. Actual RuntimeEnv
+payloads remain in a separate in-memory execution binding because they can contain
+credentials; only a secret-free projection enters the plan.
+
+Inside a durable task, the first plan is pinned on `RayTaskExecution` together with its
+bounded manifest, pinning attempt, and selection summary. A retry may rebuild the
+Python definition but must produce the same fingerprint and retry-safe environment
+bindings before any workflow leaf is submitted. A mismatch or retry-unsafe binding
+fails closed and requires a newly enqueued task. These fields remain observable when
+node progress is disabled:
+
+- `workflow_plan_fingerprint` is the exact pinned retry identity and the required key
+  for any future owner routing or prepared-strategy cache;
+- `workflow_plan_pinned_attempt` identifies the attempt allowed to reuse runtime-only
+  bindings without cross-attempt comparison;
+- `workflow_plan_json` is the bounded canonical secret-free manifest; and
+- `workflow_plan_selection` records the requested policy, selected baseline strategy,
+  eligible strategies, and bounded rejections.
+
+Local execution and ordinary dynamic Ray tasks are the only selectable strategies in
+this change. Current task-shaped leaves always receive an `UNSUPPORTED_NODE_MODEL`
+rejection for Compiled Graph. A dynamic map also receives `DYNAMIC_TOPOLOGY`, and
+unresolved code, RuntimeEnv, or platform identity adds its own rejection. A later
+strategy may route only by the exact fingerprint and must drain prepared state when it
+changes. The current `cache_key()`, owner assertion, and drain predicate are contract
+helpers; this release does not create a resident owner or operational graph cache.
+
+Context-free `WorkflowSignature.run()` materializes its plan before the public path
+resolves a Ray executor. Version 1 therefore leaves compiler-owner topology and
+submission transport blank for that path and rejects Compiled Graph with
+`OWNER_LIFETIME_MISMATCH`; it does not infer `direct-driver` from process-global Ray
+state. Resolving and transporting an explicit direct-driver owner context belongs to
+the future execution adapter. Local and dynamic execution remain available.
 
 ## Vocabulary
 
@@ -152,7 +192,9 @@ or a database schema:
   "plan_format_version": 1,
   "definition": {
     "name": "myapp.sync.fixed-width",
-    "revision": "package:myapp@sha256:0123456789abcdef"
+    "revision": "sha256:...",
+    "build_revision": "build:0123456789abcdef",
+    "container_image_digest": "sha256:..."
   },
   "topology": {
     "class": "fixed_width",
@@ -207,21 +249,27 @@ or a database schema:
     "owner": {"lifetime": "durable_run", "sharing": "isolated"}
   },
   "environments": {
-    "outer": {"digest": "sha256:...", "profile": "worker"},
+    "outer": {"digest": "sha256:...", "reusable": true},
     "by_node": {"partition": "sha256:...", "sync": "sha256:..."}
   },
   "strategy_requirements": {
-    "compiled": {
+    "compiled_graph": {
       "maximum_in_flight": 8,
-      "transport": "auto",
+      "transport": "cpu-shared-memory",
       "buffer_bytes": 1048576
     }
   },
   "compatibility": {
     "django_ray_plan_api": 1,
-    "ray": "2.56",
-    "platform": "linux-x86_64",
-    "capability_set": "ray-cgraph-2.56-linux-v1"
+    "compiled_graph": {
+      "schema_version": 2,
+      "policy_version": 2,
+      "reason": "CANDIDATE_REQUIRES_SMOKE",
+      "topology": "nested-ray-task",
+      "submission_transport": "direct-ray-core",
+      "transport": "cpu-shared-memory",
+      "runtime": {"ray_version": "2.56.1", "operating_system": "linux"}
+    }
   }
 }
 ```
@@ -340,7 +388,7 @@ conservative definition revision suitable for the deployment form:
 | Installed wheel or package | Distribution name/version plus immutable artifact digest or build revision | Version alone when the same version can be rebuilt with different bytes |
 | RuntimeEnv archive | Content-addressed URI and verified archive digest | Mutable branch, latest, or unsigned URI without a content identity |
 | Container image | Registry manifest digest plus application build revision | Mutable image tag by itself |
-| Development working directory | Deterministic content digest after documented excludes, together with dirty-state identity | Process path, modification time, or an unverified/dirty tree with no content snapshot |
+| Development working directory | Dynamic execution only in version 1; the plan records a deterministic content digest after Ray's effective excludes for retry diagnostics | Ray's local package cache key is not a strong worker-verifiable delivery identity, even with an application revision |
 
 The conservative revision may invalidate more often than perfect source-equivalence
 analysis would require. That is preferable to routing an invocation into actors that
@@ -361,6 +409,28 @@ ineligible for reusable actors or compilation and receives a structured rejectio
 Existing RuntimeEnv dictionaries that embed secret values cannot be persisted in an
 effective plan merely because another surface redacts their display.
 
+Credential-looking environment names are abstracted only by a declared provider and
+credential revision. All other values remain runtime-only unless an explicit
+`environment_revision` covers the entire configuration contract. Without that revision,
+reusable strategies receive `UNRESOLVED_RUNTIME_ENV`; with it, operators must change the
+revision for changes such as `MODE=prod` to `MODE=dev`. Token rotation can therefore
+remain stable without creating a secret-derived fingerprint.
+
+Semantic Ray label selectors and fallback placement constraints require a separate
+non-secret `scheduling_revision`; an environment revision does not cover placement.
+Dashboard task names and annotation labels remain outside canonical plan identity.
+
+Local `working_dir` and `py_modules` paths are always rejected for reusable strategies
+in version 1. django-ray computes a strong source snapshot, but Ray's local artifact
+lookup does not provide a matching end-to-end worker verification boundary. Remote
+artifacts therefore need an independently verifiable immutable identity before a
+resident or compiled strategy can reuse them.
+
+Identity hashing is also budgeted. When an otherwise valid RuntimeEnv code tree or
+callable module exceeds the identity byte, file, or traversal budget, version 1 records
+a constant runtime-only identity and rejects reusable strategies; it does not reject
+the existing local or dynamic-task execution path.
+
 ## Format compatibility and snapshot boundary
 
 `plan_format_version` is an integer with fail-closed semantics:
@@ -375,15 +445,42 @@ effective plan merely because another surface redacts their display.
 The effective plan is materialized and snapshotted before the first remote submission
 of a durable workflow run. The bounded, redacted manifest, canonical fingerprint,
 definition revision, and selection diagnostics must be persisted outside optional node
-progress. The storage model is left to the implementation issue.
+progress. Version 1 detailed snapshots admit at most 64 logical plan nodes and 64 KiB
+of canonical JSON; repeated callable identities are deduplicated in a top-level table.
+Definitions that exceed either storage bound continue through local or dynamic-task
+execution with a bounded overflow snapshot, a digest covering the complete secret-free
+definition, observed counts, and `PLAN_SNAPSHOT_OVERFLOW`. They are not eligible for a
+reusable strategy. Large runtime inventories should still be invocation data consumed
+by bounded `map_step`, not duplicated static topology. The fingerprint, canonical
+manifest, the attempt that first pinned it, and current-attempt selection are stored on
+`RayTaskExecution`; selection diagnostics are not duplicated into progress snapshots.
+The detailed and overflow forms both retain bounded `retry_safe` and
+`retry_unsafe_paths` metadata for environment bindings whose raw values cannot enter
+the secret-free fingerprint.
+
+The 64 KiB limit bounds the durable canonical artifact, not all transient memory used
+while materializing a Python definition. The materializer still walks the definition
+and holds bounded builder metadata before it can emit the overflow snapshot. It is not
+an executor memory quota or a substitute for keeping runtime inventory out of topology.
 
 The first successful materialization pins the plan identity for the
 `RayTaskExecution` attempt chain. A retry creates a new durable run identity and may
-rebuild the definition in a new process, but its materialized fingerprint must match
-the pinned identity before remote submission. A mismatch fails closed with an
-actionable plan-revision error; it does not silently run new code under the old task.
-Submitting intentionally changed work requires a new task or a future explicit,
-audited migration policy.
+rebuild the definition in a new process. Its materialized fingerprint must match the
+pinned identity before remote submission, but fingerprint equality alone is sufficient
+only when every RuntimeEnv binding is retry-safe. Opaque URIs, unsupported or malformed
+values, mutable dependency specifications, and environment or credential values without
+their required non-secret revision are retry-unsafe because distinct execution values
+can share the same redacted plan. Repeated use within the attempt that created the pin
+is allowed; a later attempt fails closed with bounded paths and remediation guidance.
+
+Content-hashed local files and trees are retry-safe even though they remain ineligible
+for reusable strategies: their source bytes can be compared to the pin before upload.
+Immutable digests and correctly declared environment or credential revisions likewise
+restore retry safety for the values they cover. A rolling writer that left the pin
+attempt null may initialize it only for a retry-safe plan; retry-unsafe rows fail closed.
+A fingerprint mismatch always fails with an actionable plan-revision error. Submitting
+intentionally changed work requires a new task or a future explicit, audited migration
+policy.
 
 This policy preserves the existing immutable outer RuntimeEnv intent and prevents a
 retry or resident owner from silently switching per-step profiles after a deployment.
@@ -396,7 +493,8 @@ Every strategy returns a structured decision before preparation or submission:
 
 ```json
 {
-  "plan_fingerprint": "sha256:...",
+  "plan_selection_format": "django-ray.workflow-plan-selection",
+  "plan_selection_format_version": 1,
   "requested_policy": "auto",
   "selected_strategy": "dynamic_tasks",
   "eligible_strategies": ["local", "dynamic_tasks"],
@@ -426,6 +524,7 @@ The initial common rejection codes are:
 | `UNSUPPORTED_NODE_MODEL` | The plan uses tasks, actors, or callable kinds the strategy cannot execute. |
 | `UNRESOLVED_CODE_IDENTITY` | The callable or deployment revision is process-local or otherwise not reusable safely. |
 | `UNRESOLVED_RUNTIME_ENV` | A profile, environment, or secret-dependent identity is not canonical and stable. |
+| `UNRESOLVED_PLAN_OPTION` | Ray accepts the option for dynamic execution, but an exception class, placement group, or scheduling object has no reusable canonical identity. |
 | `INCOMPATIBLE_PLATFORM` | Ray version, OS, architecture, accelerator, transport, or optional dependencies are unsupported. |
 | `OWNER_LIFETIME_MISMATCH` | The required invocation/reuse lifetime has no valid owner in the selected worker mode. |
 | `UNSUPPORTED_TRANSPORT` | Payload, channel, buffer, reference forwarding, or result-consumption requirements cannot be met. |
@@ -470,7 +569,8 @@ write current state.
 The compatibility path for the version 1 progress schema is additive:
 
 - current dynamic node IDs remain runtime expansion paths scoped to one invocation;
-- future snapshots add versioned run, invocation, plan, and selected-strategy summary;
+- progress snapshots carry a compact versioned run and plan summary; the selected
+  strategy and full rejection diagnostics remain in the separate durable selection;
 - a client resets rather than merges state when run or invocation identity changes;
 - progress revisions restart only with a new run/invocation identity;
 - node reporting may be disabled, but run identity, plan fingerprint, requested policy,
@@ -497,8 +597,16 @@ The public API remains source compatible while the plan boundary is introduced:
 The adapter preserves current argument ordering, bound-keyword precedence, ordered
 group/map results, local fallback, importability validation, RuntimeEnv override
 behavior, and one outer task durability boundary. Current `Step` dataclasses are frozen
-only at the attribute level; dictionaries and bound objects can still mutate. The
-materialized plan, rather than the signature object, becomes the immutable boundary.
+at the attribute level and now deep-freeze plan-relevant RuntimeEnv and Ray-option
+mappings. Bound application values remain invocation data and may contain ordinary
+mutable objects. The materialized plan, rather than the signature object, remains the
+durable immutable boundary.
+
+A dotted callable supplied only by a step RuntimeEnv does not need to import on the
+Django submitter. It materializes as worker-only code and remains dynamically
+executable, while reusable strategies receive `UNRESOLVED_CODE_IDENTITY`. Stateful
+callable instances and partials receive the same conservative rejection because their
+runtime-bound state is not a safe canonical plan field.
 
 No current caller becomes compiled merely because its `chain` or `group` is logically
 static. Current steps are Ray task nodes. Static actors, an owner, and all eligibility
@@ -512,8 +620,9 @@ Issue #84 and later implementations can cite these stable requirements:
    fingerprinting, and strategy eligibility complete before any remote submission,
    actor creation, channel allocation, or application side effect.
 2. **PLAN-02 -- Deep immutability:** the effective plan contains immutable normalized
-   data; mutation of source signatures, bound dictionaries, settings, or RuntimeEnv
-   profiles after materialization has no effect.
+   data; mutation of plan-relevant Ray options, settings, or RuntimeEnv profiles after
+   materialization has no effect. Bound application values remain outside the plan as
+   invocation data and retain their existing Python types and mutability.
 3. **PLAN-03 -- Canonical equality:** semantically equal definitions under the same
    compatibility inputs produce byte-equal canonical JSON and equal fingerprints across
    supported Python processes.
@@ -532,9 +641,10 @@ Issue #84 and later implementations can cite these stable requirements:
 8. **PLAN-08 -- Stable code identity:** package, image, archive, and development code
    use a documented conservative revision. A process-local or unverifiable identity is
    rejected for reusable strategies with `UNRESOLVED_CODE_IDENTITY`.
-9. **PLAN-09 -- Retry pinning:** the first materialized fingerprint is pinned to the
-   execution attempt chain. A retry mismatch fails before submission and cannot route
-   to an old owner or silently adopt a new definition.
+9. **PLAN-09 -- Retry pinning:** the first materialized fingerprint and attempt are
+   pinned to the execution attempt chain. A retry mismatch or retry-unsafe environment
+   fails before submission and cannot route to an old owner or silently adopt a new
+   definition or execution binding.
 10. **PLAN-10 -- Structured diagnostics:** validation returns stable code, plan path or
     node, and redacted message for every safely discoverable rejection. Explicit and
     automatic selection behavior follows the pre-start fallback rule.

@@ -710,6 +710,34 @@ class TestWorkerRayJobFailureHandling:
         assert task.finished_at is None
         assert task.pk not in cmd.active_tasks
 
+    def test_submit_task_to_ray_does_not_retry_pinned_plan_mismatch(self, monkeypatch):
+        """A changed pinned plan is permanent for the existing task identity."""
+        from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+        task = RayTaskExecution.objects.create(
+            task_id="test-ray-submit-plan-mismatch-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            attempt_number=1,
+        )
+
+        class FailingRunner:
+            def submit(self, **kwargs):
+                raise WorkflowPlanMismatchError("pinned plan changed")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FailingRunner)
+
+        cmd = self._make_command()
+        cmd.submit_task_to_ray(task)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.finished_at is not None
+
     def test_reconcile_failed_job_retries_when_attempts_remain(self, monkeypatch):
         """Ray FAILED status should trigger retry path."""
         task = RayTaskExecution.objects.create(

@@ -59,6 +59,7 @@ def retry_task(
         current.result_reference = None
         current.progress_data = None
         current.workflow_run_id = None
+        current.workflow_plan_selection = None
         current.completion_data = None
         current.error_message = None
         current.error_traceback = None
@@ -79,6 +80,7 @@ def retry_task(
                 "result_reference",
                 "progress_data",
                 "workflow_run_id",
+                "workflow_plan_selection",
                 "completion_data",
                 "error_message",
                 "error_traceback",
@@ -129,6 +131,7 @@ def record_failure(
             current.claimed_by_worker = None
             current.progress_data = None
             current.workflow_run_id = None
+            current.workflow_plan_selection = None
             current.completion_data = None
         else:
             current.state = TaskState.FAILED
@@ -144,6 +147,7 @@ def record_failure(
                 "claimed_by_worker",
                 "progress_data",
                 "workflow_run_id",
+                "workflow_plan_selection",
                 "completion_data",
             ]
         )

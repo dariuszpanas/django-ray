@@ -12,6 +12,10 @@ DEFAULTS: dict[str, Any] = {
     "RAY_STATE_API_TIMEOUT_SECONDS": 5,
     "RUNTIME_ENV_PROFILES": {},
     "DEFAULT_RUNTIME_ENV_PROFILE": None,
+    # Optional, non-secret deployment identities used by workflow plan snapshots.
+    # The code revision should be an immutable build, artifact, or image revision.
+    "WORKFLOW_PLAN_CODE_REVISION": None,
+    "WORKFLOW_PLAN_TRUST_IDENTITY": {},
     # Runner configuration
     "RUNNER": "ray_job",  # "ray_job" or "ray_core"
     # Concurrency

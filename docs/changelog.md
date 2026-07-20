@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Canonical, bounded, secret-free effective workflow plan snapshots with SHA-256
+  identities, per-step RuntimeEnv resolution, deterministic strategy diagnostics,
+  retry pinning, future-owner cache-key and stale-owner validation helpers, and
+  durable observability independent of node progress. Current workflows still execute
+  through local or dynamic Ray-task
+  strategies; static actors and Compiled Graph remain guarded future strategies.
+  RuntimeEnv and strategy metadata use strict versioned envelopes, stale fenced runs
+  fail before side effects, and local step code is snapshotted and rebound through
+  Ray's package store after fenced plan pinning and before leaf submission. Local paths
+  remain dynamic-only until Ray delivery can be strongly verified. Reusable eligibility
+  requires an explicit or detected immutable application revision, while the current
+  local and dynamic-task baseline remains compatible without one. Oversized legacy
+  DAGs retain that baseline through a bounded, fingerprinted dynamic-only overflow
+  snapshot instead of turning plan storage limits into execution limits. RuntimeEnv
+  profile names remain transported diagnostics rather than semantic identity, build
+  and container-image revisions are composed independently, and Compiled Graph
+  compatibility uses the shared policy-v2 runtime, owner, submission, and channel
+  decision. Retry safety is tracked separately from reusable-strategy eligibility:
+  later attempts fail closed for opaque or mutable RuntimeEnv bindings that collapse
+  under secret-free redaction, while content-hashed local paths and declared revision
+  contracts remain retryable. No resident prepared-graph cache or drain loop is
+  implemented yet.
 - Opt-in bounded workflow `map_step` admission with lazy generator consumption,
   incremental ordered collection, expansion guards, aggregate progress, and bounded
   dependency-aware failure cleanup. Ordered result bytes still materialize in the
