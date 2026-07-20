@@ -114,8 +114,12 @@ memory before fan-out begins. Only an iterator already available locally is pull
 lazily. Remote or paged input materialization is tracked in
 [GitHub issue #94](https://github.com/dariuszpanas/django-ray/issues/94).
 
-The ordered result payload is still materialized in coordinator memory; a bounded
-in-Ray aggregation path is tracked in
+By default, the ordered result payload is still materialized in coordinator memory.
+An explicitly bounded map can use
+[`with_result_buffer()`](workflows.md#opt-in-ray-result-buffer) to retain versioned
+serialized bytes in a resource-accounted Ray actor and forward one direct payload
+reference to a downstream Ray step. The actor, object store, and final consumer still
+have O(total output) boundaries; bounded chunk/reducer aggregation remains tracked in
 [GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91). Calling
 `map_step()` without `with_limits()` retains the legacy eager behavior.
 

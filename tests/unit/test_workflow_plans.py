@@ -29,6 +29,7 @@ from django_ray.workflow_plans import (
     MAX_PLAN_NODES,
     MAX_RUNTIME_ENV_DIAGNOSTICS,
     MAX_RUNTIME_ENV_IDENTITY_BYTES,
+    PLAN_FORMAT_VERSION,
     WorkflowPlanBuildContext,
     WorkflowPlanMismatchError,
     WorkflowPlanValidationError,
@@ -184,6 +185,130 @@ def test_result_retention_bounds_match_map_execution_behavior() -> None:
     assert any(
         rejection.code == "UNBOUNDED_ADMISSION" for rejection in unbounded.eligibility.rejections
     )
+
+
+def test_unselected_map_keeps_the_v1_extensibility_slots_unchanged() -> None:
+    plan = _materialize(
+        map_step(increment).with_limits(max_items=7, max_concurrency=2),
+        [1, 2],
+    ).plan
+    manifest = plan.as_dict()
+    map_node = next(node for node in manifest["nodes"] if node["operation"] == "dynamic_map")
+
+    assert PLAN_FORMAT_VERSION == 1
+    assert map_node["actor_layout"] is None
+    assert manifest["physical_topology"] == {
+        "node_model": "ray_tasks",
+        "stages": [],
+        "actors": [],
+        "placement_relationships": [],
+    }
+    assert "django-ray.workflow-map-result-buffer" not in plan.canonical_json
+
+
+def test_result_buffer_uses_versioned_actor_topology_extensibility_slots() -> None:
+    signature = (
+        map_step(increment)
+        .with_limits(
+            max_items=7,
+            max_concurrency=2,
+        )
+        .with_result_buffer(
+            max_serialized_bytes=8192,
+            actor_options={
+                "num_cpus": 0.25,
+                "memory": 16384,
+                "resources": {"result_buffer": 1},
+                "scheduling_strategy": "SPREAD",
+            },
+        )
+    )
+
+    plan = _materialize(signature, [1, 2]).plan
+    manifest = plan.as_dict()
+    topology = manifest["physical_topology"]
+    map_node = next(node for node in manifest["nodes"] if node["operation"] == "dynamic_map")
+    result_node = next(
+        node for node in manifest["nodes"] if node["operation"] == "ordered_actor_finalize"
+    )
+    contract = topology["actors"][0]["contract"]
+
+    assert manifest["plan_format_version"] == 1
+    assert topology["node_model"] == "ray_tasks_and_actors"
+    assert len(topology["actors"]) == 1
+    assert topology["actors"][0]["id"] == "0.result_buffer"
+    assert topology["actors"][0]["resources"] == {
+        "num_cpus": 0.25,
+        "memory": 16384,
+        "custom": {"result_buffer": 1},
+    }
+    assert topology["placement_relationships"] == [
+        {
+            "source": "0",
+            "target": "0.result_buffer",
+            "relationship": "owns_non_detached_actor",
+            "placement": {
+                "scheduling_strategy": "SPREAD",
+                "custom_resources": {"result_buffer": 1},
+            },
+        }
+    ]
+    assert map_node["actor_layout"] == "0.result_buffer"
+    assert result_node["actor_layout"] == "0.result_buffer"
+    assert result_node["node_model"] == "actor"
+    assert contract["protocol_version"] == 1
+    assert contract["codec"]["name"] == "ray.cloudpickle"
+    assert contract["codec"]["version"] == 1
+    assert contract["bounds"] == {
+        "maximum_items": 7,
+        "maximum_in_flight_leaves": 2,
+        "maximum_serialized_bytes": 8192,
+        "maximum_pending_actor_calls": 1,
+    }
+    assert contract["lifetime"]["kind"] == "non_detached"
+    assert contract["restart"] == {"max_restarts": 0, "max_task_retries": 0}
+
+
+def test_every_result_buffer_bound_resource_and_placement_changes_fingerprint() -> None:
+    def buffered(
+        *,
+        max_items: int = 7,
+        max_concurrency: int = 2,
+        max_serialized_bytes: int = 8192,
+        num_cpus: float = 0.25,
+        memory: int = 16384,
+        resource: float = 1,
+        strategy: str = "DEFAULT",
+    ):
+        return (
+            map_step(increment)
+            .with_limits(
+                max_items=max_items,
+                max_concurrency=max_concurrency,
+            )
+            .with_result_buffer(
+                max_serialized_bytes=max_serialized_bytes,
+                actor_options={
+                    "num_cpus": num_cpus,
+                    "memory": memory,
+                    "resources": {"result_buffer": resource},
+                    "scheduling_strategy": strategy,
+                },
+            )
+        )
+
+    plans = [
+        _materialize(buffered(), [1]).plan,
+        _materialize(buffered(max_items=8), [1]).plan,
+        _materialize(buffered(max_concurrency=3), [1]).plan,
+        _materialize(buffered(max_serialized_bytes=9000), [1]).plan,
+        _materialize(buffered(num_cpus=0.5), [1]).plan,
+        _materialize(buffered(memory=32768), [1]).plan,
+        _materialize(buffered(resource=2), [1]).plan,
+        _materialize(buffered(strategy="SPREAD"), [1]).plan,
+    ]
+
+    assert len({plan.fingerprint for plan in plans}) == len(plans)
 
 
 def test_compiler_platform_and_deployment_identity_are_fingerprinted() -> None:
@@ -1400,6 +1525,76 @@ def test_byte_overflow_uses_bounded_dynamic_fallback() -> None:
     assert len(materialized.step_bindings) == 16
 
 
+def test_many_result_buffers_use_bounded_physical_topology_overflow() -> None:
+    def signature(memory: int):
+        return chain(
+            *(
+                map_step(increment)
+                .with_limits(max_items=2, max_concurrency=1)
+                .with_result_buffer(
+                    max_serialized_bytes=1024,
+                    actor_options={"num_cpus": 0.1, "memory": memory},
+                )
+                for _ in range(55)
+            )
+        )
+
+    baseline = _materialize(signature(2048), [1]).plan
+    changed = _materialize(signature(4096), [1]).plan
+    manifest = baseline.as_dict()
+    physical = manifest["physical_topology"]
+
+    assert manifest["snapshot"]["state"] == "overflow"
+    assert len(baseline.canonical_json.encode("utf-8")) <= MAX_PLAN_BYTES
+    assert physical["actors"] == []
+    assert physical["placement_relationships"] == []
+    assert physical["overflow_summary"] == {
+        "stage_count": 0,
+        "actor_count": 55,
+        "result_buffer_actor_count": 55,
+        "placement_relationship_count": 55,
+        "details_omitted": True,
+    }
+    assert changed.fingerprint != baseline.fingerprint
+    assert changed.manifest["snapshot"]["source_digest"] != manifest["snapshot"]["source_digest"]
+
+
+def test_long_custom_result_buffer_resources_use_bounded_overflow() -> None:
+    def signature(resource_value: int):
+        resources = {f"{'r' * 250}{index:06d}": resource_value for index in range(32)}
+        buffered = [
+            map_step(increment)
+            .with_limits(max_items=2, max_concurrency=1)
+            .with_result_buffer(
+                max_serialized_bytes=1024,
+                actor_options={
+                    "num_cpus": 0.1,
+                    "memory": 2048,
+                    "resources": resources,
+                },
+            )
+            for _ in range(2)
+        ]
+        return chain(*buffered)
+
+    baseline = _materialize(signature(1), [1]).plan
+    changed = _materialize(signature(2), [1]).plan
+    manifest = baseline.as_dict()
+
+    assert manifest["snapshot"]["state"] == "overflow"
+    assert manifest["snapshot"]["reasons"] == ["byte_limit"]
+    assert len(baseline.canonical_json.encode("utf-8")) <= MAX_PLAN_BYTES
+    assert manifest["physical_topology"]["overflow_summary"] == {
+        "stage_count": 0,
+        "actor_count": 2,
+        "result_buffer_actor_count": 2,
+        "placement_relationship_count": 2,
+        "details_omitted": True,
+    }
+    assert changed.fingerprint != baseline.fingerprint
+    assert changed.manifest["snapshot"]["source_digest"] != manifest["snapshot"]["source_digest"]
+
+
 def test_deep_definition_materializes_without_recursion_error() -> None:
     signature = step(increment)
     for _ in range(sys.getrecursionlimit() + 100):
@@ -1606,6 +1801,67 @@ def test_retry_must_match_the_plan_pinned_by_the_first_attempt() -> None:
     assert execution.workflow_plan_fingerprint == first_plan.fingerprint
     assert execution.workflow_plan_pinned_attempt == 1
     assert execution.workflow_run_id is None
+
+
+@pytest.mark.django_db
+def test_retry_rejects_result_buffer_resource_drift_before_effects() -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-result-buffer-plan-retry",
+        callable_path=f"{__name__}.record_side_effect",
+        state=TaskState.RUNNING,
+        execution_generation=3,
+    )
+
+    def buffered(memory: int):
+        return (
+            map_step(record_side_effect)
+            .with_limits(
+                max_items=4,
+                max_concurrency=2,
+            )
+            .with_result_buffer(
+                max_serialized_bytes=4096,
+                actor_options={"num_cpus": 0.25, "memory": memory},
+            )
+        )
+
+    first_plan = _materialize(buffered(8192), [1]).plan
+    first_selection = first_plan.eligibility.select(
+        "dynamic_tasks",
+        requested_policy="auto",
+    )
+    first_identity = WorkflowRunIdentity(
+        execution.pk,
+        execution.attempt_number,
+        execution.execution_generation,
+        "00000000-0000-0000-0000-000000000121",
+    )
+    assert claim_workflow_run(first_identity, plan=first_plan, selection=first_selection)
+    assert record_failure(execution, error_message="retry", retry=True)
+    RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
+    execution.refresh_from_db()
+
+    replacement = _materialize(buffered(16384), [1]).plan
+    replacement_selection = replacement.eligibility.select(
+        "dynamic_tasks",
+        requested_policy="auto",
+    )
+    retry_identity = WorkflowRunIdentity(
+        execution.pk,
+        execution.attempt_number,
+        execution.execution_generation,
+        "00000000-0000-0000-0000-000000000122",
+    )
+    SIDE_EFFECTS.clear()
+
+    with pytest.raises(WorkflowPlanMismatchError, match="different effective plan"):
+        claim_workflow_run(
+            retry_identity,
+            plan=replacement,
+            selection=replacement_selection,
+        )
+
+    assert SIDE_EFFECTS == []
 
 
 @pytest.mark.django_db

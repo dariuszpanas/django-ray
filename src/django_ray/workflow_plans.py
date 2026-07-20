@@ -569,10 +569,10 @@ def materialize_workflow_plan(
         "callables": builder.callable_entries,
         "edges": builder.edges,
         "physical_topology": {
-            "node_model": "ray_tasks",
+            "node_model": ("ray_tasks_and_actors" if builder.result_buffer_actors else "ray_tasks"),
             "stages": [],
-            "actors": [],
-            "placement_relationships": [],
+            "actors": builder.result_buffer_actors,
+            "placement_relationships": builder.result_buffer_placements,
         },
         "capabilities": {
             "invocations": {"cardinality": "once"},
@@ -736,7 +736,7 @@ def _overflow_manifest(
         "nodes": [],
         "callables": [],
         "edges": [],
-        "physical_topology": full_manifest["physical_topology"],
+        "physical_topology": _overflow_physical_topology(full_manifest["physical_topology"]),
         "capabilities": {
             "invocations": full_capabilities["invocations"],
             "logical_items": full_capabilities["logical_items"],
@@ -772,6 +772,34 @@ def _overflow_manifest(
             "observed_edge_count": len(builder.edges),
             "observed_callable_count": len(builder.callable_entries),
             "observed_canonical_bytes": observed_bytes,
+        },
+    }
+
+
+def _overflow_physical_topology(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Compact physical details while the full source digest retains their identity."""
+    stages = value["stages"]
+    actors = value["actors"]
+    relationships = value["placement_relationships"]
+    if not stages and not actors and not relationships:
+        # Preserve byte-for-byte compatibility for pre-buffer overflow plans.
+        return value
+    result_buffer_actors = sum(
+        1
+        for actor in actors
+        if isinstance(actor, Mapping) and actor.get("kind") == "ordered_map_result_buffer"
+    )
+    return {
+        "node_model": value["node_model"],
+        "stages": [],
+        "actors": [],
+        "placement_relationships": [],
+        "overflow_summary": {
+            "stage_count": len(stages),
+            "actor_count": len(actors),
+            "result_buffer_actor_count": result_buffer_actors,
+            "placement_relationship_count": len(relationships),
+            "details_omitted": True,
         },
     }
 
@@ -1132,6 +1160,8 @@ class _PlanBuilder:
         self.map_limits: list[int | None] = []
         self.map_admission: list[dict[str, Any]] = []
         self.retained_result_bounds: list[int | None] = []
+        self.result_buffer_actors: list[dict[str, Any]] = []
+        self.result_buffer_placements: list[dict[str, Any]] = []
         self.has_dynamic_map = False
         self.unresolved_code_paths: list[str] = []
         self.unresolved_env_paths: list[str] = list(outer_identity.unresolved_paths)
@@ -1161,12 +1191,19 @@ class _PlanBuilder:
         # tags below. Keeping the traversal state on the heap means a deeply
         # nested (but otherwise valid) definition produces a controlled plan
         # result instead of leaking RecursionError from the compiler boundary.
-        work: list[tuple[Any, ...]] = [("visit", signature, node_id, dependencies, 0)]
+        work: list[tuple[Any, ...]] = [("visit", signature, node_id, dependencies, 0, 0)]
         while work:
             entry = work.pop()
             tag = entry[0]
             if tag == "visit":
-                _, current, current_id, current_dependencies, result_id = entry
+                (
+                    _,
+                    current,
+                    current_id,
+                    current_dependencies,
+                    result_id,
+                    dynamic_map_depth,
+                ) = entry
                 if isinstance(current, Step):
                     results[result_id] = self._add_step(
                         current,
@@ -1183,6 +1220,7 @@ class _PlanBuilder:
                             0,
                             current_dependencies,
                             result_id,
+                            dynamic_map_depth,
                         )
                     )
                     continue
@@ -1200,14 +1238,27 @@ class _PlanBuilder:
                                 f"{current_id}.g{index}",
                                 current_dependencies,
                                 child_result_ids[index],
+                                dynamic_map_depth,
                             )
                         )
                     continue
                 if isinstance(current, Map):
+                    if current.result_buffer is not None and dynamic_map_depth:
+                        raise WorkflowPlanValidationError(
+                            "Result-buffer maps cannot be nested inside a dynamic map in v1"
+                        )
                     self._add_map_template(current, current_id, current_dependencies)
                     body_result_id = next_result_id
                     next_result_id += 1
-                    work.append(("map_finish", current_id, body_result_id, result_id))
+                    work.append(
+                        (
+                            "map_finish",
+                            current_id,
+                            body_result_id,
+                            result_id,
+                            current.result_buffer is not None,
+                        )
+                    )
                     work.append(
                         (
                             "visit",
@@ -1215,6 +1266,7 @@ class _PlanBuilder:
                             f"{current_id}.m*",
                             (current_id,),
                             body_result_id,
+                            dynamic_map_depth + 1,
                         )
                     )
                     continue
@@ -1223,7 +1275,15 @@ class _PlanBuilder:
                     f"{type(current).__module__}.{type(current).__name__}"
                 )
             if tag == "chain_next":
-                _, current, current_id, index, current_dependencies, result_id = entry
+                (
+                    _,
+                    current,
+                    current_id,
+                    index,
+                    current_dependencies,
+                    result_id,
+                    dynamic_map_depth,
+                ) = entry
                 if index == len(current.signatures):
                     results[result_id] = current_dependencies
                     continue
@@ -1237,6 +1297,7 @@ class _PlanBuilder:
                         index,
                         child_result_id,
                         result_id,
+                        dynamic_map_depth,
                     )
                 )
                 work.append(
@@ -1246,11 +1307,20 @@ class _PlanBuilder:
                         f"{current_id}.{index}",
                         current_dependencies,
                         child_result_id,
+                        dynamic_map_depth,
                     )
                 )
                 continue
             if tag == "chain_resume":
-                _, current, current_id, index, child_result_id, result_id = entry
+                (
+                    _,
+                    current,
+                    current_id,
+                    index,
+                    child_result_id,
+                    result_id,
+                    dynamic_map_depth,
+                ) = entry
                 work.append(
                     (
                         "chain_next",
@@ -1259,6 +1329,7 @@ class _PlanBuilder:
                         index + 1,
                         results.pop(child_result_id),
                         result_id,
+                        dynamic_map_depth,
                     )
                 )
                 continue
@@ -1287,19 +1358,24 @@ class _PlanBuilder:
                 results[result_id] = (collect_id,)
                 continue
             if tag == "map_finish":
-                _, current_id, body_result_id, result_id = entry
+                _, current_id, body_result_id, result_id, uses_result_buffer = entry
                 body_terminals = results.pop(body_result_id)
                 result_node_id = f"{current_id}.result"
+                actor_id = f"{current_id}.result_buffer" if uses_result_buffer else None
                 self.nodes.append(
                     {
                         "id": result_node_id,
-                        "operation": "ordered_dynamic_collect",
-                        "node_model": "owner",
+                        "operation": (
+                            "ordered_actor_finalize"
+                            if uses_result_buffer
+                            else "ordered_dynamic_collect"
+                        ),
+                        "node_model": "actor" if uses_result_buffer else "owner",
                         "inputs": [f"node:{terminal}:result" for terminal in body_terminals],
                         "outputs": ["result"],
                         "resources": {},
                         "scheduling": {},
-                        "actor_layout": None,
+                        "actor_layout": actor_id,
                     }
                 )
                 self._add_edges(body_terminals, result_node_id)
@@ -1317,6 +1393,44 @@ class _PlanBuilder:
         cancel_timeout_seconds = signature.cancel_timeout_seconds
         if isinstance(cancel_timeout_seconds, float):
             cancel_timeout_seconds = _normalize_number(cancel_timeout_seconds)
+        result_buffer_contract = None
+        result_buffer_actor_id = None
+        if signature.result_buffer is not None:
+            from django_ray.runtime.result_buffer import result_buffer_plan_contract
+
+            if signature.max_items is None or signature.max_concurrency is None:
+                raise WorkflowPlanValidationError(
+                    "Result-buffer maps require positive max_items and max_concurrency"
+                )
+            result_buffer_contract = result_buffer_plan_contract(
+                max_items=signature.max_items,
+                max_concurrency=signature.max_concurrency,
+                max_serialized_bytes=signature.result_buffer.max_serialized_bytes,
+                actor_options=_thaw_json(signature.result_buffer.actor_options),
+            )
+            result_buffer_actor_id = f"{node_id}.result_buffer"
+            actor_options = result_buffer_contract["actor"]
+            self.result_buffer_actors.append(
+                {
+                    "id": result_buffer_actor_id,
+                    "kind": "ordered_map_result_buffer",
+                    "cardinality": "one_per_workflow_invocation",
+                    "resources": {
+                        "num_cpus": actor_options["num_cpus"],
+                        "memory": actor_options["memory"],
+                        "custom": actor_options["resources"],
+                    },
+                    "contract": result_buffer_contract,
+                }
+            )
+            self.result_buffer_placements.append(
+                {
+                    "source": node_id,
+                    "target": result_buffer_actor_id,
+                    "relationship": "owns_non_detached_actor",
+                    "placement": result_buffer_contract["placement"],
+                }
+            )
         self.has_dynamic_map = True
         self.map_limits.append(signature.max_items)
         self.retained_result_bounds.append(signature.max_items)
@@ -1328,22 +1442,21 @@ class _PlanBuilder:
                 "cancel_timeout_seconds": cancel_timeout_seconds,
             }
         )
-        self.nodes.append(
-            {
-                "id": node_id,
-                "operation": "dynamic_map",
-                "node_model": "task_template",
-                "inputs": [f"node:{dependency}:result" for dependency in dependencies]
-                or ["invocation:arg:0"],
-                "outputs": ["result"],
-                "bounds": {
-                    "maximum_items": signature.max_items,
-                    "maximum_in_flight": signature.max_concurrency,
-                    "cancel_timeout_seconds": cancel_timeout_seconds,
-                },
-                "actor_layout": None,
-            }
-        )
+        map_node = {
+            "id": node_id,
+            "operation": "dynamic_map",
+            "node_model": "task_template",
+            "inputs": [f"node:{dependency}:result" for dependency in dependencies]
+            or ["invocation:arg:0"],
+            "outputs": ["result"],
+            "bounds": {
+                "maximum_items": signature.max_items,
+                "maximum_in_flight": signature.max_concurrency,
+                "cancel_timeout_seconds": cancel_timeout_seconds,
+            },
+            "actor_layout": result_buffer_actor_id,
+        }
+        self.nodes.append(map_node)
         self._add_edges(dependencies, node_id)
 
     def _add_step(
