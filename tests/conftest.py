@@ -98,6 +98,7 @@ def _clear_django_ray_remote_caches():
         workflows._collect_workflow_results_remote_cached = None
         workflows._workflow_progress_actor_cached = None
         workflows._workflow_result_buffer_actor_cached = None
+        workflows._workflow_result_fold_actor_cached = None
     except ImportError:
         pass
 

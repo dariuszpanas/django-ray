@@ -119,7 +119,12 @@ An explicitly bounded map can use
 [`with_result_buffer()`](workflows.md#opt-in-ray-result-buffer) to retain versioned
 serialized bytes in a resource-accounted Ray actor and forward one direct payload
 reference to a downstream Ray step. The actor, object store, and final consumer still
-have O(total output) boundaries; bounded chunk/reducer aggregation remains tracked in
+have O(total output) boundaries. When only a compact summary is needed, use the explicit
+[`reduce()` ordered fold](workflows.md#opt-in-ordered-result-fold). Its actor retains one
+serialized accumulator and at most `max_concurrency - 1` out-of-order results, while
+incorporation-based admission deliberately applies head-of-line backpressure to preserve
+strict input order. Benchmark the reducer cost and accumulator size as well as map
+throughput. List-preserving chunk or hierarchical transport remains tracked in
 [GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91). Calling
 `map_step()` without `with_limits()` retains the legacy eager behavior.
 

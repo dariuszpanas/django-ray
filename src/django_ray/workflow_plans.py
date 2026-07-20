@@ -789,18 +789,26 @@ def _overflow_physical_topology(value: Mapping[str, Any]) -> Mapping[str, Any]:
         for actor in actors
         if isinstance(actor, Mapping) and actor.get("kind") == "ordered_map_result_buffer"
     )
+    result_fold_actors = sum(
+        1
+        for actor in actors
+        if isinstance(actor, Mapping) and actor.get("kind") == "ordered_map_result_fold"
+    )
+    overflow_summary = {
+        "stage_count": len(stages),
+        "actor_count": len(actors),
+        "result_buffer_actor_count": result_buffer_actors,
+        "placement_relationship_count": len(relationships),
+        "details_omitted": True,
+    }
+    if result_fold_actors:
+        overflow_summary["result_fold_actor_count"] = result_fold_actors
     return {
         "node_model": value["node_model"],
         "stages": [],
         "actors": [],
         "placement_relationships": [],
-        "overflow_summary": {
-            "stage_count": len(stages),
-            "actor_count": len(actors),
-            "result_buffer_actor_count": result_buffer_actors,
-            "placement_relationship_count": len(relationships),
-            "details_omitted": True,
-        },
+        "overflow_summary": overflow_summary,
     }
 
 
@@ -1247,6 +1255,16 @@ class _PlanBuilder:
                         raise WorkflowPlanValidationError(
                             "Result-buffer maps cannot be nested inside a dynamic map in v1"
                         )
+                    if current.result_fold is not None and dynamic_map_depth:
+                        raise WorkflowPlanValidationError(
+                            "Result-fold maps cannot be nested inside a dynamic map in v1"
+                        )
+                    if current.result_fold is not None and self._signature_contains_map(
+                        current.signature
+                    ):
+                        raise WorkflowPlanValidationError(
+                            "A result-fold mapper cannot contain a dynamic map in v1"
+                        )
                     self._add_map_template(current, current_id, current_dependencies)
                     body_result_id = next_result_id
                     next_result_id += 1
@@ -1256,7 +1274,13 @@ class _PlanBuilder:
                             current_id,
                             body_result_id,
                             result_id,
-                            current.result_buffer is not None,
+                            (
+                                "result_fold"
+                                if current.result_fold is not None
+                                else (
+                                    "result_buffer" if current.result_buffer is not None else None
+                                )
+                            ),
                         )
                     )
                     work.append(
@@ -1358,19 +1382,23 @@ class _PlanBuilder:
                 results[result_id] = (collect_id,)
                 continue
             if tag == "map_finish":
-                _, current_id, body_result_id, result_id, uses_result_buffer = entry
+                _, current_id, body_result_id, result_id, actor_mode = entry
                 body_terminals = results.pop(body_result_id)
                 result_node_id = f"{current_id}.result"
-                actor_id = f"{current_id}.result_buffer" if uses_result_buffer else None
+                actor_id = f"{current_id}.{actor_mode}" if actor_mode is not None else None
                 self.nodes.append(
                     {
                         "id": result_node_id,
                         "operation": (
-                            "ordered_actor_finalize"
-                            if uses_result_buffer
-                            else "ordered_dynamic_collect"
+                            "ordered_actor_fold_finalize"
+                            if actor_mode == "result_fold"
+                            else (
+                                "ordered_actor_finalize"
+                                if actor_mode == "result_buffer"
+                                else "ordered_dynamic_collect"
+                            )
                         ),
-                        "node_model": "actor" if uses_result_buffer else "owner",
+                        "node_model": "actor" if actor_mode is not None else "owner",
                         "inputs": [f"node:{terminal}:result" for terminal in body_terminals],
                         "outputs": ["result"],
                         "resources": {},
@@ -1383,6 +1411,26 @@ class _PlanBuilder:
                 continue
             raise AssertionError(f"Unknown workflow-plan traversal entry {tag!r}")
         return results[0]
+
+    @staticmethod
+    def _signature_contains_map(signature: Any) -> bool:
+        from django_ray.workflows import Chain, Group, Map, Step
+
+        work = [signature]
+        while work:
+            current = work.pop()
+            if isinstance(current, Map):
+                return True
+            if isinstance(current, Chain | Group):
+                work.extend(current.signatures)
+                continue
+            if isinstance(current, Step):
+                continue
+            raise WorkflowPlanValidationError(
+                "Unsupported workflow signature type "
+                f"{type(current).__module__}.{type(current).__name__}"
+            )
+        return False
 
     def _add_map_template(
         self,
@@ -1431,9 +1479,57 @@ class _PlanBuilder:
                     "placement": result_buffer_contract["placement"],
                 }
             )
+        result_fold_contract = None
+        result_fold_actor_id = None
+        if signature.result_fold is not None:
+            from django_ray.runtime.result_fold import result_fold_plan_contract
+
+            if signature.max_items is None or signature.max_concurrency is None:
+                raise WorkflowPlanValidationError(
+                    "Result-fold maps require positive max_items and max_concurrency"
+                )
+            reducer_node_id = f"{node_id}.reducer"
+            reducer_contract = self._step_execution_contract(
+                signature.result_fold.reducer,
+                reducer_node_id,
+            )
+            result_fold_contract = result_fold_plan_contract(
+                max_items=signature.max_items,
+                max_concurrency=signature.max_concurrency,
+                max_serialized_bytes=signature.result_fold.max_serialized_bytes,
+                actor_options=_thaw_json(signature.result_fold.actor_options),
+                reducer=reducer_contract,
+            )
+            result_fold_actor_id = f"{node_id}.result_fold"
+            actor_options = result_fold_contract["actor"]
+            self.result_buffer_actors.append(
+                {
+                    "id": result_fold_actor_id,
+                    "kind": "ordered_map_result_fold",
+                    "cardinality": "one_per_workflow_invocation",
+                    "resources": {
+                        "num_cpus": actor_options["num_cpus"],
+                        "memory": actor_options["memory"],
+                        "custom": actor_options["resources"],
+                    },
+                    "contract": result_fold_contract,
+                }
+            )
+            self.result_buffer_placements.append(
+                {
+                    "source": node_id,
+                    "target": result_fold_actor_id,
+                    "relationship": "owns_non_detached_actor",
+                    "placement": result_fold_contract["placement"],
+                }
+            )
         self.has_dynamic_map = True
         self.map_limits.append(signature.max_items)
-        self.retained_result_bounds.append(signature.max_items)
+        self.retained_result_bounds.append(
+            min(signature.max_items, signature.max_concurrency)
+            if signature.result_fold is not None
+            else signature.max_items
+        )
         self.map_admission.append(
             {
                 "node_id": node_id,
@@ -1453,18 +1549,28 @@ class _PlanBuilder:
                 "maximum_items": signature.max_items,
                 "maximum_in_flight": signature.max_concurrency,
                 "cancel_timeout_seconds": cancel_timeout_seconds,
+                **(
+                    {
+                        "maximum_retained_out_of_order": min(
+                            signature.max_items - 1,
+                            signature.max_concurrency - 1,
+                        ),
+                        "admission_credit_source": "incorporated_items",
+                    }
+                    if signature.result_fold is not None
+                    else {}
+                ),
             },
-            "actor_layout": result_buffer_actor_id,
+            "actor_layout": result_fold_actor_id or result_buffer_actor_id,
         }
         self.nodes.append(map_node)
         self._add_edges(dependencies, node_id)
 
-    def _add_step(
+    def _step_execution_contract(
         self,
         signature: Any,
         node_id: str,
-        dependencies: tuple[str, ...],
-    ) -> tuple[str, ...]:
+    ) -> dict[str, Any]:
         callable_identity = self.callable_identities.get(signature.callable_path)
         if callable_identity is None:
             callable_identity = _callable_code_identity(
@@ -1505,13 +1611,8 @@ class _PlanBuilder:
             signature.bound_kwargs,
             path=f"nodes.{node_id}.bound_kwargs",
         )
-        node = {
-            "id": node_id,
-            "operation": "call",
-            "node_model": "task",
+        contract = {
             "callable": {"ref": callable_ref},
-            "inputs": [f"node:{dependency}:result" for dependency in dependencies]
-            or ["invocation:root"],
             "binding_schema": {
                 "bound_positional_count": len(signature.bound_args),
                 "bound_keyword_names": bound_keyword_names,
@@ -1523,10 +1624,7 @@ class _PlanBuilder:
             "scheduling": _scheduling_options(ray_options),
             "ray_options": ray_options,
             "environment": plan_runtime_metadata,
-            "actor_layout": None,
         }
-        self.nodes.append(node)
-        self._add_edges(dependencies, node_id)
         self.environment_by_node[node_id] = dict(plan_runtime_metadata)
         if not runtime_identity.reusable:
             self.unresolved_env_paths.extend(
@@ -1551,6 +1649,26 @@ class _PlanBuilder:
             ),
             runtime_env_trust_identity=_freeze_json(self.trust_identity),
         )
+        return contract
+
+    def _add_step(
+        self,
+        signature: Any,
+        node_id: str,
+        dependencies: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        contract = self._step_execution_contract(signature, node_id)
+        node = {
+            "id": node_id,
+            "operation": "call",
+            "node_model": "task",
+            **contract,
+            "inputs": [f"node:{dependency}:result" for dependency in dependencies]
+            or ["invocation:root"],
+            "actor_layout": None,
+        }
+        self.nodes.append(node)
+        self._add_edges(dependencies, node_id)
         return (node_id,)
 
     def _resolve_step_runtime_env(
