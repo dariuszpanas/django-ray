@@ -34,8 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Queue names now serve only as workload-isolation boundaries and no longer imply
   scheduling precedence.
-- Commit-history validation now requires canonical Summary and Validation sections, rejects
-  development placeholders, and documents the final history review required before rebase merges.
+- Commit-history validation now requires descriptive body context without prescribing section
+  headings, rejects development placeholders, and documents the final history review required
+  before rebase merges.
 - Worker heartbeat, completion, reconciliation, timeout, cancellation, and lease
   cleanup schedules now remain independent from idle claim polling.
 

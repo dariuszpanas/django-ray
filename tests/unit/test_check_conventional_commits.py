@@ -24,6 +24,49 @@ Keep task ownership tied to the worker's active lease.
 - `uv run pytest tests/unit/test_worker.py`: passed.
 """
 
+DEPENDABOT_MESSAGE = """chore(ci): bump example/action from 1.0.0 to 1.0.1
+
+Bumps [example/action](https://github.com/example/action) from 1.0.0 to 1.0.1.
+- [Release notes](https://github.com/example/action/releases)
+- [Commits](https://github.com/example/action/compare/1111111111111111111111111111111111111111...2222222222222222222222222222222222222222)
+
+---
+updated-dependencies:
+- dependency-name: example/action-with-a-generated-name-that-does-not-wrap-cleanly
+  dependency-version: 1.0.1
+  dependency-type: direct:production
+  update-type: version-update:semver-patch
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+"""
+
+DEPENDABOT_GROUP_MESSAGE = """chore(deps): bump the python group with 2 updates
+
+Bumps the python group with 2 updates:
+
+| Package | From | To |
+| --- | --- | --- |
+| [example-one](https://example.com/one) | `1.0.0` | `1.0.1` |
+| [example-two](https://example.com/two) | `2.0.0` | `2.1.0` |
+
+---
+updated-dependencies:
+- dependency-name: example-one
+  dependency-version: 1.0.1
+  dependency-type: direct:production
+  update-type: version-update:semver-patch
+  dependency-group: python
+- dependency-name: example-two
+  dependency-version: 2.1.0
+  dependency-type: direct:development
+  update-type: version-update:semver-minor
+  dependency-group: python
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+"""
+
 
 def test_validate_accepts_structured_commits_and_optional_sections() -> None:
     assert (
@@ -117,92 +160,77 @@ def test_validate_requires_commit_messages() -> None:
     assert errors == ["No commit headers were found to validate."]
 
 
-def test_validate_rejects_bare_sentence_body() -> None:
+def test_validate_rejects_header_without_descriptive_body() -> None:
+    errors = CHECKER.validate_message("fix: close the lease", label="Commit 1")
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_rejects_body_without_enough_context() -> None:
     errors = CHECKER.validate_message(
         "fix: close the lease\n\nPrevent duplicate lease cleanup.",
         label="Commit 1",
     )
 
-    assert errors == [
-        "Commit 1 must use structured sections: '## Summary' followed by '## Validation'."
-    ]
+    assert any("8 or more prose words" in error for error in errors)
+
+
+def test_validate_accepts_meaningful_unstructured_body() -> None:
+    message = (
+        "fix: close the lease\n\n"
+        "Keep active lease ownership to stop duplicate cleanup during recovery."
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_treats_structured_sections_as_optional_guidance() -> None:
+    message = """fix: close the lease
+
+## Rationale
+
+Preserve active lease ownership so cleanup cannot race worker recovery.
+"""
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
 
 
 @pytest.mark.parametrize(
-    ("message", "expected"),
+    ("title", "message"),
     [
-        (
-            """fix: close the lease
-
-## Summary
-
-Prevent duplicate lease cleanup during worker recovery.
-""",
-            "missing the required '## Validation' section",
-        ),
-        (
-            """fix: close the lease
-
-## Validation
-
-- Focused lease recovery tests passed.
-""",
-            "missing the required '## Summary' section",
-        ),
-        (
-            """fix: close the lease
-
-## Summary
-
-
-## Validation
-
-- Focused lease recovery tests passed.
-""",
-            "section '## Summary' must contain meaningful content",
-        ),
-        (
-            """fix: close the lease
-
-## Summary
-
-Prevent duplicate lease cleanup during worker recovery.
-
-## Summary
-
-Preserve the active lease ownership invariant during cleanup.
-
-## Validation
-
-- Focused lease recovery tests passed.
-""",
-            "contains duplicate '## Summary' sections",
-        ),
-        (
-            """fix: close the lease
-
-## Validation
-
-- Focused lease recovery tests passed.
-
-## Summary
-
-Prevent duplicate lease cleanup during worker recovery.
-""",
-            "must place '## Summary' before '## Validation'",
-        ),
+        ("chore(ci): bump example/action from 1.0.0 to 1.0.1", DEPENDABOT_MESSAGE),
+        ("chore(deps): bump the python group with 2 updates", DEPENDABOT_GROUP_MESSAGE),
     ],
 )
-def test_validate_rejects_malformed_required_sections(message: str, expected: str) -> None:
-    errors = CHECKER.validate_message(message, label="Commit 1")
+def test_validate_accepts_descriptive_dependabot_generated_body(title: str, message: str) -> None:
+    assert CHECKER.validate(title=title, commits=[message], commit_range=None) == []
 
-    assert any(expected in error for error in errors)
+
+def test_validate_dependabot_message_still_requires_valid_header() -> None:
+    errors = CHECKER.validate(
+        title="chore(ci): bump example/action from 1.0.0 to 1.0.1",
+        commits=[DEPENDABOT_MESSAGE.replace("chore(ci):", "dependencies:", 1)],
+        commit_range=None,
+    )
+
+    assert any("uses unsupported type 'dependencies'" in error for error in errors)
+
+
+def test_validate_dependabot_message_still_requires_valid_pr_title() -> None:
+    errors = CHECKER.validate(
+        title="Dependabot update",
+        commits=[DEPENDABOT_MESSAGE],
+        commit_range=None,
+    )
+
+    assert any("PR title is not a Conventional Commit header" in error for error in errors)
 
 
 @pytest.mark.parametrize(
     "placeholder",
     [
         "WIP",
+        "**WIP**",
         "iteration 3",
         "Address review feedback.",
         "Updates.",
@@ -212,69 +240,131 @@ def test_validate_rejects_malformed_required_sections(message: str, expected: st
         "...",
     ],
 )
-def test_validate_rejects_placeholder_section_content(placeholder: str) -> None:
+def test_validate_rejects_placeholder_body_content(placeholder: str) -> None:
+    message = (
+        "fix: close the lease\n\n"
+        f"{placeholder}\n\n"
+        "Preserve active lease ownership during deterministic worker recovery."
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("contains placeholder content" in error for error in errors)
+
+
+def test_validate_rejects_html_comment_only_body() -> None:
     errors = CHECKER.validate_message(
-        VALID_MESSAGE.replace(
-            "Keep task ownership tied to the worker's active lease.", placeholder
-        ),
+        "fix: close the lease\n\n<!-- describe the durable change here -->",
         label="Commit 1",
     )
 
-    assert any("contains only placeholder content" in error for error in errors)
+    assert any("body must contain meaningful context" in error for error in errors)
 
 
-def test_validate_accepts_placeholder_looking_line_with_substantive_prose() -> None:
-    message = VALID_MESSAGE.replace(
-        "Keep task ownership tied to the worker's active lease.",
-        "WIP\n\nKeep task ownership tied to the worker's active lease.",
+def test_validate_rejects_unexpanded_tracked_template_tokens() -> None:
+    rendered = (
+        TEMPLATE.read_text(encoding="utf-8")
+        .replace("<type>[optional scope][!]: <imperative summary>", "fix: close the lease")
+        .replace("<Describe the concrete durable change.>", "Preserve active lease ownership.")
+        .replace(
+            "<Explain the problem, invariant, or outcome that motivates it.>",
+            "Prevent duplicate cleanup during deterministic worker recovery.",
+        )
     )
+    rendered = "\n".join(line for line in rendered.splitlines() if not line.startswith(";"))
+
+    errors = CHECKER.validate_message(rendered, label="Commit 1")
+
+    assert any("<command>: <result>" in error for error in errors)
+
+
+def test_validate_rejects_development_placeholder_split_across_lines() -> None:
+    errors = CHECKER.validate_message(
+        "fix: close the lease\n\nAddress review\nfeedback.",
+        label="Commit 1",
+    )
+
+    assert any("contains placeholder content" in error for error in errors)
+
+
+def test_validate_counts_plain_validation_prose_as_context() -> None:
+    message = """fix: close the lease
+
+Prevent duplicate cleanup while preserving ownership during recovery.
+
+Tests: focused lease recovery checks completed successfully.
+"""
 
     assert CHECKER.validate_message(message, label="Commit 1") == []
-
-
-def test_validate_rejects_html_comment_only_section() -> None:
-    message = VALID_MESSAGE.replace(
-        "Keep task ownership tied to the worker's active lease.",
-        "<!-- describe the durable change here -->",
-    )
-
-    errors = CHECKER.validate_message(message, label="Commit 1")
-
-    assert any("section '## Summary' must contain meaningful content" in error for error in errors)
 
 
 @pytest.mark.parametrize(
-    "example",
+    "context",
     [
-        "```text\n## Summary\nDurable change details.\n```",
-        "    ## Summary\n    Durable change details.",
-        "> ## Summary\n> Durable change details.",
-        "<!--\n## Summary\nDurable change details.\n-->",
+        "Make active lease ownership durable across worker restarts and retries.",
+        "Ruff configuration keeps generated project files out of normal checks.",
+        "Checks preserve ownership while workers retry interrupted tasks safely.",
     ],
 )
-def test_validate_does_not_treat_example_headings_as_sections(example: str) -> None:
-    message = f"fix: close the lease\n\n{example}\n\n## Validation\n\n- Focused tests passed."
-
-    errors = CHECKER.validate_message(message, label="Commit 1")
-
-    assert any("missing the required '## Summary' section" in error for error in errors)
-
-
-def test_validate_requires_exact_case_for_required_headings() -> None:
-    message = VALID_MESSAGE.replace("## Summary", "## summary")
-
-    errors = CHECKER.validate_message(message, label="Commit 1")
-
-    assert any("missing the required '## Summary' section" in error for error in errors)
-
-
-def test_validate_counts_arbitrary_label_as_validation_content() -> None:
-    message = VALID_MESSAGE.replace(
-        "- `uv run pytest tests/unit/test_worker.py`: passed.",
-        "Tests: uv run pytest completed successfully.",
-    )
+def test_validate_counts_command_like_words_as_prose(context: str) -> None:
+    message = f"fix: preserve task ownership\n\n{context}"
 
     assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_rejects_padded_development_only_prose() -> None:
+    errors = CHECKER.validate_message(
+        "fix: close the lease\n\n"
+        "Address review feedback and update tests for supported environments.",
+        label="Commit 1",
+    )
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_rejects_padded_ci_fix_prose() -> None:
+    errors = CHECKER.validate_message(
+        "fix: close the lease\n\n"
+        "Fix CI failures and update tests across all supported environments.",
+        label="Commit 1",
+    )
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        "Replace the TODO marker with durable ownership during worker recovery.",
+        "Reject placeholder tokens only when they replace durable change context.",
+    ],
+)
+def test_validate_accepts_descriptive_placeholder_discussion(context: str) -> None:
+    message = f"fix: preserve task ownership\n\n{context}"
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "TODO: add meaningful historical context before this commit is merged.",
+        "WIP: finish durable worker recovery tests before merging this change.",
+        "TBD - explain durable ownership behavior across every worker backend.",
+    ],
+)
+def test_validate_rejects_placeholder_prefix_body(prefix: str) -> None:
+    errors = CHECKER.validate_message(f"fix: preserve task ownership\n\n{prefix}", label="Commit 1")
+
+    assert any("contains placeholder content" in error for error in errors)
+
+
+@pytest.mark.parametrize("prefix", ["WIP preserve ownership", "TODO: preserve ownership"])
+def test_validate_rejects_placeholder_prefix_header(prefix: str) -> None:
+    error = CHECKER.validate_header(f"fix: {prefix}", label="Commit 1")
+
+    assert error is not None
+    assert "development placeholder" in error
 
 
 def test_validate_rejects_placeholder_header_summary() -> None:
@@ -288,14 +378,167 @@ def test_validate_rejects_placeholder_header_summary() -> None:
 
 def test_validate_rejects_summary_that_only_repeats_header() -> None:
     errors = CHECKER.validate_message(
-        VALID_MESSAGE.replace(
-            "Keep task ownership tied to the worker's active lease.",
-            "Preserve task ownership.",
-        ),
+        "fix: preserve task ownership\n\nPreserve task ownership.",
         label="Commit 1",
     )
 
-    assert any("only repeats the header summary" in error for error in errors)
+    assert any("repeats the header summary" in error for error in errors)
+
+
+def test_validate_rejects_header_summary_repeated_twice() -> None:
+    message = (
+        "fix: preserve active lease ownership\n\n"
+        "Preserve active lease ownership.\n"
+        "Preserve active lease ownership."
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("repeats the header summary" in error for error in errors)
+
+
+def test_validate_rejects_wrapped_header_summary_repetition() -> None:
+    message = (
+        "fix: preserve active lease ownership across worker recovery\n\n"
+        "Preserve active lease ownership\n"
+        "across worker recovery."
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("repeats the header summary" in error for error in errors)
+
+
+def test_validate_rejects_identifier_header_summary_repetition() -> None:
+    message = (
+        "fix: preserve execution_generation during worker recovery\n\n"
+        "Preserve execution_generation during worker recovery.\n"
+        "Preserve execution_generation during worker recovery."
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("repeats the header summary" in error for error in errors)
+
+
+def test_validate_rejects_repeated_summary_with_validation_only_body() -> None:
+    message = """fix: preserve active lease ownership
+
+## Summary
+
+Preserve active lease ownership.
+
+## Validation
+
+All checks passed successfully on the supported test matrix.
+"""
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("repeats the header summary" in error for error in errors)
+
+
+def test_validate_rejects_validation_only_body() -> None:
+    message = """fix: close the lease
+
+## Validation
+
+All checks passed successfully on the supported test matrix.
+"""
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_rejects_unstructured_validation_result_only_body() -> None:
+    errors = CHECKER.validate_message(
+        "fix: close the lease\n\nAll checks passed successfully on supported environments.",
+        label="Commit 1",
+    )
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_rejects_validation_matrix_only_body() -> None:
+    message = """fix: close the lease
+
+Windows: passed.
+Linux: passed.
+Python: passed.
+Documentation: passed.
+"""
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_counts_status_word_inside_descriptive_prose() -> None:
+    message = (
+        "fix: close the lease\n\n"
+        "Database: success depends on durable ownership across worker recovery."
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_recognizes_decorated_validation_heading() -> None:
+    message = """fix: close the lease
+
+## **Validation**
+
+Recovery checks passed across every supported worker backend.
+"""
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+@pytest.mark.parametrize("level", [1, 3, 6])
+def test_validate_does_not_count_atx_heading_as_context(level: int) -> None:
+    heading = "#" * level
+    errors = CHECKER.validate_message(
+        f"fix: close the lease\n\n{heading} This heading alone has more than eight words",
+        label="Commit 1",
+    )
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_does_not_count_setext_heading_as_context() -> None:
+    errors = CHECKER.validate_message(
+        "fix: close the lease\n\n"
+        "This heading alone contains more than eight ordinary prose words\n"
+        "--------------------------------------------------------------",
+        label="Commit 1",
+    )
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_does_not_count_setext_validation_section() -> None:
+    message = """fix: close the lease
+
+Validation
+==========
+
+All checks passed successfully on every supported environment.
+"""
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_does_not_count_numeric_tokens_as_context() -> None:
+    errors = CHECKER.validate_message(
+        "chore(deps): update versions\n\n1 2 3 4 5 6 7 8",
+        label="Commit 1",
+    )
+
+    assert any("body must contain meaningful context" in error for error in errors)
 
 
 def test_validate_rejects_missing_blank_line_after_header() -> None:
@@ -319,7 +562,317 @@ def test_validate_commit_message_line_length_boundary(length: int, has_error: bo
     line_errors = [error for error in errors if "line 5 exceeds" in error]
     assert bool(line_errors) is has_error
     if has_error:
-        assert "line 5 exceeds 72 characters (73)" in line_errors[0]
+        assert "line 5 exceeds 72 characters (73 visible characters)" in line_errors[0]
+
+
+def test_validate_measures_visible_prose_without_markdown_destination() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        "Keep the [dependency comparison](https://example.com/"
+        + "x" * 120
+        + ") available for future release history.",
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_accepts_long_raw_url_without_ignoring_surrounding_prose() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        "Keep dependency comparisons available for future release history at "
+        "https://example.com/" + "x" * 120,
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_rejects_long_markdown_link_label() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        f"[{'x' * 73}](https://example.com/comparison)",
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("line 5 exceeds 72 characters" in error for error in errors)
+
+
+def test_validate_rejects_long_prose_around_markdown_link() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        f"{'x' * 73} [comparison](https://example.com/comparison)",
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any(
+        "line 5 exceeds 72 characters" in error and "visible characters" in error
+        for error in errors
+    )
+
+
+def test_validate_does_not_exempt_content_after_unvalidated_metadata_marker() -> None:
+    message = (
+        "fix: keep metadata visible\n\n"
+        "This body explains why unvalidated metadata must remain visible in history.\n\n"
+        "---\n" + "x" * 100
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("line 6 exceeds 72 characters" in error for error in errors)
+
+
+def test_validate_does_not_wrap_markdown_table_rows() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        "Keep dependency changes visible in generated history.\n\n"
+        "| Dependency | Previous version | Updated version |\n"
+        "| --- | --- | --- |\n"
+        "| Dependency with a generated display name | Previous version | Updated version |",
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_does_not_wrap_table_rows_without_outer_pipes() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        "Keep dependency changes visible in generated history.\n\n"
+        "Dependency | Previous version | Updated version\n"
+        "--- | --- | ---\n"
+        "Dependency with a generated display name | Previous version | Updated version",
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_does_not_wrap_one_column_table_rows() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        "Keep dependency changes visible in generated history.\n\n"
+        "| Dependency |\n"
+        "| --- |\n"
+        f"| {'generated-dependency-name-' + 'x' * 80} |",
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_does_not_split_escaped_table_pipes() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        "Keep dependency changes visible in generated history.\n\n"
+        "| Dependency | Detail |\n"
+        "| --- | --- |\n"
+        f"| generated \\| alias {'x' * 80} | current version |",
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_does_not_require_body_table_column_count() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        "Keep dependency changes visible in generated history.\n\n"
+        "| Dependency | Previous | Updated |\n"
+        "| --- | --- | --- |\n"
+        f"| {'generated-dependency-name-' + 'x' * 80} |",
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+@pytest.mark.parametrize(
+    "block_line",
+    [
+        "> quoted prose | " + "x" * 90,
+        "- list prose | " + "x" * 90,
+        "## Heading prose | " + "x" * 90,
+        "    indented code | " + "x" * 90,
+        "```text | " + "x" * 90,
+    ],
+)
+def test_validate_stops_table_before_block_structure(block_line: str) -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        "Keep dependency changes visible in generated history.\n\n"
+        "| Dependency | Previous | Updated |\n"
+        "| --- | --- | --- |\n"
+        "| example | 1.0.0 | 1.0.1 |\n"
+        f"{block_line}",
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("exceeds 72 characters" in error for error in errors)
+
+
+def test_validate_requires_matching_table_column_counts() -> None:
+    message = VALID_MESSAGE.replace(
+        "Keep task ownership tied to the worker's active lease.",
+        "Keep dependency changes visible in generated history.\n\n"
+        "Dependency with a generated display name | Previous version | Updated version\n"
+        "--- | ---",
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("exceeds 72 characters" in error for error in errors)
+
+
+def test_validate_does_not_treat_pipe_wrapped_prose_as_a_table() -> None:
+    message = (
+        "fix: keep prose wrapping visible\n\n"
+        "Explain why ordinary pipe-wrapped prose still belongs to readable history.\n\n"
+        f"|{'x' * 100}|"
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("line 5 exceeds 72 characters" in error for error in errors)
+
+
+def test_validate_does_not_exempt_unrecognized_generated_metadata() -> None:
+    message = DEPENDABOT_MESSAGE.replace(
+        "  update-type: version-update:semver-patch\n",
+        f"  update-type: version-update:semver-patch\n  prose: {'x' * 100}\n",
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("exceeds 72 characters" in error for error in errors)
+
+
+def test_validate_rejects_generated_metadata_with_prose_value() -> None:
+    message = DEPENDABOT_MESSAGE.replace(
+        "  dependency-version: 1.0.1",
+        "  dependency-version: this arbitrary prose must not bypass validation",
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("unrecognized generated dependency metadata" in error for error in errors)
+
+
+def test_validate_detects_placeholder_inside_invalid_generated_metadata() -> None:
+    message = DEPENDABOT_MESSAGE.replace(
+        "  dependency-version: 1.0.1", "  dependency-version: WIP pending"
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("unrecognized generated dependency metadata" in error for error in errors)
+
+
+def test_validate_rejects_metadata_shape_without_markers() -> None:
+    message = """chore(deps): update generated metadata
+
+updated-dependencies:
+- dependency-name: example
+  dependency-version: 1.0.1
+  dependency-type: direct:production
+  update-type: version-update:semver-patch
+"""
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("unrecognized generated dependency metadata" in error for error in errors)
+
+
+def test_validate_ignores_generated_metadata_inside_fenced_example() -> None:
+    message = """docs: explain generated dependency metadata
+
+Document dependency metadata without changing durable commit behavior.
+
+```yaml
+---
+updated-dependencies:
+- dependency-name: example
+  dependency-version: 1.0.1
+  dependency-type: direct:production
+  update-type: version-update:semver-patch
+...
+```
+"""
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_validate_rejects_malformed_metadata_fields_without_markers() -> None:
+    message = """chore(deps): update generated metadata
+
+- dependency-name: arbitrary dependency prose
+  dependency-version: unfinished version details
+  dependency-type: direct production dependency
+  update-type: pending semantic update type
+"""
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("unrecognized generated dependency metadata" in error for error in errors)
+
+
+def test_validate_accepts_dependency_named_todo() -> None:
+    message = DEPENDABOT_MESSAGE.replace("example/action", "todo")
+    title = "chore(deps): bump todo from 1.0.0 to 1.0.1"
+    message = message.replace("chore(ci): bump todo from 1.0.0 to 1.0.1", title, 1).replace(
+        "todo-with-a-generated-name-that-does-not-wrap-cleanly", "todo"
+    )
+
+    assert CHECKER.validate(title=title, commits=[message], commit_range=None) == []
+
+
+def test_validate_accepts_short_generated_dependency_context() -> None:
+    title = "chore(deps): bump ray from 2.0.0 to 2.0.1"
+    message = """chore(deps): bump ray from 2.0.0 to 2.0.1
+
+Bumps [ray](https://github.com/ray-project/ray) from 2.0.0 to 2.0.1.
+- [Release notes](https://github.com/ray-project/ray/releases)
+- [Commits](https://github.com/ray-project/ray/compare/2.0.0...2.0.1)
+
+---
+updated-dependencies:
+- dependency-name: ray
+  dependency-version: 2.0.1
+  dependency-type: direct:production
+  update-type: version-update:semver-patch
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+"""
+
+    assert CHECKER.validate(title=title, commits=[message], commit_range=None) == []
+
+
+def test_validate_rejects_incomplete_short_generated_dependency_context() -> None:
+    message = DEPENDABOT_MESSAGE.replace(
+        "Bumps [example/action](https://github.com/example/action) from 1.0.0 to 1.0.1.",
+        "Bumps things.",
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_does_not_count_generated_metadata_as_description() -> None:
+    message = """chore(deps): update generated metadata
+
+---
+updated-dependencies:
+- dependency-name: example
+  dependency-version: 1.0.1
+  dependency-type: direct:production
+  update-type: version-update:semver-patch
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+"""
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("body must contain meaningful context" in error for error in errors)
 
 
 def test_validate_accepts_crlf_commit_message() -> None:
@@ -408,4 +961,6 @@ def test_commit_workflow_validates_the_fetched_pr_range_without_rest_api() -> No
     assert 'fetched_head="$(git rev-parse "$pr_ref")"' in workflow
     assert 'if [ "$fetched_head" != "$PR_HEAD_SHA" ]; then' in workflow
     assert 'git cat-file -e "${PR_BASE_SHA}^{commit}"' in workflow
+    assert "PR_AUTHOR_LOGIN" not in workflow
+    assert "--body-policy" not in workflow
     assert '--range "${PR_BASE_SHA}..${pr_ref}"' in workflow

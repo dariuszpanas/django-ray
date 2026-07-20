@@ -42,8 +42,9 @@ Create branches from an up-to-date `main` and use lowercase kebab-case names:
 automated agents must not replace it with an unrelated `agent/`, `codex/`, or similar prefix. An
 explicit maintainer-requested name still takes precedence.
 
-Use Conventional Commit syntax for commits and PR titles. Every commit also uses the canonical
-structured body:
+Use Conventional Commit syntax for commits and PR titles. Every commit also includes enough body
+context to understand the retained change without reconstructing intent from its diff. The tracked
+template recommends this layout:
 
 ```text
 <type>[optional scope][!]: <imperative summary>
@@ -58,12 +59,16 @@ structured body:
 - `<command>`: result
 ```
 
-`## Summary` must be the first section and `## Validation` the last. Add focused sections such as
-`## Rationale`, `## Migration`, `## Compatibility`, or `## Release decision` between them when the
-commit needs that context. Every section must contain meaningful content. An unstructured bare body,
-template placeholder, iteration label, or development-only note such as "address review feedback"
-fails validation. When the header uses `!`, add a non-empty `BREAKING CHANGE:` footer below the
-Validation section. Wrap commit-message lines at 72 characters.
+The headings are guidance rather than a required format. Meaningful unstructured prose is equally
+valid. The gate requires at least eight body words outside headings, validation evidence, generated
+metadata, and trailers, or structurally complete generated dependency context; rejects
+placeholders, development-only notes such as "address review feedback," and bodies that merely
+repeat the header; and requires a blank line after the header. A non-empty
+`BREAKING CHANGE:` footer may follow the descriptive body; `!` in the header is sufficient to mark
+the change as breaking. Wrap ordinary prose at 72 characters. URL destinations, complete Markdown
+tables, recognized Git trailers, and validated generated dependency metadata are exempt from
+mechanical wrapping. The same standard applies to human and automated commits, so descriptive
+Dependabot messages do not need a bot-wide exception.
 
 Install the tracked template in each checkout or worktree:
 
@@ -85,12 +90,12 @@ every commit in the PR. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`
 <type>[optional scope][!]: <imperative summary>
 ```
 
-The check enforces the structured sections, meaningful content, and 72-character line limit. It
-reports the offending commit, section, or line.
+The check enforces meaningful body context and the wrappable-prose line limit without prescribing
+section headings. It reports the offending commit or line.
 
-For example, `fix(worker): preserve task ownership` is a valid header, but its commit still needs the
-structured Summary and Validation body. Invalid titles or commit headers fail with the exact offending
-value and the expected format.
+For example, `fix(worker): preserve task ownership` is a valid header, but its commit still needs
+enough body context to explain the retained change. Invalid titles or commit headers fail with the
+exact offending value and expected format.
 
 Before editing, inspect `git status --short`, the current branch, and `HEAD`. Preserve unrelated work,
 stage explicit paths instead of `git add .`, and review both the working and staged diffs. Repository
@@ -272,8 +277,8 @@ uv run python scripts/check_conventional_commits.py --range origin/main..HEAD
 Use `git rebase -i origin/main` to fold `fixup!`/`squash!` commits, CI repairs, review repairs,
 formatting-only follow-ups, and other development iterations into the logical commit they correct.
 After rewriting, push with `--force-with-lease`. Preserve genuinely independent changes as separate,
-focused commits with their own Summary and Validation sections. Validate the final PR title together
-with the range before enabling auto-merge.
+focused commits with their own descriptive bodies. Validate the final PR title together with the
+range before enabling auto-merge.
 
 If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
 conflicts, run `uv run make ci`, and push. Auto-merge will recalculate the required checks. The
