@@ -30,6 +30,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Compiled session ownership](https://django-ray.readthedocs.io/en/latest/design/adr-0002-compiled-session-ownership/):
   initial local/direct CPU-pilot process boundary, deferred Ray Client-submitted
   topology, within-run reuse, routing, admission, and drain.
+- [Compiled invocation lifecycle](https://django-ray.readthedocs.io/en/latest/design/adr-0003-compiled-invocation-lifecycle/):
+  Ray-free session/invocation reducer, absolute deadlines, fallback and replay
+  cutoffs, one-shot outputs, reuse health, and bounded cleanup diagnostics.
 - [Compiled Graph compatibility](https://django-ray.readthedocs.io/en/latest/compiled-graph-compatibility/):
   fail-closed candidate and verified tuples, native probe outcomes, topology,
   transport, dependencies, and canary maintenance.
@@ -60,6 +63,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - `src/django_ray/workflows.py`: workflow signature construction and execution.
 - `src/django_ray/runtime/runtime_env.py`: profile validation, inheritance, hashing,
   and local-path preparation.
+- `src/django_ray/runtime/compiled_graph_lifecycle.py`: deterministic Ray-free
+  compiled session and invocation state reducer.
 - `src/django_ray/runner/ray_core.py`: low-overhead Ray Core submission.
 - `src/django_ray/runner/ray_job.py`: Ray Job submission and reconciliation.
 - `src/django_ray/observability.py`: versioned durable and optional live-Ray services.
@@ -72,6 +77,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   Django tasks.
 - `WorkflowSignature` is a definition builder, not a persisted plan. Compiled Graph is
   an execution strategy for eligible static actor regions, not a Django task type.
+- Compiled lifecycle protocol version 1 is fingerprinted in the effective plan. It
+  closes fallback before preparation and same-invocation replay when submission starts;
+  no native Compiled Graph strategy is enabled by the reducer.
 - The result returned by `enqueue()` is a snapshot. Fetch current state with
   `task_backends[alias].get_result(task_id)`.
 - Per-task numeric priority is persisted from `-100` through `100`; larger values are

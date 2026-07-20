@@ -70,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Compiled Graph ownership ADR and opt-in raw-Ray topology probe that select one
   Ray Core outer task as the initial local/direct within-run CPU-pilot owner without
   claiming production Ray Client transport or cross-schedule reuse.
+- A versioned, standard-library-only Compiled Graph lifecycle reducer that separates
+  session health from invocation outcome, applies complete run/invocation fencing and
+  absolute outer-capped deadlines, closes fallback before preparation and replay before
+  submission, accounts for one-shot outputs, and emits bounded secret-free snapshots.
+  Lifecycle protocol version 1 participates in effective-plan identity; no native
+  execution adapter or capability promotion is included.
 - A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
   with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
   capability identity includes immutable deployment, shared-memory, and object-store

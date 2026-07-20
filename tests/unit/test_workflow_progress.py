@@ -11,6 +11,7 @@ from django_ray.models import RayTaskExecution, TaskState
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
     DurableTaskContext,
+    WorkflowInvocationIdentity,
     WorkflowRunIdentity,
 )
 from django_ray.workflow_progress import (
@@ -66,6 +67,58 @@ def test_workflow_run_identity_requires_complete_durable_fence() -> None:
     assert identity.attempt_number == 2
     assert identity.execution_generation == 3
     assert identity.as_dict()["run_id"] == identity.run_id
+
+
+def test_workflow_invocation_identity_extends_without_changing_run_serialization() -> None:
+    run_identity = WorkflowRunIdentity(
+        task_execution_pk=7,
+        attempt_number=2,
+        execution_generation=3,
+        run_id="00000000-0000-0000-0000-000000000101",
+    )
+    original_run_snapshot = run_identity.as_dict()
+    invocation = WorkflowInvocationIdentity(
+        run_identity=run_identity,
+        invocation_id="00000000-0000-0000-0000-000000000102",
+    )
+
+    assert (
+        run_identity.as_dict()
+        == original_run_snapshot
+        == {
+            "schema_version": 1,
+            "run_id": "00000000-0000-0000-0000-000000000101",
+            "task_execution_pk": 7,
+            "attempt_number": 2,
+            "execution_generation": 3,
+        }
+    )
+    assert invocation.as_dict() == {
+        "schema_version": 1,
+        "task_execution_pk": 7,
+        "attempt_number": 2,
+        "execution_generation": 3,
+        "run_id": "00000000-0000-0000-0000-000000000101",
+        "invocation_id": "00000000-0000-0000-0000-000000000102",
+    }
+
+
+def test_workflow_invocation_identity_factory_preserves_parent_fence() -> None:
+    run_identity = WorkflowRunIdentity(
+        task_execution_pk=8,
+        attempt_number=4,
+        execution_generation=9,
+        run_id="00000000-0000-0000-0000-000000000103",
+    )
+
+    invocation = WorkflowInvocationIdentity.create(run_identity)
+
+    assert invocation.run_identity is run_identity
+    assert invocation.task_execution_pk == 8
+    assert invocation.attempt_number == 4
+    assert invocation.execution_generation == 9
+    assert invocation.run_id == run_identity.run_id
+    assert invocation.invocation_id
 
 
 def test_claim_workflow_run_requires_plan_and_selection_together() -> None:

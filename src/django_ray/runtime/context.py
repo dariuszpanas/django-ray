@@ -12,6 +12,7 @@ from uuid import uuid4
 
 WORKFLOW_PROGRESS_SCHEMA_VERSION = 2
 WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION = 1
+WORKFLOW_INVOCATION_IDENTITY_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,7 @@ class DurableTaskContext:
 
 @dataclass(frozen=True)
 class WorkflowRunIdentity:
-    """Immutable identity for one workflow invocation in a durable task run."""
+    """Immutable identity for one workflow run in a durable task execution."""
 
     task_execution_pk: int
     attempt_number: int
@@ -39,7 +40,7 @@ class WorkflowRunIdentity:
 
     @classmethod
     def create(cls, task_context: DurableTaskContext) -> WorkflowRunIdentity | None:
-        """Create an invocation identity when the durable context is fenceable."""
+        """Create a run identity when the durable context is fenceable."""
         if task_context.attempt_number is None or task_context.execution_generation is None:
             return None
         return cls(
@@ -57,6 +58,50 @@ class WorkflowRunIdentity:
             "task_execution_pk": self.task_execution_pk,
             "attempt_number": self.attempt_number,
             "execution_generation": self.execution_generation,
+        }
+
+
+@dataclass(frozen=True)
+class WorkflowInvocationIdentity:
+    """Immutable identity for one invocation inside a workflow run."""
+
+    run_identity: WorkflowRunIdentity
+    invocation_id: str
+
+    @classmethod
+    def create(cls, run_identity: WorkflowRunIdentity) -> WorkflowInvocationIdentity:
+        """Create an invocation identity nested under ``run_identity``."""
+        return cls(run_identity=run_identity, invocation_id=str(uuid4()))
+
+    @property
+    def task_execution_pk(self) -> int:
+        """Return the durable task primary key from the enclosing run."""
+        return self.run_identity.task_execution_pk
+
+    @property
+    def attempt_number(self) -> int:
+        """Return the durable attempt number from the enclosing run."""
+        return self.run_identity.attempt_number
+
+    @property
+    def execution_generation(self) -> int:
+        """Return the execution fence from the enclosing run."""
+        return self.run_identity.execution_generation
+
+    @property
+    def run_id(self) -> str:
+        """Return the enclosing workflow-run identifier."""
+        return self.run_identity.run_id
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the versioned, flattened five-field identity."""
+        return {
+            "schema_version": WORKFLOW_INVOCATION_IDENTITY_SCHEMA_VERSION,
+            "task_execution_pk": self.task_execution_pk,
+            "attempt_number": self.attempt_number,
+            "execution_generation": self.execution_generation,
+            "run_id": self.run_id,
+            "invocation_id": self.invocation_id,
         }
 
 

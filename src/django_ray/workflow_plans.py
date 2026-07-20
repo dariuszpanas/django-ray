@@ -38,6 +38,9 @@ from django_ray.runtime.compiled_graph import (
     detect_compiled_graph_runtime,
     evaluate_compiled_graph_support,
 )
+from django_ray.runtime.compiled_graph_lifecycle import (
+    COMPILED_GRAPH_LIFECYCLE_PROTOCOL_VERSION,
+)
 from django_ray.runtime.import_utils import import_callable
 from django_ray.runtime.runtime_env import (
     ResolvedRuntimeEnv,
@@ -1929,6 +1932,7 @@ def _default_build_context(
 def _compiled_graph_settings(value: Mapping[str, Any] | None) -> dict[str, Any]:
     settings: dict[str, Any] = {
         "settings_version": 1,
+        "lifecycle_protocol_version": COMPILED_GRAPH_LIFECYCLE_PROTOCOL_VERSION,
         "transport": CompiledGraphTransport.CPU_SHARED_MEMORY.value,
         "maximum_in_flight": 1,
         "maximum_buffered_results": 1,
@@ -1947,8 +1951,21 @@ def _compiled_graph_settings(value: Mapping[str, Any] | None) -> dict[str, Any]:
         )
     settings.update(value)
     normalized = _normalize_json(settings, path="compiled_graph_settings", depth=0)
-    if normalized["settings_version"] != 1:
+    if (
+        isinstance(normalized["settings_version"], bool)
+        or not isinstance(normalized["settings_version"], int)
+        or normalized["settings_version"] != 1
+    ):
         raise WorkflowPlanValidationError("compiled_graph_settings.settings_version must be 1")
+    if (
+        isinstance(normalized["lifecycle_protocol_version"], bool)
+        or not isinstance(normalized["lifecycle_protocol_version"], int)
+        or normalized["lifecycle_protocol_version"] != COMPILED_GRAPH_LIFECYCLE_PROTOCOL_VERSION
+    ):
+        raise WorkflowPlanValidationError(
+            "compiled_graph_settings.lifecycle_protocol_version must be "
+            f"{COMPILED_GRAPH_LIFECYCLE_PROTOCOL_VERSION}"
+        )
     if normalized["transport"] not in {
         CompiledGraphTransport.CPU_SHARED_MEMORY.value,
         CompiledGraphTransport.GPU_NCCL.value,
@@ -1958,8 +1975,11 @@ def _compiled_graph_settings(value: Mapping[str, Any] | None) -> dict[str, Any]:
         )
     for key in ("maximum_in_flight", "maximum_buffered_results", "owner_concurrency"):
         item = normalized[key]
-        if isinstance(item, bool) or not isinstance(item, int) or item < 1:
-            raise WorkflowPlanValidationError(f"compiled_graph_settings.{key} must be positive")
+        if isinstance(item, bool) or not isinstance(item, int) or item != 1:
+            raise WorkflowPlanValidationError(
+                f"compiled_graph_settings.{key} must be 1 for lifecycle protocol version "
+                f"{COMPILED_GRAPH_LIFECYCLE_PROTOCOL_VERSION}"
+            )
     buffer_bytes = normalized["buffer_bytes"]
     if buffer_bytes is not None and (
         isinstance(buffer_bytes, bool) or not isinstance(buffer_bytes, int) or buffer_bytes < 1

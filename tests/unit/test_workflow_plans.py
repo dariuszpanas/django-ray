@@ -18,6 +18,9 @@ from django_ray.runtime.compiled_graph import (
     CompiledGraphSubmissionTransport,
     CompiledGraphTopology,
 )
+from django_ray.runtime.compiled_graph_lifecycle import (
+    COMPILED_GRAPH_LIFECYCLE_PROTOCOL_VERSION,
+)
 from django_ray.runtime.context import (
     DurableTaskContext,
     WorkflowRunIdentity,
@@ -360,6 +363,82 @@ def test_compiler_platform_and_deployment_identity_are_fingerprinted() -> None:
     assert manifest["capabilities"]["transport"]["kind"] == "ray_object_store"
     assert manifest["definition"]["build_revision"] == BASE_CONTEXT.build_revision
     assert manifest["definition"]["container_image_digest"] == BASE_IMAGE_DIGEST
+
+
+def test_compiled_graph_lifecycle_protocol_is_fingerprinted_and_fail_closed(
+    monkeypatch,
+) -> None:
+    import django_ray.workflow_plans as plan_module
+
+    baseline = _materialize(step(increment), 1).plan
+    requirements = baseline.as_dict()["strategy_requirements"]["compiled_graph"]
+
+    assert (
+        requirements["lifecycle_protocol_version"] == COMPILED_GRAPH_LIFECYCLE_PROTOCOL_VERSION == 1
+    )
+    with pytest.raises(
+        WorkflowPlanValidationError,
+        match="compiled_graph_settings.lifecycle_protocol_version must be 1",
+    ):
+        _materialize(
+            step(increment),
+            1,
+            context=replace(
+                BASE_CONTEXT,
+                compiled_graph_settings={"lifecycle_protocol_version": 2},
+            ),
+        )
+
+    monkeypatch.setattr(plan_module, "COMPILED_GRAPH_LIFECYCLE_PROTOCOL_VERSION", 2)
+    changed = _materialize(
+        step(increment),
+        1,
+        context=replace(
+            BASE_CONTEXT,
+            compiled_graph_settings={"lifecycle_protocol_version": 2},
+        ),
+    ).plan
+
+    assert (
+        changed.manifest["strategy_requirements"]["compiled_graph"]["lifecycle_protocol_version"]
+        == 2
+    )
+    assert changed.fingerprint != baseline.fingerprint
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["maximum_in_flight", "maximum_buffered_results", "owner_concurrency"],
+)
+def test_compiled_graph_lifecycle_v1_rejects_wider_capacity(field: str) -> None:
+    with pytest.raises(
+        WorkflowPlanValidationError,
+        match=rf"compiled_graph_settings.{field} must be 1",
+    ):
+        _materialize(
+            step(increment),
+            1,
+            context=replace(
+                BASE_CONTEXT,
+                compiled_graph_settings={field: 2},
+            ),
+        )
+
+
+@pytest.mark.parametrize("field", ["settings_version", "lifecycle_protocol_version"])
+def test_compiled_graph_version_fields_reject_boolean_aliases(field: str) -> None:
+    with pytest.raises(
+        WorkflowPlanValidationError,
+        match=rf"compiled_graph_settings.{field} must be 1",
+    ):
+        _materialize(
+            step(increment),
+            1,
+            context=replace(
+                BASE_CONTEXT,
+                compiled_graph_settings={field: True},
+            ),
+        )
 
 
 def test_compiled_graph_compatibility_uses_the_versioned_adapter_record() -> None:

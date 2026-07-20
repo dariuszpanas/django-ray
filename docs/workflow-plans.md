@@ -3,13 +3,16 @@
 This document defines the architecture contract between the public workflow builders,
 durable Django task execution, and current or future Ray execution engines. The version
 1 effective-plan materializer, identity pinning, dynamic/local selection metadata,
-and Compiled Graph compatibility adapter are implemented. Static actors, a Compiled
-Graph execution adapter, and a resident owner remain future strategy work.
+Compiled Graph compatibility adapter, and Ray-free compiled-invocation lifecycle
+reducer are implemented. Static actors, a native Compiled Graph execution adapter, and
+a resident owner remain future strategy work.
 
 The governing plan decision is
 [ADR-0001](design/adr-0001-workflow-plan-contract.md). The first Compiled Graph
 ownership and reuse boundary is fixed separately by
-[ADR-0002](design/adr-0002-compiled-session-ownership.md).
+[ADR-0002](design/adr-0002-compiled-session-ownership.md). Invocation state, deadlines,
+fallback, one-shot output ownership, and cleanup are fixed by
+[ADR-0003](design/adr-0003-compiled-invocation-lifecycle.md).
 
 ## Stable invariants
 
@@ -24,9 +27,16 @@ ownership and reuse boundary is fixed separately by
 - Logical work cardinality and physical worker cardinality are separate facts.
 - Compiled Graph is an execution strategy for an eligible plan, not a Django task type
   or a promise that arbitrary workflow definitions can be compiled.
-- Strategy validation and selection complete before remote side effects begin. A
-  strategy may fall back only before submission; post-start fallback could duplicate
-  effects and is prohibited.
+- Strategy validation and selection complete before remote side effects begin.
+  Automatic strategy fallback closes atomically when preparation starts, before an
+  actor, channel, buffer, or other strategy resource may be allocated. Starting
+  submission additionally forbids replay or automatic re-execution of that invocation.
+- Session lifecycle actions use the complete durable run identity; invocation actions
+  add a unique `invocation_id`. Plan or session equality never replaces either fence.
+- Compiled invocation budgets are distinct absolute deadlines capped by the outer
+  durable deadline. Phase changes never grant fresh relative time.
+- Every compiled output slot has one owner and one terminal disposition before graph
+  reuse. Native one-shot references never enter durable state.
 
 ## Version 1 implementation boundary
 
@@ -67,6 +77,14 @@ submission transport blank for that path and rejects Compiled Graph with
 state. Resolving and transporting an explicit direct-driver owner context belongs to
 the future execution adapter. Local and dynamic execution remain available.
 
+The standard-library-only lifecycle protocol is executable independently of that
+adapter. It separates session health from invocation outcome, validates run and
+invocation identity on every event, issues one bounded deterministic action token at a
+time, and produces a versioned bounded snapshot without reading a clock or importing
+Ray. Its exact version is fingerprinted at
+`strategy_requirements.compiled_graph.lifecycle_protocol_version`. This does not make
+any current workflow compiled or promote a native compatibility row.
+
 ## Vocabulary
 
 | Term | Contract meaning |
@@ -86,6 +104,7 @@ the future execution adapter. Local and dynamic execution remain available.
 | **Graph instance** | Runtime resources prepared for one plan fingerprint and strategy compatibility key, such as actors, channels, and buffers. It has a finite lifetime and must be drained and cleaned up. |
 | **Execution session or owner** | The process or service that prepares graph instances, admits invocations, owns their handles, drains results, and tears resources down. Ownership and cross-run reuse are separate design decisions. |
 | **Execution strategy** | An engine that validates, prepares, admits, executes, consumes, cancels, drains, and cleans up a plan. Examples are local execution, dynamic Ray tasks, static actors, and a future Compiled Graph adapter. |
+| **Lifecycle protocol** | The deterministic Ray-free reducer that authorizes one adapter action at a time and classifies session state, invocation state, effect certainty, graph disposition, retry disposition, output ownership, and cleanup. |
 | **Progress revision** | A monotonic observability revision scoped to one durable workflow run. It is not a plan revision, code revision, attempt number, or invocation identifier. |
 
 These terms deliberately avoid using *workflow* as a synonym for every task. A Django
@@ -240,9 +259,9 @@ or a database schema:
     "invocations": {"cardinality": "repeated", "expected_count": 100},
     "logical_items": {"cardinality": "input_bounded", "maximum": 10000},
     "admission": {
-      "maximum_in_flight": 8,
-      "maximum_queued": 32,
-      "maximum_buffered_results": 8
+      "maximum_in_flight": 1,
+      "maximum_queued": 0,
+      "maximum_buffered_results": 1
     },
     "effects": {"mode": "external_idempotent", "idempotency_slot": "sync-key"},
     "durability": {"boundary": "outer_task", "per_node_recovery": false},
@@ -254,7 +273,11 @@ or a database schema:
   },
   "strategy_requirements": {
     "compiled_graph": {
-      "maximum_in_flight": 8,
+      "settings_version": 1,
+      "lifecycle_protocol_version": 1,
+      "maximum_in_flight": 1,
+      "maximum_buffered_results": 1,
+      "owner_concurrency": 1,
       "transport": "cpu-shared-memory",
       "buffer_bytes": 1048576
     }
@@ -287,7 +310,7 @@ open client, file descriptor, coroutine, lock, or process-local identity.
 | Logical topology | Topology class, ordered nodes, ports, edges, input binding schema, callable path and kind, and any explicit plan constants. |
 | Physical topology | Task/actor model, stages, replicas, actor roles, and placement relationships. Empty for plans that have no fixed physical layout. |
 | Capabilities | Cardinality, bounds, resources, RuntimeEnv behavior, transport, effects, failure, lifecycle, owner, durability, and result retention. |
-| Strategy requirements | Strategy-specific preparation settings expressed as stable values, without an engine-owned runtime object. |
+| Strategy requirements | Strategy-specific preparation settings and exact lifecycle protocol version expressed as stable values, without an engine-owned runtime object. |
 | Compatibility | django-ray plan API, exact Ray/Python ABI, owner and submission transports, channel transport, dependency identity, and kernel/libc/specific-container/immutable-deployment/shared-memory/object-store capability profiles. |
 
 ## Capability model
@@ -305,11 +328,11 @@ prove that application code is safe, deterministic, or idempotent.
 | Resources and placement | Normalized CPU, GPU, custom resources, memory, accelerator, scheduling strategy, placement group/bundle relationship, stage, and replica count. |
 | RuntimeEnv | Inherit or override mode plus resolved canonical digest for the outer run and each node/stage. A profile name alone is not identity. |
 | Payload and transport | Input/output schemas, maximum byte sizes, transport/channel requirements, serialization, buffer size, copy/zero-copy policy, and whether references may be retained or forwarded. |
-| Results | Result cardinality, ordering, maximum buffered/retained results, ownership, one-time-consumption requirements, and explicit discard/drain behavior. |
+| Results | Result cardinality, ordering, maximum buffered/retained results, ownership, one-time-consumption requirements, and truthful terminal `NOT_CREATED`, `CONSUMED`, `ADAPTER_RELEASED`, `LOST_WITH_OWNER`, `CLEANUP_UNCONFIRMED`, or `UNAVAILABLE_AFTER_TEARDOWN` accounting. |
 | Side effects | `none`, `read_only`, `idempotent`, `external_idempotent`, or `unknown`; idempotency-key slot and checkpoint contract where applicable. Unknown is the safe default. |
 | Failure and retry | Outer-run retry policy, safe leaf retry declarations, application versus system failure handling, partial-result policy, and whether state must be quarantined. |
-| Cancellation | Cooperative/forceful support, cancellation deadline, drain requirements, and the point after which fallback is forbidden. |
-| Lifecycle and owner | Owner kind, sharing/isolation, per-invocation/per-run/resident lifetime, idle TTL, teardown, rolling-deployment drain, and cache budget. |
+| Cancellation | Cooperative support, absolute cancellation deadline, drain requirements, preparation fallback cutoff, and submission replay cutoff. |
+| Lifecycle and owner | Lifecycle protocol version, owner kind, sharing/isolation, per-invocation/per-run/resident lifetime, idle TTL, absolute phase deadlines, teardown, rolling-deployment drain, and cache budget. |
 | Durability | Outer Django task remains the default boundary; per-node recovery/checkpoint support must be explicit and is currently false. |
 
 Strategy implementations may add versioned rejection rules, but they must not reinterpret
@@ -387,7 +410,8 @@ fingerprinted field changes. Important examples are:
 - normalized resource, placement, stage, replica, actor, or concurrency layout;
 - resolved outer or per-node RuntimeEnv content identity;
 - transport, channel, serialization, buffer, retained-result, or compilation setting;
-- side-effect, retry, cancellation, durability, owner, lifetime, or admission contract;
+- lifecycle protocol version, side-effect, retry, cancellation, durability, owner,
+  lifetime, or admission contract;
 - a Ray, django-ray, optional dependency, operating-system, architecture, accelerator,
   or strategy capability change that the compatibility policy says is relevant.
 
@@ -554,11 +578,13 @@ The initial common rejection codes are:
 | `UNSUPPORTED_TRANSPORT` | Payload, channel, buffer, reference forwarding, or result-consumption requirements cannot be met. |
 | `UNSAFE_EFFECT_POLICY` | Required retry/cancellation/reuse semantics conflict with declared or unknown side effects. |
 
-An explicit strategy request fails pre-submission if rejected. `auto` may select another
-eligible strategy and records all relevant rejections. Once preparation or execution
-can have created actors, channels, reserved resources, or application side effects,
-automatic fallback is forbidden; the strategy must use its own failure, cancellation,
-drain, and cleanup contract.
+An explicit strategy request fails during validation if rejected. `auto` may select
+another eligible strategy and records all relevant rejections only until preparation
+starts. Issuing the preparation action atomically closes strategy fallback before an
+actor, channel, buffer, or reservation can be created. Issuing the submission action
+also permanently forbids replay or automatic re-execution of that invocation. The
+selected strategy must then use its failure, cancellation, output-accounting, drain,
+quarantine, and teardown contract.
 
 ### Eligibility summary
 
@@ -575,6 +601,91 @@ strategy capability checks, not new task semantics. See the upstream
 [Compiled Graph overview](https://docs.ray.io/en/latest/ray-core/compiled-graph/ray-compiled-graph.html)
 and [troubleshooting limitations](https://docs.ray.io/en/latest/ray-core/compiled-graph/troubleshooting.html),
 plus django-ray's fail-closed [Compiled Graph compatibility policy](compiled-graph-compatibility.md).
+
+## Compiled invocation lifecycle protocol
+
+Lifecycle protocol version 1 is a deterministic reducer and adapter interface. The
+reducer owns transitions and never imports Ray, reads a clock, performs I/O, or stores
+an event history. It retains one bounded action token/generation. The adapter dispatches
+that exact action and returns an event carrying the same token and required identity;
+stale, duplicate, or out-of-order events are rejected.
+
+Version 1 accepts exactly one owner process, one graph instance, one caller, owner
+adapter concurrency of one, one in-flight invocation, one buffered invocation result,
+and zero owner-side queued invocations. The exact adapter actions are `VALIDATE`,
+`PREPARE`, `ADMIT`, `SUBMIT`, `CONSUME_OUTPUT`, `RELEASE_CAPACITY`, `CANCEL`,
+`DRAIN_INVOCATION`, `DRAIN_SESSION`, `CHECK_HEALTH`, and `TEARDOWN`. Other capacity
+values or an unsupported action fail closed.
+
+The executable `LifecycleCapacity` fields are `session_owners`, `callers`,
+`maximum_in_flight`, `maximum_buffered_results`, `owner_concurrency`, and
+`queue_capacity`, with respective values `1`, `1`, `1`, `1`, `1`, and `0`.
+
+Session actions for validation, preparation, readiness, idle drain, quarantine, and
+teardown carry the complete four-field durable run identity. Invocation actions for
+admission, submission, callback, cancellation, result consumption, invocation drain,
+and cleanup add `invocation_id`. Session state and invocation state remain independent:
+an invocation outcome does not prove graph health, and teardown does not rewrite the
+invocation's primary outcome.
+
+The protocol uses exactly seven absolute deadlines: `outer`, `admission`, `submission`,
+`result`, `cancellation`, `drain`, and `teardown`. Validation and preparation are capped
+only by `outer`. Every inner deadline is capped by the outer durable deadline, which
+wins ties. The adapter observes time and returns a deadline event; the reducer never
+reads a clock or refreshes a budget after a state change.
+Action-scoped `DEADLINE_EXPIRED` echoes its token. Tokenless
+`OUTER_DEADLINE_EXPIRED` supersedes pending work at the outer boundary and dispatches
+no late action.
+
+There are two irreversible cutoffs:
+
+1. issuing preparation start closes automatic strategy fallback before the adapter may
+   allocate any resource; cleanup never reopens fallback; and
+2. issuing submission start closes replay and automatic re-execution of that invocation,
+   even if the adapter later proves rejection before execution.
+
+A proven rejection may affect only the retry disposition of a future durable attempt.
+A submit timeout is otherwise ambiguous and records `MAY_HAVE_STARTED` plus
+`APPLICATION_POLICY_REQUIRED`; draining and a positive health result may still permit
+independent graph reuse, never replay. Owner loss after submission may have begun is
+indeterminate and non-adoptable.
+
+Starting result retrieval spends a slot's one-shot opportunity; a timeout is not a poll
+and cannot issue a second get. A slot is `NOT_CREATED` only when submission is proven
+not to have started. Created outputs become `CONSUMED`, `ADAPTER_RELEASED`,
+`LOST_WITH_OWNER`, `CLEANUP_UNCONFIRMED`, or `UNAVAILABLE_AFTER_TEARDOWN`; the last
+three never authorize graph reuse. `CLEANUP_UNCONFIRMED` truthfully terminates output
+accounting when cleanup or teardown failure leaves release unconfirmed, while
+`UNAVAILABLE_AFTER_TEARDOWN` requires confirmed teardown. Reuse additionally requires
+a positive session-health classification. Primary outcome, effect state (`NOT_STARTED`
+or `MAY_HAVE_STARTED`), graph disposition, retry disposition, and cleanup diagnostics
+are separate facts. Retry disposition is
+`AUTOMATIC_ALLOWED`, `APPLICATION_POLICY_REQUIRED`,
+`OPERATOR_RECONCILIATION_REQUIRED`, or `PROHIBITED`; none rewinds the invocation.
+An adapter-reported `DRAIN_FAILURE` is distinct from deadline-driven `DRAIN_TIMEOUT`;
+both require teardown without replacing an earlier primary outcome.
+
+Owner loss is classified at the submission cutoff. Before submission it leaves
+`NOT_STARTED`, `NOT_CREATED`, and `AUTOMATIC_ALLOWED`. After submission it leaves
+`MAY_HAVE_STARTED`, `LOST_WITH_OWNER`, and `OPERATOR_RECONCILIATION_REQUIRED`; that
+invocation is non-adoptable and the graph cannot be reused.
+
+The versioned snapshot is secret-free, JSON-safe, limited to 64 output slots, eight
+cleanup diagnostic codes, and 16,384 JSON bytes, and contains no payload, result value,
+credential, exception object, Ray handle, channel, DAG node, or compiled reference. See
+[ADR-0003: Compiled Invocation Lifecycle](design/adr-0003-compiled-invocation-lifecycle.md)
+for the normative state and evidence boundaries.
+
+The 64-slot reducer bound is accounting capacity for a versioned protocol, not native
+multi-output eligibility. The first adapter boundary remains one buffered invocation
+result until issue #116 supplies the additional Ray transport evidence.
+
+The reducer does not prove Kubernetes side-effect safety or native multi-output and
+zero-copy behavior. [Issue #115](https://github.com/dariuszpanas/django-ray/issues/115)
+owns idempotency, partial-write, cancellation, and reconciliation evidence for
+Kubernetes synchronization. [Issue #116](https://github.com/dariuszpanas/django-ray/issues/116)
+owns exact transport and output evidence. They do not block the Ray-free reducer, but
+they block those capability claims in a native strategy.
 
 ## Run, invocation, and observability identity
 
@@ -680,7 +791,8 @@ Issue #84 and later implementations can cite these stable requirements:
    definition or execution binding.
 10. **PLAN-10 -- Structured diagnostics:** validation returns stable code, plan path or
     node, and redacted message for every safely discoverable rejection. Explicit and
-    automatic selection behavior follows the pre-start fallback rule.
+    automatic selection behavior follows the pre-preparation fallback rule and the
+    submission replay cutoff.
 11. **PLAN-11 -- Durable summary:** run identity, plan version/fingerprint, definition
     revision, requested policy, selected strategy, and bounded rejection summary remain
     observable when node progress reporting is disabled.
@@ -698,6 +810,13 @@ Issue #84 and later implementations can cite these stable requirements:
     Its protocol, codec, bounds, resources, placement, lifetime, restart, actor-call,
     finalization, and cleanup semantics are fingerprinted; an unselected map's
     canonical manifest is unchanged.
+16. **PLAN-16 -- Compiled lifecycle identity:** every effective plan contains the
+    exact supported
+    `strategy_requirements.compiled_graph.lifecycle_protocol_version`. Changing
+    lifecycle transition meaning, fallback or replay cutoffs, deadline precedence,
+    output ownership, or snapshot interpretation changes that version and therefore
+    the plan fingerprint. The Ray-free reducer rejects stale identity/action tokens and
+    unsupported protocol versions without invoking a native engine.
 
 These requirements do not choose a database model, resident-owner topology, or compiled
 adapter. Those decisions remain in their focused issues.
@@ -721,3 +840,4 @@ adapter. Those decisions remain in their focused issues.
 - [Retry and Error Handling](retry.md)
 - [ADR-0001: Workflow plans and execution strategies](design/adr-0001-workflow-plan-contract.md)
 - [ADR-0002: Compiled session ownership and reuse](design/adr-0002-compiled-session-ownership.md)
+- [ADR-0003: Compiled invocation lifecycle](design/adr-0003-compiled-invocation-lifecycle.md)
