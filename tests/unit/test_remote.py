@@ -303,14 +303,19 @@ def test_progress_actor_registers_unknown_progress_node() -> None:
 def test_progress_actor_drains_updates_after_disable() -> None:
     actor = WorkflowProgressActor()
     actor.register("0.0", "before")
+    actor.register_map("0.1", "map:before", ["0.0"], 2, 10)
     revision = actor.revision
 
     actor.disable()
     actor.started("0.0", "after")
     actor.progress("0.0", 1, 2, "late", {})
     actor.completed("0.0", "after")
-    actor.failed("0.1", "late", "boom")
+    actor.failed("0.2", "late", "boom")
+    actor.register_map("0.3", "map:late", ["0.0"], 4, 20)
+    actor.map_progress("0.1", "map:after", 2, 1, True)
 
     assert actor.revision == revision
     assert actor.nodes["0.0"]["state"] == "PENDING"
-    assert "0.1" not in actor.nodes
+    assert actor.nodes["0.1"]["fanout"]["submitted_items"] == 0
+    assert "0.2" not in actor.nodes
+    assert "0.3" not in actor.nodes

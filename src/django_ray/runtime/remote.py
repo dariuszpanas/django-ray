@@ -247,6 +247,66 @@ class WorkflowProgressActor:
         }
         self._touch()
 
+    def register_map(
+        self,
+        node_id: str,
+        label: str,
+        dependencies: list[str],
+        max_concurrency: int | None,
+        max_items: int | None,
+    ) -> None:
+        """Register one aggregate node for a bounded dynamic map."""
+        if not self.accepting_updates:
+            return
+        self.register(node_id, label, dependencies=dependencies)
+        node = self.nodes[node_id]
+        node["kind"] = "map"
+        node["state"] = "RUNNING"
+        node["started_at"] = time.time()
+        node["fanout"] = {
+            "max_concurrency": max_concurrency,
+            "max_items": max_items,
+            "submitted_items": 0,
+            "completed_items": 0,
+            "in_flight_items": 0,
+            "input_exhausted": False,
+        }
+        self._event(node_id, "STARTED", label, state="RUNNING")
+
+    def map_progress(
+        self,
+        node_id: str,
+        label: str,
+        submitted: int,
+        completed: int,
+        input_exhausted: bool,
+    ) -> None:
+        """Update aggregate counters without retaining one node per map item."""
+        if not self.accepting_updates:
+            return
+        if node_id not in self.nodes:
+            self.register_map(node_id, label, [], None, None)
+        node = self.nodes[node_id]
+        node["fanout"].update(
+            {
+                "submitted_items": submitted,
+                "completed_items": completed,
+                "in_flight_items": submitted - completed,
+                "input_exhausted": input_exhausted,
+            }
+        )
+        if input_exhausted:
+            percent = 100.0 if submitted == 0 else round(completed / submitted * 100, 1)
+            node["progress"] = {
+                "current": completed,
+                "total": submitted,
+                "percent": percent,
+                "message": "Collecting bounded map results",
+                "metrics": dict(node["fanout"]),
+                "updated_at": time.time(),
+            }
+        self._event(node_id, "PROGRESS", label, state=node["state"])
+
     def started(
         self,
         node_id: str,
@@ -280,9 +340,20 @@ class WorkflowProgressActor:
         node = self.nodes[node_id]
         node["state"] = "SUCCEEDED"
         node["finished_at"] = time.time()
+        if node["kind"] == "map":
+            submitted = node["fanout"]["submitted_items"]
+            node["fanout"].update(
+                {
+                    "completed_items": submitted,
+                    "in_flight_items": 0,
+                    "input_exhausted": True,
+                }
+            )
         if node["progress"] is not None:
             node["progress"]["current"] = node["progress"]["total"]
             node["progress"]["percent"] = 100.0
+            if node["kind"] == "map":
+                node["progress"]["metrics"] = dict(node["fanout"])
         self._event(node_id, "COMPLETED", label, state="SUCCEEDED")
 
     def failed(self, node_id: str, label: str, error: str) -> None:

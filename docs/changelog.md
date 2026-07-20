@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in bounded workflow `map_step` admission with lazy generator consumption,
+  incremental ordered collection, expansion guards, aggregate progress, and bounded
+  dependency-aware failure cleanup. Ordered result bytes still materialize in the
+  workflow coordinator; bounded in-Ray aggregation is tracked in
+  [GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91).
 - Native Django task priority scheduling with durable `-100` through `100` priorities,
   higher-value-first claims, and FIFO ordering within equal priorities.
 - Validated worker polling intervals, bounded jittered idle backoff, and a PostgreSQL

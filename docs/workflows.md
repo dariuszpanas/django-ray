@@ -63,7 +63,10 @@ def summarize(results: list[dict[str, int]]) -> dict[str, int]:
 
 calculation = chain(
     step(build_items),
-    map_step(calculate, ray_options={"num_cpus": 0.25}),
+    map_step(calculate, ray_options={"num_cpus": 0.25}).with_limits(
+        max_concurrency=16,
+        max_items=10_000,
+    ),
     step(summarize),
 )
 
@@ -75,13 +78,102 @@ def calculate_batch(count: int) -> dict[str, int]:
 
 Calling `calculate_batch.enqueue(20)` creates one durable `RayTaskExecution`. Once it
 starts, `build_items`, every `calculate` call, and `summarize` are connected inside
-Ray. `map_step` resolves the list at the fan-out boundary, submits one Ray task per
-item, and gathers results in input order.
+Ray. After its input iterable resolves, the bounded `map_step` consumes that iterable
+lazily, keeps at most 16 map items submitted at once, incrementally resolves them, and
+returns results in input order.
 
 For a Kubernetes sync, the same shape is typically `list_namespaces → map(sync one
 namespace) → summarize`. Keep client creation or discovery outside the smallest inner
 resource loop where possible, and batch resources when each API operation is shorter
 than Ray submission overhead.
+
+## Bound Dynamic Fan-Out
+
+Call `with_limits()` on a map signature when its input cardinality is data-dependent:
+
+```python
+sync_namespaces = map_step(
+    sync_namespace,
+    ray_options={"num_cpus": 0.25},
+).with_limits(
+    max_concurrency=8,
+    max_items=500,
+    cancel_timeout_seconds=1.0,
+)
+```
+
+`max_concurrency` is an admission window. At most that many map-item result references
+are retained while Ray work is pending, and results are collected as individual items
+finish. Fast items can therefore make room without waiting for an earlier slow item,
+while the final list remains in input order. The window counts **map items**, not every
+physical task in a nested signature. A mapped `group` with three branches and a window
+of eight can have up to 24 branch tasks plus its bounded per-item collectors submitted.
+A nested dynamic map needs its own `with_limits()` contract; an outer window cannot cap
+the number of leaves expanded inside one map item.
+
+Lazy admission begins only after `map_step` calls `executor.resolve()` for its input. If
+an upstream Ray task returns a list or inventory, that task still produces the complete
+value and Ray transfers and deserializes it into the workflow coordinator before the
+first map item is admitted. Only an iterator that is already available locally is pulled
+one item at a time by the admission loop. Remote or paged input materialization is
+tracked in [GitHub issue #94](https://github.com/dariuszpanas/django-ray/issues/94).
+
+For every admitted item, django-ray retains the terminal result reference and the
+physical dependency references created by its nested `chain` or `group`. Those cleanup
+references are released as soon as the item result is collected, so their peak remains
+the admission window multiplied by the signature's fixed physical width.
+
+`max_items` is an expansion safety limit. Sized inputs that exceed it fail before any
+leaf is submitted. For a generator, detecting overflow requires reading item
+`max_items + 1`; work completed before that discovery is not rolled back. Use idempotent
+leaves when iteration, retries, or cancellation can overlap external side effects.
+
+On the first leaf, iterator, or collection failure, django-ray stops reading new items,
+requests cancellation for every retained physical reference belonging to the failed and
+pending items, and waits up to `cancel_timeout_seconds` for them to become terminal. It
+does not assume that cancelling a final task also cancels its Ray input dependencies.
+The default deadline is one second. The original exception is always re-raised.
+References still pending after the deadline are released rather than making cleanup wait
+indefinitely; an uncooperative running leaf may consequently finish after the workflow
+has failed. The deadline bounds only Ray cancellation and drain waiting. It does not
+bound input deserialization or arbitrary user iterator cleanup such as a generator's
+`close()` method.
+
+Bounded maps use one aggregate `kind="map"` progress node with submitted, completed,
+in-flight, and input-exhaustion counters. Their physical item nodes are intentionally
+omitted from the live workflow graph. This keeps observability proportional to the
+declared workflow rather than to a 10k- or 50k-item expansion. For the same reason,
+`report_progress()` returns `False` inside those physical item leaves; the aggregate map
+counters remain available.
+
+Incremental collection bounds pending references, not total result bytes. The ordered
+result list is still materialized in the workflow coordinator before it is placed back
+in Ray, so coordinator memory remains proportional to total output size. A bounded
+in-Ray reduction or aggregation path is tracked in
+[GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91).
+
+Calling `map_step()` without `with_limits()` retains the original eager behavior for
+compatibility. New dynamic workloads should normally choose an explicit window and an
+input cap. Local execution preserves inputs, ordered outputs, limits, and failures but
+runs leaves sequentially.
+
+### Choose Concurrency and Batch Granularity
+
+For a rate-limited Kubernetes or HTTP API, `max_concurrency` limits concurrent batches;
+it does not enforce requests per second. Keep the API client's own token-bucket or
+server-advertised retry policy enabled. Choose the mapped item deliberately:
+
+- Map one namespace when discovery and reconciliation can share one client session and
+  one failure boundary.
+- Map one `(namespace, resource_kind)` batch when namespaces contain enough resources to
+  leave cluster capacity idle.
+- Batch several tiny resources into one item when a single API round trip is shorter
+  than Ray submission overhead.
+
+Start with a window no larger than the external client's connection pool, benchmark
+throttling and retry rates, and increase it only while useful throughput improves. A
+preceding step can construct batches; `map_step` passes each batch to one leaf and
+returns one ordered result per batch.
 
 ## Chains and Groups
 
@@ -342,6 +434,7 @@ the timing/result tree after it completes.
 | `step(callable, *args, django=False, ray_options=None, runtime_env=None, **kwargs)` | Bind an importable callable as one workflow step |
 | `chain(*signatures)` | Run signatures sequentially |
 | `group(*signatures)` | Fan out the same input and gather ordered results |
-| `map_step(callable_or_signature, ...)` | Fan out over the preceding iterable |
+| `map_step(callable_or_signature, ...)` | Fan out over the preceding iterable; callable keyword arguments remain leaf arguments |
+| `map_signature.with_limits(max_concurrency=None, max_items=None, cancel_timeout_seconds=1.0)` | Add bounded admission, expansion, and failure-cleanup controls |
 | `report_progress(current, total, message=None, metrics=None)` | Report progress from a running leaf |
 | `signature.run(*args, use_ray=None, **kwargs)` | Execute with Ray when initialized, otherwise locally |
