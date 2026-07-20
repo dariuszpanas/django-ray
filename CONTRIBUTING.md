@@ -114,10 +114,20 @@ retain each one as a focused commit with its own Summary and Validation sections
 with the final PR title as well before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
-conflicts, run `uv run make ci`, and push. Auto-merge will wait for the new checks. A maintainer must
-configure the `main` ruleset to require the `Commit Messages` check and CI checks, enable rebase
-merging and auto-merge, and leave approval requirements disabled when the repository's sole-developer
-workflow does not need them.
+conflicts, run `uv run make ci`, and push. Auto-merge will wait for the new checks. The `main`
+ruleset requires `Commit Messages` from GitHub Actions, permits rebase merges only, and leaves
+approval requirements disabled for the repository's sole-developer workflow. The owner bypass is
+limited to pull requests: ordinary merges remain gated, and emergency use requires the explicit
+`gh pr merge --admin --rebase <PR-number>` path.
+
+Treat the bypass as break-glass recovery for a GitHub infrastructure failure, never as permission to
+retain an invalid commit or skip local validation. Record the outage and urgency in the PR, validate
+the exact range and title with `scripts/check_conventional_commits.py`, run `uv run make ci`, and
+record both results before using it. Afterward, verify the rebased `main` history and ruleset bypass
+event, then open or link a follow-up incident. If the PR merge service itself is unavailable, export
+the ruleset, temporarily change only the named owner bypass to `always`, make the smallest recovery,
+immediately restore `pull_request`, and verify the complete ruleset through the API. Never leave an
+`always` or `exempt` bypass configured.
 
 ## Worktree and staging safety
 
