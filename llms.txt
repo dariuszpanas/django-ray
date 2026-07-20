@@ -22,6 +22,11 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   results, errors, batching, and distributed utilities.
 - [Ray-native workflows](https://django-ray.readthedocs.io/en/latest/workflows/):
   `step`, `chain`, `group`, `map_step`, progress, and graph semantics.
+- [Workflow plan contract](https://django-ray.readthedocs.io/en/latest/workflow-plans/):
+  plan identity, workload classification, and execution-strategy eligibility.
+- [Compiled session ownership](https://django-ray.readthedocs.io/en/latest/design/adr-0002-compiled-session-ownership/):
+  initial local/direct CPU-pilot process boundary, deferred Ray Client-submitted
+  topology, within-run reuse, routing, admission, and drain.
 - [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
   named profiles, code delivery, cache behavior, and security boundaries.
 

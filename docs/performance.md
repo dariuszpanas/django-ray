@@ -170,6 +170,16 @@ The [workflow-plan contract](workflow-plans.md) defines how static, dynamic, and
 fixed-width workloads are classified and which plan, invocation, ownership, and
 eligibility data a future strategy must use.
 
+The first experimental ownership boundary is deliberately limited to compiling once
+and invoking repeatedly inside one Ray Core durable task. For a scheduled Kubernetes
+sync, one generic fixed-width kernel may process several namespaces during that one
+schedule. The graph is still rebuilt for the next schedule, so this is within-run reuse
+and has a zero cross-schedule graph-cache hit rate. The current probe covers a
+local/direct submitter; the production Ray Client-submitted nested owner remains gated
+on separate live-cluster lifetime evidence. See
+[ADR-0002](design/adr-0002-compiled-session-ownership.md) for the process matrix,
+resource budget, cancellation, and drain requirements.
+
 ## Benchmark the Real Shape
 
 The testproject provides:

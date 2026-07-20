@@ -44,6 +44,7 @@ nav = [
     { "Architecture" = "architecture.md" },
     { "Workflow Plan Contract" = "workflow-plans.md" },
     { "ADR-0001: Workflow Plans" = "design/adr-0001-workflow-plan-contract.md" },
+    { "ADR-0002: Compiled Sessions" = "design/adr-0002-compiled-session-ownership.md" },
     { "Ray Serve Boundary" = "design/ray-serve-boundary.md" },
     { "Changelog" = "changelog.md" },
   ] },

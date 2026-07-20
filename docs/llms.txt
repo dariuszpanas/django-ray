@@ -27,6 +27,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Workflow plan contract](https://django-ray.readthedocs.io/en/latest/workflow-plans/):
   definitions versus immutable plans, workload classification, fingerprints, run
   identity, and execution-strategy eligibility.
+- [Compiled session ownership](https://django-ray.readthedocs.io/en/latest/design/adr-0002-compiled-session-ownership/):
+  initial local/direct CPU-pilot process boundary, deferred Ray Client-submitted
+  topology, within-run reuse, routing, admission, and drain.
 - [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
   named profiles, code delivery, cache behavior, and security boundaries.
 - [Ray Serve integration boundary](https://django-ray.readthedocs.io/en/latest/design/ray-serve-boundary/):

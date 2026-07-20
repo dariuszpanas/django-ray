@@ -5,7 +5,10 @@ durable Django task execution, and current or future Ray execution engines. It i
 design contract: the effective-plan materializer and strategy interface described here
 are not implemented yet.
 
-The governing decision is [ADR-0001](design/adr-0001-workflow-plan-contract.md).
+The governing plan decision is
+[ADR-0001](design/adr-0001-workflow-plan-contract.md). The first Compiled Graph
+ownership and reuse boundary is fixed separately by
+[ADR-0002](design/adr-0002-compiled-session-ownership.md).
 
 ## Stable invariants
 
@@ -568,3 +571,4 @@ adapter. Those decisions remain in their focused issues.
 - [Runtime Environments](runtime-environments.md)
 - [Retry and Error Handling](retry.md)
 - [ADR-0001: Workflow plans and execution strategies](design/adr-0001-workflow-plan-contract.md)
+- [ADR-0002: Compiled session ownership and reuse](design/adr-0002-compiled-session-ownership.md)
