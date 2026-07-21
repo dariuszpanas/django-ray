@@ -207,6 +207,45 @@ compression, and concurrent activity. Measure on an otherwise idle disposable
 database, record unavailable WAL evidence explicitly, and compare WAL or relation
 deltas only between cases collected under the same server configuration.
 
+## Benchmark Workflow Progress Preparation
+
+ADR-0005's opt-in preparation benchmark measures the non-production SQLite spill
+prototype without changing the runtime preparer. Each sparse or high-edge scenario
+runs in a fresh subprocess, consumes topology and initial-detail generators once, and
+removes its private workspace before the parent accepts the result. It does not start
+Ray, write Django database rows, access Kubernetes, or activate schema-v3 production.
+
+Run the required decision matrix on Linux from an otherwise idle checkout:
+
+```bash
+mkdir -p artifacts /tmp/django-ray-issue140-benchmark
+python scripts/benchmark_workflow_progress_preparation.py \
+  --required-scale \
+  --timeout-seconds 7200 \
+  --workspace-parent /tmp/django-ray-issue140-benchmark \
+  --output artifacts/workflow-progress-preparation.json
+```
+
+`--required-scale` expands to 25,000, 100,000, and 250,000 observed nodes for both a
+sparse chain and a deterministic high-edge graph. The latter crosses the retained
+100,000-edge cap without constructing a quadratic graph. Smaller explicit `--nodes`
+values are smoke checks only and cannot satisfy the ADR evidence gate.
+The explicit two-hour per-case timeout accommodates the deliberately expensive exact
+high-edge path; it is a watchdog, not a performance target.
+
+The JSON records the exact source and implementation identity, environment and
+filesystem characteristics, effective SQLite settings, configured cache/batch/item/
+spill limits, observed and retained cardinalities, wall and CPU time, Python allocation
+peak, explicitly scoped RSS evidence, spill high-water bytes, query plans, and child
+plus parent-watchdog cleanup outcomes. A separate forced-termination control proves
+that the parent removes a killed child's workspace. An unavailable memory metric is
+reported as unavailable rather than as zero, and a cleanup failure fails the run.
+
+Commit the Linux summary and authoritative JSON before accepting ADR-0005. They are
+local contract evidence, not a production latency SLO. Compare resident growth only
+after the retained node, edge, and detail caps are reached, and keep #79's wire,
+mailbox, and producer allocations separate from this preparation-only measurement.
+
 ## Control Fan-Out
 
 Do not equate maximum submission count with maximum throughput.
