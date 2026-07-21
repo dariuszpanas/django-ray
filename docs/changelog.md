@@ -107,7 +107,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   private, fixed-cache, no-mmap workspace with explicit item and file budgets,
   deterministic canonical output, and parent-owned abnormal-termination cleanup. It
   does not switch the runtime preparer or activate schema v3; #141 and #142 own the
-  production integration, while #79 still owns wire, mailbox, and producer bounds.
+  production integration, while #79 still owns wire, mailbox, and producer bounds. The
+  required WSL2 Linux matrix records flat memory peaks after retained caps, increasing
+  external spill, exact truncation, clean source identity, and successful normal plus
+  forced-termination cleanup.
 - A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
   with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
   capability identity includes immutable deployment, shared-memory, and object-store
