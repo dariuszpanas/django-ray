@@ -130,6 +130,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Worker heartbeat, completion, reconciliation, timeout, cancellation, and lease
   cleanup schedules now remain independent from idle claim polling.
 
+### Fixed
+
+- The bundled testproject dashboard now accepts an operator-supplied bearer token in page memory
+  for statistics, smoke-task enqueue, metrics, and execution views without embedding or persisting
+  the configured credential.
+
 ### Migration
 
 - Apply `0012_workflow_progress_summary` before deploying upgraded readers. The two new

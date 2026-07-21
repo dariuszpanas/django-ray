@@ -70,6 +70,24 @@ docker run -p 8000:8000 \
   django-ray:latest web-dev
 ```
 
+The sample landing page does not embed that environment variable. Paste the same value into
+**Browser API access** to enable authenticated statistics, task enqueue, Metrics, and Executions.
+The page clears the password field after submission and retains a valid token only in JavaScript
+memory until **Forget token** is selected or the page reloads. It never writes the token to rendered
+HTML, browser storage, cookies, or URLs.
+
+Prefer retrieving the token from the same local secret source used to start the container. For a
+disposable Docker Compose demo, the following command prints only that variable rather than dumping
+the container's complete environment:
+
+```bash
+docker compose exec web printenv DJANGO_API_TOKEN
+```
+
+Run credential-retrieval commands only in a trusted terminal. Do not put bearer tokens in query
+strings. This browser flow is for trusted local demos; remotely accessible deployments require HTTPS
+and should use an appropriate user identity and session model rather than sharing an operator token.
+
 ### Django-Ray Worker
 
 ```bash

@@ -20,6 +20,7 @@
       --accent-strong: #0284c7;
       --accent-soft: #e0f2fe;
       --danger: #b42318;
+      --success: #157347;
       --shadow: 0 12px 30px rgba(23, 32, 42, 0.08);
     }
     html { overflow-x: hidden; }
@@ -131,6 +132,52 @@
       grid-template-columns: repeat(3, minmax(0, 1fr));
       margin-bottom: 16px;
     }
+    .credential-panel {
+      display: grid;
+      grid-template-columns: minmax(0, 0.75fr) minmax(360px, 1.25fr);
+      gap: 24px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .credential-form {
+      display: grid;
+      gap: 8px;
+    }
+    .credential-form label {
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .credential-controls {
+      display: flex;
+      gap: 8px;
+    }
+    .credential-controls input {
+      min-width: 0;
+      flex: 1 1 260px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      padding: 10px 12px;
+    }
+    .credential-controls input:focus {
+      border-color: var(--accent-strong);
+      outline: 3px solid var(--accent-soft);
+    }
+    .credential-help,
+    .credential-status {
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+    .credential-status.authenticated { color: var(--success); }
+    .credential-status.danger { color: var(--danger); }
+    .credential-panel p code {
+      display: inline;
+      padding: 2px 5px;
+    }
     .card {
       background: rgba(255, 255, 255, 0.84);
       border: 1px solid rgba(255, 255, 255, 0.9);
@@ -163,11 +210,25 @@
       box-shadow: 0 14px 32px rgba(56, 189, 248, 0.14);
       transform: translateY(-2px);
     }
+    button.link-card {
+      width: 100%;
+      min-height: 116px;
+      background: rgba(255, 255, 255, 0.84);
+      color: inherit;
+      font: inherit;
+      font-weight: inherit;
+      text-align: left;
+    }
     .link-title {
       display: block;
       margin-bottom: 8px;
       color: var(--accent-strong);
       font-weight: 700;
+    }
+    .link-description {
+      display: block;
+      color: var(--muted);
+      font-weight: 400;
     }
     .actions {
       display: grid;
@@ -197,9 +258,24 @@
       background: var(--accent-hover);
       color: #f8fafc;
     }
+    button.link-card:hover {
+      background: rgba(255, 255, 255, 0.92);
+      color: inherit;
+    }
     button:disabled {
       cursor: wait;
       opacity: 0.65;
+    }
+    button.secondary {
+      border-color: var(--line);
+      background: var(--panel-soft);
+      color: var(--text);
+      box-shadow: none;
+    }
+    button.secondary:hover {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--text);
     }
     code {
       display: block;
@@ -210,6 +286,22 @@
       color: var(--muted);
     }
     .danger { color: var(--danger); }
+    .protected-response {
+      margin-bottom: 16px;
+    }
+    .protected-response-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+    .protected-response pre {
+      max-height: 420px;
+      margin: 0;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
     footer {
       margin-top: 16px;
       padding: 16px 18px;
@@ -228,12 +320,13 @@
       .hero-bg::after {
         display: none;
       }
-      header, .actions { grid-template-columns: 1fr; display: grid; }
+      header, .actions, .credential-panel { grid-template-columns: 1fr; display: grid; }
       .brand { align-items: flex-start; }
       .logo { width: 56px; height: 56px; }
       .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .links { grid-template-columns: 1fr; }
       .badge { white-space: normal; }
+      .credential-controls { align-items: stretch; flex-direction: column; }
     }
   </style>
 </head>
@@ -251,6 +344,23 @@
       <span class="badge">v{{ django_ray_version }} / debug {% if debug %}on{% else %}off{% endif %}</span>
     </header>
 
+    <section class="card credential-panel" aria-labelledby="browser-auth-heading">
+      <div>
+        <strong id="browser-auth-heading">Browser API access</strong>
+        <p>Paste the local demo's <code>DJANGO_API_TOKEN</code> to use protected dashboard actions.</p>
+      </div>
+      <div id="credential-controls-group" class="credential-form" role="group" aria-labelledby="browser-auth-heading">
+        <label for="api-token">API token</label>
+        <div class="credential-controls">
+          <input id="api-token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="credential-help credential-status">
+          <button id="use-token" type="button">Use token</button>
+          <button id="forget-token" class="secondary" type="button">Forget token</button>
+        </div>
+        <span id="credential-help" class="credential-help">The token stays only in this loaded page's memory and is cleared on reload.</span>
+        <span id="credential-status" class="credential-status" role="status" aria-live="polite">Not authenticated. Protected actions will ask for a token.</span>
+      </div>
+    </section>
+
     <section class="grid stats" aria-label="Task statistics">
       <div class="card"><span class="stat-label">Total</span><strong class="stat-value" id="stat-total">{{ total }}</strong></div>
       <div class="card"><span class="stat-label">Queued</span><strong class="stat-value" id="stat-queued">{{ queued }}</strong></div>
@@ -264,8 +374,16 @@
       <a class="card link-card" href="/admin/"><span class="link-title">Django Admin</span><p>Inspect task executions, worker leases, retries, and cancellation state.</p></a>
       <a class="card link-card" href="{{ ray_dashboard_url }}"><span class="link-title">Ray Dashboard</span><p>Open the configured Ray dashboard for cluster and task runtime visibility.</p></a>
       <a class="card link-card" href="/api/health"><span class="link-title">Health</span><p>Database-backed application health check used by the Kubernetes probes.</p></a>
-      <a class="card link-card" href="/api/metrics"><span class="link-title">Metrics</span><p>Prometheus-format metrics exposed by the sample Django application.</p></a>
-      <a class="card link-card" href="/api/executions"><span class="link-title">Executions</span><p>Recent task execution records returned as JSON.</p></a>
+      <button id="view-metrics" class="card link-card" type="button"><span class="link-title">Metrics</span><span class="link-description">Fetch Prometheus-format metrics with the browser API token.</span></button>
+      <button id="view-executions" class="card link-card" type="button"><span class="link-title">Executions</span><span class="link-description">Fetch recent execution records with the browser API token.</span></button>
+    </section>
+
+    <section id="protected-response" class="card protected-response" aria-live="polite" hidden>
+      <div class="protected-response-header">
+        <strong id="protected-response-title">Protected API response</strong>
+        <button id="close-protected-response" class="secondary" type="button">Close</button>
+      </div>
+      <pre><code id="protected-response-body"></code></pre>
     </section>
 
     <section class="grid project-links" aria-label="Project links">
@@ -280,11 +398,11 @@
           <strong>Trigger a smoke task</strong>
           <p>Enqueues <code>add_numbers(2, 3)</code> on the default queue and refreshes stats.</p>
         </div>
-        <button id="trigger">Run test task</button>
+        <button id="trigger" type="button">Run test task</button>
       </div>
       <div class="card">
         <strong>Last action</strong>
-        <code id="output">Ready.</code>
+        <code id="output">Enter the local demo API token to enable protected actions.</code>
       </div>
     </section>
 
@@ -292,45 +410,6 @@
       This page belongs to the bundled testproject and adapts to runserver, Docker, Kubernetes, or any deployment path that serves the sample app.
     </footer>
   </main>
-  <script>
-    const output = document.querySelector("#output");
-    const trigger = document.querySelector("#trigger");
-    const statMap = {
-      total: document.querySelector("#stat-total"),
-      queued: document.querySelector("#stat-queued"),
-      running: document.querySelector("#stat-running"),
-      succeeded: document.querySelector("#stat-succeeded"),
-      failed: document.querySelector("#stat-failed"),
-    };
-
-    async function refreshStats() {
-      const response = await fetch("/api/executions/stats");
-      if (!response.ok) throw new Error(`Stats request failed: ${response.status}`);
-      const stats = await response.json();
-      for (const [key, element] of Object.entries(statMap)) {
-        element.textContent = stats[key] ?? 0;
-      }
-      return stats;
-    }
-
-    async function triggerTask() {
-      trigger.disabled = true;
-      output.textContent = "Enqueuing task...";
-      try {
-        const response = await fetch("/api/enqueue/add/2/3", { method: "POST" });
-        if (!response.ok) throw new Error(`Enqueue failed: ${response.status}`);
-        const task = await response.json();
-        output.textContent = `Task ${task.task_id} enqueued with status ${task.status}.`;
-        setTimeout(refreshStats, 700);
-      } catch (error) {
-        output.textContent = error.message;
-      } finally {
-        trigger.disabled = false;
-      }
-    }
-
-    trigger.addEventListener("click", triggerTask);
-    refreshStats().catch((error) => output.textContent = error.message);
-  </script>
+  <script src="{% static 'testproject/landing.js' %}" defer></script>
 </body>
 </html>
