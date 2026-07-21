@@ -83,6 +83,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Compiled Graph ownership ADR and opt-in raw-Ray topology probe that select one
   Ray Core outer task as the initial local/direct within-run CPU-pilot owner without
   claiming production Ray Client transport or cross-schedule reuse.
+- A source-bound Linux/KubeRay Compiled Graph pilot profile with digest-pinned Ray and
+  KubeRay inputs, fixed CPU/shared-memory/object-store resources, contained direct and
+  nested-owner probes, one-shot result and teardown checks, exact running-image
+  verification, a bounded tracked-only Git archive build context, checkout-independent
+  strict UTF-8 configuration and policy identities, actively capped and process-tree-contained
+  subprocesses, create-response namespace and create-only RayCluster leases with unique run
+  tokens and UIDs, lease-bound pod ownership, exactly bracketed KubeRay
+  controller/container/readiness/restart evidence, independently pinned `fastrlock`, exact
+  regular/init-container and lexical/semantic
+  Ray-start-parameter observations (including KubeRay's valueless usage-stats switch), and
+  an exact-profile pre-native near-neighbor rejection through the immutable image ID. A fail-closed
+  retained-record path now captures the known Ray 2.56 mutable-object reclamation
+  blocker only after a bounded cleanup wait, stable paired semaphore fingerprints,
+  unchanged final pod and container identities, verified namespace deletion, and
+  exact nested JSON types plus independent proof of zero actors, tasks, object results,
+  and pilot child processes; it remains nonzero and cannot be used as promotion evidence.
+  Pilot success remains unsupported candidate evidence until a separate review promotes
+  the exact tuple.
 - A versioned, standard-library-only Compiled Graph lifecycle reducer that separates
   session health from invocation outcome, applies complete run/invocation fencing and
   absolute outer-capped deadlines, closes fallback before preparation and replay before

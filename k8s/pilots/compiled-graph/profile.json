@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "profile_name": "django-ray-cgraph-kuberay-cpu-v1",
+  "architecture": "linux/amd64",
+  "ray_version": "2.56.0",
+  "python_version": "3.12.12",
+  "compiled_graph_distribution": "ray[cgraph]==2.56.0 (preinstalled in the pinned base image)",
+  "base_image": "rayproject/ray:2.56.0-py312@sha256:2951c07de396a8b746f9c678b52c6e2282e614e00f80e6846a9ccd12945ae6b0",
+  "docker": {
+    "context": "desktop-linux",
+    "endpoint": "npipe:////./pipe/dockerDesktopLinuxEngine",
+    "engine": {
+      "version": "29.4.3",
+      "operating_system": "linux",
+      "architecture": "amd64",
+      "kernel_version": "6.6.87.2-microsoft-standard-WSL2"
+    }
+  },
+  "runtime_expectations": {
+    "operating_system": "linux",
+    "architecture": "x86_64",
+    "python_implementation": "cpython",
+    "python_abi": "cpython-312-x86_64-linux-gnu",
+    "kernel_release": "6.6.87.2-microsoft-standard-WSL2",
+    "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+    "libc": [
+      "glibc",
+      "2.35"
+    ],
+    "os_release": {
+      "ID": "ubuntu",
+      "VERSION_ID": "22.04",
+      "PRETTY_NAME": "Ubuntu 22.04.5 LTS"
+    }
+  },
+  "dependency_profile": {
+    "django-ray": "0.3.1",
+    "django": "6.0.7",
+    "asgiref": "3.11.1",
+    "sqlparse": "0.5.5",
+    "ray": "2.56.0",
+    "numpy": "1.26.4",
+    "pyarrow": "19.0.1",
+    "cupy": "absent",
+    "cupy-cuda11x": "absent",
+    "cupy-cuda12x": "13.4.0",
+    "fastrlock": "0.8.3"
+  },
+  "kuberay": {
+    "operator_version": "1.6.2",
+    "operator_image": "quay.io/kuberay/operator@sha256:f9eb07d0d3384554763d739f0eed27aa5d0c2ed4c727ceb075930c1f3f4b9f47",
+    "operator_namespace": "kuberay-system",
+    "operator_deployment_name": "kuberay-operator",
+    "operator_container_name": "kuberay-operator",
+    "operator_strategy": "Recreate",
+    "operator_deployment_labels": {
+      "app.kubernetes.io/instance": "kuberay-operator",
+      "app.kubernetes.io/managed-by": "Helm",
+      "app.kubernetes.io/name": "kuberay-operator",
+      "helm.sh/chart": "kuberay-operator-1.6.2"
+    },
+    "operator_selector": {
+      "app.kubernetes.io/instance": "kuberay-operator",
+      "app.kubernetes.io/name": "kuberay-operator"
+    },
+    "operator_pod_labels": {
+      "app.kubernetes.io/component": "kuberay-operator",
+      "app.kubernetes.io/instance": "kuberay-operator",
+      "app.kubernetes.io/name": "kuberay-operator"
+    },
+    "operator_service_account": "kuberay-operator",
+    "autoscaling": false
+  },
+  "kubernetes": {
+    "context": "docker-desktop",
+    "server_version": "v1.34.1",
+    "node": {
+      "name": "docker-desktop",
+      "operating_system": "linux",
+      "architecture": "amd64",
+      "kernel_version": "6.6.87.2-microsoft-standard-WSL2",
+      "container_runtime_version": "docker://29.4.3"
+    },
+    "node_selector": {
+      "kubernetes.io/os": "linux",
+      "kubernetes.io/arch": "amd64",
+      "kubernetes.io/hostname": "docker-desktop"
+    }
+  },
+  "cluster": {
+    "namespace": "django-ray-cgraph-pilot",
+    "raycluster_name": "django-ray-cgraph-pilot",
+    "head": {
+      "replicas": 1,
+      "ray_cpus": 0,
+      "ray_start_parameters": {
+        "dashboard-host": {
+          "kind": "value",
+          "value": "0.0.0.0"
+        },
+        "disable-usage-stats": {
+          "kind": "valueless-true-switch",
+          "value": "true"
+        },
+        "num-cpus": {
+          "kind": "value",
+          "value": "0"
+        },
+        "object-store-memory": {
+          "kind": "value",
+          "value": "268435456"
+        }
+      },
+      "init_containers": [],
+      "cpu_request": "250m",
+      "cpu_limit": "1",
+      "memory_request": "1Gi",
+      "memory_limit": "2Gi"
+    },
+    "workers": {
+      "replicas": 2,
+      "min_replicas": 2,
+      "max_replicas": 2,
+      "ray_cpus_per_pod": 1,
+      "ray_start_parameters": {
+        "num-cpus": {
+          "kind": "value",
+          "value": "1"
+        },
+        "object-store-memory": {
+          "kind": "value",
+          "value": "268435456"
+        }
+      },
+      "init_containers": [
+        "wait-gcs-ready"
+      ],
+      "cpu_request": "500m",
+      "cpu_limit": "1",
+      "memory_request": "1Gi",
+      "memory_limit": "2Gi"
+    },
+    "shared_memory_bytes_per_pod": 536870912,
+    "object_store_bytes_per_pod": 268435456
+  },
+  "probe": {
+    "topologies": [
+      "direct-driver",
+      "nested-ray-task"
+    ],
+    "submission_transport": "direct_ray_core",
+    "channel_transport": "cpu_shared_memory",
+    "repeated_invocations": 3,
+    "max_inflight_executions": 1,
+    "max_buffered_results": 1,
+    "nested_owner_max_retries": 0,
+    "hard_timeout_seconds": 180,
+    "hard_timeout_self_test_seconds": 0.25,
+    "cleanup_retry_delays_seconds": [
+      0,
+      5,
+      15,
+      30
+    ],
+    "application_exception": true,
+    "result_timeout": true,
+    "explicit_teardown": true
+  }
+}

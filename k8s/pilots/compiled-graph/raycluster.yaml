@@ -1,0 +1,136 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: django-ray-cgraph-pilot
+  namespace: __PILOT_NAMESPACE__
+  labels:
+    app.kubernetes.io/name: django-ray-cgraph-pilot
+    app.kubernetes.io/part-of: django-ray
+    django-ray.io/capability-profile: django-ray-cgraph-kuberay-cpu-v1
+    django-ray.io/pilot-run: __PILOT_RUN_TOKEN__
+  annotations:
+    django-ray.io/pilot-namespace-uid: __PILOT_NAMESPACE_UID__
+spec:
+  rayVersion: "2.56.0"
+  enableInTreeAutoscaling: false
+  headGroupSpec:
+    serviceType: ClusterIP
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      disable-usage-stats: "true"
+      num-cpus: "0"
+      object-store-memory: "268435456"
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/name: django-ray-cgraph-pilot
+          django-ray.io/capability-profile: django-ray-cgraph-kuberay-cpu-v1
+          django-ray.io/pilot-role: head
+          django-ray.io/pilot-run: __PILOT_RUN_TOKEN__
+        annotations:
+          django-ray.io/pilot-namespace-uid: __PILOT_NAMESPACE_UID__
+      spec:
+        restartPolicy: Always
+        nodeSelector:
+          kubernetes.io/os: linux
+          kubernetes.io/arch: amd64
+          kubernetes.io/hostname: docker-desktop
+        containers:
+          - name: ray-head
+            image: __PILOT_IMAGE__
+            imagePullPolicy: Never
+            env:
+              - name: DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE
+                value: __CONTAINER_PROFILE__
+              - name: DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE
+                value: __DEPLOYMENT_PROFILE__
+              - name: DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE
+                value: "tmpfs:/dev/shm:size=536870912"
+              - name: DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE
+                value: "plasma:268435456"
+              - name: DJANGO_RAY_PILOT_IMAGE_ID
+                value: __PILOT_IMAGE_ID__
+              - name: DJANGO_RAY_PILOT_CONFIG_ID
+                value: __DEPLOYMENT_PROFILE__
+              - name: DJANGO_RAY_PILOT_KUBERAY_VERSION
+                value: "1.6.2"
+              - name: DJANGO_RAY_PILOT_NAMESPACE_UID
+                value: __PILOT_NAMESPACE_UID__
+              - name: DJANGO_RAY_PILOT_RUN_TOKEN
+                value: __PILOT_RUN_TOKEN__
+            resources:
+              requests:
+                cpu: "250m"
+                memory: "1Gi"
+              limits:
+                cpu: "1"
+                memory: "2Gi"
+            volumeMounts:
+              - name: shared-memory
+                mountPath: /dev/shm
+        volumes:
+          - name: shared-memory
+            emptyDir:
+              medium: Memory
+              sizeLimit: "512Mi"
+  workerGroupSpecs:
+    - groupName: cpu-workers
+      replicas: 2
+      minReplicas: 2
+      maxReplicas: 2
+      rayStartParams:
+        num-cpus: "1"
+        object-store-memory: "268435456"
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: django-ray-cgraph-pilot
+            django-ray.io/capability-profile: django-ray-cgraph-kuberay-cpu-v1
+            django-ray.io/pilot-role: worker
+            django-ray.io/pilot-run: __PILOT_RUN_TOKEN__
+          annotations:
+            django-ray.io/pilot-namespace-uid: __PILOT_NAMESPACE_UID__
+        spec:
+          restartPolicy: Always
+          nodeSelector:
+            kubernetes.io/os: linux
+            kubernetes.io/arch: amd64
+            kubernetes.io/hostname: docker-desktop
+          containers:
+            - name: ray-worker
+              image: __PILOT_IMAGE__
+              imagePullPolicy: Never
+              env:
+                - name: DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE
+                  value: __CONTAINER_PROFILE__
+                - name: DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE
+                  value: __DEPLOYMENT_PROFILE__
+                - name: DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE
+                  value: "tmpfs:/dev/shm:size=536870912"
+                - name: DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE
+                  value: "plasma:268435456"
+                - name: DJANGO_RAY_PILOT_IMAGE_ID
+                  value: __PILOT_IMAGE_ID__
+                - name: DJANGO_RAY_PILOT_CONFIG_ID
+                  value: __DEPLOYMENT_PROFILE__
+                - name: DJANGO_RAY_PILOT_KUBERAY_VERSION
+                  value: "1.6.2"
+                - name: DJANGO_RAY_PILOT_NAMESPACE_UID
+                  value: __PILOT_NAMESPACE_UID__
+                - name: DJANGO_RAY_PILOT_RUN_TOKEN
+                  value: __PILOT_RUN_TOKEN__
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "1Gi"
+                limits:
+                  cpu: "1"
+                  memory: "2Gi"
+              volumeMounts:
+                - name: shared-memory
+                  mountPath: /dev/shm
+          volumes:
+            - name: shared-memory
+              emptyDir:
+                medium: Memory
+                sizeLimit: "512Mi"

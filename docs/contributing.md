@@ -275,6 +275,97 @@ CI strategy:
 - CI also supports `workflow_dispatch` for a manual rerun; it does not need a repository variable
   or an externally reachable Ray cluster.
 
+### Pinned Compiled Graph KubeRay Pilot (Opt-In)
+
+The Compiled Graph candidate matrix in ordinary CI is discovery evidence. It does not replace the
+exact Linux/KubeRay profile required by the fail-closed capability policy. Maintainers collecting
+promotion-grade issue #102 evidence must use a clean commit, the pinned `desktop-linux` Docker CLI
+context, the `docker-desktop` Kubernetes context, KubeRay operator 1.6.2, and the dedicated pilot
+namespace:
+
+```powershell
+uv run python scripts/kuberay_compiled_graph_pilot.py run `
+  --context docker-desktop
+```
+
+The runner verifies the local Docker context and engine before any build. It captures one clean full
+Git revision, validates a bounded regular-file inventory, and safely extracts a tracked-only
+`git archive`; a required Dockerfile-specific deny-by-default policy is a second boundary against
+`.env`, `.vault`, Git metadata, generated source artifacts, and unrelated repository files. It then
+canonicalizes only clean-checkout CRLF pairs to the archive's LF representation when hashing the
+four strict UTF-8 pilot assets and rejects a BOM, NUL byte, or bare carriage return, so Windows and
+Linux checkouts of one commit retain the same configuration and policy identities. It then builds a
+source-labelled image from the digest-pinned Ray base; checks the exact Kubernetes, Docker runtime,
+kernel, libc, Python ABI, node placement, and dependency profile, including independently pinned
+`cupy-cuda12x==13.4.0` and required `fastrlock==0.8.3`; verifies the exact local image ID on every
+pilot pod; exercises hard-timeout containment; executes
+direct-driver and nested-owner probes in contained child processes; and deletes only
+`django-ray-cgraph-pilot` by default. Namespace lookup distinguishes explicit absence from API
+failure and refuses every pre-existing namespace. The namespace create response binds a random
+per-run label and immutable UID to the runner. The RayCluster is create-only, and its create-response
+UID is bound to the namespace UID and run token in RayCluster/pod labels, annotations, environment,
+and exact pod controller references. The runner brackets pod reads and execs with current namespace
+and RayCluster lease checks. It also verifies the shared KubeRay operator's exact
+Deployment-to-ReplicaSet-to-pod ownership, sole container inventory, pinned running digest, Ready
+state, and exact nonnegative restart count without mutating the operator. That complete observation
+must remain exactly equal immediately before RayCluster creation, after pilot-pod readiness, and
+after final runtime capture; any rollout, restart-count change, or controller/container drift
+invalidates the evidence. Cleanup verifies the exact live namespace lease and uses
+name/profile/run-token selectors, so it never adopts a stale namespace.
+Kubernetes namespaced create and `kubectl delete namespace` do not expose the namespace-UID and
+UID/resource-version preconditions needed to make these boundaries atomic. An external
+delete/recreate inside a check/call window is unsupported; the post-checks fail evidence collection
+but do not claim the scoped API call could not reach the replacement.
+It never reads Kubernetes Secrets.
+The same immutable local image ID first runs in a network-isolated one-shot container with a physical 256 MiB
+`/dev/shm` near-neighbor. The exact-profile admission layer must admit the tracked baseline and
+reject the changed identity as `PILOT_PROFILE_MISMATCH` before the hardened probe or any native
+command can run. Successful cluster evidence also requires exact shared-memory entry and object
+identity restoration, no active named owner task, and no surviving pilot child process.
+Ray 2.56.0 currently leaves mutable-object shared-memory channels behind after otherwise
+successful Compiled Graph teardown. To retain a fresh, bounded failure record without
+weakening that invariant, use a new date-stamped path:
+
+```powershell
+uv run python scripts/kuberay_compiled_graph_pilot.py run `
+  --context docker-desktop `
+  --blocked-evidence-output `
+    docs/investigations/compiled-graph-kuberay-blocked-YYYY-MM-DD.json
+```
+
+The runner checks shared-memory state immediately and again after consecutive pinned
+5, 15, and 30 second waits, for a 50 second total wait. It writes that file only when
+both topology probes completed, every actor, task, object-store result, and pilot child
+process is gone, and shared-memory state alone still fails to return to its exact empty
+baseline. The record contains only allowlisted identities, topology outcomes, hashed
+shared-memory entry identities, Ray `sem.hdr`/`sem.obj` kind and pair counts, aggregate
+digests, byte totals, and tracker URLs; raw semaphore names are never retained. The
+write boundary rechecks the clean current Git revision, tracked profile and manifest
+identities, UTC timestamp order, and exact Docker, KubeRay, Kubernetes, pod-resource,
+runtime, cleanup, and zero-state schemas and JSON integer types before creating the file. The
+known blocker classification requires the same fully paired Ray semaphore fingerprint
+in every cleanup observation, with no stray or unpaired entry. After the final wait, the
+runner refetches the pods, requires the exact sole regular container and expected KubeRay
+init-container inventory, and preserves unchanged pod UIDs, container IDs, images, restart
+counts, identity environment, namespace/RayCluster lease binding, and every profile-declared Ray
+start parameter before it captures the final cluster state used by the zero-residual proof. Valued
+parameters and KubeRay's
+valueless `--disable-usage-stats` true switch have distinct pinned semantics; retained pod
+evidence records the sanitized lexical form, lexical value, and semantic value independently.
+It refuses to overwrite evidence and still exits nonzero. `--keep-cluster` cannot be
+combined with retained blocked evidence, and persistence requires explicit verification
+that the exact create-response UID and namespace are absent after selector-bound deletion. A
+generic setup or probe failure is
+printed as bounded JSON but is not written as the known blocked record.
+
+Each subprocess runs inside a Windows Job or POSIX session, descendant trees are terminated at the
+boundary, and every post-termination process or pipe wait is bounded. Structured stdout is actively
+capped while stdout and stderr are drained concurrently; non-structured output retains only bounded
+rolling tails, and concatenated JSON documents fail closed. Do not redirect arbitrary cluster diagnostics into the repository: retain only the runner's bounded,
+allowlisted JSON record under `docs/investigations/`, then request a separate capability-promotion
+review. A passing pilot remains candidate-native evidence and does not enable Compiled Graph product
+execution.
+
 ### PostgreSQL Coordination Tests
 
 The fast default suite continues to use SQLite. A separate integration gate runs the worker's

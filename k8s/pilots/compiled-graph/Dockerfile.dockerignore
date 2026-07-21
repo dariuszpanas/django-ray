@@ -1,0 +1,17 @@
+# Deny the repository by default. The pilot may send only these source and
+# profile inputs to the explicitly pinned local Docker daemon.
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
+!src/**
+!scripts/
+!scripts/kuberay_compiled_graph_pilot.py
+!k8s/
+!k8s/pilots/
+!k8s/pilots/compiled-graph/
+!k8s/pilots/compiled-graph/Dockerfile
+!k8s/pilots/compiled-graph/Dockerfile.dockerignore
+!k8s/pilots/compiled-graph/profile.json
+!k8s/pilots/compiled-graph/raycluster.yaml
