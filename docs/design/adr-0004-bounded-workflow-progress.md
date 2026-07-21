@@ -1,6 +1,6 @@
 # ADR-0004: Bounded Workflow Progress Storage
 
-- **Status:** Accepted; bounded summary layer implemented, detail/services pending
+- **Status:** Accepted; bounded storage writer implemented, public services and activation pending
 - **Date:** 2026-07-20
 - **Decision owners:** django-ray maintainers
 - **Related contracts:** [Ray-Native Workflows](../workflows.md),
@@ -55,8 +55,9 @@ workflow progress.
 The new writer will emit workflow-progress summary schema version 3. The existing
 schema-version-1 and schema-version-2 complete snapshots remain supported during
 rollout through a compatibility reader with an explicit byte cap; they are not the
-new storage representation. This ADR does not add fields, models, migrations,
-settings, services, or writer behavior. Those are separate implementation changes.
+new storage representation. The decision is implemented through separately reviewed
+schema, storage, reader, activation, and service deliveries rather than making the ADR
+itself an activation switch.
 
 ## Summary contract
 
@@ -151,7 +152,7 @@ publication follows this order:
    of changed/deleted rows; do not rescan every unchanged row on each sparse update.
    Database constraints and periodic integrity checks may recompute those aggregates.
    Advance the run-level detail publication epoch when current detail changed; a
-   summary-only publication may retain it.
+   no-detail-change publication through this storage transaction may retain it.
 6. Conditionally update the task-row summary only when task primary key, `RUNNING`
    state, attempt number, execution generation, and `workflow_run_id` still match the
    publishing run.
@@ -164,6 +165,31 @@ detail rather than leaving it current without a summary. Readers never discover 
 pending topology manifest. Topology pages staged outside the final transaction are
 bounded orphans and cannot become current by matching only a revision number or plan
 fingerprint.
+
+`DISABLED` and `OMITTED_BY_POLICY` use the exact-run summary-only writer instead of
+this detail transaction. Their summaries carry no topology version, detail revision,
+or manifest identifier, and no empty topology or node rows are fabricated. This keeps
+an intentional no-detail policy distinct from `TRUNCATED`, `MISSING`, and `CORRUPT`.
+The summary-only writer still applies the complete stale-run fence and monotonic
+summary rules; it cannot later attach storage pointers by itself.
+
+Staging and publication deliberately have different lock scopes. Preparing and
+writing a bounded candidate does not hold the lifecycle task-row lock. Staging checks
+the exact run before and after the write and rolls the transaction back when the final
+check has already gone stale. If ownership changes immediately after that check, at
+most the single bounded pending candidate remains for periodic orphan cleanup. The
+final transaction then locks task, run, manifests, and touched detail rows in that
+order, verifies the target, and either promotes it with the summary or rolls back all
+current-state mutations.
+
+Integrity verification is bounded independently from the values stored in database
+metadata. It rejects oversized manifest metadata and relational aggregate mismatches
+before selecting page blobs, then reads each page through a capped projection and
+validates run ownership, ordering, item counts, encoded and decoded byte counts, and
+the page and manifest digests. Touched detail rows are locked and verified against
+their stable node-key hashes before aggregate deltas are applied. Any mismatch aborts
+publication; it never promotes a candidate, advances a summary, or falls back to an
+older revision.
 
 Terminal publication follows the same fence while the run still owns progress. The
 bounded terminal summary is copied to `TaskAttempt` before retry reset. When timeout,
@@ -334,7 +360,12 @@ bounded candidate topology while an update is in progress.
 Terminal detail has a default retention of 7 days and a configurable range of 0 to
 30 days. The 16 KiB terminal summary stored with `TaskAttempt` follows task-attempt
 retention and remains available after detail expires. Retention values and expiry are
-recorded in the current summary.
+recorded in the current summary, and every accepted detail publication persists the
+selected retention days on its exact run. A canonical lifecycle terminal envelope
+owns the exact expiry, including an extension beyond an earlier producer deadline. If
+the envelope is missing or corrupt, lifecycle stamping uses the terminal execution
+timestamp plus that persisted run policy so published detail cannot retain a null
+expiry indefinitely.
 
 Only one pending unpublished topology version may exist for a run. Pending or orphaned
 topology pages older than one hour are eligible for idempotent cleanup. A rejected
@@ -347,6 +378,17 @@ deleted. Cleanup first verifies that no current or retained manifest references 
 page. A failed cleanup records bounded diagnostics and is retryable; it never deletes
 the task summary or changes the task outcome. Future external storage requires an
 equivalent tombstone and retry protocol before it can become a V1-compatible backend.
+
+Operators run `django_ray_cleanup_workflow_progress` as a dry run and add `--delete`
+only after reviewing the bounded report. A pass examines at most the configured batch
+size for each of expired runs, stale pending manifests, unreferenced pages, and inactive
+empty run shells. Every candidate is rechecked under the package lock order, and an
+exact active current run is protected even if its expiry is malformed or already due.
+Deleting an expired run cascades its topology and detail rows but leaves task-row and
+`TaskAttempt` summaries byte-for-byte unchanged. Never-failed candidates are processed
+before retries so a permanent oldest failure cannot starve the queue. One item failure
+does not stop the pass; the command records only a bounded redacted diagnostic and exits
+nonzero after processing later items.
 
 ## Admin and service reads
 
@@ -369,7 +411,9 @@ Readers are deployed before writers:
    this deployment settles. This is the #125 delivery.
 2. Add package-owned topology storage, normalized-detail storage, the internal readers
    needed to validate publication, and writer code that can commit detail and its
-   summary pointer atomically. Keep activation disabled. This is #126.
+   summary pointer atomically. Migration `0013_workflow_progress_detail_storage`, the
+   retention setting, and bounded cleanup command implement this #126 delivery. Keep
+   activation disabled.
 3. Add the authorized public summary/detail facade and indexed/paginated reads. This is
    #127; old Admin and application clients must not encounter schema v3 before their
    compatible readers are deployed.
@@ -436,11 +480,12 @@ choose `OMITTED_BY_POLICY`; the durable contract cannot assume the actor survive
 - Detail readers gain bounded pagination and indexed single-node lookup; a revision
   change explicitly expires an older cursor.
 - Publication, retry, and stale-writer behavior continue to use the #81 run fence.
-- The first implementation adds database rows and cleanup work, but avoids committing
+- The database implementation adds bounded rows and cleanup work, but avoids committing
   to external storage before its lifecycle is designed.
 - Existing v1/v2 snapshots remain readable within an explicit compatibility cap.
-- This decision adds no native Ray dependency, Compiled Graph capability, migration,
-  or runtime behavior by itself.
+- The storage implementation adds no native Ray dependency or Compiled Graph
+  capability. It is strategy-neutral groundwork and does not activate schema-v3
+  producers.
 
 ## Implementation boundaries
 
@@ -448,15 +493,24 @@ Implementation remains split into focused deliveries:
 
 1. **Implemented by #125:** the bounded summary schema, additive migration, monotonic
    exact-run writer primitive, terminal attempt summary, and v1/v2/v3 rolling readers.
-   The standalone primitive cannot claim topology/detail; its locked hook is internal
-   groundwork for #126, and the runtime actor remains schema v2.
-2. **Pending #126:** database topology manifests/pages, normalized latest-state detail rows, limits,
-   integrity validation, retention, and topology-orphan cleanup.
+   The standalone primitive cannot claim topology/detail; its locked hook is reserved
+   for the package-owned storage transaction.
+2. **Implemented by #126:** additive database topology manifests/pages, normalized
+   latest-state detail rows, deterministic preparation and limits, bounded integrity
+   verification, sparse atomic publication, terminal expiry stamping, replacement-run
+   cleanup, and the retention/orphan cleanup command. The runtime actor deliberately
+   remains a schema-v2 writer.
 3. **Pending #127:** package-owned paginated services, indexed single-node retrieval,
    authorization, and public detail routes. Schema-v3 Admin aggregate mapping exists,
    but activation remains gated on this public-reader deployment.
 4. **Coordinated with #79:** producer and collector memory limits and reporting policy.
    Do not claim this storage decision bounds the actor mailbox by itself.
+5. **Follow-up #132:** preparation currently materializes complete observed identity
+   sets before selecting the deterministic retained subset. V1 therefore bounds
+   durable storage, but does not yet prove O(retained) preparation memory for an
+   arbitrarily larger observed graph. #132 owns streaming preparation with accurate
+   observed counts and bounded duplicate/reference validation; schema-v3 activation
+   must compose that boundary with #79's live-ingestion limits.
 
 Required evidence includes deterministic threshold tests, PostgreSQL write/WAL and
 query measurements, retry and stale-writer races, missing/corrupt/orphan cleanup,
@@ -471,6 +525,7 @@ defaults or motivate a new protocol version; it must not silently widen V1.
 - [GitHub issue #125: Persist bounded schema-v3 workflow progress summaries](https://github.com/dariuszpanas/django-ray/issues/125)
 - [GitHub issue #126: Persist immutable topology and normalized latest-state detail](https://github.com/dariuszpanas/django-ray/issues/126)
 - [GitHub issue #127: Add bounded authorized workflow-progress read services](https://github.com/dariuszpanas/django-ray/issues/127)
+- [GitHub issue #132: Bound workflow-progress preparation memory](https://github.com/dariuszpanas/django-ray/issues/132)
 - [GitHub issue #79: Make workflow observability cost measurable and configurable](https://github.com/dariuszpanas/django-ray/issues/79)
 - [GitHub issue #81: Fence workflow progress writes](https://github.com/dariuszpanas/django-ray/issues/81)
 - [GitHub issue #85: Define Compiled Graph invocation lifecycle](https://github.com/dariuszpanas/django-ray/issues/85)

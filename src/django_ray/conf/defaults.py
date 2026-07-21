@@ -33,6 +33,7 @@ DEFAULTS: dict[str, Any] = {
     "WORKER_HEARTBEAT_SECONDS": 15,
     "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
     "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
+    "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7,
     # Inputs
     # ``None`` preserves legacy inline args/kwargs storage. Configure a
     # retrievable input backend before setting a spill threshold.

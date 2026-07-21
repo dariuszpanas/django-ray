@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
+from django_ray.conf.defaults import DEFAULTS
 from django_ray.conf.settings import validate_settings
 
 
@@ -23,6 +24,35 @@ class TestValidateSettings:
         }
         # Should not raise
         validate_settings(settings)
+
+    def test_workflow_progress_detail_retention_default(self) -> None:
+        assert DEFAULTS["WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS"] == 7
+
+    @pytest.mark.parametrize("retention_days", [0, 30])
+    def test_validate_workflow_progress_detail_retention_boundaries(
+        self, retention_days: int
+    ) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": retention_days,
+            }
+        )
+
+    @pytest.mark.parametrize("retention_days", [-1, 31, 7.0, "7", None])
+    def test_validate_workflow_progress_detail_retention_rejects_invalid_values(
+        self, retention_days: object
+    ) -> None:
+        with pytest.raises(
+            ImproperlyConfigured,
+            match=("WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS must be an integer between 0 and 30"),
+        ):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": retention_days,
+                }
+            )
 
     def test_validate_invalid_runner(self) -> None:
         """Test that invalid RUNNER raises error."""
@@ -74,6 +104,7 @@ class TestValidateSettings:
             "WORKER_HEARTBEAT_SECONDS",
             "TASK_MONITOR_HEARTBEAT_SECONDS",
             "WORKFLOW_PROGRESS_FLUSH_SECONDS",
+            "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS",
             "RAY_STATE_API_TIMEOUT_SECONDS",
             "MAX_RESULT_SIZE_BYTES",
             "WORKER_POLL_INTERVAL_SECONDS",

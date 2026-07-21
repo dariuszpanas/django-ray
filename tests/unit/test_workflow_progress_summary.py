@@ -13,7 +13,12 @@ from django.test.utils import CaptureQueriesContext
 import django_ray.workflow_progress as progress_module
 import django_ray.workflow_progress_summary as summary_module
 from django_ray.lifecycle import cancel_task, record_failure, retry_task, succeed_task
-from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.models import (
+    RayTaskExecution,
+    TaskAttempt,
+    TaskState,
+    WorkflowProgressRunStorage,
+)
 from django_ray.observability import (
     get_workflow_graph,
 )
@@ -477,6 +482,31 @@ def test_summary_rejects_inconsistent_detail_availability(running_execution, mut
         normalize_workflow_progress_summary(summary)
 
 
+@pytest.mark.parametrize(
+    ("reporting_policy", "availability"),
+    [
+        ("disabled", "NOT_REPORTED"),
+        ("full", "DISABLED"),
+        ("full", "OMITTED_BY_POLICY"),
+        ("disabled", "OMITTED_BY_POLICY"),
+    ],
+)
+def test_summary_rejects_reporting_policy_availability_conflicts(
+    running_execution,
+    reporting_policy: str,
+    availability: str,
+) -> None:
+    summary = _summary(_identity(running_execution))
+    summary["reporting_policy"] = reporting_policy
+    summary["detail"]["availability"] = availability  # type: ignore[index]
+
+    with pytest.raises(
+        WorkflowProgressSummaryError,
+        match="reporting policy and detail availability",
+    ):
+        normalize_workflow_progress_summary(summary)
+
+
 def test_truncated_detail_requires_sorted_unique_protocol_reasons(running_execution) -> None:
     summary = _summary(_identity(running_execution), published_detail=True)
     summary["detail"] = {
@@ -687,6 +717,33 @@ def test_standalone_summary_writer_cannot_publish_detail_pointers(running_execut
 
     running_execution.refresh_from_db()
     assert running_execution.workflow_progress_summary_json is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("availability", "reporting_policy"),
+    [
+        ("OMITTED_BY_POLICY", "sampled"),
+        ("DISABLED", "disabled"),
+    ],
+)
+def test_summary_only_policy_states_do_not_create_detail_storage(
+    running_execution,
+    availability: str,
+    reporting_policy: str,
+) -> None:
+    identity = _identity(running_execution)
+    summary = _summary(identity)
+    summary["reporting_policy"] = reporting_policy
+    summary["detail"]["availability"] = availability  # type: ignore[index]
+
+    assert persist_workflow_progress_summary(identity, summary) is True
+
+    running_execution.refresh_from_db()
+    assert running_execution.workflow_progress_summary_json == (
+        serialize_workflow_progress_summary(summary, expected_identity=identity)
+    )
+    assert not WorkflowProgressRunStorage.objects.filter(execution=running_execution).exists()
 
 
 @pytest.mark.django_db
@@ -1140,7 +1197,7 @@ def test_retry_archives_one_bounded_summary_before_clearing_current(running_exec
 
 
 @pytest.mark.django_db
-def test_matching_producer_terminal_summary_archives_exact_detail_expiry(
+def test_matching_producer_terminal_summary_archives_authoritative_detail_expiry(
     running_execution,
 ) -> None:
     identity = _identity(running_execution)
@@ -1149,15 +1206,16 @@ def test_matching_producer_terminal_summary_archives_exact_detail_expiry(
         published_detail=True,
         state="FAILED",
     )
-    serialized = serialize_workflow_progress_summary(terminal)
     assert _persist_locked_summary(identity, terminal)
 
     assert record_failure(running_execution, error_message="failed", retry=False)
 
     attempt = TaskAttempt.objects.get(execution=running_execution, attempt_number=2)
-    assert attempt.workflow_progress_summary_json == serialized
+    assert attempt.workflow_progress_summary_json is not None
     archived = deserialize_workflow_progress_summary(attempt.workflow_progress_summary_json)
-    assert archived["retention"]["detail_expires_at"] == "2026-07-27T12:00:02Z"
+    finished_at = datetime.fromisoformat(archived["terminal"]["finished_at"][:-1] + "+00:00")
+    expires_at = datetime.fromisoformat(archived["retention"]["detail_expires_at"][:-1] + "+00:00")
+    assert expires_at == finished_at + timedelta(days=7)
 
 
 @pytest.mark.django_db

@@ -49,11 +49,21 @@ def _attempt_workflow_progress_summary(execution: RayTaskExecution) -> str | Non
         canonical = serialize_workflow_progress_summary(summary, expected_identity=identity)
         if canonical != serialized:
             return None
-        if (
+        terminal_summary_matches = (
             summary["state"] == execution.state
             and summary["terminal"]["outcome"] == execution.state
-        ):
-            return cast(str, serialized)
+        )
+        if terminal_summary_matches:
+            if summary["detail_revision"] is None or execution.finished_at is None:
+                return cast(str, serialized)
+            reported_finished_at = datetime.fromisoformat(
+                summary["terminal"]["finished_at"][:-1] + "+00:00"
+            )
+            outer_finished_at = execution.finished_at
+            if outer_finished_at.tzinfo is None:
+                outer_finished_at = outer_finished_at.replace(tzinfo=UTC)
+            if outer_finished_at.astimezone(UTC) <= reported_finished_at:
+                return cast(str, serialized)
         if execution.state not in WORKFLOW_PROGRESS_TERMINAL_STATES:
             return None
 
@@ -108,6 +118,14 @@ def _record_attempt(execution: RayTaskExecution) -> None:
         "result_reference": execution.result_reference,
     }
     workflow_progress_summary = _attempt_workflow_progress_summary(execution)
+    from django_ray.workflow_progress_storage import (
+        stamp_workflow_progress_detail_expiry_locked,
+    )
+
+    stamp_workflow_progress_detail_expiry_locked(
+        execution,
+        workflow_progress_summary,
+    )
     if workflow_progress_summary is not None:
         defaults["workflow_progress_summary_json"] = workflow_progress_summary
     TaskAttempt.objects.update_or_create(

@@ -14,6 +14,7 @@ This covers the `django-ray` library runtime:
 
 - `RayTaskExecution` task lifecycle rows,
 - `TaskInputPayload` durable-input registry and cleanup tombstones,
+- normalized workflow-progress topology/detail retention,
 - `TaskWorkerLease` worker heartbeat/coordination rows,
 - `django_ray_worker` process behavior.
 
@@ -27,6 +28,8 @@ It does not cover custom business task logic internals.
 4. Check Ray connectivity from workers.
 5. Check whether failures are retrying or already terminal.
 6. For input failures, verify the configured backend, object access, and registry state.
+7. For workflow-progress cleanup failures, inspect the bounded `cleanup_error` code on
+   the retained run or pending manifest without copying progress payloads into logs.
 
 ## Primary Signals
 
@@ -205,7 +208,65 @@ Recovery:
 Do not edit `input_reference`, digest metadata, or JSON placeholders by hand. Successful
 cleanup retains a `PURGED` tombstone and execution references for audit.
 
-## 5) Ray Connection Loss
+## 5) Workflow Progress Retention or Orphan Cleanup Failure
+
+Symptoms:
+
+- expired normalized detail continues to consume database storage;
+- unpublished topology candidates or unreferenced pages remain for more than one hour;
+- inactive run-storage shells remain after their last candidate or orphan page is gone;
+- `django_ray_cleanup_workflow_progress --delete` exits nonzero and a retained run or
+  pending manifest has `cleanup_error`.
+
+Checks:
+
+1. Preview one bounded pass with `django_ray_cleanup_workflow_progress`.
+2. Confirm terminal detail has `detail_retention_days` and `detail_expires_at` recorded;
+   cleanup does not invent or override the lifecycle-owned retention deadline.
+3. Treat an exact active task identity as protected even if a malformed or manually
+   altered expiry appears to be in the past.
+4. Inspect the bounded cleanup code and exception type. Exception messages are
+   intentionally redacted; use database and application logs under the deployment's
+   normal secret-handling policy for deeper diagnosis.
+
+Recovery:
+
+1. Correct the database, lock-timeout, or integrity condition reported by operations.
+2. Rerun the dry run, then run
+   `django_ray_cleanup_workflow_progress --batch-size=100 --delete`.
+3. Repeat bounded passes until zero eligible items remain. One failed item does not
+   prevent later candidates in a pass, and clean candidates are processed before retry
+   rows so a permanent oldest failure cannot starve later work. Any failure still makes
+   that command invocation exit nonzero.
+
+Cleanup removes expired run-owned detail or old unpublished orphans only. It does not
+rewrite the task-row or `TaskAttempt` summary, task state, or terminal outcome. Do not
+manually delete current manifests or referenced pages; their references are part of
+the atomic publication and integrity contract.
+
+Apply migration `0013_workflow_progress_detail_storage` before scheduling the command.
+It is safe to establish the cleanup schedule while the schema-v3 runtime writer remains
+disabled for the #127 reader rollout. Start with dry-run monitoring, then use bounded
+`--delete` passes at a cadence appropriate to database growth and the configured
+retention window. Alert on a nonzero exit and on an eligible count that does not fall
+across repeated successful passes.
+
+A manifest, digest, aggregate, or node-key integrity error during publication is a
+fail-closed storage fault. Do not manually promote the pending manifest or advance the
+task summary pointer. Preserve the bounded diagnostic and relevant database logs,
+stop the affected producer if it is repeatedly retrying, and investigate the exact run
+identity before allowing a fresh publication.
+
+Schedule `django_ray_audit_workflow_progress` for exact runs selected by operational
+policy, and run it before attempting manual storage recovery. The audit is read-only:
+it locks the task then exact run, verifies the current topology and every bounded
+latest-state row, and exits nonzero without changing the corrupt evidence. Supply all
+four identity fields from the summary or retained attempt record; do not substitute
+only the current task primary key when auditing an older retained run. An audit reads
+no more than the protocol limit plus one detail row and is intentionally separate from
+the sparse publication path.
+
+## 6) Ray Connection Loss
 
 Symptoms:
 
@@ -224,7 +285,7 @@ Recovery:
 2. Restart workers after Ray is healthy.
 3. Verify pending tasks move back to `QUEUED`/`RUNNING`.
 
-## 6) Cancellation Stuck In CANCELLING
+## 7) Cancellation Stuck In CANCELLING
 
 Symptoms:
 
@@ -240,7 +301,7 @@ Recovery:
 1. Restart worker if cancellation loop is stalled.
 2. After restart, verify `CANCELLING -> CANCELLED` transitions complete.
 
-## 7) Oversized Results
+## 8) Oversized Results
 
 Symptoms:
 

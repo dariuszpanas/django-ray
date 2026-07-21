@@ -9,6 +9,12 @@ Compiled Graph is an execution strategy for a validated static actor region in a
 not make a data-dependent workflow static. When this policy rejects compilation,
 ordinary local and dynamic Ray task execution remain available.
 
+The production target for native enablement is Linux x86_64 on Kubernetes/KubeRay.
+Windows remains useful for local ordinary execution and tests, but delayed Ray Windows
+builds or a failing Windows Compiled Graph probe do not block Linux/Kubernetes
+groundwork or promotion evidence. Every platform still fails closed unless its exact
+capability tuple is independently verified.
+
 ## Current support state
 
 Policy version 2 has **no verified native capability rows**. The rows below are canary

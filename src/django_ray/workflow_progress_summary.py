@@ -461,6 +461,20 @@ def normalize_workflow_progress_summary(
 
     timestamps, _ = _normalize_timestamps(summary["timestamps"])
     detail = _normalize_detail(summary["detail"], detail_revision=detail_revision)
+    availability = detail["availability"]
+    if (reporting_policy == "disabled") != (
+        availability == WorkflowProgressDetailAvailability.DISABLED
+    ):
+        raise WorkflowProgressSummaryError(
+            "workflow reporting policy and detail availability are inconsistent"
+        )
+    if (
+        availability == WorkflowProgressDetailAvailability.OMITTED_BY_POLICY
+        and reporting_policy not in {"sampled", "terminal_only"}
+    ):
+        raise WorkflowProgressSummaryError(
+            "workflow reporting policy and detail availability are inconsistent"
+        )
     storage = _normalize_storage(summary["storage"], topology_version=topology_version)
     if (
         detail["availability"] == WorkflowProgressDetailAvailability.EXPIRED

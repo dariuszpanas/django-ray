@@ -133,3 +133,71 @@ Storage failures are recorded in `TaskInputPayload.cleanup_error` and make the c
 exit with an error. See [Durable Input Storage](input-storage.md#retries-and-retention)
 before scheduling cleanup.
 
+## django_ray_cleanup_workflow_progress
+
+Preview expired normalized detail, stale unpublished topology storage, and empty
+inactive run rows:
+
+```bash
+python manage.py django_ray_cleanup_workflow_progress
+```
+
+The command is a dry run unless `--delete` is supplied. The deletion pass uses the
+expiry already recorded with each terminal run; it does not accept a command-line
+retention override and does not rewrite task or attempt summaries.
+
+```bash
+python manage.py django_ray_cleanup_workflow_progress --delete
+```
+
+| Option | Description |
+|--------|-------------|
+| `--batch-size=N` | Check at most `N` expired runs, pending manifests, orphan pages, and empty runs per class; default `100`, range `1`-`1000` |
+| `--delete` | Delete candidates that remain eligible after row locking |
+
+An expired run is protected while its complete attempt, generation, and run identity
+is still the active task identity. Independently, only unpublished `PENDING` manifests
+and unreferenced pages at least one hour old are orphan-cleanup candidates. Current
+manifests and every referenced page remain protected. Repeated passes are idempotent;
+schedule bounded passes until the report reaches zero eligible items.
+Empty unpublished runs are eligible only when they are inactive and have no manifest,
+page, or detail dependency.
+
+Each item is rechecked under task, run, then manifest/page locks. One item failure does
+not stop later candidates. Never-failed candidates run before retries, so one permanent
+oldest failure cannot starve newer eligible work when the batch is small. The command
+records only a bounded, message-redacted `cleanup_error` diagnostic on the retained run
+or pending manifest and exits nonzero after finishing the pass.
+
+## django_ray_audit_workflow_progress
+
+Run a read-only, whole-run integrity check for one exact workflow identity:
+
+```bash
+python manage.py django_ray_audit_workflow_progress \
+  --task-execution-pk=42 \
+  --attempt-number=1 \
+  --execution-generation=7 \
+  --run-id=3f78c15c-a3ae-4d8c-8196-c952adb581cc
+```
+
+The command locks the task and exact run in publication order, verifies the current
+topology, and streams at most 25,001 normalized detail rows in bounded batches. It
+recomputes row count, byte, state, truncation, and event aggregates and fully validates
+each row's canonical payload, digest, stable node key, and publication epochs. It never
+repairs or deletes data. Any mismatch exits nonzero; successful output is deterministic
+and suitable for periodic monitoring.
+
+When the identity still owns the task row, the audit also binds the topology and detail
+revisions, manifest pointer, and retained aggregates to the canonical task summary. For
+an older retained run after task reuse, it verifies exact run-local evidence because the
+task row now belongs to another attempt; it does not substitute that newer summary.
+
+| Option | Description |
+|--------|-------------|
+| `--task-execution-pk=N` | Required `RayTaskExecution` primary key |
+| `--attempt-number=N` | Required one-based attempt number |
+| `--execution-generation=N` | Required execution fencing generation |
+| `--run-id=UUID` | Required workflow run identifier |
+| `--database=ALIAS` | Django database alias; default `default` |
+

@@ -72,11 +72,19 @@ retention, and bounded timestamps. The public helper removes the task database p
 key and internal manifest identifier. It contains no graph records, events, arbitrary
 metrics or errors, credentials, paths, URIs, Ray identifiers, or handles.
 
-The current workflow actor still publishes schema v2. Schema-v3 publication stays
-disabled until topology/detail storage and its internal readers (#126), followed by the
-authorized public detail facade (#127), have deployed and old writers have drained.
-Until then, schema-v3 graph and node helpers report detail unavailable rather than
-fabricating an empty workflow.
+The package-owned topology/detail storage, bounded integrity verifier, atomic writer,
+and retention cleanup are present, but they are internal rollout groundwork. The
+current workflow actor still publishes schema v2. Schema-v3 publication stays disabled
+until the authorized public detail facade (#127) has deployed and old writers have
+drained. Until then, schema-v3 graph and node helpers report detail unavailable rather
+than fabricating an empty workflow.
+
+Once activated, `AVAILABLE` and `TRUNCATED` summaries may reference the manifest and
+detail revisions committed by the atomic storage writer. `DISABLED` and
+`OMITTED_BY_POLICY` are summary-only states: they carry no manifest or detail pointer,
+and callers must not interpret them as an empty completed graph. Public detail reads
+remain unavailable until #127 supplies authorization, revision-bound pagination, and
+indexed single-node lookup.
 
 `get_workflow_node_snapshot()` always returns durable node data first. Live Ray state
 and logs are opt-in:

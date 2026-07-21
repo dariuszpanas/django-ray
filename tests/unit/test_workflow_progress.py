@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 
 import pytest
 
 from django_ray.lifecycle import record_failure, retry_task
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import (
+    RayTaskExecution,
+    TaskState,
+    WorkflowProgressNodeDetail,
+    WorkflowProgressNodeState,
+    WorkflowProgressRunStorage,
+)
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
     DurableTaskContext,
@@ -49,6 +56,23 @@ def _snapshot(identity: WorkflowRunIdentity, revision: int = 1) -> dict[str, obj
         "completed_nodes": 0,
         "failed_nodes": 0,
     }
+
+
+def _run_storage(
+    execution: RayTaskExecution,
+    run_id: str,
+    *,
+    attempt_number: int | None = None,
+    execution_generation: int | None = None,
+) -> WorkflowProgressRunStorage:
+    return WorkflowProgressRunStorage.objects.create(
+        execution=execution,
+        attempt_number=(execution.attempt_number if attempt_number is None else attempt_number),
+        execution_generation=(
+            execution.execution_generation if execution_generation is None else execution_generation
+        ),
+        run_id=run_id,
+    )
 
 
 def test_workflow_run_identity_requires_complete_durable_fence() -> None:
@@ -164,6 +188,109 @@ def test_new_invocation_fences_an_older_writer_in_the_same_attempt() -> None:
     execution.refresh_from_db()
     assert str(execution.workflow_run_id) == replacement.run_id
     assert execution.progress_data is None
+
+
+@pytest.mark.django_db
+def test_replacement_claim_deletes_only_exact_same_attempt_run_storage() -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-run-storage-replacement",
+        callable_path="tests.unit.test_workflows.increment",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=5,
+    )
+    old = _identity(execution, "00000000-0000-0000-0000-000000000101")
+    replacement = _identity(execution, "00000000-0000-0000-0000-000000000102")
+    assert claim_workflow_run(old) is True
+    exact_old_storage = _run_storage(execution, old.run_id)
+    prior_attempt_storage = _run_storage(
+        execution,
+        old.run_id,
+        attempt_number=1,
+        execution_generation=4,
+    )
+    unrelated_storage = _run_storage(
+        execution,
+        "00000000-0000-0000-0000-000000000103",
+    )
+    detail_payload = b'{"node_id":"node-a","state":"RUNNING"}'
+    old_detail = WorkflowProgressNodeDetail.objects.create(
+        run_storage=exact_old_storage,
+        node_key=sha256(b"node-a").hexdigest(),
+        node_id="node-a",
+        state=WorkflowProgressNodeState.RUNNING,
+        event_count=0,
+        payload=detail_payload,
+        digest=sha256(detail_payload).hexdigest(),
+        encoded_bytes=len(detail_payload),
+        decoded_bytes=len(detail_payload),
+        last_topology_version=1,
+        last_detail_revision=1,
+    )
+
+    assert claim_workflow_run(replacement) is True
+
+    execution.refresh_from_db()
+    assert str(execution.workflow_run_id) == replacement.run_id
+    assert not WorkflowProgressRunStorage.objects.filter(pk=exact_old_storage.pk).exists()
+    assert not WorkflowProgressNodeDetail.objects.filter(pk=old_detail.pk).exists()
+    assert WorkflowProgressRunStorage.objects.filter(pk=prior_attempt_storage.pk).exists()
+    assert WorkflowProgressRunStorage.objects.filter(pk=unrelated_storage.pk).exists()
+
+
+@pytest.mark.django_db
+def test_reclaiming_same_run_keeps_storage_and_clears_existing_snapshots() -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-run-storage-idempotent-claim",
+        callable_path="tests.unit.test_workflows.increment",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=5,
+    )
+    identity = _identity(execution, "00000000-0000-0000-0000-000000000104")
+    assert claim_workflow_run(identity) is True
+    run_storage = _run_storage(execution, identity.run_id)
+    RayTaskExecution.objects.filter(pk=execution.pk).update(
+        progress_data='{"revision":1}',
+        workflow_progress_summary_json='{"summary_revision":1}',
+    )
+
+    assert claim_workflow_run(identity) is True
+
+    execution.refresh_from_db()
+    assert str(execution.workflow_run_id) == identity.run_id
+    assert execution.progress_data is None
+    assert execution.workflow_progress_summary_json is None
+    assert WorkflowProgressRunStorage.objects.filter(pk=run_storage.pk).exists()
+
+
+@pytest.mark.django_db
+def test_replacement_claim_rolls_back_storage_deletion_when_task_update_fails(
+    monkeypatch,
+) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-run-storage-rollback",
+        callable_path="tests.unit.test_workflows.increment",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=5,
+    )
+    old = _identity(execution, "00000000-0000-0000-0000-000000000105")
+    replacement = _identity(execution, "00000000-0000-0000-0000-000000000106")
+    assert claim_workflow_run(old) is True
+    old_storage = _run_storage(execution, old.run_id)
+
+    def fail_save(*_args, **_kwargs) -> None:
+        raise RuntimeError("roll back replacement claim")
+
+    monkeypatch.setattr(RayTaskExecution, "save", fail_save)
+
+    with pytest.raises(RuntimeError, match="roll back replacement claim"):
+        claim_workflow_run(replacement)
+
+    execution.refresh_from_db()
+    assert str(execution.workflow_run_id) == old.run_id
+    assert WorkflowProgressRunStorage.objects.filter(pk=old_storage.pk).exists()
 
 
 @pytest.mark.django_db

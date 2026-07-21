@@ -78,6 +78,7 @@ monotonic schedules; idle claim backoff does not postpone them.
 | `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval (`1`-`86400` seconds), which must be below the lease duration |
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |
 | `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between workflow progress snapshot writes |
+| `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS` | `int` | `7` | Terminal workflow topology and node-detail retention (`0`-`30` days) |
 
 `django-ray` validates numeric settings at startup, rejects booleans passed as integers, and enforces
 that worker/task-monitor heartbeats are shorter than their lease/stuck-task windows.
@@ -89,6 +90,10 @@ Task monitor heartbeats are batched into one update for all in-flight tasks and
 throttled by `TASK_MONITOR_HEARTBEAT_SECONDS`.
 Ray-native workflow node events are collected in memory and written as one compact
 snapshot at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
+Terminal topology and node detail become eligible for cleanup after
+`WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`; `0` makes them eligible as soon as the
+terminal state is durably archived. Active current detail is not expired by this
+setting, and bounded per-attempt summaries remain subject to task-attempt retention.
 
 RuntimeEnv profiles are resolved and stored when a task is enqueued. See
 [Runtime Environments](runtime-environments.md) for inheritance, backend aliases,
