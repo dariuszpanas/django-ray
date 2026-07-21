@@ -52,8 +52,10 @@ The best batch size sits between those constraints.
 
 A workflow creates one `RayTaskExecution` for the outer Django task. Internal leaves
 exchange Ray object references and report events to an in-memory progress actor.
-django-ray writes compact graph snapshots only when the revision changes, bounded by
-`WORKFLOW_PROGRESS_FLUSH_SECONDS`.
+django-ray writes a complete graph snapshot when a changed revision is flushed.
+`WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not bound the
+encoded snapshot, decoded object, task-row, or response size. Those costs currently
+grow with the graph and its per-node metadata.
 
 This is faster than making every leaf a Django task, but it changes semantics:
 
@@ -64,6 +66,146 @@ This is faster than making every leaf a Django task, but it changes semantics:
 
 Use idempotent leaves and external checkpoints when repeated side effects would be
 unsafe.
+
+## Benchmark Workflow Progress Persistence
+
+Use the opt-in workflow-progress benchmark to compare the current complete-row
+snapshot with bounded alternatives before changing the production persistence
+contract. The command builds deterministic logical node/payload records and exercises
+Django plus a disposable PostgreSQL database. It does not import Ray, start a Ray
+runtime, execute native Compiled Graphs, or add any candidate representation to
+production.
+
+Install the PostgreSQL dependency set, activate that environment, and point
+`tests.postgres_settings` at an isolated PostgreSQL database. Never use a production
+database: the benchmark creates and removes transient representative rows and measures
+database-wide effects. Prepare the schema, then run the fixed comparison locally:
+
+```bash
+export DJANGO_SETTINGS_MODULE=tests.postgres_settings
+export DATABASE_NAME=django_ray
+export DATABASE_USER=django_ray
+export DATABASE_PASSWORD=django_ray
+export DATABASE_HOST=127.0.0.1
+export DATABASE_PORT=5432
+
+python testproject/manage.py check
+python testproject/manage.py migrate --noinput
+mkdir -p artifacts
+python testproject/manage.py django_ray_benchmark_workflow_progress \
+  --nodes 1000 10000 50000 100000 \
+  --change-rates 0.01 0.10 1.0 \
+  --repetitions 5 \
+  --warmups 1 \
+  --seed 20260720 \
+  --database-deployment local-postgresql \
+  --output-json artifacts/workflow-progress-benchmark.json \
+  --output-markdown artifacts/workflow-progress-benchmark.md
+```
+
+The `nodes` values are logical workflow-node counts. A change rate of `0.01` or
+`0.10` models a sparse publication after 1% or 10% of nodes change; `1.0` models a
+terminal publication in which every node has changed. Each case retains its first
+measurement as `cold_sample`, then discards the requested warm-up measurements before
+recording its five `warm_samples`. A fixed seed makes payload content and modeled
+change distribution reproducible; this command does not construct dependency edges.
+
+The benchmark-only representations have these meanings:
+
+| Representation | What the benchmark models |
+|---|---|
+| `current_full_row` | The current behavior: re-encode and replace one complete graph snapshot in the task row. |
+| `bounded_inline` | A fixed-size task-row summary plus count- and byte-bounded invocation detail retained inline. |
+| `chunked_database` | A bounded task-row summary with bounded detail split into database chunks. |
+| `normalized` | A bounded summary with node detail stored as independently addressable relational rows. |
+| `append_delta` | A bounded summary plus revision deltas, with reads reconstructing detail from retained changes. |
+| `external_chunk` | A bounded database summary and opaque pointer while encoded detail is modeled as externally stored chunks. |
+| `live_only` | Bounded durable summary data with invocation detail available only from the live producer. |
+
+These are comparison models, not supported storage modes. In particular, the
+`external_chunk` case does not turn a benchmark artifact into a public storage
+reference, and the `live_only` case does not promise that detail survives producer
+loss.
+
+The versioned JSON has these top-level fields: `schema_version`, `benchmark`,
+`environment`, `configuration`, `profiles`, `candidates`, `cases`, and
+`database_evidence`. Together they retain the configured matrix and seed, core
+dependency and platform identity, PostgreSQL identity and schema state, payload
+profiles, and candidate descriptions. Each `cases` entry identifies `profile`, `candidate`, `nodes`,
+`change_rate`, `changed_nodes`, and a deterministic `workload_fingerprint`. Its
+`write_amplification` records changed items, typed modeled storage units, estimated
+database statements, and task, detail, external, and total encoded bytes. External
+operations are not counted as database statements. `cold_sample` and `warm_samples`
+retain snapshot and serialization measurements, encoded and decoded bytes,
+parse/redaction work, summary/page/single-node read timings and response bytes, and
+best-effort process memory evidence.
+
+The same `workload_fingerprint` is intentionally shared by all seven candidates for a
+given profile, node count, and change rate. It identifies a comparable workload, not a
+unique case.
+
+Payload profiles cover short and maximum-size metadata, multibyte UTF-8,
+secret-bearing values, metric-cardinality limits, compressible content, and seeded
+incompressible content. `database_evidence` holds the best-effort PostgreSQL temporary
+table measurements, including `pg_column_size`, relation growth, and WAL evidence when
+the server can provide them. Optional database evidence may be `unavailable` with an
+explicit reason without failing the benchmark; an unavailable metric remains distinct
+from a measured zero.
+
+Treat the JSON file as the source of truth for analysis. It retains environment data,
+the cold and individual warm samples, full-precision values, and unavailable-metric
+information needed to recompute comparisons. The Markdown file is a concise, rounded
+view derived from that JSON. Its first table pools heterogeneous cases into
+candidate-wide medians across the complete matrix; the sparse-focus table is one
+specific comparison. Use it to orient a decision and the GitHub Actions job
+summary, not to replace the raw repetitions or compare runs with different
+environments.
+
+The environment also records the SHA-256 digest of the benchmark implementation.
+Manual GitHub Actions runs record their exact `GITHUB_SHA`; local evidence reports the
+source revision as unavailable instead of guessing. The configured matrix records
+that the command touches only Django and its configured database, never Ray or
+Kubernetes.
+
+Python timings cover construction, serialization, parsing, redaction, and in-process
+response shaping of bounded representative structures. They exclude ORM queries,
+database and network round trips, and external-object operations. Write bytes and
+database statement counts are analytical. The PostgreSQL probe inserts one bounded
+representative document per candidate to capture JSONB row size, relation growth, and
+WAL evidence; it does not execute seven production candidate schemas or establish
+throughput. Real schema/query benchmarks remain required with the implementation.
+
+The ADR-0004 decision uses a committed [Windows 11/PostgreSQL 17 summary](benchmarks/workflow-progress-storage-postgresql17-windows-2026-07-20.md)
+and its [authoritative raw JSON](benchmarks/workflow-progress-storage-postgresql17-windows-2026-07-20.json).
+That local run used a disposable Docker database; the command did not start Ray or
+access Kubernetes. It therefore does not validate the image or package version in any
+Kubernetes deployment.
+
+For the modeled uniformly distributed sparse update, immutable 256-item detail pages
+touched most pages even when only 1% of nodes changed. ADR-0004 therefore retains
+immutable pages only for normally static topology and selects normalized latest-state
+rows for mutable node detail. The benchmark compares storage shapes; it does not add
+that schema or change production persistence.
+
+To collect the reference Ubuntu/PostgreSQL 17 series, open **Actions**, select
+**Workflow Progress Benchmark**, choose the branch or commit under test, and select
+**Run workflow**. The manual job runs the same fixed command and uploads both files in
+the `workflow-progress-benchmark-<run>-<attempt>` artifact, including any files that
+exist when the benchmark step fails. It is intentionally absent from pull-request CI.
+
+Do not turn its elapsed-time values into required pull-request thresholds. Shared
+runner load, CPU scheduling, filesystem cache state, PostgreSQL checkpoints,
+autovacuum, and fsync behavior add noise that correctness tests cannot normalize.
+Compare candidates within one run, repeat material decisions on representative
+infrastructure, and retain the raw artifacts with the ADR evidence.
+
+PostgreSQL byte metrics answer different questions. `pg_column_size` describes a value
+or row representation, not the table's complete disk cost. Relation growth can include
+indexes, TOAST data, free space, and dead tuples, and it need not fall when rows are
+deleted. WAL deltas vary with server settings, checkpoints, full-page writes,
+compression, and concurrent activity. Measure on an otherwise idle disposable
+database, record unavailable WAL evidence explicitly, and compare WAL or relation
+deltas only between cases collected under the same server configuration.
 
 ## Control Fan-Out
 

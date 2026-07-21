@@ -76,6 +76,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   submission, accounts for one-shot outputs, and emits bounded secret-free snapshots.
   Lifecycle protocol version 1 participates in effective-plan identity; no native
   execution adapter or capability promotion is included.
+- A Ray-free workflow-progress storage benchmark command, manually dispatched
+  PostgreSQL 17 evidence workflow, and committed environment-tagged comparison of
+  full-row, bounded, normalized, delta, external, and live-only storage models.
+- A strategy-neutral bounded workflow-progress storage ADR that selects an
+  always-bounded task-row summary, database-backed immutable topology pages,
+  normalized latest-state detail rows, fenced publication, paginated authorized reads,
+  exact V1 budgets, retention, cleanup, and schema-v1/v2 compatibility. The decision
+  adds no migration or runtime behavior yet.
 - A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
   with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
   capability identity includes immutable deployment, shared-memory, and object-store
