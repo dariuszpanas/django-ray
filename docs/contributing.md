@@ -193,6 +193,7 @@ Enable it explicitly:
 $env:DJANGO_RAY_LIVE_CLUSTER_TESTS="1"
 $env:DJANGO_RAY_LIVE_RAY_ADDRESS="ray://localhost:10001"
 $env:DJANGO_RAY_LIVE_MIN_NODES="2"
+$env:DJANGO_RAY_LIVE_WORKING_DIR_URI="file:///runtime-env/django-ray-source.zip"
 uv run pytest tests/integration/test_live_failure_injection.py -v
 ```
 
@@ -201,11 +202,15 @@ Environment variables:
 - `DJANGO_RAY_LIVE_CLUSTER_TESTS`: set to `1/true/yes` to enable suite.
 - `DJANGO_RAY_LIVE_RAY_ADDRESS`: Ray address for live cluster tests.
 - `DJANGO_RAY_LIVE_MIN_NODES`: minimum alive node count required before tests run.
+- `DJANGO_RAY_LIVE_WORKING_DIR_URI`: optional immutable project archive URI used by the real
+  `RayCoreRunner.submit()` smoke test. A `file://` archive must exist at the same absolute path on
+  every Ray node; without this setting, only that submission smoke test is skipped.
 
 CI strategy:
 
 - The default test matrix excludes `live_cluster` tests to keep its coverage runs deterministic.
-- The CI workflow runs these tests separately against a disposable two-node Docker Ray cluster.
+- The CI workflow runs these tests separately against a disposable two-node Docker Ray cluster and
+  stages the checked-out project archive on both generic Ray nodes.
 - CI also supports `workflow_dispatch` for a manual rerun; it does not need a repository variable
   or an externally reachable Ray cluster.
 

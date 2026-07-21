@@ -7,7 +7,6 @@ import sys
 import time
 from typing import Any
 
-from django_ray.redaction import redact_text, result_metadata
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
     WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION,
@@ -28,6 +27,7 @@ def execute_django_task_remote(
     compiled_graph_submission_transport: str | None = None,
 ) -> str:
     """Execute one durable django-ray task on a Ray worker."""
+    from django_ray.redaction import redact_text, result_metadata
     from django_ray.runtime.context import durable_task_execution
     from django_ray.runtime.entrypoint import execute_task
 

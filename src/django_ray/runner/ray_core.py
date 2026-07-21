@@ -54,6 +54,12 @@ def _get_remote_execute_django_task() -> Any:
     return _execute_django_task_remote_cached
 
 
+def _discard_remote_execute_django_task() -> None:
+    """Discard a Ray Client definition that failed before submission."""
+    global _execute_django_task_remote_cached
+    _execute_django_task_remote_cached = None
+
+
 def _compiled_graph_submission_transport(ray: Any) -> str | None:
     """Describe the live Ray connection without trusting a configured address."""
     from django_ray.runtime.compiled_graph import CompiledGraphSubmissionTransport
@@ -199,19 +205,26 @@ class RayCoreRunner(BaseRunner):
 
         # Submit to Ray (non-blocking)
         submitted_at = datetime.now(UTC)
-        object_ref = execute_django_task.remote(
-            callable_path,
-            args_json,
-            kwargs_json,
-            task_execution.pk,
-            runtime_env.profile,
-            runtime_env.digest,
-            input_reference,
-            attempt_number=getattr(task_execution, "attempt_number", None),
-            execution_generation=getattr(task_execution, "execution_generation", None),
-            runtime_env_plan_identity=snapshot_runtime_env_identity.as_transport_dict(),
-            compiled_graph_submission_transport=_compiled_graph_submission_transport(ray),
-        )
+        try:
+            object_ref = execute_django_task.remote(
+                callable_path,
+                args_json,
+                kwargs_json,
+                task_execution.pk,
+                runtime_env.profile,
+                runtime_env.digest,
+                input_reference,
+                attempt_number=getattr(task_execution, "attempt_number", None),
+                execution_generation=getattr(task_execution, "execution_generation", None),
+                runtime_env_plan_identity=snapshot_runtime_env_identity.as_transport_dict(),
+                compiled_graph_submission_transport=_compiled_graph_submission_transport(ray),
+            )
+        except Exception:
+            # Ray Client leaves a failed ClientRemoteFunc in an in-progress
+            # state. Reusing it turns the original serialization error into an
+            # unrelated InProgressSentinel failure on the next attempt.
+            _discard_remote_execute_django_task()
+            raise
 
         # Get Ray job ID (the worker's client connection job ID)
         ray_job_id = ""
