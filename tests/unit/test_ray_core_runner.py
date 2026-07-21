@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from django_ray.runner.base import JobStatus, SubmissionHandle
 from django_ray.runner.ray_core import (
     RayCoreHandle,
@@ -44,6 +46,7 @@ class _FakeRay:
         self.runtime_job_id = "02000000"
         self.runtime_context_error: Exception | None = None
         self.cancel_error: Exception | None = None
+        self.remote_error: Exception | None = None
         self.default_hex = "abcdef0123456789" * 4
         self.client_connected = False
         self.util = SimpleNamespace(
@@ -71,6 +74,8 @@ class _FakeRay:
             class _RemoteCallable:
                 @staticmethod
                 def remote(*args: Any, **kw: Any) -> _FakeObjectRef:
+                    if fake.remote_error is not None:
+                        raise fake.remote_error
                     value = fn(*args, **kw)
                     ref = _FakeObjectRef(fake.default_hex)
                     fake.values[ref] = value
@@ -301,6 +306,41 @@ class TestRayCoreRunnerRuntime:
         )
 
         assert registered == [remote_module]
+
+    def test_submit_discards_failed_ray_client_definition_before_retry(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        fake.remote_error = ModuleNotFoundError("django_ray")
+        import django_ray.runner.ray_core as ray_core_module
+
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda callable_path, args_json, kwargs_json: json.dumps(
+                {"success": True, "result": callable_path}
+            ),
+        )
+
+        runner = RayCoreRunner()
+        with pytest.raises(ModuleNotFoundError, match="django_ray"):
+            runner.submit(
+                task_execution=SimpleNamespace(pk=24),
+                callable_path="testproject.tasks.echo_task",
+                args=("hello",),
+                kwargs={},
+            )
+
+        assert ray_core_module._execute_django_task_remote_cached is None
+
+        fake.remote_error = None
+        handle = runner.submit(
+            task_execution=SimpleNamespace(pk=24),
+            callable_path="testproject.tasks.echo_task",
+            args=("hello",),
+            kwargs={},
+        )
+
+        assert handle.ray_job_id.startswith("02000000:")
+        assert runner.pending_count == 1
+        assert sum(call == {} for call in fake.remote_calls) == 2
 
     def test_submit_applies_persisted_runtime_env(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)

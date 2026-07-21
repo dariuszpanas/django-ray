@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -33,6 +34,43 @@ class _ProgressActor:
 
 def workflow_target(value: int, increment: int = 0) -> int:
     return value + increment
+
+
+def test_task_bootstrap_unpickles_before_django_ray_is_importable() -> None:
+    import ray.cloudpickle as cloudpickle
+
+    cloudpickle.register_pickle_by_value(remote_module)
+    try:
+        payload = cloudpickle.dumps(execute_django_task_remote)
+    finally:
+        cloudpickle.unregister_pickle_by_value(remote_module)
+
+    unpickle_without_django_ray = """
+import importlib.abc
+import sys
+
+import ray.cloudpickle as cloudpickle
+
+
+class BlockDjangoRay(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "django_ray" or fullname.startswith("django_ray."):
+            raise ModuleNotFoundError(fullname, name=fullname)
+        return None
+
+
+sys.meta_path.insert(0, BlockDjangoRay())
+cloudpickle.loads(sys.stdin.buffer.read())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", unpickle_without_django_ray],
+        input=payload,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
 
 
 def failing_workflow_target(value: int) -> int:

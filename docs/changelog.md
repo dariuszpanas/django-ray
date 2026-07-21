@@ -135,6 +135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The bundled testproject dashboard now accepts an operator-supplied bearer token in page memory
   for statistics, smoke-task enqueue, metrics, and execution views without embedding or persisting
   the configured credential.
+- Ray Client task submission now keeps the pre-RuntimeEnv bootstrap import-free on generic Ray
+  images and discards failed remote-function definitions before retrying.
 
 ### Migration
 

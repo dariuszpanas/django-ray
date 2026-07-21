@@ -28,6 +28,7 @@ LIVE_RAY_ADDRESS = os.environ.get("DJANGO_RAY_LIVE_RAY_ADDRESS") or os.environ.g
     "RAY_ADDRESS", "auto"
 )
 LIVE_MIN_NODES = int(os.environ.get("DJANGO_RAY_LIVE_MIN_NODES", "2"))
+LIVE_WORKING_DIR_URI = os.environ.get("DJANGO_RAY_LIVE_WORKING_DIR_URI")
 
 pytestmark = [
     pytest.mark.django_db,
@@ -103,6 +104,61 @@ def _submit_live_sleep_task(ray_module, sleep_seconds: int):
 
 class TestLiveFailureInjection:
     """Live cluster fault-injection scenarios."""
+
+    @pytest.mark.skipif(
+        not LIVE_WORKING_DIR_URI,
+        reason="DJANGO_RAY_LIVE_WORKING_DIR_URI is required for the submission smoke test",
+    )
+    def test_ray_core_runner_submits_project_code_to_generic_cluster(self, live_ray_cluster):
+        """The package-free Ray Client head must accept django-ray's bootstrap."""
+        from django_ray.runtime.runtime_env import normalize_runtime_env
+
+        assert LIVE_WORKING_DIR_URI is not None
+        runtime_env = normalize_runtime_env(
+            {
+                "working_dir": LIVE_WORKING_DIR_URI,
+                "pip": ["django>=6.0"],
+                "env_vars": {
+                    "DATABASE_ENGINE": "django.db.backends.sqlite3",
+                    "DJANGO_SETTINGS_MODULE": "testproject.settings",
+                    "PYTHONPATH": "src",
+                },
+            },
+            profile="live-project",
+        )
+        task = RayTaskExecution.objects.create(
+            task_id=f"live-ray-core-submit-{time.time_ns()}",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[2, 3]",
+            kwargs_json="{}",
+            runtime_env_profile=runtime_env.profile,
+            runtime_env_json=runtime_env.serialized,
+            runtime_env_hash=runtime_env.digest,
+        )
+
+        runner = RayCoreRunner()
+        runner.submit(
+            task_execution=task,
+            callable_path=task.callable_path,
+            args=(2, 3),
+            kwargs={},
+        )
+        payload = live_ray_cluster.get(
+            runner._pending_tasks[task.pk].object_ref,
+            timeout=120,
+        )
+
+        assert json.loads(payload) == {
+            "success": True,
+            "result": 5,
+            "result_reference": None,
+            "error": None,
+            "traceback": None,
+            "exception_type": None,
+            "retryable": None,
+        }
 
     def test_disconnect_retries_pending_ray_core_task(self, live_ray_cluster):
         """Client disconnect should trigger retry path for tracked pending tasks."""
