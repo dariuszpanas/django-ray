@@ -453,3 +453,71 @@ jobs:
           name: dist
           path: dist/
 
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs:
+      - lint
+      - docs
+      - typecheck
+      - test
+      - postgresql-coordination
+      - live-cluster
+      - testproject
+      - dependency-compatibility
+      - compiled-graph-candidate-smoke
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every blocking CI job to succeed
+        env:
+          BLOCKING_JOB_RESULTS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          results = {
+              job_id: details["result"]
+              for job_id, details in json.loads(
+                  os.environ["BLOCKING_JOB_RESULTS_JSON"]
+              ).items()
+          }
+          if not results:
+              raise SystemExit("CI Gate blocked: no blocking job results")
+
+          expected_jobs = {
+              "build",
+              "compiled-graph-candidate-smoke",
+              "dependency-compatibility",
+              "docs",
+              "lint",
+              "live-cluster",
+              "postgresql-coordination",
+              "test",
+              "testproject",
+              "typecheck",
+          }
+          received_jobs = set(results)
+          if received_jobs != expected_jobs:
+              missing = ",".join(sorted(expected_jobs - received_jobs)) or "-"
+              unexpected = ",".join(sorted(received_jobs - expected_jobs)) or "-"
+              raise SystemExit(
+                  "CI Gate blocked: result jobs mismatch; "
+                  f"missing={missing}; unexpected={unexpected}"
+              )
+
+          for job_id, result in sorted(results.items()):
+              print(f"{job_id}: {result}")
+
+          unsuccessful = [
+              f"{job_id}={result}"
+              for job_id, result in sorted(results.items())
+              if result != "success"
+          ]
+          if unsuccessful:
+              raise SystemExit(
+                  "CI Gate blocked: " + ", ".join(unsuccessful)
+              )
+          PY
+

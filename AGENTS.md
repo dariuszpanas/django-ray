@@ -37,6 +37,9 @@ When a task calls for a branch, start from current `main` and use the convention
 - Report the exact validation commands run, their results, and anything not run.
 - Before every push and before enabling auto-merge, fetch `origin` and inspect
   `git log --format=fuller origin/main..HEAD`.
+- Before merging, verify both required checks are green: `Commit Messages` for retained history and
+  `CI Gate` for the complete blocking matrix. A skipped package job or an enabled merge button is not
+  sufficient evidence by itself.
 - Fold fixup, CI-repair, review-repair, formatting follow-up, and other development-only commits into
   the logical commit they correct. Preserve genuinely independent commits with their own structured
   Summary and Validation sections.

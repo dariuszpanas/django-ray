@@ -261,9 +261,18 @@ gh pr merge --auto --rebase <PR-number>
 ```
 
 The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and every full
-commit message, and reports a required status check without needing secrets from the PR. This repository
-is private, so use rebase auto-merge rather than merge queue: auto-merge waits for the protected checks
-and then applies the rebase method.
+commit message, and reports a required status check without needing secrets from the PR. The separate
+required `CI Gate` runs after every blocking job and passes only when lint, docs, typing, all supported
+Python tests, PostgreSQL coordination, live-cluster faults, testproject, minimum/latest dependencies,
+Compiled Graph candidates, and package build all report `success`. Its `always()` condition makes a
+failed, cancelled, timed-out, or skipped dependency visible as a failed gate instead of a successful
+skip. This repository is private, so use rebase auto-merge rather than merge queue: auto-merge waits
+for both protected checks and then applies the rebase method.
+
+Scheduled/manual Compiled Graph canary and benchmark workflows are evidence producers, not merge
+checks. Documentation builds outside pull requests and release workflows run after merge, manually,
+or from tags. Codecov upload is advisory inside the otherwise blocking Python 3.12 job. Add future PR
+CI jobs to `CI Gate` unless contributor policy explicitly documents why they are non-blocking.
 
 Before each push and again before enabling auto-merge, inspect and validate the exact commit range that
 will be retained:
@@ -282,8 +291,8 @@ range before enabling auto-merge.
 
 If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
 conflicts, run `uv run make ci`, and push. Auto-merge will recalculate the required checks. The
-`main` ruleset requires `Commit Messages` from GitHub Actions, allows rebase merges only, and does
-not require approval in the sole-developer workflow. The owner's bypass is limited to pull requests,
+`main` ruleset requires `Commit Messages` and `CI Gate` from GitHub Actions, allows rebase merges only,
+and does not require approval in the sole-developer workflow. The owner's bypass is limited to pull requests,
 so routine merges remain gated and emergency use requires the explicit
 `gh pr merge --admin --rebase <PR-number>` command.
 
