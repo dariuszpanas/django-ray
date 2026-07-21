@@ -49,6 +49,7 @@ from django_ray.workflow_progress_summary import (
     WorkflowProgressTruncationReason,
     deserialize_workflow_progress_summary,
     serialize_workflow_progress_summary,
+    workflow_progress_detail_is_last_observed,
 )
 
 WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION = 1
@@ -277,6 +278,22 @@ class VerifiedWorkflowProgressTopology:
     decoded_bytes: int
     truncation_reasons: tuple[str, ...]
     map_node_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class VerifiedWorkflowProgressTopologyManifestRecord:
+    """Bounded manifest metadata verified without reading linked page payloads."""
+
+    identity: WorkflowRunIdentity
+    topology_version: int
+    slot: str
+    node_count: int
+    edge_count: int
+    page_descriptors: tuple[dict[str, Any], ...]
+    page_encoded_bytes: int
+    page_decoded_bytes: int
+    expected_link_count: int
+    truncation_reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1972,6 +1989,168 @@ def _bounded_manifest_descriptors(
     )
 
 
+def verify_workflow_progress_topology_manifest_record(
+    row: Mapping[str, Any],
+    *,
+    expected_identity: WorkflowRunIdentity | None = None,
+) -> VerifiedWorkflowProgressTopologyManifestRecord:
+    """Verify one bounded manifest projection without reading linked pages."""
+    payload_octets = row.get("_payload_octets")
+    if (
+        type(payload_octets) is not int
+        or payload_octets <= 0
+        or payload_octets > WORKFLOW_PROGRESS_TOPOLOGY_MANIFEST_MAX_ENCODED_BYTES
+        or row.get("_bounded_payload") is None
+    ):
+        raise WorkflowProgressStorageIntegrityError("workflow topology manifest is oversized")
+    payload = _as_bytes(row["_bounded_payload"], "workflow topology manifest")
+    if len(payload) != payload_octets:
+        raise WorkflowProgressStorageIntegrityError("workflow topology manifest length changed")
+
+    try:
+        identity = WorkflowRunIdentity(
+            task_execution_pk=row["run_storage__execution_id"],
+            attempt_number=row["run_storage__attempt_number"],
+            execution_generation=row["run_storage__execution_generation"],
+            run_id=str(row["run_storage__run_id"]),
+        )
+        _validate_run_identity(identity)
+    except (KeyError, WorkflowProgressStorageError) as error:
+        raise WorkflowProgressStorageIntegrityError(
+            "workflow topology run identity is invalid"
+        ) from error
+    if expected_identity is not None and identity != expected_identity:
+        raise WorkflowProgressStorageIntegrityError(
+            "workflow topology manifest belongs to another run"
+        )
+    if _digest(_MANIFEST_DOMAIN, payload) != row.get("manifest_digest"):
+        raise WorkflowProgressStorageIntegrityError("workflow topology manifest digest is invalid")
+    manifest = _decode_canonical_payload(payload, "workflow topology manifest")
+    (
+        manifest_descriptors,
+        expected_page_encoded_bytes,
+        expected_page_decoded_bytes,
+        expected_link_count,
+        authenticated_reasons,
+    ) = _bounded_manifest_descriptors(
+        manifest,
+        row,
+        identity=identity,
+        payload_octets=payload_octets,
+    )
+    slot = row.get("slot")
+    published_at = row.get("published_at")
+    if (
+        slot not in {WorkflowProgressTopologySlot.CURRENT, WorkflowProgressTopologySlot.PENDING}
+        or (slot == WorkflowProgressTopologySlot.CURRENT and published_at is None)
+        or (slot == WorkflowProgressTopologySlot.PENDING and published_at is not None)
+    ):
+        raise WorkflowProgressStorageIntegrityError(
+            "workflow topology manifest publication state is invalid"
+        )
+    return VerifiedWorkflowProgressTopologyManifestRecord(
+        identity=identity,
+        topology_version=row["topology_version"],
+        slot=slot,
+        node_count=row["node_count"],
+        edge_count=row["edge_count"],
+        page_descriptors=tuple(manifest_descriptors),
+        page_encoded_bytes=expected_page_encoded_bytes,
+        page_decoded_bytes=expected_page_decoded_bytes,
+        expected_link_count=expected_link_count,
+        truncation_reasons=authenticated_reasons,
+    )
+
+
+def verify_workflow_progress_topology_page_record(
+    row: Mapping[str, Any],
+    *,
+    descriptor: Mapping[str, Any],
+    expected_run_storage_id: int,
+) -> tuple[dict[str, Any], ...]:
+    """Verify one manifest-linked topology page and return detached records."""
+    if not isinstance(descriptor, Mapping):
+        raise WorkflowProgressStorageIntegrityError("workflow topology page descriptor is invalid")
+    collection = descriptor.get("collection")
+    if (
+        set(descriptor) != _TOPOLOGY_PAGE_DESCRIPTOR_KEYS
+        or collection
+        not in {
+            WorkflowProgressTopologyCollection.NODE.value,
+            WorkflowProgressTopologyCollection.EDGE.value,
+        }
+        or row.get("collection") != collection
+        or row.get("page_index") != descriptor.get("page_index")
+        or row.get("page__run_storage_id") != expected_run_storage_id
+        or row.get("page__collection") != collection
+        or row.get("page__encoding") != WorkflowProgressTopologyEncoding.IDENTITY
+        or row.get("page__digest") != descriptor.get("digest")
+        or row.get("page__item_count") != descriptor.get("item_count")
+        or row.get("page__encoded_bytes") != descriptor.get("encoded_bytes")
+        or row.get("page__decoded_bytes") != descriptor.get("decoded_bytes")
+    ):
+        raise WorkflowProgressStorageIntegrityError(
+            "workflow topology page ownership or metadata is invalid"
+        )
+    page_octets = row.get("_payload_octets")
+    if (
+        type(page_octets) is not int
+        or page_octets <= 0
+        or page_octets > WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ENCODED_BYTES
+        or page_octets > WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_DECODED_BYTES
+        or row.get("_bounded_payload") is None
+    ):
+        raise WorkflowProgressStorageIntegrityError("workflow topology page is oversized")
+    page_payload = _as_bytes(row["_bounded_payload"], "workflow topology page")
+    if (
+        len(page_payload) != page_octets
+        or page_octets != descriptor["encoded_bytes"]
+        or page_octets != descriptor["decoded_bytes"]
+        or _digest(_PAGE_DOMAIN, page_payload) != descriptor["digest"]
+    ):
+        raise WorkflowProgressStorageIntegrityError("workflow topology page metadata is invalid")
+    page = _decode_canonical_payload(page_payload, "workflow topology page")
+    if (
+        not isinstance(page, dict)
+        or set(page) != {"collection", "records", "schema_version"}
+        or page["collection"] != collection
+        or type(page["schema_version"]) is not int
+        or page["schema_version"] != WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION
+        or not isinstance(page["records"], list)
+        or len(page["records"]) != descriptor["item_count"]
+    ):
+        raise WorkflowProgressStorageIntegrityError("workflow topology page envelope is invalid")
+    records: list[dict[str, Any]] = []
+    try:
+        if collection == WorkflowProgressTopologyCollection.NODE.value:
+            for item in page["records"]:
+                normalized, _ = _normalize_topology_node(item)
+                if normalized != item:
+                    raise WorkflowProgressStorageIntegrityError(
+                        "workflow topology node is not normalized"
+                    )
+                records.append(normalized)
+            stable_keys = [str(item["node_id"]) for item in records]
+        else:
+            for item in page["records"]:
+                normalized = _normalize_topology_edge(item)
+                if normalized != item:
+                    raise WorkflowProgressStorageIntegrityError(
+                        "workflow topology edge is not normalized"
+                    )
+                records.append(normalized)
+            stable_keys = [(str(item["source"]), str(item["target"])) for item in records]
+    except WorkflowProgressStorageError as error:
+        raise WorkflowProgressStorageIntegrityError(
+            "workflow topology page record is invalid"
+        ) from error
+    if stable_keys != sorted(stable_keys) or len(stable_keys) != len(set(stable_keys)):
+        raise WorkflowProgressStorageIntegrityError(
+            "workflow topology page record order is invalid"
+        )
+    return tuple(records)
+
+
 def verify_workflow_progress_topology_manifest(
     manifest_id: str,
     *,
@@ -2019,49 +2198,16 @@ def verify_workflow_progress_topology_manifest(
     row = manifest_query.first()
     if row is None:
         raise WorkflowProgressStorageIntegrityError("workflow topology manifest is missing")
-    payload_octets = row["_payload_octets"]
-    if (
-        type(payload_octets) is not int
-        or payload_octets <= 0
-        or payload_octets > WORKFLOW_PROGRESS_TOPOLOGY_MANIFEST_MAX_ENCODED_BYTES
-        or row["_bounded_payload"] is None
-    ):
-        raise WorkflowProgressStorageIntegrityError("workflow topology manifest is oversized")
-    payload = _as_bytes(row["_bounded_payload"], "workflow topology manifest")
-    if len(payload) != payload_octets:
-        raise WorkflowProgressStorageIntegrityError("workflow topology manifest length changed")
-
-    identity = WorkflowRunIdentity(
-        task_execution_pk=row["run_storage__execution_id"],
-        attempt_number=row["run_storage__attempt_number"],
-        execution_generation=row["run_storage__execution_generation"],
-        run_id=str(row["run_storage__run_id"]),
-    )
-    try:
-        _validate_run_identity(identity)
-    except WorkflowProgressStorageError as error:
-        raise WorkflowProgressStorageIntegrityError(
-            "workflow topology run identity is invalid"
-        ) from error
-    if expected_identity is not None and identity != expected_identity:
-        raise WorkflowProgressStorageIntegrityError(
-            "workflow topology manifest belongs to another run"
-        )
-    if _digest(_MANIFEST_DOMAIN, payload) != row["manifest_digest"]:
-        raise WorkflowProgressStorageIntegrityError("workflow topology manifest digest is invalid")
-    manifest = _decode_canonical_payload(payload, "workflow topology manifest")
-    (
-        manifest_descriptors,
-        expected_page_encoded_bytes,
-        expected_page_decoded_bytes,
-        expected_link_count,
-        authenticated_reasons,
-    ) = _bounded_manifest_descriptors(
-        manifest,
+    verified_manifest = verify_workflow_progress_topology_manifest_record(
         row,
-        identity=identity,
-        payload_octets=payload_octets,
+        expected_identity=expected_identity,
     )
+    payload_octets = row["_payload_octets"]
+    manifest_descriptors = list(verified_manifest.page_descriptors)
+    expected_page_encoded_bytes = verified_manifest.page_encoded_bytes
+    expected_page_decoded_bytes = verified_manifest.page_decoded_bytes
+    expected_link_count = verified_manifest.expected_link_count
+    authenticated_reasons = verified_manifest.truncation_reasons
 
     link_query = WorkflowProgressTopologyManifestPage.objects.using(using).filter(
         manifest_id=manifest_id
@@ -2249,8 +2395,8 @@ def verify_workflow_progress_topology_manifest(
 
     if (
         link_count != expected_link_count
-        or manifest["node_count"] != len(node_records)
-        or manifest["edge_count"] != len(edge_records)
+        or row["node_count"] != len(node_records)
+        or row["edge_count"] != len(edge_records)
         or manifest_descriptors != descriptors
     ):
         raise WorkflowProgressStorageIntegrityError(
@@ -2729,6 +2875,26 @@ def _verify_stored_node_detail_row(
     ):
         raise WorkflowProgressStorageIntegrityError("stored workflow node detail is not normalized")
     return payload, normalized, value["fanout"] is not None
+
+
+def verify_workflow_progress_node_detail_record(
+    row: Mapping[str, Any],
+    *,
+    identity: WorkflowRunIdentity,
+    maximum_topology_version: int,
+    maximum_detail_revision: int,
+) -> dict[str, Any]:
+    """Verify and detach one bounded normalized latest-state detail record."""
+    payload, _normalized, _has_fanout = _verify_stored_node_detail_row(
+        row,
+        identity=identity,
+        maximum_topology_version=maximum_topology_version,
+        maximum_detail_revision=maximum_detail_revision,
+    )
+    value = _decode_canonical_payload(payload, "stored workflow node detail")
+    if not isinstance(value, dict):
+        raise WorkflowProgressStorageIntegrityError("stored workflow node detail must be an object")
+    return value
 
 
 def _verified_touched_node_rows(
@@ -3963,6 +4129,13 @@ def audit_workflow_progress_detail_storage(
             summary_edge_counts = active_summary["edge_counts"]
             summary_reasons = set(active_summary["detail"]["truncation_reasons"])
             expected_summary_reasons = detail_reasons | set(topology.truncation_reasons)
+            last_observed_terminal_detail = workflow_progress_detail_is_last_observed(
+                active_summary
+            )
+            if last_observed_terminal_detail:
+                expected_summary_reasons.add(
+                    WorkflowProgressTruncationReason.TERMINAL_STATE_UNREPORTED.value
+                )
             if actual_truncated_count:
                 expected_summary_reasons.add(
                     WorkflowProgressTruncationReason.RECORD_SIZE_LIMIT.value
@@ -3995,7 +4168,7 @@ def audit_workflow_progress_detail_storage(
                 raise WorkflowProgressStorageIntegrityError(
                     "workflow progress audit active summary conflicts with storage"
                 )
-            if any(
+            if not last_observed_terminal_detail and any(
                 actual_state_counts[state] > summary_state_counts[state]
                 for state in _DETAIL_STATE_AGGREGATE_FIELDS
             ):
@@ -4112,6 +4285,7 @@ __all__ = [
     "PreparedWorkflowProgressTopology",
     "PreparedWorkflowProgressTopologyPage",
     "VerifiedWorkflowProgressTopology",
+    "VerifiedWorkflowProgressTopologyManifestRecord",
     "WorkflowProgressDetailAuditResult",
     "WORKFLOW_PROGRESS_COMBINED_MAX_DECODED_BYTES",
     "WORKFLOW_PROGRESS_COMBINED_MAX_ENCODED_BYTES",
@@ -4142,5 +4316,8 @@ __all__ = [
     "prepare_workflow_progress_topology",
     "stage_workflow_progress_topology",
     "stamp_workflow_progress_detail_expiry_locked",
+    "verify_workflow_progress_node_detail_record",
     "verify_workflow_progress_topology_manifest",
+    "verify_workflow_progress_topology_manifest_record",
+    "verify_workflow_progress_topology_page_record",
 ]

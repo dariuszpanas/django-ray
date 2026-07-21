@@ -11,7 +11,9 @@ from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.workflow_progress_summary import (
     WORKFLOW_PROGRESS_TERMINAL_STATES,
+    WorkflowProgressDetailAvailability,
     WorkflowProgressSummaryError,
+    WorkflowProgressTruncationReason,
     deserialize_workflow_progress_summary,
     serialize_workflow_progress_summary,
 )
@@ -75,6 +77,7 @@ def _attempt_workflow_progress_summary(execution: RayTaskExecution) -> str | Non
             terminal_at = terminal_at.replace(tzinfo=UTC)
         terminal_at = max(terminal_at.astimezone(UTC), previous_updated_at)
         terminal_timestamp = _canonical_utc(terminal_at)
+        previous_state = summary["state"]
         summary["summary_revision"] = int(summary["summary_revision"]) + 1
         summary["state"] = execution.state
         if execution.state == TaskState.SUCCEEDED:
@@ -86,6 +89,23 @@ def _attempt_workflow_progress_summary(execution: RayTaskExecution) -> str | Non
                 failed=0,
             )
             summary["progress_percent"] = 100.0
+            detail = summary["detail"]
+            if (
+                previous_state != TaskState.SUCCEEDED
+                and summary["detail_revision"] is not None
+                and detail["availability"]
+                in {
+                    WorkflowProgressDetailAvailability.AVAILABLE.value,
+                    WorkflowProgressDetailAvailability.TRUNCATED.value,
+                }
+            ):
+                reasons = set(detail["truncation_reasons"])
+                reasons.add(WorkflowProgressTruncationReason.TERMINAL_STATE_UNREPORTED.value)
+                summary["detail"] = {
+                    "availability": WorkflowProgressDetailAvailability.TRUNCATED.value,
+                    "complete": False,
+                    "truncation_reasons": sorted(reasons),
+                }
         summary["timestamps"]["updated_at"] = terminal_timestamp
         summary["timestamps"]["finished_at"] = terminal_timestamp
         summary["terminal"] = {

@@ -25,6 +25,10 @@ from django_ray.admin import (
     TaskWorkerLeaseAdmin,
 )
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.workflow_progress_reads import (
+    WorkflowProgressReadError,
+    WorkflowProgressReadErrorCode,
+)
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
@@ -253,6 +257,47 @@ class TestRayTaskExecutionAdmin:
         with pytest.raises(PermissionDenied):
             wrapped_view(denied_request, str(execution.pk))
 
+    def test_observability_endpoint_honors_object_permission_backend(
+        self,
+        monkeypatch,
+    ) -> None:
+        allowed = RayTaskExecution.objects.create(
+            task_id="admin-object-allowed",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        denied = RayTaskExecution.objects.create(
+            task_id="admin-object-denied",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        user = get_user_model().objects.create_user(
+            username="observability-object-viewer",
+            is_staff=True,
+        )
+        checked_objects: list[int] = []
+
+        def has_perm(permission, obj=None):
+            del permission
+            if obj is None:
+                return False
+            checked_objects.append(obj.pk)
+            return obj.pk == allowed.pk
+
+        monkeypatch.setattr(user, "has_perm", has_perm)
+        admin_obj = _task_admin()
+        allowed_request = RequestFactory().get("/admin/live/")
+        allowed_request.user = user
+        denied_request = RequestFactory().get("/admin/live/")
+        denied_request.user = user
+
+        assert admin_obj.has_view_permission(allowed_request) is False
+        response = admin_obj.observability_view(allowed_request, str(allowed.pk))
+
+        assert response.status_code == 200
+        with pytest.raises(PermissionDenied):
+            admin_obj.observability_view(denied_request, str(denied.pk))
+        assert allowed.pk in checked_objects
+        assert denied.pk in checked_objects
+
     def test_observability_endpoint_returns_bounded_durable_summary(self, settings) -> None:
         settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
         execution = RayTaskExecution.objects.create(
@@ -318,7 +363,28 @@ class TestRayTaskExecutionAdmin:
         with pytest.raises(Http404):
             _task_admin().observability_view(request, "999999")
 
-    def test_observability_endpoint_keeps_task_state_when_workflow_is_invalid(self) -> None:
+    def test_observability_endpoint_maps_service_not_found_to_http_404(
+        self,
+        monkeypatch,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-progress-read-race-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        user = get_user_model().objects.create_superuser(username="progress-race-admin")
+        request = RequestFactory().get("/admin/live/")
+        request.user = user
+
+        def missing(*args, **kwargs):
+            del args, kwargs
+            raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.NOT_FOUND)
+
+        monkeypatch.setattr("django_ray.admin.get_workflow_progress_summary", missing)
+
+        with pytest.raises(Http404):
+            _task_admin().observability_view(request, str(execution.pk))
+
+    def test_observability_endpoint_ignores_invalid_legacy_progress(self) -> None:
         execution = RayTaskExecution.objects.create(
             task_id="admin-invalid-workflow-001",
             callable_path="testproject.tasks.add_numbers",
@@ -338,10 +404,11 @@ class TestRayTaskExecutionAdmin:
         assert response.status_code == 200
         assert payload["state"] == TaskState.RUNNING
         assert payload["workflow"] is None
-        assert "workflow_error" in payload
-        assert "workflow-secret" not in payload["workflow_error"]
+        assert payload["workflow_availability"] == "NOT_REPORTED"
+        assert "workflow_error" not in payload
+        assert "workflow-secret" not in response.content.decode("utf-8")
 
-    def test_observability_endpoint_returns_only_workflow_aggregates(self) -> None:
+    def test_observability_endpoint_does_not_map_legacy_graph_aggregates(self) -> None:
         execution = RayTaskExecution.objects.create(
             task_id="admin-workflow-summary-001",
             callable_path="testproject.tasks.add_numbers",
@@ -369,17 +436,8 @@ class TestRayTaskExecutionAdmin:
 
         payload = json.loads(_task_admin().observability_view(request, str(execution.pk)).content)
 
-        assert payload["workflow"] == {
-            "revision": 4,
-            "run_identity": None,
-            "state": "RUNNING",
-            "total_nodes": 2,
-            "completed_nodes": 1,
-            "failed_nodes": 0,
-            "running_nodes": 1,
-            "pending_nodes": 0,
-            "progress_percent": 50.0,
-        }
+        assert payload["workflow"] is None
+        assert payload["workflow_availability"] == "NOT_REPORTED"
         assert "secret" not in json.dumps(payload)
 
     def test_observability_endpoint_defers_payloads_and_reads_progress_once(self) -> None:
@@ -404,10 +462,242 @@ class TestRayTaskExecutionAdmin:
             if query["sql"].lstrip().upper().startswith("SELECT")
             and "django_ray_raytaskexecution" in query["sql"]
         ]
-        assert len(task_selects) == 2
-        assert "progress_data" not in task_selects[0]
-        assert "workflow_progress_summary_json" not in task_selects[0]
-        assert "args_json" not in task_selects[0]
+        assert task_selects
+        assert all("progress_data" not in query for query in task_selects)
+        assert all("args_json" not in query for query in task_selects)
+        assert any("workflow_progress_summary_json" in query for query in task_selects)
+        detail_tables = (
+            "django_ray_workflowprogressrunstorage",
+            "django_ray_workflowprogresstopologymanifest",
+            "django_ray_workflowprogresstopologypage",
+            "django_ray_workflowprogressnodedetail",
+        )
+        assert all(
+            table not in query for query in queries.captured_queries for table in detail_tables
+        )
+
+    def test_observability_endpoint_bounds_invalid_summary_without_legacy_fallback(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-invalid-summary-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            progress_data="password=legacy-secret" * 1_000,
+            workflow_progress_summary_json="{" + ("x" * 20_000),
+        )
+        user = get_user_model().objects.create_superuser(username="invalid-summary-admin")
+        request = RequestFactory().get("/admin/live/")
+        request.user = user
+
+        with CaptureQueriesContext(connection) as queries:
+            response = _task_admin().observability_view(request, str(execution.pk))
+
+        payload = json.loads(response.content)
+        assert response.status_code == 200
+        assert payload["workflow"] is None
+        assert payload["workflow_error_code"] == "CORRUPT"
+        assert len(payload["workflow_error"]) <= ADMIN_DIAGNOSTIC_MAX_CHARS
+        assert "legacy-secret" not in response.content.decode("utf-8")
+        assert all("progress_data" not in query["sql"] for query in queries.captured_queries)
+
+    def test_authorized_admin_detail_views_call_bounded_services(
+        self,
+        monkeypatch,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-detail-links-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        user = get_user_model().objects.create_superuser(username="detail-links-admin")
+        admin_obj = _task_admin()
+        called: list[str] = []
+
+        def page_payload(collection):
+            return {
+                "schema": "django-ray.workflow-progress-page",
+                "schema_version": 1,
+                "generated_at": "2026-07-20T12:00:00Z",
+                "task_id": execution.task_id,
+                "run_identity": None,
+                "publication": {
+                    "summary_revision": None,
+                    "topology_version": None,
+                    "detail_revision": None,
+                },
+                "availability": "NOT_REPORTED",
+                "complete": False,
+                "collection": collection,
+                "returned_count": 0,
+                "items": [],
+                "next_cursor": None,
+            }
+
+        def fake_nodes(candidate, *, authorize, **kwargs):
+            del kwargs
+            assert authorize(candidate) is True
+            called.append("topology_nodes")
+            return page_payload("topology_nodes")
+
+        def fake_edges(candidate, *, authorize, **kwargs):
+            del kwargs
+            assert authorize(candidate) is True
+            called.append("topology_edges")
+            return page_payload("topology_edges")
+
+        def fake_details(candidate, *, authorize, **kwargs):
+            del kwargs
+            assert authorize(candidate) is True
+            called.append("node_details")
+            return page_payload("node_details")
+
+        def fake_node(candidate, node_id, *, authorize, **kwargs):
+            del kwargs
+            assert node_id == "node/one"
+            assert authorize(candidate) is True
+            called.append("node")
+            return {
+                **page_payload("node_details"),
+                "schema": "django-ray.workflow-progress-node",
+                "found": False,
+                "item": None,
+            }
+
+        monkeypatch.setattr("django_ray.admin.list_workflow_topology_nodes", fake_nodes)
+        monkeypatch.setattr("django_ray.admin.list_workflow_topology_edges", fake_edges)
+        monkeypatch.setattr("django_ray.admin.list_workflow_node_details", fake_details)
+        monkeypatch.setattr("django_ray.admin.get_workflow_node_detail", fake_node)
+
+        with CaptureQueriesContext(connection) as queries:
+            for view in (
+                admin_obj.workflow_topology_nodes_view,
+                admin_obj.workflow_topology_edges_view,
+                admin_obj.workflow_node_details_view,
+            ):
+                request = RequestFactory().get("/admin/workflow/?limit=10")
+                request.user = user
+                response = view(request, str(execution.pk))
+                assert response.status_code == 200
+                assert response["Cache-Control"] == "no-store"
+            request = RequestFactory().get("/admin/workflow/node/?node_id=node%2Fone")
+            request.user = user
+            response = admin_obj.workflow_node_detail_view(request, str(execution.pk))
+            assert response.status_code == 200
+        assert called == ["topology_nodes", "topology_edges", "node_details", "node"]
+        task_selects = [
+            query["sql"].lower()
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(task_selects) == 4
+        payload_fields = (
+            "runtime_env_json",
+            "args_json",
+            "kwargs_json",
+            "result_data",
+            "progress_data",
+            "workflow_progress_summary_json",
+            "workflow_plan_json",
+            "workflow_plan_selection",
+            "completion_data",
+            "cancellation_error",
+            "error_message",
+            "error_traceback",
+        )
+        assert all(field not in query for query in task_selects for field in payload_fields)
+
+        invalid_limit = RequestFactory().get("/admin/workflow/?limit=not-an-integer")
+        invalid_limit.user = user
+        response = admin_obj.workflow_topology_nodes_view(
+            invalid_limit,
+            str(execution.pk),
+        )
+        assert response.status_code == 400
+        assert json.loads(response.content)["code"] == "INVALID_ARGUMENT"
+
+        assert admin_obj._page_limit(RequestFactory().get("/admin/workflow/")) == 100
+
+        denied_user = get_user_model().objects.create_user(
+            username="bounded-detail-denied-staff",
+            is_staff=True,
+        )
+        denied_page = RequestFactory().get(
+            "/admin/workflow/?limit=invalid&attempt_number=invalid&cursor=invalid&state=INVALID"
+        )
+        denied_page.user = denied_user
+        with pytest.raises(PermissionDenied):
+            admin_obj.workflow_node_details_view(denied_page, str(execution.pk))
+        denied_node = RequestFactory().get("/admin/workflow/node/?attempt_number=invalid")
+        denied_node.user = denied_user
+        with pytest.raises(PermissionDenied):
+            admin_obj.workflow_node_detail_view(denied_node, str(execution.pk))
+        assert called == ["topology_nodes", "topology_edges", "node_details", "node"]
+
+        post = RequestFactory().post("/admin/workflow/")
+        post.user = user
+        assert admin_obj.workflow_topology_nodes_view(post, str(execution.pk)).status_code == 405
+        assert admin_obj.workflow_node_detail_view(post, str(execution.pk)).status_code == 405
+
+        def corrupt_page(*args, **kwargs):
+            del args, kwargs
+            raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.CORRUPT)
+
+        monkeypatch.setattr("django_ray.admin.list_workflow_topology_nodes", corrupt_page)
+        request = RequestFactory().get("/admin/workflow/")
+        request.user = user
+        response = admin_obj.workflow_topology_nodes_view(request, str(execution.pk))
+        assert response.status_code == 503
+
+        def missing_node_detail(*args, **kwargs):
+            del args, kwargs
+            raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.MISSING)
+
+        monkeypatch.setattr("django_ray.admin.get_workflow_node_detail", missing_node_detail)
+        request = RequestFactory().get("/admin/workflow/node/?node_id=node%2Fone")
+        request.user = user
+        response = admin_obj.workflow_node_detail_view(request, str(execution.pk))
+        assert response.status_code == 409
+
+        missing_node = RequestFactory().get("/admin/workflow/node/")
+        missing_node.user = user
+        response = admin_obj.workflow_node_detail_view(missing_node, str(execution.pk))
+        assert response.status_code == 400
+        assert json.loads(response.content)["code"] == "INVALID_ARGUMENT"
+
+    @pytest.mark.parametrize(
+        ("code", "status"),
+        [
+            (WorkflowProgressReadErrorCode.INVALID_ARGUMENT, 400),
+            (WorkflowProgressReadErrorCode.INVALID_CURSOR, 400),
+            (WorkflowProgressReadErrorCode.CURSOR_MISMATCH, 409),
+            (WorkflowProgressReadErrorCode.MISSING, 409),
+            (WorkflowProgressReadErrorCode.CORRUPT, 503),
+        ],
+    )
+    def test_admin_detail_errors_keep_bounded_codes(
+        self,
+        code: WorkflowProgressReadErrorCode,
+        status: int,
+    ) -> None:
+        response = _task_admin()._workflow_read_error_response(WorkflowProgressReadError(code))
+
+        assert response.status_code == status
+        assert response["Cache-Control"] == "no-store"
+        assert json.loads(response.content) == {
+            "code": code.value,
+            "message": str(WorkflowProgressReadError(code)),
+        }
+
+    def test_admin_detail_access_and_missing_errors_raise(self) -> None:
+        admin_obj = _task_admin()
+
+        with pytest.raises(PermissionDenied):
+            admin_obj._workflow_read_error_response(
+                WorkflowProgressReadError(WorkflowProgressReadErrorCode.ACCESS_DENIED)
+            )
+        with pytest.raises(Http404):
+            admin_obj._workflow_read_error_response(
+                WorkflowProgressReadError(WorkflowProgressReadErrorCode.NOT_FOUND)
+            )
 
     def test_observability_endpoint_maps_bounded_v3_summary(self) -> None:
         execution = RayTaskExecution.objects.create(
@@ -431,6 +721,7 @@ class TestRayTaskExecutionAdmin:
         assert payload["workflow"]["total_nodes"] == 1
         assert payload["workflow"]["pending_nodes"] == 1
         assert payload["workflow"]["detail"]["availability"] == "AVAILABLE"
+        assert payload["workflow_availability"] == "AVAILABLE"
         assert "task_execution_pk" not in payload["workflow"]["run_identity"]
 
     def test_change_form_loads_live_status_panel_and_package_script(
@@ -467,6 +758,9 @@ class TestRayTaskExecutionAdmin:
         assert f'data-observability-url="{endpoint}"' in content
         assert 'src="/static/django_ray/admin/task_live.js"' in content
         assert 'aria-live="polite"' in content
+        assert "topology nodes" in content
+        assert "topology edges" in content
+        assert "node details" in content
         task_selects = [
             query["sql"]
             for query in queries.captured_queries
@@ -732,9 +1026,14 @@ class TestTaskWorkerLeaseAdmin:
 
         assert admin_obj.worker_id_short(lease) == "worker-12345..."
         assert "ago" in admin_obj.time_since_heartbeat(lease)
+        assert admin_obj._is_heartbeat_expired(lease) is False
+
+        lease.last_heartbeat_at = datetime.now(UTC) - timedelta(seconds=90)
+        assert admin_obj.time_since_heartbeat(lease).endswith("m 30s ago")
 
         lease.last_heartbeat_at = None
         assert admin_obj.time_since_heartbeat(lease) == "Never"
+        assert admin_obj.get_queryset(_request()).model is TaskWorkerLease
 
     def test_mark_inactive_and_delete_inactive_actions(self, monkeypatch) -> None:
         admin_obj = _lease_admin()
@@ -824,3 +1123,13 @@ class TestTaskWorkerLeaseAdmin:
         ]
         monkeypatch.setattr(filter_obj, "value", lambda: None)
         assert list(filter_obj.queryset(_request(), TaskWorkerLease.objects.all())) == [lease]
+        filter_obj.lookup_choices = list(filter_obj.lookups(_request(), admin_obj))
+
+        class ChangeList:
+            @staticmethod
+            def get_query_string(params):
+                return f"?is_active={params['is_active']}"
+
+        choices = list(filter_obj.choices(ChangeList()))
+        assert choices[0]["selected"] is True
+        assert choices[0]["query_string"] == "?is_active=active"

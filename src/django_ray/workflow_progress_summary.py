@@ -107,7 +107,7 @@ class WorkflowProgressDetailAvailability(StrEnum):
 
 
 class WorkflowProgressTruncationReason(StrEnum):
-    """Protocol-v1 reasons for a deterministic incomplete retained subset."""
+    """Protocol-v1 reasons that make retained detail incomplete or last-observed."""
 
     NODE_COUNT_LIMIT = "node_count_limit"
     EDGE_COUNT_LIMIT = "edge_count_limit"
@@ -118,6 +118,7 @@ class WorkflowProgressTruncationReason(StrEnum):
     DETAIL_DECODED_BYTES = "detail_decoded_bytes"
     RECORD_SIZE_LIMIT = "record_size_limit"
     REPORTING_POLICY = "reporting_policy"
+    TERMINAL_STATE_UNREPORTED = "terminal_state_unreported"
 
 
 WORKFLOW_PROGRESS_REPORTING_POLICIES = frozenset({"full", "sampled", "terminal_only", "disabled"})
@@ -125,6 +126,26 @@ WORKFLOW_PROGRESS_STATES = frozenset(
     {"RUNNING", "CANCELLING", "SUCCEEDED", "FAILED", "CANCELLED", "LOST"}
 )
 WORKFLOW_PROGRESS_TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "CANCELLED", "LOST"})
+
+
+def workflow_progress_detail_is_last_observed(value: Any) -> bool:
+    """Return whether lifecycle success retained pre-terminal node states."""
+    if not isinstance(value, dict):
+        return False
+    detail = value.get("detail")
+    terminal = value.get("terminal")
+    return (
+        value.get("state") == "SUCCEEDED"
+        and value.get("detail_revision") is not None
+        and isinstance(detail, dict)
+        and detail.get("availability") == WorkflowProgressDetailAvailability.TRUNCATED.value
+        and detail.get("complete") is False
+        and isinstance(detail.get("truncation_reasons"), list)
+        and WorkflowProgressTruncationReason.TERMINAL_STATE_UNREPORTED.value
+        in detail["truncation_reasons"]
+        and isinstance(terminal, dict)
+        and terminal.get("outcome") == "SUCCEEDED"
+    )
 
 
 def _exact_object(value: Any, keys: frozenset[str], name: str) -> dict[str, Any]:
@@ -508,6 +529,19 @@ def normalize_workflow_progress_summary(
         state=state,
         finished_at=timestamps["finished_at"],
     )
+    terminal_state_unreported = (
+        WorkflowProgressTruncationReason.TERMINAL_STATE_UNREPORTED.value
+        in detail["truncation_reasons"]
+    )
+    if terminal_state_unreported and not (
+        state == "SUCCEEDED"
+        and detail_revision is not None
+        and availability == WorkflowProgressDetailAvailability.TRUNCATED
+        and terminal["outcome"] == "SUCCEEDED"
+    ):
+        raise WorkflowProgressSummaryError(
+            "unreported terminal node state requires truncated successful detail"
+        )
     if detail_revision is not None and state in WORKFLOW_PROGRESS_TERMINAL_STATES:
         finished = datetime.fromisoformat(cast(str, terminal["finished_at"])[:-1] + "+00:00")
         expected_expiry = (
@@ -625,4 +659,5 @@ __all__ = [
     "normalize_workflow_progress_summary",
     "public_workflow_progress_summary",
     "serialize_workflow_progress_summary",
+    "workflow_progress_detail_is_last_observed",
 ]

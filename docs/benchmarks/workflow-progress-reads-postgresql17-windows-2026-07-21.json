@@ -1,0 +1,1652 @@
+{
+  "benchmark": "django-ray-workflow-progress-bounded-reads",
+  "cases": [
+    {
+      "case_index": 1,
+      "operations": {
+        "detail_first": {
+          "database_reported_ms": {
+            "max": 32.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 32.0
+          },
+          "decoded_record_bytes": 22200,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 23552,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 25.67,
+            "min": 19.684,
+            "p50": 20.498,
+            "p95": 25.67
+          }
+        },
+        "detail_next": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 22200,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 23552,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 20.539,
+            "min": 19.742,
+            "p50": 20.389,
+            "p95": 20.539
+          }
+        },
+        "detail_state_first": {
+          "database_reported_ms": {
+            "max": 31.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 31.0
+          },
+          "decoded_record_bytes": 22200,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 23577,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 21.215,
+            "min": 19.923,
+            "p50": 20.191,
+            "p95": 21.215
+          }
+        },
+        "single_middle": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 15.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 0,
+          "has_next_cursor": false,
+          "response_encoded_bytes": 661,
+          "returned_count": 0,
+          "select_counts": [
+            2
+          ],
+          "total_query_counts": [
+            4
+          ],
+          "wall_ms": {
+            "max": 9.717,
+            "min": 8.327,
+            "p50": 8.539,
+            "p95": 9.717
+          }
+        },
+        "summary": {
+          "database_reported_ms": {
+            "max": 0.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 0.0
+          },
+          "decoded_record_bytes": 0,
+          "has_next_cursor": false,
+          "response_encoded_bytes": 1392,
+          "returned_count": 0,
+          "select_counts": [
+            1
+          ],
+          "total_query_counts": [
+            1
+          ],
+          "wall_ms": {
+            "max": 1.738,
+            "min": 1.379,
+            "p50": 1.439,
+            "p95": 1.738
+          }
+        },
+        "topology_edges_first": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 15.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 4500,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 5810,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 25.617,
+            "min": 16.794,
+            "p50": 20.582,
+            "p95": 25.617
+          }
+        },
+        "topology_edges_next": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 15.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 4500,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 5810,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 16.818,
+            "min": 16.151,
+            "p50": 16.626,
+            "p95": 16.818
+          }
+        },
+        "topology_nodes_first": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 15.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 13900,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 15182,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 41.646,
+            "min": 19.645,
+            "p50": 20.266,
+            "p95": 41.646
+          }
+        },
+        "topology_nodes_next": {
+          "database_reported_ms": {
+            "max": 15.0,
+            "min": 0.0,
+            "p50": 15.0,
+            "p95": 15.0
+          },
+          "decoded_record_bytes": 13900,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 15182,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 28.095,
+            "min": 21.123,
+            "p50": 22.184,
+            "p95": 28.095
+          }
+        }
+      },
+      "plans": {
+        "detail_keyset": {
+          "execution_ms": 0.063,
+          "indexes": [
+            "ray_wf_node_key_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.063,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 77,
+              "Actual Startup Time": 0.045,
+              "Actual Total Time": 0.052,
+              "Async Capable": false,
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Limit",
+              "Parallel Aware": false,
+              "Plan Rows": 79,
+              "Plan Width": 73,
+              "Plans": [
+                {
+                  "Actual Loops": 1,
+                  "Actual Rows": 77,
+                  "Actual Startup Time": 0.045,
+                  "Actual Total Time": 0.047,
+                  "Async Capable": false,
+                  "Local Dirtied Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Node Type": "Sort",
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Plan Rows": 79,
+                  "Plan Width": 73,
+                  "Plans": [
+                    {
+                      "Actual Loops": 1,
+                      "Actual Rows": 77,
+                      "Actual Startup Time": 0.017,
+                      "Actual Total Time": 0.029,
+                      "Alias": "django_ray_workflowprogressnodedetail",
+                      "Async Capable": false,
+                      "Exact Heap Blocks": 5,
+                      "Local Dirtied Blocks": 0,
+                      "Local Hit Blocks": 0,
+                      "Local Read Blocks": 0,
+                      "Local Written Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parallel Aware": false,
+                      "Parent Relationship": "Outer",
+                      "Plan Rows": 79,
+                      "Plan Width": 73,
+                      "Plans": [
+                        {
+                          "Actual Loops": 1,
+                          "Actual Rows": 77,
+                          "Actual Startup Time": 0.011,
+                          "Actual Total Time": 0.012,
+                          "Async Capable": false,
+                          "Index Cond": "((run_storage_id = 1) AND ((node_key)::text > 'e98f9e1c68d206cf020d9cedce9806d18d6e785b45d133413319ef373f4fc726'::text))",
+                          "Index Name": "ray_wf_node_key_uniq",
+                          "Local Dirtied Blocks": 0,
+                          "Local Hit Blocks": 0,
+                          "Local Read Blocks": 0,
+                          "Local Written Blocks": 0,
+                          "Node Type": "Bitmap Index Scan",
+                          "Parallel Aware": false,
+                          "Parent Relationship": "Outer",
+                          "Plan Rows": 79,
+                          "Plan Width": 0,
+                          "Shared Dirtied Blocks": 0,
+                          "Shared Hit Blocks": 3,
+                          "Shared Read Blocks": 0,
+                          "Shared Written Blocks": 0,
+                          "Startup Cost": 0.0,
+                          "Temp Read Blocks": 0,
+                          "Temp Written Blocks": 0,
+                          "Total Cost": 9.06
+                        }
+                      ],
+                      "Recheck Cond": "((run_storage_id = 1) AND ((node_key)::text > 'e98f9e1c68d206cf020d9cedce9806d18d6e785b45d133413319ef373f4fc726'::text))",
+                      "Relation Name": "django_ray_workflowprogressnodedetail",
+                      "Rows Removed by Index Recheck": 0,
+                      "Shared Dirtied Blocks": 0,
+                      "Shared Hit Blocks": 8,
+                      "Shared Read Blocks": 0,
+                      "Shared Written Blocks": 0,
+                      "Startup Cost": 9.08,
+                      "Temp Read Blocks": 0,
+                      "Temp Written Blocks": 0,
+                      "Total Cost": 72.39
+                    }
+                  ],
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Hit Blocks": 8,
+                  "Shared Read Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Sort Key": [
+                    "node_key"
+                  ],
+                  "Sort Method": "quicksort",
+                  "Sort Space Type": "Memory",
+                  "Sort Space Used": 35,
+                  "Startup Cost": 74.88,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "Total Cost": 75.07
+                }
+              ],
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 8,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 74.88,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 75.07
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 54,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.156,
+            "Triggers": []
+          },
+          "planning_ms": 0.156
+        },
+        "detail_state_keyset": {
+          "execution_ms": 0.062,
+          "indexes": [
+            "ray_wf_node_key_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.062,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 77,
+              "Actual Startup Time": 0.044,
+              "Actual Total Time": 0.05,
+              "Async Capable": false,
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Limit",
+              "Parallel Aware": false,
+              "Plan Rows": 79,
+              "Plan Width": 73,
+              "Plans": [
+                {
+                  "Actual Loops": 1,
+                  "Actual Rows": 77,
+                  "Actual Startup Time": 0.043,
+                  "Actual Total Time": 0.046,
+                  "Async Capable": false,
+                  "Local Dirtied Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Node Type": "Sort",
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Plan Rows": 79,
+                  "Plan Width": 73,
+                  "Plans": [
+                    {
+                      "Actual Loops": 1,
+                      "Actual Rows": 77,
+                      "Actual Startup Time": 0.016,
+                      "Actual Total Time": 0.031,
+                      "Alias": "django_ray_workflowprogressnodedetail",
+                      "Async Capable": false,
+                      "Exact Heap Blocks": 5,
+                      "Filter": "((state)::text = 'PENDING'::text)",
+                      "Local Dirtied Blocks": 0,
+                      "Local Hit Blocks": 0,
+                      "Local Read Blocks": 0,
+                      "Local Written Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parallel Aware": false,
+                      "Parent Relationship": "Outer",
+                      "Plan Rows": 79,
+                      "Plan Width": 73,
+                      "Plans": [
+                        {
+                          "Actual Loops": 1,
+                          "Actual Rows": 77,
+                          "Actual Startup Time": 0.01,
+                          "Actual Total Time": 0.011,
+                          "Async Capable": false,
+                          "Index Cond": "((run_storage_id = 1) AND ((node_key)::text > 'e98f9e1c68d206cf020d9cedce9806d18d6e785b45d133413319ef373f4fc726'::text))",
+                          "Index Name": "ray_wf_node_key_uniq",
+                          "Local Dirtied Blocks": 0,
+                          "Local Hit Blocks": 0,
+                          "Local Read Blocks": 0,
+                          "Local Written Blocks": 0,
+                          "Node Type": "Bitmap Index Scan",
+                          "Parallel Aware": false,
+                          "Parent Relationship": "Outer",
+                          "Plan Rows": 79,
+                          "Plan Width": 0,
+                          "Shared Dirtied Blocks": 0,
+                          "Shared Hit Blocks": 3,
+                          "Shared Read Blocks": 0,
+                          "Shared Written Blocks": 0,
+                          "Startup Cost": 0.0,
+                          "Temp Read Blocks": 0,
+                          "Temp Written Blocks": 0,
+                          "Total Cost": 9.06
+                        }
+                      ],
+                      "Recheck Cond": "((run_storage_id = 1) AND ((node_key)::text > 'e98f9e1c68d206cf020d9cedce9806d18d6e785b45d133413319ef373f4fc726'::text))",
+                      "Relation Name": "django_ray_workflowprogressnodedetail",
+                      "Rows Removed by Filter": 0,
+                      "Rows Removed by Index Recheck": 0,
+                      "Shared Dirtied Blocks": 0,
+                      "Shared Hit Blocks": 8,
+                      "Shared Read Blocks": 0,
+                      "Shared Written Blocks": 0,
+                      "Startup Cost": 9.08,
+                      "Temp Read Blocks": 0,
+                      "Temp Written Blocks": 0,
+                      "Total Cost": 72.58
+                    }
+                  ],
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Hit Blocks": 8,
+                  "Shared Read Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Sort Key": [
+                    "node_key"
+                  ],
+                  "Sort Method": "quicksort",
+                  "Sort Space Type": "Memory",
+                  "Sort Space Used": 35,
+                  "Startup Cost": 75.07,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "Total Cost": 75.27
+                }
+              ],
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 8,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 75.07,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 75.27
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 3,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.102,
+            "Triggers": []
+          },
+          "planning_ms": 0.102
+        },
+        "single_node": {
+          "execution_ms": 0.014,
+          "indexes": [
+            "ray_wf_node_key_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.014,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 1,
+              "Actual Startup Time": 0.008,
+              "Actual Total Time": 0.008,
+              "Alias": "django_ray_workflowprogressnodedetail",
+              "Async Capable": false,
+              "Index Cond": "((run_storage_id = 1) AND ((node_key)::text = 'e98f9e1c68d206cf020d9cedce9806d18d6e785b45d133413319ef373f4fc726'::text))",
+              "Index Name": "ray_wf_node_key_uniq",
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Index Scan",
+              "Parallel Aware": false,
+              "Plan Rows": 1,
+              "Plan Width": 8,
+              "Relation Name": "django_ray_workflowprogressnodedetail",
+              "Rows Removed by Index Recheck": 0,
+              "Scan Direction": "Forward",
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 3,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 0.28,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 8.29
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 0,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.036,
+            "Triggers": []
+          },
+          "planning_ms": 0.036
+        },
+        "topology_page": {
+          "execution_ms": 0.009,
+          "indexes": [],
+          "plan": {
+            "Execution Time": 0.009,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 1,
+              "Actual Startup Time": 0.005,
+              "Actual Total Time": 0.005,
+              "Alias": "django_ray_workflowprogresstopologymanifestpage",
+              "Async Capable": false,
+              "Filter": "((manifest_id = '2addc759-92a2-4860-850c-69601a628add'::uuid) AND ((collection)::text = 'NODE'::text) AND (page_index = 1))",
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Seq Scan",
+              "Parallel Aware": false,
+              "Plan Rows": 1,
+              "Plan Width": 8,
+              "Relation Name": "django_ray_workflowprogresstopologymanifestpage",
+              "Rows Removed by Filter": 7,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 1,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 0.0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 1.14
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 3,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.046,
+            "Triggers": []
+          },
+          "planning_ms": 0.046
+        }
+      },
+      "retained_edges": 999,
+      "retained_nodes": 1000
+    },
+    {
+      "case_index": 2,
+      "operations": {
+        "detail_first": {
+          "database_reported_ms": {
+            "max": 31.0,
+            "min": 15.0,
+            "p50": 16.0,
+            "p95": 31.0
+          },
+          "decoded_record_bytes": 22200,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 23553,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 30.378,
+            "min": 22.979,
+            "p50": 24.053,
+            "p95": 30.378
+          }
+        },
+        "detail_next": {
+          "database_reported_ms": {
+            "max": 32.0,
+            "min": 0.0,
+            "p50": 15.0,
+            "p95": 32.0
+          },
+          "decoded_record_bytes": 22200,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 23553,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 35.329,
+            "min": 25.043,
+            "p50": 33.928,
+            "p95": 35.329
+          }
+        },
+        "detail_state_first": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 16.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 22200,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 23578,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 24.497,
+            "min": 22.388,
+            "p50": 24.118,
+            "p95": 24.497
+          }
+        },
+        "single_middle": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 0,
+          "has_next_cursor": false,
+          "response_encoded_bytes": 662,
+          "returned_count": 0,
+          "select_counts": [
+            2
+          ],
+          "total_query_counts": [
+            4
+          ],
+          "wall_ms": {
+            "max": 9.441,
+            "min": 8.259,
+            "p50": 8.63,
+            "p95": 9.441
+          }
+        },
+        "summary": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 0,
+          "has_next_cursor": false,
+          "response_encoded_bytes": 1401,
+          "returned_count": 0,
+          "select_counts": [
+            1
+          ],
+          "total_query_counts": [
+            1
+          ],
+          "wall_ms": {
+            "max": 1.544,
+            "min": 1.346,
+            "p50": 1.422,
+            "p95": 1.544
+          }
+        },
+        "topology_edges_first": {
+          "database_reported_ms": {
+            "max": 15.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 15.0
+          },
+          "decoded_record_bytes": 4500,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 5811,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 18.092,
+            "min": 16.144,
+            "p50": 16.846,
+            "p95": 18.092
+          }
+        },
+        "topology_edges_next": {
+          "database_reported_ms": {
+            "max": 15.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 15.0
+          },
+          "decoded_record_bytes": 4500,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 5811,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 17.461,
+            "min": 16.438,
+            "p50": 17.189,
+            "p95": 17.461
+          }
+        },
+        "topology_nodes_first": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 16.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 13900,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 15183,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 20.685,
+            "min": 19.536,
+            "p50": 20.233,
+            "p95": 20.685
+          }
+        },
+        "topology_nodes_next": {
+          "database_reported_ms": {
+            "max": 32.0,
+            "min": 0.0,
+            "p50": 16.0,
+            "p95": 32.0
+          },
+          "decoded_record_bytes": 13900,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 15183,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 24.247,
+            "min": 21.494,
+            "p50": 22.258,
+            "p95": 24.247
+          }
+        }
+      },
+      "plans": {
+        "detail_keyset": {
+          "execution_ms": 0.048,
+          "indexes": [
+            "ray_wf_node_key_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.048,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 100,
+              "Actual Startup Time": 0.012,
+              "Actual Total Time": 0.039,
+              "Async Capable": false,
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Limit",
+              "Parallel Aware": false,
+              "Plan Rows": 100,
+              "Plan Width": 73,
+              "Plans": [
+                {
+                  "Actual Loops": 1,
+                  "Actual Rows": 100,
+                  "Actual Startup Time": 0.012,
+                  "Actual Total Time": 0.034,
+                  "Alias": "django_ray_workflowprogressnodedetail",
+                  "Async Capable": false,
+                  "Index Cond": "((run_storage_id = 2) AND ((node_key)::text > '41ac6a26096fc73c1845abeabf65722f70caf9ab494bf125ef6b09c30447fd5b'::text))",
+                  "Index Name": "ray_wf_node_key_uniq",
+                  "Local Dirtied Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Node Type": "Index Scan",
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Plan Rows": 7461,
+                  "Plan Width": 73,
+                  "Relation Name": "django_ray_workflowprogressnodedetail",
+                  "Rows Removed by Index Recheck": 0,
+                  "Scan Direction": "Forward",
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Hit Blocks": 11,
+                  "Shared Read Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Startup Cost": 0.41,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "Total Cost": 1924.82
+                }
+              ],
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 11,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 0.41,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 26.2
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 60,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.157,
+            "Triggers": []
+          },
+          "planning_ms": 0.157
+        },
+        "detail_state_keyset": {
+          "execution_ms": 0.039,
+          "indexes": [
+            "ray_wf_node_key_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.039,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 100,
+              "Actual Startup Time": 0.006,
+              "Actual Total Time": 0.031,
+              "Async Capable": false,
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Limit",
+              "Parallel Aware": false,
+              "Plan Rows": 100,
+              "Plan Width": 73,
+              "Plans": [
+                {
+                  "Actual Loops": 1,
+                  "Actual Rows": 100,
+                  "Actual Startup Time": 0.006,
+                  "Actual Total Time": 0.025,
+                  "Alias": "django_ray_workflowprogressnodedetail",
+                  "Async Capable": false,
+                  "Filter": "((state)::text = 'PENDING'::text)",
+                  "Index Cond": "((run_storage_id = 2) AND ((node_key)::text > '41ac6a26096fc73c1845abeabf65722f70caf9ab494bf125ef6b09c30447fd5b'::text))",
+                  "Index Name": "ray_wf_node_key_uniq",
+                  "Local Dirtied Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Node Type": "Index Scan",
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Plan Rows": 7461,
+                  "Plan Width": 73,
+                  "Relation Name": "django_ray_workflowprogressnodedetail",
+                  "Rows Removed by Filter": 0,
+                  "Rows Removed by Index Recheck": 0,
+                  "Scan Direction": "Forward",
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Hit Blocks": 11,
+                  "Shared Read Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Startup Cost": 0.41,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "Total Cost": 1943.47
+                }
+              ],
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 11,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 0.41,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 26.45
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.062,
+            "Triggers": []
+          },
+          "planning_ms": 0.062
+        },
+        "single_node": {
+          "execution_ms": 0.011,
+          "indexes": [
+            "ray_wf_node_key_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.011,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 1,
+              "Actual Startup Time": 0.006,
+              "Actual Total Time": 0.007,
+              "Alias": "django_ray_workflowprogressnodedetail",
+              "Async Capable": false,
+              "Index Cond": "((run_storage_id = 2) AND ((node_key)::text = '41ac6a26096fc73c1845abeabf65722f70caf9ab494bf125ef6b09c30447fd5b'::text))",
+              "Index Name": "ray_wf_node_key_uniq",
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Index Scan",
+              "Parallel Aware": false,
+              "Plan Rows": 1,
+              "Plan Width": 8,
+              "Relation Name": "django_ray_workflowprogressnodedetail",
+              "Rows Removed by Index Recheck": 0,
+              "Scan Direction": "Forward",
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 0.41,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 8.43
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 0,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.032,
+            "Triggers": []
+          },
+          "planning_ms": 0.032
+        },
+        "topology_page": {
+          "execution_ms": 0.012,
+          "indexes": [],
+          "plan": {
+            "Execution Time": 0.012,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 1,
+              "Actual Startup Time": 0.004,
+              "Actual Total Time": 0.008,
+              "Alias": "django_ray_workflowprogresstopologymanifestpage",
+              "Async Capable": false,
+              "Filter": "((manifest_id = '5082dd86-c6b3-4bdb-bf18-2c0756225f0e'::uuid) AND ((collection)::text = 'NODE'::text) AND (page_index = 1))",
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Seq Scan",
+              "Parallel Aware": false,
+              "Plan Rows": 2,
+              "Plan Width": 8,
+              "Relation Name": "django_ray_workflowprogresstopologymanifestpage",
+              "Rows Removed by Filter": 87,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 1,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 0.0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 2.54
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 3,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.039,
+            "Triggers": []
+          },
+          "planning_ms": 0.039
+        }
+      },
+      "retained_edges": 9999,
+      "retained_nodes": 10000
+    },
+    {
+      "case_index": 3,
+      "operations": {
+        "detail_first": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 15.0,
+            "p50": 15.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 22200,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 23553,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 32.888,
+            "min": 29.413,
+            "p50": 30.516,
+            "p95": 32.888
+          }
+        },
+        "detail_next": {
+          "database_reported_ms": {
+            "max": 63.0,
+            "min": 15.0,
+            "p50": 31.0,
+            "p95": 63.0
+          },
+          "decoded_record_bytes": 22200,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 23553,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 59.48,
+            "min": 37.324,
+            "p50": 41.156,
+            "p95": 59.48
+          }
+        },
+        "detail_state_first": {
+          "database_reported_ms": {
+            "max": 31.0,
+            "min": 0.0,
+            "p50": 16.0,
+            "p95": 31.0
+          },
+          "decoded_record_bytes": 22200,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 23578,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 33.64,
+            "min": 30.757,
+            "p50": 32.876,
+            "p95": 33.64
+          }
+        },
+        "single_middle": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 0,
+          "has_next_cursor": false,
+          "response_encoded_bytes": 662,
+          "returned_count": 0,
+          "select_counts": [
+            2
+          ],
+          "total_query_counts": [
+            4
+          ],
+          "wall_ms": {
+            "max": 9.804,
+            "min": 8.66,
+            "p50": 9.138,
+            "p95": 9.804
+          }
+        },
+        "summary": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 0,
+          "has_next_cursor": false,
+          "response_encoded_bytes": 1404,
+          "returned_count": 0,
+          "select_counts": [
+            1
+          ],
+          "total_query_counts": [
+            1
+          ],
+          "wall_ms": {
+            "max": 3.686,
+            "min": 2.135,
+            "p50": 2.552,
+            "p95": 3.686
+          }
+        },
+        "topology_edges_first": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 15.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 4500,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 5811,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 30.027,
+            "min": 18.762,
+            "p50": 19.444,
+            "p95": 30.027
+          }
+        },
+        "topology_edges_next": {
+          "database_reported_ms": {
+            "max": 31.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 31.0
+          },
+          "decoded_record_bytes": 4500,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 5811,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 31.836,
+            "min": 26.907,
+            "p50": 29.475,
+            "p95": 31.836
+          }
+        },
+        "topology_nodes_first": {
+          "database_reported_ms": {
+            "max": 16.0,
+            "min": 0.0,
+            "p50": 15.0,
+            "p95": 16.0
+          },
+          "decoded_record_bytes": 13900,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 15183,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 30.345,
+            "min": 21.672,
+            "p50": 23.641,
+            "p95": 30.345
+          }
+        },
+        "topology_nodes_next": {
+          "database_reported_ms": {
+            "max": 31.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 31.0
+          },
+          "decoded_record_bytes": 13900,
+          "has_next_cursor": true,
+          "response_encoded_bytes": 15183,
+          "returned_count": 100,
+          "select_counts": [
+            3
+          ],
+          "total_query_counts": [
+            5
+          ],
+          "wall_ms": {
+            "max": 27.42,
+            "min": 21.822,
+            "p50": 22.612,
+            "p95": 27.42
+          }
+        }
+      },
+      "plans": {
+        "detail_keyset": {
+          "execution_ms": 0.047,
+          "indexes": [
+            "ray_wf_node_key_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.047,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 100,
+              "Actual Startup Time": 0.012,
+              "Actual Total Time": 0.038,
+              "Async Capable": false,
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Limit",
+              "Parallel Aware": false,
+              "Plan Rows": 100,
+              "Plan Width": 73,
+              "Plans": [
+                {
+                  "Actual Loops": 1,
+                  "Actual Rows": 100,
+                  "Actual Startup Time": 0.012,
+                  "Actual Total Time": 0.032,
+                  "Alias": "django_ray_workflowprogressnodedetail",
+                  "Async Capable": false,
+                  "Index Cond": "((run_storage_id = 3) AND ((node_key)::text > '34c0ad9d25f8683c2bd561ddbbe36124e8928d1842b3906ee6682e04ab412ab2'::text))",
+                  "Index Name": "ray_wf_node_key_uniq",
+                  "Local Dirtied Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Node Type": "Index Scan",
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Plan Rows": 19900,
+                  "Plan Width": 73,
+                  "Relation Name": "django_ray_workflowprogressnodedetail",
+                  "Rows Removed by Index Recheck": 0,
+                  "Scan Direction": "Forward",
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Startup Cost": 0.41,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "Total Cost": 5797.29
+                }
+              ],
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 10,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 0.41,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 29.55
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 51,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.136,
+            "Triggers": []
+          },
+          "planning_ms": 0.136
+        },
+        "detail_state_keyset": {
+          "execution_ms": 0.04,
+          "indexes": [
+            "ray_wf_node_key_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.04,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 100,
+              "Actual Startup Time": 0.006,
+              "Actual Total Time": 0.032,
+              "Async Capable": false,
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Limit",
+              "Parallel Aware": false,
+              "Plan Rows": 100,
+              "Plan Width": 73,
+              "Plans": [
+                {
+                  "Actual Loops": 1,
+                  "Actual Rows": 100,
+                  "Actual Startup Time": 0.006,
+                  "Actual Total Time": 0.027,
+                  "Alias": "django_ray_workflowprogressnodedetail",
+                  "Async Capable": false,
+                  "Filter": "((state)::text = 'PENDING'::text)",
+                  "Index Cond": "((run_storage_id = 3) AND ((node_key)::text > '34c0ad9d25f8683c2bd561ddbbe36124e8928d1842b3906ee6682e04ab412ab2'::text))",
+                  "Index Name": "ray_wf_node_key_uniq",
+                  "Local Dirtied Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Node Type": "Index Scan",
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Plan Rows": 19900,
+                  "Plan Width": 73,
+                  "Relation Name": "django_ray_workflowprogressnodedetail",
+                  "Rows Removed by Filter": 0,
+                  "Rows Removed by Index Recheck": 0,
+                  "Scan Direction": "Forward",
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Hit Blocks": 10,
+                  "Shared Read Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Startup Cost": 0.41,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "Total Cost": 5847.04
+                }
+              ],
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 10,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 0.41,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 29.8
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 3,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.06,
+            "Triggers": []
+          },
+          "planning_ms": 0.06
+        },
+        "single_node": {
+          "execution_ms": 0.012,
+          "indexes": [
+            "ray_wf_node_key_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.012,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 1,
+              "Actual Startup Time": 0.007,
+              "Actual Total Time": 0.007,
+              "Alias": "django_ray_workflowprogressnodedetail",
+              "Async Capable": false,
+              "Index Cond": "((run_storage_id = 3) AND ((node_key)::text = '34c0ad9d25f8683c2bd561ddbbe36124e8928d1842b3906ee6682e04ab412ab2'::text))",
+              "Index Name": "ray_wf_node_key_uniq",
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Node Type": "Index Scan",
+              "Parallel Aware": false,
+              "Plan Rows": 1,
+              "Plan Width": 8,
+              "Relation Name": "django_ray_workflowprogressnodedetail",
+              "Rows Removed by Index Recheck": 0,
+              "Scan Direction": "Forward",
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 0.41,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 8.43
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 0,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.029,
+            "Triggers": []
+          },
+          "planning_ms": 0.029
+        },
+        "topology_page": {
+          "execution_ms": 0.015,
+          "indexes": [
+            "ray_wf_link_position_uniq"
+          ],
+          "plan": {
+            "Execution Time": 0.015,
+            "Plan": {
+              "Actual Loops": 1,
+              "Actual Rows": 1,
+              "Actual Startup Time": 0.01,
+              "Actual Total Time": 0.01,
+              "Alias": "django_ray_workflowprogresstopologymanifestpage",
+              "Async Capable": false,
+              "Exact Heap Blocks": 1,
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Lossy Heap Blocks": 0,
+              "Node Type": "Bitmap Heap Scan",
+              "Parallel Aware": false,
+              "Plan Rows": 2,
+              "Plan Width": 8,
+              "Plans": [
+                {
+                  "Actual Loops": 1,
+                  "Actual Rows": 1,
+                  "Actual Startup Time": 0.007,
+                  "Actual Total Time": 0.007,
+                  "Async Capable": false,
+                  "Index Cond": "((manifest_id = 'cdf8de2d-ad9b-4afe-85ed-2a412deb06c5'::uuid) AND ((collection)::text = 'NODE'::text) AND (page_index = 1))",
+                  "Index Name": "ray_wf_link_position_uniq",
+                  "Local Dirtied Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Node Type": "Bitmap Index Scan",
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Plan Rows": 2,
+                  "Plan Width": 0,
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Hit Blocks": 2,
+                  "Shared Read Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Startup Cost": 0.0,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "Total Cost": 4.29
+                }
+              ],
+              "Recheck Cond": "((manifest_id = 'cdf8de2d-ad9b-4afe-85ed-2a412deb06c5'::uuid) AND ((collection)::text = 'NODE'::text) AND (page_index = 1))",
+              "Relation Name": "django_ray_workflowprogresstopologymanifestpage",
+              "Rows Removed by Index Recheck": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 3,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Startup Cost": 4.29,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Total Cost": 7.42
+            },
+            "Planning": {
+              "Local Dirtied Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Written Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Hit Blocks": 3,
+              "Shared Read Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0
+            },
+            "Planning Time": 0.042,
+            "Triggers": []
+          },
+          "planning_ms": 0.042
+        }
+      },
+      "retained_edges": 24999,
+      "retained_nodes": 25000
+    }
+  ],
+  "collected_at_utc": "2026-07-21T07:58:15.253202+00:00",
+  "environment": {
+    "benchmark_implementation_sha256": "f72bb4f2bfeee3a46a58f07f3b8e89fb380c436fc08a733a4affc9b497987229",
+    "database_deployment": "docker-desktop:postgres:17",
+    "database_vendor": "postgresql",
+    "database_version": "PostgreSQL 17.10 (Debian 17.10-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "django_ray_version": "0.3.1",
+    "django_version": "6.0.7",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "psycopg_version": "3.3.4",
+    "python_version": "3.12.12",
+    "reads_implementation_sha256": "27fddcba296d2c1f71da3dbb17a0945c7f5ce20ad095449eed37df4dcc8f5f2e",
+    "source_revision": "49ebeb384bd3e33a9817dfcc78e28c4c132d3664",
+    "source_worktree_dirty": true
+  },
+  "limitations": [
+    "This local benchmark is scale evidence, not a production latency SLO.",
+    "Dataset publication is excluded from read measurements.",
+    "The database connection is local and does not model production network latency.",
+    "PostgreSQL reported query durations use Django's coarse captured timings."
+  ],
+  "limits": {
+    "decoded_record_bytes": 1048576,
+    "response_encoded_bytes": 524288
+  },
+  "method": {
+    "cleanup": "owning synthetic RayTaskExecution rows deleted before exit",
+    "repetitions": 5,
+    "response_encoding": "canonical compact UTF-8 JSON",
+    "sql_count": "Django CaptureQueriesContext around each package read",
+    "timer": "time.perf_counter",
+    "warmups": 1
+  },
+  "schema_version": 1
+}

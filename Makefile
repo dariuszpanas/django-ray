@@ -66,6 +66,7 @@ test-postgres:
 	python -m pytest \
 		tests/integration/test_postgresql_coordination.py \
 		tests/integration/test_postgresql_workflow_progress_storage.py \
+		tests/integration/test_postgresql_workflow_progress_reads.py \
 		tests/integration/test_postgresql_polling.py \
 		tests/integration/test_postgresql_metrics.py \
 		-m postgresql -vv --durations=20
@@ -74,6 +75,7 @@ test-postgres:
 test-testproject:
 	python testproject/manage.py check
 	pytest tests/integration/test_api.py \
+		tests/integration/test_workflow_progress_api.py \
 		tests/unit/test_sample_security.py \
 		tests/unit/test_testproject_workflows.py \
 		--cov=testproject.api \

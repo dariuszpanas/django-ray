@@ -1,6 +1,6 @@
 # ADR-0004: Bounded Workflow Progress Storage
 
-- **Status:** Accepted; bounded storage writer implemented, public services and activation pending
+- **Status:** Accepted; bounded storage and public readers implemented, producer activation pending
 - **Date:** 2026-07-20
 - **Decision owners:** django-ray maintainers
 - **Related contracts:** [Ray-Native Workflows](../workflows.md),
@@ -200,6 +200,14 @@ is never copied into the task row or attempt history. Derivation advances the re
 final summary revision and records the outer outcome and detail expiry. Success marks
 every discovered node succeeded and progress complete; interrupted outcomes preserve
 the last observed node counters rather than fabricating unavailable final node states.
+When lifecycle-owned success wins before the producer publishes terminal node detail,
+the aggregate task outcome remains authoritative but the retained node rows remain the
+last accepted observation. The summary therefore changes detail to `TRUNCATED`, marks
+it incomplete, and adds `terminal_state_unreported`. Readers may return those retained
+rows, including their pre-terminal states, but must not present them as exact terminal
+detail. A producer-authored successful terminal publication remains `AVAILABLE` when
+it is otherwise complete. Lifecycle does not rewrite every normalized row or record
+this summary-only reason in storage-loss metadata.
 Producer publications reserve that final revision. If a producer-authored terminal
 outcome races and disagrees, the row-locked durable task transition remains authoritative
 and derives the next terminal envelope.
@@ -290,6 +298,10 @@ The summary and service response use this exact availability vocabulary:
 bounded service error while the task-row summary remains readable. `TRUNCATED` is not
 an error and never claims completeness. `NOT_REPORTED`, `OMITTED_BY_POLICY`, and
 `DISABLED` are distinct operational facts rather than aliases for an empty graph.
+The summary-only truncation reason `terminal_state_unreported` means lifecycle has
+authoritatively completed the task while retained node rows still represent their last
+accepted pre-terminal states. It is not storage loss and does not appear in manifest
+or run-storage truncation fields.
 
 ## Pagination and cursors
 
@@ -301,12 +313,16 @@ Every collection has a deterministic indexed order. An opaque validated cursor b
 all of the following:
 
 - cursor schema version;
-- complete four-field run identity;
-- topology version and, for state data, detail revision;
+- a non-reversible binding over the complete four-field run identity;
+- the public run identity and originating summary revision needed to describe an
+  expired page without exposing the internal task primary key;
+- the applicable publication epochs: topology version for topology reads and both
+  topology version and detail revision for state-data reads;
 - collection kind;
 - normalized filters and ordering;
 - last returned stable key; and
-- requested limit after the server hard cap is applied.
+- requested limit after the server hard cap is applied; and
+- the cumulative number of records already returned for completeness checks.
 
 A cursor is not an authorization token or a storage reference. The service repeats
 object-level authorization on every request. It validates the requested run-level
@@ -315,17 +331,33 @@ single statement or consistent database snapshot prevents the epoch check and ro
 read from straddling a publication. Rows may have an older last-updated epoch and
 remain current. A different run, topology version, detail revision, collection,
 filter, or order rejects the cursor. A cursor for a retired revision returns
-`EXPIRED`; it never advances into the current revision.
+`EXPIRED` with the cursor's original public run and applicable publication metadata;
+it never advances into the current revision. On the final normalized-detail page,
+the cumulative cursor count must match the retained run counter. Fewer child rows are
+`MISSING`; extra rows or conflicting counters are `CORRUPT`.
 
 The default page size is 100 and the hard maximum is 256. Page construction stops
 before either the item or encoded-response byte limit. Because every stored record is
 individually bounded, one valid record can always fit. Responses return the exact run
-identity, topology/detail revision, availability, completeness, returned item count,
-and `next_cursor`.
+public run identity, topology/detail revision, availability, completeness, returned
+item count, and `next_cursor`. Public responses omit the internal task primary key even
+though the signed run binding covers it.
 
-Single-node retrieval validates the summary's topology/detail epochs, then uses an
+Single-node retrieval validates the selected summary's topology/detail epochs, then uses an
 indexed run/node key for its current normalized detail record. It never scans or
-decodes every page or filters the row by exact last-updated epoch.
+decodes every page or filters the row by exact last-updated epoch. The selected row
+also carries the bounded run counters and truncation metadata needed to reconcile the
+summary. An absent key returns `found: false`: V1 deliberately cannot distinguish an
+unknown node ID from one deleted behind the storage protocol without violating the
+indexed-lookup boundary. Final-page cumulative checks and the periodic whole-run audit
+provide the global child-row integrity proof.
+
+An explicit attempt number can select retained terminal detail after the current task
+has advanced to a retry. Authorization still evaluates the owning `RayTaskExecution`;
+the archived `TaskAttempt` summary supplies the immutable run identity and publication
+epochs. Paginated detail remains schema-v3-only. The compatibility summary may derive
+bounded schema-v1/v2 aggregates, but it never repackages a legacy complete graph as
+normalized pages.
 
 ## Write-side safety and authorization
 
@@ -392,11 +424,12 @@ nonzero after processing later items.
 
 ## Admin and service reads
 
-Periodic Admin polling prefers the bounded task-row summary. During the reader-first
-compatibility window, it may use the SQL-length-guarded schema-v1/v2 fallback under the
-64 MiB legacy cap; after the writer drain it reads only the 16 KiB summary. It never
-loads topology pages or normalized detail rows. The task change form defers both
-progress payloads and does not render the legacy complete graph field.
+Periodic Admin polling reads only the bounded task-row summary through a SQL byte guard.
+It never selects or parses legacy `progress_data`, topology pages, or normalized detail
+rows. During the compatibility window, legacy writers appear as not yet reported in
+the high-frequency panel; explicit compatibility tools may still opt into the 64 MiB
+legacy reader. The task change form defers both progress payloads and does not render
+the legacy complete graph field.
 
 Package task summaries likewise read the bounded summary directly. A caller must
 request detail explicitly. A summary poll therefore remains bounded even when the
@@ -500,9 +533,10 @@ Implementation remains split into focused deliveries:
    verification, sparse atomic publication, terminal expiry stamping, replacement-run
    cleanup, and the retention/orphan cleanup command. The runtime actor deliberately
    remains a schema-v2 writer.
-3. **Pending #127:** package-owned paginated services, indexed single-node retrieval,
-   authorization, and public detail routes. Schema-v3 Admin aggregate mapping exists,
-   but activation remains gated on this public-reader deployment.
+3. **Implemented by #127:** package-owned paginated services, indexed single-node
+   retrieval, mandatory per-request authorization, summary-only Admin polling, and
+   public testproject adapters. Producer activation remains a separate writer-drain
+   decision.
 4. **Coordinated with #79:** producer and collector memory limits and reporting policy.
    Do not claim this storage decision bounds the actor mailbox by itself.
 5. **Follow-up #132:** preparation currently materializes complete observed identity

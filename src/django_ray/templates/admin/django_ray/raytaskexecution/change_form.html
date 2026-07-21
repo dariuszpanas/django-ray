@@ -37,6 +37,14 @@
           <dd data-field="workflow">No workflow progress available.</dd>
         </div>
       </dl>
+      {% if django_ray_workflow_topology_nodes_url %}
+        <p>
+          Bounded workflow detail:
+          <a href="{{ django_ray_workflow_topology_nodes_url }}">topology nodes</a>,
+          <a href="{{ django_ray_workflow_topology_edges_url }}">topology edges</a>,
+          and <a href="{{ django_ray_workflow_node_details_url }}">node details</a>.
+        </p>
+      {% endif %}
     </fieldset>
   {% endif %}
 {% endblock %}

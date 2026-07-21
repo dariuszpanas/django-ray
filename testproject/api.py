@@ -19,8 +19,9 @@ from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
 from django.tasks.exceptions import InvalidTaskBackend
 from ninja import NinjaAPI, Schema
+from ninja.responses import Status
 from ninja.security import HttpBearer
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from django_ray import __version__ as django_ray_version
 from django_ray.lifecycle import cancel_task, record_failure, retry_task
@@ -32,6 +33,15 @@ from django_ray.observability import (
     get_workflow_progress,
 )
 from django_ray.redaction import redact_text, redact_value, safe_json_dumps
+from django_ray.workflow_progress_reads import (
+    WorkflowProgressReadError,
+    WorkflowProgressReadErrorCode,
+    get_workflow_node_detail,
+    get_workflow_progress_summary,
+    list_workflow_node_details,
+    list_workflow_topology_edges,
+    list_workflow_topology_nodes,
+)
 from django_ray.workflow_progress_summary import WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION
 
 # Import tasks that use Django 6's @task decorator
@@ -50,13 +60,62 @@ def _workflow_observability_executions():
     )
 
 
+_WORKFLOW_OBSERVABILITY_CALLABLES = frozenset(
+    {
+        "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
+        "testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark",
+    }
+)
+
+
+def _authorize_example_workflow(execution: RayTaskExecution) -> bool:
+    """Apply the sample's explicit object policy after bearer authentication."""
+    return execution.callable_path in _WORKFLOW_OBSERVABILITY_CALLABLES
+
+
+def _workflow_observability_execution(task_id: str) -> RayTaskExecution:
+    return get_object_or_404(_workflow_observability_executions(), task_id=task_id)
+
+
+def _bounded_workflow_observability_execution(task_id: str) -> RayTaskExecution:
+    """Resolve only bounded identity fields before the package reader reloads the row."""
+    try:
+        return RayTaskExecution.objects.only("pk", "callable_path").get(task_id=task_id)
+    except RayTaskExecution.DoesNotExist as error:
+        raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.NOT_FOUND) from error
+
+
+def _require_example_workflow_access(execution: RayTaskExecution) -> None:
+    """Authorize before parsing operation-specific workflow read arguments."""
+    if not _authorize_example_workflow(execution):
+        raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.ACCESS_DENIED)
+
+
+def _workflow_integer_argument(value: str | None, *, default: int | None = None) -> int | None:
+    """Normalize one integer query argument into the package service contract."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError as error:
+        raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.INVALID_ARGUMENT) from error
+
+
+def _workflow_limit_argument(value: str | None) -> int:
+    """Return the default or parsed page limit with a concrete integer type."""
+    normalized = _workflow_integer_argument(value, default=100)
+    if normalized is None:  # pragma: no cover - the non-None default is invariant
+        raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.INVALID_ARGUMENT)
+    return normalized
+
+
 class ApiTokenAuth(HttpBearer):
     """Require the configured bearer token for every operational API endpoint."""
 
     def authenticate(self, request, token: str):
         expected = getattr(settings, "DJANGO_API_TOKEN", None)
         if expected and secrets.compare_digest(token, expected):
-            return token
+            return "django-ray-testproject-operator"
         return None
 
 
@@ -266,6 +325,91 @@ class WorkflowNodeSchema(Schema):
     @classmethod
     def redact_observability_error(cls, value):
         return redact_text(value) if value is not None else None
+
+
+class WorkflowProgressSummaryReadSchema(Schema):
+    """Bounded package summary adapted to the example HTTP API."""
+
+    schema_name: str = Field(alias="schema")
+    schema_version: int
+    generated_at: str
+    task_id: str
+    run_identity: dict | None
+    publication: dict
+    availability: str
+    complete: bool
+    source_schema_version: int | None
+    summary: dict | None
+
+
+class WorkflowProgressPageReadSchema(Schema):
+    """One bounded topology or normalized-detail page."""
+
+    schema_name: str = Field(alias="schema")
+    schema_version: int
+    generated_at: str
+    task_id: str
+    run_identity: dict | None
+    publication: dict
+    availability: str
+    complete: bool
+    collection: str
+    returned_count: int
+    items: list[dict]
+    next_cursor: str | None
+
+
+class WorkflowProgressNodeReadSchema(Schema):
+    """One indexed normalized-node lookup result."""
+
+    schema_name: str = Field(alias="schema")
+    schema_version: int
+    generated_at: str
+    task_id: str
+    run_identity: dict | None
+    publication: dict
+    availability: str
+    complete: bool
+    found: bool
+    item: dict | None
+
+
+class WorkflowProgressReadErrorSchema(Schema):
+    """Stable bounded package-read error."""
+
+    code: str
+    message: str
+
+
+_WORKFLOW_READ_RESPONSES = {
+    200: WorkflowProgressPageReadSchema,
+    400: WorkflowProgressReadErrorSchema,
+    403: WorkflowProgressReadErrorSchema,
+    404: WorkflowProgressReadErrorSchema,
+    409: WorkflowProgressReadErrorSchema,
+    503: WorkflowProgressReadErrorSchema,
+}
+
+
+def _workflow_read_error_response(
+    error: WorkflowProgressReadError,
+) -> Status[dict[str, str]]:
+    status_by_code = {
+        WorkflowProgressReadErrorCode.ACCESS_DENIED: 403,
+        WorkflowProgressReadErrorCode.NOT_FOUND: 404,
+        WorkflowProgressReadErrorCode.INVALID_ARGUMENT: 400,
+        WorkflowProgressReadErrorCode.INVALID_CURSOR: 400,
+        WorkflowProgressReadErrorCode.CURSOR_MISMATCH: 409,
+        WorkflowProgressReadErrorCode.MISSING: 409,
+        WorkflowProgressReadErrorCode.CORRUPT: 503,
+    }
+    return Status(
+        status_by_code[error.code],
+        {
+            "code": error.code.value,
+            "message": str(error),
+        },
+    )
 
 
 class RuntimeEnvResultSchema(Schema):
@@ -1136,13 +1280,137 @@ def get_cluster_complex_workflow(request, task_id: str):
 
 
 @api.get(
+    "/cluster/workflows/{task_id}",
+    response={
+        200: WorkflowProgressSummaryReadSchema,
+        400: WorkflowProgressReadErrorSchema,
+        403: WorkflowProgressReadErrorSchema,
+        404: WorkflowProgressReadErrorSchema,
+        409: WorkflowProgressReadErrorSchema,
+        503: WorkflowProgressReadErrorSchema,
+    },
+    tags=["Workflows"],
+    by_alias=True,
+)
+def get_cluster_workflow_summary(
+    request,
+    task_id: str,
+    attempt_number: str | None = None,
+):
+    """Return the bounded package summary after per-object authorization."""
+    try:
+        execution = _bounded_workflow_observability_execution(task_id)
+        _require_example_workflow_access(execution)
+        return get_workflow_progress_summary(
+            execution,
+            authorize=_authorize_example_workflow,
+            include_legacy=True,
+            attempt_number=_workflow_integer_argument(attempt_number),
+        )
+    except WorkflowProgressReadError as error:
+        return _workflow_read_error_response(error)
+
+
+@api.get(
+    "/cluster/workflows/{task_id}/topology/nodes",
+    response=_WORKFLOW_READ_RESPONSES,
+    tags=["Workflows"],
+    by_alias=True,
+)
+def get_cluster_workflow_topology_nodes(
+    request,
+    task_id: str,
+    attempt_number: str | None = None,
+    cursor: str | None = None,
+    limit: str | None = None,
+):
+    """Return one deterministic bounded topology-node page."""
+    try:
+        execution = _bounded_workflow_observability_execution(task_id)
+        _require_example_workflow_access(execution)
+        applied_limit = _workflow_limit_argument(limit)
+        return list_workflow_topology_nodes(
+            execution,
+            authorize=_authorize_example_workflow,
+            attempt_number=_workflow_integer_argument(attempt_number),
+            cursor=cursor,
+            limit=applied_limit,
+        )
+    except WorkflowProgressReadError as error:
+        return _workflow_read_error_response(error)
+
+
+@api.get(
+    "/cluster/workflows/{task_id}/topology/edges",
+    response=_WORKFLOW_READ_RESPONSES,
+    tags=["Workflows"],
+    by_alias=True,
+)
+def get_cluster_workflow_topology_edges(
+    request,
+    task_id: str,
+    attempt_number: str | None = None,
+    cursor: str | None = None,
+    limit: str | None = None,
+):
+    """Return one deterministic bounded topology-edge page."""
+    try:
+        execution = _bounded_workflow_observability_execution(task_id)
+        _require_example_workflow_access(execution)
+        applied_limit = _workflow_limit_argument(limit)
+        return list_workflow_topology_edges(
+            execution,
+            authorize=_authorize_example_workflow,
+            attempt_number=_workflow_integer_argument(attempt_number),
+            cursor=cursor,
+            limit=applied_limit,
+        )
+    except WorkflowProgressReadError as error:
+        return _workflow_read_error_response(error)
+
+
+@api.get(
+    "/cluster/workflows/{task_id}/nodes",
+    response=_WORKFLOW_READ_RESPONSES,
+    tags=["Workflows"],
+    by_alias=True,
+)
+def get_cluster_workflow_node_details(
+    request,
+    task_id: str,
+    attempt_number: str | None = None,
+    state: str | None = None,
+    cursor: str | None = None,
+    limit: str | None = None,
+):
+    """Return one bounded latest-state node-detail page."""
+    try:
+        execution = _bounded_workflow_observability_execution(task_id)
+        _require_example_workflow_access(execution)
+        applied_limit = _workflow_limit_argument(limit)
+        return list_workflow_node_details(
+            execution,
+            authorize=_authorize_example_workflow,
+            attempt_number=_workflow_integer_argument(attempt_number),
+            state=state,
+            cursor=cursor,
+            limit=applied_limit,
+        )
+    except WorkflowProgressReadError as error:
+        return _workflow_read_error_response(error)
+
+
+@api.get(
     "/cluster/workflows/{task_id}/graph",
     response=WorkflowGraphSchema,
     tags=["Workflows"],
+    deprecated=True,
 )
 def get_cluster_workflow_graph(request, task_id: str):
-    """Return a versioned node/edge graph suitable for custom tracking UIs."""
-    execution = get_object_or_404(_workflow_observability_executions(), task_id=task_id)
+    """Return the legacy complete graph; new clients use bounded page routes."""
+    execution = _workflow_observability_execution(task_id)
+    if not _authorize_example_workflow(execution):
+        raise Http404("Workflow was not found")
     try:
         progress = get_workflow_progress(execution)
     except WorkflowObservabilityError as exc:
@@ -1206,6 +1474,41 @@ def get_cluster_workflow_node(
         "logs": live["logs"],
         "observability_error": live["reason"],
     }
+
+
+@api.get(
+    "/cluster/workflows/{task_id}/node-detail",
+    response={
+        200: WorkflowProgressNodeReadSchema,
+        400: WorkflowProgressReadErrorSchema,
+        403: WorkflowProgressReadErrorSchema,
+        404: WorkflowProgressReadErrorSchema,
+        409: WorkflowProgressReadErrorSchema,
+        503: WorkflowProgressReadErrorSchema,
+    },
+    tags=["Workflows"],
+    by_alias=True,
+)
+def get_cluster_workflow_node_detail(
+    request,
+    task_id: str,
+    node_id: str | None = None,
+    attempt_number: str | None = None,
+):
+    """Return one indexed durable node record without scanning the graph."""
+    try:
+        execution = _bounded_workflow_observability_execution(task_id)
+        _require_example_workflow_access(execution)
+        if node_id is None:
+            raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.INVALID_ARGUMENT)
+        return get_workflow_node_detail(
+            execution,
+            node_id,
+            authorize=_authorize_example_workflow,
+            attempt_number=_workflow_integer_argument(attempt_number),
+        )
+    except WorkflowProgressReadError as error:
+        return _workflow_read_error_response(error)
 
 
 _RUNTIME_ENV_BACKENDS = {
