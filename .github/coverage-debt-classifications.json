@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "files": {
+    "src/django_ray/admin.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Admin authorization, input validation, and bounded error responses are observable contracts that should be covered with permission and response assertions."
+      }
+    },
+    "src/django_ray/lifecycle.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Terminal workflow-summary timestamp and state reconciliation are deterministic lifecycle contracts that can be covered with exact persisted-state assertions."
+      }
+    },
+    "src/django_ray/runner/ray_core.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "RuntimeEnv identity rejection and Ray Core submission behavior can be exercised with controlled runner dependencies and exact failure assertions."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "72-81"
+          ],
+          "category": "environment-specific",
+          "rationale": "Ray initialization and transport detection depend on the installed Ray runtime and belong in real-Ray or Linux integration evidence."
+        }
+      ]
+    },
+    "src/django_ray/runner/ray_job.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Ray Job RuntimeEnv identity rejection is a deterministic runner boundary that can be covered with exact submission and mismatch assertions."
+      }
+    },
+    "src/django_ray/runtime/compiled_graph.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Capability normalization and rejection diagnostics are pure policy behavior that can be covered without enabling native Compiled Graph execution."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "707-713"
+          ],
+          "category": "environment-specific",
+          "rationale": "Container-profile auto-detection depends on Linux container marker files and should be exercised in the appropriate container job."
+        }
+      ]
+    },
+    "src/django_ray/runtime/compiled_graph_lifecycle.py": {
+      "default": {
+        "category": "defensive-invariant",
+        "rationale": "The lifecycle reducer validates its own transition output; coverage should prove the invariant or simplify the redundant guard rather than bypass it."
+      }
+    },
+    "src/django_ray/runtime/compiled_graph_probe.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Bounded control-record, subprocess, timeout, and exit-status behavior can be covered with assertion-rich subprocess or fault-injection tests."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "240-245",
+            "576-678",
+            "710-750"
+          ],
+          "category": "environment-specific",
+          "rationale": "Process-group and Windows Job Object ownership paths require the matching operating system and belong in platform-specific probe evidence."
+        }
+      ]
+    },
+    "src/django_ray/runtime/remote.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Progress-actor admission and map registration are package behavior that can be covered with exact state-transition and no-op assertions."
+      }
+    },
+    "src/django_ray/runtime/result_buffer.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Result-buffer count and byte admission limits are public workflow safety contracts that require exact boundary and state-preservation assertions."
+      }
+    },
+    "src/django_ray/runtime/runtime_env.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "RuntimeEnv validation and local-file snapshotting can be covered with temporary paths and assertions about immutable packaged content."
+      }
+    },
+    "src/django_ray/workflow_plans.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Plan validation, normalization, RuntimeEnv identity, and retry-safety decisions are deterministic contracts suited to focused behavioral tests."
+      }
+    },
+    "src/django_ray/workflow_progress_reads.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Bounded summary, cursor, topology, and node-detail read outcomes can be covered with exact query, authorization, and response assertions."
+      }
+    },
+    "src/django_ray/workflow_progress_storage.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Topology preparation, record verification, fenced persistence, audit, and expiry behavior can be covered against SQLite or the dedicated PostgreSQL job."
+      }
+    },
+    "src/django_ray/workflow_progress_summary.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Summary-shape predicates are deterministic compatibility behavior that can be covered with malformed and valid payload assertions."
+      }
+    },
+    "src/django_ray/workflows.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Workflow submission, bounded admission, cleanup, result buffering, reduction, and progress behavior need assertion-rich mocked and real-Ray tests."
+      }
+    }
+  }
+}

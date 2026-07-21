@@ -5,7 +5,7 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install format fix lint typecheck test test-unit test-integration test-postgres test-testproject test-cov check ci build clean help
+.PHONY: all install format fix lint typecheck test test-unit test-integration test-postgres test-testproject test-cov coverage-debt check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
@@ -20,6 +20,8 @@ COVERAGE_GLOBAL_MIN ?= 95
 COVERAGE_WORKER_MIN ?= 90
 COVERAGE_RAY_JOB_MIN ?= 90
 COVERAGE_TESTPROJECT_MIN ?= 80
+COVERAGE_DEBT_OUTPUT_DIR ?= artifacts/coverage-debt
+COVERAGE_DEBT_SOURCE_COMMIT ?= $(shell git rev-parse HEAD)
 
 # =============================================================================
 # Development
@@ -89,6 +91,21 @@ test-cov:
 	pytest -m "not live_cluster" --cov=src --cov-report=html --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
+
+# Produce deterministic line-coverage debt evidence from the normal suite.
+coverage-debt:
+	python scripts/coverage_debt.py prepare-output --output-dir "$(COVERAGE_DEBT_OUTPUT_DIR)"
+	pytest -m "not live_cluster" --cov=src --cov-config=pyproject.toml --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
+	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
+	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
+	coverage json --rcfile=pyproject.toml --pretty-print -o "$(COVERAGE_DEBT_OUTPUT_DIR)/coverage.py.json"
+	python scripts/coverage_debt.py render \
+		--coverage-json "$(COVERAGE_DEBT_OUTPUT_DIR)/coverage.py.json" \
+		--classifications .github/coverage-debt-classifications.json \
+		--pyproject pyproject.toml \
+		--source-commit "$(COVERAGE_DEBT_SOURCE_COMMIT)" \
+		--json-output "$(COVERAGE_DEBT_OUTPUT_DIR)/coverage-debt.json" \
+		--markdown-output "$(COVERAGE_DEBT_OUTPUT_DIR)/coverage-debt.md"
 
 # Run formatting, lint, and type checks without modifying files
 check:
@@ -200,6 +217,7 @@ help:
 	@echo "  test-postgres  - Run PostgreSQL coordination tests"
 	@echo "  test-testproject - Validate the bundled sample project"
 	@echo "  test-cov       - Run tests with coverage"
+	@echo "  coverage-debt  - Build exact JSON and Markdown line-coverage debt reports"
 	@echo "  docs-build     - Build Zensical site"
 	@echo "  docs-build-strict - Build Zensical site (strict mode)"
 	@echo "  docs-serve     - Serve docs locally at http://127.0.0.1:8000"

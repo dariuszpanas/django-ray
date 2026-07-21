@@ -1,0 +1,69 @@
+name: Coverage Debt
+
+on:
+  schedule:
+    - cron: "17 8 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: coverage-debt-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Monthly line-coverage debt report
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COVERAGE_DEBT_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --python 3.12
+
+      - name: Build exact coverage-debt reports
+        run: uv run --no-sync --python 3.12 make coverage-debt
+
+      - name: Add coverage-debt job summary
+        if: always()
+        run: |
+          if [ -f artifacts/coverage-debt/coverage-debt.md ]; then
+            cat artifacts/coverage-debt/coverage-debt.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Coverage-debt reporting did not produce a Markdown report." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage-debt evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-debt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/coverage-debt/coverage.py.json
+            artifacts/coverage-debt/coverage-debt.json
+            artifacts/coverage-debt/coverage-debt.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Update the marked coverage-debt tracker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          uv run --no-sync --python 3.12 python scripts/coverage_debt.py
+          update-tracker
+          --report-json artifacts/coverage-debt/coverage-debt.json
+          --repository "$GITHUB_REPOSITORY"

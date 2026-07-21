@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A manual and monthly line-coverage debt report now records exact JSON and Markdown evidence,
+  classifies every uncovered range, and idempotently updates one marked GitHub tracker comment while
+  preserving the existing global, worker, Ray Job, and testproject coverage floors.
 - Canonical, bounded, secret-free effective workflow plan snapshots with SHA-256
   identities, per-step RuntimeEnv resolution, deterministic strategy diagnostics,
   retry pinning, future-owner cache-key and stale-owner validation helpers, and

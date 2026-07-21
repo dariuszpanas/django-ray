@@ -15,6 +15,7 @@ venv/
 *.log
 .coverage
 coverage.xml
+artifacts/coverage-debt/
 htmlcov/
 site/
 .idea/
