@@ -63,6 +63,38 @@ curl -H "Authorization: Bearer $DJANGO_API_TOKEN" \
   http://localhost:30080/api/executions/stats
 ```
 
+### Authenticate the Sample Dashboard
+
+The landing page never receives `DJANGO_API_TOKEN` from Django. To use **Run test task**,
+**Metrics**, **Executions**, and authenticated statistics refreshes, retrieve the local demo token
+from the Kubernetes Secret and paste it into **Browser API access**.
+
+On PowerShell:
+
+```powershell
+$encodedApiToken = kubectl get secret django-ray-secret -n django-ray -o jsonpath='{.data.DJANGO_API_TOKEN}'
+$apiToken = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encodedApiToken))
+$apiToken
+```
+
+On a POSIX shell:
+
+```bash
+kubectl get secret django-ray-secret -n django-ray \
+  -o jsonpath='{.data.DJANGO_API_TOKEN}' | base64 --decode
+printf '\n'
+```
+
+These commands intentionally print the credential, so run them only in a trusted terminal. The
+dashboard clears the password field after submission and keeps a valid token only in the loaded
+page's JavaScript memory. It does not put the token in rendered HTML, browser storage, cookies, or
+URLs. Select **Forget token** or reload the page to clear it. A missing token produces a prompt;
+invalid or otherwise unverifiable candidates are discarded rather than retained.
+
+This flow is intended for trusted local demos. Do not pass bearer tokens in query strings, and do
+not expose the sample dashboard over an untrusted network or plaintext HTTP. Production front ends
+should use an appropriate identity and session model instead of distributing one operator token.
+
 For a production deployment, start from `k8s/base` (or copy it into an environment overlay),
 replace the placeholder Secret through an external secret manager, and set an explicit host in
 `DJANGO_ALLOWED_HOSTS`. The production mode rejects missing or weak Django/API secrets,
