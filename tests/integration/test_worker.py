@@ -10,7 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.models import (
+    CancellationStatus,
+    RayTaskExecution,
+    TaskAttempt,
+    TaskState,
+    TaskWorkerLease,
+)
+from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +76,36 @@ class TestWorkerSync:
         assert task.error_message is None
         assert task.finished_at is not None
         assert task.claimed_by_worker == "test-worker"
+
+    def test_worker_claim_clears_stale_progress_summary(self, setup_django_env, monkeypatch):
+        """A new execution generation never inherits the previous run summary."""
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-clear-summary-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+            progress_data='{"revision":9}',
+            workflow_progress_summary_json="stale-summary",
+            workflow_run_id="00000000-0000-0000-0000-000000000125",
+        )
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+        monkeypatch.setattr(cmd, "process_task", lambda _task: None)
+
+        assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.progress_data is None
+        assert task.workflow_progress_summary_json is None
+        assert task.workflow_run_id is None
 
     def test_worker_processes_async_task_with_normal_lifecycle(self, setup_django_env):
         """Sync mode awaits a coroutine before persisting its successful result."""
@@ -902,7 +940,13 @@ class TestWorkerOrphanRecovery:
             attempt_number=1,
             started_at=datetime.now(UTC) - timedelta(minutes=10),
             claimed_by_worker="dead-worker",
+            workflow_run_id="00000000-0000-0000-0000-000000000125",
         )
+        terminal_summary = serialize_workflow_progress_summary(
+            workflow_progress_summary(task, state="LOST")
+        )
+        task.workflow_progress_summary_json = terminal_summary
+        task.save(update_fields=["workflow_progress_summary_json"])
 
         cmd = self._make_command()
         cmd.detect_stuck_tasks()
@@ -914,6 +958,9 @@ class TestWorkerOrphanRecovery:
         assert task.claimed_by_worker is None
         assert task.started_at is None
         assert task.finished_at is None
+        assert task.workflow_progress_summary_json is None
+        attempt = TaskAttempt.objects.get(execution=task, attempt_number=1)
+        assert attempt.workflow_progress_summary_json == terminal_summary
 
     def test_recovers_stuck_task_from_missing_worker_lease(self):
         """A task with no corresponding lease should also be recovered."""
@@ -939,6 +986,28 @@ class TestWorkerOrphanRecovery:
         assert task.attempt_number == 2
         assert task.run_after is not None
         assert task.claimed_by_worker is None
+
+    def test_stuck_recovery_skips_retry_when_lost_transition_loses_race(self, monkeypatch):
+        task = RayTaskExecution.objects.create(
+            task_id="test-orphan-lost-race-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[10, 20]",
+            kwargs_json="{}",
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+            claimed_by_worker="missing-worker",
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.mark_task_lost",
+            lambda _task: False,
+        )
+
+        assert self._make_command().detect_stuck_tasks() == 0
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.attempt_number == 1
 
     def test_does_not_recover_task_from_active_other_worker(self):
         """Tasks owned by healthy workers should not be recovered by this worker."""

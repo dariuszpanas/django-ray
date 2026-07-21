@@ -82,8 +82,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A strategy-neutral bounded workflow-progress storage ADR that selects an
   always-bounded task-row summary, database-backed immutable topology pages,
   normalized latest-state detail rows, fenced publication, paginated authorized reads,
-  exact V1 budgets, retention, cleanup, and schema-v1/v2 compatibility. The decision
-  adds no migration or runtime behavior yet.
+  exact V1 budgets, retention, cleanup, and schema-v1/v2 compatibility.
+- Additive current/per-attempt workflow-progress summary fields, a strict canonical
+  schema-v3 codec with a 16 KiB UTF-8 cap, monotonic exact-run writer primitive,
+  one-query bounded v1/v2/v3 compatibility reads, bounded diagnostics, public internal
+  identifier removal, and terminal lifecycle archival or derivation under the task-row
+  lock. Routine Admin and bundled monitoring reads omit or defer complete progress
+  payloads. The standalone writer cannot claim topology/detail pointers, and the current
+  workflow actor remains a schema-v2 writer; schema-v3 activation waits for atomic
+  topology/detail storage and authorized public readers.
 - A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
   with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
   capability identity includes immutable deployment, shared-memory, and object-store
@@ -102,6 +109,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before rebase merges.
 - Worker heartbeat, completion, reconciliation, timeout, cancellation, and lease
   cleanup schedules now remain independent from idle claim polling.
+
+### Migration
+
+- Apply `0012_workflow_progress_summary` before deploying upgraded readers. The two new
+  columns are nullable, so existing rows and rolling old writers remain valid. Keep the
+  schema-v3 producer disabled through the topology/detail and public-reader rollout,
+  then drain old workflow writers before activation. Reversing this migration drops the
+  new summary history columns but does not modify legacy `progress_data`.
 
 ## [0.3.1] - 2026-07-18
 

@@ -11,8 +11,10 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser, Permission
 from django.core.exceptions import PermissionDenied
+from django.db import connection
 from django.http import Http404
 from django.test import RequestFactory, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from django_ray.admin import (
@@ -23,6 +25,8 @@ from django_ray.admin import (
     TaskWorkerLeaseAdmin,
 )
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 
 def _request() -> Any:
@@ -130,6 +134,31 @@ class TestRayTaskExecutionAdmin:
         task.error_traceback = None
         assert admin_obj.error_message_display(task) == "-"
         assert admin_obj.error_traceback_display(task) == "-"
+
+    def test_routine_admin_queryset_defers_complete_progress_payloads(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="admin-bounded-change-form-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            progress_data="legacy-graph" * 10_000,
+            workflow_progress_summary_json="summary" * 10_000,
+        )
+        admin_obj = _task_admin()
+
+        with CaptureQueriesContext(connection) as queries:
+            loaded = admin_obj.get_queryset(_request()).get(pk=task.pk)
+
+        assert loaded.pk == task.pk
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(task_selects) == 1
+        assert "progress_data" not in task_selects[0]
+        assert "workflow_progress_summary_json" not in task_selects[0]
+        assert "progress_data_display" not in admin_obj.readonly_fields
 
     @pytest.mark.parametrize(
         "state",
@@ -353,6 +382,57 @@ class TestRayTaskExecutionAdmin:
         }
         assert "secret" not in json.dumps(payload)
 
+    def test_observability_endpoint_defers_payloads_and_reads_progress_once(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-bounded-query-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            progress_data=json.dumps({"schema_version": 1, "revision": 4}),
+            args_json=json.dumps(["private-input"]),
+        )
+        user = get_user_model().objects.create_superuser(username="bounded-query-admin")
+        request = RequestFactory().get("/admin/live/")
+        request.user = user
+
+        with CaptureQueriesContext(connection) as queries:
+            response = _task_admin().observability_view(request, str(execution.pk))
+
+        assert response.status_code == 200
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(task_selects) == 2
+        assert "progress_data" not in task_selects[0]
+        assert "workflow_progress_summary_json" not in task_selects[0]
+        assert "args_json" not in task_selects[0]
+
+    def test_observability_endpoint_maps_bounded_v3_summary(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-v3-summary-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            workflow_run_id="00000000-0000-0000-0000-000000000125",
+        )
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(
+            workflow_progress_summary(execution, published_detail=True)
+        )
+        execution.save(update_fields=["workflow_progress_summary_json"])
+        user = get_user_model().objects.create_superuser(username="v3-summary-admin")
+        request = RequestFactory().get("/admin/live/")
+        request.user = user
+
+        payload = json.loads(_task_admin().observability_view(request, str(execution.pk)).content)
+
+        assert payload["workflow_revision"] == 1
+        assert payload["workflow"]["revision"] == 1
+        assert payload["workflow"]["total_nodes"] == 1
+        assert payload["workflow"]["pending_nodes"] == 1
+        assert payload["workflow"]["detail"]["availability"] == "AVAILABLE"
+        assert "task_execution_pk" not in payload["workflow"]["run_identity"]
+
     def test_change_form_loads_live_status_panel_and_package_script(
         self,
     ) -> None:
@@ -360,6 +440,8 @@ class TestRayTaskExecutionAdmin:
             task_id="admin-live-form-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
+            progress_data="legacy-graph" * 10_000,
+            workflow_progress_summary_json="summary" * 10_000,
         )
         user_model = get_user_model()
         superuser = user_model.objects.create_superuser(
@@ -371,8 +453,9 @@ class TestRayTaskExecutionAdmin:
         )
         request = RequestFactory().get(change_url)
         request.user = superuser
-        response = _task_admin().change_view(request, str(execution.pk))
-        response.render()
+        with CaptureQueriesContext(connection) as queries:
+            response = _task_admin().change_view(request, str(execution.pk))
+            response.render()
 
         content = response.content.decode("utf-8")
         endpoint = reverse(
@@ -384,6 +467,15 @@ class TestRayTaskExecutionAdmin:
         assert f'data-observability-url="{endpoint}"' in content
         assert 'src="/static/django_ray/admin/task_live.js"' in content
         assert 'aria-live="polite"' in content
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert task_selects
+        assert all("progress_data" not in query for query in task_selects)
+        assert all("workflow_progress_summary_json" not in query for query in task_selects)
 
     def test_retry_tasks_requeues_failed_and_lost(self, monkeypatch) -> None:
         admin_obj = _task_admin()

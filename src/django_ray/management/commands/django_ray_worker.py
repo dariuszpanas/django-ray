@@ -15,7 +15,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import transaction
 
 from django_ray.conf.settings import get_settings
-from django_ray.lifecycle import record_failure, succeed_task
+from django_ray.lifecycle import cancel_task, record_failure, retry_task, succeed_task
 from django_ray.logging import get_worker_logger
 from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.runner.base import SubmissionHandle
@@ -850,6 +850,7 @@ class Command(BaseCommand):
                 task.execution_generation = int(task.execution_generation) + 1
                 task.completion_data = None
                 task.progress_data = None
+                task.workflow_progress_summary_json = None
                 task.workflow_run_id = None
                 task.workflow_plan_selection = None
                 task.ray_job_id = None
@@ -863,6 +864,7 @@ class Command(BaseCommand):
                         "execution_generation",
                         "completion_data",
                         "progress_data",
+                        "workflow_progress_summary_json",
                         "workflow_run_id",
                         "workflow_plan_selection",
                         "ray_job_id",
@@ -1197,9 +1199,7 @@ class Command(BaseCommand):
                 # Skip if task was cancelled externally
                 if task.state in (TaskState.CANCELLED, TaskState.CANCELLING):
                     if task.state == TaskState.CANCELLING:
-                        task.state = TaskState.CANCELLED
-                        task.finished_at = datetime.now(UTC)
-                        task.save(update_fields=["state", "finished_at"])
+                        cancel_task(task)
                     self.stdout.write(self.style.WARNING(f"\n  Task {task.pk} was cancelled"))
                     continue
 
@@ -1332,9 +1332,7 @@ class Command(BaseCommand):
         # Skip reconciliation if task was cancelled externally.
         if task.state in (TaskState.CANCELLED, TaskState.CANCELLING):
             if task.state == TaskState.CANCELLING:
-                task.state = TaskState.CANCELLED
-                task.finished_at = datetime.now(UTC)
-                task.save(update_fields=["state", "finished_at"])
+                cancel_task(task)
             completed_tasks.append(task.pk)
             self.stdout.write(self.style.WARNING(f"\nTask {task.pk} was cancelled"))
             return
@@ -1378,9 +1376,7 @@ class Command(BaseCommand):
         if job_info.status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.STOPPED):
             if task.state in (TaskState.CANCELLED, TaskState.CANCELLING):
                 if task.state == TaskState.CANCELLING:
-                    task.state = TaskState.CANCELLED
-                    task.finished_at = now
-                    task.save(update_fields=["state", "finished_at"])
+                    cancel_task(task)
                 completed_tasks.append(task.pk)
                 return
             if task.state != TaskState.RUNNING:
@@ -1504,16 +1500,13 @@ class Command(BaseCommand):
             return
 
         if job_info.status == JobStatus.STOPPED:
-            updated = RayTaskExecution.objects.filter(
-                pk=task.pk,
-                state=TaskState.RUNNING,
-                ray_job_id=ray_job_id,
-                execution_generation=task.execution_generation,
-            ).update(state=TaskState.CANCELLED, finished_at=now)
-            if not updated:
+            if not cancel_task(
+                task,
+                allowed_states=(TaskState.RUNNING,),
+                expected_ray_job_id=ray_job_id,
+                expected_execution_generation=task.execution_generation,
+            ):
                 return
-            task.state = TaskState.CANCELLED
-            task.finished_at = now
             completed_tasks.append(task.pk)
             self.stdout.write(self.style.WARNING(f"\nTask {task.pk} was stopped"))
             return
@@ -1709,39 +1702,25 @@ class Command(BaseCommand):
                         )
                     )
 
-                mark_task_lost(task)
+                if not mark_task_lost(task):
+                    continue
 
                 # Check if we should retry the lost task
                 retry_decision = should_retry(task, exception_type="TaskLost")
                 if retry_decision.should_retry:
-                    task.state = TaskState.QUEUED
-                    task.attempt_number += 1
-                    task.run_after = retry_decision.next_attempt_at
-                    task.started_at = None
-                    task.finished_at = None
-                    task.claimed_by_worker = None
-                    task.progress_data = None
-                    task.workflow_run_id = None
-                    task.workflow_plan_selection = None
-                    task.save(
-                        update_fields=[
-                            "state",
-                            "attempt_number",
-                            "run_after",
-                            "started_at",
-                            "finished_at",
-                            "claimed_by_worker",
-                            "progress_data",
-                            "workflow_run_id",
-                            "workflow_plan_selection",
-                        ]
+                    retried = retry_task(
+                        task,
+                        allowed_states=(TaskState.LOST,),
+                        next_attempt_at=retry_decision.next_attempt_at,
                     )
-                    self.stdout.write(
-                        self.style.NOTICE(
-                            f"  Scheduling retry #{task.attempt_number} "
-                            f"at {retry_decision.next_attempt_at}"
+                    if retried is not None:
+                        task = retried
+                        self.stdout.write(
+                            self.style.NOTICE(
+                                f"  Scheduling retry #{task.attempt_number} "
+                                f"at {retry_decision.next_attempt_at}"
+                            )
                         )
-                    )
 
                 stuck_count += 1
                 if not claimed_by_this_worker:

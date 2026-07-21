@@ -1,6 +1,6 @@
 # ADR-0004: Bounded Workflow Progress Storage
 
-- **Status:** Accepted as a strategy-neutral storage contract; implementation pending
+- **Status:** Accepted; bounded summary layer implemented, detail/services pending
 - **Date:** 2026-07-20
 - **Decision owners:** django-ray maintainers
 - **Related contracts:** [Ray-Native Workflows](../workflows.md),
@@ -166,8 +166,17 @@ bounded orphans and cannot become current by matching only a revision number or 
 fingerprint.
 
 Terminal publication follows the same fence while the run still owns progress. The
-bounded terminal summary is copied to `TaskAttempt` before retry reset. Complete node
-detail is never copied into the task row or attempt history.
+bounded terminal summary is copied to `TaskAttempt` before retry reset. When timeout,
+loss, cancellation, or another lifecycle owner wins before the producer publishes its
+terminal state, the lifecycle transition derives a canonical terminal envelope from
+the last accepted running summary under the same task-row lock. Complete node detail
+is never copied into the task row or attempt history. Derivation advances the reserved
+final summary revision and records the outer outcome and detail expiry. Success marks
+every discovered node succeeded and progress complete; interrupted outcomes preserve
+the last observed node counters rather than fabricating unavailable final node states.
+Producer publications reserve that final revision. If a producer-authored terminal
+outcome races and disagrees, the row-locked durable task transition remains authoritative
+and derives the next terminal envelope.
 
 ## Version 1 limits
 
@@ -341,11 +350,11 @@ equivalent tombstone and retry protocol before it can become a V1-compatible bac
 
 ## Admin and service reads
 
-Periodic Admin polling reads only the bounded task-row summary. It does not load,
-parse, redact, count, or deserialize topology pages, normalized detail rows, or the
-legacy `progress_data` value. The task change form presents explicit availability
-and links to authorized paginated detail services rather than rendering a complete
-graph field.
+Periodic Admin polling prefers the bounded task-row summary. During the reader-first
+compatibility window, it may use the SQL-length-guarded schema-v1/v2 fallback under the
+64 MiB legacy cap; after the writer drain it reads only the 16 KiB summary. It never
+loads topology pages or normalized detail rows. The task change form defers both
+progress payloads and does not render the legacy complete graph field.
 
 Package task summaries likewise read the bounded summary directly. A caller must
 request detail explicitly. A summary poll therefore remains bounded even when the
@@ -355,13 +364,18 @@ run observed more nodes than V1 retained.
 
 Readers are deployed before writers:
 
-1. Add nullable summary, package-owned topology storage, normalized-detail storage,
-   and readers that understand schema versions 1, 2, and 3.
-2. Keep existing workers on schema v1/v2 while the reader deployment settles.
-3. Drain old workflow writers before enabling schema-v3 publication.
-4. Enable the new writer, which publishes the dedicated summary, immutable topology
-   pages, and normalized detail rows and stops writing a complete graph to
-   `progress_data`.
+1. Add the nullable current/per-attempt summary fields and bounded readers that
+   understand schema versions 1, 2, and 3. Keep every producer on schema v1/v2 while
+   this deployment settles. This is the #125 delivery.
+2. Add package-owned topology storage, normalized-detail storage, the internal readers
+   needed to validate publication, and writer code that can commit detail and its
+   summary pointer atomically. Keep activation disabled. This is #126.
+3. Add the authorized public summary/detail facade and indexed/paginated reads. This is
+   #127; old Admin and application clients must not encounter schema v3 before their
+   compatible readers are deployed.
+4. Drain old workflow writers, then enable the new producer. It publishes the dedicated
+   summary, immutable topology pages, and normalized detail rows and stops writing a
+   complete graph to `progress_data`.
 5. Remove the legacy field only in a later, explicitly reviewed migration after the
    compatibility window closes.
 
@@ -430,16 +444,19 @@ choose `OMITTED_BY_POLICY`; the durable contract cannot assume the actor survive
 
 ## Implementation boundaries
 
-Implementation should remain split into focused deliveries:
+Implementation remains split into focused deliveries:
 
-1. Add the bounded summary schema, migration, writer fence, terminal attempt summary,
-   and v1/v2/v3 dual readers.
-2. Add database topology manifests/pages, normalized latest-state detail rows, limits,
+1. **Implemented by #125:** the bounded summary schema, additive migration, monotonic
+   exact-run writer primitive, terminal attempt summary, and v1/v2/v3 rolling readers.
+   The standalone primitive cannot claim topology/detail; its locked hook is internal
+   groundwork for #126, and the runtime actor remains schema v2.
+2. **Pending #126:** database topology manifests/pages, normalized latest-state detail rows, limits,
    integrity validation, retention, and topology-orphan cleanup.
-3. Add package-owned paginated services, indexed single-node retrieval, authorization,
-   and summary-only Admin polling.
-4. Coordinate producer and collector memory limits with the separate reporting-policy
-   work; do not claim this storage decision bounds the actor mailbox by itself.
+3. **Pending #127:** package-owned paginated services, indexed single-node retrieval,
+   authorization, and public detail routes. Schema-v3 Admin aggregate mapping exists,
+   but activation remains gated on this public-reader deployment.
+4. **Coordinated with #79:** producer and collector memory limits and reporting policy.
+   Do not claim this storage decision bounds the actor mailbox by itself.
 
 Required evidence includes deterministic threshold tests, PostgreSQL write/WAL and
 query measurements, retry and stale-writer races, missing/corrupt/orphan cleanup,

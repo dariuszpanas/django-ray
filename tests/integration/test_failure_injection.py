@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 
 @pytest.mark.django_db
@@ -73,9 +75,14 @@ class TestFailureInjection:
             args_json="[3, 4]",
             kwargs_json="{}",
             attempt_number=1,
+            workflow_run_id="00000000-0000-0000-0000-000000000125",
             ray_job_id="raysubmit_stopped_001",
             ray_address="ray://cluster:10001",
         )
+        task.workflow_progress_summary_json = serialize_workflow_progress_summary(
+            workflow_progress_summary(task, state="CANCELLED")
+        )
+        task.save(update_fields=["workflow_progress_summary_json"])
 
         class FakeRunner:
             def get_status(self, handle):
@@ -100,6 +107,8 @@ class TestFailureInjection:
         assert task.state == TaskState.CANCELLED
         assert task.finished_at is not None
         assert task.pk not in cmd.active_tasks
+        attempt = TaskAttempt.objects.get(execution=task, attempt_number=1)
+        assert attempt.workflow_progress_summary_json == task.workflow_progress_summary_json
 
     def test_cancellation_race_prefers_cancelled_over_completed_result(self, monkeypatch):
         """If cancellation arrives before poll processing, task should finalize CANCELLED."""

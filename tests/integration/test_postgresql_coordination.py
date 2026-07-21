@@ -11,14 +11,17 @@ from threading import Barrier, Event
 
 import pytest
 from django.db import close_old_connections, connection, transaction
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
+import django_ray.workflow_progress as workflow_progress_module
 from django_ray.input_storage import load_task_input, prepare_task_input, register_task_input
 from django_ray.lifecycle import record_failure, retry_task, succeed_task
 from django_ray.management.commands.django_ray_purge_inputs import Command as PurgeInputsCommand
 from django_ray.models import (
     InputPayloadState,
     RayTaskExecution,
+    TaskAttempt,
     TaskInputPayload,
     TaskState,
     TaskWorkerLease,
@@ -27,7 +30,18 @@ from django_ray.runner.cancellation import finalize_cancellation, request_cancel
 from django_ray.runner.leasing import get_active_workers
 from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow_progress import claim_workflow_run, persist_workflow_progress
+from django_ray.workflow_progress import (
+    WorkflowProgressDiagnosticCode,
+    claim_workflow_run,
+    persist_workflow_progress,
+    persist_workflow_progress_summary,
+    read_workflow_progress,
+)
+from django_ray.workflow_progress_summary import (
+    deserialize_workflow_progress_summary,
+    serialize_workflow_progress_summary,
+)
+from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.postgresql]
 
@@ -422,6 +436,194 @@ def test_workflow_progress_retry_race_cannot_resurrect_cleared_snapshot() -> Non
     assert task.workflow_run_id is None
     assert task.progress_data is None
     assert persist_workflow_progress(identity, _workflow_snapshot(identity, 3)) is False
+
+
+def test_v3_summary_retry_race_cannot_resurrect_cleared_summary() -> None:
+    task = _execution(
+        "postgres-v3-summary-retry-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=7,
+        started_at=datetime.now(UTC),
+    )
+    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000125")
+    assert claim_workflow_run(identity)
+    task.refresh_from_db(fields=["workflow_run_id"])
+    assert persist_workflow_progress_summary(identity, workflow_progress_summary(task))
+    retry = RayTaskExecution.objects.get(pk=task.pk)
+    late_summary = workflow_progress_summary(task, summary_revision=3)
+    terminal_summary = workflow_progress_summary(
+        task,
+        summary_revision=2,
+        state="FAILED",
+    )
+    terminal_serialized = serialize_workflow_progress_summary(terminal_summary)
+
+    results = _run_concurrently(
+        lambda: record_failure(
+            retry,
+            error_message="retry bounded summary",
+            retry=True,
+            next_attempt_at=datetime.now(UTC),
+            expected_execution_generation=7,
+        ),
+        lambda: persist_workflow_progress_summary(
+            identity,
+            terminal_summary,
+        ),
+    )
+
+    assert results[0] is True
+    assert results[1] in {True, False}
+    task.refresh_from_db()
+    assert task.state == TaskState.QUEUED
+    assert task.attempt_number == 2
+    assert task.workflow_run_id is None
+    assert task.workflow_progress_summary_json is None
+    attempt = TaskAttempt.objects.get(execution=task, attempt_number=1)
+    if results[1] is True:
+        assert attempt.workflow_progress_summary_json == terminal_serialized
+    else:
+        archived = deserialize_workflow_progress_summary(attempt.workflow_progress_summary_json)
+        assert archived["state"] == "FAILED"
+        assert archived["terminal"]["outcome"] == "FAILED"
+    assert (
+        persist_workflow_progress_summary(
+            identity,
+            late_summary,
+        )
+        is False
+    )
+
+
+def test_v3_summary_terminal_race_leaves_terminal_state_authoritative() -> None:
+    task = _execution(
+        "postgres-v3-summary-terminal-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=8,
+        started_at=datetime.now(UTC),
+    )
+    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000126")
+    assert claim_workflow_run(identity)
+    task.refresh_from_db(fields=["workflow_run_id"])
+    assert persist_workflow_progress_summary(identity, workflow_progress_summary(task))
+    completion = RayTaskExecution.objects.get(pk=task.pk)
+    terminal_summary = workflow_progress_summary(
+        task,
+        summary_revision=2,
+        state="SUCCEEDED",
+    )
+    terminal_serialized = serialize_workflow_progress_summary(terminal_summary)
+
+    results = _run_concurrently(
+        lambda: succeed_task(
+            completion,
+            result_data="3",
+            result_reference=None,
+            expected_execution_generation=8,
+        ),
+        lambda: persist_workflow_progress_summary(
+            identity,
+            terminal_summary,
+        ),
+    )
+
+    assert results[0] is True
+    assert results[1] in {True, False}
+    task.refresh_from_db()
+    assert task.state == TaskState.SUCCEEDED
+    attempt = TaskAttempt.objects.get(execution=task, attempt_number=1)
+    if results[1] is True:
+        assert attempt.workflow_progress_summary_json == terminal_serialized
+    else:
+        archived = deserialize_workflow_progress_summary(attempt.workflow_progress_summary_json)
+        assert archived["state"] == "SUCCEEDED"
+        assert archived["terminal"]["outcome"] == "SUCCEEDED"
+    assert (
+        persist_workflow_progress_summary(
+            identity,
+            workflow_progress_summary(task, summary_revision=3),
+        )
+        is False
+    )
+
+
+def test_v3_conflicting_terminal_writer_cannot_override_lost_outcome() -> None:
+    task = _execution(
+        "postgres-v3-conflicting-terminal-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=9,
+        started_at=datetime.now(UTC),
+    )
+    identity = _workflow_identity(task, "00000000-0000-0000-0000-00000000012a")
+    assert claim_workflow_run(identity)
+    task.refresh_from_db(fields=["workflow_run_id"])
+    assert persist_workflow_progress_summary(identity, workflow_progress_summary(task))
+    lost = RayTaskExecution.objects.get(pk=task.pk)
+    succeeded = workflow_progress_summary(
+        task,
+        summary_revision=2,
+        state="SUCCEEDED",
+    )
+
+    results = _run_concurrently(
+        lambda: mark_task_lost(lost),
+        lambda: persist_workflow_progress_summary(identity, succeeded),
+    )
+
+    assert results[0] is True
+    assert results[1] in {True, False}
+    task.refresh_from_db()
+    attempt = TaskAttempt.objects.get(execution=task, attempt_number=1)
+    archived = deserialize_workflow_progress_summary(attempt.workflow_progress_summary_json)
+    assert task.state == TaskState.LOST
+    assert archived["state"] == "LOST"
+    assert archived["terminal"]["outcome"] == "LOST"
+    assert archived["summary_revision"] == (3 if results[1] is True else 2)
+    assert persist_workflow_progress_summary(identity, succeeded) is False
+
+
+def test_v3_summary_writer_rolls_back_with_owning_transaction() -> None:
+    task = _execution(
+        "postgres-v3-summary-rollback-001",
+        state=TaskState.RUNNING,
+        execution_generation=2,
+    )
+    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000127")
+    assert claim_workflow_run(identity)
+    task.refresh_from_db(fields=["workflow_run_id"])
+
+    with pytest.raises(RuntimeError, match="roll back summary"):
+        with transaction.atomic():
+            assert persist_workflow_progress_summary(identity, workflow_progress_summary(task))
+            raise RuntimeError("roll back summary")
+
+    task.refresh_from_db()
+    assert task.workflow_progress_summary_json is None
+
+
+def test_postgresql_reader_bounds_legacy_text_before_transfer(monkeypatch) -> None:
+    task = _execution(
+        "postgres-bounded-legacy-reader-001",
+        state=TaskState.RUNNING,
+        progress_data=json.dumps({"schema_version": 1, "message": "x" * 1_000}),
+    )
+    monkeypatch.setattr(workflow_progress_module, "WORKFLOW_PROGRESS_LEGACY_MAX_BYTES", 128)
+
+    with CaptureQueriesContext(connection) as queries:
+        result = read_workflow_progress(task)
+
+    assert result.diagnostic_code is WorkflowProgressDiagnosticCode.LEGACY_OVERSIZED
+    assert result.payload is None
+    selects = [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].lstrip().upper().startswith("SELECT")
+    ]
+    assert len(selects) == 1
+    assert "OCTET_LENGTH" in selects[0].upper()
 
 
 def test_workflow_progress_cancellation_race_disables_late_writer() -> None:

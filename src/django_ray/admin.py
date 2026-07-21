@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from django.contrib import admin
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import QuerySet
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.urls import path, reverse
@@ -48,6 +48,30 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
     """Admin for RayTaskExecution model."""
 
     change_form_template = "admin/django_ray/raytaskexecution/change_form.html"
+    observability_fields = (
+        "pk",
+        "task_id",
+        "callable_path",
+        "queue_name",
+        "priority",
+        "state",
+        "attempt_number",
+        "execution_generation",
+        "workflow_run_id",
+        "created_at",
+        "run_after",
+        "started_at",
+        "finished_at",
+        "last_heartbeat_at",
+        "claimed_by_worker",
+        "ray_job_id",
+        "runtime_env_profile",
+        "runtime_env_hash",
+        "workflow_plan_fingerprint",
+        "workflow_plan_pinned_attempt",
+        "workflow_plan_selection",
+        "error_message",
+    )
 
     list_display = [
         "id",
@@ -98,7 +122,6 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "input_reference",
         "result_data_display",
         "result_reference",
-        "progress_data_display",
         "completion_data_display",
         "cancellation_status",
         "cancellation_error",
@@ -138,7 +161,6 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
                 "fields": (
                     "result_data_display",
                     "result_reference",
-                    "progress_data_display",
                     "completion_data_display",
                     "cancellation_status",
                     "cancellation_error",
@@ -168,6 +190,18 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             },
         ),
     )
+
+    def get_queryset(self, request: HttpRequest) -> QuerySet[RayTaskExecution]:
+        """Keep complete workflow payloads out of routine Admin reads."""
+        return (
+            super()
+            .get_queryset(request)
+            .defer(
+                "progress_data",
+                "workflow_progress_summary_json",
+            )
+        )
+
     ordering = ["-created_at"]
     actions = ["retry_tasks", "cancel_tasks"]
 
@@ -206,7 +240,13 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         """Return a versioned durable summary without querying Ray or task logs."""
         if request.method != "GET":
             return HttpResponseNotAllowed(["GET"])
-        execution = self.get_object(request, unquote(object_id))
+        try:
+            execution_id = self.model._meta.pk.to_python(unquote(object_id))
+            execution = (
+                self.get_queryset(request).only(*self.observability_fields).get(pk=execution_id)
+            )
+        except (RayTaskExecution.DoesNotExist, ValidationError, ValueError):
+            execution = None
         if execution is None:
             raise Http404("Ray task execution was not found")
         if not self.has_view_permission(request, execution):
@@ -214,25 +254,52 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
 
         from django_ray import observability
 
-        summary = observability.get_task_summary(execution)
-        if summary.get("error_message") is not None:
-            summary["error_message"] = _bounded_redacted_text(summary["error_message"])
+        workflow_error = None
         try:
             progress = observability.get_workflow_progress(execution)
         except observability.WorkflowObservabilityError as error:
             progress = None
-            summary["workflow_error"] = _bounded_redacted_text(error)
+            workflow_error = _bounded_redacted_text(error)
+        summary = observability.get_task_summary(execution, workflow_progress=progress)
+        if summary.get("error_message") is not None:
+            summary["error_message"] = _bounded_redacted_text(summary["error_message"])
+        if workflow_error is not None:
+            summary["workflow_error"] = workflow_error
+        node_counts = progress.get("node_counts", {}) if progress is not None else {}
+        schema_v3 = (
+            progress is not None
+            and progress.get("schema_version")
+            == observability.WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION
+        )
         summary["workflow"] = (
             {
-                "revision": progress.get("revision", 0),
+                "revision": progress.get(
+                    "summary_revision" if schema_v3 else "revision",
+                    0,
+                ),
                 "run_identity": progress.get("run_identity"),
                 "state": progress.get("state", "RUNNING"),
-                "total_nodes": progress.get("total_nodes", 0),
-                "completed_nodes": progress.get("completed_nodes", 0),
-                "failed_nodes": progress.get("failed_nodes", 0),
-                "running_nodes": progress.get("running_nodes", 0),
-                "pending_nodes": progress.get("pending_nodes", 0),
+                "total_nodes": (
+                    node_counts.get("discovered", 0)
+                    if schema_v3
+                    else progress.get("total_nodes", 0)
+                ),
+                "completed_nodes": (
+                    node_counts.get("succeeded", 0)
+                    if schema_v3
+                    else progress.get("completed_nodes", 0)
+                ),
+                "failed_nodes": (
+                    node_counts.get("failed", 0) if schema_v3 else progress.get("failed_nodes", 0)
+                ),
+                "running_nodes": (
+                    node_counts.get("running", 0) if schema_v3 else progress.get("running_nodes", 0)
+                ),
+                "pending_nodes": (
+                    node_counts.get("pending", 0) if schema_v3 else progress.get("pending_nodes", 0)
+                ),
                 "progress_percent": progress.get("progress_percent", 0.0),
+                **({"detail": progress.get("detail")} if schema_v3 else {}),
             }
             if progress is not None
             else None
