@@ -137,6 +137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the configured credential.
 - Ray Client task submission now keeps the pre-RuntimeEnv bootstrap import-free on generic Ray
   images and discards failed remote-function definitions before retrying.
+- Kubernetes web probes now send explicit `Host` headers that match each production or local
+  allow-list without admitting dynamic pod IPs or wildcard hosts.
 
 ### Migration
 

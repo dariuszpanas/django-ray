@@ -153,6 +153,9 @@ patches:
           httpGet:
             path: /api/livez
             port: 8000
+            httpHeaders:
+              - name: Host
+                value: django-ray.localhost
           periodSeconds: 10
           timeoutSeconds: 10
           failureThreshold: 18

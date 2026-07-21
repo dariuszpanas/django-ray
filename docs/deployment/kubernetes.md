@@ -100,6 +100,14 @@ replace the placeholder Secret through an external secret manager, and set an ex
 `DJANGO_ALLOWED_HOSTS`. The production mode rejects missing or weak Django/API secrets,
 `DEBUG=True`, and wildcard hosts before Gunicorn starts.
 
+The base web readiness and liveness probes connect to the pod IP but explicitly send
+`Host: django-ray.example.com`, matching the base allow-list. A production overlay that changes
+`DJANGO_ALLOWED_HOSTS` must patch both probe `httpHeaders` values to one of its accepted application
+hosts; do not add dynamic pod IPs or a wildcard to the allow-list. The local-demo overlays instead
+send `Host: django-ray.localhost`. The Kong local overlay deliberately uses a TCP readiness probe and
+process liveness probe for its overload-testing profile, while its HTTP startup probe sends the same
+local host header.
+
 When using the Kong local overlay on Docker Desktop's managed kind cluster, use:
 
 ```bash
@@ -327,10 +335,13 @@ Set via ConfigMap:
 data:
   DJANGO_DEPLOYMENT_MODE: "production"
   DJANGO_DEBUG: "False"
-  DJANGO_ALLOWED_HOSTS: "app.example.com"
+  DJANGO_ALLOWED_HOSTS: "django-ray.example.com"
   DATABASE_ENGINE: "django.db.backends.postgresql"
   DATABASE_HOST: "postgres-svc"
 ```
+
+If the public application host differs, patch `DJANGO_ALLOWED_HOSTS` and the web readiness and
+liveness probe `Host` headers together in the same production overlay.
 
 ### Secrets
 
