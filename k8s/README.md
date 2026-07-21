@@ -414,7 +414,7 @@ For more details, see the [Ray TLS documentation](https://docs.ray.io/en/latest/
 | `DJANGO_SECRET_KEY` | placeholder in base Secret | Random value of at least 50 characters in production |
 | `DJANGO_API_TOKEN` | placeholder in base Secret | Bearer token for non-health API routes; at least 32 characters in production |
 | `DJANGO_DEBUG` | False | Debug mode; production rejects True |
-| `DJANGO_ALLOWED_HOSTS` | `django-ray.example.com` | Explicit comma-separated hosts; production rejects `*` |
+| `DJANGO_ALLOWED_HOSTS` | `django-ray.example.com` | Explicit comma-separated hosts; production rejects `*`. Keep web probe `Host` headers aligned in production overlays. |
 
 ### Database Configuration
 

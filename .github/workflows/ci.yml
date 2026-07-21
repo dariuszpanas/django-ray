@@ -85,6 +85,7 @@ jobs:
       COVERAGE_GLOBAL_MIN: "95"
       COVERAGE_WORKER_MIN: "90"
       COVERAGE_RAY_JOB_MIN: "90"
+      DJANGO_RAY_REQUIRE_KUSTOMIZE_PROBE_TESTS: "1"
     strategy:
       fail-fast: false
       matrix:

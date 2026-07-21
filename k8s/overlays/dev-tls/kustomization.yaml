@@ -29,6 +29,18 @@ patches:
         path: /data/DJANGO_ALLOWED_HOSTS
         value: "localhost,127.0.0.1,django-ray.localhost"
 
+  # Kubelet connects to the pod IP but sends this stable, allowed Host header.
+  - target:
+      kind: Deployment
+      name: django-web
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/httpHeaders/0/value
+        value: django-ray.localhost
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/httpHeaders/0/value
+        value: django-ray.localhost
+
   # Ray Head TLS configuration
   - target:
       kind: Deployment

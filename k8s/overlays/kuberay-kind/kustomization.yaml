@@ -30,6 +30,18 @@ patches:
       kind: ConfigMap
       name: django-ray-config
 
+  # Kubelet connects to the pod IP but sends this stable, allowed Host header.
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/httpHeaders/0/value
+        value: django-ray.localhost
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/httpHeaders/0/value
+        value: django-ray.localhost
+    target:
+      kind: Deployment
+      name: django-web
+
   # Remove legacy static Ray resources from base.
   - patch: |-
       $patch: delete

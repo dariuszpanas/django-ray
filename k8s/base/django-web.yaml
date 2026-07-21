@@ -73,16 +73,24 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          # Keep the probe Host values aligned with DJANGO_ALLOWED_HOSTS when
+          # deriving a production overlay from this base.
           readinessProbe:
             httpGet:
               path: /api/health
               port: 8000
+              httpHeaders:
+                - name: Host
+                  value: django-ray.example.com
             initialDelaySeconds: 10
             periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /api/health
               port: 8000
+              httpHeaders:
+                - name: Host
+                  value: django-ray.example.com
             initialDelaySeconds: 30
             periodSeconds: 10
           volumeMounts:

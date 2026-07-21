@@ -147,6 +147,9 @@ patches:
           httpGet:
             path: /api/health
             port: 8000
+            httpHeaders:
+              - name: Host
+                value: django-ray.localhost
           initialDelaySeconds: 30
           periodSeconds: 15
           timeoutSeconds: 10
@@ -157,6 +160,9 @@ patches:
           httpGet:
             path: /api/health
             port: 8000
+            httpHeaders:
+              - name: Host
+                value: django-ray.localhost
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 5
