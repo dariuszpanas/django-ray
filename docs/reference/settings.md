@@ -368,6 +368,22 @@ state, and workflow run ID.
 "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1
 ```
 
+### WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS
+
+- **Type**: `int` (booleans are rejected)
+- **Default**: `7`
+- **Allowed**: `0` to `30`
+
+Number of whole days to retain terminal workflow topology and node detail. A value of
+`0` makes terminal detail eligible for cleanup as soon as the terminal state is durably
+archived; cleanup is still a separate operation. Active current detail is never made
+eligible by this setting. The bounded terminal summary stored with the task attempt
+follows task-attempt retention and remains available after detail expires.
+
+```python
+"WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7
+```
+
 ## Durable Inputs
 
 ### MAX_INLINE_INPUT_SIZE_BYTES
@@ -644,6 +660,7 @@ DJANGO_RAY = {
     "WORKER_HEARTBEAT_SECONDS": 15,
     "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
     "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
+    "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7,
 }
 ```
 

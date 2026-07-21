@@ -12,7 +12,7 @@ from uuid import UUID
 from django.db import transaction
 from django.db.models import Case, F, Func, IntegerField, Q, TextField, Value, When
 
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import RayTaskExecution, TaskState, WorkflowProgressRunStorage
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
     WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION,
@@ -164,6 +164,14 @@ def claim_workflow_run(
         )
         if execution is None:
             return False
+        previous_run_id = execution.workflow_run_id
+        if previous_run_id is not None and str(previous_run_id) != identity.run_id:
+            WorkflowProgressRunStorage.objects.filter(
+                execution=execution,
+                attempt_number=execution.attempt_number,
+                execution_generation=execution.execution_generation,
+                run_id=previous_run_id,
+            ).delete()
         update_fields = [
             "workflow_run_id",
             "progress_data",

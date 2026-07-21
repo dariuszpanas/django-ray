@@ -114,11 +114,14 @@ duplicated for each ADR-0003 invocation. Detail has exact availability, size,
 retention, authorization, cursor, corruption, and cleanup contracts; periodic Admin
 polling defers both durable payload fields and selects progress through one bounded
 compatibility query. The nullable schema-v3 summary fields, strict codec, fenced writer
-primitive, rolling reader, and terminal attempt archival are implemented. The
-standalone primitive rejects topology/detail pointers; only #126's package-internal
-locked hook may advance them in the storage transaction. The current workflow actor
-deliberately continues to publish schema v2; topology/detail storage, writer activation,
-cleanup, and authorized paginated services remain implementation work. See
+primitive, rolling reader, terminal attempt archival, topology/detail tables, atomic
+storage writer, and retention cleanup are implemented. The standalone summary writer
+rejects topology/detail pointers. The package-owned storage transaction alone may
+promote a verified pending manifest, apply sparse latest-state changes, and advance
+the summary pointer together. A summary-only `DISABLED` or `OMITTED_BY_POLICY` update
+creates no topology or detail rows. The current workflow actor deliberately continues
+to publish schema v2; authorized paginated services and schema-v3 producer activation
+remain #127 work. See
 [ADR-0004](design/adr-0004-bounded-workflow-progress.md).
 
 ### Database
@@ -146,7 +149,7 @@ Primary execution record for one task attempt chain.
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
 | `progress_data` | Current schema-v1/v2 complete workflow snapshot; retained for rolling compatibility |
-| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; publication remains disabled until detail storage and public readers are ready |
+| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; runtime publication remains disabled until #127 public readers are ready |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
 | `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
@@ -198,6 +201,46 @@ attempt. If timeout, loss, cancellation, or another lifecycle owner wins first, 
 same row lock derives a terminal envelope from the last accepted running summary and
 archives it before cleanup. Legacy complete graphs and malformed or noncanonical
 summaries are never copied into attempt history.
+
+### Workflow progress detail storage
+
+Migration `0013_workflow_progress_detail_storage` adds package-owned, run-scoped
+tables without changing existing task or attempt columns:
+
+- `WorkflowProgressRunStorage` binds the complete task, attempt, generation, and run
+  identity to the current detail revision, exact bounded aggregates, persisted
+  retention policy, expiry, and a bounded cleanup diagnostic.
+- `WorkflowProgressTopologyManifest` and `WorkflowProgressTopologyPage` retain one
+  immutable current topology plus at most one bounded pending candidate. Ordered link
+  rows associate run-scoped content-addressed pages with a manifest.
+- `WorkflowProgressNodeDetail` retains at most one bounded latest-state record per
+  stable node key. Its last-updated revisions are evidence, not a historical snapshot
+  filter.
+
+Candidate topology is normalized, redacted, digested, and bounded before persistence.
+Staging does not hold the lifecycle task lock; it checks the exact run at both ends and
+can leave at most one bounded orphan when ownership changes at the final boundary. The
+publication transaction locks the exact task and run, verifies manifest/page metadata,
+counts, ownership, sizes, and digests, then promotes topology, applies sparse detail
+changes, and advances the summary pointer atomically. A stale fence, corrupt candidate,
+or summary conflict rolls back the current-state mutation instead of exposing partial
+detail.
+
+Those are durable-storage bounds, not yet an O(retained) preparation-memory claim.
+Preparation currently retains complete observed identity sets before deterministic
+truncation. [Issue #132](https://github.com/dariuszpanas/django-ray/issues/132) owns the
+streaming preparation contract; #79 separately owns live wire, mailbox, and producer
+backpressure. Schema-v3 activation must compose both boundaries for workflows larger
+than the retained V1 limits.
+
+Terminal detail expiry is derived from the canonical terminal timestamp and
+`WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`. Every accepted detail publication records
+the selected retention days on the exact run. A lifecycle-authored canonical terminal
+summary owns the exact expiry and can extend an earlier producer deadline. If that
+summary is missing or corrupt, a terminal transition falls back to its completion
+timestamp plus the run's persisted policy. The cleanup command deletes only due
+inactive runs and old unpublished orphans; task-row and attempt summaries survive
+detail deletion.
 
 ## Task State Model
 
@@ -309,14 +352,15 @@ Drain old Ray Job drivers before enabling spillover. Existing inline rows remain
 referenced Ray Jobs use transport version 2 and contain only `input_reference`. Before
 rolling back, disable spillover and drain all tasks that already have a reference.
 
-Bounded progress summaries also use an additive reader-first rollout. Apply migration
-`0012_workflow_progress_summary` before deploying upgraded readers. Existing rows and
-older writers leave both nullable summary columns empty and continue using
-`progress_data`. Keep schema-v3 producer activation disabled through the topology/detail
-storage and authorized-reader deployments, then drain old workflow writers before
-activation. Reversing migration `0012` drops only the new summary columns, so export any
-terminal summaries needed for audit before that rollback; legacy progress remains
-unchanged.
+Bounded progress storage uses an additive reader-first rollout. Apply migration
+`0012_workflow_progress_summary` before deploying upgraded summary readers, then apply
+`0013_workflow_progress_detail_storage` for the dormant package-owned detail tables.
+Existing rows and older writers continue using `progress_data`; migration `0013` does
+not backfill or reinterpret legacy snapshots. Keep schema-v3 producer activation
+disabled until #127's authorized readers are deployed, then drain old workflow writers
+before activation. Reversing `0013` discards normalized detail tables, while reversing
+`0012` drops the summary columns. Export any retained schema-v3 data needed for audit
+before either rollback; legacy progress remains unchanged.
 
 ## Reliability Controls
 
@@ -325,8 +369,8 @@ unchanged.
 - Task monitor heartbeats for active reconciliation paths.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
 - Per-workflow in-memory progress coordination still emits revision-based complete
-  schema-v2 snapshots. Bounded schema-v3 storage and readers are present but producer
-  activation waits for topology/detail storage and authorized services.
+  schema-v2 snapshots. Bounded schema-v3 summary and detail storage are present but
+  producer activation waits for #127's authorized services and an old-writer drain.
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.

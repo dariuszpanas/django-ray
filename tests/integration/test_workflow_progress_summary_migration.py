@@ -91,4 +91,6 @@ def test_summary_fields_are_additive_nullable_and_reversible() -> None:
             == legacy_progress
         )
     finally:
-        MigrationExecutor(connection).migrate(migrate_to)
+        MigrationExecutor(connection).migrate(
+            [("django_ray", "0013_workflow_progress_detail_storage")]
+        )

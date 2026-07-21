@@ -25,6 +25,7 @@ from django_ray.models import (
     TaskInputPayload,
     TaskState,
     TaskWorkerLease,
+    WorkflowProgressRunStorage,
 )
 from django_ray.runner.cancellation import finalize_cancellation, request_cancellation
 from django_ray.runner.leasing import get_active_workers
@@ -744,6 +745,58 @@ def test_workflow_run_claim_is_consistent_for_concurrent_reader() -> None:
     assert str(task.workflow_run_id) == replacement.run_id
     assert task.progress_data is None
     assert persist_workflow_progress(old, _workflow_snapshot(old, 2)) is False
+
+
+def test_concurrent_replacement_claims_delete_only_superseded_run_storage() -> None:
+    task = _execution(
+        "postgres-workflow-storage-replacement-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=5,
+    )
+    old = _workflow_identity(task, "00000000-0000-0000-0000-000000000131")
+    replacement_a = _workflow_identity(task, "00000000-0000-0000-0000-000000000132")
+    replacement_b = _workflow_identity(task, "00000000-0000-0000-0000-000000000133")
+    unrelated_run_id = "00000000-0000-0000-0000-000000000134"
+    assert claim_workflow_run(old) is True
+    for run_id, attempt_number, execution_generation in (
+        (old.run_id, 2, 5),
+        (replacement_a.run_id, 2, 5),
+        (replacement_b.run_id, 2, 5),
+        (unrelated_run_id, 2, 5),
+        (old.run_id, 1, 4),
+    ):
+        WorkflowProgressRunStorage.objects.create(
+            execution=task,
+            attempt_number=attempt_number,
+            execution_generation=execution_generation,
+            run_id=run_id,
+        )
+
+    results = _run_concurrently(
+        lambda: claim_workflow_run(replacement_a),
+        lambda: claim_workflow_run(replacement_b),
+    )
+
+    assert results == [True, True]
+    task.refresh_from_db()
+    final_run_id = str(task.workflow_run_id)
+    assert final_run_id in {replacement_a.run_id, replacement_b.run_id}
+    current_run_ids = {
+        str(run_id)
+        for run_id in WorkflowProgressRunStorage.objects.filter(
+            execution=task,
+            attempt_number=2,
+            execution_generation=5,
+        ).values_list("run_id", flat=True)
+    }
+    assert current_run_ids == {final_run_id, unrelated_run_id}
+    assert WorkflowProgressRunStorage.objects.filter(
+        execution=task,
+        attempt_number=1,
+        execution_generation=4,
+        run_id=old.run_id,
+    ).exists()
 
 
 def test_input_cleanup_racing_reenqueue_preserves_shared_payload(settings, tmp_path) -> None:

@@ -540,10 +540,13 @@ The outer Django task is the durability and retry boundary:
   bytes are not size-bounded.
 - A separate nullable `workflow_progress_summary_json` field and schema-v3 codec are
   deployed reader-first. The field is fixed-shape and capped at 16 KiB of canonical
-  UTF-8 JSON. Current coordinators intentionally remain schema-v2 writers until the
-  topology/detail storage delivery can publish detail and its summary pointer in one
-  transaction. The standalone schema-v3 writer rejects topology/detail pointers; the
-  package-internal locked hook is reserved for that atomic storage path.
+  UTF-8 JSON. Package-owned topology/detail tables and the internal storage writer can
+  now publish a verified immutable topology, sparse normalized latest-state detail,
+  and that summary pointer in one transaction. The standalone schema-v3 writer rejects
+  topology/detail pointers; it is the only path for an intentional summary-only
+  `DISABLED` or `OMITTED_BY_POLICY` record, which creates no empty detail storage.
+  Current coordinators intentionally remain schema-v2 writers until #127's authorized
+  public readers are deployed and old writers have drained.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -575,13 +578,17 @@ ADR-0004 accepts the replacement storage contract: a dedicated always-bounded
 task-row summary points to immutable topology manifests/pages and normalized
 latest-state node-detail rows. Changed detail rows are batch-upserted before the
 #81-fenced summary pointer advances; each accepted detail-changing publication expires
-prior cursors, while static topology is not duplicated for repeated invocations.
+prior cursors, while static topology is not duplicated across repeated publications or
+state transitions within one run and topology version.
 Authorized readers use revision-bound pagination. The ADR defines exact V1 limits,
 availability states, legacy v1/v2 reads, retention, and cleanup. Its first delivery now
 implements the nullable current/per-attempt summary fields, strict schema-v3 codec,
 monotonic exact-run writer primitive, bounded rolling reader, and lifecycle archival.
-Topology/detail models and public detail services remain #126 and #127 work, so the
-runtime producer still writes complete schema-v2 snapshots. See
+Its second delivery adds the run-scoped topology manifests/pages, normalized
+latest-state rows, bounded staging and integrity verification, sparse atomic
+publication, terminal expiry, and retention/orphan cleanup. Public detail services and
+producer activation remain #127 work, so the runtime producer still writes complete
+schema-v2 snapshots. See
 [ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md).
 
 Ray Core tasks already run inside an initialized Ray worker. Ray Job drivers
@@ -594,11 +601,12 @@ not a Django task type or a flag that makes data-dependent `map_step` expansion 
 See [Workflow Plans and Execution Strategies](workflow-plans.md).
 
 Apply database migrations before starting upgraded workers. Migration
-`0012_workflow_progress_summary` is additive: existing rows and older writers leave the
-new summary fields `NULL`, and upgraded readers continue to accept schema v1/v2 from
-`progress_data` under the 64 MiB compatibility cap. Do not enable schema-v3 production
-yet. Deploy #126's internal topology/detail readers and storage, then #127's authorized
-public facade, and drain old workflow writers before activation.
+`0012_workflow_progress_summary` adds nullable summary fields, and migration
+`0013_workflow_progress_detail_storage` adds dormant package-owned topology and detail
+tables. Neither migration rewrites existing `progress_data`; older writers continue to
+work and upgraded readers retain the 64 MiB schema-v1/v2 compatibility cap. Do not
+enable schema-v3 production yet. Deploy #127's authorized public facade, drain old
+workflow writers, and only then activate the new producer.
 
 Existing rows start with `workflow_run_id = NULL` and a nullable plan identity so an
 older writer can still insert during the rollout; the first upgraded, fully identified

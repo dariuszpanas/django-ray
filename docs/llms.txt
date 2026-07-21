@@ -85,9 +85,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   no native Compiled Graph strategy is enabled by the reducer.
 - Current workflow actors still emit complete, size-unbounded schema-v2 graph snapshots.
   ADR-0004's additive schema-v3 summary columns, strict 16 KiB codec, fenced writer
-  primitive, rolling reader, and terminal attempt archival are implemented, but writer
-  activation waits for topology/detail storage (#126) and authorized public readers
-  (#127).
+  primitive, rolling reader, terminal attempt archival, bounded topology/detail
+  storage, atomic publication, and retention cleanup are implemented. Writer activation
+  waits for authorized public readers (#127) and an old-writer drain.
 - The result returned by `enqueue()` is a snapshot. Fetch current state with
   `task_backends[alias].get_result(task_id)`.
 - Per-task numeric priority is persisted from `-100` through `100`; larger values are

@@ -106,6 +106,7 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
         ("WORKER_HEARTBEAT_SECONDS", 1, 86400),
         ("TASK_MONITOR_HEARTBEAT_SECONDS", 1, 300),
         ("WORKFLOW_PROGRESS_FLUSH_SECONDS", 1, 300),
+        ("WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS", 0, 30),
         ("RAY_STATE_API_TIMEOUT_SECONDS", 1, 60),
         ("MAX_RESULT_SIZE_BYTES", 1024, 100 * 1024 * 1024),
     ]
