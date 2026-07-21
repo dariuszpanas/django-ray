@@ -105,6 +105,17 @@ values. The exact protocol version is a fingerprinted plan requirement at
 [ADR-0003](design/adr-0003-compiled-invocation-lifecycle.md). No native execution
 adapter or verified Compiled Graph capability is introduced by this state machine.
 
+Workflow progress storage has a separate strategy-neutral decision. ADR-0004 replaces
+the current complete task-row graph design with an always-bounded summary plus
+database-backed immutable topology pages and normalized latest-state node-detail rows.
+Publication writes and verifies detail before conditionally advancing the summary
+pointer through the exact #81 run fence. Static topology is run-scoped and is not
+duplicated for each ADR-0003 invocation. Detail has exact availability, size,
+retention, authorization, cursor, corruption, and cleanup contracts; periodic Admin
+polling reads only the bounded summary. The models, migration, writer, cleanup, and
+paginated services remain implementation work. See
+[ADR-0004](design/adr-0004-bounded-workflow-progress.md).
+
 ### Database
 
 - Canonical source of truth for task lifecycle state.
@@ -129,8 +140,8 @@ Primary execution record for one task attempt chain.
 | `input_reference` | Optional durable pointer to a versioned combined input envelope |
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
-| `progress_data` | Latest JSON progress snapshot for a Ray-native workflow |
-| `workflow_run_id` | Current workflow invocation allowed to update `progress_data` |
+| `progress_data` | Current schema-v1/v2 complete workflow snapshot; retained for the planned ADR-0004 dual-read rollout |
+| `workflow_run_id` | Current workflow run allowed to update `progress_data` |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
 | `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
 | `runtime_env_hash` | SHA-256 content identity used to correlate cache reuse |
@@ -292,7 +303,8 @@ rolling back, disable spillover and drain all tasks that already have a referenc
 - Worker lease heartbeat + cross-worker orphan recovery.
 - Task monitor heartbeats for active reconciliation paths.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
-- Per-workflow in-memory progress coordination with revision-based database snapshots.
+- Per-workflow in-memory progress coordination with revision-based complete database
+  snapshots; their current graph bytes remain unbounded until ADR-0004 is implemented.
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.
@@ -321,5 +333,6 @@ rolling back, disable spillover and drain all tasks that already have a referenc
 - [ADR-0001: Workflow Plans and Execution Strategies](design/adr-0001-workflow-plan-contract.md)
 - [ADR-0002: Compiled Session Ownership and Reuse](design/adr-0002-compiled-session-ownership.md)
 - [ADR-0003: Compiled Invocation Lifecycle](design/adr-0003-compiled-invocation-lifecycle.md)
+- [ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md)
 - [Runtime Environments](runtime-environments.md)
 - [Retry & Error Handling](retry.md)

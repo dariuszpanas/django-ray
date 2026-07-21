@@ -30,6 +30,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Compiled invocation lifecycle](https://django-ray.readthedocs.io/en/latest/design/adr-0003-compiled-invocation-lifecycle/):
   Ray-free session/invocation reducer, absolute deadlines, fallback and replay
   cutoffs, one-shot outputs, reuse health, and bounded cleanup diagnostics.
+- [Bounded workflow progress](https://django-ray.readthedocs.io/en/latest/design/adr-0004-bounded-workflow-progress/):
+  Always-bounded summaries, immutable topology pages, normalized latest-state detail,
+  fenced publication, pagination, retention, and legacy snapshot rollout.
 - [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
   named profiles, code delivery, cache behavior, and security boundaries.
 
@@ -66,6 +69,10 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - Compiled lifecycle protocol version 1 is fingerprinted in the effective plan. It
   closes fallback before preparation and same-invocation replay when submission starts;
   no native Compiled Graph strategy is enabled by the reducer.
+- Current workflow graph snapshots remain complete and size-unbounded. ADR-0004
+  accepts a bounded summary, immutable topology manifests/pages, and normalized
+  latest-state detail rows, but no model, migration, writer, or service implementation
+  exists yet.
 - The result returned by `enqueue()` is a snapshot. Fetch current state with
   `task_backends[alias].get_result(task_id)`.
 - Per-task numeric priority is not supported. Conventional queue names influence claim

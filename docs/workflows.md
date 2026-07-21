@@ -534,8 +534,10 @@ The outer Django task is the durability and retry boundary:
 
 - Internal steps do not create individual Django tasks.
 - While a workflow runs, an in-memory Ray coordinator collects node events. The
-  outer task writes a bounded progress snapshot to `RayTaskExecution.progress_data`
-  at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
+  outer task currently writes a complete progress snapshot to
+  `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
+  Recent events have a count cap, but the current node/edge graph and its serialized
+  bytes are not size-bounded.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -555,6 +557,16 @@ The outer Django task is the durability and retry boundary:
   Ray's normal cancellation behavior.
 - The final workflow result must satisfy the same result-serialization rules as any
   django-ray task.
+
+ADR-0004 accepts the replacement storage contract: a dedicated always-bounded
+task-row summary points to immutable topology manifests/pages and normalized
+latest-state node-detail rows. Changed detail rows are batch-upserted before the
+#81-fenced summary pointer advances; each accepted detail-changing publication expires
+prior cursors, while static topology is not duplicated for repeated invocations.
+Authorized readers use revision-bound pagination. The ADR defines exact V1 limits,
+availability states, legacy v1/v2 reads, retention, and cleanup, but this release has
+not implemented its models, migration, writer, or services. See
+[ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md).
 
 Ray Core tasks already run inside an initialized Ray worker. Ray Job drivers
 initialize their cluster connection lazily when a workflow first requests Ray, and
