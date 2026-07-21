@@ -2,6 +2,7 @@
 # Include in main Makefile with: include mk/k8s.mk
 
 .PHONY: k8s-build k8s-deploy k8s-deploy-local k8s-deploy-tls k8s-delete k8s-status k8s-reset k8s-urls k8s-urls-kong
+.PHONY: k8s-check-prometheus-targets
 .PHONY: k8s-install-kuberay k8s-uninstall-kuberay k8s-kind-load k8s-deploy-kuberay-kind k8s-delete-kuberay-kind
 .PHONY: k8s-install-kong-local k8s-deploy-kong-local
 
@@ -29,6 +30,7 @@ K8S_KONG_ADMIN_URL ?= $(K8S_KONG_WEB_URL)/admin/
 K8S_KONG_GRAFANA_URL ?= $(K8S_URL_SCHEME)://$(K8S_KONG_GRAFANA_HOST):$(K8S_KONG_PORT)
 K8S_KONG_PROMETHEUS_URL ?= $(K8S_URL_SCHEME)://$(K8S_KONG_PROMETHEUS_HOST):$(K8S_KONG_PORT)
 K8S_KONG_RAY_DASHBOARD_URL ?= $(K8S_URL_SCHEME)://$(K8S_KONG_RAY_HOST):$(K8S_KONG_PORT)
+K8S_PROMETHEUS_TARGET_TIMEOUT ?= 120
 
 # Build Docker images for Kubernetes
 k8s-build:
@@ -160,6 +162,12 @@ k8s-status:
 	@echo ""
 	@echo "=== Deployments ==="
 	kubectl get deployments -n django-ray
+
+# Verify the bundled Ray and authenticated django-ray Prometheus scrape targets.
+k8s-check-prometheus-targets:
+	python scripts/check_prometheus_targets.py \
+		--url "$(K8S_PROMETHEUS_URL)" \
+		--timeout "$(K8S_PROMETHEUS_TARGET_TIMEOUT)"
 
 # Print local service URLs. Override K8S_URL_HOST, K8S_URL_SCHEME, or ports for non-local clusters.
 k8s-urls:

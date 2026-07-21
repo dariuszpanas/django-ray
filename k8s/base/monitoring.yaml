@@ -1,4 +1,4 @@
-# Monitoring Stack: Prometheus + Grafana for Ray Cluster
+# Monitoring Stack: Prometheus + Grafana for Ray and django-ray
 # Based on Ray's metrics documentation: https://docs.ray.io/en/latest/cluster/metrics.html
 #
 # Ray exposes Prometheus metrics on port 8080 by default on each node
@@ -62,21 +62,6 @@ data:
         authorization:
           type: Bearer
           credentials_file: /etc/prometheus-secrets/DJANGO_API_TOKEN
-
-      # Django-Ray worker metrics
-      - job_name: 'django-ray-worker'
-        kubernetes_sd_configs:
-          - role: pod
-            namespaces:
-              names: ['django-ray']
-        relabel_configs:
-          - source_labels: [__meta_kubernetes_pod_label_app, __meta_kubernetes_pod_label_component]
-            regex: django-ray;worker
-            action: keep
-          - source_labels: [__meta_kubernetes_pod_ip]
-            target_label: __address__
-            replacement: ${1}:8000
-        metrics_path: /metrics
 ---
 # Prometheus Deployment
 apiVersion: apps/v1

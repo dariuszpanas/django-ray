@@ -443,6 +443,32 @@ The bundled Prometheus deployment mounts only `DJANGO_API_TOKEN` from the applic
 Secret and uses it as a bearer credential for this scrape. Replace the base placeholder
 before deployment and rotate it with the same care as other service credentials.
 
+The scrape pools have separate ownership boundaries. `ray-head` and `ray-workers` collect
+Ray's native process metrics from port 8080. `django-ray` collects the durable database
+snapshot from the authenticated Django application endpoint. The `django_ray_worker`
+task-manager processes do not run an HTTP server or a per-process metrics exporter; their
+durable task and lease state is already represented by the application endpoint. Do not
+scrape those pods at port 8000 unless the deployment adds a real, explicitly secured
+exporter.
+
+After a fresh deployment, verify that each supported scrape pool has at least one healthy
+target and that the removed `django-ray-worker` pool is absent:
+
+```bash
+make k8s-check-prometheus-targets
+```
+
+The check waits up to two minutes for Prometheus discovery to converge. Override
+`K8S_PROMETHEUS_URL` for a non-default service address. When upgrading an existing
+deployment after changing the Prometheus ConfigMap, reload or restart Prometheus before
+running the check:
+
+```bash
+kubectl rollout restart deployment/prometheus -n django-ray
+kubectl rollout status deployment/prometheus -n django-ray --timeout=180s
+make k8s-check-prometheus-targets
+```
+
 ## Troubleshooting
 
 ### Pods Not Starting
