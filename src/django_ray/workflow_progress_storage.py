@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
@@ -325,33 +326,103 @@ class WorkflowProgressDetailAuditResult:
 class _PreparedTopologyCapability:
     reference: ReferenceType[PreparedWorkflowProgressTopology]
     signature: tuple[Any, ...]
+    evidence_references: tuple[object, ...]
+    page_signatures: tuple[tuple[Any, ...], ...]
+    trusts_observed_node_ids: bool
 
 
 _PREPARED_TOPOLOGY_CAPABILITIES: dict[str, _PreparedTopologyCapability] = {}
 _PREPARED_TOPOLOGY_CAPABILITIES_LOCK = Lock()
 
 
+def _type_exact_capability_value(value: Any) -> tuple[type[Any], Any]:
+    """Bind scalar evidence without Python's cross-type equality coercions."""
+    return type(value), value
+
+
 def _prepared_topology_capability_signature(
     topology: PreparedWorkflowProgressTopology,
 ) -> tuple[Any, ...]:
     return (
-        topology.identity,
-        topology.topology_version,
-        topology.manifest_digest,
-        topology.observed_node_count,
-        topology.observed_edge_count,
-        topology.retained_node_count,
-        topology.retained_edge_count,
-        topology.encoded_bytes,
-        topology.decoded_bytes,
-        id(topology.manifest_payload),
-        id(topology.pages),
-        id(topology.node_ids),
-        id(topology.observed_node_ids),
-        id(topology.node_kinds),
-        id(topology.edges),
-        id(topology.truncation_reasons),
-        id(topology.map_node_ids),
+        _type_exact_capability_value(topology.identity.task_execution_pk),
+        _type_exact_capability_value(topology.identity.attempt_number),
+        _type_exact_capability_value(topology.identity.execution_generation),
+        _type_exact_capability_value(topology.identity.run_id),
+        _type_exact_capability_value(topology.topology_version),
+        _type_exact_capability_value(topology.manifest_digest),
+        _type_exact_capability_value(topology.observed_node_count),
+        _type_exact_capability_value(topology.observed_edge_count),
+        _type_exact_capability_value(topology.retained_node_count),
+        _type_exact_capability_value(topology.retained_edge_count),
+        _type_exact_capability_value(topology.encoded_bytes),
+        _type_exact_capability_value(topology.decoded_bytes),
+    )
+
+
+def _prepared_topology_capability_evidence_references(
+    topology: PreparedWorkflowProgressTopology,
+) -> tuple[object, ...]:
+    """Retain every identity-bound immutable value while the capability is live.
+
+    Holding the old values prevents CPython from reusing their ``id()`` after a
+    hostile ``object.__setattr__`` replacement. Page objects and payloads are
+    retained separately so replacing a field of a frozen page is also detected.
+    The weak topology reference still controls registry lifetime.
+    """
+    references: list[object] = [
+        topology.manifest_payload,
+        topology.pages,
+        topology.node_ids,
+        topology.observed_node_ids,
+        topology.node_kinds,
+        topology.edges,
+        topology.truncation_reasons,
+        topology.map_node_ids,
+    ]
+    for page in topology.pages:
+        references.extend((page, page.payload))
+    return tuple(references)
+
+
+def _prepared_topology_page_signatures(
+    topology: PreparedWorkflowProgressTopology,
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            _type_exact_capability_value(page.collection),
+            _type_exact_capability_value(page.page_index),
+            _type_exact_capability_value(page.digest),
+            _type_exact_capability_value(page.item_count),
+            _type_exact_capability_value(page.encoded_bytes),
+            _type_exact_capability_value(page.decoded_bytes),
+        )
+        for page in topology.pages
+    )
+
+
+def _prepared_topology_capability_record_matches(
+    capability: _PreparedTopologyCapability,
+    topology: PreparedWorkflowProgressTopology,
+) -> bool:
+    try:
+        current_signature = _prepared_topology_capability_signature(topology)
+        current_references = _prepared_topology_capability_evidence_references(topology)
+        current_page_signatures = _prepared_topology_page_signatures(topology)
+    except (AttributeError, TypeError):
+        return False
+    return bool(
+        capability.reference() is topology
+        and capability.signature == current_signature
+        and capability.page_signatures == current_page_signatures
+        and len(capability.evidence_references) == len(current_references)
+        and all(
+            retained is current
+            for retained, current in zip(
+                capability.evidence_references,
+                current_references,
+                strict=True,
+            )
+        )
     )
 
 
@@ -367,10 +438,18 @@ def _drop_prepared_topology_capability(
 
 def _register_prepared_topology_capability(
     topology: PreparedWorkflowProgressTopology,
+    *,
+    trust_observed_node_ids: bool = False,
 ) -> None:
     with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
         token = topology._capability_token
         current = _PREPARED_TOPOLOGY_CAPABILITIES.get(token or "")
+        signature = _prepared_topology_capability_signature(topology)
+        retained_observed_trust = bool(
+            current is not None
+            and current.trusts_observed_node_ids
+            and _prepared_topology_capability_record_matches(current, topology)
+        )
         if token is None or (current is not None and current.reference() is not topology):
             token = token_hex(32)
             object.__setattr__(topology, "_capability_token", token)
@@ -383,7 +462,10 @@ def _register_prepared_topology_capability(
         )
         _PREPARED_TOPOLOGY_CAPABILITIES[token] = _PreparedTopologyCapability(
             reference=observed,
-            signature=_prepared_topology_capability_signature(topology),
+            signature=signature,
+            evidence_references=_prepared_topology_capability_evidence_references(topology),
+            page_signatures=_prepared_topology_page_signatures(topology),
+            trusts_observed_node_ids=trust_observed_node_ids or retained_observed_trust,
         )
 
 
@@ -397,9 +479,36 @@ def _prepared_topology_capability_matches(
         capability = _PREPARED_TOPOLOGY_CAPABILITIES.get(token)
         return bool(
             capability is not None
-            and capability.reference() is topology
-            and capability.signature == _prepared_topology_capability_signature(topology)
+            and _prepared_topology_capability_record_matches(capability, topology)
         )
+
+
+def _prepared_topology_observed_membership_capability_matches(
+    topology: PreparedWorkflowProgressTopology,
+) -> bool:
+    """Return whether this exact object owns complete observed membership trust."""
+    token = topology._capability_token
+    if token is None:
+        return False
+    with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
+        capability = _PREPARED_TOPOLOGY_CAPABILITIES.get(token)
+        return bool(
+            capability is not None
+            and capability.trusts_observed_node_ids
+            and _prepared_topology_capability_record_matches(capability, topology)
+        )
+
+
+def _reset_prepared_topology_capabilities_after_fork() -> None:
+    """Drop process-local authority and inherited lock state in a fork child."""
+    global _PREPARED_TOPOLOGY_CAPABILITIES
+    global _PREPARED_TOPOLOGY_CAPABILITIES_LOCK
+    _PREPARED_TOPOLOGY_CAPABILITIES = {}
+    _PREPARED_TOPOLOGY_CAPABILITIES_LOCK = Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_prepared_topology_capabilities_after_fork)
 
 
 @dataclass
@@ -1006,7 +1115,7 @@ def _topology_manifest_payload(
     )
 
 
-def prepare_workflow_progress_topology(
+def _prepare_workflow_progress_topology_materialized(
     identity: WorkflowRunIdentity,
     topology_version: int,
     nodes: Iterable[Mapping[str, Any]],
@@ -1146,8 +1255,30 @@ def prepare_workflow_progress_topology(
             str(item["node_id"]) for item in retained_node_records if item["kind"] == "map"
         ),
     )
-    _register_prepared_topology_capability(prepared)
+    _register_prepared_topology_capability(
+        prepared,
+        trust_observed_node_ids=True,
+    )
     return prepared
+
+
+def prepare_workflow_progress_topology(
+    identity: WorkflowRunIdentity,
+    topology_version: int,
+    nodes: Iterable[Mapping[str, Any]],
+    edges: Iterable[Mapping[str, Any]],
+) -> PreparedWorkflowProgressTopology:
+    """Normalize topology through the package-owned bounded spill workspace."""
+    from django_ray.workflow_progress_preparation import (
+        prepare_workflow_progress_topology as prepare_with_bounded_spill,
+    )
+
+    return prepare_with_bounded_spill(
+        identity,
+        topology_version,
+        nodes,
+        edges,
+    )
 
 
 def _normalize_event(value: Any) -> tuple[dict[str, Any], bool]:
@@ -1481,6 +1612,12 @@ def prepare_workflow_progress_detail(
     reporting_policy: str = "full",
 ) -> PreparedWorkflowProgressDetail:
     """Prepare a deterministic bounded initial latest-state detail set."""
+    if not isinstance(topology, PreparedWorkflowProgressTopology) or not (
+        _prepared_topology_observed_membership_capability_matches(topology)
+    ):
+        raise WorkflowProgressStorageError(
+            "initial detail requires package-issued observed topology membership"
+        )
     if reporting_policy not in {"full", "sampled", "terminal_only", "disabled"}:
         raise WorkflowProgressStorageError("workflow reporting policy is unsupported")
     reasons: set[str] = set(topology.truncation_reasons)

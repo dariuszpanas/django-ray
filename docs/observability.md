@@ -75,8 +75,9 @@ metrics or errors, credentials, paths, URIs, Ray identifiers, or handles.
 The package-owned topology/detail storage, bounded integrity verifier, atomic writer,
 retention cleanup, and authorized public read facade are present. The current workflow
 actor still publishes schema v2. Schema-v3 publication stays disabled until #79 bounds
-live ingestion, #132 integrates ADR-0005's bounded preparation contract through #141
-and #142, and old writers have drained. Until then, schema-v3 graph and node helpers
+live ingestion, #142 completes ADR-0005's composite topology/detail preparation after
+#141's spill-backed topology delivery, and old writers have drained. Until then,
+schema-v3 graph and node helpers
 report detail unavailable rather than fabricating an empty workflow.
 
 Once activated, `AVAILABLE` and `TRUNCATED` summaries may reference the manifest and

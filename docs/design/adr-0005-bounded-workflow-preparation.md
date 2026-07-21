@@ -1,6 +1,6 @@
 # ADR-0005: Bounded Workflow Progress Preparation
 
-- **Status:** Accepted as a preparation contract; production integration pending
+- **Status:** Accepted; production topology integrated, composite detail pending
 - **Date:** 2026-07-21
 - **Decision owners:** django-ray maintainers
 - **Related contracts:** [ADR-0004](adr-0004-bounded-workflow-progress.md),
@@ -127,9 +127,10 @@ One workspace follows a monotonic state machine:
 
 1. **Validate configuration.** Reject invalid or internally inconsistent budgets
    before creating a directory or consuming input.
-2. **Acquire.** Create a UUID-named private directory and an exclusive owner lease
-   beneath the configured package spill root. Files are readable and writable only
-   by the current user or container identity.
+2. **Acquire.** Resolve and identity-pin a safe temporary parent, atomically create a
+   UUID-named private directory, and write an exclusive PID-bound owner lease. POSIX
+   parents must be owner-controlled or a sticky root-owned shared temporary directory;
+   the workspace and lease use modes `0700` and `0600`.
 3. **Initialize.** Open one SQLite database, apply the preparation profile, create
    exact indexes and constraints, and verify the effective pragma values.
 4. **Observe nodes.** Consume the node iterable once, update the raw count, and
@@ -222,12 +223,15 @@ configuration is intentionally different from a durable application database:
 - `mmap_size` is zero and its effective value is verified;
 - `journal_mode` is `OFF` and `synchronous` is `OFF`;
 - `temp_store` is `MEMORY`, but every fixed selection and membership query plan is
-  preflighted before input consumption and must use declared indexes without a
-  temporary B-tree or materialization;
+  preflighted before input consumption and must match its statement-specific primary-
+  key scan/search order without a temporary B-tree, materialization, automatic index,
+  or unrecognized planner drift;
 - foreign-key enforcement is enabled;
 - locking mode is exclusive for the workspace lifetime;
-- the connection and directory have exactly one owner and are never shared across
-  threads or processes;
+- preparation operations have exactly one owner thread and creator process. The SQLite
+  connection permits a different thread to close it only while holding the workspace
+  lifecycle lock, allowing best-effort interpreter cleanup without racing an active
+  owner operation;
 - untrusted SQL, extensions, and application-defined functions are not accepted; and
 - the production package selects its workspace root. The benchmark-only
   `--workspace-parent` option places an isolated evidence run on a chosen test volume;
@@ -271,11 +275,25 @@ same poisoned-workspace path. Iterators that expose `close()` receive a best-eff
 close after consumption failure, but arbitrary user iterator cleanup is not part of
 the memory or latency guarantee.
 
+Workspace acquisition owns every resource as soon as it exists. The connection is
+registered before post-connect configuration, live-workspace registration is inside
+the acquisition failure boundary, and a partially written lease is removed only
+after its exact file identity is revalidated. Temporary-root discovery, canonical
+resolution, lease creation, and cleanup failures become bounded pathless diagnostics;
+this includes symlink-resolution loops that raise a runtime error rather than an
+ordinary filesystem error.
+
 On success, ordinary exception, cooperative cancellation, `GeneratorExit`, or a
 graceful termination that unwinds Python, a `finally` path closes cursors and the
-connection, releases the lease, and removes only the resolved UUID workspace
-directory. Cleanup failure prevents handoff and emits a bounded operational
-diagnostic. It never broadens deletion to the spill root.
+connection and cleans only the resolved UUID workspace directory. Cleanup first
+renames that exact directory to a random quarantine name under the already validated
+same parent. It then revalidates the moved directory identity, lease identity,
+contents, permissions, and absence of a replacement at the source name before
+unlinking any member. A rename failure, identity change, source reappearance, or
+quarantine replacement refuses cleanup and can never be reported as removal.
+Operational unlink failures retain the validated quarantine for a bounded retry;
+cleanup never broadens deletion to the spill root. Cleanup failure prevents handoff
+and emits a bounded operational diagnostic.
 
 Python cleanup cannot run after `SIGKILL`, native process abort, power loss, or host
 loss. This ADR does not claim otherwise. Subprocess preparation is parent-owned: the
@@ -284,7 +302,9 @@ including forced termination. The #140 prototype proves that parent-owned path a
 ordinary context cleanup only. The production in-process integration must add
 best-effort `atexit` cleanup. A later package process may remove an orphan only after
 validating the package root and UUID name, acquiring the exclusive lease, proving no
-live owner, and observing the configured stale age. #141, #142, and #79 must supply
+live owner, and observing the configured stale age. A fork child drops inherited live-
+workspace and prepared-capability registries, uses fresh locks, and cannot validate a
+parent PID lease or detach a parent candidate. #141, #142, and #79 must supply
 that stale-cleanup and quota-backed deployment behavior before activation.
 
 An abrupt failure can therefore leave at most the admitted per-workspace spill until
@@ -361,8 +381,8 @@ no candidate; it does not silently select a smaller topology. Raising or lowerin
 workspace resource limit requires evidence and release documentation but no migration
 or storage-protocol bump unless canonical durable behavior also changes.
 
-Schema-v3 producer activation remains disabled through issues #140, #141, and #142.
-After #142 proves bounded composite preparation, activation still waits for #79's
+Schema-v3 producer activation remains disabled while issue #142 completes bounded
+composite preparation. After #142 proves that boundary, activation still waits for #79's
 bounded producer messages, mailbox, reporting policies, and admission behavior, plus
 the ADR-0004 reader-first writer drain. Neither this ADR nor a successful preparation
 benchmark authorizes production writer activation.
@@ -375,11 +395,61 @@ cooperative cancellation checkpoints, context cleanup, and parent-owned subproce
 cleanup without changing a model, migration, public API, runtime preparer, or writer
 flag.
 
-The prototype does not reserve aggregate node-local capacity, register the production
-`atexit`/stale-workspace janitor, issue a runtime preparation capability, stage a
-durable candidate, or configure Kubernetes. Those are explicit #141, #142, and #79
-integration requirements. Its explicit workspace-parent option is only an evidence
-sandbox so filesystem behavior can be recorded.
+The prototype does not reserve aggregate node-local capacity, register production
+cleanup, issue a runtime preparation capability, stage a durable candidate, or
+configure Kubernetes. Issue #141 now supplies the in-process topology capability and
+best-effort `atexit` cleanup. Stale-workspace cleanup, quota-backed deployment, and
+aggregate admission remain activation requirements shared with #142 and #79. The
+prototype's explicit workspace-parent option is only an evidence sandbox so filesystem
+behavior can be recorded.
+
+## Production topology delivery
+
+Issue #141 moves the public topology preparer onto the package-owned SQLite workspace
+without changing its call signature or `PreparedWorkflowProgressTopology` result. The
+workspace streams exact node and edge identity state, selects only retained V1 records
+into Python, constructs the existing pages and manifest, and deletes its UUID directory
+before issuing the process-local prepared-topology capability. Successful cleanup,
+ordinary exceptions, cooperative cancellation, item or byte exhaustion, injected
+insert/selection/page failures, and best-effort graceful-process cleanup are covered at
+the production adapter boundary.
+
+By default, each workspace is an atomic private UUID child directly beneath the
+resolved operating-system temporary location; there is no reusable package root whose
+unsafe pre-creation could grant ownership. An explicit benchmark parent is accepted
+only after the same identity, ownership, and permission checks. Parent and workspace
+file identities are rechecked before accounting. Deletion uses the same-parent atomic
+quarantine and post-rename identity checks defined above, including exact partial-lease
+cleanup during failed acquisition. Package filesystem failures become phase-specific
+pathless diagnostics, while caller iterator exceptions remain unchanged. A deployment
+must still provide quota-backed ephemeral storage, stale-orphan cleanup, and aggregate
+concurrent-workspace admission before schema-v3 activation. The lock-serialized
+cross-thread `atexit` hook is best effort and is not a substitute for those node-level
+controls.
+
+The intermediate public result still contains the historical complete
+`observed_node_ids` field required by the materialized initial-detail API. The bounded
+candidate does not create that set while the workspace is observing, validating, or
+selecting topology. It is materialized from the indexed identity scan immediately
+before successful cleanup and is authenticated only for that exact package-issued
+object. Capability records retain strong references to every identity-bound immutable
+evidence value until the weak topology owner is collected, preventing allocator ID
+reuse after hostile frozen-field replacement. A copied or durably revalidated topology
+can prove its bounded pages and manifest, but it cannot impersonate complete
+observed-membership authority. This compatibility detachment remains O(observed) and
+is deliberately visible in production resource reports; issue #142 must confine or
+remove it through composite preparation.
+
+The existing subprocess harness accepts `--implementation production-topology`. That
+mode runs the production workspace and compatibility detachment in a fresh child,
+reports the same cache, batch, item, spill, CPU, wall, query-plan, and cleanup evidence,
+and emits no detail measurement. Report schema v2 separates the bounded pre-legacy
+tracemalloc/RSS checkpoint from the end-to-end peak that includes compatibility
+detachment. It retains the schema-v1 peak field names as aliases for additive readers,
+requires all v2 fields to be present and internally consistent, and ignores unknown
+extra fields. The default `prototype-composite` mode and the committed issue-#140
+evidence remain unchanged in meaning. Neither mode starts a writer or authorizes
+schema-v3 production.
 
 ## Evidence gate
 
@@ -392,8 +462,10 @@ records:
   and filesystem or volume identity;
 - observed and retained node, edge, and detail cardinality;
 - configured cache, item, batch, page, retained, and spill budgets;
-- wall time, process CPU time, tracemalloc peak, process peak RSS, and spill high-water
-  bytes; and
+- wall time, process CPU time, spill high-water bytes, and explicitly scoped memory
+  evidence. Production mode records a bounded topology checkpoint before legacy
+  detachment plus an end-to-end peak that includes the O(observed) compatibility set;
+  and
 - successful scale cases plus forced-termination and cleanup outcomes.
 
 Focused prototype tests separately record success, validation error, spill and item
@@ -409,13 +481,20 @@ ordered, reverse, and shuffled inputs produce identical accepted output. Represe
 oversized identities and records, late duplicate nodes and edges, unknown edge and
 detail references, and full-policy omissions exercise exact failure parity.
 
+A report marked `required_scale` is accepted only when all six node/profile
+combinations are present exactly once. Schema-v2 validation also rejects missing or
+inconsistent phase evidence, mismatched legacy/end-to-end aliases, and non-monotonic
+memory peaks. RSS may remain explicitly unavailable as `null`; it is never inferred as
+zero. Unknown additive fields do not invalidate an otherwise complete v2 report.
+
 The prototype must compare every retained record, page payload, manifest payload,
 digest, byte count, observed count, and truncation reason with the current preparer for
 inputs accepted by both. #140 fault coverage exercises configuration, workspace
 creation, constraint insertion, selection/page failures, spill and item exhaustion,
 cooperative cancellation, cleanup failure, timeout, and child termination at the
-prototype boundary. #141 and #142 must repeat fault injection at the production adapter
-and staging boundaries. Forced child termination passes only when the parent removes
+prototype boundary. #141 repeats those faults at the production topology adapter;
+#142 must repeat them at the composite detail and staging boundaries. Forced child
+termination passes only when the parent removes
 the workspace and no durable candidate exists.
 
 Benchmark evidence is a release decision aid, not a latency SLO. The contract is
@@ -430,7 +509,7 @@ issue-#140 prototype at revision `c42fb22634712e52d8aee74c86a62fea459da5e8`.
 Sparse and high-edge memory peaks plateaued after retained caps while the external spill
 grew with observed input. All six cases, source-identity checks, focused parity and
 fault paths, normal cleanup paths, and the forced-termination cleanup control passed.
-This accepts the preparation contract only; it does not satisfy #141, #142, #79, or the
+This accepts the preparation contract only; by itself it does not satisfy #141, #142, #79, or the
 schema-v3 activation gate.
 
 ## Alternatives considered
@@ -506,7 +585,7 @@ must remain local and package-owned.
 1. **Issue #140:** accept this decision, add a non-production prototype, prove
    canonical parity, and record the preparation-only subprocess benchmark. No runtime
    preparer switches and schema-v3 production remains disabled.
-2. **Issue #141:** implement bounded spill-backed topology observation, exact edge
+2. **Issue #141 (implemented):** implement bounded spill-backed topology observation, exact edge
    validation, canonical selection, and cleanup. Preserve the current materialized
    API and observed-identity compatibility field while downstream detail preparation
    still needs them. This is an intermediate bound, not completion of #132.

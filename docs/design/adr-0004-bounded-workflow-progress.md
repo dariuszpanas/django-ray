@@ -450,7 +450,7 @@ Readers are deployed before writers:
 3. Add the authorized public summary/detail facade and indexed/paginated reads. This is
    #127; old Admin and application clients must not encounter schema v3 before their
    compatible readers are deployed.
-4. Complete #79's live-ingestion bound and #132's ADR-0005 preparation integration,
+4. Complete #79's live-ingestion bound and #142's composite ADR-0005 preparation,
    drain old workflow writers, then enable the new producer. It publishes the dedicated
    summary, immutable topology pages, and normalized detail rows and stops writing a
    complete graph to `progress_data`.
@@ -540,13 +540,13 @@ Implementation remains split into focused deliveries:
    producer activation.
 4. **Coordinated with #79:** producer and collector memory limits and reporting policy.
    Do not claim this storage decision bounds the actor mailbox by itself.
-5. **Follow-up #132:** preparation currently materializes complete observed identity
-   sets before selecting the deterministic retained subset. V1 therefore bounds
-   durable storage, but does not yet prove O(retained) preparation memory for an
-   arbitrarily larger observed graph. [ADR-0005](adr-0005-bounded-workflow-preparation.md)
-   selects a package-owned, private SQLite spill workspace for exact one-shot
-   validation; #141 and #142 own production integration. Schema-v3 activation must
-   compose that boundary with #79's live-ingestion limits.
+5. **Follow-up #132:** issue #141 now streams topology identity, duplicate, reference,
+   and retained-selection state through ADR-0005's package-owned private SQLite
+   workspace. The unchanged prepared value still materializes complete
+   `observed_node_ids` for initial detail, so V1 does not yet prove an end-to-end
+   O(retained) preparation bound for an arbitrarily larger observed graph. #142 owns
+   composite detail preparation. Schema-v3 activation must compose that boundary with
+   #79's live-ingestion limits.
 
 Required evidence includes deterministic threshold tests, PostgreSQL write/WAL and
 query measurements, retry and stale-writer races, missing/corrupt/orphan cleanup,

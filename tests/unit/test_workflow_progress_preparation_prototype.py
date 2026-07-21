@@ -18,19 +18,31 @@ from uuid import UUID
 
 import pytest
 
+import django_ray.workflow_progress_preparation as preparation
 import django_ray.workflow_progress_storage as storage
 from django_ray.runtime.context import WorkflowRunIdentity
-from scripts import benchmark_workflow_progress_preparation as benchmark
-from scripts import workflow_progress_preparation_prototype as prototype
-from scripts.workflow_progress_preparation_prototype import (
-    PrototypeCleanupRefusedError,
-    PrototypeConfigurationError,
-    PrototypeSpillExhaustedError,
-    PrototypeWorkspaceIntegrityError,
+from django_ray.workflow_progress_preparation import (
     SQLitePreparationConfig,
     SQLitePreparationWorkspace,
     canonical_topology_evidence,
 )
+from django_ray.workflow_progress_preparation import (
+    WorkflowProgressPreparationCleanupRefusedError as PrototypeCleanupRefusedError,
+)
+from django_ray.workflow_progress_preparation import (
+    WorkflowProgressPreparationConfigurationError as PrototypeConfigurationError,
+)
+from django_ray.workflow_progress_preparation import (
+    WorkflowProgressPreparationSpillExhaustedError as PrototypeSpillExhaustedError,
+)
+from django_ray.workflow_progress_preparation import (
+    WorkflowProgressPreparationWorkspaceAcquisitionError as PrototypeWorkspaceAcquisitionError,
+)
+from django_ray.workflow_progress_preparation import (
+    WorkflowProgressPreparationWorkspaceIntegrityError as PrototypeWorkspaceIntegrityError,
+)
+from scripts import benchmark_workflow_progress_preparation as benchmark
+from scripts import workflow_progress_preparation_prototype as prototype
 from tests.workflow_progress_storage_helpers import (
     workflow_detail,
     workflow_node,
@@ -134,7 +146,7 @@ def test_sqlite_topology_and_detail_match_current_canonical_output(
         random.Random(141).shuffle(edges)
         random.Random(142).shuffle(details)
 
-    expected_topology = storage.prepare_workflow_progress_topology(
+    expected_topology = storage._prepare_workflow_progress_topology_materialized(
         identity,
         1,
         _OneShot(nodes),
@@ -144,7 +156,7 @@ def test_sqlite_topology_and_detail_match_current_canonical_output(
         _OneShot(details),
         topology=expected_topology,
     )
-    workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
+    workspace = prototype.SQLitePreparationWorkspace(parent_directory=tmp_path)
     with workspace:
         actual_topology = workspace.prepare_topology(
             identity,
@@ -179,7 +191,7 @@ def test_sqlite_topology_matches_truncation_and_oversized_identity_semantics(
         _edge(workflow_node_id(1), workflow_node_id(2)),
         _edge(workflow_node_id(2), workflow_node_id(3)),
     ]
-    expected = storage.prepare_workflow_progress_topology(identity, 1, nodes, edges)
+    expected = storage._prepare_workflow_progress_topology_materialized(identity, 1, nodes, edges)
     workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
     with workspace:
         actual = workspace.prepare_topology(identity, 1, _OneShot(nodes), _OneShot(edges))
@@ -204,12 +216,14 @@ def test_sqlite_omits_oversized_normalized_record_but_preserves_identity_parity(
     edges = [_edge("node-oversized-body", "node-retained")]
     details = [workflow_detail("node-oversized-body"), workflow_detail("node-retained")]
 
-    expected_topology = storage.prepare_workflow_progress_topology(identity, 1, nodes, edges)
+    expected_topology = storage._prepare_workflow_progress_topology_materialized(
+        identity, 1, nodes, edges
+    )
     expected_detail = storage.prepare_workflow_progress_detail(
         details,
         topology=expected_topology,
     )
-    workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
+    workspace = prototype.SQLitePreparationWorkspace(parent_directory=tmp_path)
     with workspace:
         actual_topology = workspace.prepare_topology(identity, 1, nodes, edges)
         actual_detail = workspace.prepare_detail(details, topology=actual_topology)
@@ -279,7 +293,7 @@ def test_sqlite_topology_matches_page_and_total_byte_removal(
         page_limit_name,
         max(one_node_page_bytes, one_edge_page_bytes),
     )
-    baseline = storage.prepare_workflow_progress_topology(identity, 1, nodes, edges)
+    baseline = storage._prepare_workflow_progress_topology_materialized(identity, 1, nodes, edges)
     node_pages = [
         page
         for page in baseline.pages
@@ -294,7 +308,7 @@ def test_sqlite_topology_matches_page_and_total_byte_removal(
         getattr(baseline, total_limit_name.split("_MAX_")[1].lower()) - 1,
     )
 
-    expected = storage.prepare_workflow_progress_topology(identity, 1, nodes, edges)
+    expected = storage._prepare_workflow_progress_topology_materialized(identity, 1, nodes, edges)
     workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
     with workspace:
         actual = workspace.prepare_topology(
@@ -343,7 +357,9 @@ def test_sqlite_detail_matches_count_and_byte_boundaries(
     identity = _identity()
     nodes = [workflow_node(workflow_node_id(index)) for index in range(3)]
     details = [workflow_detail(workflow_node_id(index)) for index in range(3)]
-    expected_topology = storage.prepare_workflow_progress_topology(identity, 1, nodes, [])
+    expected_topology = storage._prepare_workflow_progress_topology_materialized(
+        identity, 1, nodes, []
+    )
     baseline = storage.prepare_workflow_progress_detail(details, topology=expected_topology)
     first = baseline.records[0]
     if limit_kind == "count":
@@ -377,7 +393,7 @@ def test_sqlite_detail_matches_count_and_byte_boundaries(
         details,
         topology=expected_topology,
     )
-    workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
+    workspace = prototype.SQLitePreparationWorkspace(parent_directory=tmp_path)
     with workspace:
         actual_topology = workspace.prepare_topology(identity, 1, nodes, [])
         actual_detail = workspace.prepare_detail(details, topology=actual_topology)
@@ -415,13 +431,15 @@ def test_sqlite_detail_matches_run_global_event_selection(
             "recent_events": [_event(4, prefix="z"), _event(5, prefix="z")],
         },
     ]
-    expected_topology = storage.prepare_workflow_progress_topology(identity, 1, nodes, [])
+    expected_topology = storage._prepare_workflow_progress_topology_materialized(
+        identity, 1, nodes, []
+    )
     expected_detail = storage.prepare_workflow_progress_detail(
         details,
         topology=expected_topology,
     )
 
-    workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
+    workspace = prototype.SQLitePreparationWorkspace(parent_directory=tmp_path)
     with workspace:
         actual_topology = workspace.prepare_topology(identity, 1, nodes, [])
         actual_detail = workspace.prepare_detail(details, topology=actual_topology)
@@ -450,14 +468,16 @@ def test_sqlite_detail_matches_non_full_reporting_policies(
     identity = _identity()
     nodes = [workflow_node("node-a"), workflow_node("node-b")]
     details = [workflow_detail("node-a")]
-    expected_topology = storage.prepare_workflow_progress_topology(identity, 1, nodes, [])
+    expected_topology = storage._prepare_workflow_progress_topology_materialized(
+        identity, 1, nodes, []
+    )
     expected_detail = storage.prepare_workflow_progress_detail(
         details,
         topology=expected_topology,
         reporting_policy=reporting_policy,
     )
 
-    workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
+    workspace = prototype.SQLitePreparationWorkspace(parent_directory=tmp_path)
     with workspace:
         actual_topology = workspace.prepare_topology(identity, 1, nodes, [])
         actual_detail = workspace.prepare_detail(
@@ -481,7 +501,7 @@ def test_utf8_blob_primary_keys_preserve_canonical_multibyte_order(tmp_path: Pat
         _edge("node-é", "node-界"),
         _edge("node-z", "node-界"),
     ]
-    expected = storage.prepare_workflow_progress_topology(identity, 1, nodes, edges)
+    expected = storage._prepare_workflow_progress_topology_materialized(identity, 1, nodes, edges)
     workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
     with workspace:
         actual = workspace.prepare_topology(identity, 1, _OneShot(nodes), _OneShot(edges))
@@ -587,7 +607,7 @@ def test_sqlite_detail_preserves_duplicate_unknown_and_full_set_validation(
     identity = _identity()
     nodes = [workflow_node("node-a"), workflow_node("node-b")]
 
-    duplicate_workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
+    duplicate_workspace = prototype.SQLitePreparationWorkspace(parent_directory=tmp_path)
     with pytest.raises(
         storage.WorkflowProgressStorageError,
         match="node detail contains a duplicate node_id",
@@ -599,7 +619,7 @@ def test_sqlite_detail_preserves_duplicate_unknown_and_full_set_validation(
                 topology=topology,
             )
 
-    unknown_workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
+    unknown_workspace = prototype.SQLitePreparationWorkspace(parent_directory=tmp_path)
     with pytest.raises(
         storage.WorkflowProgressStorageError,
         match="node detail references an unknown topology node_id",
@@ -611,7 +631,7 @@ def test_sqlite_detail_preserves_duplicate_unknown_and_full_set_validation(
                 topology=topology,
             )
 
-    incomplete_workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
+    incomplete_workspace = prototype.SQLitePreparationWorkspace(parent_directory=tmp_path)
     with pytest.raises(
         storage.WorkflowProgressStorageError,
         match="full detail must contain one record per observed topology node",
@@ -644,8 +664,8 @@ def test_detail_constraints_precede_invalid_body_normalization(
     details: list[dict[str, Any]],
     message: str,
 ) -> None:
-    workspace = SQLitePreparationWorkspace(
-        SQLitePreparationConfig(batch_max_items=1),
+    workspace = prototype.SQLitePreparationWorkspace(
+        prototype.SQLitePreparationConfig(batch_max_items=1),
         parent_directory=tmp_path,
     )
     with pytest.raises(storage.WorkflowProgressStorageError, match=message):
@@ -676,9 +696,13 @@ def test_workspace_applies_fixed_sqlite_budgets_and_index_order_plans(tmp_path: 
             "max_page_count": 261120,
         }
         plans = workspace.retained_query_plans()
-        assert plans
-        assert all("TEMP B-TREE" not in plan.upper() for plan in plans)
-        assert any("USING PRIMARY KEY" in plan.upper() for plan in plans)
+        assert plans == (
+            "SCAN nodes",
+            "SCAN e",
+            "SEARCH source_node USING PRIMARY KEY (node_id=?)",
+            "SEARCH target_node USING PRIMARY KEY (node_id=?)",
+            "SCAN nodes",
+        )
 
 
 def test_exclusive_workspace_rejects_a_second_connection_reader(tmp_path: Path) -> None:
@@ -727,8 +751,6 @@ def test_workspace_rejects_reentry_without_orphaning_the_owned_directory(
         SQLitePreparationConfig(max_node_items=1_000_001),
         SQLitePreparationConfig(max_edge_items=0),
         SQLitePreparationConfig(max_edge_items=4_000_001),
-        SQLitePreparationConfig(max_detail_items=0),
-        SQLitePreparationConfig(max_detail_items=1_000_001),
         SQLitePreparationConfig(batch_max_items=257),
         SQLitePreparationConfig(batch_max_decoded_bytes=4 * 1024 * 1024 + 1),
     ],
@@ -963,7 +985,7 @@ def test_workspace_acquisition_cleans_directory_when_lease_creation_fails(
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", fail_lease)
-    with pytest.raises(OSError, match="lease write failed"):
+    with pytest.raises(PrototypeWorkspaceAcquisitionError, match="lease initialization failed"):
         with SQLitePreparationWorkspace(parent_directory=tmp_path):
             pass
     assert not list(tmp_path.iterdir())
@@ -984,7 +1006,7 @@ def test_workspace_acquisition_refuses_to_remove_an_unproven_raced_lease(
 
     monkeypatch.setattr(Path, "open", race_lease)
     workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
-    with pytest.raises(PrototypeCleanupRefusedError, match="not safely removable"):
+    with pytest.raises(PrototypeCleanupRefusedError, match="unleased directory is not empty"):
         workspace.__enter__()
     monkeypatch.undo()
     assert workspace.cleanup_outcome == "refused"
@@ -1006,10 +1028,10 @@ def test_workspace_does_not_clean_a_directory_it_failed_to_create(
     lease = collision / "owner.lease"
     database.write_bytes(b"not-owned")
     lease.write_text("not-owned", encoding="utf-8")
-    monkeypatch.setattr(prototype, "uuid4", lambda: workspace_id)
+    monkeypatch.setattr(preparation, "uuid4", lambda: workspace_id)
 
     workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
-    with pytest.raises(FileExistsError):
+    with pytest.raises(PrototypeWorkspaceAcquisitionError, match="directory creation failed"):
         workspace.__enter__()
     assert workspace.cleanup_outcome == "not_created"
     assert database.read_bytes() == b"not-owned"
@@ -1029,10 +1051,10 @@ def test_workspace_does_not_follow_a_dangling_uuid_collision(
         collision.symlink_to(escaped, target_is_directory=True)
     except OSError as error:
         pytest.skip(f"directory symlinks are unavailable: {error}")
-    monkeypatch.setattr(prototype, "uuid4", lambda: workspace_id)
+    monkeypatch.setattr(preparation, "uuid4", lambda: workspace_id)
 
     workspace = SQLitePreparationWorkspace(parent_directory=tmp_path)
-    with pytest.raises(FileExistsError):
+    with pytest.raises(PrototypeWorkspaceAcquisitionError, match="directory creation failed"):
         workspace.__enter__()
     assert workspace.cleanup_outcome == "not_created"
     assert os.path.lexists(collision)
@@ -1084,7 +1106,7 @@ def test_workspace_refuses_cleanup_when_owned_directory_was_renamed(tmp_path: Pa
     moved = tmp_path / "moved-preparation-workspace"
     directory.rename(moved)
 
-    with pytest.raises(PrototypeCleanupRefusedError, match="disappeared"):
+    with pytest.raises(PrototypeCleanupRefusedError, match="disappeared before owned cleanup"):
         workspace.__exit__(None, None, None)
     assert workspace.cleanup_outcome == "refused"
     assert moved.is_dir()
@@ -1134,12 +1156,71 @@ def test_workspace_rejects_temp_query_plan_before_input(
 ) -> None:
     monkeypatch.setattr(
         SQLitePreparationWorkspace,
-        "retained_query_plans",
-        lambda _workspace: ("USE TEMP B-TREE FOR ORDER BY",),
+        "_retained_query_plans_by_statement",
+        lambda _workspace: (("USE TEMP B-TREE FOR ORDER BY",), (), ()),
     )
     with pytest.raises(PrototypeConfigurationError, match="temporary storage"):
         with SQLitePreparationWorkspace(parent_directory=tmp_path):
             pass
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("plans", "message"),
+    [
+        (
+            (
+                ("SCAN nodes",),
+                (
+                    "SCAN e",
+                    "SEARCH source_node USING AUTOMATIC COVERING INDEX (node_id=?)",
+                    "SEARCH target_node USING PRIMARY KEY (node_id=?)",
+                ),
+                ("SCAN nodes",),
+            ),
+            "unbudgeted temporary storage",
+        ),
+        (
+            (
+                ("SCAN nodes",),
+                (
+                    "SCAN e",
+                    "SEARCH source_node USING PRIMARY KEY (node_id=?)",
+                ),
+                ("SCAN nodes",),
+            ),
+            "drifted from its primary-key ordering contract",
+        ),
+        (
+            (
+                ("SEARCH nodes USING PRIMARY KEY (node_id>?)",),
+                (
+                    "SCAN e",
+                    "SEARCH source_node USING PRIMARY KEY (node_id=?)",
+                    "SEARCH target_node USING PRIMARY KEY (node_id=?)",
+                ),
+                ("SCAN nodes",),
+            ),
+            "drifted from its primary-key ordering contract",
+        ),
+    ],
+)
+def test_workspace_rejects_statement_specific_query_plan_drift_before_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plans: tuple[tuple[str, ...], ...],
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        SQLitePreparationWorkspace,
+        "_retained_query_plans_by_statement",
+        lambda _workspace: plans,
+    )
+
+    with pytest.raises(PrototypeConfigurationError, match=message):
+        with SQLitePreparationWorkspace(parent_directory=tmp_path):
+            pass
+
     assert not list(tmp_path.iterdir())
 
 
@@ -1240,7 +1321,8 @@ def test_subprocess_benchmark_reports_resources_cardinality_spill_and_cleanup(
     assert "[1/2] starting nodes=16 profile=sparse" in completed.stderr
     assert "[2/2] completed nodes=16 profile=high-edge" in completed.stderr
     report = json.loads(output.read_text(encoding="utf-8"))
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
+    assert report["required_scale"] is False
     assert report["source_revision"]
     assert report["implementation_digest"]
     assert report["source_snapshot_before"] == report["source_snapshot_after"]
@@ -1266,6 +1348,12 @@ def test_subprocess_benchmark_reports_resources_cardinality_spill_and_cleanup(
         assert case["cpu_seconds"] >= 0
         assert case["tracemalloc_peak_bytes"] > 0
         assert case["peak_rss_bytes"] is None or case["peak_rss_bytes"] > 0
+        assert case["bounded_phase_tracemalloc_current_bytes"] is None
+        assert case["bounded_phase_tracemalloc_peak_bytes"] is None
+        assert case["bounded_phase_peak_rss_bytes"] is None
+        assert case["bounded_phase_rss_measurement"] is None
+        assert case["end_to_end_tracemalloc_peak_bytes"] == case["tracemalloc_peak_bytes"]
+        assert case["end_to_end_peak_rss_bytes"] == case["peak_rss_bytes"]
         rss = case["rss_measurement"]
         assert rss["peak_bytes"] == case["peak_rss_bytes"]
         assert rss["method"] != "unavailable" or rss["peak_bytes"] is None

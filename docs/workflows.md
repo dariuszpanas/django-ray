@@ -547,7 +547,9 @@ The outer Django task is the durability and retry boundary:
   `DISABLED` or `OMITTED_BY_POLICY` record, which creates no empty detail storage.
   Current coordinators intentionally remain schema-v2 writers. Authorized public
   readers are implemented, but activation still requires #79's live-ingestion bound,
-  ADR-0005's bounded preparation implementation, and an old-writer drain.
+  #142's composite bounded preparation, and an old-writer drain. Topology preparation
+  already uses ADR-0005's spill-backed package path, while the compatibility result
+  still carries complete observed membership for materialized initial detail.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -589,8 +591,11 @@ Its second delivery adds the run-scoped topology manifests/pages, normalized
 latest-state rows, bounded staging and integrity verification, sparse atomic
 publication, terminal expiry, and retention/orphan cleanup. Public detail services are
 implemented, but the runtime producer still writes complete schema-v2 snapshots.
-ADR-0005 selects a bounded external-state preparation contract; #141 and #142 must
-integrate it before activation. See
+ADR-0005's production topology phase now externalizes exact node/edge identity,
+duplicate, reference, and selection state into a private bounded SQLite workspace and
+removes it before returning prepared evidence. The unchanged result still includes
+complete `observed_node_ids` for the existing materialized detail API, so #142 must
+complete the shared topology/detail lifetime before activation. See
 [ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md)
 and
 [ADR-0005: Bounded Workflow Progress Preparation](design/adr-0005-bounded-workflow-preparation.md).
@@ -610,7 +615,7 @@ Apply database migrations before starting upgraded workers. Migration
 tables. Neither migration rewrites existing `progress_data`; older writers continue to
 work and upgraded readers retain the 64 MiB schema-v1/v2 compatibility cap. Do not
 enable schema-v3 production yet. Deploy the authorized public facade, complete #79's
-live-ingestion bound and #132's bounded preparation work, drain old workflow writers,
+live-ingestion bound and #142's composite preparation work, drain old workflow writers,
 and only then activate the new producer.
 
 Existing rows start with `workflow_run_id = NULL` and a nullable plan identity so an
