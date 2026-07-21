@@ -43,9 +43,14 @@ If you need a REST API for task management in your project, you can use the test
 | `POST /api/executions/{id}/retry` | Retry failed, cancelled, or lost execution |
 | `POST /api/executions/reset` | Reset matching executions to queued |
 | `DELETE /api/executions/{id}` | Delete execution |
-| `GET /api/cluster/workflows/{task_id}/graph` | Get the versioned workflow node/edge graph |
-| `GET /api/cluster/workflows/{task_id}/nodes/{node_id}` | Get durable node metadata and live Ray state |
+| `GET /api/cluster/workflows/{task_id}` | Get the bounded compatible workflow summary |
+| `GET /api/cluster/workflows/{task_id}/topology/nodes` | Page through immutable topology nodes |
+| `GET /api/cluster/workflows/{task_id}/topology/edges` | Page through immutable topology edges |
+| `GET /api/cluster/workflows/{task_id}/nodes` | Page through normalized node detail, optionally by state |
+| `GET /api/cluster/workflows/{task_id}/node-detail?node_id={node_id}` | Get one indexed durable node record without scanning the graph |
+| `GET /api/cluster/workflows/{task_id}/nodes/{node_id}` | Get legacy durable node metadata and live Ray state |
 | `GET /api/cluster/workflows/{task_id}/nodes/{node_id}?include_logs=true` | Include bounded Ray stdout/stderr tails |
+| `GET /api/cluster/workflows/{task_id}/graph` | Deprecated schema-v1/v2 complete-graph example |
 
 When the testproject server is running:
 - **Swagger UI**: http://localhost:8000/api/docs
@@ -82,11 +87,19 @@ def request_cancellation(execution_id: int) -> None:
 
 For a complete REST API example, see `testproject/api.py` in the repository.
 
-The reusable library helpers in `django_ray.observability` expose schema-versioned task,
-queue, attempt, and workflow snapshots, then optionally query Ray's live State and Log
-APIs. `django_ray.metrics.render_prometheus_metrics()` supplies the package-owned text
-format used by the sample endpoint. Treat node logs and operational metadata as
-sensitive and protect every adapter with authorization appropriate to the deployment.
+The reusable helpers in `django_ray.observability` expose schema-versioned task, queue,
+attempt, and workflow snapshots, then optionally query Ray's live State and Log APIs.
+The bounded functions in `django_ray.workflow_progress_reads` expose summary,
+topology-node, topology-edge, node-detail, and indexed-node reads. Every call requires
+an object authorizer; applications must replace the testproject's callable allowlist
+with their tenant or ownership policy. `django_ray.metrics.render_prometheus_metrics()`
+supplies the package-owned text format used by the sample endpoint. Treat node logs and
+operational metadata as sensitive.
+
+The indexed example accepts `node_id` as a query parameter so URL encoding round-trips
+the full bounded UTF-8 identifier, including values such as `namespace/apply`. The
+older `/nodes/{node_id}` route retains its live-Ray and optional-log behavior for
+testproject compatibility; it is not the normalized indexed read facade.
 
 See [Observability Services](../observability.md) for the supported Python schemas,
 metrics, degradation behavior, and security boundary.

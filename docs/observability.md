@@ -73,18 +73,86 @@ key and internal manifest identifier. It contains no graph records, events, arbi
 metrics or errors, credentials, paths, URIs, Ray identifiers, or handles.
 
 The package-owned topology/detail storage, bounded integrity verifier, atomic writer,
-and retention cleanup are present, but they are internal rollout groundwork. The
-current workflow actor still publishes schema v2. Schema-v3 publication stays disabled
-until the authorized public detail facade (#127) has deployed and old writers have
-drained. Until then, schema-v3 graph and node helpers report detail unavailable rather
-than fabricating an empty workflow.
+retention cleanup, and authorized public read facade are present. The current workflow
+actor still publishes schema v2. Schema-v3 publication stays disabled until upgraded
+readers are deployed and old writers have drained. Until then, schema-v3 graph and node
+helpers report detail unavailable rather than fabricating an empty workflow.
 
 Once activated, `AVAILABLE` and `TRUNCATED` summaries may reference the manifest and
 detail revisions committed by the atomic storage writer. `DISABLED` and
 `OMITTED_BY_POLICY` are summary-only states: they carry no manifest or detail pointer,
-and callers must not interpret them as an empty completed graph. Public detail reads
-remain unavailable until #127 supplies authorization, revision-bound pagination, and
-indexed single-node lookup.
+and callers must not interpret them as an empty completed graph.
+
+### Authorized bounded detail reads
+
+The package read facade requires an object authorizer on every call. There is no
+allow-all default, and a cursor never substitutes for authorization:
+
+```python
+from django_ray.workflow_progress_reads import (
+    get_workflow_node_detail,
+    get_workflow_progress_summary,
+    list_workflow_node_details,
+    list_workflow_topology_edges,
+    list_workflow_topology_nodes,
+)
+
+
+def can_view(execution):
+    return request.user.has_perm("django_ray.view_raytaskexecution", execution)
+
+
+summary = get_workflow_progress_summary(execution, authorize=can_view)
+nodes = list_workflow_topology_nodes(execution, authorize=can_view, limit=100)
+edges = list_workflow_topology_edges(execution, authorize=can_view, limit=100)
+detail = list_workflow_node_details(
+    execution,
+    authorize=can_view,
+    state="RUNNING",
+    limit=100,
+)
+node = get_workflow_node_detail(execution, "namespace/apply", authorize=can_view)
+```
+
+Collection responses default to 100 records and never exceed 256 records, 512 KiB of
+encoded response data, or 1 MiB of decoded records. Their opaque cursors are bound to
+the complete run and applicable publication epochs, collection, filters, ordering,
+applied limit, and cumulative returned count. A retired publication reports `EXPIRED`
+with the cursor's original public identity and epoch metadata; it never advances the old
+cursor into new rows. Final pages reconcile the cumulative count with bounded run-level
+retention counters so missing child rows are not mistaken for complete results. Indexed
+node lookup validates the current publication, reconciles bounded run counters and
+truncation reasons, and looks up the stable node key without decoding the complete graph.
+An absent key is `found: false`; distinguishing an unknown ID from an out-of-protocol
+deletion requires paginated traversal or the periodic whole-run audit rather than making
+the indexed endpoint scan retained detail.
+
+Pass `attempt_number=` to select retained terminal detail after a retry has advanced the
+current task row. The service still authorizes the owning `RayTaskExecution` on every
+request, then validates the archived attempt's bounded summary and exact run epochs.
+
+`AVAILABLE` and `TRUNCATED` return retained records while preserving their distinct
+completeness values. `NOT_REPORTED`, `OMITTED_BY_POLICY`, `DISABLED`, and `EXPIRED`
+return empty bounded envelopes with the exact availability. Missing or corrupt storage
+raises a bounded `WorkflowProgressReadError`; readers never fall back to an older
+revision or legacy graph.
+
+When a lifecycle-owned successful transition wins before the workflow producer reports
+terminal node states, the task summary is successful while detail is `TRUNCATED` with
+`terminal_state_unreported`. The retained rows remain readable as the last accepted
+node observations, so a state-filtered detail page can still contain `PENDING` or
+`RUNNING` rows for that successful attempt. Aggregate task success is authoritative;
+the rows are not rewritten or represented as complete terminal detail. Producer-authored
+successful terminal detail remains `AVAILABLE` when it is otherwise complete.
+
+The bundled testproject adapts these bounded functions under its bearer authentication
+and an explicit callable-path object policy. It exposes bounded summary, topology-node,
+topology-edge, node-detail-page, and indexed-node examples below
+`/api/cluster/workflows/{task_id}`. The indexed read is
+`/node-detail?node_id=...`; the query parameter round-trips bounded UTF-8 identifiers
+such as `namespace/apply`. Applications must replace the sample callable allowlist with
+their tenant or ownership policy. The old `/graph` endpoint remains a deprecated
+schema-v1/v2 compatibility example and should not be used for new clients.
 
 `get_workflow_node_snapshot()` always returns durable node data first. Live Ray state
 and logs are opt-in:
@@ -103,6 +171,10 @@ node = get_workflow_node_snapshot(
 If the Ray State API is unavailable, the response keeps the durable node and reports a
 stable unavailable status. It does not turn a live-data outage into loss of durable task
 visibility.
+
+The testproject keeps its pre-existing `/nodes/{node_id}` adapter for this live snapshot
+contract, including `include_logs` and `tail`. It is separate from the normalized
+indexed `node-detail` route.
 
 Ray logs are bounded independently by line count and UTF-8 byte size, then redacted.
 The byte bound applies to each returned stream. Logs are live operational data, not a
@@ -182,12 +254,16 @@ for durable task state and workflow progress. Polling uses ordinary same-origin 
 requests, pauses while the tab is hidden, and stops when the task reaches a terminal
 state. Responses use `Cache-Control: no-store`.
 
-The polling queryset defers both progress payload columns, then reuses one bounded
-compatibility read for the task revision and workflow aggregate. For schema v3, the
-panel maps only summary counts and availability; it does not load topology or normalized
-detail. During the compatibility window, a legacy value below the explicit 64 MiB cap
-may still be decoded, so high-frequency polling should be measured until all writers
-have moved off complete snapshots.
+The polling queryset defers both progress payload columns. Its follow-up workflow read
+uses a database byte guard for only the 16 KiB schema-v3 summary and explicitly disables
+the legacy fallback. It never selects or parses `progress_data`, topology pages, or
+normalized detail rows. Legacy writers therefore appear as not yet reported in the
+high-frequency panel until they publish a schema-v3 summary; explicit compatibility
+tools may still opt into the separately capped schema-v1/v2 reader.
+
+The change form links to bounded Admin topology and node-detail views. Those views repeat
+the same per-object permission check on every page request and call the package read
+facade; they are not fetched by the polling script.
 
 The panel does not query Ray or retrieve logs automatically. Operators can explicitly
 request live node data through an authorized application surface when needed. This
@@ -195,11 +271,13 @@ makes database state visible even during Ray outages.
 
 ## Security Boundary
 
-The Python services are authorization-neutral. Every HTTP adapter must authenticate the
-caller and enforce access to the referenced task. Redaction is defense in depth, not a
-replacement for authorization or encryption. Custom patterns cannot guarantee removal
-of arbitrary customer data, and application `print()` calls can still write sensitive
-values to Ray logs.
+General task and live-Ray helpers remain authorization-neutral. The bounded workflow
+read facade instead requires an explicit object authorizer for every operation. Every
+HTTP adapter must still authenticate its caller and express the deployment's tenant or
+ownership rule through that authorizer. Redaction is defense in depth, not a replacement
+for authorization or encryption. Custom patterns cannot guarantee removal of arbitrary
+customer data, and application `print()` calls can still write sensitive values to Ray
+logs.
 
 Protect the database, admin, metrics route, Ray dashboard, State API, and storage
 backends independently. Never expose live log access by default.

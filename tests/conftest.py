@@ -54,6 +54,7 @@ def pytest_configure(config: object) -> None:
             ],
             ROOT_URLCONF="testproject.urls",
             STATIC_URL="static/",
+            SECRET_KEY="django-ray-tests-only-cursor-signing-key",
             DJANGO_RAY={
                 "RAY_ADDRESS": "ray://localhost:10001",
             },

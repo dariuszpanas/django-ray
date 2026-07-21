@@ -1,9 +1,11 @@
 """Django admin configuration for django-ray."""
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 from django.contrib import admin
+from django.contrib.auth import get_permission_codename
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import QuerySet
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseNotAllowed, JsonResponse
@@ -16,6 +18,15 @@ from django.utils.text import Truncator
 from django_ray.lifecycle import retry_task
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.redaction import redact_text, safe_json_dumps
+from django_ray.workflow_progress_reads import (
+    WorkflowProgressReadError,
+    WorkflowProgressReadErrorCode,
+    get_workflow_node_detail,
+    get_workflow_progress_summary,
+    list_workflow_node_details,
+    list_workflow_topology_edges,
+    list_workflow_topology_nodes,
+)
 
 # Ray Dashboard URL fallback for local Ray.
 RAY_DASHBOARD_URL = "http://localhost:8265"
@@ -71,6 +82,14 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "workflow_plan_pinned_attempt",
         "workflow_plan_selection",
         "error_message",
+    )
+    workflow_read_fields = (
+        "pk",
+        "task_id",
+        "callable_path",
+        "attempt_number",
+        "execution_generation",
+        "workflow_run_id",
     )
 
     list_display = [
@@ -202,6 +221,25 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             )
         )
 
+    def has_view_permission(
+        self,
+        request: HttpRequest,
+        obj: RayTaskExecution | None = None,
+    ) -> bool:
+        """Honor global grants and object-permission backends."""
+        if super().has_view_permission(request, obj):
+            return True
+        if obj is None:
+            return False
+        opts = self.opts
+        return request.user.has_perm(
+            f"{opts.app_label}.{get_permission_codename('view', opts)}",
+            obj,
+        ) or request.user.has_perm(
+            f"{opts.app_label}.{get_permission_codename('change', opts)}",
+            obj,
+        )
+
     ordering = ["-created_at"]
     actions = ["retry_tasks", "cancel_tasks"]
 
@@ -213,7 +251,27 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
                 "<path:object_id>/observability/",
                 self.admin_site.admin_view(self.observability_view),
                 name=f"{opts.app_label}_{opts.model_name}_observability",
-            )
+            ),
+            path(
+                "<path:object_id>/workflow/topology/nodes/",
+                self.admin_site.admin_view(self.workflow_topology_nodes_view),
+                name=f"{opts.app_label}_{opts.model_name}_workflow_topology_nodes",
+            ),
+            path(
+                "<path:object_id>/workflow/topology/edges/",
+                self.admin_site.admin_view(self.workflow_topology_edges_view),
+                name=f"{opts.app_label}_{opts.model_name}_workflow_topology_edges",
+            ),
+            path(
+                "<path:object_id>/workflow/nodes/",
+                self.admin_site.admin_view(self.workflow_node_details_view),
+                name=f"{opts.app_label}_{opts.model_name}_workflow_node_details",
+            ),
+            path(
+                "<path:object_id>/workflow/node/",
+                self.admin_site.admin_view(self.workflow_node_detail_view),
+                name=f"{opts.app_label}_{opts.model_name}_workflow_node_detail",
+            ),
         ]
         return custom_urls + super().get_urls()
 
@@ -233,38 +291,138 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
                 args=[quote(object_id)],
                 current_app=self.admin_site.name,
             ),
+            "django_ray_workflow_topology_nodes_url": reverse(
+                f"{self.admin_site.name}:"
+                f"{opts.app_label}_{opts.model_name}_workflow_topology_nodes",
+                args=[quote(object_id)],
+                current_app=self.admin_site.name,
+            ),
+            "django_ray_workflow_topology_edges_url": reverse(
+                f"{self.admin_site.name}:"
+                f"{opts.app_label}_{opts.model_name}_workflow_topology_edges",
+                args=[quote(object_id)],
+                current_app=self.admin_site.name,
+            ),
+            "django_ray_workflow_node_details_url": reverse(
+                f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_workflow_node_details",
+                args=[quote(object_id)],
+                current_app=self.admin_site.name,
+            ),
         }
         return super().change_view(request, object_id, form_url, context)
+
+    def _observability_execution(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> RayTaskExecution:
+        """Load only bounded task metadata before the authorized read service."""
+        try:
+            execution_id = self.model._meta.pk.to_python(unquote(object_id))
+            return self.get_queryset(request).only(*self.observability_fields).get(pk=execution_id)
+        except (RayTaskExecution.DoesNotExist, ValidationError, ValueError) as error:
+            raise Http404("Ray task execution was not found") from error
+
+    def _authorized_workflow_read_execution(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> RayTaskExecution:
+        """Load bounded identity fields and authorize before parsing read arguments."""
+        try:
+            execution_id = self.model._meta.pk.to_python(unquote(object_id))
+            execution = (
+                self.get_queryset(request).only(*self.workflow_read_fields).get(pk=execution_id)
+            )
+        except (RayTaskExecution.DoesNotExist, ValidationError, ValueError) as error:
+            raise Http404("Ray task execution was not found") from error
+        if not self.has_view_permission(request, execution):
+            raise PermissionDenied
+        return execution
+
+    def _workflow_authorizer(
+        self,
+        request: HttpRequest,
+    ) -> Callable[[RayTaskExecution], bool]:
+        """Build the per-request object authorizer required by public reads."""
+        return lambda execution: self.has_view_permission(request, execution)
+
+    @staticmethod
+    def _workflow_read_error_response(error: WorkflowProgressReadError) -> JsonResponse:
+        """Map bounded service errors without exposing storage diagnostics."""
+        status_by_code = {
+            WorkflowProgressReadErrorCode.INVALID_ARGUMENT: 400,
+            WorkflowProgressReadErrorCode.INVALID_CURSOR: 400,
+            WorkflowProgressReadErrorCode.CURSOR_MISMATCH: 409,
+            WorkflowProgressReadErrorCode.MISSING: 409,
+            WorkflowProgressReadErrorCode.CORRUPT: 503,
+        }
+        if error.code is WorkflowProgressReadErrorCode.ACCESS_DENIED:
+            raise PermissionDenied
+        if error.code is WorkflowProgressReadErrorCode.NOT_FOUND:
+            raise Http404("Ray task execution was not found")
+        response = JsonResponse(
+            {
+                "code": error.code.value,
+                "message": _bounded_redacted_text(str(error)),
+            },
+            status=status_by_code.get(error.code, 400),
+        )
+        response["Cache-Control"] = "no-store"
+        return response
+
+    @staticmethod
+    def _page_limit(request: HttpRequest) -> int:
+        value = request.GET.get("limit")
+        if value is None:
+            return 100
+        try:
+            return int(value)
+        except ValueError as error:
+            raise ValueError("limit must be an integer") from error
+
+    @staticmethod
+    def _attempt_number(request: HttpRequest) -> int | None:
+        value = request.GET.get("attempt_number")
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except ValueError as error:
+            raise ValueError("attempt_number must be an integer") from error
 
     def observability_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
         """Return a versioned durable summary without querying Ray or task logs."""
         if request.method != "GET":
             return HttpResponseNotAllowed(["GET"])
-        try:
-            execution_id = self.model._meta.pk.to_python(unquote(object_id))
-            execution = (
-                self.get_queryset(request).only(*self.observability_fields).get(pk=execution_id)
-            )
-        except (RayTaskExecution.DoesNotExist, ValidationError, ValueError):
-            execution = None
-        if execution is None:
-            raise Http404("Ray task execution was not found")
-        if not self.has_view_permission(request, execution):
-            raise PermissionDenied
+        execution = self._observability_execution(request, object_id)
 
         from django_ray import observability
 
         workflow_error = None
+        workflow_error_code = None
+        progress_envelope = None
         try:
-            progress = observability.get_workflow_progress(execution)
-        except observability.WorkflowObservabilityError as error:
+            progress_envelope = get_workflow_progress_summary(
+                execution,
+                authorize=self._workflow_authorizer(request),
+                include_legacy=False,
+            )
+            progress = progress_envelope["summary"]
+        except WorkflowProgressReadError as error:
+            if error.code is WorkflowProgressReadErrorCode.ACCESS_DENIED:
+                raise PermissionDenied from error
+            if error.code is WorkflowProgressReadErrorCode.NOT_FOUND:
+                raise Http404("Ray task execution was not found") from error
             progress = None
-            workflow_error = _bounded_redacted_text(error)
+            workflow_error = _bounded_redacted_text(str(error))
+            workflow_error_code = error.code.value
         summary = observability.get_task_summary(execution, workflow_progress=progress)
         if summary.get("error_message") is not None:
             summary["error_message"] = _bounded_redacted_text(summary["error_message"])
         if workflow_error is not None:
             summary["workflow_error"] = workflow_error
+            summary["workflow_error_code"] = workflow_error_code
         node_counts = progress.get("node_counts", {}) if progress is not None else {}
         schema_v3 = (
             progress is not None
@@ -304,7 +462,126 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             if progress is not None
             else None
         )
+        summary["workflow_availability"] = (
+            progress_envelope.get("availability") if progress_envelope is not None else None
+        )
         response = JsonResponse(summary)
+        response["Cache-Control"] = "no-store"
+        return response
+
+    def workflow_topology_nodes_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> HttpResponse:
+        """Return one authorized bounded topology-node page."""
+        return self._workflow_page_view(request, object_id, collection="topology_nodes")
+
+    def workflow_topology_edges_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> HttpResponse:
+        """Return one authorized bounded topology-edge page."""
+        return self._workflow_page_view(request, object_id, collection="topology_edges")
+
+    def workflow_node_details_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> HttpResponse:
+        """Return one authorized bounded normalized-node page."""
+        return self._workflow_page_view(request, object_id, collection="node_details")
+
+    def _workflow_page_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+        *,
+        collection: str,
+    ) -> HttpResponse:
+        if request.method != "GET":
+            return HttpResponseNotAllowed(["GET"])
+        execution = self._authorized_workflow_read_execution(request, object_id)
+        try:
+            limit = self._page_limit(request)
+            attempt_number = self._attempt_number(request)
+        except ValueError:
+            response = JsonResponse(
+                {"code": "INVALID_ARGUMENT", "message": "page arguments are invalid"},
+                status=400,
+            )
+            response["Cache-Control"] = "no-store"
+            return response
+        authorizer = self._workflow_authorizer(request)
+        cursor = request.GET.get("cursor") or None
+        try:
+            if collection == "topology_nodes":
+                payload = list_workflow_topology_nodes(
+                    execution,
+                    authorize=authorizer,
+                    attempt_number=attempt_number,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            elif collection == "topology_edges":
+                payload = list_workflow_topology_edges(
+                    execution,
+                    authorize=authorizer,
+                    attempt_number=attempt_number,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            else:
+                payload = list_workflow_node_details(
+                    execution,
+                    authorize=authorizer,
+                    attempt_number=attempt_number,
+                    state=request.GET.get("state") or None,
+                    cursor=cursor,
+                    limit=limit,
+                )
+        except WorkflowProgressReadError as error:
+            return self._workflow_read_error_response(error)
+        response = JsonResponse(payload)
+        response["Cache-Control"] = "no-store"
+        return response
+
+    def workflow_node_detail_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> HttpResponse:
+        """Return one authorized indexed durable node record."""
+        if request.method != "GET":
+            return HttpResponseNotAllowed(["GET"])
+        execution = self._authorized_workflow_read_execution(request, object_id)
+        node_id = request.GET.get("node_id")
+        if node_id is None:
+            response = JsonResponse(
+                {"code": "INVALID_ARGUMENT", "message": "node_id is required"},
+                status=400,
+            )
+            response["Cache-Control"] = "no-store"
+            return response
+        try:
+            attempt_number = self._attempt_number(request)
+            payload = get_workflow_node_detail(
+                execution,
+                node_id,
+                authorize=self._workflow_authorizer(request),
+                attempt_number=attempt_number,
+            )
+        except ValueError:
+            response = JsonResponse(
+                {"code": "INVALID_ARGUMENT", "message": "attempt_number must be an integer"},
+                status=400,
+            )
+            response["Cache-Control"] = "no-store"
+            return response
+        except WorkflowProgressReadError as error:
+            return self._workflow_read_error_response(error)
+        response = JsonResponse(payload)
         response["Cache-Control"] = "no-store"
         return response
 

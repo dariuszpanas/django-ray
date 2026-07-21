@@ -227,8 +227,10 @@ def workflow_run_is_current(identity: WorkflowRunIdentity) -> bool:
 def _bounded_progress_fields(execution: Any) -> _BoundedProgressFields:
     """Read the preferred progress field without returning oversized text."""
     if isinstance(execution, RayTaskExecution) and execution.pk is not None:
+        database = execution._state.db or "default"
         rows = (
-            RayTaskExecution.objects.filter(pk=execution.pk)
+            RayTaskExecution.objects.using(database)
+            .filter(pk=execution.pk)
             .annotate(
                 _summary_bytes=_OctetLength("workflow_progress_summary_json"),
                 _legacy_bytes=Case(

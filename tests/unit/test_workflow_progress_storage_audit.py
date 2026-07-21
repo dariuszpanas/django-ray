@@ -12,6 +12,7 @@ from django.core.management.base import CommandError
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
+from django_ray.lifecycle import succeed_task
 from django_ray.models import WorkflowProgressNodeDetail, WorkflowProgressRunStorage
 from django_ray.workflow_progress_storage import (
     WORKFLOW_PROGRESS_DETAIL_MAX_ITEMS,
@@ -172,6 +173,27 @@ def test_audit_rejects_retained_state_count_above_truncated_active_summary() -> 
         match="retained state counts conflict with active summary",
     ):
         audit_workflow_progress_detail_storage(published.identity)
+
+
+@pytest.mark.django_db
+def test_audit_accepts_last_observed_detail_after_lifecycle_success() -> None:
+    published = publish_initial_workflow(2, case_id=2181)
+
+    assert succeed_task(
+        published.execution,
+        result_data="{}",
+        result_reference=None,
+    )
+
+    result = audit_workflow_progress_detail_storage(published.identity)
+
+    assert result.node_count == 2
+    assert result.state_counts == (
+        ("PENDING", 2),
+        ("RUNNING", 0),
+        ("SUCCEEDED", 0),
+        ("FAILED", 0),
+    )
 
 
 @pytest.mark.django_db

@@ -23,16 +23,20 @@
     }
   };
 
-  const renderWorkflow = (workflow) => {
+  const renderWorkflow = (workflow, availability) => {
     if (!workflow) {
-      return "No workflow progress available.";
+      return availability
+        ? `Workflow detail: ${availability}.`
+        : "No workflow progress available.";
     }
     const completed = workflow.completed_nodes ?? 0;
     const total = workflow.total_nodes ?? 0;
     const percent = workflow.progress_percent ?? 0;
     const revision = workflow.revision ?? 0;
     const state = workflow.state ?? workflow.workflow_state ?? "UNKNOWN";
-    return `${state}: ${completed}/${total} nodes (${percent}%), revision ${revision}`;
+    const detailAvailability = workflow.detail?.availability ?? availability;
+    const detail = detailAvailability ? `, detail ${detailAvailability}` : "";
+    return `${state}: ${completed}/${total} nodes (${percent}%), revision ${revision}${detail}`;
   };
 
   async function refresh() {
@@ -65,7 +69,10 @@
       const state = String(task.state ?? "UNKNOWN");
       stateNode.textContent = state;
       attemptNode.textContent = String(task.attempt_number ?? "-");
-      const workflowText = renderWorkflow(payload.workflow ?? null);
+      const workflowText = renderWorkflow(
+        payload.workflow ?? null,
+        payload.workflow_availability ?? null,
+      );
       workflowNode.textContent = workflowText;
       const announcementKey = [
         state,

@@ -527,6 +527,49 @@ class TestTasksAPI:
         assert data["ray_state"] is None
         assert data["logs"] is None
 
+    def test_indexed_workflow_node_does_not_scan_legacy_graph(self, client):
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-indexed-node-001",
+            callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
+            queue_name="default",
+            state=TaskState.RUNNING,
+            progress_data=json.dumps(
+                {
+                    "graph": {
+                        "nodes": [
+                            {
+                                "node_id": "namespace/apply",
+                                "label": "prepare",
+                                "dependencies": [],
+                                "execution": {},
+                            }
+                        ],
+                        "edges": [],
+                    }
+                }
+            ),
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get(
+                f"/api/cluster/workflows/{execution.task_id}/node-detail",
+                {"node_id": "namespace/apply"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["availability"] == "NOT_REPORTED"
+        assert data["found"] is False
+        assert data["item"] is None
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert task_selects
+        assert all("progress_data" not in query for query in task_selects)
+
 
 @pytest.mark.django_db
 class TestExecutionsAPI:

@@ -202,6 +202,12 @@ same row lock derives a terminal envelope from the last accepted running summary
 archives it before cleanup. Legacy complete graphs and malformed or noncanonical
 summaries are never copied into attempt history.
 
+If lifecycle owns a successful transition before the producer publishes terminal node
+states, it preserves authoritative aggregate success while marking retained detail
+`TRUNCATED` with `terminal_state_unreported`. The normalized rows remain last-observed
+rather than being rewritten in an unbounded terminal update. Producer-authored complete
+terminal detail remains `AVAILABLE`.
+
 ### Workflow progress detail storage
 
 Migration `0013_workflow_progress_detail_storage` adds package-owned, run-scoped
@@ -357,8 +363,8 @@ Bounded progress storage uses an additive reader-first rollout. Apply migration
 `0013_workflow_progress_detail_storage` for the dormant package-owned detail tables.
 Existing rows and older writers continue using `progress_data`; migration `0013` does
 not backfill or reinterpret legacy snapshots. Keep schema-v3 producer activation
-disabled until #127's authorized readers are deployed, then drain old workflow writers
-before activation. Reversing `0013` discards normalized detail tables, while reversing
+disabled until the authorized bounded readers are deployed, then drain old workflow
+writers before activation. Reversing `0013` discards normalized detail tables, while reversing
 `0012` drops the summary columns. Export any retained schema-v3 data needed for audit
 before either rollback; legacy progress remains unchanged.
 
@@ -369,8 +375,8 @@ before either rollback; legacy progress remains unchanged.
 - Task monitor heartbeats for active reconciliation paths.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
 - Per-workflow in-memory progress coordination still emits revision-based complete
-  schema-v2 snapshots. Bounded schema-v3 summary and detail storage are present but
-  producer activation waits for #127's authorized services and an old-writer drain.
+  schema-v2 snapshots. Bounded schema-v3 summary/detail storage and authorized readers
+  are present, but producer activation still waits for an old-writer drain.
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.
@@ -383,7 +389,8 @@ before either rollback; legacy progress remains unchanged.
 
 - Django admin for task/lease inspection and operations.
 - Authenticated, polling-based live task state and workflow progress in the task admin.
-- Versioned package services for task, queue, attempt, workflow, and bounded live-Ray data.
+- Versioned package services for task, queue, attempt, workflow, bounded paginated
+  workflow detail, indexed nodes, and bounded live-Ray data.
 - Package-owned Prometheus rendering with explicit queue-label allowlists and fixed labels.
 - Worker logs for claim/submit/reconcile/retry events.
 - Structured workflow-leaf logs correlated by durable task, workflow node, and Ray IDs.

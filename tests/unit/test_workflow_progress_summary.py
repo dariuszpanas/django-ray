@@ -1276,6 +1276,67 @@ def test_terminal_lifecycle_transitions_derive_one_bounded_terminal_summary(
 
 
 @pytest.mark.django_db
+def test_lifecycle_success_marks_preterminal_detail_as_last_observed(
+    running_execution,
+) -> None:
+    identity = _identity(running_execution)
+    assert _persist_locked_summary(
+        identity,
+        _summary(identity, published_detail=True),
+    )
+
+    assert succeed_task(running_execution, result_data="{}", result_reference=None)
+
+    attempt = TaskAttempt.objects.get(execution=running_execution, attempt_number=2)
+    archived = deserialize_workflow_progress_summary(attempt.workflow_progress_summary_json)
+    assert archived["state"] == "SUCCEEDED"
+    assert archived["node_counts"]["succeeded"] == 1
+    assert archived["detail"] == {
+        "availability": "TRUNCATED",
+        "complete": False,
+        "truncation_reasons": ["terminal_state_unreported"],
+    }
+
+
+@pytest.mark.django_db
+def test_lifecycle_success_preserves_producer_terminal_detail(running_execution) -> None:
+    identity = _identity(running_execution)
+    assert _persist_locked_summary(
+        identity,
+        _summary(identity, published_detail=True, state="SUCCEEDED"),
+    )
+
+    assert succeed_task(running_execution, result_data="{}", result_reference=None)
+
+    attempt = TaskAttempt.objects.get(execution=running_execution, attempt_number=2)
+    archived = deserialize_workflow_progress_summary(attempt.workflow_progress_summary_json)
+    assert archived["detail"] == {
+        "availability": "AVAILABLE",
+        "complete": True,
+        "truncation_reasons": [],
+    }
+
+
+@pytest.mark.django_db
+def test_terminal_state_unreported_reason_requires_successful_truncated_detail(
+    running_execution,
+) -> None:
+    identity = _identity(running_execution)
+    invalid = _summary(identity, published_detail=True)
+    invalid["detail"] = {
+        "availability": "TRUNCATED",
+        "complete": False,
+        "truncation_reasons": ["terminal_state_unreported"],
+    }
+
+    with pytest.raises(
+        WorkflowProgressSummaryError,
+        match="unreported terminal node state",
+    ):
+        serialize_workflow_progress_summary(invalid, expected_identity=identity)
+
+
+@pytest.mark.django_db
 def test_lifecycle_reserves_final_revision_and_sets_published_detail_expiry(
     running_execution,
 ) -> None:
