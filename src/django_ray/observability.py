@@ -19,6 +19,11 @@ from django_ray.workflow_plans import (
     WorkflowPlanValidationError,
     validate_plan_selection_manifest,
 )
+from django_ray.workflow_progress import WorkflowProgressReadSource, read_workflow_progress
+from django_ray.workflow_progress_summary import (
+    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
+    public_workflow_progress_summary,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -34,6 +39,13 @@ MAX_RAY_LOG_MAX_BYTES = 1024 * 1024
 
 class WorkflowObservabilityError(RuntimeError):
     """Raised when workflow or Ray observability data cannot be retrieved."""
+
+
+class _WorkflowProgressNotRead:
+    """Sentinel distinguishing an absent summary from one not read yet."""
+
+
+_WORKFLOW_PROGRESS_NOT_READ = _WorkflowProgressNotRead()
 
 
 def _isoformat(value: datetime | None) -> str | None:
@@ -68,15 +80,31 @@ def get_task_summary(
     execution: RayTaskExecution,
     *,
     generated_at: datetime | None = None,
+    workflow_progress: dict[str, Any] | None | _WorkflowProgressNotRead = (
+        _WORKFLOW_PROGRESS_NOT_READ
+    ),
 ) -> dict[str, Any]:
-    """Return a redacted operational summary without task payloads or topology."""
+    """Return a redacted operational summary without task payloads or topology.
+
+    Callers that already performed the bounded progress read may pass its result to
+    avoid a second database round trip.
+    """
     workflow_revision = None
-    try:
-        progress = get_workflow_progress(execution)
-        if progress is not None and isinstance(progress.get("revision"), int):
-            workflow_revision = progress["revision"]
-    except WorkflowObservabilityError:
-        pass
+    if isinstance(workflow_progress, _WorkflowProgressNotRead):
+        try:
+            progress = get_workflow_progress(execution)
+        except WorkflowObservabilityError:
+            progress = None
+    else:
+        progress = workflow_progress
+    if progress is not None:
+        revision_field = (
+            "summary_revision"
+            if progress.get("schema_version") == WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION
+            else "revision"
+        )
+        if isinstance(progress.get(revision_field), int):
+            workflow_revision = progress[revision_field]
 
     try:
         plan_selection = _workflow_plan_selection(execution)
@@ -263,42 +291,17 @@ def get_attempt_history(
 
 
 def get_workflow_progress(execution: RayTaskExecution) -> dict[str, Any] | None:
-    """Decode the latest durable workflow progress snapshot."""
-    if not execution.progress_data:
+    """Decode bounded schema v1/v2/v3 durable workflow progress."""
+    result = read_workflow_progress(execution)
+    if result.diagnostic_code is not None:
+        task_id = str(getattr(execution, "task_id", "unknown"))[:255]
+        message = result.diagnostic_message or "workflow progress is unavailable"
+        raise WorkflowObservabilityError(f"Task {task_id} {message}")
+    if result.payload is None:
         return None
-    try:
-        progress = json.loads(execution.progress_data)
-    except (TypeError, json.JSONDecodeError) as error:
-        raise WorkflowObservabilityError(
-            f"Task {execution.task_id} contains invalid workflow progress JSON"
-        ) from error
-    if not isinstance(progress, dict):
-        raise WorkflowObservabilityError(
-            f"Task {execution.task_id} workflow progress must be a JSON object"
-        )
-    schema_version = progress.get("schema_version", 1)
-    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
-        raise WorkflowObservabilityError(
-            f"Task {execution.task_id} workflow progress has an invalid schema version"
-        )
-    if schema_version >= 2:
-        identity = progress.get("run_identity")
-        if not isinstance(identity, dict):
-            raise WorkflowObservabilityError(
-                f"Task {execution.task_id} workflow progress must contain a run identity"
-            )
-        expected_identity = {
-            "run_id": (
-                str(execution.workflow_run_id) if execution.workflow_run_id is not None else None
-            ),
-            "task_execution_pk": execution.pk,
-            "attempt_number": execution.attempt_number,
-            "execution_generation": execution.execution_generation,
-        }
-        if any(identity.get(key) != value for key, value in expected_identity.items()):
-            raise WorkflowObservabilityError(
-                f"Task {execution.task_id} workflow progress belongs to another run"
-            )
+    progress = result.payload
+    if result.source is WorkflowProgressReadSource.SUMMARY:
+        progress = public_workflow_progress_summary(progress)
     return redact_value(progress)
 
 
@@ -306,6 +309,8 @@ def get_workflow_graph(execution: RayTaskExecution) -> dict[str, Any] | None:
     """Return the UI-ready graph from a durable workflow snapshot."""
     progress = get_workflow_progress(execution)
     if progress is None:
+        return None
+    if progress.get("schema_version") == WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION:
         return None
     graph = progress.get("graph")
     if isinstance(graph, dict):

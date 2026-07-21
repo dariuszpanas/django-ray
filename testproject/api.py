@@ -23,7 +23,7 @@ from ninja.security import HttpBearer
 from pydantic import field_validator
 
 from django_ray import __version__ as django_ray_version
-from django_ray.lifecycle import retry_task
+from django_ray.lifecycle import cancel_task, record_failure, retry_task
 from django_ray.metrics import render_prometheus_metrics
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.observability import (
@@ -32,6 +32,7 @@ from django_ray.observability import (
     get_workflow_progress,
 )
 from django_ray.redaction import redact_text, redact_value, safe_json_dumps
+from django_ray.workflow_progress_summary import WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION
 
 # Import tasks that use Django 6's @task decorator
 from testproject import tasks
@@ -39,6 +40,14 @@ from testproject.apps.cluster_tasks import tasks as cluster_tasks
 from testproject.apps.local_ray import tasks as local_tasks
 from testproject.apps.ml_pipeline import tasks as ml_tasks
 from testproject.apps.sync_tasks import tasks as sync_tasks
+
+
+def _workflow_observability_executions():
+    """Avoid loading either durable progress payload before the bounded reader."""
+    return RayTaskExecution.objects.defer(
+        "progress_data",
+        "workflow_progress_summary_json",
+    )
 
 
 class ApiTokenAuth(HttpBearer):
@@ -122,12 +131,11 @@ class TaskExecutionSchema(Schema):
     started_at: datetime | None
     finished_at: datetime | None
     result_data: str | None
-    progress_data: str | None
     runtime_env_profile: str | None
     runtime_env_hash: str
     error_message: str | None
 
-    @field_validator("result_data", "progress_data", mode="before")
+    @field_validator("result_data", mode="before")
     @classmethod
     def redact_json_fields(cls, value):
         if value is None:
@@ -543,7 +551,7 @@ def list_executions(
 
     This provides visibility into the internal execution tracking.
     """
-    queryset = RayTaskExecution.objects.all()
+    queryset = _workflow_observability_executions()
 
     if state:
         queryset = queryset.filter(state=state.upper())
@@ -593,18 +601,34 @@ def reset_executions(
             state__in=[TaskState.SUCCEEDED, TaskState.QUEUED]
         )
 
-    count = queryset.count()
-    queryset.update(
-        state=TaskState.QUEUED,
-        started_at=None,
-        finished_at=None,
-        claimed_by_worker=None,
-        ray_job_id=None,
-        error_message=None,
-        error_traceback=None,
-        progress_data=None,
-        workflow_run_id=None,
-    )
+    execution_ids = list(queryset.values_list("pk", flat=True))
+    count = 0
+    for execution_id in execution_ids:
+        execution = (
+            RayTaskExecution.objects.only("pk", "state", "execution_generation")
+            .filter(pk=execution_id)
+            .first()
+        )
+        if execution is None:
+            continue
+        if execution.state == TaskState.RUNNING:
+            reset = record_failure(
+                execution,
+                error_message="Task reset through the bundled operations API",
+                retry=True,
+                expected_execution_generation=execution.execution_generation,
+            )
+        elif execution.state == TaskState.CANCELLING:
+            reset = (
+                cancel_task(
+                    execution,
+                    expected_execution_generation=execution.execution_generation,
+                )
+                and retry_task(execution.pk) is not None
+            )
+        else:
+            reset = retry_task(execution.pk) is not None
+        count += int(reset)
 
     return {"message": f"Reset {count} execution(s) to QUEUED state"}
 
@@ -612,14 +636,14 @@ def reset_executions(
 @api.get("/executions/{execution_id}", response=TaskExecutionSchema, tags=["Admin"])
 def get_execution(request, execution_id: int):
     """Get detailed execution record by internal ID."""
-    task = get_object_or_404(RayTaskExecution, pk=execution_id)
+    task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
     return task
 
 
 @api.delete("/executions/{execution_id}", response=MessageSchema, tags=["Admin"])
 def delete_execution(request, execution_id: int):
     """Delete an execution record."""
-    task = get_object_or_404(RayTaskExecution, pk=execution_id)
+    task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
     task.delete()
     return {"message": f"Execution {execution_id} deleted"}
 
@@ -627,7 +651,7 @@ def delete_execution(request, execution_id: int):
 @api.post("/executions/{execution_id}/cancel", response=TaskExecutionSchema, tags=["Admin"])
 def cancel_execution(request, execution_id: int):
     """Cancel a queued or running task execution."""
-    task = get_object_or_404(RayTaskExecution, pk=execution_id)
+    task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
 
     if task.state == TaskState.QUEUED:
         task.state = TaskState.CANCELLED
@@ -642,7 +666,7 @@ def cancel_execution(request, execution_id: int):
 @api.post("/executions/{execution_id}/retry", response=TaskExecutionSchema, tags=["Admin"])
 def retry_execution(request, execution_id: int):
     """Retry a failed task execution."""
-    task = get_object_or_404(RayTaskExecution, pk=execution_id)
+    task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
     return retry_task(task) or task
 
 
@@ -1036,7 +1060,7 @@ def cluster_workflow_benchmark(
 def get_cluster_workflow_benchmark(request, task_id: str):
     """Return workflow state, timing summary, leaf details, or failure."""
     execution = get_object_or_404(
-        RayTaskExecution,
+        _workflow_observability_executions(),
         task_id=task_id,
         callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
     )
@@ -1091,7 +1115,7 @@ def cluster_complex_workflow(
 def get_cluster_complex_workflow(request, task_id: str):
     """Return live progress and results for the nested workflow example."""
     execution = get_object_or_404(
-        RayTaskExecution,
+        _workflow_observability_executions(),
         task_id=task_id,
         callable_path=("testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"),
     )
@@ -1118,13 +1142,15 @@ def get_cluster_complex_workflow(request, task_id: str):
 )
 def get_cluster_workflow_graph(request, task_id: str):
     """Return a versioned node/edge graph suitable for custom tracking UIs."""
-    execution = get_object_or_404(RayTaskExecution, task_id=task_id)
+    execution = get_object_or_404(_workflow_observability_executions(), task_id=task_id)
     try:
         progress = get_workflow_progress(execution)
     except WorkflowObservabilityError as exc:
         raise Http404(str(exc)) from exc
     if progress is None:
         raise Http404("Workflow graph is not available yet")
+    if progress.get("schema_version") == WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION:
+        raise Http404("Workflow graph detail is not available through the bounded summary")
     return {
         "task_id": execution.task_id,
         "task_state": execution.state,
@@ -1160,7 +1186,7 @@ def get_cluster_workflow_node(
     tail: int = 200,
 ):
     """Return durable node metadata plus live Ray state and optional log tails."""
-    execution = get_object_or_404(RayTaskExecution, task_id=task_id)
+    execution = get_object_or_404(_workflow_observability_executions(), task_id=task_id)
     snapshot = get_workflow_node_snapshot(
         execution,
         node_id,

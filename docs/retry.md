@@ -72,9 +72,21 @@ Attempt numbers are one-based and increase for both automatic and manual retries
 manual retry never resets the counter or consumes a separate budget. Each terminal
 attempt is copied to `TaskAttempt`, preserving its state, result reference, and
 failure diagnostics while the current execution row is prepared for the next run.
+When that run already owns an accepted canonical schema-v3 terminal progress summary,
+the same at-most-16-KiB JSON value is archived on `TaskAttempt` before the current
+summary is cleared. When lifecycle reconciliation wins first, it derives a terminal
+envelope from the last accepted running summary under the same row lock. The envelope
+records the authoritative outer outcome and detail expiry. Success marks every
+discovered node complete; interrupted outcomes retain the last observed node counters.
+Complete legacy graphs and topology/detail rows are never copied; malformed,
+noncanonical, or missing summaries do not block the lifecycle transition.
+Producer publications reserve one final summary revision so a conflicting terminal
+report can be replaced by the authoritative row-locked task outcome.
+
 The admin action, operational retry endpoint, and worker retry path use the same
 row-locked transition service, so a racing retry request is rejected rather than
-applied twice.
+applied twice. Success, permanent failure, timeout, LOST recovery, cancellation, and
+Ray Job `STOPPED` reconciliation use that same terminal archival boundary.
 
 Tasks with durable external inputs keep the same immutable `input_reference` across
 automatic and manual retries; a retry does not upload a replacement. Corrupt,

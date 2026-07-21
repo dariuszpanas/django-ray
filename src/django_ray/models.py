@@ -181,6 +181,12 @@ class RayTaskExecution(models.Model):
         blank=True,
         help_text="JSON workflow progress snapshot for the durable outer task",
     )
+    workflow_progress_summary_json = models.TextField(
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Bounded canonical schema-v3 workflow progress summary",
+    )
     workflow_run_id = models.UUIDField(
         null=True,
         blank=True,
@@ -319,6 +325,12 @@ class TaskAttempt(models.Model):
     error_traceback = models.TextField(null=True, blank=True)
     result_data = models.TextField(null=True, blank=True)
     result_reference = models.CharField(max_length=500, null=True, blank=True)
+    workflow_progress_summary_json = models.TextField(
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Bounded terminal workflow progress summary for this attempt",
+    )
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:

@@ -136,8 +136,10 @@ def test_versioned_task_summary_omits_sensitive_payloads(db, settings) -> None:
 
     execution.progress_data = "{"
     execution.error_message = None
+    execution.save(update_fields=["progress_data", "error_message"])
     assert get_task_summary(execution)["workflow_revision"] is None
     execution.progress_data = json.dumps({"revision": "not-an-integer"})
+    execution.save(update_fields=["progress_data"])
     assert get_task_summary(execution)["workflow_revision"] is None
 
 
@@ -475,6 +477,7 @@ def test_get_workflow_progress_rejects_mismatched_versioned_run(db) -> None:
             "revision": 1,
         }
     )
+    execution.save(update_fields=["progress_data"])
 
     with pytest.raises(WorkflowObservabilityError, match="belongs to another run"):
         get_workflow_progress(execution)

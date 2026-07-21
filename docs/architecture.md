@@ -112,8 +112,13 @@ Publication writes and verifies detail before conditionally advancing the summar
 pointer through the exact #81 run fence. Static topology is run-scoped and is not
 duplicated for each ADR-0003 invocation. Detail has exact availability, size,
 retention, authorization, cursor, corruption, and cleanup contracts; periodic Admin
-polling reads only the bounded summary. The models, migration, writer, cleanup, and
-paginated services remain implementation work. See
+polling defers both durable payload fields and selects progress through one bounded
+compatibility query. The nullable schema-v3 summary fields, strict codec, fenced writer
+primitive, rolling reader, and terminal attempt archival are implemented. The
+standalone primitive rejects topology/detail pointers; only #126's package-internal
+locked hook may advance them in the storage transaction. The current workflow actor
+deliberately continues to publish schema v2; topology/detail storage, writer activation,
+cleanup, and authorized paginated services remain implementation work. See
 [ADR-0004](design/adr-0004-bounded-workflow-progress.md).
 
 ### Database
@@ -140,8 +145,9 @@ Primary execution record for one task attempt chain.
 | `input_reference` | Optional durable pointer to a versioned combined input envelope |
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
-| `progress_data` | Current schema-v1/v2 complete workflow snapshot; retained for the planned ADR-0004 dual-read rollout |
-| `workflow_run_id` | Current workflow run allowed to update `progress_data` |
+| `progress_data` | Current schema-v1/v2 complete workflow snapshot; retained for rolling compatibility |
+| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; publication remains disabled until detail storage and public readers are ready |
+| `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
 | `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
 | `runtime_env_hash` | SHA-256 content identity used to correlate cache reuse |
@@ -185,7 +191,13 @@ references, and failure diagnostics in `TaskAttempt`. The current
 `RayTaskExecution` row remains the source of truth for scheduling, while this
 history makes retries auditable after the current row is reset for its next
 attempt. Admin retries, the operational retry API, and automatic worker retries
-all use the same row-locked lifecycle service and increment the attempt counter.
+all use the same row-locked lifecycle service and increment the attempt counter. When
+the current run has already published an accepted canonical terminal schema-v3
+summary, `workflow_progress_summary_json` stores those exact bounded bytes on the
+attempt. If timeout, loss, cancellation, or another lifecycle owner wins first, the
+same row lock derives a terminal envelope from the last accepted running summary and
+archives it before cleanup. Legacy complete graphs and malformed or noncanonical
+summaries are never copied into attempt history.
 
 ## Task State Model
 
@@ -297,14 +309,24 @@ Drain old Ray Job drivers before enabling spillover. Existing inline rows remain
 referenced Ray Jobs use transport version 2 and contain only `input_reference`. Before
 rolling back, disable spillover and drain all tasks that already have a reference.
 
+Bounded progress summaries also use an additive reader-first rollout. Apply migration
+`0012_workflow_progress_summary` before deploying upgraded readers. Existing rows and
+older writers leave both nullable summary columns empty and continue using
+`progress_data`. Keep schema-v3 producer activation disabled through the topology/detail
+storage and authorized-reader deployments, then drain old workflow writers before
+activation. Reversing migration `0012` drops only the new summary columns, so export any
+terminal summaries needed for audit before that rollback; legacy progress remains
+unchanged.
+
 ## Reliability Controls
 
 - Unified retry policy with denylist support (short and fully-qualified exception names).
 - Worker lease heartbeat + cross-worker orphan recovery.
 - Task monitor heartbeats for active reconciliation paths.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
-- Per-workflow in-memory progress coordination with revision-based complete database
-  snapshots; their current graph bytes remain unbounded until ADR-0004 is implemented.
+- Per-workflow in-memory progress coordination still emits revision-based complete
+  schema-v2 snapshots. Bounded schema-v3 storage and readers are present but producer
+  activation waits for topology/detail storage and authorized services.
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.

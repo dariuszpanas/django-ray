@@ -538,6 +538,12 @@ The outer Django task is the durability and retry boundary:
   `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
   Recent events have a count cap, but the current node/edge graph and its serialized
   bytes are not size-bounded.
+- A separate nullable `workflow_progress_summary_json` field and schema-v3 codec are
+  deployed reader-first. The field is fixed-shape and capped at 16 KiB of canonical
+  UTF-8 JSON. Current coordinators intentionally remain schema-v2 writers until the
+  topology/detail storage delivery can publish detail and its summary pointer in one
+  transaction. The standalone schema-v3 writer rejects topology/detail pointers; the
+  package-internal locked hook is reserved for that atomic storage path.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -550,9 +556,16 @@ The outer Django task is the durability and retry boundary:
   runtime environment identity, and recent events.
 - A leaf failure fails the outer task.
 - Retrying the outer task reruns the workflow, including previously completed leaves.
-- `TaskAttempt` archives terminal task diagnostics, not workflow graphs. This keeps
-  retry history bounded; `progress_data` and `workflow_run_id` describe only the
-  current attempt or its latest terminal invocation.
+- `TaskAttempt` archives terminal task diagnostics, not workflow graphs. If a run has
+  already published a canonical terminal schema-v3 summary, the same bounded value is
+  archived with its attempt before retry cleanup. Otherwise, lifecycle reconciliation
+  derives a terminal envelope from the last accepted running summary under the row
+  lock. The outer outcome and expiry are authoritative. Success marks every discovered
+  node complete; interrupted outcomes retain the last accepted counters. Invalid
+  summaries and legacy complete snapshots are not copied. This keeps retry history
+  bounded;
+  `progress_data`, the current summary, and `workflow_run_id` otherwise describe only
+  the current attempt or its latest terminal invocation.
 - Cancellation of a Ray Core outer task recursively cancels its child tasks through
   Ray's normal cancellation behavior.
 - The final workflow result must satisfy the same result-serialization rules as any
@@ -564,8 +577,11 @@ latest-state node-detail rows. Changed detail rows are batch-upserted before the
 #81-fenced summary pointer advances; each accepted detail-changing publication expires
 prior cursors, while static topology is not duplicated for repeated invocations.
 Authorized readers use revision-bound pagination. The ADR defines exact V1 limits,
-availability states, legacy v1/v2 reads, retention, and cleanup, but this release has
-not implemented its models, migration, writer, or services. See
+availability states, legacy v1/v2 reads, retention, and cleanup. Its first delivery now
+implements the nullable current/per-attempt summary fields, strict schema-v3 codec,
+monotonic exact-run writer primitive, bounded rolling reader, and lifecycle archival.
+Topology/detail models and public detail services remain #126 and #127 work, so the
+runtime producer still writes complete schema-v2 snapshots. See
 [ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md).
 
 Ray Core tasks already run inside an initialized Ray worker. Ray Job drivers
@@ -577,12 +593,17 @@ particular, Compiled Graph is a possible engine for a validated static actor reg
 not a Django task type or a flag that makes data-dependent `map_step` expansion static.
 See [Workflow Plans and Execution Strategies](workflow-plans.md).
 
-Apply the database migration before starting upgraded workers, and drain workflow
-executions from older workers during a rolling deployment. Existing rows start with
-`workflow_run_id = NULL` and a nullable plan identity so an older writer can still
-insert during the rollout; the first upgraded, fully
-identified workflow invocation claims a UUID and pins its plan. Prepared actors or
-graphs in later strategies must drain when that fingerprint changes. Custom uses of
+Apply database migrations before starting upgraded workers. Migration
+`0012_workflow_progress_summary` is additive: existing rows and older writers leave the
+new summary fields `NULL`, and upgraded readers continue to accept schema v1/v2 from
+`progress_data` under the 64 MiB compatibility cap. Do not enable schema-v3 production
+yet. Deploy #126's internal topology/detail readers and storage, then #127's authorized
+public facade, and drain old workflow writers before activation.
+
+Existing rows start with `workflow_run_id = NULL` and a nullable plan identity so an
+older writer can still insert during the rollout; the first upgraded, fully identified
+workflow invocation claims a UUID and pins its plan. Prepared actors or graphs in later
+strategies must drain when that fingerprint changes. Custom uses of
 `durable_task_execution()` that omit the attempt or execution generation continue to
 run their workflow but intentionally do not persist the plan or progress because their
 writes cannot be fenced safely.

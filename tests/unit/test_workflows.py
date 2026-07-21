@@ -1486,6 +1486,7 @@ def test_real_ray_workflow_persists_graph_and_execution_metadata() -> None:
 
     assert progress["state"] == "SUCCEEDED"
     assert progress["schema_version"] == WORKFLOW_PROGRESS_SCHEMA_VERSION
+    assert execution.workflow_progress_summary_json is None
     assert progress["run_identity"]["attempt_number"] == 1
     assert progress["run_identity"]["execution_generation"] == 1
     assert progress["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]

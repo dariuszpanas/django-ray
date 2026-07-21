@@ -11,7 +11,9 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 
 from django_ray import __version__ as django_ray_version
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 
 @pytest.fixture
@@ -459,6 +461,41 @@ class TestTasksAPI:
         assert data["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]
         assert data["graph"]["nodes"][1]["execution"]["ray_task_id"] == "ray-2"
 
+    def test_bounded_v3_summary_is_public_but_legacy_graph_route_is_unavailable(self, client):
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-v3-api-001",
+            callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
+            queue_name="default",
+            state=TaskState.RUNNING,
+            workflow_run_id="00000000-0000-0000-0000-000000000125",
+            progress_data="legacy-graph" * 1_000,
+        )
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(
+            workflow_progress_summary(execution, published_detail=True)
+        )
+        execution.save(update_fields=["workflow_progress_summary_json"])
+
+        with CaptureQueriesContext(connection) as queries:
+            progress_response = client.get(f"/api/cluster/workflow-benchmark/{execution.task_id}")
+
+        assert progress_response.status_code == 200
+        progress = progress_response.json()["progress"]
+        assert progress["schema_version"] == 3
+        assert "task_execution_pk" not in progress["run_identity"]
+        assert progress["storage"]["manifest_id"] is None
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(task_selects) == 2
+        assert "progress_data" not in task_selects[0]
+        assert "workflow_progress_summary_json" not in task_selects[0]
+
+        graph_response = client.get(f"/api/cluster/workflows/{execution.task_id}/graph")
+        assert graph_response.status_code == 404
+
     def test_get_workflow_node_returns_durable_metadata_without_ray_id(self, client):
         execution = RayTaskExecution.objects.create(
             task_id="workflow-node-001",
@@ -582,6 +619,33 @@ class TestExecutionsAPI:
         assert "result-secret" not in serialized
         assert "error-secret" not in serialized
         assert "[REDACTED]" in serialized
+        assert "progress_data" not in payload
+
+    def test_execution_monitoring_reads_defer_complete_progress_payloads(self, client):
+        task = RayTaskExecution.objects.create(
+            task_id="test-bounded-execution-api",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            progress_data="legacy-graph" * 10_000,
+            workflow_progress_summary_json="summary" * 10_000,
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            detail = client.get(f"/api/executions/{task.pk}")
+            listing = client.get("/api/executions")
+
+        assert detail.status_code == 200
+        assert listing.status_code == 200
+        assert "progress_data" not in detail.json()
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert task_selects
+        assert all("progress_data" not in query for query in task_selects)
+        assert all("workflow_progress_summary_json" not in query for query in task_selects)
 
     def test_get_execution_not_found(self, client):
         """Test getting a non-existent execution."""
@@ -633,11 +697,18 @@ class TestExecutionsAPI:
 
     def test_reset_executions(self, client):
         """Test resetting stuck executions."""
-        RayTaskExecution.objects.create(
+        running = RayTaskExecution.objects.create(
             task_id="test-running",
             callable_path="test.task",
             state=TaskState.RUNNING,
+            progress_data='{"revision":9}',
+            workflow_run_id="00000000-0000-0000-0000-000000000125",
         )
+        terminal = serialize_workflow_progress_summary(
+            workflow_progress_summary(running, state="FAILED")
+        )
+        running.workflow_progress_summary_json = terminal
+        running.save(update_fields=["workflow_progress_summary_json"])
         RayTaskExecution.objects.create(
             task_id="test-failed",
             callable_path="test.task",
@@ -651,6 +722,17 @@ class TestExecutionsAPI:
 
         # Verify all reset to QUEUED
         assert RayTaskExecution.objects.filter(state=TaskState.QUEUED).count() == 2
+        running.refresh_from_db()
+        assert running.progress_data is None
+        assert running.workflow_progress_summary_json is None
+        assert running.attempt_number == 2
+        assert (
+            TaskAttempt.objects.get(
+                execution=running,
+                attempt_number=1,
+            ).workflow_progress_summary_json
+            == terminal
+        )
 
     def test_get_stats(self, client):
         """Test getting execution statistics."""
