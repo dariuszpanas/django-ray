@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+import json
+import textwrap
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+import yaml
+
+PROJECT_ROOT = Path(__file__).parents[2]
+CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
+CONTRIBUTING = PROJECT_ROOT / "CONTRIBUTING.md"
+CONTRIBUTING_DOCS = PROJECT_ROOT / "docs" / "contributing.md"
+REQUIRED_CHECK_JOBS = {
+    ("ci.yml", "ci-gate"): "CI Gate",
+    ("commit-messages.yml", "conventional-commits"): "Commit Messages",
+}
+REQUIRED_CHECK_NAMES = set(REQUIRED_CHECK_JOBS.values())
+EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {}
+
+
+def _workflow_paths() -> list[Path]:
+    return sorted(path for path in WORKFLOWS.iterdir() if path.suffix in {".yml", ".yaml"})
+
+
+def _workflow(path: Path = CI_WORKFLOW) -> dict[str, Any]:
+    loaded = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert isinstance(loaded, dict), path
+    return loaded
+
+
+def _jobs(path: Path = CI_WORKFLOW) -> dict[str, dict[str, Any]]:
+    jobs = _workflow(path).get("jobs")
+    assert isinstance(jobs, dict), path
+    assert all(isinstance(job_id, str) and isinstance(job, dict) for job_id, job in jobs.items())
+    return jobs
+
+
+def _events(path: Path) -> set[str]:
+    events = _workflow(path).get("on")
+    if isinstance(events, str):
+        return {events}
+    if isinstance(events, list):
+        return {event for event in events if isinstance(event, str)}
+    if isinstance(events, dict):
+        return {event for event in events if isinstance(event, str)}
+    return set()
+
+
+def _needs(job: dict[str, Any]) -> set[str]:
+    needs = job.get("needs", [])
+    if isinstance(needs, str):
+        return {needs}
+    assert isinstance(needs, list)
+    assert all(isinstance(job_id, str) for job_id in needs)
+    return set(cast(list[str], needs))
+
+
+def _gate_job() -> dict[str, Any]:
+    return _jobs()["ci-gate"]
+
+
+def _gate_script() -> str:
+    steps = _gate_job().get("steps")
+    assert isinstance(steps, list)
+    gate_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("name") == "Require every blocking CI job to succeed"
+    )
+    run = gate_step.get("run")
+    assert isinstance(run, str)
+    script = run.split("python3 - <<'PY'\n", maxsplit=1)[1].split("\nPY", maxsplit=1)[0]
+    return textwrap.dedent(script)
+
+
+def _execute_gate(monkeypatch: pytest.MonkeyPatch, results: dict[str, str]) -> None:
+    payload = {job_id: {"result": result} for job_id, result in results.items()}
+    monkeypatch.setenv("BLOCKING_JOB_RESULTS_JSON", json.dumps(payload))
+    exec(compile(_gate_script(), "<ci-gate>", "exec"))
+
+
+def _all_successful_results() -> dict[str, str]:
+    return dict.fromkeys(_needs(_gate_job()), "success")
+
+
+def _contains_key(value: object, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_contains_key(child, key) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_key(child, key) for child in value)
+    return False
+
+
+def test_ci_gate_covers_every_pr_ci_job_and_runs_after_failures() -> None:
+    jobs = _jobs()
+    gate = jobs["ci-gate"]
+
+    assert gate["name"] == "CI Gate"
+    assert gate["if"] == "always()"
+    assert gate["steps"][0]["env"]["BLOCKING_JOB_RESULTS_JSON"] == "${{ toJSON(needs) }}"
+    assert _needs(gate) == set(jobs) - {"ci-gate"}
+    assert _needs(jobs["build"]) == set(jobs) - {"build", "ci-gate"}
+
+
+def test_required_check_names_are_globally_unique() -> None:
+    for (workflow_name, job_id), check_name in REQUIRED_CHECK_JOBS.items():
+        required_job = _jobs(WORKFLOWS / workflow_name)[job_id]
+        assert required_job.get("name") == check_name
+
+    check_names = [
+        job.get("name")
+        for path in _workflow_paths()
+        for job in _jobs(path).values()
+        if isinstance(job.get("name"), str)
+    ]
+
+    for required_name in REQUIRED_CHECK_NAMES:
+        assert check_names.count(required_name) == 1
+
+
+def test_blocking_ci_jobs_cannot_tolerate_job_or_step_failures() -> None:
+    blocking_jobs = {(CI_WORKFLOW.name, job_id): job for job_id, job in _jobs().items()}
+    for workflow_job in REQUIRED_CHECK_JOBS:
+        workflow_name, job_id = workflow_job
+        blocking_jobs[workflow_job] = _jobs(WORKFLOWS / workflow_name)[job_id]
+
+    for workflow_job, job in blocking_jobs.items():
+        assert not _contains_key(job, "continue-on-error"), workflow_job
+
+
+def test_pull_request_jobs_are_gated_required_or_explicitly_nonblocking() -> None:
+    gate_needs = _needs(_gate_job())
+    observed_nonblocking: set[tuple[str, str]] = set()
+
+    for path in _workflow_paths():
+        if not _events(path) & {"pull_request", "pull_request_target"}:
+            continue
+        for job_id, job in _jobs(path).items():
+            key = (path.name, job_id)
+            if key in REQUIRED_CHECK_JOBS:
+                assert job.get("name") == REQUIRED_CHECK_JOBS[key]
+                continue
+            gated = path == CI_WORKFLOW and job_id in gate_needs
+            nonblocking = key in EXPLICIT_NONBLOCKING_PR_JOBS
+            assert gated != nonblocking, key
+            if nonblocking:
+                observed_nonblocking.add(key)
+
+    assert observed_nonblocking == set(EXPLICIT_NONBLOCKING_PR_JOBS)
+
+
+def test_ci_gate_accepts_only_complete_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _all_successful_results()
+
+    _execute_gate(monkeypatch, results)
+
+    output = capsys.readouterr().out
+    assert set(output.splitlines()) == {f"{job_id}: success" for job_id in results}
+
+
+@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped", "timed_out"])
+def test_ci_gate_rejects_every_non_success_result(
+    monkeypatch: pytest.MonkeyPatch,
+    result: str,
+) -> None:
+    results = _all_successful_results()
+    results["lint"] = result
+
+    with pytest.raises(SystemExit, match=rf"CI Gate blocked: lint={result}"):
+        _execute_gate(monkeypatch, results)
+
+
+def test_ci_gate_fails_closed_without_dependency_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(SystemExit, match="CI Gate blocked: no blocking job results"):
+        _execute_gate(monkeypatch, {})
+
+
+def test_ci_gate_rejects_partial_or_unexpected_result_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partial = _all_successful_results()
+    partial.pop("build")
+    with pytest.raises(SystemExit, match="missing=build; unexpected=-"):
+        _execute_gate(monkeypatch, partial)
+
+    unexpected = _all_successful_results() | {"unreviewed-job": "success"}
+    with pytest.raises(SystemExit, match="missing=-; unexpected=unreviewed-job"):
+        _execute_gate(monkeypatch, unexpected)
+
+
+def test_required_and_nonblocking_workflows_are_documented() -> None:
+    documentation = CONTRIBUTING.read_text(encoding="utf-8") + CONTRIBUTING_DOCS.read_text(
+        encoding="utf-8"
+    )
+
+    assert "`CI Gate`" in documentation
+    assert "`Commit Messages`" in documentation
+    assert "Compiled Graph canary" in documentation
+    assert "benchmark workflows" in documentation
+    for reason in EXPLICIT_NONBLOCKING_PR_JOBS.values():
+        assert reason.strip()
+        assert reason in documentation

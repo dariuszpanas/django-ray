@@ -86,7 +86,10 @@ validation results, and link the issue with `Closes #<number>` when appropriate.
 commits over unrelated cleanup in the same PR.
 
 The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
-every commit in the PR. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`,
+every commit in the PR. The separate required `CI Gate` check fails unless lint, docs, typing,
+supported-Python tests, PostgreSQL, live-cluster faults, testproject, minimum/latest dependencies,
+Compiled Graph candidates, and package build all succeed. Use one of `build`, `chore`, `ci`, `docs`,
+`feat`, `fix`, `perf`, `refactor`,
 `revert`, `style`, or `test`, optionally add a scope and `!`, and include a summary after `:`. The
 check enforces meaningful body context and the wrappable-prose line limit without prescribing
 section headings. A failed check prints the offending title, commit, or line and the expected
@@ -101,9 +104,16 @@ inside the PR. Do not squash a PR. After CI is green, enable auto-merge with the
 gh pr merge --auto --rebase <PR-number>
 ```
 
-Auto-merge waits for the required checks on the pull request and then applies the rebase merge method,
-so each descriptive commit remains visible on `main`. The `Commit Messages` workflow validates the PR
-title and each commit through the read-only `pull_request_target` event.
+Auto-merge waits for both required checks and then applies the rebase merge method, so each descriptive
+commit remains visible on `main`. The `Commit Messages` workflow validates the PR title and each commit
+through the read-only `pull_request_target` event. `CI Gate` runs with `always()` and rejects failed,
+cancelled, timed-out, or skipped blocking jobs, including a package build skipped after an upstream
+failure.
+
+Scheduled/manual Compiled Graph canary and benchmark workflows, post-merge/manual documentation
+builds, and tag/manual release workflows remain outside the PR merge gate. PR-facing equivalents that
+protect correctness live in the blocking CI workflow; Codecov upload is advisory within the otherwise
+blocking Python 3.12 job.
 
 Before every push and again before enabling auto-merge, fetch and inspect the exact history that the
 rebase merge will retain:
@@ -122,8 +132,8 @@ PR title as well before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
 conflicts, run `uv run make ci`, and push. Auto-merge will wait for the new checks. The `main`
-ruleset requires `Commit Messages` from GitHub Actions, permits rebase merges only, and leaves
-approval requirements disabled for the repository's sole-developer workflow. The owner bypass is
+ruleset requires `Commit Messages` and `CI Gate` from GitHub Actions, permits rebase merges only, and
+leaves approval requirements disabled for the repository's sole-developer workflow. The owner bypass is
 limited to pull requests: ordinary merges remain gated, and emergency use requires the explicit
 `gh pr merge --admin --rebase <PR-number>` path.
 
