@@ -1,17 +1,27 @@
 <type>[optional scope][!]: <imperative summary>
 
-; Recommended layout; headings are guidance rather than a validation requirement.
+; This retained logical commit is the portable change record for Git-only consumers.
+; Headings are optional, and one large atomic commit is valid. Keep detail proportional.
 ## Summary
 
-- <Describe the concrete durable change.>
-- <Explain the problem, invariant, or outcome that motivates it.>
+- <Describe the observable durable change and why it is needed.>
 
-; Optional focused sections belong between Summary and Validation.
-; Examples: Rationale, Migration, Compatibility, or Release decision.
+## Boundaries and rollout
+
+- <Describe important invariants, non-goals, and compatibility impact.>
+- <Describe migration, rollout, or activation details when applicable.>
+
+## Investigation
+
+- <Describe repository-local ADRs, modules, tests, or docs to open.>
 
 ## Validation
 
 - `<command>`: <result>
 
+; Or replace Validation with: Validation: not run because <specific reason>.
+; Delete optional sections that do not apply; do not leave template tokens behind.
+; PR metadata supplements this body. Wrap commit prose at 72 columns, but use
+; natural Markdown without artificial hard wrapping in the PR description.
 ; Add `BREAKING CHANGE: <impact and migration>` below Validation when
 ; more migration detail is useful. Add issue trailers such as `Closes #60` last.

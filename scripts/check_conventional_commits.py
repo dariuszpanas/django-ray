@@ -65,6 +65,68 @@ _VALIDATION_STATUS_RE = re.compile(
     r"(?:[.!]|\s+\([^)]*\)|\s+(?:in|on|with)\b.*)?$",
     re.IGNORECASE,
 )
+_VALIDATION_SECTION_NAMES = frozenset({"checks", "testing", "tests", "validation", "verification"})
+_VALIDATION_OUTCOME_TRAIL_RE = re.compile(
+    r"(?:\b(?:clean|completed|failed|green|ok|passed|succeeded|"
+    r"successful(?:ly)?)\b|"
+    r"\bno (?:errors?|issues?) found\b)"
+    r"(?:[.!]|\s+\([^)]*\)|\s+(?:as|in|on|with)\b.*)?$",
+    re.IGNORECASE,
+)
+_VALIDATION_EXPLICIT_OUTCOME_TRAIL_RE = re.compile(
+    r"(?:\b(?:clean|completed|fail(?:ed|ure)?|green|ok|pass(?:ed)?|"
+    r"succeed(?:ed)?|success(?:ful(?:ly)?)?)\b|"
+    r"\bno (?:errors?|issues?) found\b)"
+    r"(?:[.!]|\s+\([^)]*\)|\s+(?:as|in|on|with)\b.*)?$",
+    re.IGNORECASE,
+)
+_VALIDATION_COUNT_RESULT_RE = re.compile(
+    r"\b(?:exit code \d+|\d+\s+(?:deselected|errors?|failed|passed|skipped|"
+    r"warnings?|xfailed|xpassed)|no failures|\d+\s+files? left unchanged)\b",
+    re.IGNORECASE,
+)
+_VALIDATION_EXECUTED_COUNT_RE = re.compile(
+    r"\b\d+\s+(?:errors?|failed|passed|xfailed|xpassed)\b",
+    re.IGNORECASE,
+)
+_VALIDATION_MODAL_RESULT_RE = re.compile(
+    r"\b(?:can|could|expected to|may|might|must|should|will|would)\s+"
+    r"(?:have\s+)?(?:fail(?:ed)?|pass(?:ed)?|succeed(?:ed)?)\b",
+    re.IGNORECASE,
+)
+_VALIDATION_SUBJECT_RE = re.compile(
+    r"(?:\b(?:build|coverage|docs?|documentation|gate|lint|matrix|package|"
+    r"pytest|ruff|suite|tests?|checks?|typecheck|typing)\b|\bcommit messages\b)"
+    r"(?:\s+(?:across|against|for|in|on|under|with)\s+\S+(?:\s+\S+){0,7})?"
+    r"(?:\s+(?:are|have been|is|was|were))?$",
+    re.IGNORECASE,
+)
+_VALIDATION_NARRATIVE_RE = re.compile(
+    r"\b(?:allegedly|describes?|documents?|explains?|if|meant|means?|perhaps|"
+    r"possibly|records?|reportedly|verifies?|when|why)\b|"
+    r"\b(?:earlier|historical|previous|prior)(?!-)\b",
+    re.IGNORECASE,
+)
+_GENERIC_VALIDATION_SUBJECT_RE = re.compile(
+    r"^(?:(?:all|the)\s+)?(?:tests?|checks?)$",
+    re.IGNORECASE,
+)
+_VALIDATION_NOT_RUN_RE = re.compile(
+    r"\b(?:not run|not executed|not applicable)\b(?P<suffix>.*)$",
+    re.IGNORECASE,
+)
+_VALIDATION_SKIPPED_RE = re.compile(r"\bskipped\b(?P<suffix>.*)$", re.IGNORECASE)
+_VALIDATION_REASON_RE = re.compile(
+    r"^(?:(?:because|as|due to)\s+|[:;\-\N{EM DASH}]\s*|\()"
+    r"(?P<reason>\S.*?)(?:\))?[.!]?$",
+    re.IGNORECASE,
+)
+_GENERIC_VALIDATION_REASON_RE = re.compile(
+    r"^(?:reasons?|not (?:applicable|needed|required)|"
+    r"(?:it|this|checks?|tests?|validation)\s+(?:(?:was|were)\s+)?"
+    r"(?:not run|skipped)|skipped)$",
+    re.IGNORECASE,
+)
 _TEMPLATE_TOKEN_RE = re.compile(r"<(?:command|result|describe[^>]*)>", re.IGNORECASE)
 _PLACEHOLDER_PREFIX_RE = re.compile(
     r"^(?:(?:wip|todo|tbd)(?:\s*(?::|-|\N{EM DASH})\s*|\s+)"
@@ -233,23 +295,11 @@ def _context_lines(lines: Sequence[str]) -> list[str]:
             continue
         if index in setext_lines:
             if index + 1 < len(lines) and _SETEXT_UNDERLINE_RE.fullmatch(lines[index + 1]):
-                validation_section = _strip_markup(raw).casefold() in {
-                    "checks",
-                    "testing",
-                    "tests",
-                    "validation",
-                    "verification",
-                }
+                validation_section = _strip_markup(raw).casefold() in _VALIDATION_SECTION_NAMES
             continue
         if heading := _HEADING_RE.fullmatch(raw):
             section_name = _strip_markup(heading.group("name")).casefold()
-            validation_section = section_name in {
-                "checks",
-                "testing",
-                "tests",
-                "validation",
-                "verification",
-            }
+            validation_section = section_name in _VALIDATION_SECTION_NAMES
             continue
 
         visible = _strip_markup(line)
@@ -266,6 +316,218 @@ def _context_lines(lines: Sequence[str]) -> list[str]:
             continue
         context.append(visible)
     return context
+
+
+def _has_explicit_not_run_reason(text: str) -> bool:
+    """Require a concrete reason after a validation not-run statement."""
+    match = _VALIDATION_NOT_RUN_RE.search(text)
+    if match is None or not (
+        reason_match := _VALIDATION_REASON_RE.match(match.group("suffix").strip())
+    ):
+        return False
+    reason = _strip_markup(reason_match.group("reason")).strip(" ().")
+    return bool(reason) and not (
+        _is_placeholder(reason) or _GENERIC_VALIDATION_REASON_RE.fullmatch(reason)
+    )
+
+
+def _validation_blocks(
+    lines: Sequence[str],
+    *,
+    metadata_candidate_bounds: tuple[int, int] | None,
+) -> list[tuple[tuple[str, ...], bool, tuple[int, ...]]]:
+    """Return top-level logical body blocks and validation-section state."""
+    blocks: list[tuple[tuple[str, ...], bool, tuple[int, ...]]] = []
+    parts: list[str] = []
+    part_indexes: list[int] = []
+    parts_are_validation = False
+    validation_section = False
+    in_html_comment = False
+    setext_lines = _setext_heading_lines(lines)
+    top_level_indexes = _top_level_line_indexes(lines)
+    body_start = 2 if len(lines) >= 2 and lines[1] == "" else 1
+
+    def flush() -> None:
+        nonlocal part_indexes, parts
+        if parts:
+            blocks.append((tuple(parts), parts_are_validation, tuple(part_indexes)))
+            parts = []
+            part_indexes = []
+
+    for index, line in enumerate(lines):
+        raw = line.strip()
+        if index < body_start:
+            continue
+        if in_html_comment:
+            if "-->" in raw:
+                in_html_comment = False
+            continue
+        if raw.startswith("<!--"):
+            flush()
+            in_html_comment = "-->" not in raw
+            continue
+        if index not in top_level_indexes or (
+            metadata_candidate_bounds is not None
+            and metadata_candidate_bounds[0] <= index <= metadata_candidate_bounds[1]
+        ):
+            flush()
+            continue
+        if index in setext_lines:
+            flush()
+            if index + 1 < len(lines) and _SETEXT_UNDERLINE_RE.fullmatch(lines[index + 1]):
+                validation_section = _strip_markup(raw).casefold() in _VALIDATION_SECTION_NAMES
+            continue
+        if heading := _HEADING_RE.fullmatch(raw):
+            flush()
+            validation_section = (
+                _strip_markup(heading.group("name")).casefold() in _VALIDATION_SECTION_NAMES
+            )
+            continue
+
+        visible = _strip_markup(line)
+        if not visible or visible.startswith(";") or _is_trailer(visible):
+            flush()
+            continue
+
+        starts_record = bool(
+            _BULLET_RE.match(line)
+            or _VALIDATION_LABEL_RE.match(visible)
+            or _VALIDATION_COMMAND_RE.match(visible)
+        )
+        if parts and (starts_record or parts_are_validation != validation_section):
+            flush()
+        if not parts:
+            parts_are_validation = validation_section
+        parts.append(visible)
+        part_indexes.append(index)
+    flush()
+    return blocks
+
+
+def _has_concrete_command_result(candidate: str, command_match: re.Match[str] | None) -> bool:
+    """Accept an explicit result attached to a recognized command."""
+    if command_match is None:
+        return False
+    result_match = re.search(r":\s+(?P<result>\S.*)$", candidate)
+    if result_match is None:
+        return False
+    result = _strip_markup(result_match.group("result")).strip()
+    return bool(
+        result
+        and not _is_placeholder(result)
+        and not _VALIDATION_MODAL_RESULT_RE.search(result)
+        and (
+            _VALIDATION_COUNT_RESULT_RE.search(result)
+            or _VALIDATION_EXPLICIT_OUTCOME_TRAIL_RE.search(result)
+        )
+    )
+
+
+def _has_unstructured_validation_subject(subject: str) -> bool:
+    """Reject narrative prose while accepting a concise named check or suite."""
+    return bool(
+        _VALIDATION_SUBJECT_RE.search(subject) and not _VALIDATION_NARRATIVE_RE.search(subject)
+    )
+
+
+def _is_validation_record(candidate: str, *, validation_section: bool) -> bool:
+    """Return whether one logical candidate records a concrete validation result."""
+    label_match = _VALIDATION_LABEL_RE.match(candidate)
+    explicit_context = validation_section or label_match is not None
+    if label_match:
+        candidate = candidate[label_match.end() :].strip()
+    command_match = _VALIDATION_COMMAND_RE.match(candidate)
+
+    if not_run_match := _VALIDATION_NOT_RUN_RE.search(candidate):
+        not_run_subject = candidate[: not_run_match.start()].strip(" :=-\N{EM DASH}")
+        return bool(
+            (
+                explicit_context
+                or command_match
+                or _has_unstructured_validation_subject(not_run_subject)
+            )
+            and _has_explicit_not_run_reason(candidate)
+        )
+
+    if skipped_match := _VALIDATION_SKIPPED_RE.search(candidate):
+        if not _VALIDATION_EXECUTED_COUNT_RE.search(candidate):
+            skipped_subject = candidate[: skipped_match.start()].strip(" :=-\N{EM DASH}")
+            return bool(
+                (
+                    explicit_context
+                    or command_match
+                    or _has_unstructured_validation_subject(skipped_subject)
+                )
+                and _has_explicit_not_run_reason(f"not run {skipped_match.group('suffix')}")
+            )
+
+    if command_match:
+        return _has_concrete_command_result(candidate, command_match)
+
+    if count_result := _VALIDATION_COUNT_RESULT_RE.search(candidate):
+        subject = candidate[: count_result.start()].strip(" :=-\N{EM DASH}")
+        normalized_subject = " ".join(subject.casefold().split())
+        if subject and _GENERIC_VALIDATION_SUBJECT_RE.fullmatch(normalized_subject):
+            return False
+        return bool(explicit_context or _has_unstructured_validation_subject(subject))
+
+    outcome = _VALIDATION_OUTCOME_TRAIL_RE.search(candidate)
+    if outcome is None and explicit_context:
+        outcome = _VALIDATION_EXPLICIT_OUTCOME_TRAIL_RE.search(candidate)
+    if outcome is None or _VALIDATION_MODAL_RESULT_RE.search(candidate):
+        return False
+    subject = candidate[: outcome.start()].strip(" :=-\N{EM DASH}")
+    normalized_subject = " ".join(subject.casefold().split())
+    if not subject or _GENERIC_VALIDATION_SUBJECT_RE.fullmatch(normalized_subject):
+        return False
+    return bool(explicit_context or _has_unstructured_validation_subject(subject))
+
+
+def _classify_validation_block(
+    parts: Sequence[str], *, validation_section: bool
+) -> tuple[bool, str]:
+    """Return validation status and any descriptive prefix in a mixed block."""
+    block = " ".join(parts)
+    if validation_section or _VALIDATION_LABEL_RE.match(block):
+        return _is_validation_record(block, validation_section=validation_section), ""
+
+    candidate_starts = {0}
+    offset = 0
+    for part in parts[:-1]:
+        offset += len(part) + 1
+        candidate_starts.add(offset)
+    candidate_starts.update(match.end() for match in re.finditer(r"(?<=[.!?])\s+", block))
+    for start in sorted(candidate_starts, reverse=True):
+        candidate = block[start:].strip()
+        if _is_validation_record(candidate, validation_section=False):
+            return True, block[:start].strip()
+    return False, block
+
+
+def _analyze_validation(
+    lines: Sequence[str],
+    *,
+    metadata_candidate_bounds: tuple[int, int] | None,
+) -> tuple[bool, set[int], list[str]]:
+    """Return evidence state, excluded lines, and mixed-block context."""
+    has_evidence = False
+    indexes: set[int] = set()
+    context_prefixes: list[str] = []
+    for parts, validation_section, block_indexes in _validation_blocks(
+        lines,
+        metadata_candidate_bounds=metadata_candidate_bounds,
+    ):
+        is_validation, context_prefix = _classify_validation_block(
+            parts,
+            validation_section=validation_section,
+        )
+        if not is_validation:
+            continue
+        has_evidence = True
+        indexes.update(block_indexes)
+        if context_prefix:
+            context_prefixes.append(context_prefix)
+    return has_evidence, indexes, context_prefixes
 
 
 def _word_count(lines: Sequence[str]) -> int:
@@ -530,6 +792,8 @@ def _validate_descriptive_body(
     metadata_candidate_bounds: tuple[int, int] | None,
     metadata_bounds: tuple[int, int] | None,
     metadata_records: Sequence[dict[str, str]] | None,
+    validation_indexes: set[int],
+    validation_context_prefixes: Sequence[str],
 ) -> list[str]:
     """Require useful historical context without prescribing Markdown sections."""
     errors: list[str] = []
@@ -539,7 +803,7 @@ def _validate_descriptive_body(
     body_start = 2 if len(lines) >= 2 and lines[1] == "" else 1
     full_body = list(lines[body_start:])
     body = [
-        line
+        "" if index in validation_indexes else line
         for index, line in enumerate(lines[body_start:], start=body_start)
         if metadata_candidate_bounds is None
         or not metadata_candidate_bounds[0] <= index <= metadata_candidate_bounds[1]
@@ -565,7 +829,7 @@ def _validate_descriptive_body(
     placeholders = [
         line for line in meaningful if _is_placeholder(line) or _TEMPLATE_TOKEN_RE.search(line)
     ]
-    context = _context_lines(body)
+    context = [*_context_lines(body), *validation_context_prefixes]
     joined_context = " ".join(context)
     if joined_context and _is_placeholder(joined_context):
         placeholders.append(joined_context)
@@ -639,6 +903,13 @@ def validate_message(message: str, *, label: str) -> list[str]:
     metadata_candidate_bounds = _generated_metadata_candidate_bounds(lines)
     metadata_bounds = _generated_metadata_bounds(lines)
     metadata_records = _generated_metadata_records(lines, metadata_bounds)
+    validation_evidence, validation_indexes, validation_context_prefixes = _analyze_validation(
+        lines,
+        metadata_candidate_bounds=metadata_candidate_bounds,
+    )
+    generated_dependency_message = metadata_bounds is not None and _has_generated_dependency_header(
+        lines[0], metadata_records
+    )
     if (metadata_candidate_bounds is not None and metadata_bounds is None) or (
         metadata_candidate_bounds is None and _contains_generated_metadata_shape(lines)
     ):
@@ -654,14 +925,22 @@ def validate_message(message: str, *, label: str) -> list[str]:
             metadata_candidate_bounds=metadata_candidate_bounds,
             metadata_bounds=metadata_bounds,
             metadata_records=metadata_records,
+            validation_indexes=validation_indexes,
+            validation_context_prefixes=validation_context_prefixes,
         )
     )
+    if not generated_dependency_message and not validation_evidence:
+        errors.append(
+            f"{label} must record validation evidence or a specific reason validation "
+            "was not run. Include a result such as `uv run make ci: passed` or "
+            "`Validation: not run because this changes documentation only`."
+        )
     errors.extend(
         _line_length_errors(
             lines,
             label=label,
             metadata_bounds=metadata_bounds,
-            generated_header=_has_generated_dependency_header(lines[0], metadata_records),
+            generated_header=generated_dependency_message,
         )
     )
     return errors

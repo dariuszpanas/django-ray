@@ -42,17 +42,31 @@ Create branches from an up-to-date `main` and use lowercase kebab-case names:
 automated agents must not replace it with an unrelated `agent/`, `codex/`, or similar prefix. An
 explicit maintainer-requested name still takes precedence.
 
-Use Conventional Commit syntax for commits and PR titles. Every commit also includes enough body
-context to understand the retained change without reconstructing intent from its diff. The tracked
-template recommends this layout:
+Use Conventional Commit syntax for commits and PR titles. For a material change, treat each retained
+logical commit as the portable, PR-grade change record. Its body must stand on its own in `git log`,
+mirrors, archives, changelog tooling, and other systems without GitHub metadata. Record observable
+behavior and motivation; important invariants, boundaries, and non-goals; compatibility, migration,
+rollout, or activation details when applicable; exact validation or a specific reason it was not run;
+and repository-local documentation, ADRs, modules, migrations, or tests that are useful investigation
+starting points. One large atomic commit is valid. Use proportional detail for small mechanical
+changes and keep unrelated changes in separate logical commits.
+
+The tracked template recommends this layout:
 
 ```text
 <type>[optional scope][!]: <imperative summary>
 
 ## Summary
 
-- Describe the concrete durable change.
-- Explain the problem, invariant, or outcome that motivates it.
+- Describe the observable durable change and why it is needed.
+
+## Boundaries and rollout
+
+- Record important invariants, non-goals, and applicable rollout impact.
+
+## Investigation
+
+- Point to useful repository-local ADRs, modules, migrations, tests, or docs.
 
 ## Validation
 
@@ -61,14 +75,20 @@ template recommends this layout:
 
 The headings are guidance rather than a required format. Meaningful unstructured prose is equally
 valid. The gate requires at least eight body words outside headings, validation evidence, generated
-metadata, and trailers, or structurally complete generated dependency context; rejects
-placeholders, development-only notes such as "address review feedback," and bodies that merely
-repeat the header; and requires a blank line after the header. A non-empty
+metadata, and trailers, plus a specific validation result or an explicit non-placeholder reason
+validation was not run. It rejects placeholders, development-only notes such as "address review
+feedback," bodies that merely repeat the header, and commands with no recorded result. A non-empty
 `BREAKING CHANGE:` footer may follow the descriptive body; `!` in the header is sufficient to mark
-the change as breaking. Wrap ordinary prose at 72 characters. Structurally validated generated
-dependency headers and metadata, URL destinations, complete Markdown tables, and recognized Git
-trailers are exempt from mechanical wrapping. The same standard applies to human and automated
-commits, so descriptive Dependabot messages do not need a bot-wide exception.
+the change as breaking. Wrap ordinary **commit prose** at 72 characters. PR descriptions use natural
+Markdown without artificial hard wrapping. Structurally validated generated dependency headers and
+metadata, URL destinations, complete Markdown tables, and recognized Git trailers are exempt from
+mechanical wrapping. Structurally complete Dependabot messages keep their generated validation path
+without a bot-wide exception.
+
+PR descriptions and issue trailers are supplemental: they must not be the only place durable commit
+context exists. Keep material facts aligned between the PR and every retained logical commit, but
+format each surface independently. PR descriptions use natural Markdown rather than copied
+72-column commit wrapping.
 
 Install the tracked template in each checkout or worktree:
 
@@ -80,7 +100,7 @@ git config --worktree core.commentChar ";"
 
 Worktree-specific configuration keeps linked worktrees pointed at their own tracked template. Git
 normally removes lines beginning with `#` as comments. Setting the comment character to `;` preserves
-the required `##` headings; the template uses `;` for instructions that Git should remove.
+the template's optional `##` headings; the template uses `;` for instructions that Git should remove.
 
 The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
 every commit in the PR. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`,
@@ -90,8 +110,9 @@ every commit in the PR. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`
 <type>[optional scope][!]: <imperative summary>
 ```
 
-The check enforces meaningful body context and the wrappable-prose line limit without prescribing
-section headings. It reports the offending commit or line.
+The check enforces meaningful body context, validation evidence or a specific not-run reason, and the
+wrappable commit-prose line limit without prescribing section headings. It reports the offending
+commit or line.
 
 For example, `fix(worker): preserve task ownership` is a valid header, but its commit still needs
 enough body context to explain the retained change. Invalid titles or commit headers fail with the
@@ -244,12 +265,12 @@ Test via the API at http://127.0.0.1:8000/api/docs
 ## Pull Request Process
 
 1. **Create a branch from the latest `main`**
-2. **Make your changes** with clear, focused commits
+2. **Make your changes** as one or more clear logical commits; one large atomic commit is valid
 3. **Add tests** for new functionality
 4. **Update documentation** if needed
 5. **Run all checks**: `uv run make ci`
-6. **Submit a pull request** with a Conventional Commit title, clear description, validation results,
-   and `Closes #<number>` when applicable
+6. **Submit a pull request** with a Conventional Commit title, naturally formatted Markdown, clear
+   description, validation results, and `Closes #<number>` when applicable
 
 ### Rebase auto-merge
 
@@ -282,6 +303,12 @@ git fetch origin
 git log --format=fuller origin/main..HEAD
 uv run python scripts/check_conventional_commits.py --range origin/main..HEAD
 ```
+
+For every material commit shown by that log, compare its body with the PR description before pushing
+and again before enabling auto-merge. They should agree on observable behavior, important boundaries,
+rollout or activation impact, validation, and useful investigation starting points. Semantic parity
+does not require copied wording, identical headings, or identical wrapping. Commit prose wraps for
+terminal history; PR descriptions remain natural Markdown.
 
 Use `git rebase -i origin/main` to fold `fixup!`/`squash!` commits, CI repairs, review repairs,
 formatting-only follow-ups, and other development iterations into the logical commit they correct.
@@ -322,7 +349,11 @@ test: add unit tests for retry logic
 - [ ] Packaging builds when packaging or release metadata changed (`uv build`)
 - [ ] Documentation updated (if needed)
 - [ ] Changelog updated (for user-facing changes)
-- [ ] Exact validation commands and results included in the PR description
+- [ ] Each material retained commit records exact validation or a specific not-run reason
+- [ ] Exact aggregate validation commands and results included in the PR description
+- [ ] Material behavior, boundaries, rollout impact, and investigation paths agree between commits
+      and the PR without requiring copied formatting
+- [ ] PR description uses natural Markdown without artificial 72-column hard wrapping
 
 ## Code Organization
 

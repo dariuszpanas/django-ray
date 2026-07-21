@@ -8,6 +8,9 @@ import pytest
 SCRIPT = Path(__file__).parents[2] / "scripts" / "check_conventional_commits.py"
 TEMPLATE = Path(__file__).parents[2] / ".gitmessage"
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "commit-messages.yml"
+AGENT_GUIDANCE = Path(__file__).parents[2] / "AGENTS.md"
+CONTRIBUTING = Path(__file__).parents[2] / "CONTRIBUTING.md"
+CONTRIBUTING_DOCS = Path(__file__).parents[2] / "docs" / "contributing.md"
 SPEC = importlib.util.spec_from_file_location("check_conventional_commits", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 CHECKER = importlib.util.module_from_spec(SPEC)
@@ -32,7 +35,7 @@ Bumps [example/action](https://github.com/example/action) from 1.0.0 to 1.0.1.
 
 ---
 updated-dependencies:
-- dependency-name: example/action-with-a-generated-name-that-does-not-wrap-cleanly
+- dependency-name: example/action
   dependency-version: 1.0.1
   dependency-type: direct:production
   update-type: version-update:semver-patch
@@ -192,7 +195,8 @@ def test_validate_rejects_body_without_enough_context() -> None:
 def test_validate_accepts_meaningful_unstructured_body() -> None:
     message = (
         "fix: close the lease\n\n"
-        "Keep active lease ownership to stop duplicate cleanup during recovery."
+        "Keep active lease ownership to stop duplicate cleanup during recovery.\n\n"
+        "Focused lease recovery tests passed."
     )
 
     assert CHECKER.validate_message(message, label="Commit 1") == []
@@ -204,6 +208,8 @@ def test_validate_treats_structured_sections_as_optional_guidance() -> None:
 ## Rationale
 
 Preserve active lease ownership so cleanup cannot race worker recovery.
+
+Validation: not run because this fixture checks optional headings only.
 """
 
     assert CHECKER.validate_message(message, label="Commit 1") == []
@@ -222,6 +228,18 @@ Preserve active lease ownership so cleanup cannot race worker recovery.
 )
 def test_validate_accepts_descriptive_dependabot_generated_body(title: str, message: str) -> None:
     assert CHECKER.validate(title=title, commits=[message], commit_range=None) == []
+
+
+def test_validate_does_not_exempt_noncanonical_generated_header() -> None:
+    message = DEPENDABOT_MESSAGE.replace(
+        "chore(ci): bump example/action from 1.0.0 to 1.0.1",
+        "chore(ci): bump other/action from 1.0.0 to 1.0.1",
+        1,
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("must record validation evidence" in error for error in errors)
 
 
 @pytest.mark.parametrize(
@@ -303,10 +321,21 @@ def test_validate_rejects_unexpanded_tracked_template_tokens() -> None:
     rendered = (
         TEMPLATE.read_text(encoding="utf-8")
         .replace("<type>[optional scope][!]: <imperative summary>", "fix: close the lease")
-        .replace("<Describe the concrete durable change.>", "Preserve active lease ownership.")
         .replace(
-            "<Explain the problem, invariant, or outcome that motivates it.>",
+            "<Describe the observable durable change and why it is needed.>",
             "Prevent duplicate cleanup during deterministic worker recovery.",
+        )
+        .replace(
+            "<Describe important invariants, non-goals, and compatibility impact.>",
+            "Preserve active lease ownership across supported workers.",
+        )
+        .replace(
+            "<Describe migration, rollout, or activation details when applicable.>",
+            "No migration or activation change is required.",
+        )
+        .replace(
+            "<Describe repository-local ADRs, modules, tests, or docs to open.>",
+            "Inspect tests/unit/test_worker.py for the recovery contract.",
         )
     )
     rendered = "\n".join(line for line in rendered.splitlines() if not line.startswith(";"))
@@ -337,6 +366,178 @@ Tests: focused lease recovery checks completed successfully.
 
 
 @pytest.mark.parametrize(
+    "validation",
+    [
+        "Focused lease recovery tests passed.",
+        "Focused lease recovery suite: 12 passed.",
+        "`uv run pytest tests/unit/test_worker.py -q`: 12 passed.",
+        "`uv run pytest`: 114 passed, 2 skipped in 0.46s.",
+        "Focused tests: 114 passed, 2 skipped.",
+        "CI Gate: passed.",
+        "Commit Messages: passed.",
+        "Previous-release compatibility tests passed.",
+        "git diff --check: clean.",
+        "Tests: focused lease recovery checks completed\nsuccessfully.",
+    ],
+)
+def test_validate_accepts_specific_validation_results(validation: str) -> None:
+    message = (
+        "fix: close the lease\n\n"
+        "Prevent duplicate cleanup while preserving ownership during recovery.\n\n"
+        f"{validation}"
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+@pytest.mark.parametrize(
+    "validation",
+    [
+        "Validation: Ray cluster smoke completed successfully.",
+        "## Validation\n\nRay cluster smoke completed successfully.",
+        "Validation: `kubectl auth can-i get pods`: passed.",
+        "Validation: `uv run pytest`: 114 passed, 2 xfailed.",
+        "Validation: `uv run ruff format`: 2 files left unchanged.",
+        "Validation: `custom smoke command`: exit code 0.",
+    ],
+)
+def test_validate_accepts_repo_specific_results_in_explicit_context(validation: str) -> None:
+    message = (
+        "fix: close the lease\n\n"
+        "Prevent duplicate cleanup while preserving ownership during recovery.\n\n"
+        f"{validation}"
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+@pytest.mark.parametrize(
+    "validation",
+    [
+        "Validation: not run because this changes documentation text only.",
+        "## Validation\n\nNot run: documentation-only wording change.",
+        "Tests were not run because this changes explanatory comments only.",
+        "Focused policy tests skipped because this changes documentation only.",
+        "uv run pytest skipped because only prose changed.",
+        "Validation: not run because this changes only\ndocumentation wording.",
+    ],
+)
+def test_validate_accepts_explicit_not_run_reasons(validation: str) -> None:
+    message = (
+        "docs: clarify lease ownership\n\n"
+        "Explain durable lease ownership for operators investigating recovery.\n\n"
+        f"{validation}"
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+@pytest.mark.parametrize(
+    "validation",
+    [
+        "",
+        "Validation: not run.",
+        "Tests: skipped.",
+        "Validation: not run because N/A.",
+        "Validation: not run because reasons.",
+        "Validation: not run because it was not run.",
+        "Focused policy tests skipped.",
+        "uv run pytest skipped.",
+        "uv run make ci",
+        "uv run pytest tests/passed",
+        "uv run ruff check tests/green",
+        "uv run make ci: pending CI",
+        "uv run make ci: will run later",
+        "uv run make ci: waiting for CI",
+        "uv run make ci: unknown",
+        "uv run make ci: not yet",
+        "uv run make ci: result pending",
+        "uv run make ci: not tested",
+        "uv run make ci: untested",
+        "uv run make ci: did not test",
+        "uv run make ci: not checked",
+        "uv run make ci: not performed",
+        "uv run make ci: later",
+        "uv run make ci: to be run",
+        "uv run make ci: queued",
+        "uv run make ci: in progress",
+        "uv run make ci: awaiting results",
+        "uv run make ci: no results",
+        "uv run make ci: not available",
+        "uv run make ci: deferred",
+        "uv run make ci: running now",
+        "uv run pytest: details recorded elsewhere.",
+        "## Validation",
+        "All checks passed.",
+        "Windows: passed.",
+    ],
+)
+def test_validate_rejects_missing_or_generic_validation_evidence(validation: str) -> None:
+    message = (
+        "fix: close the lease\n\n"
+        "Prevent duplicate cleanup while preserving ownership during recovery.\n\n"
+        f"{validation}"
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("must record validation evidence" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "validation",
+    [
+        "Focused lease recovery tests should pass.",
+        "Focused lease recovery tests should have passed.",
+        "Tests reportedly passed.",
+        "Tests allegedly passed.",
+        "Tests perhaps passed.",
+        "Tests may already have passed.",
+        "Build could possibly have passed.",
+        "The documentation explains why recovery tests may fail.",
+        "The documentation explains why recovery tests failed.",
+        "This documentation records that recovery tests passed.",
+        "The prior release recovery tests passed.",
+        "The migration completed successfully.",
+        "The bug meant recovery tests were not run because CI ignored them.",
+        "This change documents why tests were not run because the fixture is static.",
+        "Focused recovery tests are important to success.",
+    ],
+)
+def test_validate_rejects_modal_or_explanatory_result_prose(validation: str) -> None:
+    message = (
+        "fix: close the lease\n\n"
+        "Prevent duplicate cleanup while preserving ownership during recovery.\n\n"
+        f"{validation}"
+    )
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("must record validation evidence" in error for error in errors)
+
+
+def test_validate_ignores_validation_examples_and_comments() -> None:
+    message = """docs: explain validation syntax
+
+Document portable validation records without claiming example commands ran.
+
+```text
+uv run make ci: passed
+```
+
+> Focused policy tests passed.
+
+    uv run pytest: passed
+
+<!-- Focused documentation checks passed. -->
+"""
+
+    errors = CHECKER.validate_message(message, label="Commit 1")
+
+    assert any("must record validation evidence" in error for error in errors)
+
+
+@pytest.mark.parametrize(
     "context",
     [
         "Make active lease ownership durable across worker restarts and retries.",
@@ -345,7 +546,7 @@ Tests: focused lease recovery checks completed successfully.
     ],
 )
 def test_validate_counts_command_like_words_as_prose(context: str) -> None:
-    message = f"fix: preserve task ownership\n\n{context}"
+    message = f"fix: preserve task ownership\n\n{context}\n\nFocused message-policy tests passed."
 
     assert CHECKER.validate_message(message, label="Commit 1") == []
 
@@ -378,7 +579,9 @@ def test_validate_rejects_padded_ci_fix_prose() -> None:
     ],
 )
 def test_validate_accepts_descriptive_placeholder_discussion(context: str) -> None:
-    message = f"fix: preserve task ownership\n\n{context}"
+    message = (
+        f"fix: preserve task ownership\n\n{context}\n\nFocused placeholder-policy tests passed."
+    )
 
     assert CHECKER.validate_message(message, label="Commit 1") == []
 
@@ -498,6 +701,32 @@ def test_validate_rejects_unstructured_validation_result_only_body() -> None:
     assert any("body must contain meaningful context" in error for error in errors)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Focused lease tests across all supported workers and backends passed.",
+        "Tests were not run because only explanatory documentation changed here.",
+    ],
+)
+def test_validate_does_not_count_specific_evidence_as_change_context(body: str) -> None:
+    errors = CHECKER.validate_message(
+        f"fix: close the lease\n\n{body}",
+        label="Commit 1",
+    )
+
+    assert any("body must contain meaningful context" in error for error in errors)
+
+
+def test_validate_preserves_context_before_evidence_in_the_same_block() -> None:
+    message = (
+        "fix: close the lease\n\n"
+        "Prevent duplicate cleanup while preserving ownership\n"
+        "during recovery. Focused lease recovery tests passed."
+    )
+
+    assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
 def test_validate_rejects_validation_matrix_only_body() -> None:
     message = """fix: close the lease
 
@@ -515,7 +744,8 @@ Documentation: passed.
 def test_validate_counts_status_word_inside_descriptive_prose() -> None:
     message = (
         "fix: close the lease\n\n"
-        "Database: success depends on durable ownership across worker recovery."
+        "Database: success depends on durable ownership across worker recovery.\n\n"
+        "Focused database recovery tests passed."
     )
 
     assert CHECKER.validate_message(message, label="Commit 1") == []
@@ -832,6 +1062,8 @@ updated-dependencies:
   update-type: version-update:semver-patch
 ...
 ```
+
+Documentation policy tests passed.
 """
 
     assert CHECKER.validate_message(message, label="Commit 1") == []
@@ -972,10 +1204,21 @@ def test_tracked_template_renders_as_a_valid_commit_message() -> None:
     rendered = (
         TEMPLATE.read_text(encoding="utf-8")
         .replace("<type>[optional scope][!]: <imperative summary>", "ci: enforce polished history")
-        .replace("<Describe the concrete durable change.>", "Require structured commit sections.")
         .replace(
-            "<Explain the problem, invariant, or outcome that motivates it.>",
+            "<Describe the observable durable change and why it is needed.>",
             "Keep rebase-merged history useful after development ends.",
+        )
+        .replace(
+            "<Describe important invariants, non-goals, and compatibility impact.>",
+            "Keep headings optional and preserve generated dependency messages.",
+        )
+        .replace(
+            "<Describe migration, rollout, or activation details when applicable.>",
+            "Apply the policy to new commits without rewriting old history.",
+        )
+        .replace(
+            "<Describe repository-local ADRs, modules, tests, or docs to open.>",
+            "Inspect scripts/check_conventional_commits.py and its unit tests.",
         )
         .replace("<command>", "uv run pytest")
         .replace("<result>", "passed")
@@ -983,6 +1226,23 @@ def test_tracked_template_renders_as_a_valid_commit_message() -> None:
     rendered = "\n".join(line for line in rendered.splitlines() if not line.startswith(";"))
 
     assert CHECKER.validate_message(rendered, label="Commit 1") == []
+
+
+def test_portable_history_guidance_distinguishes_commit_and_pr_surfaces() -> None:
+    for path in (AGENT_GUIDANCE, CONTRIBUTING, CONTRIBUTING_DOCS):
+        guidance = path.read_text(encoding="utf-8")
+        normalized = " ".join(guidance.split())
+        assert "portable, PR-grade change record" in normalized
+        assert "one large atomic commit is valid" in normalized.casefold()
+        assert "natural Markdown" in normalized
+        assert "artificial hard wrapping" in normalized
+
+    template = TEMPLATE.read_text(encoding="utf-8")
+    normalized_template = " ".join(template.split())
+    assert "Boundaries and rollout" in template
+    assert "Investigation" in template
+    assert "not run because <specific reason>" in template
+    assert "natural Markdown without artificial hard wrapping" in normalized_template
 
 
 def test_commit_workflow_validates_the_fetched_pr_range_without_rest_api() -> None:
