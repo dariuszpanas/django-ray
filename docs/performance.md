@@ -241,10 +241,13 @@ plus parent-watchdog cleanup outcomes. A separate forced-termination control pro
 that the parent removes a killed child's workspace. An unavailable memory metric is
 reported as unavailable rather than as zero, and a cleanup failure fails the run.
 
-Commit the Linux summary and authoritative JSON before accepting ADR-0005. They are
-local contract evidence, not a production latency SLO. Compare resident growth only
-after the retained node, edge, and detail caps are reached, and keep #79's wire,
-mailbox, and producer allocations separate from this preparation-only measurement.
+The committed [WSL2 Linux summary](benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.md)
+and [authoritative JSON](benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json)
+join the focused canonical and lifecycle tests to satisfy ADR-0005's issue-#140 evidence
+gate. They are local contract evidence, not a production latency SLO. Compare resident
+growth only after the retained node, edge, and detail caps are reached, and keep #79's
+wire, mailbox, and producer allocations separate from this preparation-only
+measurement.
 
 ## Control Fan-Out
 

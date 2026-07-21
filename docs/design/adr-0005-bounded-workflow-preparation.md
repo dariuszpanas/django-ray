@@ -1,6 +1,6 @@
 # ADR-0005: Bounded Workflow Progress Preparation
 
-- **Status:** Proposed; contract selected, evidence gate pending
+- **Status:** Accepted as a preparation contract; production integration pending
 - **Date:** 2026-07-21
 - **Decision owners:** django-ray maintainers
 - **Related contracts:** [ADR-0004](adr-0004-bounded-workflow-progress.md),
@@ -423,6 +423,16 @@ accepted only when increasing observed cardinality beyond retained caps does not
 Python identity collections and measured resident growth is explained by the fixed
 cache, batch, and retained-output budgets rather than total observed identities.
 
+The required 2026-07-21 WSL2 Linux [evidence summary](../benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.md)
+and [authoritative JSON](../benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json),
+together with the focused canonical and lifecycle suite, satisfy this gate for the
+issue-#140 prototype at revision `c42fb22634712e52d8aee74c86a62fea459da5e8`.
+Sparse and high-edge memory peaks plateaued after retained caps while the external spill
+grew with observed input. All six cases, source-identity checks, focused parity and
+fault paths, normal cleanup paths, and the forced-termination cleanup control passed.
+This accepts the preparation contract only; it does not satisfy #141, #142, #79, or the
+schema-v3 activation gate.
+
 ## Alternatives considered
 
 ### Keep bounded top-k values in Python
@@ -516,3 +526,5 @@ must remain local and package-owned.
 - [GitHub issue #140: Select bounded workflow-progress preparation contract](https://github.com/dariuszpanas/django-ray/issues/140)
 - [GitHub issue #141: Stream workflow topology preparation through bounded spill](https://github.com/dariuszpanas/django-ray/issues/141)
 - [GitHub issue #142: Compose bounded topology and detail preparation](https://github.com/dariuszpanas/django-ray/issues/142)
+- [WSL2 Linux preparation evidence summary](../benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.md)
+- [Authoritative preparation evidence JSON](../benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json)
