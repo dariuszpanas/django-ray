@@ -170,6 +170,57 @@ uv run make test-cov
 checks for the current interpreter. GitHub Actions additionally repeats tests across supported Python
 versions and minimum/latest dependency resolutions.
 
+### Coverage debt review
+
+The hard floors are safety margins, not coverage targets. Build the same report used by the monthly
+tracker from a local checkout with:
+
+```bash
+uv run make coverage-debt
+```
+
+The target runs the normal `not live_cluster` suite, including tests marked `real_ray`, and reads the
+central coverage settings in `pyproject.toml`. It writes these ignored artifacts under
+`artifacts/coverage-debt/`:
+
+- `coverage.py.json`: Coverage.py's source evidence;
+- `coverage-debt.json`: exact covered, missed, and statement totals plus every uncovered range;
+- `coverage-debt.md`: the same measurements and ranges in reviewable Markdown.
+
+Files are sorted by missed lines. Every range receives the explicit per-file classification in
+`.github/coverage-debt-classifications.json`; narrow range overrides identify platform-owned paths.
+If a newly uncovered file has no classification, report generation fails until a maintainer reviews
+it. Classify each remaining path using one of these policies:
+
+1. **Testable behavior**: add assertion-rich unit, integration, subprocess, or real-Ray coverage for
+   a meaningful contract, error, cleanup, or recovery path.
+2. **Environment-specific**: exercise the path in the matching Linux, PostgreSQL, live-cluster,
+   canary, or platform job. Windows-only Ray behavior remains visible but does not block the primary
+   Linux/Kubernetes delivery target.
+3. **Upstream/native constraint**: link upstream evidence or the applicable canary and record when
+   the constraint should be reconsidered.
+4. **Defensive invariant**: demonstrate why normal inputs cannot reach the path. Prefer simplifying
+   or deleting the redundant branch; use only a narrow, explained exclusion when it must remain.
+5. **Dead or non-behavioral code**: delete the code or justify a narrowly scoped exclusion.
+
+Tests must assert behavior rather than mutate private state merely to execute lines. Do not add broad
+coverage omissions or blanket `pragma: no cover` annotations to improve the percentage. Keep cleanup
+changes in focused pull requests and create a child issue manually only when the uncovered behavior
+is independently reviewable; the reporting workflow never creates issues or pull requests.
+
+`.github/workflows/coverage-debt.yml` runs on Ubuntu and Python 3.12 on the first day of each month.
+Scheduled runs use the current default branch; manual dispatch is available after substantial
+runtime, workflow, or release changes. It uploads all three artifacts, appends the Markdown report to
+the job summary, and updates one bot-owned comment on the issue containing
+`<!-- django-ray:coverage-debt-tracker -->`. The updater scans all issues and fails before writing if
+the tracker marker or latest-report comment is duplicated. Its first run seeds current, previous, and
+high-water measurements; later runs move current to previous and retain the exact best ratio.
+Repeated identical runs replace the same comment rather than creating another issue or comment.
+
+The current metric is **line coverage only**. Enabling branch coverage changes both the evidence and
+the baseline and therefore belongs in a separate follow-up. The recurring report does not change the
+95% global, 90% worker, 90% Ray Job, or 80% testproject floors and does not depend on Codecov.
+
 ### Testproject Smoke Test
 
 The bundled `testproject` is validated as an application boundary rather than only as task fixtures:
@@ -295,10 +346,11 @@ failed, cancelled, timed-out, or skipped dependency visible as a failed gate ins
 skip. This repository is private, so use rebase auto-merge rather than merge queue: auto-merge waits
 for both protected checks and then applies the rebase method.
 
-Scheduled/manual Compiled Graph canary and benchmark workflows are evidence producers, not merge
-checks. Documentation builds outside pull requests and release workflows run after merge, manually,
-or from tags. Codecov upload is advisory inside the otherwise blocking Python 3.12 job. Add future PR
-CI jobs to `CI Gate` unless contributor policy explicitly documents why they are non-blocking.
+Scheduled/manual Compiled Graph canary, coverage-debt review, and benchmark workflows are evidence
+producers, not merge checks. Documentation builds outside pull requests and release workflows run
+after merge, manually, or from tags. Codecov upload is advisory inside the otherwise blocking Python
+3.12 job. Add future PR CI jobs to `CI Gate` unless contributor policy explicitly documents why they
+are non-blocking.
 
 Before each push and again before enabling auto-merge, inspect and validate the exact commit range that
 will be retained:

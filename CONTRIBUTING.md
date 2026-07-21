@@ -130,10 +130,10 @@ through the read-only `pull_request_target` event. `CI Gate` runs with `always()
 cancelled, timed-out, or skipped blocking jobs, including a package build skipped after an upstream
 failure.
 
-Scheduled/manual Compiled Graph canary and benchmark workflows, post-merge/manual documentation
-builds, and tag/manual release workflows remain outside the PR merge gate. PR-facing equivalents that
-protect correctness live in the blocking CI workflow; Codecov upload is advisory within the otherwise
-blocking Python 3.12 job.
+Scheduled/manual Compiled Graph canary, coverage-debt review, and benchmark workflows,
+post-merge/manual documentation builds, and tag/manual release workflows remain outside the PR merge
+gate. PR-facing equivalents that protect correctness live in the blocking CI workflow; Codecov
+upload is advisory within the otherwise blocking Python 3.12 job.
 
 Before every push and again before enabling auto-merge, fetch and inspect the exact history that the
 rebase merge will retain:
