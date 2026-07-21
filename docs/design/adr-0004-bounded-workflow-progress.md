@@ -450,7 +450,8 @@ Readers are deployed before writers:
 3. Add the authorized public summary/detail facade and indexed/paginated reads. This is
    #127; old Admin and application clients must not encounter schema v3 before their
    compatible readers are deployed.
-4. Drain old workflow writers, then enable the new producer. It publishes the dedicated
+4. Complete #79's live-ingestion bound and #132's ADR-0005 preparation integration,
+   drain old workflow writers, then enable the new producer. It publishes the dedicated
    summary, immutable topology pages, and normalized detail rows and stops writing a
    complete graph to `progress_data`.
 5. Remove the legacy field only in a later, explicitly reviewed migration after the
@@ -535,16 +536,17 @@ Implementation remains split into focused deliveries:
    remains a schema-v2 writer.
 3. **Implemented by #127:** package-owned paginated services, indexed single-node
    retrieval, mandatory per-request authorization, summary-only Admin polling, and
-   public testproject adapters. Producer activation remains a separate writer-drain
-   decision.
+   public testproject adapters. These readers are necessary but do not authorize
+   producer activation.
 4. **Coordinated with #79:** producer and collector memory limits and reporting policy.
    Do not claim this storage decision bounds the actor mailbox by itself.
 5. **Follow-up #132:** preparation currently materializes complete observed identity
    sets before selecting the deterministic retained subset. V1 therefore bounds
    durable storage, but does not yet prove O(retained) preparation memory for an
-   arbitrarily larger observed graph. #132 owns streaming preparation with accurate
-   observed counts and bounded duplicate/reference validation; schema-v3 activation
-   must compose that boundary with #79's live-ingestion limits.
+   arbitrarily larger observed graph. [ADR-0005](adr-0005-bounded-workflow-preparation.md)
+   selects a package-owned, private SQLite spill workspace for exact one-shot
+   validation; #141 and #142 own production integration. Schema-v3 activation must
+   compose that boundary with #79's live-ingestion limits.
 
 Required evidence includes deterministic threshold tests, PostgreSQL write/WAL and
 query measurements, retry and stale-writer races, missing/corrupt/orphan cleanup,
@@ -560,6 +562,7 @@ defaults or motivate a new protocol version; it must not silently widen V1.
 - [GitHub issue #126: Persist immutable topology and normalized latest-state detail](https://github.com/dariuszpanas/django-ray/issues/126)
 - [GitHub issue #127: Add bounded authorized workflow-progress read services](https://github.com/dariuszpanas/django-ray/issues/127)
 - [GitHub issue #132: Bound workflow-progress preparation memory](https://github.com/dariuszpanas/django-ray/issues/132)
+- [ADR-0005: Bounded Workflow Progress Preparation](adr-0005-bounded-workflow-preparation.md)
 - [GitHub issue #79: Make workflow observability cost measurable and configurable](https://github.com/dariuszpanas/django-ray/issues/79)
 - [GitHub issue #81: Fence workflow progress writes](https://github.com/dariuszpanas/django-ray/issues/81)
 - [GitHub issue #85: Define Compiled Graph invocation lifecycle](https://github.com/dariuszpanas/django-ray/issues/85)

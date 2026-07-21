@@ -246,10 +246,11 @@ the atomic publication and integrity contract.
 
 Apply migration `0013_workflow_progress_detail_storage` before scheduling the command.
 It is safe to establish the cleanup schedule while the schema-v3 runtime writer remains
-disabled for the #127 reader rollout. Start with dry-run monitoring, then use bounded
-`--delete` passes at a cadence appropriate to database growth and the configured
-retention window. Alert on a nonzero exit and on an eligible count that does not fall
-across repeated successful passes.
+disabled for the reader-first rollout, #79 live-ingestion bound, and #132 preparation
+integration. Start with dry-run monitoring, then use bounded `--delete` passes at a
+cadence appropriate to database growth and the configured retention window. Alert on
+a nonzero exit and on an eligible count that does not fall across repeated successful
+passes.
 
 A manifest, digest, aggregate, or node-key integrity error during publication is a
 fail-closed storage fault. Do not manually promote the pending manifest or advance the

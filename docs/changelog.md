@@ -89,8 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identifier removal, and terminal lifecycle archival or derivation under the task-row
   lock. Routine Admin and bundled monitoring reads omit or defer complete progress
   payloads. The standalone writer cannot claim topology/detail pointers, and the current
-  workflow actor remains a schema-v2 writer; schema-v3 activation waits for authorized
-  public readers.
+  workflow actor remains a schema-v2 writer; schema-v3 activation waits for bounded
+  live ingestion, bounded preparation, and the old-writer drain.
 - Package-owned, run-scoped workflow-progress topology manifests and content-addressed
   pages, normalized bounded latest-state node rows, deterministic truncation evidence,
   sparse aggregate updates, bounded integrity verification, and exact-fence atomic
@@ -98,10 +98,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OMITTED_BY_POLICY` reporting stays on the summary-only path and creates no empty
   detail store. Terminal expiry uses a validated 0-30 day retention setting, and a
   bounded dry-run-first management command removes only due inactive detail and old
-  unpublished orphans while preserving task and attempt summaries. The runtime writer
-  remains inactive until #127's authorized public readers deploy and old writers drain.
-  Durable rows and pages are bounded independently from preparer memory; #132 owns the
-  streaming preparation follow-up for observed graphs larger than the retained V1 caps.
+  unpublished orphans while preserving task and attempt summaries. Authorized public
+  readers are implemented, but the runtime writer remains inactive until bounded live
+  ingestion, bounded preparation, and the old-writer drain are complete. Durable rows
+  and pages are bounded independently from preparer memory.
+- A bounded workflow-progress preparation decision and non-production SQLite spill
+  prototype. The exact one-shot path externalizes duplicate and reference state into a
+  private, fixed-cache, no-mmap workspace with explicit item and file budgets,
+  deterministic canonical output, and parent-owned abnormal-termination cleanup. It
+  does not switch the runtime preparer or activate schema v3; #141 and #142 own the
+  production integration, while #79 still owns wire, mailbox, and producer bounds.
 - A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
   with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
   capability identity includes immutable deployment, shared-memory, and object-store
@@ -125,12 +131,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Apply `0012_workflow_progress_summary` before deploying upgraded readers. The two new
   columns are nullable, so existing rows and rolling old writers remain valid. Keep the
-  schema-v3 producer disabled through the public-reader rollout, then drain old
-  workflow writers before activation. Reversing this migration drops the new summary
-  history columns but does not modify legacy `progress_data`.
+  schema-v3 producer disabled through the public-reader rollout, #79 live-ingestion
+  bound, and #132 preparation integration, then drain old workflow writers before
+  activation. Reversing this migration drops the new summary history columns but does
+  not modify legacy `progress_data`.
 - Apply `0013_workflow_progress_detail_storage` after `0012` to add dormant run,
   manifest, page, link, and normalized-detail tables. It does not backfill or rewrite
-  legacy snapshots, so old schema-v2 writers remain valid while #127 is deployed.
+  legacy snapshots, so old schema-v2 writers remain valid during the reader-first rollout.
   Reverse it only after disabling schema-v3 publication and exporting any retained
   topology/detail needed for audit; reversal deletes those package-owned detail tables.
 

@@ -120,9 +120,11 @@ rejects topology/detail pointers. The package-owned storage transaction alone ma
 promote a verified pending manifest, apply sparse latest-state changes, and advance
 the summary pointer together. A summary-only `DISABLED` or `OMITTED_BY_POLICY` update
 creates no topology or detail rows. The current workflow actor deliberately continues
-to publish schema v2; authorized paginated services and schema-v3 producer activation
-remain #127 work. See
-[ADR-0004](design/adr-0004-bounded-workflow-progress.md).
+to publish schema v2. Authorized paginated services are implemented, but producer
+activation still requires the live-ingestion bound from #79, the bounded preparation
+implementation selected by ADR-0005, and an old-writer drain. See
+[ADR-0004](design/adr-0004-bounded-workflow-progress.md) and
+[ADR-0005](design/adr-0005-bounded-workflow-preparation.md).
 
 ### Database
 
@@ -149,7 +151,7 @@ Primary execution record for one task attempt chain.
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
 | `progress_data` | Current schema-v1/v2 complete workflow snapshot; retained for rolling compatibility |
-| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; runtime publication remains disabled until #127 public readers are ready |
+| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; runtime publication remains disabled until #79 and #132 bounds plus the writer drain are complete |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
 | `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
@@ -234,10 +236,13 @@ detail.
 
 Those are durable-storage bounds, not yet an O(retained) preparation-memory claim.
 Preparation currently retains complete observed identity sets before deterministic
-truncation. [Issue #132](https://github.com/dariuszpanas/django-ray/issues/132) owns the
-streaming preparation contract; #79 separately owns live wire, mailbox, and producer
-backpressure. Schema-v3 activation must compose both boundaries for workflows larger
-than the retained V1 limits.
+truncation. [ADR-0005](design/adr-0005-bounded-workflow-preparation.md) selects a
+package-owned, private SQLite spill workspace for exact one-shot duplicate and
+reference validation with bounded resident state. The decision and its prototype do
+not switch the production preparer; #141 and #142 deliver that integration under
+[issue #132](https://github.com/dariuszpanas/django-ray/issues/132). #79 separately
+owns live wire, mailbox, and producer backpressure. Schema-v3 activation must compose
+both boundaries for workflows larger than the retained V1 limits.
 
 Terminal detail expiry is derived from the canonical terminal timestamp and
 `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`. Every accepted detail publication records
@@ -363,10 +368,11 @@ Bounded progress storage uses an additive reader-first rollout. Apply migration
 `0013_workflow_progress_detail_storage` for the dormant package-owned detail tables.
 Existing rows and older writers continue using `progress_data`; migration `0013` does
 not backfill or reinterpret legacy snapshots. Keep schema-v3 producer activation
-disabled until the authorized bounded readers are deployed, then drain old workflow
-writers before activation. Reversing `0013` discards normalized detail tables, while reversing
-`0012` drops the summary columns. Export any retained schema-v3 data needed for audit
-before either rollback; legacy progress remains unchanged.
+disabled until the authorized bounded readers are deployed, #79 bounds live ingestion,
+and #132 integrates bounded preparation. Then drain old workflow writers before
+activation. Reversing `0013` discards normalized detail tables, while reversing `0012`
+drops the summary columns. Export any retained schema-v3 data needed for audit before
+either rollback; legacy progress remains unchanged.
 
 ## Reliability Controls
 
@@ -376,7 +382,8 @@ before either rollback; legacy progress remains unchanged.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
 - Per-workflow in-memory progress coordination still emits revision-based complete
   schema-v2 snapshots. Bounded schema-v3 summary/detail storage and authorized readers
-  are present, but producer activation still waits for an old-writer drain.
+  are present, but producer activation still waits for bounded live ingestion, bounded
+  preparation, and an old-writer drain.
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.
@@ -407,5 +414,6 @@ before either rollback; legacy progress remains unchanged.
 - [ADR-0002: Compiled Session Ownership and Reuse](design/adr-0002-compiled-session-ownership.md)
 - [ADR-0003: Compiled Invocation Lifecycle](design/adr-0003-compiled-invocation-lifecycle.md)
 - [ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md)
+- [ADR-0005: Bounded Workflow Progress Preparation](design/adr-0005-bounded-workflow-preparation.md)
 - [Runtime Environments](runtime-environments.md)
 - [Retry & Error Handling](retry.md)

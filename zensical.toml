@@ -45,6 +45,7 @@ nav = [
     { "ADR-0002: Compiled Sessions" = "design/adr-0002-compiled-session-ownership.md" },
     { "ADR-0003: Invocation Lifecycle" = "design/adr-0003-compiled-invocation-lifecycle.md" },
     { "ADR-0004: Bounded Progress" = "design/adr-0004-bounded-workflow-progress.md" },
+    { "ADR-0005: Bounded Preparation" = "design/adr-0005-bounded-workflow-preparation.md" },
   ] },
   { "Development" = [
     { "Contributing" = "contributing.md" },

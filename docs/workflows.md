@@ -545,8 +545,9 @@ The outer Django task is the durability and retry boundary:
   and that summary pointer in one transaction. The standalone schema-v3 writer rejects
   topology/detail pointers; it is the only path for an intentional summary-only
   `DISABLED` or `OMITTED_BY_POLICY` record, which creates no empty detail storage.
-  Current coordinators intentionally remain schema-v2 writers until #127's authorized
-  public readers are deployed and old writers have drained.
+  Current coordinators intentionally remain schema-v2 writers. Authorized public
+  readers are implemented, but activation still requires #79's live-ingestion bound,
+  ADR-0005's bounded preparation implementation, and an old-writer drain.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -586,10 +587,13 @@ implements the nullable current/per-attempt summary fields, strict schema-v3 cod
 monotonic exact-run writer primitive, bounded rolling reader, and lifecycle archival.
 Its second delivery adds the run-scoped topology manifests/pages, normalized
 latest-state rows, bounded staging and integrity verification, sparse atomic
-publication, terminal expiry, and retention/orphan cleanup. Public detail services and
-producer activation remain #127 work, so the runtime producer still writes complete
-schema-v2 snapshots. See
-[ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md).
+publication, terminal expiry, and retention/orphan cleanup. Public detail services are
+implemented, but the runtime producer still writes complete schema-v2 snapshots.
+ADR-0005 selects a bounded external-state preparation contract; #141 and #142 must
+integrate it before activation. See
+[ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md)
+and
+[ADR-0005: Bounded Workflow Progress Preparation](design/adr-0005-bounded-workflow-preparation.md).
 
 Ray Core tasks already run inside an initialized Ray worker. Ray Job drivers
 initialize their cluster connection lazily when a workflow first requests Ray, and
@@ -605,8 +609,9 @@ Apply database migrations before starting upgraded workers. Migration
 `0013_workflow_progress_detail_storage` adds dormant package-owned topology and detail
 tables. Neither migration rewrites existing `progress_data`; older writers continue to
 work and upgraded readers retain the 64 MiB schema-v1/v2 compatibility cap. Do not
-enable schema-v3 production yet. Deploy #127's authorized public facade, drain old
-workflow writers, and only then activate the new producer.
+enable schema-v3 production yet. Deploy the authorized public facade, complete #79's
+live-ingestion bound and #132's bounded preparation work, drain old workflow writers,
+and only then activate the new producer.
 
 Existing rows start with `workflow_run_id = NULL` and a nullable plan identity so an
 older writer can still insert during the rollout; the first upgraded, fully identified

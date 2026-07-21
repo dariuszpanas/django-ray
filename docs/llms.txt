@@ -36,6 +36,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Bounded workflow progress](https://django-ray.readthedocs.io/en/latest/design/adr-0004-bounded-workflow-progress/):
   Always-bounded summaries, immutable topology pages, normalized latest-state detail,
   fenced publication, pagination, retention, and legacy snapshot rollout.
+- [Bounded workflow progress preparation](https://django-ray.readthedocs.io/en/latest/design/adr-0005-bounded-workflow-preparation/):
+  Selected non-production contract and prototype for exact one-shot preparation through
+  a private, budgeted SQLite spill workspace; #141/#142 still own runtime integration.
 - [Compiled Graph compatibility](https://django-ray.readthedocs.io/en/latest/compiled-graph-compatibility/):
   fail-closed candidate and verified tuples, native probe outcomes, topology,
   transport, dependencies, and canary maintenance.
@@ -86,8 +89,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - Current workflow actors still emit complete, size-unbounded schema-v2 graph snapshots.
   ADR-0004's additive schema-v3 summary columns, strict 16 KiB codec, fenced writer
   primitive, rolling reader, terminal attempt archival, bounded topology/detail
-  storage, atomic publication, and retention cleanup are implemented. Writer activation
-  waits for authorized public readers (#127) and an old-writer drain.
+  storage, atomic publication, retention cleanup, and authorized public readers are
+  implemented. Writer activation waits for bounded live ingestion (#79), bounded
+  preparation (#132), and an old-writer drain.
 - The result returned by `enqueue()` is a snapshot. Fetch current state with
   `task_backends[alias].get_result(task_id)`.
 - Per-task numeric priority is persisted from `-100` through `100`; larger values are
