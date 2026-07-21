@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "evidence_id": "ci-gate-enforcement-proof-2026-07-21",
+  "issue": "https://github.com/dariuszpanas/django-ray/issues/135",
+  "repository": "dariuszpanas/django-ray",
+  "captured_on": "2026-07-21",
+  "foundation": {
+    "pull_request": "https://github.com/dariuszpanas/django-ray/pull/137",
+    "head_sha": "e67b56a9f67ccca3cf61ed93697549f42ff6775e",
+    "merge_sha": "43fd2147072d52484c94d47749433b702fd59d8d",
+    "workflow_run": "https://github.com/dariuszpanas/django-ray/actions/runs/29816821818",
+    "ci_gate_job": "https://github.com/dariuszpanas/django-ray/actions/runs/29816821818/job/88590940047",
+    "ci_gate_conclusion": "success",
+    "github_actions_app_id": 15368,
+    "all_checks_green": true
+  },
+  "ruleset": {
+    "id": 18511305,
+    "history_version": 43869926,
+    "target": "default_branch",
+    "enforcement": "active",
+    "updated_at": "2026-07-21T02:11:16.867-07:00",
+    "required_status_checks": [
+      {
+        "context": "Commit Messages",
+        "integration_id": 15368
+      },
+      {
+        "context": "CI Gate",
+        "integration_id": 15368
+      }
+    ],
+    "strict_required_status_checks_policy": false,
+    "do_not_enforce_on_create": false,
+    "other_rules_preserved": [
+      "deletion",
+      "non_fast_forward",
+      "code_coverage_95_percent_max_1_percent_drop",
+      "pull_request_rebase_only_zero_approvals_resolved_threads"
+    ],
+    "owner_bypass": "pull_request_only"
+  },
+  "controlled_proof": {
+    "status": "red_and_green_verified",
+    "pull_request": "https://github.com/dariuszpanas/django-ray/pull/138",
+    "method": "Fail only the minimum-direct dependency job, then remove the deliberate failure before merge.",
+    "required_red_observations": [
+      "Commit Messages succeeds",
+      "minimum-direct fails",
+      "Build Package is skipped",
+      "CI Gate fails",
+      "the pull request is blocked"
+    ],
+    "red": {
+      "head_sha": "bdd5f0454e86c0cf58b7ce01f96670c5465276d8",
+      "workflow_run": "https://github.com/dariuszpanas/django-ray/actions/runs/29817461903",
+      "workflow_conclusion": "failure",
+      "commit_messages": {
+        "workflow_run": "https://github.com/dariuszpanas/django-ray/actions/runs/29817462384",
+        "conclusion": "success"
+      },
+      "minimum_direct": {
+        "job": "https://github.com/dariuszpanas/django-ray/actions/runs/29817461903/job/88592046387",
+        "conclusion": "failure"
+      },
+      "build_package": {
+        "conclusion": "skipped"
+      },
+      "ci_gate": {
+        "job": "https://github.com/dariuszpanas/django-ray/actions/runs/29817461903/job/88592924246",
+        "conclusion": "failure",
+        "github_actions_app_id": 15368,
+        "message": "CI Gate blocked: build=skipped, dependency-compatibility=failure"
+      },
+      "required_checks": {
+        "Commit Messages": "success",
+        "CI Gate": "failure"
+      },
+      "merge_state_status": "BLOCKED",
+      "admin_bypass_used": false
+    },
+    "green": {
+      "head_sha": "2eb4a072772f4e8084a72b69e0c1d9d5e5aa52c2",
+      "workflow_run": "https://github.com/dariuszpanas/django-ray/actions/runs/29818298551",
+      "workflow_conclusion": "success",
+      "commit_messages": {
+        "required_workflow_run": "https://github.com/dariuszpanas/django-ray/actions/runs/29818324748",
+        "conclusion": "success"
+      },
+      "minimum_direct": {
+        "conclusion": "success"
+      },
+      "build_package": {
+        "job": "https://github.com/dariuszpanas/django-ray/actions/runs/29818298551/job/88595602831",
+        "conclusion": "success"
+      },
+      "ci_gate": {
+        "job": "https://github.com/dariuszpanas/django-ray/actions/runs/29818298551/job/88595645402",
+        "conclusion": "success",
+        "github_actions_app_id": 15368
+      },
+      "required_checks": {
+        "Commit Messages": "success",
+        "CI Gate": "success"
+      },
+      "all_checks_green": true,
+      "merge_state_status": "CLEAN",
+      "branch_diff": "Only this evidence artifact changed from main.",
+      "admin_bypass_used": false
+    }
+  }
+}
