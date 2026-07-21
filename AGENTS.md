@@ -35,14 +35,21 @@ When a task calls for a branch, start from current `main` and use the convention
 - Stage explicit paths; never default to `git add .` in a shared or dirty worktree.
 - Review `git diff` and `git diff --cached` before reporting completion.
 - Report the exact validation commands run, their results, and anything not run.
+- Treat each material retained logical commit as a portable, PR-grade change record. One large atomic
+  commit is valid, headings are optional, and its body must preserve the applicable behavior,
+  motivation, boundaries, rollout impact, validation, and useful repository-local investigation
+  paths without relying on GitHub metadata.
+- Before every push and before enabling auto-merge, compare each material commit body with the PR
+  description for the same material facts. Wrap commit prose at 72 columns; format PR descriptions
+  as natural Markdown without artificial hard wrapping.
 - Before every push and before enabling auto-merge, fetch `origin` and inspect
   `git log --format=fuller origin/main..HEAD`.
 - Before merging, verify both required checks are green: `Commit Messages` for retained history and
   `CI Gate` for the complete blocking matrix. A skipped package job or an enabled merge button is not
   sufficient evidence by itself.
 - Fold fixup, CI-repair, review-repair, formatting follow-up, and other development-only commits into
-  the logical commit they correct. Preserve genuinely independent commits with their own structured
-  Summary and Validation sections.
+  the logical commit they correct. Preserve genuinely independent commits with their own
+  self-contained descriptive bodies and validation evidence.
 - Validate the retained range with
   `uv run python scripts/check_conventional_commits.py --range origin/main..HEAD`.
 
