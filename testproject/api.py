@@ -19,7 +19,6 @@ from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
 from django.tasks.exceptions import InvalidTaskBackend
 from ninja import NinjaAPI, Schema
-from ninja.responses import Status
 from ninja.security import HttpBearer
 from pydantic import Field, field_validator
 
@@ -393,7 +392,7 @@ _WORKFLOW_READ_RESPONSES = {
 
 def _workflow_read_error_response(
     error: WorkflowProgressReadError,
-) -> Status[dict[str, str]]:
+) -> tuple[int, dict[str, str]]:
     status_by_code = {
         WorkflowProgressReadErrorCode.ACCESS_DENIED: 403,
         WorkflowProgressReadErrorCode.NOT_FOUND: 404,
@@ -403,7 +402,8 @@ def _workflow_read_error_response(
         WorkflowProgressReadErrorCode.MISSING: 409,
         WorkflowProgressReadErrorCode.CORRUPT: 503,
     }
-    return Status(
+    # django-ninja 1.5.1 supports status tuples but does not export Status.
+    return (
         status_by_code[error.code],
         {
             "code": error.code.value,
