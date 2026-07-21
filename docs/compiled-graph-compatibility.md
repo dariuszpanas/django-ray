@@ -46,6 +46,169 @@ Version sources:
 The general django-ray dependency remains `ray[default]>=2.53.0`. That broader range
 does not imply Compiled Graph eligibility.
 
+### Pinned Linux/KubeRay pilot profile
+
+Issue #102 defines one promotion-grade evidence profile named
+`django-ray-cgraph-kuberay-cpu-v1`. It is intentionally narrower than ordinary
+django-ray support:
+
+- Linux `amd64`, Python 3.12.12, and `ray[cgraph]` 2.56.0;
+- the official `rayproject/ray:2.56.0-py312` base pinned at
+  `sha256:2951c07de396a8b746f9c678b52c6e2282e614e00f80e6846a9ccd12945ae6b0`;
+- KubeRay operator 1.6.2 pinned at
+  `sha256:f9eb07d0d3384554763d739f0eed27aa5d0c2ed4c727ceb075930c1f3f4b9f47`;
+- Docker CLI context `desktop-linux`, its local Docker Desktop Linux-engine endpoint,
+  and engine 29.4.3 on the pinned Linux/amd64 kernel;
+- Kubernetes 1.34.1 on the `docker-desktop` Linux/amd64 node, pinned to its
+  Docker runtime and `6.6.87.2-microsoft-standard-WSL2` kernel for this evidence row;
+- Ubuntu 22.04.5 with glibc 2.35 inside the pinned image, with exact Python ABI
+  and `platform.platform()` identities checked before accepting native evidence;
+- `cupy-cuda12x` 13.4.0 and its required `fastrlock` 0.8.3 dependency are both
+  installed or reinstalled without dependency resolution and observed exactly;
+- one zero-CPU Ray head and two fixed one-CPU workers, with autoscaling disabled;
+- explicit OS, architecture, and hostname node selectors for every Ray pod;
+- 512 MiB memory-backed `/dev/shm` and a 256 MiB Ray object store on every Ray pod;
+- direct Ray Core submission only, for a cluster-side driver control and a nested
+  owner task with `max_retries=0`;
+- a deliberately terminated hard-timeout child process group, three ordered
+  invocations, an application exception, a one-shot result timeout, explicit result
+  discard/consumption, actor termination, and graph teardown.
+
+The Dockerfile, Dockerfile-specific ignore policy, profile, and RayCluster template live
+under `k8s/pilots/compiled-graph/`. The runner captures one clean full Git revision, validates a
+bounded regular-file inventory, and safely materializes a tracked-only `git archive` build
+context. The Dockerfile-specific policy remains a required deny-by-default second boundary, so
+ignored credentials, generated source artifacts, `.vault`, Git metadata, tests, docs, and unrelated
+Kubernetes assets are not sent to the daemon. The runner verifies the pinned local Docker context
+before it builds. Configuration and build-policy identities use a strict UTF-8 source-text
+contract that maps clean-checkout CRLF pairs to the Git archive's LF bytes while preserving every
+other byte; a BOM, NUL byte, or bare carriage return fails closed. The same commit therefore keeps
+one identity across Windows and Linux checkouts. The runner refuses a dirty source tree, a changed
+Kubernetes context, any namespace except `django-ray-cgraph-pilot`, a changed KubeRay operator
+identity, a mutable/restarted Ray pod image, or an unowned cleanup target. The operator check
+requires the exact Deployment, ReplicaSet, and pod names and UIDs; their controller ownership;
+the sole spec/status container; the configured image and running digest; linked Ready status; and
+an exact nonnegative restart count. The restart count is retained as observational evidence, not
+required to be zero, and the runner never rolls or otherwise mutates the shared operator. The full
+observation is compared for exact equality immediately before RayCluster creation, after the
+operator reports the pilot pods ready, and after the final runtime capture. An operator rollout,
+container restart, readiness change, or controller/container identity drift at any bracket
+invalidates the run. The runner builds a source-labelled immutable local image, calculates
+configuration and rendered manifest identities, and verifies the sole regular container, the pinned
+KubeRay worker init-container inventory, running image IDs, exact restart counts, identity
+environment, and every profile-declared effective Ray start parameter before native execution. The
+profile distinguishes ordinary valued parameters
+from KubeRay's valueless `--disable-usage-stats` true switch. Pod evidence retains each
+parameter's sanitized lexical form, lexical value, and effective semantic value, so a
+valued, duplicated, missing, or changed switch cannot pass as the pinned form. Namespace
+discovery uses explicit structured
+not-found semantics; an API failure cannot fall through to creation, and every existing
+namespace is refused. A successful namespace create response supplies a cryptographically random
+run-token label and immutable UID lease. The RayCluster is also create-only: its create-response UID,
+the namespace UID, and the run token form a second lease. Those values are rendered into RayCluster
+and pod labels, annotations, and identity environment, and each pod must have the exact RayCluster
+controller reference. Namespace and RayCluster leases are checked before and after pod reads and
+exec boundaries. Cleanup first verifies the exact live namespace lease, deletes only through
+name/profile/run-token selectors, and fails if either the leased UID or a replacement namespace
+remains.
+
+Kubernetes does not offer this runner a namespace-UID precondition on namespaced create, and
+`kubectl delete namespace` exposes neither a UID nor resource-version precondition. The pre/post
+lease checks, create-only RayCluster, embedded identities, selector-bound delete, and absence check
+make any replacement fail evidence collection; they do not make those API calls atomic. External
+namespace deletion and recreation inside a check/call window is outside the supported pilot
+coordination contract and is not claimed safe from a scoped create reaching the replacement.
+
+Before creating the RayCluster, the runner starts the same immutable local image ID in a
+network-isolated, read-only one-shot container with a physically smaller 256 MiB
+`/dev/shm`. It requires the complete policy identity to differ only on that declared and
+observed resource. A pilot-specific admission layer proves that the tracked baseline is
+admitted, then rejects the changed identity as `PILOT_PROFILE_MISMATCH` before the
+hardened probe or any native command can be invoked. Both policy decisions and both
+admission outcomes are retained. This is the required physical near-neighbor rejection,
+not a claim that a changed KubeRay profile was executed natively.
+
+From a clean commit on the supported local Docker Desktop/KubeRay setup, run:
+
+```powershell
+uv run python scripts/kuberay_compiled_graph_pilot.py run `
+  --context docker-desktop
+```
+
+The reference operator installation uses the versioned upstream chart and tag; the
+runner then verifies the running image digest before it creates the pilot namespace:
+
+```powershell
+helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+helm repo update kuberay
+helm upgrade --install kuberay-operator kuberay/kuberay-operator `
+  --namespace kuberay-system --create-namespace `
+  --version 1.6.2 `
+  --set image.repository=quay.io/kuberay/operator `
+  --set image.tag=v1.6.2 `
+  --wait
+```
+
+The command starts each subprocess inside an operating-system process-tree boundary, actively caps
+and concurrently drains its streams, bounds post-termination waits, and terminates descendants that
+retain inherited pipes. It accepts exactly one complete JSON document, prints one bounded allowlisted
+record, and deletes only its dedicated pilot namespace by default. Retained subprocess records contain structured status,
+exit, timing, decision, and private control-record observations; they omit stdout,
+stderr, tracebacks, and arbitrary process errors.
+The runner does not read or print Kubernetes Secrets. Retain a successful record under
+`docs/investigations/` and open a
+separate capability promotion review; the runner does not edit `_VERIFIED_CAPABILITIES`,
+enable product execution, or turn a candidate-native probe into support by itself. A
+changed image, Ray/Python dependency, Docker context/engine/build-context policy,
+KubeRay operator, kernel/runtime, `/dev/shm`, object store, topology, or submission
+transport requires a new profile identity and evidence.
+
+The hard wall-clock containment self-test deliberately kills and reaps a Linux process
+group. Each direct and nested native suite separately exercises a one-shot Compiled
+Graph result timeout followed by explicit teardown. Successful cleanup evidence requires
+every named graph actor to reach Ray `DEAD`, no named nested-owner task to remain active,
+no pilot child process in any Ray pod, exact restoration of hashed `/dev/shm` entry
+identities, and exact restoration of the Ray object identity digest after global GC.
+
+Ray 2.56.0 does not currently satisfy that cleanup boundary on the pinned profile.
+Both owner topologies can complete while Experimental MutableObject allocations and
+their POSIX semaphore entries remain in `/dev/shm`. The project tracks that blocker in
+[django-ray issue #154](https://github.com/dariuszpanas/django-ray/issues/154) and the
+upstream reclamation work in
+[ray-project/ray issue #43836](https://github.com/ray-project/ray/issues/43836) and
+[ray-project/ray issue #59127](https://github.com/ray-project/ray/issues/59127).
+The pilot observes immediately, then waits `5`, `15`, and `30` more seconds (50 seconds
+total) before classifying this outcome. A retained `status: blocked` record proves the
+failure; it is not successful #102 evidence, is never promotion-eligible, and the
+command exits nonzero after deleting the dedicated namespace. Classification requires
+stable, fully paired `sem.hdr`/`sem.obj` fingerprints across the complete observation
+window; aggregate kind/pair counts and digests are retained, never raw names. The final
+proof also refetches exact pod UID, regular/init-container, image, restart, identity-
+environment, and Ray-start-parameter observations before a
+fresh actor/task/object-state inspection. Evidence persistence is rejected unless
+the create-response namespace UID lease and namespace absence are verified, and it cannot
+be combined with `--keep-cluster`.
+Do not unlink Ray-owned semaphores,
+restart pods, destroy the cluster early, increase `/dev/shm`, or relax exact restoration
+to manufacture a passing result. Re-run the same profile against the first upstream fix,
+and create a promotion review only after teardown restores the state without pod or
+cluster destruction.
+
+The retained record's source revision, local image ID, profile ID, and configuration ID
+are the comparison tuple for #97, #87, and #88. Those pilots must verify that the
+still-loaded local image matches that exact ID. If the image is rebuilt or no longer
+exists, its new ID is a revalidation trigger rather than an interchangeable replacement;
+run this pilot again and retain the new evidence before comparing results. The project does not claim
+that independent Docker builds are bit-for-bit identical or publish this candidate image
+as a supported registry artifact.
+
+Ray still classifies Compiled Graph as beta and describes its benefit for workloads that
+repeatedly execute the same static graph. The pilot therefore establishes an exact
+platform capability only; issues #87 and #88 retain workload benchmarking and the final
+adoption decision. See the upstream
+[Compiled Graph overview](https://docs.ray.io/en/latest/ray-core/compiled-graph/ray-compiled-graph.html)
+and [RayCluster configuration](https://docs.ray.io/en/latest/cluster/kubernetes/user-guides/config.html).
+
 ## Topology decisions
 
 The topology names identify the process that compiles the graph and must perform every
@@ -82,10 +245,13 @@ nested-task row.
 | CPU shared memory | Candidate | The django-ray runtime keeps its normal `ray[default]` dependency. Native canaries install `ray[cgraph]` as recommended by Ray so a missing Compiled Graph extra cannot produce a false compatibility result. No GPU package becomes an application dependency. |
 | GPU/NCCL | Rejected | Requires a separately tested `ray[cgraph]`, CuPy package matching the CUDA major, NVIDIA driver/runtime, NCCL, GPU topology, tensor schema, and peer-to-peer transport matrix. |
 
-Ray 2.56's `cgraph` extra currently selects `cupy-cuda12x` outside macOS. That is a
-canary or future GPU-strategy dependency, not a mandatory django-ray dependency. The
-old `ray[adag]` spelling is not used for the candidate versions. Current tensor paths
-must use `with_tensor_transport`; older `with_type_hint` examples are not the policy.
+Ray 2.56's `cgraph` extra currently selects `cupy-cuda12x` outside macOS, and that
+distribution requires `fastrlock`. The pinned pilot therefore records
+`cupy-cuda12x==13.4.0` and `fastrlock==0.8.3` independently so a changed base image cannot
+silently omit or substitute the transitive package. These remain canary or future
+GPU-strategy dependencies, not mandatory django-ray dependencies. The old `ray[adag]`
+spelling is not used for the candidate versions. Current tensor paths must use
+`with_tensor_transport`; older `with_type_hint` examples are not the policy.
 
 GPU support must be introduced in its own policy revision. Ray currently documents
 peer-to-peer GPU transfers and says broader collective support is still forthcoming.
