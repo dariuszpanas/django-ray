@@ -1,4 +1,4 @@
-"""Run isolated workflow-progress preparation prototype benchmarks.
+"""Run isolated workflow-progress preparation benchmarks.
 
 Each scenario runs in a fresh subprocess.  The parent owns an ephemeral
 scenario directory and removes it after reading the worker result, including
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -33,16 +34,221 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 DEFAULT_NODES = (100, 500)
 REQUIRED_SCALE_NODES = (25_000, 100_000, 250_000)
 DEFAULT_PROFILES = ("sparse", "high-edge")
+IMPLEMENTATIONS = ("prototype-composite", "production-topology")
 DEFAULT_TIMEOUT_SECONDS = 1_800.0
 REQUIRED_SCALE_TIMEOUT_SECONDS = 7_200.0
 SCENARIO_PREFIX = "django-ray-preparation-benchmark-"
 WORKER_READY_NAME = "worker-ready.json"
 RSS_SAMPLE_INTERVAL_SECONDS = 0.01
 WORKSPACE_PREFIX = "django-ray-preparation-"
+
+_PREPARATION_PAGE_BYTES = 4 * 1024
+_PREPARATION_CACHE_MAX_BYTES = 8 * 1024 * 1024
+_PREPARATION_SPILL_MAX_BYTES = 1024 * 1024 * 1024
+_PREPARATION_CONTROL_RESERVE_MAX_BYTES = 4 * 1024 * 1024
+_PREPARATION_MIN_DATABASE_BYTES = 64 * 1024
+_PREPARATION_NODE_MAX_ITEMS = 1_000_000
+_PREPARATION_EDGE_MAX_ITEMS = 4_000_000
+_PREPARATION_DETAIL_MAX_ITEMS = 1_000_000
+_PREPARATION_BATCH_MAX_ITEMS = 256
+_PREPARATION_BATCH_MAX_DECODED_BYTES = 4 * 1024 * 1024
+
+_PRODUCTION_RESIDENT_CONTRACT = (
+    "phase-separated bounded topology candidate plus end-to-end legacy "
+    "O(observed) observed_node_ids detachment"
+)
+_PROTOTYPE_RESIDENT_CONTRACT = (
+    "bounded prototype composite without legacy observed_node_ids detachment"
+)
+_PRODUCTION_MEMORY_EVIDENCE_CONTRACT = (
+    "production cases retain a bounded pre-legacy checkpoint and an end-to-end "
+    "legacy-detachment peak"
+)
+_PROTOTYPE_MEMORY_EVIDENCE_CONTRACT = (
+    "prototype cases retain one end-to-end composite preparation peak"
+)
+_CLEANUP_CONTRACT = (
+    "Context cleanup handles normal return and Python exceptions; the parent watchdog "
+    "owns the ephemeral scenario directory after worker exit or termination."
+)
+
+_REPORT_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "implementation",
+        "required_scale",
+        "created_at",
+        "source_revision",
+        "source_dirty",
+        "implementation_digest",
+        "source_snapshot_before",
+        "source_snapshot_after",
+        "command",
+        "cases",
+        "forced_termination",
+        "memory_evidence_contract",
+        "cleanup_contract",
+    }
+)
+_SOURCE_SNAPSHOT_REQUIRED_FIELDS = frozenset({"revision", "dirty", "implementation_digest"})
+_CASE_REQUIRED_FIELDS = frozenset(
+    {
+        "implementation",
+        "profile",
+        "observed_nodes",
+        "observed_edges",
+        "observed_detail",
+        "retained_nodes",
+        "retained_edges",
+        "retained_detail",
+        "topology_pages",
+        "topology_encoded_bytes",
+        "topology_decoded_bytes",
+        "detail_encoded_bytes",
+        "detail_decoded_bytes",
+        "legacy_observed_node_ids",
+        "manifest_digest",
+        "truncation_reasons",
+        "topology_truncation_reasons",
+        "detail_truncation_reasons",
+        "wall_seconds",
+        "cpu_seconds",
+        "bounded_phase_tracemalloc_current_bytes",
+        "bounded_phase_tracemalloc_peak_bytes",
+        "bounded_phase_peak_rss_bytes",
+        "bounded_phase_rss_measurement",
+        "tracemalloc_peak_bytes",
+        "peak_rss_bytes",
+        "end_to_end_tracemalloc_peak_bytes",
+        "end_to_end_peak_rss_bytes",
+        "rss_measurement",
+        "spill_peak_bytes",
+        "spill_items",
+        "cleanup",
+        "budgets",
+        "v1_output_limits",
+        "sqlite_pragmas",
+        "query_plans",
+        "resident_contract",
+        "environment",
+    }
+)
+_RSS_REQUIRED_FIELDS = frozenset(
+    {
+        "peak_bytes",
+        "method",
+        "scope",
+        "baseline_bytes",
+        "baseline_current_bytes",
+        "baseline_high_water_bytes",
+        "sample_interval_seconds",
+        "sampled_peak_bytes",
+        "process_high_water_bytes",
+    }
+)
+_FILESYSTEM_REQUIRED_FIELDS = frozenset(
+    {
+        "identity_sha256",
+        "identity_method",
+        "filesystem_type",
+        "allocation_block_bytes",
+    }
+)
+_ENVIRONMENT_REQUIRED_FIELDS = frozenset(
+    {
+        "platform",
+        "python",
+        "python_implementation",
+        "sqlite",
+        "django",
+        "django_ray",
+        "pid",
+        "filesystem",
+    }
+)
+_CLEANUP_REQUIRED_FIELDS = frozenset(
+    {
+        "worker_context",
+        "workspace_exists_after_context",
+        "parent_watchdog",
+        "scenario_root_exists_after_parent",
+    }
+)
+_FORCED_TERMINATION_REQUIRED_FIELDS = frozenset(
+    {
+        "outcome",
+        "readiness_observed",
+        "workspace_open_before_kill",
+        "worker_returncode",
+        "durable_candidate_exists_before_cleanup",
+        "durable_candidate_exists_after_cleanup",
+        "parent_watchdog",
+        "scenario_root_exists_after_parent",
+        "filesystem",
+    }
+)
+_COMMON_BUDGET_REQUIRED_FIELDS = frozenset(
+    {
+        "page_bytes",
+        "cache_bytes",
+        "mmap_bytes",
+        "max_spill_bytes",
+        "control_reserve_bytes",
+        "max_node_items",
+        "max_edge_items",
+        "batch_max_items",
+        "batch_max_decoded_bytes",
+    }
+)
+_SQLITE_PRAGMA_REQUIRED_FIELDS = frozenset(
+    {
+        "page_size",
+        "cache_size",
+        "mmap_size",
+        "temp_store",
+        "journal_mode",
+        "synchronous",
+        "locking_mode",
+        "foreign_keys",
+        "trusted_schema",
+        "max_page_count",
+    }
+)
+_V1_OUTPUT_LIMIT_REQUIRED_FIELDS = frozenset(
+    {
+        "storage_protocol_version",
+        "limits_profile",
+        "topology_page_max_items",
+        "topology_page_max_encoded_bytes",
+        "topology_page_max_decoded_bytes",
+        "record_max_encoded_bytes",
+        "topology_node_max_items",
+        "topology_edge_max_items",
+        "topology_max_encoded_bytes",
+        "topology_max_decoded_bytes",
+        "detail_max_items",
+        "detail_max_encoded_bytes",
+        "detail_max_decoded_bytes",
+        "combined_max_encoded_bytes",
+        "combined_max_decoded_bytes",
+        "value_max_depth",
+        "metrics_max_items",
+        "metrics_max_encoded_bytes",
+        "metric_key_max_bytes",
+        "metric_string_max_bytes",
+        "node_id_max_bytes",
+        "label_max_bytes",
+        "message_max_bytes",
+        "recent_event_max_items",
+        "event_max_encoded_bytes",
+        "topology_manifest_max_encoded_bytes",
+        "identity_max_integer",
+    }
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -60,20 +266,37 @@ def _parse_args() -> argparse.Namespace:
         default=list(DEFAULT_PROFILES),
     )
     parser.add_argument("--high-edge-factor", type=int, default=8)
+    parser.add_argument(
+        "--implementation",
+        choices=IMPLEMENTATIONS,
+        default="prototype-composite",
+        help=(
+            "prototype-composite measures issue #140 topology plus detail; "
+            "production-topology measures issue #141 including legacy detachment"
+        ),
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--timeout-seconds",
         type=float,
         help="per-scenario timeout (default: 1800s, or 7200s with --required-scale)",
     )
-    parser.add_argument("--cache-bytes", type=int, default=8 * 1024 * 1024)
-    parser.add_argument("--spill-max-bytes", type=int, default=1024 * 1024 * 1024)
-    parser.add_argument("--control-reserve-bytes", type=int, default=4 * 1024 * 1024)
-    parser.add_argument("--node-max-items", type=int, default=1_000_000)
-    parser.add_argument("--edge-max-items", type=int, default=4_000_000)
-    parser.add_argument("--detail-max-items", type=int, default=1_000_000)
-    parser.add_argument("--batch-items", type=int, default=256)
-    parser.add_argument("--batch-decoded-bytes", type=int, default=4 * 1024 * 1024)
+    parser.add_argument("--cache-bytes", type=int, default=_PREPARATION_CACHE_MAX_BYTES)
+    parser.add_argument("--spill-max-bytes", type=int, default=_PREPARATION_SPILL_MAX_BYTES)
+    parser.add_argument(
+        "--control-reserve-bytes",
+        type=int,
+        default=_PREPARATION_CONTROL_RESERVE_MAX_BYTES,
+    )
+    parser.add_argument("--node-max-items", type=int, default=_PREPARATION_NODE_MAX_ITEMS)
+    parser.add_argument("--edge-max-items", type=int, default=_PREPARATION_EDGE_MAX_ITEMS)
+    parser.add_argument("--detail-max-items", type=int, default=_PREPARATION_DETAIL_MAX_ITEMS)
+    parser.add_argument("--batch-items", type=int, default=_PREPARATION_BATCH_MAX_ITEMS)
+    parser.add_argument(
+        "--batch-decoded-bytes",
+        type=int,
+        default=_PREPARATION_BATCH_MAX_DECODED_BYTES,
+    )
     parser.add_argument("--workspace-parent", type=Path)
 
     worker = parser.add_argument_group("internal worker arguments")
@@ -156,6 +379,7 @@ def _implementation_digest() -> str:
     for path in (
         Path(__file__),
         ROOT / "scripts" / "workflow_progress_preparation_prototype.py",
+        ROOT / "src" / "django_ray" / "workflow_progress_preparation.py",
         ROOT / "src" / "django_ray" / "workflow_progress_storage.py",
     ):
         digest.update(path.relative_to(ROOT).as_posix().encode())
@@ -248,6 +472,7 @@ class _RssSampler:
         self.baseline_high_water_bytes: int | None = None
         self.sampled_peak_bytes: int | None = None
         self.process_high_water_bytes: int | None = None
+        self._process: Any | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -260,35 +485,67 @@ class _RssSampler:
         except (ImportError, OSError):
             return self
 
+        self._process = process
+
         def sample() -> None:
             while not self._stop.wait(RSS_SAMPLE_INTERVAL_SECONDS):
-                try:
-                    current = int(process.memory_info().rss)
-                    self.sampled_peak_bytes = max(self.sampled_peak_bytes or 0, current)
-                except (OSError, RuntimeError):
+                if self._sample_current() is None:
                     return
 
-        self.baseline_current_bytes = int(process.memory_info().rss)
+        self.baseline_current_bytes = self._sample_current()
         self.sampled_peak_bytes = self.baseline_current_bytes
         self._thread = threading.Thread(target=sample, name="preparation-rss", daemon=True)
         self._thread.start()
         return self
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self._sample_current()
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
         self.process_high_water_bytes = _peak_resource_rss()
 
+    def _sample_current(self) -> int | None:
+        if self._process is None:
+            return None
+        try:
+            current = int(self._process.memory_info().rss)
+        except (OSError, RuntimeError):
+            return None
+        self.sampled_peak_bytes = max(self.sampled_peak_bytes or 0, current)
+        return current
+
+    def checkpoint(self, *, scope: str) -> dict[str, Any]:
+        """Return high-water evidence through one named in-window phase."""
+        self._sample_current()
+        return self._report(
+            process_high_water_bytes=_peak_resource_rss(),
+            high_water_scope=f"fresh child process high-water through {scope}",
+            sampled_scope=f"measurement window through {scope}",
+        )
+
     def report(self) -> dict[str, Any]:
-        if self.process_high_water_bytes is not None:
+        return self._report(
+            process_high_water_bytes=self.process_high_water_bytes,
+            high_water_scope="fresh child process lifetime high-water",
+            sampled_scope="preparation measurement window",
+        )
+
+    def _report(
+        self,
+        *,
+        process_high_water_bytes: int | None,
+        high_water_scope: str,
+        sampled_scope: str,
+    ) -> dict[str, Any]:
+        if process_high_water_bytes is not None:
             method = "resource.getrusage(RUSAGE_SELF).ru_maxrss"
-            scope = "fresh child process lifetime high-water"
+            scope = high_water_scope
             baseline = self.baseline_high_water_bytes
-            peak = self.process_high_water_bytes
+            peak = process_high_water_bytes
         elif self.sampled_peak_bytes is not None:
             method = "psutil.Process.memory_info().rss sampling"
-            scope = "preparation measurement window"
+            scope = sampled_scope
             baseline = self.baseline_current_bytes
             peak = self.sampled_peak_bytes
         else:
@@ -307,7 +564,7 @@ class _RssSampler:
                 RSS_SAMPLE_INTERVAL_SECONDS if self._thread is not None else None
             ),
             "sampled_peak_bytes": self.sampled_peak_bytes,
-            "process_high_water_bytes": self.process_high_water_bytes,
+            "process_high_water_bytes": process_high_water_bytes,
         }
 
 
@@ -434,29 +691,50 @@ def _v1_output_limits() -> dict[str, Any]:
     }
 
 
+def _implementation(args: argparse.Namespace) -> str:
+    return str(getattr(args, "implementation", "prototype-composite"))
+
+
 def _workspace_config(args: argparse.Namespace):
+    common = {
+        "cache_bytes": args.cache_bytes,
+        "max_spill_bytes": args.spill_max_bytes,
+        "control_reserve_bytes": args.control_reserve_bytes,
+        "max_node_items": args.node_max_items,
+        "max_edge_items": args.edge_max_items,
+        "batch_max_items": args.batch_items,
+        "batch_max_decoded_bytes": args.batch_decoded_bytes,
+    }
+    if _implementation(args) == "production-topology":
+        from django_ray.workflow_progress_preparation import SQLitePreparationConfig
+
+        return SQLitePreparationConfig(**common).validated()
+
     from scripts.workflow_progress_preparation_prototype import (
         SQLitePreparationConfig,
     )
 
     return SQLitePreparationConfig(
-        cache_bytes=args.cache_bytes,
-        max_spill_bytes=args.spill_max_bytes,
-        control_reserve_bytes=args.control_reserve_bytes,
-        max_node_items=args.node_max_items,
-        max_edge_items=args.edge_max_items,
+        **common,
         max_detail_items=args.detail_max_items,
-        batch_max_items=args.batch_items,
-        batch_max_decoded_bytes=args.batch_decoded_bytes,
     ).validated()
+
+
+def _workspace_type(args: argparse.Namespace):
+    if _implementation(args) == "production-topology":
+        from django_ray.workflow_progress_preparation import SQLitePreparationWorkspace
+
+        return SQLitePreparationWorkspace
+
+    from scripts.workflow_progress_preparation_prototype import SQLitePreparationWorkspace
+
+    return SQLitePreparationWorkspace
 
 
 def _hold_open_worker(args: argparse.Namespace) -> int:
     if args.worker_workspace_root is None or args.worker_ready is None or args.worker_nonce is None:
         raise ValueError("hold-open worker requires workspace, readiness, and nonce values")
-    from scripts.workflow_progress_preparation_prototype import SQLitePreparationWorkspace
-
-    workspace = SQLitePreparationWorkspace(
+    workspace = _workspace_type(args)(
         _workspace_config(args),
         parent_directory=args.worker_workspace_root,
     )
@@ -491,9 +769,9 @@ def _worker(args: argparse.Namespace) -> int:
         raise ValueError("worker mode requires one complete scenario")
 
     from django_ray.runtime.context import WorkflowRunIdentity
-    from scripts.workflow_progress_preparation_prototype import SQLitePreparationWorkspace
 
     config = _workspace_config(args)
+    implementation = _implementation(args)
     node_count = args.worker_nodes
     edge_count = (
         max(0, node_count - 1)
@@ -506,14 +784,18 @@ def _worker(args: argparse.Namespace) -> int:
         execution_generation=1,
         run_id="00000000-0000-0000-0000-000000000140",
     )
-    workspace = SQLitePreparationWorkspace(
+    workspace = _workspace_type(args)(
         config,
         parent_directory=args.worker_workspace_root,
     )
     tracemalloc.start()
     wall_started = time.perf_counter()
     cpu_started = time.process_time()
+    bounded_phase_tracemalloc_current_bytes: int | None = None
+    bounded_phase_tracemalloc_peak_bytes: int | None = None
+    bounded_phase_rss_measurement: dict[str, Any] | None = None
     with _RssSampler() as rss:
+        detail = None
         with workspace:
             pragmas = workspace.sqlite_pragmas()
             topology = workspace.prepare_topology(
@@ -522,38 +804,70 @@ def _worker(args: argparse.Namespace) -> int:
                 _nodes(node_count),
                 _edges(node_count, args.worker_profile, args.high_edge_factor),
             )
-            detail = workspace.prepare_detail(_details(node_count), topology=topology)
-            query_plans = workspace.retained_query_plans()
-            spill_peak_bytes = workspace.spill_peak_bytes
-            spill_items = workspace.spill_items
+            if implementation == "production-topology":
+                query_plans = workspace.retained_query_plans()
+                spill_peak_bytes = workspace.spill_peak_bytes
+                spill_items = workspace.spill_items
+                (
+                    bounded_phase_tracemalloc_current_bytes,
+                    bounded_phase_tracemalloc_peak_bytes,
+                ) = tracemalloc.get_traced_memory()
+                bounded_phase_rss_measurement = rss.checkpoint(scope="bounded topology preparation")
+                workspace.prepare_legacy_detachment(topology)
+            else:
+                detail = workspace.prepare_detail(_details(node_count), topology=topology)
+                query_plans = workspace.retained_query_plans()
+                spill_peak_bytes = workspace.spill_peak_bytes
+                spill_items = workspace.spill_items
+        if implementation == "production-topology":
+            topology = workspace.detach_legacy_topology(topology)
     cpu_seconds = time.process_time() - cpu_started
     wall_seconds = time.perf_counter() - wall_started
     _, tracemalloc_peak_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     rss_measurement = rss.report()
+    observed_detail = None if detail is None else detail.observed_count
+    retained_detail = None if detail is None else len(detail.records)
+    detail_encoded_bytes = None if detail is None else detail.encoded_bytes
+    detail_decoded_bytes = None if detail is None else detail.decoded_bytes
+    detail_truncation_reasons = [] if detail is None else list(detail.truncation_reasons)
     report = {
+        "implementation": implementation,
         "profile": args.worker_profile,
         "observed_nodes": node_count,
         "observed_edges": edge_count,
-        "observed_detail": detail.observed_count,
+        "observed_detail": observed_detail,
         "retained_nodes": topology.retained_node_count,
         "retained_edges": topology.retained_edge_count,
-        "retained_detail": len(detail.records),
+        "retained_detail": retained_detail,
         "topology_pages": len(topology.pages),
         "topology_encoded_bytes": topology.encoded_bytes,
         "topology_decoded_bytes": topology.decoded_bytes,
-        "detail_encoded_bytes": detail.encoded_bytes,
-        "detail_decoded_bytes": detail.decoded_bytes,
+        "detail_encoded_bytes": detail_encoded_bytes,
+        "detail_decoded_bytes": detail_decoded_bytes,
+        "legacy_observed_node_ids": (
+            len(topology.observed_node_ids) if implementation == "production-topology" else None
+        ),
         "manifest_digest": topology.manifest_digest,
         "truncation_reasons": sorted(
-            set(topology.truncation_reasons) | set(detail.truncation_reasons)
+            set(topology.truncation_reasons) | set(detail_truncation_reasons)
         ),
         "topology_truncation_reasons": list(topology.truncation_reasons),
-        "detail_truncation_reasons": list(detail.truncation_reasons),
+        "detail_truncation_reasons": detail_truncation_reasons,
         "wall_seconds": round(wall_seconds, 6),
         "cpu_seconds": round(cpu_seconds, 6),
+        "bounded_phase_tracemalloc_current_bytes": (bounded_phase_tracemalloc_current_bytes),
+        "bounded_phase_tracemalloc_peak_bytes": bounded_phase_tracemalloc_peak_bytes,
+        "bounded_phase_peak_rss_bytes": (
+            None
+            if bounded_phase_rss_measurement is None
+            else bounded_phase_rss_measurement["peak_bytes"]
+        ),
+        "bounded_phase_rss_measurement": bounded_phase_rss_measurement,
         "tracemalloc_peak_bytes": tracemalloc_peak_bytes,
         "peak_rss_bytes": rss_measurement["peak_bytes"],
+        "end_to_end_tracemalloc_peak_bytes": tracemalloc_peak_bytes,
+        "end_to_end_peak_rss_bytes": rss_measurement["peak_bytes"],
         "rss_measurement": rss_measurement,
         "spill_peak_bytes": spill_peak_bytes,
         "spill_items": spill_items,
@@ -565,6 +879,11 @@ def _worker(args: argparse.Namespace) -> int:
         "v1_output_limits": _v1_output_limits(),
         "sqlite_pragmas": pragmas,
         "query_plans": list(query_plans),
+        "resident_contract": (
+            _PRODUCTION_RESIDENT_CONTRACT
+            if implementation == "production-topology"
+            else _PROTOTYPE_RESIDENT_CONTRACT
+        ),
         "environment": {
             **_worker_environment(),
             "filesystem": _filesystem_metadata(args.worker_workspace_root),
@@ -601,6 +920,8 @@ def _worker_command(
 
 def _configuration_arguments(args: argparse.Namespace) -> list[str]:
     return [
+        "--implementation",
+        _implementation(args),
         "--high-edge-factor",
         str(args.high_edge_factor),
         "--cache-bytes",
@@ -769,6 +1090,793 @@ def _run_worker_process(command: list[str], *, timeout_seconds: float) -> tuple[
     return stdout, stderr
 
 
+def _required_mapping(
+    value: Any,
+    required_fields: frozenset[str],
+    *,
+    message: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or not required_fields.issubset(value):
+        raise RuntimeError(message)
+    return value
+
+
+def _is_sha256(value: Any) -> bool:
+    return bool(
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_nonnegative_number(value: Any) -> bool:
+    return bool(type(value) in {int, float} and math.isfinite(float(value)) and value >= 0)
+
+
+def _is_optional_nonnegative_int(value: Any) -> bool:
+    return value is None or (type(value) is int and value >= 0)
+
+
+def _validate_filesystem_evidence(value: Any) -> tuple[Any, ...]:
+    filesystem = _required_mapping(
+        value,
+        _FILESYSTEM_REQUIRED_FIELDS,
+        message="preparation benchmark filesystem evidence is incomplete",
+    )
+    identity = filesystem["identity_sha256"]
+    allocation = filesystem["allocation_block_bytes"]
+    if (
+        not _is_sha256(identity)
+        or type(filesystem["identity_method"]) is not str
+        or filesystem["identity_method"] != "sha256(platform, st_dev)"
+        or type(filesystem["filesystem_type"]) is not str
+        or not filesystem["filesystem_type"]
+        or (allocation is not None and (type(allocation) is not int or allocation <= 0))
+    ):
+        raise RuntimeError("preparation benchmark filesystem evidence is invalid")
+    return (
+        identity,
+        filesystem["identity_method"],
+        filesystem["filesystem_type"],
+        allocation,
+    )
+
+
+def _validate_rss_measurement(
+    value: Any,
+    *,
+    label: str,
+    phase: str,
+) -> int | None:
+    measurement = _required_mapping(
+        value,
+        _RSS_REQUIRED_FIELDS,
+        message=f"preparation benchmark {label} RSS evidence is incomplete",
+    )
+    peak = measurement["peak_bytes"]
+    optional_int_fields = (
+        "baseline_bytes",
+        "baseline_current_bytes",
+        "baseline_high_water_bytes",
+        "sampled_peak_bytes",
+        "process_high_water_bytes",
+    )
+    if not _is_optional_nonnegative_int(peak) or (peak is not None and peak <= 0):
+        raise RuntimeError(f"preparation benchmark {label} RSS peak is invalid")
+    if any(not _is_optional_nonnegative_int(measurement[name]) for name in optional_int_fields):
+        raise RuntimeError(f"preparation benchmark {label} RSS evidence is invalid")
+    interval = measurement["sample_interval_seconds"]
+    if interval is not None and (not _is_nonnegative_number(interval) or float(interval) <= 0):
+        raise RuntimeError(f"preparation benchmark {label} RSS interval is invalid")
+    method = measurement["method"]
+    scope = measurement["scope"]
+    if (
+        type(method) is not str
+        or method
+        not in {
+            "resource.getrusage(RUSAGE_SELF).ru_maxrss",
+            "psutil.Process.memory_info().rss sampling",
+            "unavailable",
+        }
+        or type(scope) is not str
+        or not scope
+    ):
+        raise RuntimeError(f"preparation benchmark {label} RSS evidence is invalid")
+    expected_scopes = {
+        "end-to-end": {
+            "resource.getrusage(RUSAGE_SELF).ru_maxrss": (
+                "fresh child process lifetime high-water"
+            ),
+            "psutil.Process.memory_info().rss sampling": "preparation measurement window",
+            "unavailable": "unavailable",
+        },
+        "bounded-phase": {
+            "resource.getrusage(RUSAGE_SELF).ru_maxrss": (
+                "fresh child process high-water through bounded topology preparation"
+            ),
+            "psutil.Process.memory_info().rss sampling": (
+                "measurement window through bounded topology preparation"
+            ),
+            "unavailable": "unavailable",
+        },
+    }
+    if phase not in expected_scopes or scope != expected_scopes[phase][method]:
+        raise RuntimeError(f"preparation benchmark {label} RSS scope is inconsistent")
+    if interval is not None and (
+        type(interval) is not float or interval != RSS_SAMPLE_INTERVAL_SECONDS
+    ):
+        raise RuntimeError(f"preparation benchmark {label} RSS interval is inconsistent")
+    baseline_current = measurement["baseline_current_bytes"]
+    baseline_high_water = measurement["baseline_high_water_bytes"]
+    sampled_peak = measurement["sampled_peak_bytes"]
+    process_high_water = measurement["process_high_water_bytes"]
+    if (
+        baseline_current is not None
+        and sampled_peak is not None
+        and sampled_peak < baseline_current
+    ) or (
+        baseline_high_water is not None
+        and process_high_water is not None
+        and process_high_water < baseline_high_water
+    ):
+        raise RuntimeError(f"preparation benchmark {label} RSS peaks are inconsistent")
+    if method == "resource.getrusage(RUSAGE_SELF).ru_maxrss" and (
+        peak != process_high_water or measurement["baseline_bytes"] != baseline_high_water
+    ):
+        raise RuntimeError(f"preparation benchmark {label} RSS evidence is inconsistent")
+    if method == "psutil.Process.memory_info().rss sampling" and (
+        peak != sampled_peak
+        or measurement["baseline_bytes"] != baseline_current
+        or interval is None
+    ):
+        raise RuntimeError(f"preparation benchmark {label} RSS evidence is inconsistent")
+    if method == "unavailable" and any(
+        measurement[name] is not None
+        for name in (
+            "peak_bytes",
+            "baseline_bytes",
+            "sampled_peak_bytes",
+            "process_high_water_bytes",
+        )
+    ):
+        raise RuntimeError(f"preparation benchmark {label} RSS evidence is inconsistent")
+    return peak
+
+
+def _validate_worker_memory_evidence(
+    report: dict[str, Any],
+    *,
+    implementation: str,
+) -> None:
+    """Fail a scenario whose phase or end-to-end memory evidence is incomplete."""
+    required_fields = frozenset(
+        {
+            "tracemalloc_peak_bytes",
+            "peak_rss_bytes",
+            "end_to_end_tracemalloc_peak_bytes",
+            "end_to_end_peak_rss_bytes",
+            "bounded_phase_tracemalloc_current_bytes",
+            "bounded_phase_tracemalloc_peak_bytes",
+            "bounded_phase_peak_rss_bytes",
+            "bounded_phase_rss_measurement",
+            "rss_measurement",
+        }
+    )
+    if not required_fields.issubset(report):
+        raise RuntimeError("preparation benchmark v2 memory evidence is incomplete")
+    end_tracemalloc = report["tracemalloc_peak_bytes"]
+    end_rss = report["peak_rss_bytes"]
+    if type(end_tracemalloc) is not int or end_tracemalloc <= 0:
+        raise RuntimeError("preparation benchmark end-to-end tracemalloc peak is invalid")
+    if end_rss is not None and (type(end_rss) is not int or end_rss <= 0):
+        raise RuntimeError("preparation benchmark end-to-end RSS peak is invalid")
+    if (
+        type(report["end_to_end_tracemalloc_peak_bytes"]) is not type(end_tracemalloc)
+        or report["end_to_end_tracemalloc_peak_bytes"] != end_tracemalloc
+        or type(report["end_to_end_peak_rss_bytes"]) is not type(end_rss)
+        or report["end_to_end_peak_rss_bytes"] != end_rss
+    ):
+        raise RuntimeError("preparation benchmark end-to-end memory evidence is inconsistent")
+    measured_end_rss = _validate_rss_measurement(
+        report["rss_measurement"],
+        label="end-to-end",
+        phase="end-to-end",
+    )
+    if measured_end_rss != end_rss:
+        raise RuntimeError("preparation benchmark end-to-end RSS evidence is inconsistent")
+    if implementation != "production-topology":
+        bounded_fields = (
+            "bounded_phase_tracemalloc_current_bytes",
+            "bounded_phase_tracemalloc_peak_bytes",
+            "bounded_phase_peak_rss_bytes",
+            "bounded_phase_rss_measurement",
+        )
+        if any(report[name] is not None for name in bounded_fields):
+            raise RuntimeError(
+                "prototype preparation report unexpectedly contains production phase evidence"
+            )
+        return
+
+    bounded_current = report["bounded_phase_tracemalloc_current_bytes"]
+    bounded_peak = report["bounded_phase_tracemalloc_peak_bytes"]
+    bounded_rss = report["bounded_phase_peak_rss_bytes"]
+    bounded_measurement = report["bounded_phase_rss_measurement"]
+    if (
+        type(bounded_current) is not int
+        or bounded_current <= 0
+        or type(bounded_peak) is not int
+        or bounded_peak < bounded_current
+        or end_tracemalloc < bounded_peak
+    ):
+        raise RuntimeError(
+            "production preparation benchmark bounded tracemalloc evidence is invalid"
+        )
+    measured_bounded_rss = _validate_rss_measurement(
+        bounded_measurement,
+        label="bounded-phase",
+        phase="bounded-phase",
+    )
+    if (
+        measured_bounded_rss != bounded_rss
+        or "bounded topology preparation" not in bounded_measurement["scope"]
+    ):
+        raise RuntimeError("production preparation benchmark bounded RSS evidence is invalid")
+    if bounded_rss is not None and (type(bounded_rss) is not int or bounded_rss <= 0):
+        raise RuntimeError("production preparation benchmark bounded RSS peak is invalid")
+    if bounded_rss is not None and end_rss is not None and end_rss < bounded_rss:
+        raise RuntimeError("production preparation benchmark RSS peaks are not monotonic")
+
+
+def _validate_cleanup_evidence(value: Any) -> None:
+    cleanup = _required_mapping(
+        value,
+        _CLEANUP_REQUIRED_FIELDS,
+        message="preparation benchmark case cleanup evidence is incomplete",
+    )
+    if (
+        type(cleanup["worker_context"]) is not str
+        or cleanup["worker_context"] != "removed"
+        or cleanup["workspace_exists_after_context"] is not False
+        or type(cleanup["parent_watchdog"]) is not str
+        or cleanup["parent_watchdog"] != "removed"
+        or cleanup["scenario_root_exists_after_parent"] is not False
+    ):
+        raise RuntimeError("preparation benchmark case cleanup did not succeed")
+
+
+def _validate_budget_evidence(value: Any, *, implementation: str) -> dict[str, Any]:
+    required = _COMMON_BUDGET_REQUIRED_FIELDS | (
+        frozenset({"max_detail_items"}) if implementation == "prototype-composite" else frozenset()
+    )
+    budgets = _required_mapping(
+        value,
+        required,
+        message="preparation benchmark case budget evidence is incomplete",
+    )
+    if any(type(budgets[name]) is not int for name in required):
+        raise RuntimeError("preparation benchmark case budget evidence is invalid")
+    if (
+        budgets["page_bytes"] != _PREPARATION_PAGE_BYTES
+        or not _PREPARATION_PAGE_BYTES <= budgets["cache_bytes"] <= _PREPARATION_CACHE_MAX_BYTES
+        or budgets["cache_bytes"] % 1024
+        or budgets["mmap_bytes"] != 0
+        or budgets["max_spill_bytes"] > _PREPARATION_SPILL_MAX_BYTES
+        or budgets["max_spill_bytes"] % budgets["page_bytes"]
+        or not _PREPARATION_PAGE_BYTES
+        <= budgets["control_reserve_bytes"]
+        <= _PREPARATION_CONTROL_RESERVE_MAX_BYTES
+        or budgets["control_reserve_bytes"] % budgets["page_bytes"]
+        or budgets["max_spill_bytes"] - budgets["control_reserve_bytes"]
+        < _PREPARATION_MIN_DATABASE_BYTES
+        or not 1 <= budgets["max_node_items"] <= _PREPARATION_NODE_MAX_ITEMS
+        or not 1 <= budgets["max_edge_items"] <= _PREPARATION_EDGE_MAX_ITEMS
+        or not 1 <= budgets["batch_max_items"] <= _PREPARATION_BATCH_MAX_ITEMS
+        or not _PREPARATION_PAGE_BYTES
+        <= budgets["batch_max_decoded_bytes"]
+        <= _PREPARATION_BATCH_MAX_DECODED_BYTES
+        or (
+            implementation == "prototype-composite"
+            and not 1 <= budgets["max_detail_items"] <= _PREPARATION_DETAIL_MAX_ITEMS
+        )
+    ):
+        raise RuntimeError("preparation benchmark case budget evidence is invalid")
+    return {name: budgets[name] for name in required}
+
+
+def _validate_output_limit_evidence(value: Any) -> dict[str, Any]:
+    limits = _required_mapping(
+        value,
+        _V1_OUTPUT_LIMIT_REQUIRED_FIELDS,
+        message="preparation benchmark V1 output-limit evidence is incomplete",
+    )
+    if (
+        type(limits["limits_profile"]) is not str
+        or limits["storage_protocol_version"] != 1
+        or limits["limits_profile"] != "v1"
+    ):
+        raise RuntimeError("preparation benchmark V1 output-limit profile is invalid")
+    integer_fields = _V1_OUTPUT_LIMIT_REQUIRED_FIELDS - frozenset({"limits_profile"})
+    if any(type(limits[name]) is not int or limits[name] <= 0 for name in integer_fields):
+        raise RuntimeError("preparation benchmark V1 output-limit evidence is invalid")
+    if (
+        limits["topology_page_max_items"]
+        > max(limits["topology_node_max_items"], limits["topology_edge_max_items"])
+        or limits["topology_page_max_encoded_bytes"] > limits["topology_max_encoded_bytes"]
+        or limits["topology_page_max_decoded_bytes"] > limits["topology_max_decoded_bytes"]
+        or limits["topology_manifest_max_encoded_bytes"] > limits["topology_max_encoded_bytes"]
+        or limits["record_max_encoded_bytes"]
+        > min(
+            limits["topology_page_max_encoded_bytes"],
+            limits["detail_max_encoded_bytes"],
+        )
+        or limits["topology_max_encoded_bytes"] + limits["detail_max_encoded_bytes"]
+        > limits["combined_max_encoded_bytes"]
+        or limits["topology_max_decoded_bytes"] + limits["detail_max_decoded_bytes"]
+        > limits["combined_max_decoded_bytes"]
+        or limits["metrics_max_encoded_bytes"] > limits["record_max_encoded_bytes"]
+        or limits["event_max_encoded_bytes"] > limits["record_max_encoded_bytes"]
+    ):
+        raise RuntimeError("preparation benchmark V1 output limits are inconsistent")
+    return {name: limits[name] for name in _V1_OUTPUT_LIMIT_REQUIRED_FIELDS}
+
+
+def _validate_sqlite_evidence(
+    value: Any,
+    *,
+    budgets: dict[str, Any],
+) -> None:
+    pragmas = _required_mapping(
+        value,
+        _SQLITE_PRAGMA_REQUIRED_FIELDS,
+        message="preparation benchmark SQLite evidence is incomplete",
+    )
+    expected = {
+        "page_size": budgets["page_bytes"],
+        "cache_size": -budgets["cache_bytes"] // 1024,
+        "mmap_size": budgets["mmap_bytes"],
+        "temp_store": 2,
+        "journal_mode": "off",
+        "synchronous": 0,
+        "locking_mode": "exclusive",
+        "foreign_keys": 1,
+        "trusted_schema": 0,
+        "max_page_count": (budgets["max_spill_bytes"] - budgets["control_reserve_bytes"])
+        // budgets["page_bytes"],
+    }
+    if any(type(pragmas[name]) is not type(expected[name]) for name in expected) or any(
+        pragmas[name] != expected[name] for name in expected
+    ):
+        raise RuntimeError("preparation benchmark SQLite evidence is inconsistent")
+
+
+def _validate_query_plan_evidence(value: Any, *, implementation: str) -> None:
+    if not isinstance(value, list) or any(type(plan) is not str or not plan for plan in value):
+        raise RuntimeError("preparation benchmark query-plan evidence is incomplete")
+    normalized = tuple(" ".join(plan.upper().split()) for plan in value)
+    expected = (
+        "SCAN NODES",
+        "SCAN E",
+        "SEARCH SOURCE_NODE USING PRIMARY KEY (NODE_ID=?)",
+        "SEARCH TARGET_NODE USING PRIMARY KEY (NODE_ID=?)",
+        "SCAN NODES" if implementation == "production-topology" else "SCAN DETAIL",
+    )
+    if normalized != expected:
+        raise RuntimeError("preparation benchmark query-plan evidence is inconsistent")
+
+
+def _validate_environment_evidence(value: Any) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    environment = _required_mapping(
+        value,
+        _ENVIRONMENT_REQUIRED_FIELDS,
+        message="preparation benchmark environment evidence is incomplete",
+    )
+    for name in ("platform", "python", "python_implementation", "sqlite", "django", "django_ray"):
+        if type(environment[name]) is not str or not environment[name]:
+            raise RuntimeError("preparation benchmark environment evidence is invalid")
+    if type(environment["pid"]) is not int or environment["pid"] <= 0:
+        raise RuntimeError("preparation benchmark environment evidence is invalid")
+    filesystem = _validate_filesystem_evidence(environment["filesystem"])
+    stable_environment = tuple(
+        environment[name]
+        for name in (
+            "platform",
+            "python",
+            "python_implementation",
+            "sqlite",
+            "django",
+            "django_ray",
+        )
+    )
+    return stable_environment, filesystem
+
+
+def _validate_truncation_reasons(value: Any, *, label: str) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or any(type(reason) is not str or not reason for reason in value)
+        or value != sorted(set(value))
+    ):
+        raise RuntimeError(f"preparation benchmark {label} truncation evidence is invalid")
+    return value
+
+
+def _validate_case(
+    value: Any,
+    *,
+    implementation: str,
+) -> tuple[
+    tuple[int, str],
+    dict[str, Any],
+    dict[str, Any],
+    tuple[Any, ...],
+    tuple[Any, ...],
+    int | None,
+]:
+    case = _required_mapping(
+        value,
+        _CASE_REQUIRED_FIELDS,
+        message="preparation benchmark case evidence is incomplete",
+    )
+    if type(case["implementation"]) is not str or case["implementation"] != implementation:
+        raise RuntimeError("preparation benchmark case implementation is inconsistent")
+    observed_nodes = case["observed_nodes"]
+    observed_edges = case["observed_edges"]
+    profile = case["profile"]
+    count_fields = (
+        "observed_nodes",
+        "observed_edges",
+        "retained_nodes",
+        "retained_edges",
+        "topology_pages",
+        "topology_encoded_bytes",
+        "topology_decoded_bytes",
+        "spill_peak_bytes",
+        "spill_items",
+    )
+    if (
+        any(type(case[name]) is not int or case[name] < 0 for name in count_fields)
+        or observed_nodes <= 0
+        or case["topology_pages"] <= 0
+        or case["topology_encoded_bytes"] <= 0
+        or case["topology_decoded_bytes"] <= 0
+        or case["spill_peak_bytes"] <= 0
+        or type(profile) is not str
+        or profile not in DEFAULT_PROFILES
+    ):
+        raise RuntimeError("preparation benchmark case cardinality evidence is invalid")
+    if case["retained_nodes"] > observed_nodes or case["retained_edges"] > observed_edges:
+        raise RuntimeError("preparation benchmark retained cardinality exceeds observation")
+    if profile == "sparse" and observed_edges != max(0, observed_nodes - 1):
+        raise RuntimeError("preparation benchmark sparse edge cardinality is inconsistent")
+    high_edge_factor: int | None = None
+    if profile == "high-edge":
+        if observed_edges <= 0 or observed_edges % observed_nodes:
+            raise RuntimeError("preparation benchmark high-edge cardinality is inconsistent")
+        high_edge_factor = observed_edges // observed_nodes
+        if high_edge_factor <= 0 or high_edge_factor >= observed_nodes:
+            raise RuntimeError("preparation benchmark high-edge factor is invalid")
+
+    if not _is_sha256(case["manifest_digest"]):
+        raise RuntimeError("preparation benchmark manifest digest is invalid")
+    topology_reasons = _validate_truncation_reasons(
+        case["topology_truncation_reasons"],
+        label="topology",
+    )
+    detail_reasons = _validate_truncation_reasons(
+        case["detail_truncation_reasons"],
+        label="detail",
+    )
+    combined_reasons = _validate_truncation_reasons(
+        case["truncation_reasons"],
+        label="combined",
+    )
+    if combined_reasons != sorted(set(topology_reasons) | set(detail_reasons)):
+        raise RuntimeError("preparation benchmark truncation evidence is inconsistent")
+    if (
+        not _is_nonnegative_number(case["wall_seconds"])
+        or not _is_nonnegative_number(case["cpu_seconds"])
+        or case["wall_seconds"] <= 0
+        or case["cpu_seconds"] <= 0
+    ):
+        raise RuntimeError("preparation benchmark timing evidence is invalid")
+
+    _validate_worker_memory_evidence(case, implementation=implementation)
+    _validate_cleanup_evidence(case["cleanup"])
+    budgets = _validate_budget_evidence(case["budgets"], implementation=implementation)
+    limits = _validate_output_limit_evidence(case["v1_output_limits"])
+    _validate_sqlite_evidence(case["sqlite_pragmas"], budgets=budgets)
+    _validate_query_plan_evidence(case["query_plans"], implementation=implementation)
+    environment_identity, filesystem_identity = _validate_environment_evidence(case["environment"])
+    expected_resident_contract = (
+        _PRODUCTION_RESIDENT_CONTRACT
+        if implementation == "production-topology"
+        else _PROTOTYPE_RESIDENT_CONTRACT
+    )
+    if (
+        type(case["resident_contract"]) is not str
+        or case["resident_contract"] != expected_resident_contract
+    ):
+        raise RuntimeError("preparation benchmark resident contract is invalid")
+    if (
+        observed_nodes > budgets["max_node_items"]
+        or observed_edges > budgets["max_edge_items"]
+        or case["spill_peak_bytes"] > budgets["max_spill_bytes"]
+        or case["retained_nodes"] > limits["topology_node_max_items"]
+        or case["retained_edges"] > limits["topology_edge_max_items"]
+        or case["topology_encoded_bytes"] > limits["topology_max_encoded_bytes"]
+        or case["topology_decoded_bytes"] > limits["topology_max_decoded_bytes"]
+    ):
+        raise RuntimeError("preparation benchmark case exceeds its recorded limits")
+
+    expected_retained_nodes = min(observed_nodes, limits["topology_node_max_items"])
+    if profile == "sparse":
+        eligible_retained_edges = max(0, expected_retained_nodes - 1)
+    elif expected_retained_nodes == observed_nodes:
+        if high_edge_factor is None:
+            raise AssertionError("validated high-edge case has no factor")
+        eligible_retained_edges = observed_edges
+    else:
+        if high_edge_factor is None:
+            raise AssertionError("validated high-edge case has no factor")
+        retained_offsets = min(high_edge_factor, expected_retained_nodes - 1)
+        eligible_retained_edges = (
+            retained_offsets * expected_retained_nodes
+            - retained_offsets * (retained_offsets + 1) // 2
+        )
+    expected_retained_edges = min(
+        eligible_retained_edges,
+        limits["topology_edge_max_items"],
+    )
+    expected_topology_reasons = sorted(
+        reason
+        for reason, truncated in (
+            (
+                "node_count_limit",
+                observed_nodes > limits["topology_node_max_items"],
+            ),
+            (
+                "edge_count_limit",
+                eligible_retained_edges > limits["topology_edge_max_items"],
+            ),
+        )
+        if truncated
+    )
+    if (
+        case["retained_nodes"] != expected_retained_nodes
+        or case["retained_edges"] != expected_retained_edges
+        or topology_reasons != expected_topology_reasons
+    ):
+        raise RuntimeError("preparation benchmark retained topology evidence is inconsistent")
+    minimum_topology_pages = (
+        expected_retained_nodes + limits["topology_page_max_items"] - 1
+    ) // limits["topology_page_max_items"]
+    if expected_retained_edges:
+        minimum_topology_pages += (
+            expected_retained_edges + limits["topology_page_max_items"] - 1
+        ) // limits["topology_page_max_items"]
+    if (
+        case["topology_pages"] < minimum_topology_pages
+        or case["topology_pages"] > expected_retained_nodes + expected_retained_edges
+        or case["topology_encoded_bytes"] != case["topology_decoded_bytes"]
+    ):
+        raise RuntimeError("preparation benchmark topology encoding evidence is inconsistent")
+
+    if implementation == "production-topology":
+        if (
+            any(
+                case[name] is not None
+                for name in (
+                    "observed_detail",
+                    "retained_detail",
+                    "detail_encoded_bytes",
+                    "detail_decoded_bytes",
+                )
+            )
+            or detail_reasons != []
+        ):
+            raise RuntimeError("production preparation benchmark detail evidence is invalid")
+        if (
+            type(case["legacy_observed_node_ids"]) is not int
+            or case["legacy_observed_node_ids"] != observed_nodes
+            or case["spill_items"] != observed_nodes + observed_edges
+            or "legacy" not in case["resident_contract"]
+        ):
+            raise RuntimeError("production preparation compatibility evidence is inconsistent")
+    else:
+        detail_count_fields = (
+            "observed_detail",
+            "retained_detail",
+            "detail_encoded_bytes",
+            "detail_decoded_bytes",
+        )
+        if (
+            any(type(case[name]) is not int or case[name] <= 0 for name in detail_count_fields)
+            or case["observed_detail"] != observed_nodes
+            or case["retained_detail"] != expected_retained_nodes
+            or case["observed_detail"] > budgets["max_detail_items"]
+            or case["retained_detail"] > limits["detail_max_items"]
+            or case["detail_encoded_bytes"] > limits["detail_max_encoded_bytes"]
+            or case["detail_decoded_bytes"] > limits["detail_max_decoded_bytes"]
+            or case["detail_encoded_bytes"] != case["detail_decoded_bytes"]
+            or case["topology_encoded_bytes"] + case["detail_encoded_bytes"]
+            > limits["combined_max_encoded_bytes"]
+            or case["topology_decoded_bytes"] + case["detail_decoded_bytes"]
+            > limits["combined_max_decoded_bytes"]
+            or detail_reasons != topology_reasons
+            or case["legacy_observed_node_ids"] is not None
+            or case["spill_items"] != observed_nodes + observed_edges + case["observed_detail"]
+        ):
+            raise RuntimeError("prototype preparation detail evidence is inconsistent")
+    return (
+        (observed_nodes, str(profile)),
+        budgets,
+        limits,
+        environment_identity,
+        filesystem_identity,
+        high_edge_factor,
+    )
+
+
+def _validate_source_snapshot(value: Any) -> dict[str, Any]:
+    snapshot = _required_mapping(
+        value,
+        _SOURCE_SNAPSHOT_REQUIRED_FIELDS,
+        message="preparation benchmark source snapshot is incomplete",
+    )
+    revision = snapshot["revision"]
+    if (
+        type(revision) is not str
+        or not (
+            revision == "unavailable"
+            or (
+                len(revision) == 40
+                and all(character in "0123456789abcdef" for character in revision)
+            )
+        )
+        or type(snapshot["dirty"]) is not bool
+        or (revision == "unavailable" and snapshot["dirty"] is not False)
+        or not _is_sha256(snapshot["implementation_digest"])
+    ):
+        raise RuntimeError("preparation benchmark source snapshot is invalid")
+    return {name: snapshot[name] for name in _SOURCE_SNAPSHOT_REQUIRED_FIELDS}
+
+
+def _validate_forced_termination(value: Any) -> tuple[Any, ...]:
+    evidence = _required_mapping(
+        value,
+        _FORCED_TERMINATION_REQUIRED_FIELDS,
+        message="preparation benchmark forced-termination evidence is incomplete",
+    )
+    if (
+        type(evidence["outcome"]) is not str
+        or evidence["outcome"] != "forcibly-terminated"
+        or evidence["readiness_observed"] is not True
+        or evidence["workspace_open_before_kill"] is not True
+        or type(evidence["worker_returncode"]) is not int
+        or evidence["worker_returncode"] == 0
+        or evidence["durable_candidate_exists_before_cleanup"] is not False
+        or evidence["durable_candidate_exists_after_cleanup"] is not False
+        or type(evidence["parent_watchdog"]) is not str
+        or evidence["parent_watchdog"] != "removed"
+        or evidence["scenario_root_exists_after_parent"] is not False
+    ):
+        raise RuntimeError("preparation benchmark forced-termination control failed")
+    return _validate_filesystem_evidence(evidence["filesystem"])
+
+
+def _validate_report(report: dict[str, Any]) -> None:
+    """Validate every required v2 field while allowing additive future fields."""
+    report = _required_mapping(
+        report,
+        _REPORT_REQUIRED_FIELDS,
+        message="preparation benchmark v2 report is incomplete",
+    )
+    if type(report["schema_version"]) is not int or (
+        report["schema_version"] != REPORT_SCHEMA_VERSION
+    ):
+        raise RuntimeError("preparation benchmark report schema is unsupported")
+
+    implementation = report["implementation"]
+    if type(implementation) is not str or implementation not in IMPLEMENTATIONS:
+        raise RuntimeError("preparation benchmark implementation is invalid")
+    if type(report["required_scale"]) is not bool:
+        raise RuntimeError("preparation benchmark required-scale marker is invalid")
+    try:
+        parsed_timestamp = (
+            time.strptime(report["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+            if type(report["created_at"]) is str
+            else None
+        )
+        timestamp_valid = bool(
+            parsed_timestamp is not None
+            and time.strftime("%Y-%m-%dT%H:%M:%SZ", parsed_timestamp) == report["created_at"]
+        )
+    except (TypeError, ValueError):
+        timestamp_valid = False
+    if not timestamp_valid:
+        raise RuntimeError("preparation benchmark creation timestamp is invalid")
+    if type(report["command"]) is not str or not report["command"]:
+        raise RuntimeError("preparation benchmark command evidence is invalid")
+    expected_memory_contract = (
+        _PRODUCTION_MEMORY_EVIDENCE_CONTRACT
+        if implementation == "production-topology"
+        else _PROTOTYPE_MEMORY_EVIDENCE_CONTRACT
+    )
+    if (
+        type(report["memory_evidence_contract"]) is not str
+        or report["memory_evidence_contract"] != expected_memory_contract
+        or type(report["cleanup_contract"]) is not str
+        or report["cleanup_contract"] != _CLEANUP_CONTRACT
+    ):
+        raise RuntimeError("preparation benchmark evidence contract is invalid")
+
+    source_before = _validate_source_snapshot(report["source_snapshot_before"])
+    source_after = _validate_source_snapshot(report["source_snapshot_after"])
+    if source_before != source_after:
+        raise RuntimeError("preparation benchmark source snapshots are inconsistent")
+    if (
+        type(report["source_revision"]) is not str
+        or report["source_revision"] != source_before["revision"]
+        or type(report["source_dirty"]) is not bool
+        or report["source_dirty"] is not source_before["dirty"]
+        or not _is_sha256(report["implementation_digest"])
+        or report["implementation_digest"] != source_before["implementation_digest"]
+    ):
+        raise RuntimeError("preparation benchmark source identity is inconsistent")
+
+    cases = report["cases"]
+    if not isinstance(cases, list) or not cases:
+        raise RuntimeError("preparation benchmark cases are incomplete")
+    observed_matrix: list[tuple[int, str]] = []
+    first_budgets: dict[str, Any] | None = None
+    first_limits: dict[str, Any] | None = None
+    environment_identities: set[tuple[Any, ...]] = set()
+    filesystem_identities: set[tuple[Any, ...]] = set()
+    high_edge_factors: set[int] = set()
+    for case in cases:
+        (
+            coordinates,
+            budgets,
+            limits,
+            environment_identity,
+            filesystem_identity,
+            high_edge_factor,
+        ) = _validate_case(case, implementation=implementation)
+        observed_matrix.append(coordinates)
+        environment_identities.add(environment_identity)
+        filesystem_identities.add(filesystem_identity)
+        if high_edge_factor is not None:
+            high_edge_factors.add(high_edge_factor)
+        if first_budgets is None:
+            first_budgets = budgets
+            first_limits = limits
+        elif budgets != first_budgets or limits != first_limits:
+            raise RuntimeError("preparation benchmark case limits are inconsistent")
+
+    forced_filesystem = _validate_forced_termination(report["forced_termination"])
+    filesystem_identities.add(forced_filesystem)
+    if len(environment_identities) != 1:
+        raise RuntimeError("preparation benchmark environment changed during run")
+    if len(filesystem_identities) != 1:
+        raise RuntimeError("preparation benchmark filesystem identity changed during run")
+    if len(high_edge_factors) > 1:
+        raise RuntimeError("preparation benchmark high-edge factor changed during run")
+    if len(observed_matrix) != len(set(observed_matrix)):
+        raise RuntimeError("preparation benchmark case matrix contains duplicates")
+    if report["required_scale"]:
+        required_matrix = {
+            (nodes, profile) for nodes in REQUIRED_SCALE_NODES for profile in DEFAULT_PROFILES
+        }
+        if set(observed_matrix) != required_matrix:
+            raise RuntimeError("preparation benchmark required-scale matrix is incomplete")
+        if first_limits is None or any(
+            case["observed_edges"] <= first_limits["topology_edge_max_items"]
+            for case in cases
+            if case["profile"] == "high-edge"
+        ):
+            raise RuntimeError("preparation benchmark required high-edge scale is insufficient")
+
+
 def _run_scenario(args: argparse.Namespace, *, nodes: int, profile: str) -> dict[str, Any]:
     parent, scenario_root = _make_scenario_root(args)
     output = scenario_root / "worker-result.json"
@@ -786,6 +1894,10 @@ def _run_scenario(args: argparse.Namespace, *, nodes: int, profile: str) -> dict
             timeout_seconds=args.timeout_seconds,
         )
         report = json.loads(output.read_text(encoding="utf-8"))
+        _validate_worker_memory_evidence(
+            report,
+            implementation=_implementation(args),
+        )
     except BaseException as caught:
         error = caught
     parent_cleanup = _remove_scenario_root(scenario_root, expected_parent=parent)
@@ -917,6 +2029,8 @@ def main() -> int:
     _require_unchanged_source(source_before, source_after)
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
+        "implementation": _implementation(args),
+        "required_scale": args.required_scale,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source_revision": source_before["revision"],
         "source_dirty": source_before["dirty"],
@@ -926,11 +2040,14 @@ def main() -> int:
         "command": " ".join(sys.argv),
         "cases": cases,
         "forced_termination": forced_termination,
-        "cleanup_contract": (
-            "Context cleanup handles normal return and Python exceptions; the parent watchdog "
-            "owns the ephemeral scenario directory after worker exit or termination."
+        "memory_evidence_contract": (
+            _PRODUCTION_MEMORY_EVIDENCE_CONTRACT
+            if _implementation(args) == "production-topology"
+            else _PROTOTYPE_MEMORY_EVIDENCE_CONTRACT
         ),
+        "cleanup_contract": _CLEANUP_CONTRACT,
     }
+    _validate_report(report)
     _write_report(report, args.output)
     return 0
 

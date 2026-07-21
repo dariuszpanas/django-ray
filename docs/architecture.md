@@ -121,8 +121,8 @@ promote a verified pending manifest, apply sparse latest-state changes, and adva
 the summary pointer together. A summary-only `DISABLED` or `OMITTED_BY_POLICY` update
 creates no topology or detail rows. The current workflow actor deliberately continues
 to publish schema v2. Authorized paginated services are implemented, but producer
-activation still requires the live-ingestion bound from #79, the bounded preparation
-implementation selected by ADR-0005, and an old-writer drain. See
+activation still requires the live-ingestion bound from #79, composite bounded
+preparation completion under #142, and an old-writer drain. See
 [ADR-0004](design/adr-0004-bounded-workflow-progress.md) and
 [ADR-0005](design/adr-0005-bounded-workflow-preparation.md).
 
@@ -234,15 +234,18 @@ changes, and advances the summary pointer atomically. A stale fence, corrupt can
 or summary conflict rolls back the current-state mutation instead of exposing partial
 detail.
 
-Those are durable-storage bounds, not yet an O(retained) preparation-memory claim.
-Preparation currently retains complete observed identity sets before deterministic
-truncation. [ADR-0005](design/adr-0005-bounded-workflow-preparation.md) selects a
-package-owned, private SQLite spill workspace for exact one-shot duplicate and
-reference validation with bounded resident state. The decision and its prototype do
-not switch the production preparer; #141 and #142 deliver that integration under
+Those durable-storage bounds are now paired with spill-backed production topology
+preparation. [ADR-0005](design/adr-0005-bounded-workflow-preparation.md) uses a
+package-owned, private SQLite workspace for exact one-shot node/edge duplicate and
+reference validation, canonical selection, and cleanup before capability issuance.
+Only retained topology and bounded batches enter Python during that phase. The public
+prepared value still materializes the complete `observed_node_ids` compatibility set
+needed by initial detail, so this is not yet an end-to-end O(retained) preparation
+claim. #142 completes composite detail preparation under
 [issue #132](https://github.com/dariuszpanas/django-ray/issues/132). #79 separately
-owns live wire, mailbox, and producer backpressure. Schema-v3 activation must compose
-both boundaries for workflows larger than the retained V1 limits.
+owns live wire, mailbox, producer backpressure, and aggregate workspace admission.
+Schema-v3 activation must compose both boundaries for workflows larger than the
+retained V1 limits.
 
 Terminal detail expiry is derived from the canonical terminal timestamp and
 `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`. Every accepted detail publication records
@@ -369,7 +372,7 @@ Bounded progress storage uses an additive reader-first rollout. Apply migration
 Existing rows and older writers continue using `progress_data`; migration `0013` does
 not backfill or reinterpret legacy snapshots. Keep schema-v3 producer activation
 disabled until the authorized bounded readers are deployed, #79 bounds live ingestion,
-and #132 integrates bounded preparation. Then drain old workflow writers before
+and #142 completes composite bounded preparation. Then drain old workflow writers before
 activation. Reversing `0013` discards normalized detail tables, while reversing `0012`
 drops the summary columns. Export any retained schema-v3 data needed for audit before
 either rollback; legacy progress remains unchanged.

@@ -109,11 +109,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prototype. The exact one-shot path externalizes duplicate and reference state into a
   private, fixed-cache, no-mmap workspace with explicit item and file budgets,
   deterministic canonical output, and parent-owned abnormal-termination cleanup. It
-  does not switch the runtime preparer or activate schema v3; #141 and #142 own the
-  production integration, while #79 still owns wire, mailbox, and producer bounds. The
+  does not itself switch the runtime preparer or activate schema v3. The production
+  delivery below now covers #141, while #142 owns composite detail preparation and #79
+  still owns wire, mailbox, and producer bounds. The
   required WSL2 Linux matrix records flat memory peaks after retained caps, increasing
   external spill, exact truncation, clean source identity, and successful normal plus
   forced-termination cleanup.
+- Spill-backed production topology preparation using the same canonical storage
+  contract. Node and edge identity, duplicate, reference, ordering, and retained
+  selection state now live in a private package-owned SQLite workspace with an 8 MiB
+  cache target, disabled mmap, a 1 GiB file ceiling, explicit input-item and batch
+  limits, fail-closed exhaustion, and cleanup before package capability issuance.
+  The public prepared-topology type and durable bytes remain unchanged. Its legacy
+  complete `observed_node_ids` compatibility field is still materialized only at
+  detachment, so #142 must complete composite topology/detail preparation before #132
+  can claim an end-to-end O(retained) bound. Schema-v3 workflow publication remains
+  disabled, and #79 still owns live transfer, mailbox, and concurrent-workspace
+  admission limits.
 - A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
   with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
   capability identity includes immutable deployment, shared-memory, and object-store
@@ -152,7 +164,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Apply `0012_workflow_progress_summary` before deploying upgraded readers. The two new
   columns are nullable, so existing rows and rolling old writers remain valid. Keep the
   schema-v3 producer disabled through the public-reader rollout, #79 live-ingestion
-  bound, and #132 preparation integration, then drain old workflow writers before
+  bound, and #142 composite preparation, then drain old workflow writers before
   activation. Reversing this migration drops the new summary history columns but does
   not modify legacy `progress_data`.
 - Apply `0013_workflow_progress_detail_storage` after `0012` to add dormant run,

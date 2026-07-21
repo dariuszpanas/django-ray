@@ -209,21 +209,35 @@ deltas only between cases collected under the same server configuration.
 
 ## Benchmark Workflow Progress Preparation
 
-ADR-0005's opt-in preparation benchmark measures the non-production SQLite spill
-prototype without changing the runtime preparer. Each sparse or high-edge scenario
-runs in a fresh subprocess, consumes topology and initial-detail generators once, and
-removes its private workspace before the parent accepts the result. It does not start
-Ray, write Django database rows, access Kubernetes, or activate schema-v3 production.
+ADR-0005's opt-in preparation benchmark has two explicit implementations. The default
+`prototype-composite` mode measures the issue-#140 non-production topology/detail
+prototype. `production-topology` measures the issue-#141 package path through legacy
+topology detachment. Each sparse or high-edge scenario runs in a fresh subprocess and
+removes its private workspace before the parent accepts the result. Neither mode starts
+Ray, writes Django database rows, accesses Kubernetes, or activates schema-v3
+production.
 
 Run the required decision matrix on Linux from an otherwise idle checkout:
 
 ```bash
 mkdir -p artifacts /tmp/django-ray-issue140-benchmark
 python scripts/benchmark_workflow_progress_preparation.py \
+  --implementation prototype-composite \
   --required-scale \
   --timeout-seconds 7200 \
   --workspace-parent /tmp/django-ray-issue140-benchmark \
   --output artifacts/workflow-progress-preparation.json
+```
+
+Repeat the topology-only production matrix separately:
+
+```bash
+python scripts/benchmark_workflow_progress_preparation.py \
+  --implementation production-topology \
+  --required-scale \
+  --timeout-seconds 7200 \
+  --workspace-parent /tmp/django-ray-issue141-benchmark \
+  --output artifacts/workflow-progress-production-topology.json
 ```
 
 `--required-scale` expands to 25,000, 100,000, and 250,000 observed nodes for both a
@@ -233,13 +247,28 @@ values are smoke checks only and cannot satisfy the ADR evidence gate.
 The explicit two-hour per-case timeout accommodates the deliberately expensive exact
 high-edge path; it is a watchdog, not a performance target.
 
-The JSON records the exact source and implementation identity, environment and
-filesystem characteristics, effective SQLite settings, configured cache/batch/item/
-spill limits, observed and retained cardinalities, wall and CPU time, Python allocation
-peak, explicitly scoped RSS evidence, spill high-water bytes, query plans, and child
-plus parent-watchdog cleanup outcomes. A separate forced-termination control proves
-that the parent removes a killed child's workspace. An unavailable memory metric is
-reported as unavailable rather than as zero, and a cleanup failure fails the run.
+Report schema v2 is additive. It retains `tracemalloc_peak_bytes` and
+`peak_rss_bytes` for schema-v1 consumers, adds explicit `end_to_end_*` aliases, and
+adds the production-only `bounded_phase_*` checkpoint fields. Consumers that already
+accept additive JSON can continue reading the legacy peak fields and should ignore
+unknown fields. New consumers must check `schema_version`; the runner rejects a
+missing or inconsistent required v2 field rather than interpreting a schema-v1 or
+future-version report as current evidence.
+
+The JSON records the selected implementation, exact source and implementation
+identity, environment and filesystem characteristics, effective SQLite settings,
+configured cache/batch/item/spill limits, observed and retained cardinalities, wall
+and CPU time, Python allocation peaks, explicitly scoped RSS evidence, spill
+high-water bytes, query plans, and child plus parent-watchdog cleanup outcomes. A
+separate forced-termination control proves that the parent removes a killed child's
+workspace. An unavailable RSS metric is `null`, never zero. Cleanup failure, missing
+phase evidence, mismatched legacy aliases, and non-monotonic phase/end-to-end peaks
+fail the run. Unknown extra fields remain valid so the schema can grow additively.
+
+When `required_scale` is true, validation requires each combination of 25,000,
+100,000, and 250,000 observed nodes with `sparse` and `high-edge` exactly once. A
+missing, duplicate, or extra matrix case is not decision evidence even when the
+individual cases completed.
 
 The committed [WSL2 Linux summary](benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.md)
 and [authoritative JSON](benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json)
@@ -248,6 +277,15 @@ gate. They are local contract evidence, not a production latency SLO. Compare re
 growth only after the retained node, edge, and detail caps are reached, and keep #79's
 wire, mailbox, and producer allocations separate from this preparation-only
 measurement.
+
+In `production-topology` reports, detail fields are `null`, spill-item counts cover
+only nodes and edges, and `legacy_observed_node_ids` records the compatibility set
+materialized after the bounded candidate is sealed. The `bounded_phase_*` fields are
+captured after observation, selection, and page construction but before that set is
+materialized. The legacy peak fields and their `end_to_end_*` aliases include the
+later O(observed) compatibility detachment. Compare those two phases separately.
+Issue #141 removes complete Python node/edge validation collections, but it does not
+claim that the legacy returned value is O(retained); issue #142 owns that final bound.
 
 ## Control Fan-Out
 

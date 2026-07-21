@@ -89,9 +89,11 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - Current workflow actors still emit complete, size-unbounded schema-v2 graph snapshots.
   ADR-0004's additive schema-v3 summary columns, strict 16 KiB codec, fenced writer
   primitive, rolling reader, terminal attempt archival, bounded topology/detail
-  storage, atomic publication, retention cleanup, and authorized public readers are
-  implemented. Writer activation waits for bounded live ingestion (#79), bounded
-  preparation (#132), and an old-writer drain.
+  storage, atomic publication, retention cleanup, authorized public readers, and
+  spill-backed bounded topology preparation are implemented. The compatibility
+  topology still contains complete observed membership; writer activation waits for
+  bounded live ingestion (#79), composite detail preparation (#142), and an old-writer
+  drain.
 - The result returned by `enqueue()` is a snapshot. Fetch current state with
   `task_backends[alias].get_result(task_id)`.
 - Per-task numeric priority is persisted from `-100` through `100`; larger values are
