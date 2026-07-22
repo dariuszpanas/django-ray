@@ -1,0 +1,5602 @@
+{
+  "directories": [
+    {
+      "collected_count": 2724,
+      "path": "tests/unit"
+    },
+    {
+      "collected_count": 219,
+      "path": "tests/integration"
+    }
+  ],
+  "environment": {
+    "django_settings_module": "unset",
+    "packages": {
+      "coverage": "7.15.0",
+      "django": "6.0.7",
+      "pytest": "9.1.1",
+      "pytest-cov": "7.1.0",
+      "pytest-django": "4.12.0",
+      "pytest-xdist": "not-installed",
+      "ray": "2.56.0"
+    },
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.12"
+  },
+  "files": [
+    {
+      "collected_count": 307,
+      "domains": {
+        "compiled-graph-and-kuberay": 307
+      },
+      "execution_contracts": {
+        "hermetic": 307
+      },
+      "parameterized_cases": 246,
+      "path": "tests/unit/test_kuberay_compiled_graph_pilot.py"
+    },
+    {
+      "collected_count": 195,
+      "domains": {
+        "workflow-progress": 195
+      },
+      "execution_contracts": {
+        "hermetic": 195
+      },
+      "parameterized_cases": 125,
+      "path": "tests/unit/test_workflow_progress_preparation.py"
+    },
+    {
+      "collected_count": 173,
+      "domains": {
+        "repository-policy-and-release": 173
+      },
+      "execution_contracts": {
+        "hermetic": 173
+      },
+      "parameterized_cases": 109,
+      "path": "tests/unit/test_check_conventional_commits.py"
+    },
+    {
+      "collected_count": 156,
+      "domains": {
+        "compiled-graph-and-kuberay": 156
+      },
+      "execution_contracts": {
+        "hermetic": 156
+      },
+      "parameterized_cases": 69,
+      "path": "tests/unit/test_local_kuberay_gate.py"
+    },
+    {
+      "collected_count": 151,
+      "domains": {
+        "workflow-progress": 151
+      },
+      "execution_contracts": {
+        "hermetic": 21,
+        "sqlite-django": 130
+      },
+      "parameterized_cases": 102,
+      "path": "tests/unit/test_workflow_progress_summary.py"
+    },
+    {
+      "collected_count": 103,
+      "domains": {
+        "workflow-plan-and-task-runtime": 103
+      },
+      "execution_contracts": {
+        "hermetic": 89,
+        "sqlite-django": 14
+      },
+      "parameterized_cases": 34,
+      "path": "tests/unit/test_workflow_plans.py"
+    },
+    {
+      "collected_count": 87,
+      "domains": {
+        "compiled-graph-and-kuberay": 87
+      },
+      "execution_contracts": {
+        "hermetic": 87
+      },
+      "parameterized_cases": 40,
+      "path": "tests/unit/test_compiled_graph_lifecycle.py"
+    },
+    {
+      "collected_count": 86,
+      "domains": {
+        "workflow-progress": 86
+      },
+      "execution_contracts": {
+        "sqlite-django": 86
+      },
+      "parameterized_cases": 25,
+      "path": "tests/unit/test_workflow_progress_reads.py"
+    },
+    {
+      "collected_count": 79,
+      "domains": {
+        "configuration-storage-and-observability": 79
+      },
+      "execution_contracts": {
+        "hermetic": 79
+      },
+      "parameterized_cases": 54,
+      "path": "tests/unit/test_settings.py"
+    },
+    {
+      "collected_count": 77,
+      "domains": {
+        "workflow-progress": 77
+      },
+      "execution_contracts": {
+        "hermetic": 77
+      },
+      "parameterized_cases": 40,
+      "path": "tests/unit/test_workflow_progress_preparation_prototype.py"
+    },
+    {
+      "collected_count": 75,
+      "domains": {
+        "compiled-graph-and-kuberay": 75
+      },
+      "execution_contracts": {
+        "hermetic": 75
+      },
+      "parameterized_cases": 53,
+      "path": "tests/unit/test_compiled_graph.py"
+    },
+    {
+      "collected_count": 74,
+      "domains": {
+        "workflow-progress": 74
+      },
+      "execution_contracts": {
+        "hermetic": 74
+      },
+      "parameterized_cases": 49,
+      "path": "tests/unit/test_workflow_progress_storage_records.py"
+    },
+    {
+      "collected_count": 68,
+      "domains": {
+        "workflow-plan-and-task-runtime": 68
+      },
+      "execution_contracts": {
+        "hermetic": 60,
+        "local-ray": 6,
+        "sqlite-django": 2
+      },
+      "parameterized_cases": 13,
+      "path": "tests/unit/test_workflows.py"
+    },
+    {
+      "collected_count": 65,
+      "domains": {
+        "configuration-storage-and-observability": 65
+      },
+      "execution_contracts": {
+        "hermetic": 59,
+        "sqlite-django": 6
+      },
+      "parameterized_cases": 36,
+      "path": "tests/unit/test_input_storage.py"
+    },
+    {
+      "collected_count": 63,
+      "domains": {
+        "workflow-progress": 63
+      },
+      "execution_contracts": {
+        "hermetic": 30,
+        "sqlite-django": 33
+      },
+      "parameterized_cases": 22,
+      "path": "tests/unit/test_workflow_progress_storage_boundaries.py"
+    },
+    {
+      "collected_count": 55,
+      "domains": {
+        "workflow-progress": 55
+      },
+      "execution_contracts": {
+        "hermetic": 2,
+        "sqlite-django": 53
+      },
+      "parameterized_cases": 13,
+      "path": "tests/unit/test_workflow_progress_storage_persistence.py"
+    },
+    {
+      "collected_count": 52,
+      "domains": {
+        "workflow-progress": 52
+      },
+      "execution_contracts": {
+        "hermetic": 52
+      },
+      "parameterized_cases": 37,
+      "path": "tests/unit/test_workflow_progress_benchmark_command.py"
+    },
+    {
+      "collected_count": 51,
+      "domains": {
+        "configuration-storage-and-observability": 51
+      },
+      "execution_contracts": {
+        "hermetic": 51
+      },
+      "parameterized_cases": 13,
+      "path": "tests/unit/test_result_storage.py"
+    },
+    {
+      "collected_count": 51,
+      "domains": {
+        "coordination-polling-and-recovery": 51,
+        "worker-and-ray-runtime": 51
+      },
+      "execution_contracts": {
+        "hermetic": 8,
+        "sqlite-django": 43
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_worker_reconnect_poll_reconcile.py"
+    },
+    {
+      "collected_count": 46,
+      "domains": {
+        "configuration-storage-and-observability": 46
+      },
+      "execution_contracts": {
+        "hermetic": 26,
+        "sqlite-django": 20
+      },
+      "parameterized_cases": 17,
+      "path": "tests/unit/test_observability.py"
+    },
+    {
+      "collected_count": 44,
+      "domains": {
+        "django-admin-and-api": 44
+      },
+      "execution_contracts": {
+        "sqlite-django": 44
+      },
+      "parameterized_cases": 2,
+      "path": "tests/integration/test_api.py"
+    },
+    {
+      "collected_count": 44,
+      "domains": {
+        "worker-and-ray-runtime": 44
+      },
+      "execution_contracts": {
+        "hermetic": 28,
+        "sqlite-django": 16
+      },
+      "parameterized_cases": 4,
+      "path": "tests/unit/test_worker_command_runtime.py"
+    },
+    {
+      "collected_count": 43,
+      "domains": {
+        "django-admin-and-api": 43
+      },
+      "execution_contracts": {
+        "sqlite-django": 43
+      },
+      "parameterized_cases": 12,
+      "path": "tests/integration/test_admin.py"
+    },
+    {
+      "collected_count": 42,
+      "domains": {
+        "configuration-storage-and-observability": 42
+      },
+      "execution_contracts": {
+        "hermetic": 37,
+        "local-ray": 4,
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 10,
+      "path": "tests/unit/test_result_fold.py"
+    },
+    {
+      "collected_count": 41,
+      "domains": {
+        "configuration-storage-and-observability": 41
+      },
+      "execution_contracts": {
+        "hermetic": 37,
+        "local-ray": 4
+      },
+      "parameterized_cases": 20,
+      "path": "tests/unit/test_result_buffer.py"
+    },
+    {
+      "collected_count": 40,
+      "domains": {
+        "compiled-graph-and-kuberay": 40
+      },
+      "execution_contracts": {
+        "hermetic": 40
+      },
+      "parameterized_cases": 2,
+      "path": "tests/unit/test_compiled_graph_probe.py"
+    },
+    {
+      "collected_count": 40,
+      "domains": {
+        "coordination-polling-and-recovery": 40
+      },
+      "execution_contracts": {
+        "hermetic": 40
+      },
+      "parameterized_cases": 14,
+      "path": "tests/unit/test_polling_benchmark_command.py"
+    },
+    {
+      "collected_count": 36,
+      "domains": {
+        "worker-and-ray-runtime": 36
+      },
+      "execution_contracts": {
+        "sqlite-django": 36
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_worker.py"
+    },
+    {
+      "collected_count": 35,
+      "domains": {
+        "configuration-storage-and-observability": 35
+      },
+      "execution_contracts": {
+        "hermetic": 35
+      },
+      "parameterized_cases": 14,
+      "path": "tests/unit/test_runtime_env.py"
+    },
+    {
+      "collected_count": 32,
+      "domains": {
+        "django-admin-and-api": 32,
+        "workflow-progress": 32
+      },
+      "execution_contracts": {
+        "sqlite-django": 32
+      },
+      "parameterized_cases": 29,
+      "path": "tests/integration/test_workflow_progress_api.py"
+    },
+    {
+      "collected_count": 29,
+      "domains": {
+        "workflow-plan-and-task-runtime": 29
+      },
+      "execution_contracts": {
+        "sqlite-django": 29
+      },
+      "parameterized_cases": 15,
+      "path": "tests/unit/test_backends.py"
+    },
+    {
+      "collected_count": 29,
+      "domains": {
+        "workflow-progress": 29
+      },
+      "execution_contracts": {
+        "sqlite-django": 29
+      },
+      "parameterized_cases": 14,
+      "path": "tests/unit/test_workflow_progress_storage_audit.py"
+    },
+    {
+      "collected_count": 28,
+      "domains": {
+        "schema-migrations-and-bootstrap": 28
+      },
+      "execution_contracts": {
+        "hermetic": 22,
+        "sqlite-django": 6
+      },
+      "parameterized_cases": 6,
+      "path": "tests/unit/test_entrypoint.py"
+    },
+    {
+      "collected_count": 25,
+      "domains": {
+        "worker-and-ray-runtime": 25
+      },
+      "execution_contracts": {
+        "hermetic": 15,
+        "sqlite-django": 10
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_worker_command_coverage.py"
+    },
+    {
+      "collected_count": 23,
+      "domains": {
+        "coordination-polling-and-recovery": 23
+      },
+      "execution_contracts": {
+        "hermetic": 8,
+        "sqlite-django": 15
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_leasing.py"
+    },
+    {
+      "collected_count": 23,
+      "domains": {
+        "workflow-progress": 23
+      },
+      "execution_contracts": {
+        "hermetic": 6,
+        "sqlite-django": 17
+      },
+      "parameterized_cases": 4,
+      "path": "tests/unit/test_workflow_progress_cleanup.py"
+    },
+    {
+      "collected_count": 22,
+      "domains": {
+        "worker-and-ray-runtime": 22
+      },
+      "execution_contracts": {
+        "hermetic": 22
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_ray_core_runner.py"
+    },
+    {
+      "collected_count": 19,
+      "domains": {
+        "coordination-polling-and-recovery": 19
+      },
+      "execution_contracts": {
+        "postgresql": 19
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_postgresql_coordination.py"
+    },
+    {
+      "collected_count": 18,
+      "domains": {
+        "worker-and-ray-runtime": 18
+      },
+      "execution_contracts": {
+        "hermetic": 18
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_ray_job.py"
+    },
+    {
+      "collected_count": 15,
+      "domains": {
+        "workflow-plan-and-task-runtime": 15
+      },
+      "execution_contracts": {
+        "local-ray": 15
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_task_execution.py"
+    },
+    {
+      "collected_count": 15,
+      "domains": {
+        "worker-and-ray-runtime": 15
+      },
+      "execution_contracts": {
+        "hermetic": 15
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_remote.py"
+    },
+    {
+      "collected_count": 14,
+      "domains": {
+        "worker-and-ray-runtime": 14
+      },
+      "execution_contracts": {
+        "hermetic": 11,
+        "local-ray": 3
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_distributed.py"
+    },
+    {
+      "collected_count": 14,
+      "domains": {
+        "repository-policy-and-release": 14
+      },
+      "execution_contracts": {
+        "hermetic": 14
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_test_suite_inventory.py"
+    },
+    {
+      "collected_count": 14,
+      "domains": {
+        "workflow-progress": 14
+      },
+      "execution_contracts": {
+        "sqlite-django": 14
+      },
+      "parameterized_cases": 9,
+      "path": "tests/unit/test_workflow_progress_terminal_expiry.py"
+    },
+    {
+      "collected_count": 13,
+      "domains": {},
+      "execution_contracts": {
+        "hermetic": 12,
+        "local-ray": 1
+      },
+      "parameterized_cases": 6,
+      "path": "tests/unit/test_compiled_session_topology_probe.py"
+    },
+    {
+      "collected_count": 13,
+      "domains": {
+        "worker-and-ray-runtime": 13
+      },
+      "execution_contracts": {
+        "hermetic": 13
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_distributed_mocked.py"
+    },
+    {
+      "collected_count": 13,
+      "domains": {
+        "workflow-progress": 13
+      },
+      "execution_contracts": {
+        "hermetic": 5,
+        "sqlite-django": 8
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_workflow_progress.py"
+    },
+    {
+      "collected_count": 12,
+      "domains": {
+        "repository-policy-and-release": 12
+      },
+      "execution_contracts": {
+        "hermetic": 12
+      },
+      "parameterized_cases": 4,
+      "path": "tests/unit/test_ci_workflow_policy.py"
+    },
+    {
+      "collected_count": 12,
+      "domains": {
+        "compiled-graph-and-kuberay": 12
+      },
+      "execution_contracts": {
+        "hermetic": 6,
+        "sqlite-django": 6
+      },
+      "parameterized_cases": 12,
+      "path": "tests/unit/test_kubernetes_web_probes.py"
+    },
+    {
+      "collected_count": 12,
+      "domains": {
+        "repository-policy-and-release": 12
+      },
+      "execution_contracts": {
+        "hermetic": 12
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_release.py"
+    },
+    {
+      "collected_count": 11,
+      "domains": {},
+      "execution_contracts": {
+        "hermetic": 10,
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 4,
+      "path": "tests/unit/test_runtime_models_storage_coverage.py"
+    },
+    {
+      "collected_count": 10,
+      "domains": {
+        "configuration-storage-and-observability": 10
+      },
+      "execution_contracts": {
+        "hermetic": 10
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_logging.py"
+    },
+    {
+      "collected_count": 9,
+      "domains": {
+        "workflow-plan-and-task-runtime": 9
+      },
+      "execution_contracts": {
+        "sqlite-django": 9
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_cancellation.py"
+    },
+    {
+      "collected_count": 9,
+      "domains": {
+        "repository-policy-and-release": 9
+      },
+      "execution_contracts": {
+        "hermetic": 9
+      },
+      "parameterized_cases": 2,
+      "path": "tests/unit/test_coverage_debt.py"
+    },
+    {
+      "collected_count": 9,
+      "domains": {},
+      "execution_contracts": {
+        "hermetic": 1,
+        "sqlite-django": 8
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_purge_inputs_command.py"
+    },
+    {
+      "collected_count": 9,
+      "domains": {
+        "configuration-storage-and-observability": 9
+      },
+      "execution_contracts": {
+        "hermetic": 9
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_redaction.py"
+    },
+    {
+      "collected_count": 8,
+      "domains": {
+        "workflow-progress": 8
+      },
+      "execution_contracts": {
+        "postgresql": 8
+      },
+      "parameterized_cases": 3,
+      "path": "tests/integration/test_postgresql_workflow_progress_reads.py"
+    },
+    {
+      "collected_count": 8,
+      "domains": {
+        "coordination-polling-and-recovery": 8
+      },
+      "execution_contracts": {
+        "hermetic": 8
+      },
+      "parameterized_cases": 3,
+      "path": "tests/unit/test_polling.py"
+    },
+    {
+      "collected_count": 7,
+      "domains": {
+        "workflow-plan-and-task-runtime": 7
+      },
+      "execution_contracts": {
+        "hermetic": 7
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_retry.py"
+    },
+    {
+      "collected_count": 6,
+      "domains": {},
+      "execution_contracts": {
+        "hermetic": 6
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_prometheus_targets.py"
+    },
+    {
+      "collected_count": 6,
+      "domains": {
+        "worker-and-ray-runtime": 6
+      },
+      "execution_contracts": {
+        "hermetic": 6
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_ray_core.py"
+    },
+    {
+      "collected_count": 6,
+      "domains": {
+        "workflow-progress": 6
+      },
+      "execution_contracts": {
+        "hermetic": 2,
+        "sqlite-django": 4
+      },
+      "parameterized_cases": 2,
+      "path": "tests/unit/test_workflow_progress_cleanup_command.py"
+    },
+    {
+      "collected_count": 5,
+      "domains": {},
+      "execution_contracts": {
+        "hermetic": 5
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_import_utils.py"
+    },
+    {
+      "collected_count": 5,
+      "domains": {
+        "configuration-storage-and-observability": 5
+      },
+      "execution_contracts": {
+        "sqlite-django": 5
+      },
+      "parameterized_cases": 2,
+      "path": "tests/unit/test_metrics.py"
+    },
+    {
+      "collected_count": 5,
+      "domains": {
+        "configuration-storage-and-observability": 5
+      },
+      "execution_contracts": {
+        "hermetic": 5
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_serialization.py"
+    },
+    {
+      "collected_count": 5,
+      "domains": {},
+      "execution_contracts": {
+        "hermetic": 5
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_testproject_workflows.py"
+    },
+    {
+      "collected_count": 5,
+      "domains": {
+        "worker-and-ray-runtime": 5
+      },
+      "execution_contracts": {
+        "hermetic": 5
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_worker_mode_selection.py"
+    },
+    {
+      "collected_count": 4,
+      "domains": {
+        "coordination-polling-and-recovery": 4
+      },
+      "execution_contracts": {
+        "sqlite-django": 4
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_failure_injection.py"
+    },
+    {
+      "collected_count": 4,
+      "domains": {},
+      "execution_contracts": {
+        "hermetic": 4
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_apps.py"
+    },
+    {
+      "collected_count": 4,
+      "domains": {
+        "workflow-plan-and-task-runtime": 4
+      },
+      "execution_contracts": {
+        "sqlite-django": 4
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_lifecycle.py"
+    },
+    {
+      "collected_count": 4,
+      "domains": {
+        "repository-policy-and-release": 4
+      },
+      "execution_contracts": {
+        "hermetic": 4
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_package_metadata.py"
+    },
+    {
+      "collected_count": 4,
+      "domains": {},
+      "execution_contracts": {
+        "hermetic": 4
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_sample_security.py"
+    },
+    {
+      "collected_count": 4,
+      "domains": {
+        "workflow-progress": 4
+      },
+      "execution_contracts": {
+        "sqlite-django": 4
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_workflow_progress_storage_models.py"
+    },
+    {
+      "collected_count": 3,
+      "domains": {
+        "coordination-polling-and-recovery": 3
+      },
+      "execution_contracts": {
+        "live-cluster": 3
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_live_failure_injection.py"
+    },
+    {
+      "collected_count": 3,
+      "domains": {
+        "workflow-progress": 3
+      },
+      "execution_contracts": {
+        "postgresql": 3
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_postgresql_workflow_progress_storage.py"
+    },
+    {
+      "collected_count": 3,
+      "domains": {
+        "schema-migrations-and-bootstrap": 3
+      },
+      "execution_contracts": {
+        "hermetic": 2,
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_priority_migration.py"
+    },
+    {
+      "collected_count": 3,
+      "domains": {
+        "coordination-polling-and-recovery": 3
+      },
+      "execution_contracts": {
+        "hermetic": 2,
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_reconciliation.py"
+    },
+    {
+      "collected_count": 2,
+      "domains": {
+        "django-admin-and-api": 2
+      },
+      "execution_contracts": {
+        "sqlite-django": 2
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_admin_coverage.py"
+    },
+    {
+      "collected_count": 1,
+      "domains": {
+        "schema-migrations-and-bootstrap": 1
+      },
+      "execution_contracts": {
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_input_payload_migration.py"
+    },
+    {
+      "collected_count": 1,
+      "domains": {},
+      "execution_contracts": {
+        "postgresql": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_postgresql_metrics.py"
+    },
+    {
+      "collected_count": 1,
+      "domains": {
+        "coordination-polling-and-recovery": 1
+      },
+      "execution_contracts": {
+        "postgresql": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_postgresql_polling.py"
+    },
+    {
+      "collected_count": 1,
+      "domains": {
+        "schema-migrations-and-bootstrap": 1
+      },
+      "execution_contracts": {
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_workflow_plan_migration.py"
+    },
+    {
+      "collected_count": 1,
+      "domains": {
+        "schema-migrations-and-bootstrap": 1,
+        "workflow-progress": 1
+      },
+      "execution_contracts": {
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_workflow_progress_detail_storage_migration.py"
+    },
+    {
+      "collected_count": 1,
+      "domains": {
+        "schema-migrations-and-bootstrap": 1,
+        "workflow-progress": 1
+      },
+      "execution_contracts": {
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_workflow_progress_migration.py"
+    },
+    {
+      "collected_count": 1,
+      "domains": {
+        "schema-migrations-and-bootstrap": 1,
+        "workflow-progress": 1
+      },
+      "execution_contracts": {
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/integration/test_workflow_progress_summary_migration.py"
+    },
+    {
+      "collected_count": 1,
+      "domains": {
+        "workflow-progress": 1
+      },
+      "execution_contracts": {
+        "sqlite-django": 1
+      },
+      "parameterized_cases": 0,
+      "path": "tests/unit/test_workflow_progress_storage_scaling.py"
+    }
+  ],
+  "fixtures": [
+    {
+      "name": "_clear_django_ray_remote_caches",
+      "selected_count": 2943
+    },
+    {
+      "name": "_dj_autoclear_mailbox",
+      "selected_count": 2943
+    },
+    {
+      "name": "_django_clear_site_cache",
+      "selected_count": 2943
+    },
+    {
+      "name": "_django_db_marker",
+      "selected_count": 2943
+    },
+    {
+      "name": "_django_isolate_apps",
+      "selected_count": 2943
+    },
+    {
+      "name": "_django_set_urlconf",
+      "selected_count": 2943
+    },
+    {
+      "name": "_django_setup_unittest",
+      "selected_count": 2943
+    },
+    {
+      "name": "_fail_for_invalid_template_variable",
+      "selected_count": 2943
+    },
+    {
+      "name": "_live_server_helper",
+      "selected_count": 2943
+    },
+    {
+      "name": "_template_string_if_invalid_marker",
+      "selected_count": 2943
+    },
+    {
+      "name": "django_db_blocker",
+      "selected_count": 2943
+    },
+    {
+      "name": "django_test_environment",
+      "selected_count": 2943
+    },
+    {
+      "name": "monkeypatch",
+      "selected_count": 2943
+    },
+    {
+      "name": "request",
+      "selected_count": 2943
+    },
+    {
+      "name": "tmp_path",
+      "selected_count": 313
+    },
+    {
+      "name": "tmp_path_factory",
+      "selected_count": 313
+    },
+    {
+      "name": "_django_db_helper",
+      "selected_count": 171
+    },
+    {
+      "name": "db",
+      "selected_count": 171
+    },
+    {
+      "name": "django_db_createdb",
+      "selected_count": 171
+    },
+    {
+      "name": "django_db_keepdb",
+      "selected_count": 171
+    },
+    {
+      "name": "django_db_modify_db_settings",
+      "selected_count": 171
+    },
+    {
+      "name": "django_db_modify_db_settings_parallel_suffix",
+      "selected_count": 171
+    },
+    {
+      "name": "django_db_modify_db_settings_tox_suffix",
+      "selected_count": 171
+    },
+    {
+      "name": "django_db_modify_db_settings_xdist_suffix",
+      "selected_count": 171
+    },
+    {
+      "name": "django_db_setup",
+      "selected_count": 171
+    },
+    {
+      "name": "django_db_use_migrations",
+      "selected_count": 171
+    },
+    {
+      "name": "running_execution",
+      "selected_count": 130
+    },
+    {
+      "name": "client",
+      "selected_count": 63
+    },
+    {
+      "name": "settings",
+      "selected_count": 43
+    },
+    {
+      "name": "setup_django_env",
+      "selected_count": 36
+    },
+    {
+      "name": "_require_postgresql",
+      "selected_count": 32
+    },
+    {
+      "name": "workflow_execution",
+      "selected_count": 24
+    },
+    {
+      "name": "capsys",
+      "selected_count": 21
+    },
+    {
+      "name": "django_settings_env",
+      "selected_count": 14
+    },
+    {
+      "name": "caplog",
+      "selected_count": 12
+    },
+    {
+      "name": "rendered_kustomization",
+      "selected_count": 12
+    },
+    {
+      "name": "ray_cluster",
+      "selected_count": 8
+    },
+    {
+      "name": "record_property",
+      "selected_count": 5
+    },
+    {
+      "name": "live_ray_cluster",
+      "selected_count": 3
+    },
+    {
+      "name": "task_execution",
+      "selected_count": 2
+    },
+    {
+      "name": "django_assert_num_queries",
+      "selected_count": 1
+    },
+    {
+      "name": "pytestconfig",
+      "selected_count": 1
+    }
+  ],
+  "groups": [
+    {
+      "contract": "Runs without Django database access, a local Ray runtime, PostgreSQL, or a live cluster.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 59,
+      "id": "hermetic",
+      "kind": "execution_contract",
+      "owner": "Pure-Python and mocked-boundary tests",
+      "selected_count": 2133,
+      "selection": {
+        "expression": "(path:tests) AND NOT marker:django_db AND NOT marker:live_cluster AND NOT marker:postgresql AND NOT marker:real_ray AND NOT fixture:admin_client AND NOT fixture:admin_user AND NOT fixture:db AND NOT fixture:django_db_reset_sequences AND NOT fixture:django_db_serialized_rollback AND NOT fixture:live_server AND NOT fixture:transactional_db",
+        "pytest_arguments": null
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Portable profiles preserve explicit platform or optional-capability skips and report them as outcomes."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Uses pytest-django's default SQLite database but no external database or Ray runtime.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 41,
+      "id": "sqlite-django",
+      "kind": "execution_contract",
+      "owner": "Django ORM and application integration tests",
+      "selected_count": 742,
+      "selection": {
+        "expression": "(path:tests) AND (marker:django_db OR fixture:admin_client OR fixture:admin_user OR fixture:db OR fixture:django_db_reset_sequences OR fixture:django_db_serialized_rollback OR fixture:live_server OR fixture:transactional_db) AND NOT marker:live_cluster AND NOT marker:postgresql AND NOT marker:real_ray",
+        "pytest_arguments": null
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "SQLite profiles preserve optional-capability skips unrelated to database availability and report them as outcomes."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Starts and stops a real local Ray runtime and therefore remains serial.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 6,
+      "id": "local-ray",
+      "kind": "execution_contract",
+      "owner": "Ray Core and worker integration tests",
+      "selected_count": 33,
+      "selection": {
+        "expression": "(path:tests) AND marker:real_ray AND NOT marker:live_cluster AND NOT marker:postgresql",
+        "pytest_arguments": [
+          "tests",
+          "-m",
+          "real_ray and not live_cluster and not postgresql"
+        ]
+      },
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "A local-Ray observation is valid only when every selected runtime case executes."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Requires the disposable PostgreSQL service and tests backend-specific behavior serially.",
+      "django_settings_modules": [
+        "tests.postgres_settings"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 5,
+      "id": "postgresql",
+      "kind": "execution_contract",
+      "owner": "Database coordination and PostgreSQL persistence tests",
+      "selected_count": 32,
+      "selection": {
+        "expression": "(path:tests) AND marker:postgresql AND NOT marker:live_cluster AND NOT marker:real_ray",
+        "pytest_arguments": [
+          "tests",
+          "-m",
+          "postgresql and not live_cluster and not real_ray"
+        ]
+      },
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "PostgreSQL evidence must prove the configured database rather than skip unavailable resources."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Requires the explicitly enabled disposable two-node Ray cluster.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 1,
+      "id": "live-cluster",
+      "kind": "execution_contract",
+      "owner": "Ray cluster fault and transport integration tests",
+      "selected_count": 3,
+      "selection": {
+        "expression": "(path:tests) AND marker:live_cluster",
+        "pytest_arguments": [
+          "tests",
+          "-m",
+          "live_cluster"
+        ]
+      },
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "Live-cluster evidence must execute every selected fault and transport case."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Tracks the end-to-end workflow-progress feature family across pure, SQLite, and PostgreSQL boundaries.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 21,
+      "id": "workflow-progress",
+      "kind": "domain",
+      "owner": "Workflow progress preparation, persistence, reads, summaries, cleanup, and API",
+      "selected_count": 889,
+      "selection": {
+        "expression": "(path:tests/integration/test_postgresql_workflow_progress_reads.py OR path:tests/integration/test_postgresql_workflow_progress_storage.py OR path:tests/integration/test_workflow_progress_api.py OR path:tests/integration/test_workflow_progress_detail_storage_migration.py OR path:tests/integration/test_workflow_progress_migration.py OR path:tests/integration/test_workflow_progress_summary_migration.py OR path:tests/unit/test_workflow_progress.py OR path:tests/unit/test_workflow_progress_benchmark_command.py OR path:tests/unit/test_workflow_progress_cleanup.py OR path:tests/unit/test_workflow_progress_cleanup_command.py OR path:tests/unit/test_workflow_progress_preparation.py OR path:tests/unit/test_workflow_progress_preparation_prototype.py OR path:tests/unit/test_workflow_progress_reads.py OR path:tests/unit/test_workflow_progress_storage_audit.py OR path:tests/unit/test_workflow_progress_storage_boundaries.py OR path:tests/unit/test_workflow_progress_storage_models.py OR path:tests/unit/test_workflow_progress_storage_persistence.py OR path:tests/unit/test_workflow_progress_storage_records.py OR path:tests/unit/test_workflow_progress_storage_scaling.py OR path:tests/unit/test_workflow_progress_summary.py OR path:tests/unit/test_workflow_progress_terminal_expiry.py)",
+        "pytest_arguments": [
+          "tests/integration/test_postgresql_workflow_progress_reads.py",
+          "tests/integration/test_postgresql_workflow_progress_storage.py",
+          "tests/integration/test_workflow_progress_api.py",
+          "tests/integration/test_workflow_progress_detail_storage_migration.py",
+          "tests/integration/test_workflow_progress_migration.py",
+          "tests/integration/test_workflow_progress_summary_migration.py",
+          "tests/unit/test_workflow_progress.py",
+          "tests/unit/test_workflow_progress_benchmark_command.py",
+          "tests/unit/test_workflow_progress_cleanup.py",
+          "tests/unit/test_workflow_progress_cleanup_command.py",
+          "tests/unit/test_workflow_progress_preparation.py",
+          "tests/unit/test_workflow_progress_preparation_prototype.py",
+          "tests/unit/test_workflow_progress_reads.py",
+          "tests/unit/test_workflow_progress_storage_audit.py",
+          "tests/unit/test_workflow_progress_storage_boundaries.py",
+          "tests/unit/test_workflow_progress_storage_models.py",
+          "tests/unit/test_workflow_progress_storage_persistence.py",
+          "tests/unit/test_workflow_progress_storage_records.py",
+          "tests/unit/test_workflow_progress_storage_scaling.py",
+          "tests/unit/test_workflow_progress_summary.py",
+          "tests/unit/test_workflow_progress_terminal_expiry.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles retain test-declared resource skips; dedicated resource lanes own mandatory execution proof."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Tracks candidate lifecycle, probes, pinned pilot policy, local gate, and Kubernetes web probes.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 6,
+      "id": "compiled-graph-and-kuberay",
+      "kind": "domain",
+      "owner": "Compiled Graph capability and guarded KubeRay evidence",
+      "selected_count": 677,
+      "selection": {
+        "expression": "(path:tests/unit/test_compiled_graph.py OR path:tests/unit/test_compiled_graph_lifecycle.py OR path:tests/unit/test_compiled_graph_probe.py OR path:tests/unit/test_kuberay_compiled_graph_pilot.py OR path:tests/unit/test_kubernetes_web_probes.py OR path:tests/unit/test_local_kuberay_gate.py)",
+        "pytest_arguments": [
+          "tests/unit/test_compiled_graph.py",
+          "tests/unit/test_compiled_graph_lifecycle.py",
+          "tests/unit/test_compiled_graph_probe.py",
+          "tests/unit/test_kuberay_compiled_graph_pilot.py",
+          "tests/unit/test_kubernetes_web_probes.py",
+          "tests/unit/test_local_kuberay_gate.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles retain test-declared capability skips and expose them in timing outcomes."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Tracks local policy parsers and release/package invariants rather than deployed runtime behavior.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 6,
+      "id": "repository-policy-and-release",
+      "kind": "domain",
+      "owner": "Repository policy, coverage review, packaging, and release",
+      "selected_count": 224,
+      "selection": {
+        "expression": "(path:tests/unit/test_check_conventional_commits.py OR path:tests/unit/test_ci_workflow_policy.py OR path:tests/unit/test_coverage_debt.py OR path:tests/unit/test_package_metadata.py OR path:tests/unit/test_release.py OR path:tests/unit/test_test_suite_inventory.py)",
+        "pytest_arguments": [
+          "tests/unit/test_check_conventional_commits.py",
+          "tests/unit/test_ci_workflow_policy.py",
+          "tests/unit/test_coverage_debt.py",
+          "tests/unit/test_package_metadata.py",
+          "tests/unit/test_release.py",
+          "tests/unit/test_test_suite_inventory.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles retain explicit platform skips and expose them in timing outcomes."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Tracks worker orchestration and Ray runtime behavior across mocked, local-Ray, and SQLite contracts.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 11,
+      "id": "worker-and-ray-runtime",
+      "kind": "domain",
+      "owner": "Worker command, runner, distributed helper, and remote execution",
+      "selected_count": 249,
+      "selection": {
+        "expression": "(path:tests/integration/test_worker.py OR path:tests/unit/test_distributed.py OR path:tests/unit/test_distributed_mocked.py OR path:tests/unit/test_ray_core.py OR path:tests/unit/test_ray_core_runner.py OR path:tests/unit/test_ray_job.py OR path:tests/unit/test_remote.py OR path:tests/unit/test_worker_command_coverage.py OR path:tests/unit/test_worker_command_runtime.py OR path:tests/unit/test_worker_mode_selection.py OR path:tests/unit/test_worker_reconnect_poll_reconcile.py)",
+        "pytest_arguments": [
+          "tests/integration/test_worker.py",
+          "tests/unit/test_distributed.py",
+          "tests/unit/test_distributed_mocked.py",
+          "tests/unit/test_ray_core.py",
+          "tests/unit/test_ray_core_runner.py",
+          "tests/unit/test_ray_job.py",
+          "tests/unit/test_remote.py",
+          "tests/unit/test_worker_command_coverage.py",
+          "tests/unit/test_worker_command_runtime.py",
+          "tests/unit/test_worker_mode_selection.py",
+          "tests/unit/test_worker_reconnect_poll_reconcile.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Mixed domain profiles may select optional runtime cases; execution contracts own mandatory resource proof."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Tracks scheduler coordination and recovery behavior across pure, SQLite, PostgreSQL, and live-cluster boundaries.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 9,
+      "id": "coordination-polling-and-recovery",
+      "kind": "domain",
+      "owner": "Coordination leases, polling, recovery, priority, and fault handling",
+      "selected_count": 152,
+      "selection": {
+        "expression": "(path:tests/integration/test_failure_injection.py OR path:tests/integration/test_live_failure_injection.py OR path:tests/integration/test_postgresql_coordination.py OR path:tests/integration/test_postgresql_polling.py OR path:tests/unit/test_leasing.py OR path:tests/unit/test_polling.py OR path:tests/unit/test_polling_benchmark_command.py OR path:tests/unit/test_reconciliation.py OR path:tests/unit/test_worker_reconnect_poll_reconcile.py)",
+        "pytest_arguments": [
+          "tests/integration/test_failure_injection.py",
+          "tests/integration/test_live_failure_injection.py",
+          "tests/integration/test_postgresql_coordination.py",
+          "tests/integration/test_postgresql_polling.py",
+          "tests/unit/test_leasing.py",
+          "tests/unit/test_polling.py",
+          "tests/unit/test_polling_benchmark_command.py",
+          "tests/unit/test_reconciliation.py",
+          "tests/unit/test_worker_reconnect_poll_reconcile.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles retain test-declared resource skips; dedicated resource lanes own mandatory execution proof."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Tracks forward migration semantics and the installed command-line bootstrap boundary.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 7,
+      "id": "schema-migrations-and-bootstrap",
+      "kind": "domain",
+      "owner": "Persisted-schema compatibility and application bootstrap",
+      "selected_count": 36,
+      "selection": {
+        "expression": "(path:tests/integration/test_input_payload_migration.py OR path:tests/integration/test_priority_migration.py OR path:tests/integration/test_workflow_plan_migration.py OR path:tests/integration/test_workflow_progress_detail_storage_migration.py OR path:tests/integration/test_workflow_progress_migration.py OR path:tests/integration/test_workflow_progress_summary_migration.py OR path:tests/unit/test_entrypoint.py)",
+        "pytest_arguments": [
+          "tests/integration/test_input_payload_migration.py",
+          "tests/integration/test_priority_migration.py",
+          "tests/integration/test_workflow_plan_migration.py",
+          "tests/integration/test_workflow_progress_detail_storage_migration.py",
+          "tests/integration/test_workflow_progress_migration.py",
+          "tests/integration/test_workflow_progress_summary_migration.py",
+          "tests/unit/test_entrypoint.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Migration and bootstrap profiles report explicit environment skips while their owning CI lanes retain execution proof."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Tracks public plan validation and the task/workflow lifecycle independent of progress storage.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 7,
+      "id": "workflow-plan-and-task-runtime",
+      "kind": "domain",
+      "owner": "Workflow plans, workflow execution, and Django task backend",
+      "selected_count": 235,
+      "selection": {
+        "expression": "(path:tests/integration/test_task_execution.py OR path:tests/unit/test_backends.py OR path:tests/unit/test_cancellation.py OR path:tests/unit/test_lifecycle.py OR path:tests/unit/test_retry.py OR path:tests/unit/test_workflow_plans.py OR path:tests/unit/test_workflows.py)",
+        "pytest_arguments": [
+          "tests/integration/test_task_execution.py",
+          "tests/unit/test_backends.py",
+          "tests/unit/test_cancellation.py",
+          "tests/unit/test_lifecycle.py",
+          "tests/unit/test_retry.py",
+          "tests/unit/test_workflow_plans.py",
+          "tests/unit/test_workflows.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles preserve test-declared optional-capability skips and report them as outcomes."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Tracks settings and portable storage, buffering, serialization, metrics, logging, and redaction behavior.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 11,
+      "id": "configuration-storage-and-observability",
+      "kind": "domain",
+      "owner": "Configuration, durable payload/result storage, and observability",
+      "selected_count": 388,
+      "selection": {
+        "expression": "(path:tests/unit/test_input_storage.py OR path:tests/unit/test_logging.py OR path:tests/unit/test_metrics.py OR path:tests/unit/test_observability.py OR path:tests/unit/test_redaction.py OR path:tests/unit/test_result_buffer.py OR path:tests/unit/test_result_fold.py OR path:tests/unit/test_result_storage.py OR path:tests/unit/test_runtime_env.py OR path:tests/unit/test_serialization.py OR path:tests/unit/test_settings.py)",
+        "pytest_arguments": [
+          "tests/unit/test_input_storage.py",
+          "tests/unit/test_logging.py",
+          "tests/unit/test_metrics.py",
+          "tests/unit/test_observability.py",
+          "tests/unit/test_redaction.py",
+          "tests/unit/test_result_buffer.py",
+          "tests/unit/test_result_fold.py",
+          "tests/unit/test_result_storage.py",
+          "tests/unit/test_runtime_env.py",
+          "tests/unit/test_serialization.py",
+          "tests/unit/test_settings.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles preserve test-declared optional-capability skips and report them as outcomes."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Tracks the framework-facing admin, API, and URL presentation boundaries.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 4,
+      "id": "django-admin-and-api",
+      "kind": "domain",
+      "owner": "Django admin and bundled HTTP API",
+      "selected_count": 121,
+      "selection": {
+        "expression": "(path:tests/integration/test_admin.py OR path:tests/integration/test_admin_coverage.py OR path:tests/integration/test_api.py OR path:tests/integration/test_workflow_progress_api.py)",
+        "pytest_arguments": [
+          "tests/integration/test_admin.py",
+          "tests/integration/test_admin_coverage.py",
+          "tests/integration/test_api.py",
+          "tests/integration/test_workflow_progress_api.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles preserve test-declared browser or platform skips; the bundled CI lane forbids them."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Re-executes the user-facing API, security, URL, and workflow boundary with testproject coverage.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 4,
+      "id": "bundled-testproject",
+      "kind": "boundary",
+      "owner": "Bundled Django sample application",
+      "selected_count": 85,
+      "selection": {
+        "expression": "(path:tests/integration/test_api.py OR path:tests/integration/test_workflow_progress_api.py OR path:tests/unit/test_sample_security.py OR path:tests/unit/test_testproject_workflows.py)",
+        "pytest_arguments": [
+          "tests/integration/test_api.py",
+          "tests/integration/test_workflow_progress_api.py",
+          "tests/unit/test_sample_security.py",
+          "tests/unit/test_testproject_workflows.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Ad hoc boundary profiles expose environment skips; the dedicated testproject CI lane forbids them."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Measures the broad local path without live-cluster or real-Ray resource ownership.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": null,
+      "file_count": 84,
+      "id": "portable-local",
+      "kind": "profile",
+      "owner": "Cross-platform local suite profiling",
+      "selected_count": 2907,
+      "selection": {
+        "expression": "(path:tests) AND NOT marker:live_cluster AND NOT marker:real_ray",
+        "pytest_arguments": [
+          "tests",
+          "-m",
+          "not live_cluster and not real_ray"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The broad local profile intentionally includes backend and optional-capability cases that self-skip without dedicated resources."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Runs the normal suite with source coverage on every supported Python version.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": 8820,
+      "file_count": 85,
+      "id": "supported-python",
+      "kind": "ci_lane",
+      "owner": "Required Python compatibility and source coverage gate",
+      "selected_count": 2940,
+      "selection": {
+        "expression": "(path:tests) AND NOT marker:live_cluster",
+        "pytest_arguments": [
+          "tests",
+          "-m",
+          "not live_cluster"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+      },
+      "variants": 3
+    },
+    {
+      "contract": "Runs the backend-specific coordination, storage, read, polling, and metrics evidence.",
+      "django_settings_modules": [
+        "tests.postgres_settings"
+      ],
+      "estimated_ci_selected_case_slots": 32,
+      "file_count": 5,
+      "id": "postgresql-evidence",
+      "kind": "ci_lane",
+      "owner": "Required PostgreSQL coordination gate",
+      "selected_count": 32,
+      "selection": {
+        "expression": "(path:tests/integration/test_postgresql_coordination.py OR path:tests/integration/test_postgresql_metrics.py OR path:tests/integration/test_postgresql_polling.py OR path:tests/integration/test_postgresql_workflow_progress_reads.py OR path:tests/integration/test_postgresql_workflow_progress_storage.py) AND marker:postgresql",
+        "pytest_arguments": [
+          "tests/integration/test_postgresql_coordination.py",
+          "tests/integration/test_postgresql_metrics.py",
+          "tests/integration/test_postgresql_polling.py",
+          "tests/integration/test_postgresql_workflow_progress_reads.py",
+          "tests/integration/test_postgresql_workflow_progress_storage.py",
+          "-m",
+          "postgresql"
+        ]
+      },
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "The PostgreSQL service job must execute every selected backend case."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Runs fault and transport behavior against a disposable two-node Ray cluster.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": 3,
+      "file_count": 1,
+      "id": "live-cluster-evidence",
+      "kind": "ci_lane",
+      "owner": "Required live-cluster fault gate",
+      "selected_count": 3,
+      "selection": {
+        "expression": "(path:tests/integration/test_live_failure_injection.py) AND marker:live_cluster",
+        "pytest_arguments": [
+          "tests/integration/test_live_failure_injection.py",
+          "-m",
+          "live_cluster"
+        ]
+      },
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "The enabled live-cluster job must execute every selected fault case."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Runs the bundled-testproject boundary again with its own coverage floor.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": 85,
+      "file_count": 4,
+      "id": "testproject-contract",
+      "kind": "ci_lane",
+      "owner": "Required bundled-application gate",
+      "selected_count": 85,
+      "selection": {
+        "expression": "(path:tests/integration/test_api.py OR path:tests/integration/test_workflow_progress_api.py OR path:tests/unit/test_sample_security.py OR path:tests/unit/test_testproject_workflows.py)",
+        "pytest_arguments": [
+          "tests/integration/test_api.py",
+          "tests/integration/test_workflow_progress_api.py",
+          "tests/unit/test_sample_security.py",
+          "tests/unit/test_testproject_workflows.py"
+        ]
+      },
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "The bundled-application gate provisions its browser runtime and must not skip selected cases."
+      },
+      "variants": 1
+    },
+    {
+      "contract": "Repeats the portable subset under minimum-direct and latest dependency resolutions.",
+      "django_settings_modules": [
+        "unset"
+      ],
+      "estimated_ci_selected_case_slots": 5814,
+      "file_count": 84,
+      "id": "dependency-compatibility",
+      "kind": "ci_lane",
+      "owner": "Required minimum and latest dependency gate",
+      "selected_count": 2907,
+      "selection": {
+        "expression": "(path:tests) AND NOT marker:live_cluster AND NOT marker:real_ray",
+        "pytest_arguments": [
+          "tests",
+          "-m",
+          "not live_cluster and not real_ray"
+        ]
+      },
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Dependency jobs intentionally select backend-specific and optional-capability cases that self-skip without their dedicated resources."
+      },
+      "variants": 2
+    }
+  ],
+  "markers": {
+    "django_db": 672,
+    "live_cluster": 3,
+    "parametrize": 1278,
+    "postgresql": 32,
+    "real_ray": 33,
+    "skip": 3,
+    "skipif": 8
+  },
+  "overlap_candidates": [
+    {
+      "collected_count": 237,
+      "file_count": 2,
+      "id": "workflow-progress-protocol",
+      "owner": "Workflow progress summary protocol and read fixtures",
+      "parameterized_cases": 127,
+      "paths": [
+        "tests/unit/test_workflow_progress_reads.py",
+        "tests/unit/test_workflow_progress_summary.py"
+      ],
+      "reason": "Pure summary codec cases pay for a database identity, while several read-order cases construct larger workflows than their cursor boundary requires.",
+      "review": "Split DB-free protocol cases from ORM/lifecycle cases and right-size read cardinalities without merging HTTP adapter coverage."
+    },
+    {
+      "collected_count": 272,
+      "file_count": 2,
+      "id": "workflow-progress-preparation",
+      "owner": "Workflow progress preparation and prototype",
+      "parameterized_cases": 165,
+      "paths": [
+        "tests/unit/test_workflow_progress_preparation.py",
+        "tests/unit/test_workflow_progress_preparation_prototype.py"
+      ],
+      "reason": "Production and prototype suites have similar ordering and reporting shapes but retain different end-to-end topology and detachment contracts.",
+      "review": "Do not consolidate until a scheduled benchmark or replacement harness proves both production and prototype invariants."
+    },
+    {
+      "collected_count": 44,
+      "file_count": 1,
+      "id": "bundled-browser-contract",
+      "owner": "Bundled dashboard authentication",
+      "parameterized_cases": 2,
+      "paths": [
+        "tests/integration/test_api.py",
+        "tests/javascript/landing_auth.test.mjs"
+      ],
+      "reason": "Authentication setup overlaps endpoint cases, and one collected pytest case launches a nested Node suite whose subtests are repeated by every CI variant.",
+      "review": "Share the configured token fixture, remove only proven endpoint overlap, and keep browser behavior as a distinct contract."
+    },
+    {
+      "collected_count": 156,
+      "file_count": 1,
+      "id": "kuberay-overlay-render",
+      "owner": "Guarded local KubeRay overlay policy",
+      "parameterized_cases": 69,
+      "paths": [
+        "tests/unit/test_local_kuberay_gate.py"
+      ],
+      "reason": "Two overlay-policy tests copy and render the same immutable Kustomize overlay independently.",
+      "review": "Share one module-scoped raw render and deep-copy parsed data while retaining separate source-binding and topology assertions."
+    }
+  ],
+  "parameterized_families": [
+    {
+      "case_count": 38,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_blocked_evidence_rejects_mutated_nested_context",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 35,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_rejects_missing_or_generic_validation_evidence",
+      "parameter_keys": [
+        "validation"
+      ]
+    },
+    {
+      "case_count": 31,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_blocked_evidence_requires_every_root_field",
+      "parameter_keys": [
+        "field"
+      ]
+    },
+    {
+      "case_count": 24,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_rejects_invalid_scalar_boundaries",
+      "parameter_keys": [
+        "message",
+        "path",
+        "value"
+      ]
+    },
+    {
+      "case_count": 23,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_blocked_evidence_writer_independently_revalidates_every_invariant",
+      "parameter_keys": [
+        "error_match",
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 21,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_pod_requires_each_exact_identity_environment_entry_once",
+      "parameter_keys": [
+        "mutation",
+        "variable_name"
+      ]
+    },
+    {
+      "case_count": 19,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_blocked_evidence_rejects_bool_and_float_integer_coercion",
+      "parameter_keys": [
+        "invalid_value",
+        "path"
+      ]
+    },
+    {
+      "case_count": 18,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_kuberay_operator_rejects_decoys_inventory_and_ownership_drift",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 15,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_rejects_modal_or_explanatory_result_prose",
+      "parameter_keys": [
+        "validation"
+      ]
+    },
+    {
+      "case_count": 14,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_workspace_configuration_rejects_values_outside_preparation_v1",
+      "parameter_keys": [
+        "config"
+      ]
+    },
+    {
+      "case_count": 13,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_numeric_settings_reject_booleans",
+      "parameter_keys": [
+        "setting"
+      ]
+    },
+    {
+      "case_count": 12,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_head_pod_requires_every_profile_ray_start_parameter_once",
+      "parameter_keys": [
+        "mutation",
+        "option"
+      ]
+    },
+    {
+      "case_count": 12,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_secret_token_rejects_unbounded_or_non_header_safe_values",
+      "parameter_keys": [
+        "token"
+      ]
+    },
+    {
+      "case_count": 12,
+      "nodeid": "tests/unit/test_result_buffer.py::test_actor_options_reject_unbounded_or_unsupported_values",
+      "parameter_keys": [
+        "actor_options",
+        "message"
+      ]
+    },
+    {
+      "case_count": 12,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_candidate_signature_rejects_tampering_before_capability_issue",
+      "parameter_keys": [
+        "mutation",
+        "tamper_phase"
+      ]
+    },
+    {
+      "case_count": 12,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_public_spill_preparer_has_byte_for_byte_materialized_parity",
+      "parameter_keys": [
+        "ordering",
+        "scenario"
+      ]
+    },
+    {
+      "case_count": 10,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_accepts_specific_validation_results",
+      "parameter_keys": [
+        "validation"
+      ]
+    },
+    {
+      "case_count": 10,
+      "nodeid": "tests/unit/test_result_storage.py::TestResultStorageFactory::test_result_reference_validation",
+      "parameter_keys": [
+        "expected",
+        "reference"
+      ]
+    },
+    {
+      "case_count": 10,
+      "nodeid": "tests/unit/test_workflow_plans.py::test_explicit_ray_defaults_match_omitted_options",
+      "parameter_keys": [
+        "ray_options"
+      ]
+    },
+    {
+      "case_count": 10,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_capability_references_defeat_evidence_replacement_and_id_reuse",
+      "parameter_keys": [
+        "field"
+      ]
+    },
+    {
+      "case_count": 10,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_legacy_v2_reader_strictly_validates_run_identity",
+      "parameter_keys": [
+        "case"
+      ]
+    },
+    {
+      "case_count": 9,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_rejects_placeholder_body_content",
+      "parameter_keys": [
+        "placeholder"
+      ]
+    },
+    {
+      "case_count": 9,
+      "nodeid": "tests/unit/test_compiled_graph.py::test_generic_or_unresolved_context_fails_closed",
+      "parameter_keys": [
+        "field",
+        "missing_fragment",
+        "value"
+      ]
+    },
+    {
+      "case_count": 9,
+      "nodeid": "tests/unit/test_compiled_graph.py::test_missing_exact_context_fails_closed_but_preserves_candidate_discovery",
+      "parameter_keys": [
+        "field"
+      ]
+    },
+    {
+      "case_count": 9,
+      "nodeid": "tests/unit/test_compiled_graph.py::test_near_neighbor_runtime_cannot_inherit_verified_row",
+      "parameter_keys": [
+        "field",
+        "value"
+      ]
+    },
+    {
+      "case_count": 9,
+      "nodeid": "tests/unit/test_compiled_graph.py::test_proposed_linux_cpu_rows_remain_unverified_candidates",
+      "parameter_keys": [
+        "ray_version",
+        "submission_transport",
+        "topology"
+      ]
+    },
+    {
+      "case_count": 9,
+      "nodeid": "tests/unit/test_input_storage.py::test_reference_parser_rejects_malformed_metadata",
+      "parameter_keys": [
+        "reference"
+      ]
+    },
+    {
+      "case_count": 9,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_pod_evidence_is_bound_to_the_exact_namespace_and_raycluster_lease",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 9,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_requires_canonical_complete_run_identity",
+      "parameter_keys": [
+        "field",
+        "value"
+      ]
+    },
+    {
+      "case_count": 8,
+      "nodeid": "tests/unit/test_compiled_graph.py::test_runtime_rejections_are_structured",
+      "parameter_keys": [
+        "message_fragment",
+        "reason",
+        "runtime"
+      ]
+    },
+    {
+      "case_count": 8,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_malformed_public_states_return_structured_rejections",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 8,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_tracked_build_context_rejects_unsafe_archive_paths",
+      "parameter_keys": [
+        "value"
+      ]
+    },
+    {
+      "case_count": 8,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_secret_token_accepts_strict_token68_values",
+      "parameter_keys": [
+        "token"
+      ]
+    },
+    {
+      "case_count": 8,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_polling_settings_reject_unsafe_values",
+      "parameter_keys": [
+        "setting",
+        "value"
+      ]
+    },
+    {
+      "case_count": 8,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_benchmark_v2_rejects_cross_type_equal_substitutions",
+      "parameter_keys": [
+        "path",
+        "replacement"
+      ]
+    },
+    {
+      "case_count": 8,
+      "nodeid": "tests/unit/test_workflows.py::test_map_limits_are_validated",
+      "parameter_keys": [
+        "error_type",
+        "kwargs",
+        "message"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/integration/test_admin.py::TestRayTaskExecutionAdmin::test_state_display_formats_each_known_state",
+      "parameter_keys": [
+        "state"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/integration/test_workflow_progress_api.py::test_workflow_read_errors_keep_distinct_bounded_codes",
+      "parameter_keys": [
+        "code",
+        "expected_status"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_input_storage.py::test_stored_envelope_rejects_invalid_shape",
+      "parameter_keys": [
+        "message",
+        "payload"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_current_raycluster_lease_fails_closed_for_every_identity_change",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_kuberay_operator_revalidation_rejects_any_observed_identity_drift",
+      "parameter_keys": [
+        "changed",
+        "field"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_result_fold.py::test_actor_constructor_rejects_invalid_protocol_inputs",
+      "parameter_keys": [
+        "error_type",
+        "message",
+        "overrides"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_runtime_env.py::test_normalization_rejects_invalid_fields",
+      "parameter_keys": [
+        "message",
+        "spec"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_input_storage_rejects_incomplete_configuration",
+      "parameter_keys": [
+        "message",
+        "overrides"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_workflow_progress_benchmark_command.py::test_candidate_models_and_samples_are_finite",
+      "parameter_keys": [
+        "candidate"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_workflow_progress_benchmark_command.py::test_change_rate_validation",
+      "parameter_keys": [
+        "message",
+        "values"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_workflow_progress_benchmark_command.py::test_profiles_are_bounded_redacted_json",
+      "parameter_keys": [
+        "profile"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_benchmark_v2_rejects_inconsistent_generated_case_evidence",
+      "parameter_keys": [
+        "field",
+        "replacement"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_capability_scalar_signatures_are_recursively_type_exact",
+      "parameter_keys": [
+        "substitution"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_owned_path_validation_rejects_unprovable_boundaries",
+      "parameter_keys": [
+        "message",
+        "scenario"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_rejects_graph_records_and_unknown_fields",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_rejects_inconsistent_detail_availability",
+      "parameter_keys": [
+        "mutate"
+      ]
+    },
+    {
+      "case_count": 7,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_rejects_remaining_protocol_inconsistencies",
+      "parameter_keys": [
+        "message",
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/integration/test_workflow_progress_api.py::test_bounded_workflow_routes_normalize_query_errors_to_declared_error",
+      "parameter_keys": [
+        "suffix"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/integration/test_workflow_progress_api.py::test_bounded_workflow_routes_require_bearer_authentication",
+      "parameter_keys": [
+        "path"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_backends.py::TestRayTaskBackend::test_backend_rejects_invalid_timeout",
+      "parameter_keys": [
+        "timeout_seconds"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_accepts_explicit_not_run_reasons",
+      "parameter_keys": [
+        "validation"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_accepts_repo_specific_results_in_explicit_context",
+      "parameter_keys": [
+        "validation"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_v1_capacity_rejects_every_alternative",
+      "parameter_keys": [
+        "field",
+        "value"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_compiled_session_topology_probe.py::test_validate_report_rejects_invalid_topology_evidence",
+      "parameter_keys": [
+        "message",
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_current_namespace_lease_fails_closed_for_every_identity_change",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_worker_pod_requires_exact_successful_init_container_inventory",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_http_web_probes_send_a_host_django_accepts",
+      "parameter_keys": [
+        "rendered_kustomization"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_rendered_allowed_hosts_still_reject_a_dynamic_pod_ip",
+      "parameter_keys": [
+        "rendered_kustomization"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_polling_benchmark_command.py::test_positive_float_validation",
+      "parameter_keys": [
+        "value"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_result_buffer.py::test_actor_options_reject_malformed_bounded_structures",
+      "parameter_keys": [
+        "actor_options",
+        "message"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_workflow_plans.py::test_compiled_graph_rejection_reason_maps_to_stable_plan_path",
+      "parameter_keys": [
+        "path",
+        "reason",
+        "runtime"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_workflow_progress_benchmark_command.py::test_scalar_validation",
+      "parameter_keys": [
+        "message",
+        "method",
+        "value"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_cleanup_quarantine_validation_faults_are_retryable",
+      "parameter_keys": [
+        "fault",
+        "message"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_spill_workspace_matches_late_materialized_identity_failures",
+      "parameter_keys": [
+        "failure",
+        "input_kind"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_workflow_progress_reads.py::test_saved_execution_authorizes_once_before_request_validation",
+      "parameter_keys": [
+        "expected_code",
+        "operation"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_workflow_progress_storage_boundaries.py::test_touched_detail_reader_rejects_corrupt_durable_rows",
+      "parameter_keys": [
+        "corruption"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_node_detail_nested_objects_require_exact_fields",
+      "parameter_keys": [
+        "component"
+      ]
+    },
+    {
+      "case_count": 6,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_rejects_inconsistent_aggregate_counts",
+      "parameter_keys": [
+        "mutate"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/integration/test_admin.py::TestRayTaskExecutionAdmin::test_admin_detail_errors_keep_bounded_codes",
+      "parameter_keys": [
+        "code",
+        "status"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/integration/test_workflow_progress_api.py::test_bounded_workflow_routes_apply_object_policy",
+      "parameter_keys": [
+        "suffix"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/integration/test_workflow_progress_api.py::test_bounded_workflow_routes_map_unknown_tasks_to_declared_error",
+      "parameter_keys": [
+        "suffix"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_stops_table_before_block_structure",
+      "parameter_keys": [
+        "block_line"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_initial_session_rejects_incomplete_or_unbounded_identity",
+      "parameter_keys": [
+        "identity"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_input_storage.py::test_filesystem_reference_rejects_invalid_shape",
+      "parameter_keys": [
+        "reference"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_cleanup_refuses_namespace_outside_exact_live_lease",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_pod_rejects_duplicate_conflicting_or_substring_ray_start_flags",
+      "parameter_keys": [
+        "arguments"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_docker_guard_rejects_remote_daemons",
+      "parameter_keys": [
+        "endpoint"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_real_http_path_rejects_local_credential_boundary_changes",
+      "parameter_keys": [
+        "path"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_polling_benchmark_command.py::test_positive_integer_validation",
+      "parameter_keys": [
+        "value"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_ray_address_requires_non_empty_string",
+      "parameter_keys": [
+        "ray_address"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_workflow_progress_detail_retention_rejects_invalid_values",
+      "parameter_keys": [
+        "retention_days"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_workflow_progress_benchmark_command.py::test_metadata_label_rejects_unsafe_values",
+      "parameter_keys": [
+        "value"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_workflow_progress_benchmark_command.py::test_node_validation",
+      "parameter_keys": [
+        "message",
+        "values"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_partial_lease_cleanup_fails_closed_and_is_retryable",
+      "parameter_keys": [
+        "error_type",
+        "fault",
+        "message"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_sqlite_detail_matches_count_and_byte_boundaries",
+      "parameter_keys": [
+        "limit_kind",
+        "reason"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_detail_rejects_inconsistent_progress_and_timestamps",
+      "parameter_keys": [
+        "mutate"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_secret_like_values_are_rejected_from_identity_fields",
+      "parameter_keys": [
+        "location"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_rejects_noncanonical_time_and_terminal_metadata",
+      "parameter_keys": [
+        "mutate"
+      ]
+    },
+    {
+      "case_count": 5,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_terminal_lifecycle_transitions_derive_one_bounded_terminal_summary",
+      "parameter_keys": [
+        "summary_state",
+        "transition"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_backends.py::TestRayTaskBackend::test_django_rejects_invalid_priority",
+      "parameter_keys": [
+        "priority"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_ci_workflow_policy.py::test_ci_gate_rejects_every_non_success_result",
+      "parameter_keys": [
+        "result"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_compiled_graph.py::test_oversized_environment_identity_is_rejected_and_bounded",
+      "parameter_keys": [
+        "environment_name",
+        "field"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_admission_rejects_invalid_output_cardinality",
+      "parameter_keys": [
+        "declared_outputs"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_initial_session_rejects_invalid_absolute_deadlines",
+      "parameter_keys": [
+        "field",
+        "value"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_invalid_event_envelopes_return_stable_codes",
+      "parameter_keys": [
+        "code",
+        "event"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_input_storage.py::test_load_rejects_unauthorized_or_digest_only_reference",
+      "parameter_keys": [
+        "reference"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_input_storage.py::test_prepare_rejects_invalid_threshold",
+      "parameter_keys": [
+        "threshold"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_input_storage.py::test_prepare_rejects_non_retrievable_storage_backend",
+      "parameter_keys": [
+        "backend"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_head_pod_rejects_a_separate_value_for_valueless_true_switch",
+      "parameter_keys": [
+        "value"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_head_pod_rejects_equals_value_for_valueless_true_switch",
+      "parameter_keys": [
+        "value"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_pod_evidence_requires_running_ready_non_deleting_configuration_identity",
+      "parameter_keys": [
+        "error_match",
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_pod_restart_count_requires_exact_json_integer_zero",
+      "parameter_keys": [
+        "restart_count"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_source_text_identity_rejects_noncanonical_inputs",
+      "parameter_keys": [
+        "error_match",
+        "value"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_application_convergence_fails_closed_without_retrying_structural_pods",
+      "parameter_keys": [
+        "message",
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_effective_kuberay_worker_contract_rejects_spec_status_mismatch",
+      "parameter_keys": [
+        "mismatch"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_http_guard_rejects_token_exfiltration_paths",
+      "parameter_keys": [
+        "url"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_runtime_image_id_normalization",
+      "parameter_keys": [
+        "runtime_id"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_setup_identity_rejects_stale_owner_tag_or_image_id",
+      "parameter_keys": [
+        "message",
+        "pod"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_runtime_env.py::test_profile_composition_rejects_invalid_definitions",
+      "parameter_keys": [
+        "message",
+        "profiles"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_redact_patterns_rejects_invalid_values",
+      "parameter_keys": [
+        "message",
+        "patterns"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_workflow_plan_identity_rejects_ambiguous_values",
+      "parameter_keys": [
+        "message",
+        "overrides"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_worker_command_runtime.py::TestWorkerCommandRuntime::test_handle_rejects_invalid_cli_concurrency_before_ray_init",
+      "parameter_keys": [
+        "concurrency"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_plans.py::test_callable_resource_topology_and_admission_changes_invalidate",
+      "parameter_keys": [
+        "first",
+        "second"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_plans.py::test_default_context_carries_actual_submission_transport",
+      "parameter_keys": [
+        "path",
+        "reason",
+        "submission_transport",
+        "task_context",
+        "topology"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_cleanup.py::test_invalid_batch_sizes_are_rejected",
+      "parameter_keys": [
+        "batch_size"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_benchmark_v2_rejects_failed_cleanup_even_in_complete_required_matrix",
+      "parameter_keys": [
+        "cleanup_field",
+        "failed_value"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_benchmark_v2_rejects_inconsistent_production_memory_evidence",
+      "parameter_keys": [
+        "message",
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_cleanup_inspection_errors_are_pathless_and_classified",
+      "parameter_keys": [
+        "message",
+        "phase"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_partial_lease_cleanup_failure_is_bounded_pathless_and_retryable",
+      "parameter_keys": [
+        "cleanup_failure_type"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_partial_lease_write_is_removed_for_every_exception_type",
+      "parameter_keys": [
+        "failure_type"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_sqlite_topology_preserves_exact_identity_failures",
+      "parameter_keys": [
+        "edges",
+        "message",
+        "nodes"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_reads.py::test_invalid_v3_summary_never_falls_back_to_legacy",
+      "parameter_keys": [
+        "summary_case"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_storage_audit.py::test_audit_rejects_in_range_run_count_state_truncation_and_event_tamper",
+      "parameter_keys": [
+        "message",
+        "updates"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_storage_audit.py::test_audit_rejects_payload_digest_and_normalized_metadata_corruption",
+      "parameter_keys": [
+        "message",
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_storage_boundaries.py::test_node_detail_rejects_inconsistent_lifecycle_shapes",
+      "parameter_keys": [
+        "message",
+        "state",
+        "updates"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_storage_persistence.py::test_stage_rejects_every_stale_execution_fence_without_creating_a_run",
+      "parameter_keys": [
+        "stale_update"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_detail_byte_boundaries_are_inclusive",
+      "parameter_keys": [
+        "combined",
+        "constant",
+        "reason"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_invocation_identity_rejects_a_mismatched_parent",
+      "parameter_keys": [
+        "field",
+        "mismatch"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_node_detail_accepts_all_four_protocol_states",
+      "parameter_keys": [
+        "state"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_node_detail_requires_protocol_v1_input",
+      "parameter_keys": [
+        "schema_version"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_recent_event_state_uses_the_same_four_state_vocabulary",
+      "parameter_keys": [
+        "state"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_legacy_reader_returns_stable_bounded_diagnostics",
+      "parameter_keys": [
+        "code",
+        "value"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_rejects_reporting_policy_availability_conflicts",
+      "parameter_keys": [
+        "availability",
+        "reporting_policy"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_writer_rejects_each_stale_fence",
+      "parameter_keys": [
+        "fence"
+      ]
+    },
+    {
+      "case_count": 4,
+      "nodeid": "tests/unit/test_workflow_progress_terminal_expiry.py::test_outer_terminal_transition_stamps_detail_when_producer_only_reported_running",
+      "parameter_keys": [
+        "terminal_state",
+        "transition"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_read_query_shape_and_response_bounds_are_independent_of_retained_size",
+      "parameter_keys": [
+        "node_count"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_backends.py::TestRayTaskBackend::test_priority_boundaries_persist_and_round_trip",
+      "parameter_keys": [
+        "priority"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_accepts_descriptive_dependabot_generated_body",
+      "parameter_keys": [
+        "message",
+        "title"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_counts_command_like_words_as_prose",
+      "parameter_keys": [
+        "context"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_does_not_count_atx_heading_as_context",
+      "parameter_keys": [
+        "level"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_generated_header_exemption_requires_matching_metadata",
+      "parameter_keys": [
+        "message"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_rejects_placeholder_prefix_body",
+      "parameter_keys": [
+        "prefix"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_compiled_graph.py::test_unvalidated_topologies_reject_with_owner_code",
+      "parameter_keys": [
+        "topology"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_session_commands_reject_an_extra_invocation_identity",
+      "parameter_keys": [
+        "command_kind"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_input_storage.py::test_prepare_rejects_invalid_inputs",
+      "parameter_keys": [
+        "args",
+        "kwargs",
+        "message"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_every_preexisting_namespace_is_refused_without_claim_or_mutation",
+      "parameter_keys": [
+        "metadata"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_runtime_cleanup_does_not_misclassify_nonstable_ray_semaphores",
+      "parameter_keys": [
+        "snapshot_sets"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_source_text_identities_match_git_archive_bytes_across_clean_checkouts",
+      "parameter_keys": [
+        "line_endings"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_context_guard_fails_closed",
+      "parameter_keys": [
+        "current",
+        "expected",
+        "message",
+        "server"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_docker_guard_accepts_only_local_daemons",
+      "parameter_keys": [
+        "endpoint"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_effective_kuberay_worker_contract_rejects_extra_or_substituted_init",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_http_guard_accepts_only_local_urls",
+      "parameter_keys": [
+        "url"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_ray_pod_discovery_rejects_non_owned_pods",
+      "parameter_keys": [
+        "field",
+        "message",
+        "replacement"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_observability.py::test_get_workflow_plan_rejects_invalid_verified_manifest",
+      "parameter_keys": [
+        "message",
+        "serialized"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_polling.py::test_downward_jitter_is_bounded_and_deterministic",
+      "parameter_keys": [
+        "expected",
+        "random_value"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_polling_benchmark_command.py::test_integer_validation",
+      "parameter_keys": [
+        "value"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_result_fold.py::test_large_folds_keep_admission_references_bytes_and_plan_metadata_bounded",
+      "parameter_keys": [
+        "item_count"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_result_storage.py::test_result_reference_validation_rejects_missing_required_parts",
+      "parameter_keys": [
+        "reference"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_runtime_env.py::test_profile_name_must_be_a_string",
+      "parameter_keys": [
+        "profile"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_input_storage_accepts_retrievable_backends",
+      "parameter_keys": [
+        "config"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_retry_denylist_requires_list_of_strings",
+      "parameter_keys": [
+        "denylist"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_plans.py::test_compiled_graph_lifecycle_v1_rejects_wider_capacity",
+      "parameter_keys": [
+        "field"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_plans.py::test_installed_ray_package_uris_are_recognized_but_not_sole_reusable_identity",
+      "parameter_keys": [
+        "uri"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_cleanup_refuses_unreadable_or_mismatched_owner_lease",
+      "parameter_keys": [
+        "tampering"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_sqlite_detail_matches_non_full_reporting_policies",
+      "parameter_keys": [
+        "reporting_policy"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_sqlite_topology_and_detail_match_current_canonical_output",
+      "parameter_keys": [
+        "ordering"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_workspace_rejects_statement_specific_query_plan_drift_before_input",
+      "parameter_keys": [
+        "message",
+        "plans"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_reads.py::test_corrupted_storage_metadata_returns_only_the_bounded_error",
+      "parameter_keys": [
+        "corruption"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_reads.py::test_missing_archived_attempt_is_not_found",
+      "parameter_keys": [
+        "operation"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_reads.py::test_summary_only_availability_states_return_empty_detail_contracts",
+      "parameter_keys": [
+        "availability"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_storage_boundaries.py::test_node_progress_timestamp_and_completion_must_match_lifecycle",
+      "parameter_keys": [
+        "message",
+        "percent",
+        "state",
+        "updated_at"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_storage_boundaries.py::test_publication_rechecks_records_returned_by_sparse_event_rebalancing",
+      "parameter_keys": [
+        "conflict"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_storage_persistence.py::test_untrusted_truncation_reason_does_not_mask_required_storage_reason",
+      "parameter_keys": [
+        "expected_reason",
+        "initial_reason",
+        "node_ids",
+        "retained_detail_ids",
+        "summary_edge_count",
+        "summary_states",
+        "topology_edges"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_assigned_resources_are_numeric_only",
+      "parameter_keys": [
+        "resource_value"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_node_detail_rejects_inconsistent_fanout",
+      "parameter_keys": [
+        "fanout"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_non_finite_values_are_rejected_everywhere",
+      "parameter_keys": [
+        "value"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_published_detail_expiry_matches_terminal_retention",
+      "parameter_keys": [
+        "expires_at",
+        "message",
+        "state"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_requires_publication_revisions_for_retained_counts",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflow_progress_terminal_expiry.py::test_non_stampable_progress_never_blocks_the_outer_terminal_transition",
+      "parameter_keys": [
+        "case"
+      ]
+    },
+    {
+      "case_count": 3,
+      "nodeid": "tests/unit/test_workflows.py::test_bounded_map_keeps_peak_pending_refs_within_window",
+      "parameter_keys": [
+        "size"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/integration/test_api.py::TestLandingPage::test_browser_actions_reject_missing_and_invalid_credentials",
+      "parameter_keys": [
+        "authorization"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_backends.py::TestRayTaskBackend::test_execution_constraint_rejects_out_of_range_priority",
+      "parameter_keys": [
+        "priority"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_accepts_descriptive_placeholder_discussion",
+      "parameter_keys": [
+        "context"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_commit_message_line_length_boundary",
+      "parameter_keys": [
+        "has_error",
+        "length"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_does_not_count_specific_evidence_as_change_context",
+      "parameter_keys": [
+        "body"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_check_conventional_commits.py::test_validate_rejects_placeholder_prefix_header",
+      "parameter_keys": [
+        "prefix"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_compiled_graph.py::test_unvalidated_transports_reject_with_transport_code",
+      "parameter_keys": [
+        "transport"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_actor_and_channel_failures_require_teardown_before_outputs_are_unavailable",
+      "parameter_keys": [
+        "event_kind",
+        "outcome"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_cross_state_session_invariants_reject_incoherent_public_state",
+      "parameter_keys": [
+        "mutation"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_compiled_graph_lifecycle.py::test_v1_rejects_a_second_in_flight_invocation",
+      "parameter_keys": [
+        "state_factory"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_compiled_graph_probe.py::test_native_worker_crash_message_detection",
+      "parameter_keys": [
+        "error"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_coverage_debt.py::test_report_fails_closed_for_wrong_metric_or_unclassified_debt",
+      "parameter_keys": [
+        "branch_coverage",
+        "classify_small",
+        "message"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_entrypoint.py::TestEntrypointPayload::test_execute_task_does_not_serialize_async_cancellation_base_exceptions",
+      "parameter_keys": [
+        "exception_type"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_entrypoint.py::TestEntrypointPayload::test_execute_task_from_payload_rejects_invalid_reference_transport",
+      "parameter_keys": [
+        "payload"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_entrypoint.py::TestEntrypointPayload::test_main_reports_invalid_completion_envelopes",
+      "parameter_keys": [
+        "result_json"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_cleanup_fails_when_exact_or_replacement_namespace_still_exists_after_delete",
+      "parameter_keys": [
+        "replacement"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_context_guard_accepts_named_local_clusters",
+      "parameter_keys": [
+        "context",
+        "server"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_local_kuberay_gate.py::test_make_gate_wrapper_expands_on_the_host_shell",
+      "parameter_keys": [
+        "target"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_metrics.py::test_queue_allowlist_requires_string_sequence",
+      "parameter_keys": [
+        "queue_names"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_observability.py::test_get_ray_task_logs_validates_byte_limit",
+      "parameter_keys": [
+        "max_bytes"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_observability.py::test_get_ray_task_logs_validates_tail",
+      "parameter_keys": [
+        "tail"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_observability.py::test_get_workflow_graph_rejects_malformed_nested_shapes",
+      "parameter_keys": [
+        "graph"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_observability.py::test_get_workflow_progress_rejects_invalid_schema_version",
+      "parameter_keys": [
+        "schema_version"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_observability.py::test_get_workflow_progress_rejects_invalid_snapshots",
+      "parameter_keys": [
+        "progress_data"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_observability.py::test_get_workflow_progress_returns_none_without_snapshot",
+      "parameter_keys": [
+        "progress_data"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_observability.py::test_task_summary_omits_invalid_plan_selection",
+      "parameter_keys": [
+        "selection"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_result_buffer.py::test_actor_constructor_rejects_invalid_bounds",
+      "parameter_keys": [
+        "max_items",
+        "max_serialized_bytes",
+        "message"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_runtime_models_storage_coverage.py::test_parallel_map_rejects_boolean_resource_values",
+      "parameter_keys": [
+        "kwargs",
+        "message"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_runtime_models_storage_coverage.py::test_scatter_gather_rejects_invalid_task_arguments",
+      "parameter_keys": [
+        "task"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_settings.py::TestValidateSettings::test_validate_workflow_progress_detail_retention_boundaries",
+      "parameter_keys": [
+        "retention_days"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_plans.py::test_compiled_graph_version_fields_reject_boolean_aliases",
+      "parameter_keys": [
+        "field"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_plans.py::test_container_image_does_not_hide_invalid_runtime_deployment_profile",
+      "parameter_keys": [
+        "deployment_profile",
+        "reason"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_cleanup_command.py::test_command_rejects_out_of_range_batch_size",
+      "parameter_keys": [
+        "batch_size"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_acquisition_revalidation_errors_are_pathless",
+      "parameter_keys": [
+        "message",
+        "phase"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_benchmark_v2_rejects_missing_required_report_fields",
+      "parameter_keys": [
+        "field",
+        "message"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_cleanup_quarantine_rejects_post_rename_replacement",
+      "parameter_keys": [
+        "replacement"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_cleanup_revalidates_each_entry_immediately_before_unlink",
+      "parameter_keys": [
+        "replacement"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_configuration_rejects_ambiguous_or_insufficient_resource_budgets",
+      "parameter_keys": [
+        "config",
+        "message"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_owned_path_canonical_inspection_error_is_pathless_and_retryable",
+      "parameter_keys": [
+        "failure_type"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_owned_path_rejects_identity_or_parent_safety_drift",
+      "parameter_keys": [
+        "scenario"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_owner_lease_initialization_rejects_nonregular_identity_evidence",
+      "parameter_keys": [
+        "invalid_stage"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_unleased_cleanup_filesystem_failures_are_pathless",
+      "parameter_keys": [
+        "message",
+        "phase"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_unleased_cleanup_revalidates_after_quarantine_rename",
+      "parameter_keys": [
+        "fault"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_workspace_rejects_unsafe_preexisting_parent_before_creation",
+      "parameter_keys": [
+        "parent_source"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_cooperative_cancellation_runs_before_next_item_and_poisons_workspace",
+      "parameter_keys": [
+        "error_type"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_detail_constraints_precede_invalid_body_normalization",
+      "parameter_keys": [
+        "details",
+        "message"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_exception_and_cancellation_cleanup_remove_the_workspace",
+      "parameter_keys": [
+        "error_type"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_sqlite_topology_matches_page_and_total_byte_removal",
+      "parameter_keys": [
+        "page_limit_name",
+        "reason",
+        "total_limit_name"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_reads.py::test_expired_cursor_preserves_its_original_public_run_and_publication",
+      "parameter_keys": [
+        "collection"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_reads.py::test_fault_availability_keeps_summary_readable_but_blocks_detail",
+      "parameter_keys": [
+        "availability",
+        "expected_code"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_reads.py::test_matching_cursor_epoch_uses_expired_page_after_time_retention",
+      "parameter_keys": [
+        "collection"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_audit.py::test_audit_binds_active_summary_retention_to_run_storage",
+      "parameter_keys": [
+        "run_update"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_audit.py::test_audit_rejects_a_future_row_epoch",
+      "parameter_keys": [
+        "epoch_field"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_audit.py::test_sparse_touched_row_verification_rejects_a_future_epoch",
+      "parameter_keys": [
+        "epoch_field"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_boundaries.py::test_publication_omits_a_record_that_crosses_a_detail_byte_budget",
+      "parameter_keys": [
+        "limit_kind"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_boundaries.py::test_publication_revalidates_verified_target_ownership_and_slot",
+      "parameter_keys": [
+        "invalid_target"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_boundaries.py::test_staging_maps_database_creation_races_to_protocol_errors",
+      "parameter_keys": [
+        "raced_model"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_persistence.py::test_sampled_publication_preserves_policy_provenance_even_when_all_rows_fit",
+      "parameter_keys": [
+        "node_ids",
+        "sampled_ids"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_persistence.py::test_summary_only_policy_cannot_publish_detail_storage",
+      "parameter_keys": [
+        "availability",
+        "reporting_policy"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_persistence.py::test_topology_kind_change_deletes_incompatible_detail_unless_replaced",
+      "parameter_keys": [
+        "initial_kind",
+        "next_kind",
+        "supply_replacement"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_topology_requires_exact_node_and_edge_shapes",
+      "parameter_keys": [
+        "shape"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_storage_records.py::test_topology_total_byte_boundaries_are_inclusive",
+      "parameter_keys": [
+        "constant",
+        "reason",
+        "size_attribute"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_successful_summary_requires_complete_discovered_counts",
+      "parameter_keys": [
+        "mutate"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_summary.py::test_summary_only_policy_states_do_not_create_detail_storage",
+      "parameter_keys": [
+        "availability",
+        "reporting_policy"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflow_progress_terminal_expiry.py::test_terminal_lifecycle_falls_back_to_persisted_policy_without_canonical_summary",
+      "parameter_keys": [
+        "retention_days",
+        "summary_case"
+      ]
+    },
+    {
+      "case_count": 2,
+      "nodeid": "tests/unit/test_workflows.py::test_bounded_map_cleans_every_nested_physical_ref_on_failure",
+      "parameter_keys": [
+        "expected_cleanup_labels",
+        "signature"
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "source": {
+    "algorithm": "sha256",
+    "digest": "0088add37c5ee8acffcb628638387b412d0963f22a50593f9e45084889f3fa47",
+    "file_count": 326,
+    "roots": [
+      "git ls-files --cached --others --exclude-standard",
+      "excluding generated test-suite baseline JSON and Markdown"
+    ]
+  },
+  "timings": [
+    {
+      "environment": {
+        "django_settings_module": "unset",
+        "packages": {
+          "coverage": "7.15.0",
+          "django": "6.0.7",
+          "pytest": "9.1.1",
+          "pytest-cov": "7.1.0",
+          "pytest-django": "4.12.0",
+          "pytest-xdist": "not-installed",
+          "ray": "2.56.0"
+        },
+        "platform": "Windows-11-10.0.26200-SP0",
+        "processor_count": 16,
+        "python": "3.12.12"
+      },
+      "external": {
+        "environment_setup_seconds": null,
+        "note": "Windows local developer path; uv environment was already synchronized; runner queue and dependency setup excluded.",
+        "runner_queue_seconds": null
+      },
+      "integrity": {
+        "errors": [],
+        "valid": true
+      },
+      "lane": "portable-local",
+      "measured_at_utc": "2026-07-23T00:54:19.939104+00:00",
+      "observation": "windows-local-py312",
+      "pytest": {
+        "call_phase_seconds": 97.493954,
+        "cleanup_seconds": 0.24609,
+        "collection_seconds": 6.201157,
+        "completed_count": 2907,
+        "coverage_enabled": true,
+        "deselected_count": 36,
+        "execution_wall_seconds": 114.210451,
+        "exit_code": 0,
+        "initialization_seconds": 1.269506,
+        "logfinished_count": 2907,
+        "outcomes": {
+          "failed": 0,
+          "passed": 2869,
+          "skipped": 38,
+          "xfailed": 0,
+          "xpassed": 0
+        },
+        "post_test_reporting_seconds": 2.747832,
+        "process_seconds": 124.675512,
+        "selected_count": 2907,
+        "setup_phase_seconds": 10.693562,
+        "teardown_phase_seconds": 3.146892,
+        "terminal_reporting_seconds": 0.000401
+      },
+      "pytest_arguments": [
+        "--cov=src",
+        "--cov-report=term",
+        "--cov-fail-under=95",
+        "-q"
+      ],
+      "sample_id": "af1a4f38-aede-4aed-ae00-39a973368762",
+      "schema_version": 2,
+      "selection": "(path:tests) AND NOT marker:live_cluster AND NOT marker:real_ray",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The broad local profile intentionally includes backend and optional-capability cases that self-skip without dedicated resources."
+      },
+      "skipped_tests": [
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_cancellation_and_completion_race_cannot_overwrite_winner",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_completion_retry_and_timeout_race_has_one_winner",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_concurrent_replacement_claims_delete_only_superseded_run_storage",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_expired_lease_allows_exactly_one_orphan_adopter",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_input_cleanup_racing_reenqueue_preserves_shared_payload",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_postgresql_reader_bounds_legacy_text_before_transfer",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_skip_locked_claims_available_row_then_locked_row_without_starvation",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_stale_generation_cannot_write_over_replacement_execution",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_two_workers_claim_each_execution_exactly_once",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_two_workers_claim_global_priority_frontier_with_fifo_ties",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_v3_conflicting_terminal_writer_cannot_override_lost_outcome",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_v3_summary_retry_race_cannot_resurrect_cleared_summary",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_v3_summary_terminal_race_leaves_terminal_state_authoritative",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_v3_summary_writer_rolls_back_with_owning_transaction",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_progress_cancellation_race_disables_late_writer",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_progress_lost_recovery_clears_obsolete_run",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_progress_retry_race_cannot_resurrect_cleared_snapshot",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_progress_timeout_race_cannot_write_after_terminal_state",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_run_claim_is_consistent_for_concurrent_reader",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_metrics.py::test_prometheus_duration_aggregates_execute_on_postgresql",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_polling.py::test_production_claim_benchmark_records_repeatable_metrics_and_cleans_up",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_cursor_epoch_does_not_advance_into_a_new_detail_publication",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_first_and_next_pages_use_the_same_bounded_keyset_shapes",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_postgresql_plans_use_run_key_state_and_manifest_position_indexes",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_read_query_shape_and_response_bounds_are_independent_of_retained_size[10000]",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_read_query_shape_and_response_bounds_are_independent_of_retained_size[1000]",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_read_query_shape_and_response_bounds_are_independent_of_retained_size[25000]",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_reader_and_writer_epoch_race_never_returns_a_mixed_page",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_terminal_attempt_reads_use_the_archived_epoch_without_scanning_current_payloads",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_storage.py::test_concurrent_sparse_writers_serialize_and_loser_rolls_back",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_storage.py::test_outer_transaction_rollback_restores_detail_aggregates_rows_and_summary",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_storage.py::test_representative_sparse_write_records_postgresql_round_trip_row_and_wal_evidence",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_hard_timeout_self_test_reaps_its_process_group",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_fork_child_cannot_cleanup_or_detach_parent_authority",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_owned_path_and_lease_reject_posix_authority_drift",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_private_workspace_validation_rejects_unsafe_mode",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_workspace_rejects_nonsticky_writable_parent",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_workspace_rejects_parent_owned_by_an_untrusted_uid",
+          "outcome": "skipped"
+        }
+      ],
+      "slowest_files": [
+        {
+          "path": "tests/unit/test_workflow_progress_reads.py",
+          "phases": {
+            "call": 17.184304,
+            "setup": 0.259987,
+            "teardown": 0.104555
+          },
+          "total_seconds": 17.548846
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_preparation.py",
+          "phases": {
+            "call": 8.864292,
+            "setup": 0.744384,
+            "teardown": 0.139138
+          },
+          "total_seconds": 9.747814
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_storage_scaling.py",
+          "phases": {
+            "call": 7.731005,
+            "setup": 0.003401,
+            "teardown": 0.002178
+          },
+          "total_seconds": 7.736584
+        },
+        {
+          "path": "tests/unit/test_result_fold.py",
+          "phases": {
+            "call": 6.903096,
+            "setup": 0.066933,
+            "teardown": 0.023771
+          },
+          "total_seconds": 6.993801
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_storage_persistence.py",
+          "phases": {
+            "call": 6.194748,
+            "setup": 0.161414,
+            "teardown": 0.061875
+          },
+          "total_seconds": 6.418037
+        },
+        {
+          "path": "tests/unit/test_test_suite_inventory.py",
+          "phases": {
+            "call": 6.184554,
+            "setup": 0.050046,
+            "teardown": 0.010114
+          },
+          "total_seconds": 6.244713
+        },
+        {
+          "path": "tests/unit/test_kuberay_compiled_graph_pilot.py",
+          "phases": {
+            "call": 5.022755,
+            "setup": 0.687606,
+            "teardown": 0.204214
+          },
+          "total_seconds": 5.914575
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_preparation_prototype.py",
+          "phases": {
+            "call": 4.862697,
+            "setup": 0.327984,
+            "teardown": 0.053907
+          },
+          "total_seconds": 5.244588
+        },
+        {
+          "path": "tests/unit/test_local_kuberay_gate.py",
+          "phases": {
+            "call": 3.648765,
+            "setup": 0.338694,
+            "teardown": 0.101986
+          },
+          "total_seconds": 4.089445
+        },
+        {
+          "path": "tests/unit/test_workflows.py",
+          "phases": {
+            "call": 3.35988,
+            "setup": 0.109704,
+            "teardown": 0.052391
+          },
+          "total_seconds": 3.521975
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_benchmark_command.py",
+          "phases": {
+            "call": 2.978767,
+            "setup": 0.280486,
+            "teardown": 0.082943
+          },
+          "total_seconds": 3.342196
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_storage_boundaries.py",
+          "phases": {
+            "call": 2.612492,
+            "setup": 0.152971,
+            "teardown": 0.056885
+          },
+          "total_seconds": 2.822348
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_storage_audit.py",
+          "phases": {
+            "call": 2.563646,
+            "setup": 0.085711,
+            "teardown": 0.033735
+          },
+          "total_seconds": 2.683092
+        },
+        {
+          "path": "tests/unit/test_kubernetes_web_probes.py",
+          "phases": {
+            "call": 0.022926,
+            "setup": 2.606255,
+            "teardown": 0.009667
+          },
+          "total_seconds": 2.638848
+        },
+        {
+          "path": "tests/unit/test_workflow_plans.py",
+          "phases": {
+            "call": 2.192399,
+            "setup": 0.231767,
+            "teardown": 0.081839
+          },
+          "total_seconds": 2.506006
+        },
+        {
+          "path": "tests/unit/test_compiled_graph_probe.py",
+          "phases": {
+            "call": 2.251588,
+            "setup": 0.086212,
+            "teardown": 0.025508
+          },
+          "total_seconds": 2.363309
+        },
+        {
+          "path": "tests/unit/test_ci_workflow_policy.py",
+          "phases": {
+            "call": 2.107251,
+            "setup": 0.021321,
+            "teardown": 0.008354
+          },
+          "total_seconds": 2.136925
+        },
+        {
+          "path": "tests/integration/test_admin.py",
+          "phases": {
+            "call": 1.088585,
+            "setup": 0.8812,
+            "teardown": 0.048477
+          },
+          "total_seconds": 2.018261
+        },
+        {
+          "path": "tests/unit/test_remote.py",
+          "phases": {
+            "call": 1.597886,
+            "setup": 0.020215,
+            "teardown": 0.007634
+          },
+          "total_seconds": 1.625735
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_storage_records.py",
+          "phases": {
+            "call": 1.024285,
+            "setup": 0.131604,
+            "teardown": 0.046946
+          },
+          "total_seconds": 1.202835
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_summary.py",
+          "phases": {
+            "call": 0.458301,
+            "setup": 0.505882,
+            "teardown": 0.131129
+          },
+          "total_seconds": 1.095312
+        },
+        {
+          "path": "tests/integration/test_priority_migration.py",
+          "phases": {
+            "call": 0.754064,
+            "setup": 0.007242,
+            "teardown": 0.027314
+          },
+          "total_seconds": 0.788621
+        },
+        {
+          "path": "tests/integration/test_api.py",
+          "phases": {
+            "call": 0.502393,
+            "setup": 0.146248,
+            "teardown": 0.049011
+          },
+          "total_seconds": 0.697652
+        },
+        {
+          "path": "tests/integration/test_worker.py",
+          "phases": {
+            "call": 0.449831,
+            "setup": 0.159708,
+            "teardown": 0.038277
+          },
+          "total_seconds": 0.647817
+        },
+        {
+          "path": "tests/integration/test_workflow_progress_summary_migration.py",
+          "phases": {
+            "call": 0.597755,
+            "setup": 0.003796,
+            "teardown": 0.021946
+          },
+          "total_seconds": 0.623497
+        },
+        {
+          "path": "tests/unit/test_check_conventional_commits.py",
+          "phases": {
+            "call": 0.197423,
+            "setup": 0.310573,
+            "teardown": 0.097287
+          },
+          "total_seconds": 0.605284
+        },
+        {
+          "path": "tests/integration/test_workflow_progress_detail_storage_migration.py",
+          "phases": {
+            "call": 0.514255,
+            "setup": 0.003402,
+            "teardown": 0.024871
+          },
+          "total_seconds": 0.542528
+        },
+        {
+          "path": "tests/unit/test_compiled_graph_lifecycle.py",
+          "phases": {
+            "call": 0.357382,
+            "setup": 0.13818,
+            "teardown": 0.046498
+          },
+          "total_seconds": 0.542059
+        },
+        {
+          "path": "tests/integration/test_postgresql_coordination.py",
+          "phases": {
+            "setup": 0.058394,
+            "teardown": 0.472718
+          },
+          "total_seconds": 0.531112
+        },
+        {
+          "path": "tests/integration/test_input_payload_migration.py",
+          "phases": {
+            "call": 0.497247,
+            "setup": 0.002417,
+            "teardown": 0.030217
+          },
+          "total_seconds": 0.52988
+        }
+      ],
+      "slowest_tests": [
+        {
+          "nodeid": "tests/unit/test_workflow_progress_storage_scaling.py::test_sparse_publication_round_trips_are_independent_of_retained_workflow_size",
+          "phases": {
+            "call": 7.731005,
+            "setup": 0.003401,
+            "teardown": 0.002178
+          },
+          "total_seconds": 7.736584
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_large_folds_keep_admission_references_bytes_and_plan_metadata_bounded[50000]",
+          "phases": {
+            "call": 3.74173,
+            "setup": 0.001541,
+            "teardown": 0.000535
+          },
+          "total_seconds": 3.743806
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_production_topology_subprocess_benchmark_reports_resource_boundary",
+          "phases": {
+            "call": 2.678784,
+            "setup": 0.005184,
+            "teardown": 0.000698
+          },
+          "total_seconds": 2.684666
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_subprocess_benchmark_reports_resources_cardinality_spill_and_cleanup",
+          "phases": {
+            "call": 2.555097,
+            "setup": 0.003551,
+            "teardown": 0.000591
+          },
+          "total_seconds": 2.559239
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_topology_pages_keep_stable_node_and_edge_order_across_cursors",
+          "phases": {
+            "call": 2.277759,
+            "setup": 0.002602,
+            "teardown": 0.001449
+          },
+          "total_seconds": 2.281811
+        },
+        {
+          "nodeid": "tests/unit/test_test_suite_inventory.py::test_cli_run_records_completed_outcomes_and_merges_valid_timing",
+          "phases": {
+            "call": 2.070106,
+            "setup": 0.007365,
+            "teardown": 0.000753
+          },
+          "total_seconds": 2.078224
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_storage_persistence.py::test_idempotent_publication_batches_more_than_five_hundred_touched_nodes",
+          "phases": {
+            "call": 1.979172,
+            "setup": 0.001978,
+            "teardown": 0.001078
+          },
+          "total_seconds": 1.982227
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_benchmark_command.py::test_command_emits_versioned_safe_deterministic_evidence",
+          "phases": {
+            "call": 1.888416,
+            "setup": 0.003542,
+            "teardown": 0.000881
+          },
+          "total_seconds": 1.892839
+        },
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_bounded_map_keeps_peak_pending_refs_within_window[50000]",
+          "phases": {
+            "call": 1.708351,
+            "setup": 0.001278,
+            "teardown": 0.000804
+          },
+          "total_seconds": 1.710433
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_retry_rejects_fold_resource_drift_before_leaf_effects",
+          "phases": {
+            "call": 1.549272,
+            "setup": 0.003204,
+            "teardown": 0.000975
+          },
+          "total_seconds": 1.553452
+        },
+        {
+          "nodeid": "tests/unit/test_test_suite_inventory.py::test_cli_run_enforces_group_skip_policy",
+          "phases": {
+            "call": 1.451155,
+            "setup": 0.008472,
+            "teardown": 0.000507
+          },
+          "total_seconds": 1.460134
+        },
+        {
+          "nodeid": "tests/unit/test_test_suite_inventory.py::test_cli_select_and_collect_use_fixture_aware_taxonomy_and_atomic_outputs",
+          "phases": {
+            "call": 1.349836,
+            "setup": 0.005446,
+            "teardown": 0.00088
+          },
+          "total_seconds": 1.356162
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_topology_cursor_positions_are_checked_against_authenticated_pages",
+          "phases": {
+            "call": 1.316804,
+            "setup": 0.003338,
+            "teardown": 0.001126
+          },
+          "total_seconds": 1.321268
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_summary_pages_and_indexed_node_use_public_bounded_contract",
+          "phases": {
+            "call": 1.206627,
+            "setup": 0.002645,
+            "teardown": 0.000966
+          },
+          "total_seconds": 1.210239
+        },
+        {
+          "nodeid": "tests/unit/test_compiled_graph_probe.py::test_abrupt_root_exit_cleans_real_grandchild",
+          "phases": {
+            "call": 1.104211,
+            "setup": 0.003068,
+            "teardown": 0.000704
+          },
+          "total_seconds": 1.107983
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_detail_cursor_expires_but_topology_cursor_survives_detail_only_update",
+          "phases": {
+            "call": 1.060803,
+            "setup": 0.001748,
+            "teardown": 0.001279
+          },
+          "total_seconds": 1.06383
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_detail_cursor_carries_strict_publication_identity_and_cumulative_seen",
+          "phases": {
+            "call": 1.043523,
+            "setup": 0.003156,
+            "teardown": 0.001603
+          },
+          "total_seconds": 1.048282
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_parent_watchdog_removes_scenario_workspace_after_worker_timeout",
+          "phases": {
+            "call": 0.903676,
+            "setup": 0.004382,
+            "teardown": 0.000794
+          },
+          "total_seconds": 0.908852
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_cursor_rejects_oversize_schema_owner_collection_and_order_mismatch",
+          "phases": {
+            "call": 0.898612,
+            "setup": 0.004169,
+            "teardown": 0.001387
+          },
+          "total_seconds": 0.904168
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_benchmark_command.py::test_command_prints_markdown_when_no_output_paths",
+          "phases": {
+            "call": 0.828059,
+            "setup": 0.009188,
+            "teardown": 0.001022
+          },
+          "total_seconds": 0.838268
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_large_folds_keep_admission_references_bytes_and_plan_metadata_bounded[10000]",
+          "phases": {
+            "call": 0.78533,
+            "setup": 0.002202,
+            "teardown": 0.0007
+          },
+          "total_seconds": 0.788231
+        },
+        {
+          "nodeid": "tests/integration/test_priority_migration.py::test_existing_executions_migrate_to_default_priority_without_reordering",
+          "phases": {
+            "call": 0.752776,
+            "setup": 0.003259,
+            "teardown": 0.026231
+          },
+          "total_seconds": 0.782266
+        },
+        {
+          "nodeid": "tests/unit/test_remote.py::test_ray_execution_metadata_does_not_initialize_local_ray",
+          "phases": {
+            "call": 0.731864,
+            "setup": 0.001228,
+            "teardown": 0.000665
+          },
+          "total_seconds": 0.733758
+        },
+        {
+          "nodeid": "tests/integration/test_admin.py::TestRayTaskExecutionAdmin::test_ray_job_display_variants",
+          "phases": {
+            "call": 0.004042,
+            "setup": 0.727231,
+            "teardown": 0.001127
+          },
+          "total_seconds": 0.7324
+        },
+        {
+          "nodeid": "tests/integration/test_admin.py::TestRayTaskExecutionAdmin::test_observability_endpoint_requires_admin_access",
+          "phases": {
+            "call": 0.700498,
+            "setup": 0.002195,
+            "teardown": 0.001225
+          },
+          "total_seconds": 0.703919
+        },
+        {
+          "nodeid": "tests/unit/test_remote.py::test_task_bootstrap_unpickles_before_django_ray_is_importable",
+          "phases": {
+            "call": 0.690409,
+            "setup": 0.001807,
+            "teardown": 0.000622
+          },
+          "total_seconds": 0.692837
+        },
+        {
+          "nodeid": "tests/integration/test_workflow_progress_summary_migration.py::test_summary_fields_are_additive_nullable_and_reversible",
+          "phases": {
+            "call": 0.597755,
+            "setup": 0.003796,
+            "teardown": 0.021946
+          },
+          "total_seconds": 0.623497
+        },
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_ray_executor_throttles_high_cardinality_progress_snapshots",
+          "phases": {
+            "call": 0.594908,
+            "setup": 0.001984,
+            "teardown": 0.000801
+          },
+          "total_seconds": 0.597693
+        },
+        {
+          "nodeid": "tests/unit/test_local_kuberay_gate.py::test_real_kuberay_overlay_is_namespace_scoped_and_source_bound",
+          "phases": {
+            "call": 0.574332,
+            "setup": 0.004167,
+            "teardown": 0.000799
+          },
+          "total_seconds": 0.579299
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_cursor_rejects_invalid_bound_identity_revision_and_seen_shapes",
+          "phases": {
+            "call": 0.572319,
+            "setup": 0.002988,
+            "teardown": 0.00121
+          },
+          "total_seconds": 0.576516
+        },
+        {
+          "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_http_web_probes_send_a_host_django_accepts[k8s/overlays/kong-local]",
+          "phases": {
+            "call": 0.00208,
+            "setup": 0.542236,
+            "teardown": 0.001095
+          },
+          "total_seconds": 0.545411
+        },
+        {
+          "nodeid": "tests/integration/test_workflow_progress_detail_storage_migration.py::test_detail_storage_tables_are_additive_reversible_and_rolling_safe",
+          "phases": {
+            "call": 0.514255,
+            "setup": 0.003402,
+            "teardown": 0.024871
+          },
+          "total_seconds": 0.542528
+        },
+        {
+          "nodeid": "tests/unit/test_kuberay_compiled_graph_pilot.py::test_tracked_build_context_excludes_ignored_and_dirty_worktree_files",
+          "phases": {
+            "call": 0.531949,
+            "setup": 0.003383,
+            "teardown": 0.000577
+          },
+          "total_seconds": 0.535909
+        },
+        {
+          "nodeid": "tests/integration/test_input_payload_migration.py::test_existing_inline_execution_round_trips_through_input_payload_migration",
+          "phases": {
+            "call": 0.497247,
+            "setup": 0.002417,
+            "teardown": 0.030217
+          },
+          "total_seconds": 0.52988
+        },
+        {
+          "nodeid": "tests/integration/test_workflow_progress_migration.py::test_existing_progress_gains_nullable_run_identity_and_reverses",
+          "phases": {
+            "call": 0.48228,
+            "setup": 0.002138,
+            "teardown": 0.030797
+          },
+          "total_seconds": 0.515216
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_topology_cursor_binds_summary_but_not_detail_revision",
+          "phases": {
+            "call": 0.509289,
+            "setup": 0.00302,
+            "teardown": 0.001277
+          },
+          "total_seconds": 0.513586
+        },
+        {
+          "nodeid": "tests/unit/test_local_kuberay_gate.py::test_real_kuberay_overlay_pins_exact_static_ray_topology",
+          "phases": {
+            "call": 0.503818,
+            "setup": 0.005444,
+            "teardown": 0.000748
+          },
+          "total_seconds": 0.510009
+        },
+        {
+          "nodeid": "tests/integration/test_workflow_plan_migration.py::test_existing_and_rolling_writer_rows_gain_nullable_plan_fields",
+          "phases": {
+            "call": 0.474487,
+            "setup": 0.002432,
+            "teardown": 0.024003
+          },
+          "total_seconds": 0.500922
+        },
+        {
+          "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_http_web_probes_send_a_host_django_accepts[k8s/overlays/kuberay-kind]",
+          "phases": {
+            "call": 0.003004,
+            "setup": 0.478065,
+            "teardown": 0.001103
+          },
+          "total_seconds": 0.482173
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_expired_cursor_preserves_its_original_public_run_and_publication[detail]",
+          "phases": {
+            "call": 0.465714,
+            "setup": 0.003211,
+            "teardown": 0.001254
+          },
+          "total_seconds": 0.470179
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_expired_cursor_preserves_its_original_public_run_and_publication[topology]",
+          "phases": {
+            "call": 0.456189,
+            "setup": 0.002921,
+            "teardown": 0.001188
+          },
+          "total_seconds": 0.460298
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_every_operation_repeats_object_authorization",
+          "phases": {
+            "call": 0.448383,
+            "setup": 0.001844,
+            "teardown": 0.001123
+          },
+          "total_seconds": 0.451349
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_plans.py::test_many_result_buffers_use_bounded_physical_topology_overflow",
+          "phases": {
+            "call": 0.429072,
+            "setup": 0.002337,
+            "teardown": 0.000585
+          },
+          "total_seconds": 0.431994
+        },
+        {
+          "nodeid": "tests/unit/test_local_kuberay_gate.py::test_source_build_context_exports_only_the_committed_tree",
+          "phases": {
+            "call": 0.420987,
+            "setup": 0.004152,
+            "teardown": 0.000646
+          },
+          "total_seconds": 0.425785
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_spill_workspace_matches_late_materialized_identity_failures[duplicate-edge-replayable]",
+          "phases": {
+            "call": 0.411754,
+            "setup": 0.003149,
+            "teardown": 0.000828
+          },
+          "total_seconds": 0.415731
+        },
+        {
+          "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_http_web_probes_send_a_host_django_accepts[k8s/overlays/dev]",
+          "phases": {
+            "call": 0.002338,
+            "setup": 0.410361,
+            "teardown": 0.000985
+          },
+          "total_seconds": 0.413684
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_cursor_tampering_and_request_mismatch_fail_explicitly",
+          "phases": {
+            "call": 0.410579,
+            "setup": 0.002057,
+            "teardown": 0.000952
+          },
+          "total_seconds": 0.413588
+        },
+        {
+          "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_http_web_probes_send_a_host_django_accepts[k8s/overlays/local]",
+          "phases": {
+            "call": 0.002386,
+            "setup": 0.406767,
+            "teardown": 0.001089
+          },
+          "total_seconds": 0.410242
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_spill_workspace_matches_late_materialized_identity_failures[unknown-edge-one-shot]",
+          "phases": {
+            "call": 0.399874,
+            "setup": 0.006539,
+            "teardown": 0.000728
+          },
+          "total_seconds": 0.40714
+        },
+        {
+          "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_http_web_probes_send_a_host_django_accepts[k8s/overlays/dev-tls]",
+          "phases": {
+            "call": 0.001829,
+            "setup": 0.396144,
+            "teardown": 0.000897
+          },
+          "total_seconds": 0.398871
+        }
+      ],
+      "source": {
+        "algorithm": "sha256",
+        "digest": "0088add37c5ee8acffcb628638387b412d0963f22a50593f9e45084889f3fa47",
+        "file_count": 326,
+        "roots": [
+          "git ls-files --cached --others --exclude-standard",
+          "excluding generated test-suite baseline JSON and Markdown"
+        ]
+      },
+      "source_after_digest": "0088add37c5ee8acffcb628638387b412d0963f22a50593f9e45084889f3fa47",
+      "variant": "locked-dependencies"
+    },
+    {
+      "environment": {
+        "django_settings_module": "unset",
+        "packages": {
+          "coverage": "7.15.0",
+          "django": "6.0.7",
+          "pytest": "9.1.1",
+          "pytest-cov": "7.1.0",
+          "pytest-django": "4.12.0",
+          "pytest-xdist": "not-installed",
+          "ray": "2.56.0"
+        },
+        "platform": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+        "processor_count": 4,
+        "python": "3.12.13"
+      },
+      "external": {
+        "environment_setup_seconds": null,
+        "note": "GitHub Actions queue and environment setup are recorded by workflow metadata; this record starts at pytest instrumentation",
+        "runner_queue_seconds": null
+      },
+      "integrity": {
+        "errors": [],
+        "valid": true
+      },
+      "lane": "supported-python",
+      "measured_at_utc": "2026-07-23T01:08:36.369291+00:00",
+      "observation": "github-actions-ubuntu-py312",
+      "pytest": {
+        "call_phase_seconds": 194.230631,
+        "cleanup_seconds": 0.389774,
+        "collection_seconds": 10.016411,
+        "completed_count": 2940,
+        "coverage_enabled": true,
+        "deselected_count": 3,
+        "execution_wall_seconds": 230.827215,
+        "exit_code": 0,
+        "initialization_seconds": 1.687111,
+        "logfinished_count": 2940,
+        "outcomes": {
+          "failed": 0,
+          "passed": 2907,
+          "skipped": 33,
+          "xfailed": 0,
+          "xpassed": 0
+        },
+        "post_test_reporting_seconds": 4.115796,
+        "process_seconds": 247.036792,
+        "selected_count": 2940,
+        "setup_phase_seconds": 27.195189,
+        "teardown_phase_seconds": 7.371669,
+        "terminal_reporting_seconds": 0.00043
+      },
+      "pytest_arguments": [
+        "--cov=src",
+        "--cov-report=xml",
+        "--cov-report=term",
+        "--cov-fail-under=95",
+        "-v"
+      ],
+      "sample_id": "fd1d33b9-9361-41e7-a4d0-212ef55383af",
+      "schema_version": 2,
+      "selection": "(path:tests) AND NOT marker:live_cluster",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+      },
+      "skipped_tests": [
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_cancellation_and_completion_race_cannot_overwrite_winner",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_completion_retry_and_timeout_race_has_one_winner",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_concurrent_replacement_claims_delete_only_superseded_run_storage",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_expired_lease_allows_exactly_one_orphan_adopter",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_input_cleanup_racing_reenqueue_preserves_shared_payload",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_postgresql_reader_bounds_legacy_text_before_transfer",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_skip_locked_claims_available_row_then_locked_row_without_starvation",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_stale_generation_cannot_write_over_replacement_execution",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_two_workers_claim_each_execution_exactly_once",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_two_workers_claim_global_priority_frontier_with_fifo_ties",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_v3_conflicting_terminal_writer_cannot_override_lost_outcome",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_v3_summary_retry_race_cannot_resurrect_cleared_summary",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_v3_summary_terminal_race_leaves_terminal_state_authoritative",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_v3_summary_writer_rolls_back_with_owning_transaction",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_progress_cancellation_race_disables_late_writer",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_progress_lost_recovery_clears_obsolete_run",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_progress_retry_race_cannot_resurrect_cleared_snapshot",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_progress_timeout_race_cannot_write_after_terminal_state",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_coordination.py::test_workflow_run_claim_is_consistent_for_concurrent_reader",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_metrics.py::test_prometheus_duration_aggregates_execute_on_postgresql",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_polling.py::test_production_claim_benchmark_records_repeatable_metrics_and_cleans_up",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_cursor_epoch_does_not_advance_into_a_new_detail_publication",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_first_and_next_pages_use_the_same_bounded_keyset_shapes",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_postgresql_plans_use_run_key_state_and_manifest_position_indexes",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_read_query_shape_and_response_bounds_are_independent_of_retained_size[10000]",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_read_query_shape_and_response_bounds_are_independent_of_retained_size[1000]",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_read_query_shape_and_response_bounds_are_independent_of_retained_size[25000]",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_reader_and_writer_epoch_race_never_returns_a_mixed_page",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_reads.py::test_terminal_attempt_reads_use_the_archived_epoch_without_scanning_current_payloads",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_storage.py::test_concurrent_sparse_writers_serialize_and_loser_rolls_back",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_storage.py::test_outer_transaction_rollback_restores_detail_aggregates_rows_and_summary",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/integration/test_postgresql_workflow_progress_storage.py::test_representative_sparse_write_records_postgresql_round_trip_row_and_wal_evidence",
+          "outcome": "skipped"
+        },
+        {
+          "nodeid": "tests/unit/test_compiled_session_topology_probe.py::test_opt_in_native_nested_owner_topology",
+          "outcome": "skipped"
+        }
+      ],
+      "slowest_files": [
+        {
+          "path": "tests/unit/test_workflows.py",
+          "phases": {
+            "call": 59.639494,
+            "setup": 0.084339,
+            "teardown": 0.045972
+          },
+          "total_seconds": 59.769805
+        },
+        {
+          "path": "tests/unit/test_result_fold.py",
+          "phases": {
+            "call": 42.162492,
+            "setup": 0.073009,
+            "teardown": 0.025855
+          },
+          "total_seconds": 42.261355
+        },
+        {
+          "path": "tests/unit/test_result_buffer.py",
+          "phases": {
+            "call": 37.545995,
+            "setup": 0.046971,
+            "teardown": 0.015868
+          },
+          "total_seconds": 37.608834
+        },
+        {
+          "path": "tests/unit/test_distributed.py",
+          "phases": {
+            "call": 5.902545,
+            "setup": 14.848439,
+            "teardown": 3.795326
+          },
+          "total_seconds": 24.546311
+        },
+        {
+          "path": "tests/integration/test_task_execution.py",
+          "phases": {
+            "call": 5.297214,
+            "setup": 4.613152,
+            "teardown": 1.37789
+          },
+          "total_seconds": 11.288256
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_reads.py",
+          "phases": {
+            "call": 9.795856,
+            "setup": 0.160878,
+            "teardown": 0.062614
+          },
+          "total_seconds": 10.019348
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_storage_scaling.py",
+          "phases": {
+            "call": 4.516628,
+            "setup": 0.001811,
+            "teardown": 0.001277
+          },
+          "total_seconds": 4.519716
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_preparation.py",
+          "phases": {
+            "call": 3.574699,
+            "setup": 0.307393,
+            "teardown": 0.070267
+          },
+          "total_seconds": 3.952359
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_storage_persistence.py",
+          "phases": {
+            "call": 3.06022,
+            "setup": 0.10441,
+            "teardown": 0.039212
+          },
+          "total_seconds": 3.203841
+        },
+        {
+          "path": "tests/unit/test_kuberay_compiled_graph_pilot.py",
+          "phases": {
+            "call": 2.504425,
+            "setup": 0.405689,
+            "teardown": 0.123934
+          },
+          "total_seconds": 3.034048
+        },
+        {
+          "path": "tests/unit/test_kubernetes_web_probes.py",
+          "phases": {
+            "call": 0.014681,
+            "setup": 3.012382,
+            "teardown": 0.005396
+          },
+          "total_seconds": 3.032458
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_preparation_prototype.py",
+          "phases": {
+            "call": 2.205035,
+            "setup": 0.129094,
+            "teardown": 0.027027
+          },
+          "total_seconds": 2.361157
+        },
+        {
+          "path": "tests/unit/test_test_suite_inventory.py",
+          "phases": {
+            "call": 1.783545,
+            "setup": 0.020121,
+            "teardown": 0.005787
+          },
+          "total_seconds": 1.809453
+        },
+        {
+          "path": "tests/unit/test_compiled_graph_probe.py",
+          "phases": {
+            "call": 1.614266,
+            "setup": 0.045742,
+            "teardown": 0.01431
+          },
+          "total_seconds": 1.674318
+        },
+        {
+          "path": "tests/unit/test_local_kuberay_gate.py",
+          "phases": {
+            "call": 1.407755,
+            "setup": 0.17257,
+            "teardown": 0.051261
+          },
+          "total_seconds": 1.631585
+        },
+        {
+          "path": "tests/integration/test_admin.py",
+          "phases": {
+            "call": 0.923919,
+            "setup": 0.493188,
+            "teardown": 0.023106
+          },
+          "total_seconds": 1.440213
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_storage_audit.py",
+          "phases": {
+            "call": 1.345152,
+            "setup": 0.057838,
+            "teardown": 0.023058
+          },
+          "total_seconds": 1.426048
+        },
+        {
+          "path": "tests/unit/test_ci_workflow_policy.py",
+          "phases": {
+            "call": 1.316315,
+            "setup": 0.015339,
+            "teardown": 0.005682
+          },
+          "total_seconds": 1.337336
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_storage_boundaries.py",
+          "phases": {
+            "call": 1.131336,
+            "setup": 0.103424,
+            "teardown": 0.035476
+          },
+          "total_seconds": 1.270236
+        },
+        {
+          "path": "tests/unit/test_workflow_plans.py",
+          "phases": {
+            "call": 1.07794,
+            "setup": 0.124287,
+            "teardown": 0.039438
+          },
+          "total_seconds": 1.241665
+        },
+        {
+          "path": "tests/unit/test_remote.py",
+          "phases": {
+            "call": 0.797611,
+            "setup": 0.015723,
+            "teardown": 0.005294
+          },
+          "total_seconds": 0.818627
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_summary.py",
+          "phases": {
+            "call": 0.315123,
+            "setup": 0.329425,
+            "teardown": 0.076452
+          },
+          "total_seconds": 0.721
+        },
+        {
+          "path": "tests/unit/test_workflow_progress_benchmark_command.py",
+          "phases": {
+            "call": 0.6317,
+            "setup": 0.061139,
+            "teardown": 0.016936
+          },
+          "total_seconds": 0.709775
+        },
+        {
+          "path": "tests/integration/test_postgresql_coordination.py",
+          "phases": {
+            "setup": 0.07576,
+            "teardown": 0.626664
+          },
+          "total_seconds": 0.702424
+        },
+        {
+          "path": "tests/integration/test_workflow_progress_detail_storage_migration.py",
+          "phases": {
+            "call": 0.514252,
+            "setup": 0.00203,
+            "teardown": 0.016688
+          },
+          "total_seconds": 0.53297
+        },
+        {
+          "path": "tests/integration/test_api.py",
+          "phases": {
+            "call": 0.418405,
+            "setup": 0.075403,
+            "teardown": 0.023529
+          },
+          "total_seconds": 0.517337
+        },
+        {
+          "path": "tests/integration/test_priority_migration.py",
+          "phases": {
+            "call": 0.475442,
+            "setup": 0.004421,
+            "teardown": 0.018089
+          },
+          "total_seconds": 0.497952
+        },
+        {
+          "path": "tests/unit/test_check_conventional_commits.py",
+          "phases": {
+            "call": 0.146176,
+            "setup": 0.256248,
+            "teardown": 0.070863
+          },
+          "total_seconds": 0.473287
+        },
+        {
+          "path": "tests/integration/test_input_payload_migration.py",
+          "phases": {
+            "call": 0.382306,
+            "setup": 0.004507,
+            "teardown": 0.025364
+          },
+          "total_seconds": 0.412178
+        },
+        {
+          "path": "tests/integration/test_worker.py",
+          "phases": {
+            "call": 0.277546,
+            "setup": 0.079687,
+            "teardown": 0.019932
+          },
+          "total_seconds": 0.377164
+        }
+      ],
+      "slowest_tests": [
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_real_ray_mapped_group_cleans_sibling_ref_before_failure_returns",
+          "phases": {
+            "call": 10.524901,
+            "setup": 0.001643,
+            "teardown": 0.000715
+          },
+          "total_seconds": 10.527259
+        },
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_real_ray_workflow_persists_graph_and_execution_metadata",
+          "phases": {
+            "call": 9.959524,
+            "setup": 0.001764,
+            "teardown": 0.001684
+          },
+          "total_seconds": 9.962973
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_real_ray_non_detached_fold_dies_with_owner",
+          "phases": {
+            "call": 9.898951,
+            "setup": 0.001879,
+            "teardown": 0.001092
+          },
+          "total_seconds": 9.901922
+        },
+        {
+          "nodeid": "tests/unit/test_result_buffer.py::test_real_ray_non_detached_buffer_dies_with_owner",
+          "phases": {
+            "call": 9.840651,
+            "setup": 0.002406,
+            "teardown": 0.001167
+          },
+          "total_seconds": 9.844223
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_real_ray_production_summary_stays_out_of_coordinator_until_final_result",
+          "phases": {
+            "call": 9.757551,
+            "setup": 0.001052,
+            "teardown": 0.00077
+          },
+          "total_seconds": 9.759373
+        },
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_real_ray_bounded_map_preserves_order_and_limits_concurrency",
+          "phases": {
+            "call": 9.721716,
+            "setup": 0.001882,
+            "teardown": 0.001163
+          },
+          "total_seconds": 9.724761
+        },
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_workflow_executes_on_real_ray",
+          "phases": {
+            "call": 9.655633,
+            "setup": 0.001055,
+            "teardown": 0.00077
+          },
+          "total_seconds": 9.657458
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_real_ray_item_overflow_stops_admission_and_preserves_actor_error",
+          "phases": {
+            "call": 9.654453,
+            "setup": 0.001829,
+            "teardown": 0.0008
+          },
+          "total_seconds": 9.657083
+        },
+        {
+          "nodeid": "tests/unit/test_result_buffer.py::test_real_ray_overflow_stops_admission_and_preserves_actor_error",
+          "phases": {
+            "call": 9.596254,
+            "setup": 0.002426,
+            "teardown": 0.000744
+          },
+          "total_seconds": 9.599424
+        },
+        {
+          "nodeid": "tests/unit/test_result_buffer.py::test_real_ray_production_payload_stays_out_of_coordinator_until_reducer",
+          "phases": {
+            "call": 9.556665,
+            "setup": 0.00109,
+            "teardown": 0.001022
+          },
+          "total_seconds": 9.558777
+        },
+        {
+          "nodeid": "tests/unit/test_distributed.py::TestDistributedWithRay::test_parallel_map_repeated_calls_reuse_cached_remote",
+          "phases": {
+            "call": 2.63024,
+            "setup": 5.259528,
+            "teardown": 1.352432
+          },
+          "total_seconds": 9.2422
+        },
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_real_ray_bounded_map_persists_one_aggregate_node",
+          "phases": {
+            "call": 9.188033,
+            "setup": 0.003733,
+            "teardown": 0.001458
+          },
+          "total_seconds": 9.193224
+        },
+        {
+          "nodeid": "tests/unit/test_distributed.py::TestDistributedWithRay::test_parallel_map_with_ray",
+          "phases": {
+            "call": 3.268163,
+            "setup": 4.556339,
+            "teardown": 1.336906
+          },
+          "total_seconds": 9.161408
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup",
+          "phases": {
+            "call": 8.666313,
+            "setup": 0.001669,
+            "teardown": 0.000746
+          },
+          "total_seconds": 8.668728
+        },
+        {
+          "nodeid": "tests/unit/test_result_buffer.py::test_real_ray_actor_resources_direct_returns_and_success_cleanup",
+          "phases": {
+            "call": 8.473433,
+            "setup": 0.001733,
+            "teardown": 0.001086
+          },
+          "total_seconds": 8.476253
+        },
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_real_ray_mapped_chain_drains_upstream_ref_and_preserves_failure",
+          "phases": {
+            "call": 8.44502,
+            "setup": 0.001573,
+            "teardown": 0.001035
+          },
+          "total_seconds": 8.447627
+        },
+        {
+          "nodeid": "tests/integration/test_task_execution.py::TestRayRemoteExecution::test_ray_worker_reports_execution_metadata",
+          "phases": {
+            "call": 2.684617,
+            "setup": 4.593083,
+            "teardown": 0.000582
+          },
+          "total_seconds": 7.278281
+        },
+        {
+          "nodeid": "tests/unit/test_distributed.py::TestDistributedWithRay::test_get_ray_resources_with_ray",
+          "phases": {
+            "call": 0.001207,
+            "setup": 5.022196,
+            "teardown": 1.102743
+          },
+          "total_seconds": 6.126146
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_storage_scaling.py::test_sparse_publication_round_trips_are_independent_of_retained_workflow_size",
+          "phases": {
+            "call": 4.516628,
+            "setup": 0.001811,
+            "teardown": 0.001277
+          },
+          "total_seconds": 4.519716
+        },
+        {
+          "nodeid": "tests/integration/test_task_execution.py::TestRayRemoteExecution::test_ray_job_runs_async_task_through_cli_entrypoint",
+          "phases": {
+            "call": 1.86347,
+            "setup": 0.001213,
+            "teardown": 1.354565
+          },
+          "total_seconds": 3.219249
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_large_folds_keep_admission_references_bytes_and_plan_metadata_bounded[50000]",
+          "phases": {
+            "call": 2.219703,
+            "setup": 0.001263,
+            "teardown": 0.000483
+          },
+          "total_seconds": 2.221449
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_topology_pages_keep_stable_node_and_edge_order_across_cursors",
+          "phases": {
+            "call": 1.565604,
+            "setup": 0.001855,
+            "teardown": 0.000888
+          },
+          "total_seconds": 1.568347
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation.py::test_production_topology_subprocess_benchmark_reports_resource_boundary",
+          "phases": {
+            "call": 1.232774,
+            "setup": 0.002258,
+            "teardown": 0.000493
+          },
+          "total_seconds": 1.235524
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_subprocess_benchmark_reports_resources_cardinality_spill_and_cleanup",
+          "phases": {
+            "call": 1.143534,
+            "setup": 0.001749,
+            "teardown": 0.000499
+          },
+          "total_seconds": 1.145782
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_storage_persistence.py::test_idempotent_publication_batches_more_than_five_hundred_touched_nodes",
+          "phases": {
+            "call": 1.128221,
+            "setup": 0.001905,
+            "teardown": 0.000951
+          },
+          "total_seconds": 1.131077
+        },
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_bounded_map_keeps_peak_pending_refs_within_window[50000]",
+          "phases": {
+            "call": 1.110634,
+            "setup": 0.001301,
+            "teardown": 0.000559
+          },
+          "total_seconds": 1.112494
+        },
+        {
+          "nodeid": "tests/unit/test_compiled_graph_probe.py::test_abrupt_root_exit_cleans_real_grandchild",
+          "phases": {
+            "call": 1.034647,
+            "setup": 0.001608,
+            "teardown": 0.000505
+          },
+          "total_seconds": 1.036759
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_summary_pages_and_indexed_node_use_public_bounded_contract",
+          "phases": {
+            "call": 0.872817,
+            "setup": 0.001736,
+            "teardown": 0.000822
+          },
+          "total_seconds": 0.875375
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_topology_cursor_positions_are_checked_against_authenticated_pages",
+          "phases": {
+            "call": 0.825394,
+            "setup": 0.001848,
+            "teardown": 0.000849
+          },
+          "total_seconds": 0.828091
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_retry_rejects_fold_resource_drift_before_leaf_effects",
+          "phases": {
+            "call": 0.82304,
+            "setup": 0.001571,
+            "teardown": 0.000681
+          },
+          "total_seconds": 0.825293
+        },
+        {
+          "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_http_web_probes_send_a_host_django_accepts[k8s/overlays/kuberay-kind]",
+          "phases": {
+            "call": 0.001728,
+            "setup": 0.81597,
+            "teardown": 0.000582
+          },
+          "total_seconds": 0.81828
+        },
+        {
+          "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_http_web_probes_send_a_host_django_accepts[k8s/base]",
+          "phases": {
+            "call": 0.003358,
+            "setup": 0.758059,
+            "teardown": 0.000635
+          },
+          "total_seconds": 0.762052
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_detail_cursor_expires_but_topology_cursor_survives_detail_only_update",
+          "phases": {
+            "call": 0.738548,
+            "setup": 0.001834,
+            "teardown": 0.000873
+          },
+          "total_seconds": 0.741255
+        },
+        {
+          "nodeid": "tests/integration/test_task_execution.py::TestRayRemoteExecution::test_ray_remote_task",
+          "phases": {
+            "call": 0.719807,
+            "setup": 0.001334,
+            "teardown": 0.000494
+          },
+          "total_seconds": 0.721635
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_preparation_prototype.py::test_parent_watchdog_removes_scenario_workspace_after_worker_timeout",
+          "phases": {
+            "call": 0.703951,
+            "setup": 0.001992,
+            "teardown": 0.000498
+          },
+          "total_seconds": 0.706441
+        },
+        {
+          "nodeid": "tests/unit/test_test_suite_inventory.py::test_cli_run_records_completed_outcomes_and_merges_valid_timing",
+          "phases": {
+            "call": 0.648793,
+            "setup": 0.00181,
+            "teardown": 0.000519
+          },
+          "total_seconds": 0.651122
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_detail_cursor_carries_strict_publication_identity_and_cumulative_seen",
+          "phases": {
+            "call": 0.572546,
+            "setup": 0.001862,
+            "teardown": 0.000823
+          },
+          "total_seconds": 0.57523
+        },
+        {
+          "nodeid": "tests/integration/test_admin.py::TestRayTaskExecutionAdmin::test_observability_endpoint_requires_admin_access",
+          "phases": {
+            "call": 0.570233,
+            "setup": 0.001628,
+            "teardown": 0.000728
+          },
+          "total_seconds": 0.572589
+        },
+        {
+          "nodeid": "tests/integration/test_workflow_progress_detail_storage_migration.py::test_detail_storage_tables_are_additive_reversible_and_rolling_safe",
+          "phases": {
+            "call": 0.514252,
+            "setup": 0.00203,
+            "teardown": 0.016688
+          },
+          "total_seconds": 0.53297
+        },
+        {
+          "nodeid": "tests/integration/test_priority_migration.py::test_existing_executions_migrate_to_default_priority_without_reordering",
+          "phases": {
+            "call": 0.474606,
+            "setup": 0.001803,
+            "teardown": 0.017451
+          },
+          "total_seconds": 0.49386
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_reads.py::test_cursor_rejects_oversize_schema_owner_collection_and_order_mismatch",
+          "phases": {
+            "call": 0.477948,
+            "setup": 0.001815,
+            "teardown": 0.0008
+          },
+          "total_seconds": 0.480563
+        },
+        {
+          "nodeid": "tests/unit/test_kubernetes_web_probes.py::test_http_web_probes_send_a_host_django_accepts[k8s/overlays/kong-local]",
+          "phases": {
+            "call": 0.001342,
+            "setup": 0.469934,
+            "teardown": 0.000622
+          },
+          "total_seconds": 0.471897
+        },
+        {
+          "nodeid": "tests/unit/test_local_kuberay_gate.py::test_real_kuberay_overlay_is_namespace_scoped_and_source_bound",
+          "phases": {
+            "call": 0.461441,
+            "setup": 0.001533,
+            "teardown": 0.000459
+          },
+          "total_seconds": 0.463433
+        },
+        {
+          "nodeid": "tests/unit/test_result_fold.py::test_large_folds_keep_admission_references_bytes_and_plan_metadata_bounded[10000]",
+          "phases": {
+            "call": 0.458467,
+            "setup": 0.001214,
+            "teardown": 0.000507
+          },
+          "total_seconds": 0.460188
+        },
+        {
+          "nodeid": "tests/unit/test_test_suite_inventory.py::test_cli_run_enforces_group_skip_policy",
+          "phases": {
+            "call": 0.443643,
+            "setup": 0.001625,
+            "teardown": 0.000486
+          },
+          "total_seconds": 0.445755
+        },
+        {
+          "nodeid": "tests/unit/test_local_kuberay_gate.py::test_real_kuberay_overlay_pins_exact_static_ray_topology",
+          "phases": {
+            "call": 0.437869,
+            "setup": 0.00176,
+            "teardown": 0.000472
+          },
+          "total_seconds": 0.440101
+        },
+        {
+          "nodeid": "tests/unit/test_workflow_progress_benchmark_command.py::test_command_emits_versioned_safe_deterministic_evidence",
+          "phases": {
+            "call": 0.434913,
+            "setup": 0.001663,
+            "teardown": 0.000462
+          },
+          "total_seconds": 0.437038
+        },
+        {
+          "nodeid": "tests/integration/test_admin.py::TestRayTaskExecutionAdmin::test_ray_job_display_variants",
+          "phases": {
+            "call": 0.002267,
+            "setup": 0.420779,
+            "teardown": 0.000738
+          },
+          "total_seconds": 0.423784
+        },
+        {
+          "nodeid": "tests/integration/test_input_payload_migration.py::test_existing_inline_execution_round_trips_through_input_payload_migration",
+          "phases": {
+            "call": 0.382306,
+            "setup": 0.004507,
+            "teardown": 0.025364
+          },
+          "total_seconds": 0.412178
+        },
+        {
+          "nodeid": "tests/unit/test_workflows.py::test_ray_executor_throttles_high_cardinality_progress_snapshots",
+          "phases": {
+            "call": 0.400058,
+            "setup": 0.001083,
+            "teardown": 0.000606
+          },
+          "total_seconds": 0.401747
+        }
+      ],
+      "source": {
+        "algorithm": "sha256",
+        "digest": "0088add37c5ee8acffcb628638387b412d0963f22a50593f9e45084889f3fa47",
+        "file_count": 326,
+        "roots": [
+          "git ls-files --cached --others --exclude-standard",
+          "excluding generated test-suite baseline JSON and Markdown"
+        ]
+      },
+      "source_after_digest": "0088add37c5ee8acffcb628638387b412d0963f22a50593f9e45084889f3fa47",
+      "variant": "locked-dependencies"
+    }
+  ],
+  "totals": {
+    "collected": 2943,
+    "estimated_blocking_ci_selected_case_slots": 14754,
+    "files": 86,
+    "parameterized_cases": 1290,
+    "parameterized_families": 252
+  }
+}

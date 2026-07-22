@@ -50,6 +50,8 @@ nav = [
   ] },
   { "Development" = [
     { "Contributing" = "contributing.md" },
+    { "Test Suite Taxonomy" = "testing/test-suite-taxonomy.md" },
+    { "Test Suite Baseline" = "investigations/test-suite-baseline-2026-07-22.md" },
     { "Architecture" = "architecture.md" },
     { "Workflow Plan Contract" = "workflow-plans.md" },
     { "Ray Serve Boundary" = "design/ray-serve-boundary.md" },

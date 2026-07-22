@@ -16,6 +16,7 @@ venv/
 .coverage
 coverage.xml
 artifacts/coverage-debt/
+artifacts/test-suite-inventory/
 htmlcov/
 site/
 .idea/
