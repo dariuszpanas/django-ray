@@ -22,6 +22,18 @@ pytestmark = pytest.mark.real_ray
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 
+def _ray_worker_execution_metadata_probe() -> dict[str, object]:
+    """Read django-ray execution metadata inside a real Ray worker."""
+    import sys
+
+    from django_ray.runtime.remote import _ray_execution_metadata
+
+    return {
+        "ray_loaded_before_probe": "ray" in sys.modules,
+        "metadata": _ray_execution_metadata(),
+    }
+
+
 @pytest.fixture(scope="module")
 def ray_cluster():
     """Start a local Ray cluster for testing."""
@@ -228,6 +240,27 @@ class TestEntrypointExecution:
 
 class TestRayRemoteExecution:
     """Test executing tasks as Ray remote functions."""
+
+    def test_ray_worker_reports_execution_metadata(self, ray_cluster):
+        """Ray workers preload the module required by the metadata fast path."""
+        probe = ray.remote(_ray_worker_execution_metadata_probe)
+
+        result = ray.get(probe.remote())
+
+        assert result["ray_loaded_before_probe"] is True
+        metadata = result["metadata"]
+        assert isinstance(metadata, dict)
+        assert set(metadata) == {
+            "assigned_resources",
+            "ray_job_id",
+            "ray_node_id",
+            "ray_task_id",
+            "ray_worker_id",
+        }
+        assert all(
+            metadata[key] for key in ("ray_job_id", "ray_node_id", "ray_task_id", "ray_worker_id")
+        )
+        assert metadata["assigned_resources"].get("CPU") == 1.0
 
     def test_ray_remote_task(self, django_settings_env, ray_cluster):
         """Test running a task via Ray remote."""

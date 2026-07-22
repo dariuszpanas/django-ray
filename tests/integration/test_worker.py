@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import sys
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -22,22 +20,15 @@ from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 
 @pytest.fixture(autouse=True)
-def setup_django_env():
-    """Ensure Django settings are available for entrypoint."""
-    # Set the environment variable
-    os.environ["DJANGO_SETTINGS_MODULE"] = "testproject.settings"
+def setup_django_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide entrypoint import state and restore it after every test."""
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings")
 
-    # Ensure paths are set up
     project_root = Path(__file__).parent.parent.parent
     src_path = str(project_root / "src")
     root_path = str(project_root)
-
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-    if root_path not in sys.path:
-        sys.path.insert(0, root_path)
-
-    yield
+    monkeypatch.syspath_prepend(src_path)
+    monkeypatch.syspath_prepend(root_path)
 
 
 @pytest.mark.django_db

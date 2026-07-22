@@ -125,10 +125,13 @@ def execute_workflow_step_remote(
 
 
 def _ray_execution_metadata() -> dict[str, Any]:
-    """Return stable Ray identifiers when called from a real Ray worker."""
+    """Return identifiers from an already-running Ray process without importing Ray."""
+    ray: Any = sys.modules.get("ray")
+    if ray is None:
+        return {}
     try:
-        import ray
-
+        if not ray.is_initialized():
+            return {}
         context = ray.get_runtime_context()
         return {
             "ray_task_id": str(context.get_task_id()),
