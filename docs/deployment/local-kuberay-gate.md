@@ -277,9 +277,10 @@ review that change separately. It is outside this local final gate.
 
 Use a browser after the automated gate when a dashboard/template/static-assets row triggered it.
 Confirm the version, token controls, statistics, Metrics, Executions, and browser console. Paste the
-token manually into the page only in a trusted local session, then use **Forget token** or reload.
-Do not automate token retrieval into browser logs, screenshots, recordings, or artifacts, and do not
-include the token in a URL.
+token manually into the page only in a trusted local session, reload, and confirm a protected action
+works without another paste. Then select **Forget token**, reload again, and confirm protected actions
+require a token. Do not automate token retrieval into browser logs, screenshots, recordings, or
+artifacts, and do not include the token in a URL.
 
 ## Initial reference evidence
 

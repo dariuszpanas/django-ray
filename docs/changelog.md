@@ -175,9 +175,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The bundled testproject dashboard now accepts an operator-supplied bearer token in page memory
-  for statistics, smoke-task enqueue, metrics, and execution views without embedding or persisting
-  the configured credential.
+- The bundled testproject dashboard now retains a successfully verified operator-supplied bearer
+  token in tab-scoped `sessionStorage`, so statistics, smoke-task enqueue, metrics, and execution
+  views remain authenticated across reloads. It clears credentials rejected with 401 or explicitly
+  forgotten and never embeds them in rendered HTML or long-lived browser storage.
 - Ray Client task submission now keeps the pre-RuntimeEnv bootstrap import-free on generic Ray
   images and discards failed remote-function definitions before retrying.
 - Kubernetes web probes now send explicit `Host` headers that match each production or local
