@@ -72,9 +72,11 @@ docker run -p 8000:8000 \
 
 The sample landing page does not embed that environment variable. Paste the same value into
 **Browser API access** to enable authenticated statistics, task enqueue, Metrics, and Executions.
-The page clears the password field after submission and retains a valid token only in JavaScript
-memory until **Forget token** is selected or the page reloads. It never writes the token to rendered
-HTML, browser storage, cookies, or URLs.
+The page clears the password field after submission. Only after the statistics API verifies the
+credential does the page retain it in this tab's `sessionStorage`, so reloads do not require another
+paste. Select **Forget token** or end the tab session to clear it. A current credential rejected with
+401 is also removed. The token is never written to rendered HTML, `localStorage`, cookies, or
+URLs; an unverified replacement is never persisted.
 
 Prefer retrieving the token from the same local secret source used to start the container. For a
 disposable Docker Compose demo, the following command prints only that variable rather than dumping
@@ -85,8 +87,10 @@ docker compose exec web printenv DJANGO_API_TOKEN
 ```
 
 Run credential-retrieval commands only in a trusted terminal. Do not put bearer tokens in query
-strings. This browser flow is for trusted local demos; remotely accessible deployments require HTTPS
-and should use an appropriate user identity and session model rather than sharing an operator token.
+strings. `sessionStorage` is convenience storage, not a secret vault: same-origin JavaScript,
+extensions, developer tools, browser session recovery, or a compromised page may expose or restore
+it. This browser flow is for trusted local demos; remotely accessible deployments require HTTPS and
+should use an appropriate user identity and session model rather than sharing an operator token.
 
 ### Django-Ray Worker
 

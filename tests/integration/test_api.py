@@ -62,11 +62,12 @@ class TestLandingPage:
         assert 'id="use-token"' in content
         assert 'id="view-metrics"' in content
         assert 'id="view-executions"' in content
+        assert "survives reloads" in content
         assert 'id="stat-succeeded">1</strong>' in content
 
-    def test_browser_auth_contract_does_not_embed_or_persist_token(self, settings):
-        """The browser supplies its credential without server or browser persistence."""
-        configured_token = "configured-browser-token-must-not-leak-issue-144"
+    def test_browser_auth_contract_does_not_embed_or_leak_token(self, settings):
+        """The browser session retains its credential without server-side leakage."""
+        configured_token = "configured-browser-token-must-not-leak-issue-162"
         settings.DJANGO_API_TOKEN = configured_token
 
         response = Client().get("/")
@@ -83,6 +84,10 @@ class TestLandingPage:
         assert 'href="/api/executions"' not in content
         assert script.count("window.fetch(") == 1
         assert 'headers.set("Authorization", `Bearer ${requestToken}`)' in script
+        assert 'const sessionCredentialKey = "django-ray.testproject.api-token.v1"' in script
+        assert "window.sessionStorage.getItem(sessionCredentialKey)" in script
+        assert "window.sessionStorage.setItem(sessionCredentialKey, token)" in script
+        assert "window.sessionStorage.removeItem(sessionCredentialKey)" in script
         for endpoint in (
             "/api/executions/stats",
             "/api/enqueue/add/2/3",
@@ -90,8 +95,13 @@ class TestLandingPage:
             "/api/executions",
         ):
             assert endpoint in script
-        for browser_store in ("localStorage", "sessionStorage", "document.cookie"):
-            assert browser_store not in script
+        for leak_path in (
+            "localStorage",
+            "document.cookie",
+            "window.location",
+            "URLSearchParams",
+        ):
+            assert leak_path not in script
 
         token_bytes = configured_token.encode()
         static_root = REPOSITORY_ROOT / "testproject/static/testproject"

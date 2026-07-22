@@ -86,14 +86,17 @@ printf '\n'
 ```
 
 These commands intentionally print the credential, so run them only in a trusted terminal. The
-dashboard clears the password field after submission and keeps a valid token only in the loaded
-page's JavaScript memory. It does not put the token in rendered HTML, browser storage, cookies, or
-URLs. Select **Forget token** or reload the page to clear it. A missing token produces a prompt;
-invalid or otherwise unverifiable candidates are discarded rather than retained.
+dashboard clears the password field after submission and writes a token to this tab's
+`sessionStorage` only after the statistics API verifies it. The token survives reloads; select
+**Forget token** or end the tab session to clear it. A current credential rejected with 401 is also
+removed. The token is never put in rendered HTML, `localStorage`, cookies, or URLs. Missing
+tokens produce a prompt, and unverified replacements are discarded rather than persisted.
 
-This flow is intended for trusted local demos. Do not pass bearer tokens in query strings, and do
-not expose the sample dashboard over an untrusted network or plaintext HTTP. Production front ends
-should use an appropriate identity and session model instead of distributing one operator token.
+This flow is intended for trusted local demos. `sessionStorage` is plaintext convenience storage
+readable by same-origin JavaScript; browser tab duplication/session recovery, extensions, developer
+tools, or a compromised page can expose or restore it. Do not pass bearer tokens in query strings,
+and do not expose the sample dashboard over an untrusted network or plaintext HTTP. Production front
+ends should use an appropriate identity and session model instead of distributing one operator token.
 
 For a production deployment, start from `k8s/base` (or copy it into an environment overlay),
 replace the placeholder Secret through an external secret manager, and set an explicit host in
