@@ -210,10 +210,16 @@ tests the supported Python and dependency-resolution matrix. Use `uv run make fo
 Changes that cross the local deployment boundary also follow the
 [local KubeRay final-gate trigger matrix](docs/deployment/local-kuberay-gate.md). Run a required gate
 from a clean checkout after `uv run make ci`, choose `required` or `skip` for the cold-Ray step as the
-matrix specifies, and retain the command's complete secret-free evidence block in the material commit
-and PR. For a recommended gate, record either its evidence or a specific reason it was not run.
-Add passing evidence to the retained commit by amending only its message, then prove the recorded
-`source_tree` still equals `git rev-parse HEAD^{tree}`; any tree change requires a new run.
+matrix specifies, and retain a concise semantic validation summary in the material commit and PR.
+The summary records the exact gate command and result, the explicit cold-Ray decision, the verified
+source-tree match, and the relevant workload-readiness, authenticated API/task-smoke, and preservation
+outcomes. For a recommended gate, record either the same passing summary or a specific reason it was
+not run. The complete secret-free evidence block remains available as bounded runtime diagnostics;
+do not paste its image IDs, pod hashes, cluster UIDs, checksums, or similar run-specific identifiers
+into durable Git history by default. Retain an identifier only in a focused issue or PR comment or
+diagnostic artifact when an investigation needs it, and explain how it will be used. Add the summary
+to the retained commit by amending only its message, then prove the emitted `source_tree` still equals
+`git rev-parse HEAD^{tree}` without recording the hash; any tree change requires a new run.
 Deployment-independent documentation and policy changes remain outside this gate.
 
 For faster iteration on documentation changes, run the strict documentation build directly:

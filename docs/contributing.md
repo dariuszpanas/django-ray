@@ -225,11 +225,17 @@ For changes that affect dashboard/static assets, images or RuntimeEnv packaging,
 bootstrap behavior, Kubernetes resources, probes, workers, monitoring, or a cross-component task
 lifecycle, consult the [local KubeRay final-gate trigger matrix](deployment/local-kuberay-gate.md).
 Run required rows from a clean checkout after `uv run make ci`, make the cold-Ray decision explicit,
-and copy the command's complete secret-free evidence block into the material commit and PR. For a
-recommended row, retain either the evidence or a specific reason it was not run. Never include the
-API token or unbounded cluster logs. Add passing evidence by amending only the retained commit
-message, then verify that its recorded `source_tree` still equals `git rev-parse HEAD^{tree}`. A
-tracked tree change invalidates the evidence and requires a new run.
+and record a concise semantic validation summary in the material commit and PR. Include the exact
+gate command and result, explicit cold-Ray decision, verified source-tree match, and relevant
+workload-readiness, authenticated API/task-smoke, and preservation outcomes. For a recommended row,
+retain either the same passing summary or a specific reason it was not run. The complete secret-free
+evidence block remains available as bounded runtime diagnostics; do not paste its image IDs, pod
+hashes, cluster UIDs, checksums, or similar run-specific identifiers into durable Git history by
+default. Retain an identifier only in a focused issue or PR comment or diagnostic artifact when an
+investigation needs it, and explain how it will be used. Never include the API token or unbounded
+cluster logs. Add the summary by amending only the retained commit message, then verify that the
+emitted `source_tree` still equals `git rev-parse HEAD^{tree}` without recording the hash. A tracked
+tree change invalidates the evidence and requires a new run.
 
 ### Testproject Smoke Test
 
@@ -509,8 +515,8 @@ test: add unit tests for retry logic
 - [ ] Changelog updated (for user-facing changes)
 - [ ] Each material retained commit records exact validation or a specific not-run reason
 - [ ] Exact aggregate validation commands and results included in the PR description
-- [ ] Local KubeRay gate evidence recorded when its trigger matrix is required, or a specific
-      not-run reason recorded when recommended
+- [ ] Concise semantic Local KubeRay gate summary recorded when its trigger matrix is required, or
+      a specific not-run reason recorded when recommended
 - [ ] Material behavior, boundaries, rollout impact, and investigation paths agree between commits
       and the PR without requiring copied formatting
 - [ ] PR description uses natural Markdown without artificial 72-column hard wrapping

@@ -18,7 +18,6 @@ import pytest
 import yaml
 
 from scripts import local_kuberay_gate as gate_module
-from scripts.check_conventional_commits import validate_message
 from scripts.local_kuberay_gate import (
     APP_DEPLOYMENTS,
     DOCKER_CONTEXT_ALLOWLISTS,
@@ -3328,7 +3327,7 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     assert f"source_tree={SOURCE_TREE}" in output
 
 
-def test_complete_evidence_block_is_reconstructable_and_commit_compatible() -> None:
+def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> None:
     output: list[str] = []
     gate = LocalKubeRayGate(_config(), output=output.append)
     gate._verify_final_identity = lambda: None  # type: ignore[method-assign]
@@ -3381,33 +3380,45 @@ def test_complete_evidence_block_is_reconstructable_and_commit_compatible() -> N
     assert reconstructed("docker_host") == gate.evidence.docker_host
     assert reconstructed("app_image_id") == IMAGE_ID
     assert all(len(line) <= EVIDENCE_LINE_LIMIT for line in output)
-    message = "\n".join(
-        (
-            "feat(k8s): add guarded local deployment gate",
-            "",
-            "Validate immutable local deployment inputs and retain portable",
-            "integration evidence for later investigation.",
-            "",
-            "Validation: `uv run pytest`: passed",
-            "",
-            *output,
-        )
-    )
-    assert not [
-        error for error in validate_message(message, label="evidence probe") if "exceeds" in error
-    ]
 
 
-def test_contributor_and_agent_guidance_require_secret_free_gate_evidence() -> None:
+def test_guidance_requires_concise_semantic_gate_summaries() -> None:
     guidance = {
         path: (ROOT / path).read_text(encoding="utf-8")
         for path in ("AGENTS.md", "CONTRIBUTING.md", "docs/contributing.md")
     }
 
     for path, content in guidance.items():
-        assert "local-kuberay-gate.md" in content, path
-        assert "secret-free evidence" in content, path
-        assert "clean checkout" in content, path
+        normalized = " ".join(content.split())
+        assert "local-kuberay-gate.md" in normalized, path
+        assert "concise semantic validation summary" in normalized, path
+        assert "exact gate command" in normalized, path
+        assert "cold-Ray decision" in normalized, path
+        assert "source-tree match" in normalized, path
+        assert "complete secret-free evidence block" in normalized, path
+        assert "runtime diagnostics" in normalized, path
+        assert "clean checkout" in normalized, path
+        assert "do not paste" in normalized, path
+
+    combined = "\n".join(guidance.values())
+    assert "copy the command's complete secret-free evidence block" not in combined
+    assert "Record the complete secret-free evidence block" not in combined
+
+
+def test_gate_guide_separates_runtime_evidence_from_durable_summary() -> None:
+    guide = (ROOT / "docs/deployment/local-kuberay-gate.md").read_text(encoding="utf-8")
+
+    assert "## Runtime evidence and durable validation summary" in guide
+    assert "=== Local KubeRay final gate evidence ===" in guide
+    assert "Do not copy the complete block into a retained commit or PR" in guide
+    assert "exact `uv run make k8s-final-gate` command and arguments" in guide
+    assert "`K8S_RAY_RESTART=skip`: passed" in guide
+    assert "authenticated API smoke" in guide
+    assert "task succeeded with result 5" in guide
+    assert "data-bearing resources were preserved" in guide
+    assert "focused value or artifact in an issue or PR comment" in guide
+    assert "without copying the tree hash into history" in guide
+    assert "complete block can be copied into a commit" not in guide
 
 
 def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservation() -> None:
@@ -3441,7 +3452,7 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
     assert "direct NodePort pair" in guide
     assert "`http://localhost:30090`" in guide
     assert "K8S_PROMETHEUS_URL=http://prometheus.localhost:30080" not in guide
-    assert "Every emitted line is at most 72 characters" in guide
+    assert "Each emitted line is at most 72 characters" in guide
     assert "key_part_001" in guide
 
 

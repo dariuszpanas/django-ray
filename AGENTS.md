@@ -59,12 +59,17 @@ and the canonical `.gitmessage` template. Run the full local gate as `uv run mak
 
 Before handing off deployed-behavior changes, consult the trigger matrix in
 `docs/deployment/local-kuberay-gate.md`. A required row must pass the guarded local KubeRay gate from
-a clean checkout after `uv run make ci`. Record the complete secret-free evidence block in every
-applicable retained commit and PR, including the explicit cold-Ray decision. A recommended row needs
-either passing evidence or a specific reason it was not run. Never copy the API token or unbounded
-cluster logs into Git history. The gate records `source_tree`; after adding its evidence by amending
-only the commit message, verify that value still equals `git rev-parse HEAD^{tree}`. Any tracked tree
-change invalidates the evidence and requires a new run.
+a clean checkout after `uv run make ci`. Record a concise semantic validation summary in every
+applicable retained commit and PR: the exact gate command and result, the explicit cold-Ray decision,
+the verified source-tree match, and the relevant workload, API/task-smoke, and preservation outcomes.
+A recommended row needs either the same passing summary or a specific reason it was not run. Keep the
+complete secret-free evidence block as runtime diagnostics; do not paste its image IDs, pod hashes,
+cluster UIDs, checksums, or similar run-specific identifiers into durable Git history by default. If
+an investigation needs one, retain it in a focused issue or PR comment or diagnostic artifact and
+explain how it will be used. Never copy the API token or unbounded cluster logs into Git history.
+After amending only the commit message with the summary, verify that the emitted `source_tree` still
+equals `git rev-parse HEAD^{tree}` without recording the hash. Any tracked tree change invalidates the
+evidence and requires a new run.
 
 ## Optional Obsidian project memory
 
