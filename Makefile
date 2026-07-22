@@ -218,6 +218,8 @@ help:
 	@echo "  test-testproject - Validate the bundled sample project"
 	@echo "  test-cov       - Run tests with coverage"
 	@echo "  coverage-debt  - Build exact JSON and Markdown line-coverage debt reports"
+	@echo "  k8s-final-gate-preflight - Validate a guarded local KubeRay gate without mutations"
+	@echo "  k8s-final-gate - Run the guarded local KubeRay final integration gate"
 	@echo "  docs-build     - Build Zensical site"
 	@echo "  docs-build-strict - Build Zensical site (strict mode)"
 	@echo "  docs-serve     - Serve docs locally at http://127.0.0.1:8000"

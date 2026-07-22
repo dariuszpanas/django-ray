@@ -57,6 +57,15 @@ Use Conventional Commit syntax for commit messages and PR titles. See `CONTRIBUT
 and the canonical `.gitmessage` template. Run the full local gate as `uv run make ci`; do not add nested
 `uv run` wrappers inside that target because real-Ray workers inherit the outer environment.
 
+Before handing off deployed-behavior changes, consult the trigger matrix in
+`docs/deployment/local-kuberay-gate.md`. A required row must pass the guarded local KubeRay gate from
+a clean checkout after `uv run make ci`. Record the complete secret-free evidence block in every
+applicable retained commit and PR, including the explicit cold-Ray decision. A recommended row needs
+either passing evidence or a specific reason it was not run. Never copy the API token or unbounded
+cluster logs into Git history. The gate records `source_tree`; after adding its evidence by amending
+only the commit message, verify that value still equals `git rev-parse HEAD^{tree}`. Any tracked tree
+change invalidates the evidence and requires a new run.
+
 ## Optional Obsidian project memory
 
 When a repository-local Obsidian vault is available (for example, `.vault/*/.obsidian/`), use it as a

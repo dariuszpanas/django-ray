@@ -689,6 +689,7 @@ def list_executions(
     request,
     state: str | None = None,
     queue: str | None = None,
+    task_id: str | None = None,
     limit: int = 50,
 ):
     """List task executions with optional filtering.
@@ -701,6 +702,8 @@ def list_executions(
         queryset = queryset.filter(state=state.upper())
     if queue:
         queryset = queryset.filter(queue_name=queue)
+    if task_id:
+        queryset = queryset.filter(task_id=task_id)
 
     queryset = queryset.order_by("-created_at")[:limit]
 

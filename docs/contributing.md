@@ -221,6 +221,16 @@ The current metric is **line coverage only**. Enabling branch coverage changes b
 the baseline and therefore belongs in a separate follow-up. The recurring report does not change the
 95% global, 90% worker, 90% Ray Job, or 80% testproject floors and does not depend on Codecov.
 
+For changes that affect dashboard/static assets, images or RuntimeEnv packaging, Ray Client or
+bootstrap behavior, Kubernetes resources, probes, workers, monitoring, or a cross-component task
+lifecycle, consult the [local KubeRay final-gate trigger matrix](deployment/local-kuberay-gate.md).
+Run required rows from a clean checkout after `uv run make ci`, make the cold-Ray decision explicit,
+and copy the command's complete secret-free evidence block into the material commit and PR. For a
+recommended row, retain either the evidence or a specific reason it was not run. Never include the
+API token or unbounded cluster logs. Add passing evidence by amending only the retained commit
+message, then verify that its recorded `source_tree` still equals `git rev-parse HEAD^{tree}`. A
+tracked tree change invalidates the evidence and requires a new run.
+
 ### Testproject Smoke Test
 
 The bundled `testproject` is validated as an application boundary rather than only as task fixtures:
@@ -408,6 +418,8 @@ test: add unit tests for retry logic
 - [ ] Changelog updated (for user-facing changes)
 - [ ] Each material retained commit records exact validation or a specific not-run reason
 - [ ] Exact aggregate validation commands and results included in the PR description
+- [ ] Local KubeRay gate evidence recorded when its trigger matrix is required, or a specific
+      not-run reason recorded when recommended
 - [ ] Material behavior, boundaries, rollout impact, and investigation paths agree between commits
       and the PR without requiring copied formatting
 - [ ] PR description uses natural Markdown without artificial 72-column hard wrapping

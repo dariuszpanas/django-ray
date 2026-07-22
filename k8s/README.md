@@ -91,6 +91,12 @@ Use this path to manage Ray via `RayCluster` custom resources instead of static
 This path requires `helm` and `kind` on your PATH. The default Docker Desktop
 Kubernetes path above does not require either tool.
 
+The ordinary targets below use `latest` for local iteration. Before merging a change that crosses
+the deployment boundary, follow the source-bound trigger matrix and guarded commands in
+[`docs/deployment/local-kuberay-gate.md`](../docs/deployment/local-kuberay-gate.md). That gate keeps
+mutations in `django-ray`, preserves PostgreSQL/PVCs, and verifies the running image IDs, protected
+task smoke, probes, generic-Ray RuntimeEnv boundary, and Prometheus pools together.
+
 ```bash
 # Build app images, load them into kind, install operator, deploy KubeRay overlay.
 # Ray head/workers use the upstream image; RuntimeEnv supplies project code.

@@ -24,6 +24,11 @@ __pycache__/
 venv/
 ENV/
 
+# Local environment and credential files
+.env
+.env.*
+!.env.example
+
 # Build artifacts
 *.egg-info/
 dist/
@@ -46,7 +51,11 @@ coverage.xml
 
 # Documentation
 docs/_build/
+site/
 adr/
+
+# Local agent/project memory is never part of an image build context
+.vault/
 
 # Scripts (not needed in container)
 scripts/

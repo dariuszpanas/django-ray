@@ -207,6 +207,15 @@ package build for the current interpreter without modifying tracked files. GitHu
 tests the supported Python and dependency-resolution matrix. Use `uv run make format` or
 `uv run make fix` explicitly when files should be changed.
 
+Changes that cross the local deployment boundary also follow the
+[local KubeRay final-gate trigger matrix](docs/deployment/local-kuberay-gate.md). Run a required gate
+from a clean checkout after `uv run make ci`, choose `required` or `skip` for the cold-Ray step as the
+matrix specifies, and retain the command's complete secret-free evidence block in the material commit
+and PR. For a recommended gate, record either its evidence or a specific reason it was not run.
+Add passing evidence to the retained commit by amending only its message, then prove the recorded
+`source_tree` still equals `git rev-parse HEAD^{tree}`; any tree change requires a new run.
+Deployment-independent documentation and policy changes remain outside this gate.
+
 For faster iteration on documentation changes, run the strict documentation build directly:
 
 ```bash

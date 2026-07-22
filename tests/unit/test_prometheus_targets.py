@@ -117,3 +117,30 @@ def test_target_health_waits_for_prometheus_to_converge() -> None:
 
     assert counts == {"django-ray": 1, "ray-head": 1, "ray-workers": 1}
     assert sleeps == [1]
+
+
+def test_target_health_waits_for_the_exact_expected_topology() -> None:
+    responses = iter(
+        [
+            _payload(_target("django-ray"), _target("ray-head"), _target("ray-workers")),
+            _payload(
+                _target("django-ray"),
+                _target("ray-head"),
+                *(_target("ray-workers") for _ in range(4)),
+            ),
+        ]
+    )
+    sleeps: list[float] = []
+    timestamps = iter([0.0, 0.0, 1.0])
+
+    counts = wait_for_healthy_targets(
+        lambda: next(responses),
+        timeout=5,
+        interval=1,
+        expected_counts={"django-ray": 1, "ray-head": 1, "ray-workers": 4},
+        clock=lambda: next(timestamps),
+        sleep=sleeps.append,
+    )
+
+    assert counts == {"django-ray": 1, "ray-head": 1, "ray-workers": 4}
+    assert sleeps == [1]

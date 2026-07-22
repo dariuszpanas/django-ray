@@ -1,0 +1,10 @@
+# Deny by default. The legacy Ray image needs only these reviewed inputs.
+**
+!Dockerfile.ray
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!src/**
+!testproject/
+!testproject/**

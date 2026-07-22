@@ -161,6 +161,11 @@ HTTPS, S3, or GCS archive on storage reachable from every Ray node.
 This keeps Django web/worker Deployments in this repo, but replaces static Ray
 Deployments with a `RayCluster` custom resource.
 
+For source-bound validation before merging deployment-sensitive work, use the guarded
+[local KubeRay final gate](local-kuberay-gate.md). It rejects unexpected contexts and namespaces,
+renders unique immutable application tags without editing this overlay, and records the live API,
+probe, image-ID, RuntimeEnv, and Prometheus evidence.
+
 ### 1. Install Operator + Deploy
 
 ```bash
@@ -199,9 +204,11 @@ make k8s-delete-kuberay-kind
 
 ### Notes
 
-- Custom images are still required:
-  - `django-ray:latest` for Django web/worker pods
-  - `django-ray-worker:latest` for Ray head/worker pods
+- `django-ray:latest` is the ordinary iteration image for Django web, setup, and task-manager pods.
+  The final gate replaces it with a unique source-bound tag.
+- KubeRay head and worker pods deliberately use the pinned upstream `rayproject/ray` image. They do
+  not use `django-ray-worker`; project code arrives through the shared RuntimeEnv archive. The
+  custom Ray image remains relevant to the legacy/static deployment path.
 - Default kind cluster name is `kind`. Override when needed:
 
 ```bash

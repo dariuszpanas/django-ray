@@ -26,6 +26,8 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
+              set -euo pipefail
+
               echo "Running migrations..."
               python testproject/manage.py migrate --noinput
               

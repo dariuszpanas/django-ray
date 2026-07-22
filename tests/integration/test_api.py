@@ -728,6 +728,26 @@ class TestExecutionsAPI:
         assert len(data["tasks"]) == 1
         assert data["tasks"][0]["state"] == "QUEUED"
 
+    def test_list_executions_filter_by_exact_task_id(self, client):
+        """A caller can poll one execution without fetching the recent history."""
+        RayTaskExecution.objects.create(
+            task_id="gate-target",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data="5",
+        )
+        RayTaskExecution.objects.create(
+            task_id="unrelated",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data="99",
+        )
+
+        response = client.get("/api/executions?task_id=gate-target&limit=1")
+
+        assert response.status_code == 200
+        assert [task["task_id"] for task in response.json()["tasks"]] == ["gate-target"]
+
     def test_get_execution(self, client):
         """Test getting a specific execution by internal ID."""
         task = RayTaskExecution.objects.create(
