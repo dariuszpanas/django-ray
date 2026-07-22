@@ -15,6 +15,37 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+EXTERNAL_RESOURCE_FIXTURE_MARKERS = {
+    "live_ray_cluster": "live_cluster",
+    "ray_cluster": "real_ray",
+}
+MARKER_IMPLICATIONS = {
+    "compiled_graph_opt_in": "real_ray",
+}
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Require external-resource fixtures to declare their execution contract."""
+    for item in items:
+        for marker_name, required_marker_name in MARKER_IMPLICATIONS.items():
+            if item.get_closest_marker(marker_name) is None:
+                continue
+            if item.get_closest_marker(required_marker_name) is None:
+                raise pytest.UsageError(
+                    f"{item.nodeid} is marked {marker_name!r} but is not marked "
+                    f"{required_marker_name!r}"
+                )
+
+        fixture_names = set(getattr(item, "fixturenames", ()))
+        for fixture_name, marker_name in EXTERNAL_RESOURCE_FIXTURE_MARKERS.items():
+            if fixture_name not in fixture_names:
+                continue
+            if item.get_closest_marker(marker_name) is None:
+                raise pytest.UsageError(
+                    f"{item.nodeid} uses {fixture_name!r} but is not marked {marker_name!r}"
+                )
+
 
 def pytest_configure(config: object) -> None:
     """Configure Django for testing."""

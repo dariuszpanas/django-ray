@@ -18,6 +18,9 @@ pytest-cov, pytest-django, and pytest-xdist identity.
 The dated baseline is comparison evidence, not a claim that counts never change and not a new gate on
 every test-only pull request. Regenerate artifacts for any tree being measured; add a new dated
 snapshot when a later optimization decision needs a durable before/after reference.
+The frozen 2026-07-22 snapshot records 33 `local-ray` cases. The post-#168 taxonomy instead assigns
+22 cases to required `local-ray` evidence and one capability-gated case to
+`compiled-graph-opt-in`; the raw `real_ray` marker still selects all 23.
 
 ## Reproduce the collection baseline
 
@@ -89,7 +92,8 @@ Each collected pytest case belongs to exactly one execution contract:
 |---|---|---|
 | `hermetic` | No Django database, local Ray runtime, PostgreSQL, or live cluster | External markers and database fixture closure excluded |
 | `sqlite-django` | pytest-django's default SQLite database | Inherited/direct `django_db` or a database-owning fixture; external markers excluded |
-| `local-ray` | Starts and stops local Ray | Explicit `real_ray`; serial |
+| `local-ray` | Starts and stops required local Ray | Explicit `real_ray` without `compiled_graph_opt_in`; serial and skips forbidden |
+| `compiled-graph-opt-in` | Starts local Ray for the capability-gated native topology probe | Both `compiled_graph_opt_in` and `real_ray`; serial and deliberate opt-in skip allowed |
 | `postgresql` | Disposable PostgreSQL service | Explicit `postgresql`; serial evidence lane |
 | `live-cluster` | Disposable two-node Ray cluster | Explicit `live_cluster`; serial opt-in lane |
 
@@ -98,6 +102,10 @@ the resolved fixture closure, including `db`, `transactional_db`, reset/rollback
 admin fixtures, and `live_server`; it does not rely on an explicit marker being present. Direct
 parametrization pseudo-fixtures are removed from fixture counts, while genuine indirect fixtures are
 retained.
+
+Collection also enforces that `compiled_graph_opt_in` implies `real_ray`. This keeps the optional
+capability probe out of in-process lanes while allowing required local-Ray evidence to remain
+fail-closed.
 
 A boundary such as `bundled-testproject` intentionally overlaps an execution contract: it answers
 which product surface is being proven, while the execution contract answers what resources the case
@@ -129,8 +137,9 @@ Phase sums are diagnostic work totals. The schema keeps them separate from wall 
 xdist-capable runner can represent overlapping worker phases, but the current schema-v2 runner is
 serial-only. Outcome counts distinguish passed, failed, skipped, expected-failed, and
 unexpected-passed cases. Every runnable group declares whether skips are allowed; external-resource
-contracts and dedicated resource lanes forbid them. The machine JSON retains every fixture and
-parameterized family, while Markdown limits those tables for readability. It also retains the
+contracts and dedicated resource lanes forbid them, except for the explicit
+`compiled-graph-opt-in` contract's capability-gated skip. The machine JSON retains every fixture
+and parameterized family, while Markdown limits those tables for readability. It also retains the
 slowest tests and files, making changes comparable without parsing `--durations` output.
 
 Two Linux GitHub Actions observations show why queue delay must not be attributed to the suite:

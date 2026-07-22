@@ -1,7 +1,4 @@
-"""Integration tests for django-ray task execution.
-
-These tests require a running Ray cluster and execute actual tasks.
-"""
+"""Exercise direct task entrypoints and the serial local-Ray boundary."""
 
 from __future__ import annotations
 
@@ -15,8 +12,6 @@ from pathlib import Path
 
 import pytest
 import ray
-
-pytestmark = pytest.mark.real_ray
 
 # Get project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -36,39 +31,33 @@ def _ray_worker_execution_metadata_probe() -> dict[str, object]:
 
 @pytest.fixture(scope="module")
 def ray_cluster():
-    """Start a local Ray cluster for testing."""
-    if not ray.is_initialized():
-        try:
-            ray.init(ignore_reinit_error=True, include_dashboard=True)
-        except Exception as e:
-            pytest.skip(f"Local Ray startup failed for integration test fixture: {e}")
-    yield
-    # Shutdown Ray to avoid polluting other tests
+    """Start the required local Ray cluster for the serial real-Ray lane."""
     if ray.is_initialized():
+        raise RuntimeError("Required local Ray fixture found an initialized runtime")
+    try:
+        ray.init(address="local", include_dashboard=True, dashboard_port=8265)
+    except Exception as exc:
+        ray.shutdown()
+        raise RuntimeError("Required local Ray startup failed") from exc
+    try:
+        yield
+    finally:
         ray.shutdown()
 
 
 @pytest.fixture
-def django_settings_env():
-    """Set up Django settings environment variable."""
-    old_value = os.environ.get("DJANGO_SETTINGS_MODULE")
-    os.environ["DJANGO_SETTINGS_MODULE"] = "testproject.settings"
+def django_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide entrypoint import state and restore it after every test."""
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings")
 
     # Ensure paths are set up
     src_path = str(PROJECT_ROOT / "src")
     root_path = str(PROJECT_ROOT)
 
     if src_path not in sys.path:
-        sys.path.insert(0, src_path)
+        monkeypatch.syspath_prepend(src_path)
     if root_path not in sys.path:
-        sys.path.insert(0, root_path)
-
-    yield
-
-    if old_value:
-        os.environ["DJANGO_SETTINGS_MODULE"] = old_value
-    else:
-        os.environ.pop("DJANGO_SETTINGS_MODULE", None)
+        monkeypatch.syspath_prepend(root_path)
 
 
 class TestEntrypointExecution:
@@ -238,6 +227,7 @@ class TestEntrypointExecution:
         assert "nonexistent_task" in result["error"]
 
 
+@pytest.mark.real_ray
 class TestRayRemoteExecution:
     """Test executing tasks as Ray remote functions."""
 
