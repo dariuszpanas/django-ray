@@ -440,6 +440,31 @@ verified set less fail-closed. It does mean the evidence must be collected again
 any later promotion. Issue #102 owns a pinned Linux/KubeRay pilot with all four explicit
 policy profiles and immutable image identity.
 
+### Retained Linux/KubeRay blocker evidence
+
+The [2026-07-21 retained KubeRay record](investigations/compiled-graph-kuberay-blocked-2026-07-21.json)
+is the canonical 164,686-byte blocked record (SHA-256
+`972d9d9ad3f39f2e97ebc9bd491cd5222a69cb39f01ec7c28578b7ae0976d702`). It binds source
+`e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b`, image ID
+`sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b`, profile ID
+`sha256:0d95a99dfd7fe8c4bf8258d937e034bb917fb4fb7bd9079961fed63bc551ae99`, configuration ID
+`sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a`, and rendered
+manifest ID `sha256:3ddecb07cbacb6b8edcd171020854547d651ec3111e0fe256fc093a8f3db818c`.
+
+Both the direct driver and retry-disabled nested owner completed their native suites. A
+physically halved shared-memory near neighbor changed only that profile and was rejected
+before a child or native execution started. After the final 50-second cleanup bracket,
+the record proves zero active pilot actors and tasks, zero object-store objects and bytes,
+and zero pilot child processes. The only residue was 22 stable, fully paired Ray
+mutable-object semaphore pairs, with no unpaired or unrelated shared-memory entries.
+The selector-bound pilot namespace was subsequently proven absent, and no unrelated
+namespace was touched.
+
+This is candidate-native failure evidence for the reclamation blocker tracked in
+[issue #154](https://github.com/dariuszpanas/django-ray/issues/154). It does not satisfy
+issue #102, make product execution eligible, trigger a capability-promotion review, or
+add a verified capability row.
+
 ## Evidence promotion and maintenance
 
 A candidate becomes verified only through a reviewed policy change with all of the

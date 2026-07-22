@@ -1,0 +1,3615 @@
+{
+  "candidate_native": true,
+  "cleanup": {
+    "cluster_state": {
+      "active_pilot_actors": 0,
+      "active_pilot_tasks": 0,
+      "global_gc_completed": true,
+      "object_bytes_delta": 0,
+      "object_count_delta": 0,
+      "object_identity_restored": true,
+      "status": "success"
+    },
+    "cluster_state_after": {
+      "active_pilot_actor_count": 0,
+      "active_pilot_actors": [],
+      "active_pilot_task_count": 0,
+      "active_pilot_tasks": [],
+      "global_gc_completed": true,
+      "object_bytes": 0,
+      "object_count": 0,
+      "object_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "schema_version": 1,
+      "status": "success"
+    },
+    "cluster_state_before": {
+      "active_pilot_actor_count": 0,
+      "active_pilot_actors": [],
+      "active_pilot_task_count": 0,
+      "active_pilot_tasks": [],
+      "global_gc_completed": true,
+      "object_bytes": 0,
+      "object_count": 0,
+      "object_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "schema_version": 1,
+      "status": "success"
+    },
+    "compiled_graph_teardown_verified": false,
+    "pilot_namespace_deleted": true,
+    "shared_memory": {
+      "available_memory_restored": false,
+      "available_memory_tolerance_bytes": 1048576,
+      "cleanup_observation_count": 5,
+      "cleanup_observation_wait_seconds": 50,
+      "failure_classification": "ray_mutable_object_shared_memory_reclamation_blocked",
+      "failure_reasons": [
+        "shared_memory_available_bytes_not_restored",
+        "shared_memory_entries_not_restored"
+      ],
+      "pilot_child_processes_remaining": 0,
+      "pod_set_unchanged": true,
+      "pods": {
+        "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+          "after": {
+            "available_bytes": 530812928,
+            "entry_bytes": 384,
+            "entry_count": 12,
+            "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+            "ray_mutable_object_semaphores": {
+              "fully_paired_and_exclusive": true,
+              "header_count": 6,
+              "object_count": 6,
+              "other_entry_count": 0,
+              "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "pair_count": 6,
+              "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+              "paired_entry_count": 12,
+              "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+              "unpaired_entry_count": 0,
+              "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "total_bytes": 536870912
+          },
+          "available_memory_restored": false,
+          "before": {
+            "available_bytes": 536862720,
+            "entry_bytes": 0,
+            "entry_count": 0,
+            "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "ray_mutable_object_semaphores": {
+              "fully_paired_and_exclusive": false,
+              "header_count": 0,
+              "object_count": 0,
+              "other_entry_count": 0,
+              "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "pair_count": 0,
+              "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "paired_entry_count": 0,
+              "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "unpaired_entry_count": 0,
+              "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "total_bytes": 536870912
+          },
+          "deltas": {
+            "available_bytes": -6049792,
+            "entry_bytes": 384,
+            "entry_count": 12
+          },
+          "entries_restored": false,
+          "pilot_child_process_count_after": 0,
+          "pilot_child_process_count_before": 0
+        },
+        "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+          "after": {
+            "available_bytes": 526782464,
+            "entry_bytes": 640,
+            "entry_count": 20,
+            "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+            "ray_mutable_object_semaphores": {
+              "fully_paired_and_exclusive": true,
+              "header_count": 10,
+              "object_count": 10,
+              "other_entry_count": 0,
+              "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "pair_count": 10,
+              "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+              "paired_entry_count": 20,
+              "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+              "unpaired_entry_count": 0,
+              "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "total_bytes": 536870912
+          },
+          "available_memory_restored": false,
+          "before": {
+            "available_bytes": 536862720,
+            "entry_bytes": 0,
+            "entry_count": 0,
+            "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "ray_mutable_object_semaphores": {
+              "fully_paired_and_exclusive": false,
+              "header_count": 0,
+              "object_count": 0,
+              "other_entry_count": 0,
+              "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "pair_count": 0,
+              "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "paired_entry_count": 0,
+              "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "unpaired_entry_count": 0,
+              "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "total_bytes": 536870912
+          },
+          "deltas": {
+            "available_bytes": -10080256,
+            "entry_bytes": 640,
+            "entry_count": 20
+          },
+          "entries_restored": false,
+          "pilot_child_process_count_after": 0,
+          "pilot_child_process_count_before": 0
+        },
+        "django-ray-cgraph-pilot-head-fdsz9": {
+          "after": {
+            "available_bytes": 524787712,
+            "entry_bytes": 384,
+            "entry_count": 12,
+            "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+            "ray_mutable_object_semaphores": {
+              "fully_paired_and_exclusive": true,
+              "header_count": 6,
+              "object_count": 6,
+              "other_entry_count": 0,
+              "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "pair_count": 6,
+              "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+              "paired_entry_count": 12,
+              "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+              "unpaired_entry_count": 0,
+              "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "total_bytes": 536870912
+          },
+          "available_memory_restored": false,
+          "before": {
+            "available_bytes": 536862720,
+            "entry_bytes": 0,
+            "entry_count": 0,
+            "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "ray_mutable_object_semaphores": {
+              "fully_paired_and_exclusive": false,
+              "header_count": 0,
+              "object_count": 0,
+              "other_entry_count": 0,
+              "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "pair_count": 0,
+              "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "paired_entry_count": 0,
+              "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "unpaired_entry_count": 0,
+              "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "total_bytes": 536870912
+          },
+          "deltas": {
+            "available_bytes": -12075008,
+            "entry_bytes": 384,
+            "entry_count": 12
+          },
+          "entries_restored": false,
+          "pilot_child_process_count_after": 0,
+          "pilot_child_process_count_before": 0
+        }
+      },
+      "ray_mutable_object_semaphore_pair_count": 22,
+      "ray_mutable_object_semaphore_pair_fingerprint_digest": "3c884ca9a3a9c15c037f577670e9663cbd692150f37477b33c4b832157fe6922",
+      "shared_memory_entries_restored": false,
+      "shared_memory_entry_identity_restored": false,
+      "stable_paired_semaphore_fingerprints": true,
+      "status": "failure"
+    },
+    "shared_memory_observations": [
+      {
+        "assessment": {
+          "available_memory_restored": false,
+          "available_memory_tolerance_bytes": 1048576,
+          "failure_classification": "runtime_cleanup_invariant_failed",
+          "failure_reasons": [
+            "shared_memory_available_bytes_not_restored",
+            "shared_memory_entries_not_restored"
+          ],
+          "pilot_child_processes_remaining": 0,
+          "pod_set_unchanged": true,
+          "pods": {
+            "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+              "after": {
+                "available_bytes": 530812928,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -6049792,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+              "after": {
+                "available_bytes": 526782464,
+                "entry_bytes": 640,
+                "entry_count": 20,
+                "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 10,
+                  "object_count": 10,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 10,
+                  "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                  "paired_entry_count": 20,
+                  "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -10080256,
+                "entry_bytes": 640,
+                "entry_count": 20
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-head-fdsz9": {
+              "after": {
+                "available_bytes": 524787712,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -12075008,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            }
+          },
+          "shared_memory_entries_restored": false,
+          "shared_memory_entry_identity_restored": false,
+          "stable_paired_semaphore_fingerprints": false,
+          "status": "failure"
+        },
+        "attempt": 1,
+        "cumulative_wait_seconds": 0,
+        "pods": {
+          "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 530812928,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 526782464,
+              "entry_bytes": 640,
+              "entry_count": 20,
+              "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 10,
+                "object_count": 10,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 10,
+                "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                "paired_entry_count": 20,
+                "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-head-fdsz9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 524787712,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          }
+        },
+        "wait_before_seconds": 0
+      },
+      {
+        "assessment": {
+          "available_memory_restored": false,
+          "available_memory_tolerance_bytes": 1048576,
+          "failure_classification": "runtime_cleanup_invariant_failed",
+          "failure_reasons": [
+            "shared_memory_available_bytes_not_restored",
+            "shared_memory_entries_not_restored"
+          ],
+          "pilot_child_processes_remaining": 0,
+          "pod_set_unchanged": true,
+          "pods": {
+            "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+              "after": {
+                "available_bytes": 530812928,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -6049792,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+              "after": {
+                "available_bytes": 526782464,
+                "entry_bytes": 640,
+                "entry_count": 20,
+                "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 10,
+                  "object_count": 10,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 10,
+                  "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                  "paired_entry_count": 20,
+                  "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -10080256,
+                "entry_bytes": 640,
+                "entry_count": 20
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-head-fdsz9": {
+              "after": {
+                "available_bytes": 524787712,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -12075008,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            }
+          },
+          "shared_memory_entries_restored": false,
+          "shared_memory_entry_identity_restored": false,
+          "stable_paired_semaphore_fingerprints": false,
+          "status": "failure"
+        },
+        "attempt": 2,
+        "cumulative_wait_seconds": 5,
+        "pods": {
+          "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 530812928,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 526782464,
+              "entry_bytes": 640,
+              "entry_count": 20,
+              "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 10,
+                "object_count": 10,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 10,
+                "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                "paired_entry_count": 20,
+                "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-head-fdsz9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 524787712,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          }
+        },
+        "wait_before_seconds": 5
+      },
+      {
+        "assessment": {
+          "available_memory_restored": false,
+          "available_memory_tolerance_bytes": 1048576,
+          "failure_classification": "runtime_cleanup_invariant_failed",
+          "failure_reasons": [
+            "shared_memory_available_bytes_not_restored",
+            "shared_memory_entries_not_restored"
+          ],
+          "pilot_child_processes_remaining": 0,
+          "pod_set_unchanged": true,
+          "pods": {
+            "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+              "after": {
+                "available_bytes": 530812928,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -6049792,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+              "after": {
+                "available_bytes": 526782464,
+                "entry_bytes": 640,
+                "entry_count": 20,
+                "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 10,
+                  "object_count": 10,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 10,
+                  "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                  "paired_entry_count": 20,
+                  "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -10080256,
+                "entry_bytes": 640,
+                "entry_count": 20
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-head-fdsz9": {
+              "after": {
+                "available_bytes": 524787712,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -12075008,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            }
+          },
+          "shared_memory_entries_restored": false,
+          "shared_memory_entry_identity_restored": false,
+          "stable_paired_semaphore_fingerprints": false,
+          "status": "failure"
+        },
+        "attempt": 3,
+        "cumulative_wait_seconds": 20,
+        "pods": {
+          "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 530812928,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 526782464,
+              "entry_bytes": 640,
+              "entry_count": 20,
+              "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 10,
+                "object_count": 10,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 10,
+                "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                "paired_entry_count": 20,
+                "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-head-fdsz9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 524787712,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          }
+        },
+        "wait_before_seconds": 15
+      },
+      {
+        "assessment": {
+          "available_memory_restored": false,
+          "available_memory_tolerance_bytes": 1048576,
+          "failure_classification": "runtime_cleanup_invariant_failed",
+          "failure_reasons": [
+            "shared_memory_available_bytes_not_restored",
+            "shared_memory_entries_not_restored"
+          ],
+          "pilot_child_processes_remaining": 0,
+          "pod_set_unchanged": true,
+          "pods": {
+            "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+              "after": {
+                "available_bytes": 530812928,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -6049792,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+              "after": {
+                "available_bytes": 526782464,
+                "entry_bytes": 640,
+                "entry_count": 20,
+                "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 10,
+                  "object_count": 10,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 10,
+                  "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                  "paired_entry_count": 20,
+                  "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -10080256,
+                "entry_bytes": 640,
+                "entry_count": 20
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-head-fdsz9": {
+              "after": {
+                "available_bytes": 524787712,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -12075008,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            }
+          },
+          "shared_memory_entries_restored": false,
+          "shared_memory_entry_identity_restored": false,
+          "stable_paired_semaphore_fingerprints": false,
+          "status": "failure"
+        },
+        "attempt": 4,
+        "cumulative_wait_seconds": 50,
+        "pods": {
+          "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 530812928,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 526782464,
+              "entry_bytes": 640,
+              "entry_count": 20,
+              "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 10,
+                "object_count": 10,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 10,
+                "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                "paired_entry_count": 20,
+                "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-head-fdsz9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 524787712,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          }
+        },
+        "wait_before_seconds": 30
+      },
+      {
+        "assessment": {
+          "available_memory_restored": false,
+          "available_memory_tolerance_bytes": 1048576,
+          "failure_classification": "runtime_cleanup_invariant_failed",
+          "failure_reasons": [
+            "shared_memory_available_bytes_not_restored",
+            "shared_memory_entries_not_restored"
+          ],
+          "pilot_child_processes_remaining": 0,
+          "pod_set_unchanged": true,
+          "pods": {
+            "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+              "after": {
+                "available_bytes": 530812928,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -6049792,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+              "after": {
+                "available_bytes": 526782464,
+                "entry_bytes": 640,
+                "entry_count": 20,
+                "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 10,
+                  "object_count": 10,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 10,
+                  "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                  "paired_entry_count": 20,
+                  "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -10080256,
+                "entry_bytes": 640,
+                "entry_count": 20
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            },
+            "django-ray-cgraph-pilot-head-fdsz9": {
+              "after": {
+                "available_bytes": 524787712,
+                "entry_bytes": 384,
+                "entry_count": 12,
+                "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": true,
+                  "header_count": 6,
+                  "object_count": 6,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 6,
+                  "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                  "paired_entry_count": 12,
+                  "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "available_memory_restored": false,
+              "before": {
+                "available_bytes": 536862720,
+                "entry_bytes": 0,
+                "entry_count": 0,
+                "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "ray_mutable_object_semaphores": {
+                  "fully_paired_and_exclusive": false,
+                  "header_count": 0,
+                  "object_count": 0,
+                  "other_entry_count": 0,
+                  "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "pair_count": 0,
+                  "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "paired_entry_count": 0,
+                  "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "unpaired_entry_count": 0,
+                  "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+                },
+                "total_bytes": 536870912
+              },
+              "deltas": {
+                "available_bytes": -12075008,
+                "entry_bytes": 384,
+                "entry_count": 12
+              },
+              "entries_restored": false,
+              "pilot_child_process_count_after": 0,
+              "pilot_child_process_count_before": 0
+            }
+          },
+          "shared_memory_entries_restored": false,
+          "shared_memory_entry_identity_restored": false,
+          "stable_paired_semaphore_fingerprints": false,
+          "status": "failure"
+        },
+        "attempt": 5,
+        "cumulative_wait_seconds": 50,
+        "phase": "final_capture_bracket_verified",
+        "pods": {
+          "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 530812928,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 526782464,
+              "entry_bytes": 640,
+              "entry_count": 20,
+              "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 10,
+                "object_count": 10,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 10,
+                "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+                "paired_entry_count": 20,
+                "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          },
+          "django-ray-cgraph-pilot-head-fdsz9": {
+            "pilot_child_process_count": 0,
+            "pilot_child_processes": [],
+            "runtime": {
+              "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+              "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+              "kernel": "6.6.87.2-microsoft-standard-WSL2",
+              "machine": "x86_64",
+              "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+            },
+            "schema_version": 1,
+            "shared_memory": {
+              "available_bytes": 524787712,
+              "entry_bytes": 384,
+              "entry_count": 12,
+              "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+              "ray_mutable_object_semaphores": {
+                "fully_paired_and_exclusive": true,
+                "header_count": 6,
+                "object_count": 6,
+                "other_entry_count": 0,
+                "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "pair_count": 6,
+                "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+                "paired_entry_count": 12,
+                "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+                "unpaired_entry_count": 0,
+                "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+              },
+              "total_bytes": 536870912
+            },
+            "status": "success"
+          }
+        },
+        "wait_before_seconds": 0
+      }
+    ],
+    "unrelated_namespaces_touched": []
+  },
+  "completed_at": "2026-07-22T04:40:32.154730+00:00",
+  "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+  "docker": {
+    "build_context_policy": "dockerfile-specific-deny-by-default",
+    "build_context_policy_id": "sha256:2e120dd1914ac74b654b1ce6b2f0dff79ceb9b44f33c9bf44a9ccf9ebb4fc559",
+    "context": "desktop-linux",
+    "endpoint": "npipe:////./pipe/dockerDesktopLinuxEngine",
+    "engine": {
+      "architecture": "amd64",
+      "kernel_version": "6.6.87.2-microsoft-standard-WSL2",
+      "operating_system": "linux",
+      "version": "29.4.3"
+    }
+  },
+  "evidence_id": "local-kuberay:e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b:sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+  "failure": {
+    "classification": "ray_mutable_object_shared_memory_reclamation_blocked",
+    "invariant": "exact_shared_memory_restoration_after_graph_teardown",
+    "summary": "Compiled Graph probes completed, but runtime cleanup did not restore the pinned pod state.",
+    "tracker_urls": [
+      "https://github.com/dariuszpanas/django-ray/issues/154",
+      "https://github.com/ray-project/ray/issues/43836",
+      "https://github.com/ray-project/ray/issues/59127"
+    ]
+  },
+  "hard_timeout": {
+    "child_exit_code": -15,
+    "child_process_group_empty": true,
+    "duration_seconds": 0.257843,
+    "hard_timeout_observed": true,
+    "schema_version": 1,
+    "status": "success",
+    "timeout_seconds": 0.25
+  },
+  "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+  "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+  "kuberay_operator": {
+    "container_id": "docker://e3af13cc220c2551c50f58c2ab2896ee0e47d9bbdba08d2f209981b3c94f0b0d",
+    "container_inventory_verified": true,
+    "container_name": "kuberay-operator",
+    "controller_chain_verified": true,
+    "deployment_name": "kuberay-operator",
+    "deployment_uid": "77b6b7a6-f5ff-4293-be82-901d2f40d9da",
+    "image": "quay.io/kuberay/operator:v1.6.2",
+    "image_id": "sha256:f9eb07d0d3384554763d739f0eed27aa5d0c2ed4c727ceb075930c1f3f4b9f47",
+    "pod_name": "kuberay-operator-7c6759ffd8-n6gbs",
+    "pod_phase": "Running",
+    "pod_uid": "f54653ce-d388-4960-82b4-83895f2ea46a",
+    "ready": true,
+    "replica_set_name": "kuberay-operator-7c6759ffd8",
+    "replica_set_uid": "1baa3e0a-b448-4460-b984-0bad5b013f02",
+    "restart_count": 6,
+    "version": "1.6.2"
+  },
+  "kubernetes": {
+    "node": {
+      "allocatable": {
+        "cpu": "16",
+        "ephemeral-storage": "972991057538",
+        "hugepages-1Gi": "0",
+        "hugepages-2Mi": "0",
+        "memory": "32725172Ki",
+        "pods": "110"
+      },
+      "architecture": "amd64",
+      "capacity": {
+        "cpu": "16",
+        "ephemeral-storage": "1055762868Ki",
+        "hugepages-1Gi": "0",
+        "hugepages-2Mi": "0",
+        "memory": "32827572Ki",
+        "pods": "110"
+      },
+      "container_runtime_version": "docker://29.4.3",
+      "kernel_version": "6.6.87.2-microsoft-standard-WSL2",
+      "name": "docker-desktop",
+      "operating_system": "linux"
+    },
+    "node_selector": {
+      "kubernetes.io/arch": "amd64",
+      "kubernetes.io/hostname": "docker-desktop",
+      "kubernetes.io/os": "linux"
+    },
+    "server_version": "v1.34.1"
+  },
+  "kubernetes_context": "docker-desktop",
+  "namespace": "django-ray-cgraph-pilot",
+  "namespace_lease": {
+    "name": "django-ray-cgraph-pilot",
+    "profile_name": "django-ray-cgraph-kuberay-cpu-v1",
+    "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+    "uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857"
+  },
+  "near_neighbor": {
+    "baseline_admission": {
+      "admitted": true,
+      "changed_dimensions": [],
+      "classification": "EXACT_PILOT_PROFILE_MATCH",
+      "decision": {
+        "beta": true,
+        "candidate": true,
+        "capability_set": "ray-cgraph-policy-v2:55710130886e943e07e033901812d4162b807b839be38ce48b34c2ced7bd8fee",
+        "eligible": false,
+        "message": "Runtime matches a candidate Compiled Graph row, but no reviewed native subprocess smoke verifies this exact capability tuple. Dynamic execution remains available.",
+        "plan_rejection_code": "INCOMPATIBLE_PLATFORM",
+        "policy_version": 2,
+        "reason": "CANDIDATE_REQUIRES_SMOKE",
+        "runtime": {
+          "architecture": "x86_64",
+          "container_profile": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "dependency_profile": "ray=2.56.0;numpy=1.26.4;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=13.4.0",
+          "deployment_profile": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "libc_profile": "glibc-2.35",
+          "object_store_profile": "plasma:268435456",
+          "operating_system": "linux",
+          "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+          "python_abi": "cpython-312-x86_64-linux-gnu",
+          "python_implementation": "cpython",
+          "python_version": "3.12.12",
+          "ray_version": "2.56.0",
+          "shared_memory_profile": "tmpfs:/dev/shm:size=536870912"
+        },
+        "schema_version": 2,
+        "submission_transport": "direct-ray-core",
+        "topology": "direct-driver",
+        "transport": "cpu-shared-memory",
+        "verified": false
+      }
+    },
+    "baseline_value": "tmpfs:/dev/shm:size=536870912",
+    "changed_admission": {
+      "admitted": false,
+      "changed_dimensions": [
+        "shared_memory_profile"
+      ],
+      "classification": "PILOT_PROFILE_MISMATCH",
+      "decision": {
+        "beta": true,
+        "candidate": true,
+        "capability_set": "ray-cgraph-policy-v2:5aadfbe723de8a33cd4aaa5ce4222f8d54151d0f37b5826ecce86519df8b301a",
+        "eligible": false,
+        "message": "Runtime matches a candidate Compiled Graph row, but no reviewed native subprocess smoke verifies this exact capability tuple. Dynamic execution remains available.",
+        "plan_rejection_code": "INCOMPATIBLE_PLATFORM",
+        "policy_version": 2,
+        "reason": "CANDIDATE_REQUIRES_SMOKE",
+        "runtime": {
+          "architecture": "x86_64",
+          "container_profile": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "dependency_profile": "ray=2.56.0;numpy=1.26.4;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=13.4.0",
+          "deployment_profile": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "libc_profile": "glibc-2.35",
+          "object_store_profile": "plasma:268435456",
+          "operating_system": "linux",
+          "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+          "python_abi": "cpython-312-x86_64-linux-gnu",
+          "python_implementation": "cpython",
+          "python_version": "3.12.12",
+          "ray_version": "2.56.0",
+          "shared_memory_profile": "tmpfs:/dev/shm:size=268435456"
+        },
+        "schema_version": 2,
+        "submission_transport": "direct-ray-core",
+        "topology": "direct-driver",
+        "transport": "cpu-shared-memory",
+        "verified": false
+      }
+    },
+    "changed_dimension": "shared_memory_profile",
+    "changed_value": "tmpfs:/dev/shm:size=268435456",
+    "child_spawned": false,
+    "native_started": false,
+    "physical_resource_changed": true,
+    "physical_shared_memory_bytes": 268435456,
+    "pilot_dependency_profile": {
+      "asgiref": "3.11.1",
+      "cupy": "absent",
+      "cupy-cuda11x": "absent",
+      "cupy-cuda12x": "13.4.0",
+      "django": "6.0.7",
+      "django-ray": "0.3.1",
+      "fastrlock": "0.8.3",
+      "numpy": "1.26.4",
+      "pyarrow": "19.0.1",
+      "ray": "2.56.0",
+      "sqlparse": "0.5.5"
+    },
+    "reason": "PILOT_PROFILE_MISMATCH",
+    "schema_version": 1,
+    "status": "success"
+  },
+  "pilot_evidence_passed": false,
+  "pods": {
+    "after": [
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://e510bff8d61312a9d7799348aaaef0cae376a2b174135824ab3fa429b1111e6e",
+        "container_name": "ray-head",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [],
+        "name": "django-ray-cgraph-pilot-head-fdsz9",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "dashboard-host": {
+            "lexical_form": "equals-value",
+            "lexical_value": "0.0.0.0",
+            "semantic_value": "0.0.0.0"
+          },
+          "disable-usage-stats": {
+            "lexical_form": "valueless-switch",
+            "lexical_value": null,
+            "semantic_value": true
+          },
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "0",
+            "semantic_value": "0"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "head",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "ac79e1b5-2258-4165-9c26-22549883f046"
+      },
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://d676f77d7a405875edd8ca741a4750e0a77214256fdc4b065b65d459a8448794",
+        "container_name": "ray-worker",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [
+          {
+            "container_id": "docker://8f2333ddf5a0ee1491b9cedadcb91cd6299e328ef71c04a20f492d31e2edb6b6",
+            "exit_code": 0,
+            "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+            "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "name": "wait-gcs-ready",
+            "ready": true,
+            "reason": "Completed",
+            "restart_count": 0,
+            "state": "terminated"
+          }
+        ],
+        "name": "django-ray-cgraph-pilot-cpu-workers-worker-mftt9",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "1",
+            "semantic_value": "1"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "worker",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "894c7b01-af05-46a7-88a3-c23a5fc28486"
+      },
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://75960cffde6167c21d3c10a89a8f9480295d486a5b2c61b9b5297f2857d644d7",
+        "container_name": "ray-worker",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [
+          {
+            "container_id": "docker://dccbc99bc5f9a85afea7ca8942840eb7d48cea7baaeacb099762598760846c8b",
+            "exit_code": 0,
+            "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+            "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "name": "wait-gcs-ready",
+            "ready": true,
+            "reason": "Completed",
+            "restart_count": 0,
+            "state": "terminated"
+          }
+        ],
+        "name": "django-ray-cgraph-pilot-cpu-workers-worker-zp77r",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "1",
+            "semantic_value": "1"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "worker",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "9172a726-0baf-45cc-9508-617b0ab54e9b"
+      }
+    ],
+    "before": [
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://e510bff8d61312a9d7799348aaaef0cae376a2b174135824ab3fa429b1111e6e",
+        "container_name": "ray-head",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [],
+        "name": "django-ray-cgraph-pilot-head-fdsz9",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "dashboard-host": {
+            "lexical_form": "equals-value",
+            "lexical_value": "0.0.0.0",
+            "semantic_value": "0.0.0.0"
+          },
+          "disable-usage-stats": {
+            "lexical_form": "valueless-switch",
+            "lexical_value": null,
+            "semantic_value": true
+          },
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "0",
+            "semantic_value": "0"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "head",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "ac79e1b5-2258-4165-9c26-22549883f046"
+      },
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://d676f77d7a405875edd8ca741a4750e0a77214256fdc4b065b65d459a8448794",
+        "container_name": "ray-worker",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [
+          {
+            "container_id": "docker://8f2333ddf5a0ee1491b9cedadcb91cd6299e328ef71c04a20f492d31e2edb6b6",
+            "exit_code": 0,
+            "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+            "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "name": "wait-gcs-ready",
+            "ready": true,
+            "reason": "Completed",
+            "restart_count": 0,
+            "state": "terminated"
+          }
+        ],
+        "name": "django-ray-cgraph-pilot-cpu-workers-worker-mftt9",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "1",
+            "semantic_value": "1"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "worker",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "894c7b01-af05-46a7-88a3-c23a5fc28486"
+      },
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://75960cffde6167c21d3c10a89a8f9480295d486a5b2c61b9b5297f2857d644d7",
+        "container_name": "ray-worker",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [
+          {
+            "container_id": "docker://dccbc99bc5f9a85afea7ca8942840eb7d48cea7baaeacb099762598760846c8b",
+            "exit_code": 0,
+            "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+            "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "name": "wait-gcs-ready",
+            "ready": true,
+            "reason": "Completed",
+            "restart_count": 0,
+            "state": "terminated"
+          }
+        ],
+        "name": "django-ray-cgraph-pilot-cpu-workers-worker-zp77r",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "1",
+            "semantic_value": "1"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "worker",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "9172a726-0baf-45cc-9508-617b0ab54e9b"
+      }
+    ],
+    "final_capture_after": [
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://e510bff8d61312a9d7799348aaaef0cae376a2b174135824ab3fa429b1111e6e",
+        "container_name": "ray-head",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [],
+        "name": "django-ray-cgraph-pilot-head-fdsz9",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "dashboard-host": {
+            "lexical_form": "equals-value",
+            "lexical_value": "0.0.0.0",
+            "semantic_value": "0.0.0.0"
+          },
+          "disable-usage-stats": {
+            "lexical_form": "valueless-switch",
+            "lexical_value": null,
+            "semantic_value": true
+          },
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "0",
+            "semantic_value": "0"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "head",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "ac79e1b5-2258-4165-9c26-22549883f046"
+      },
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://d676f77d7a405875edd8ca741a4750e0a77214256fdc4b065b65d459a8448794",
+        "container_name": "ray-worker",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [
+          {
+            "container_id": "docker://8f2333ddf5a0ee1491b9cedadcb91cd6299e328ef71c04a20f492d31e2edb6b6",
+            "exit_code": 0,
+            "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+            "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "name": "wait-gcs-ready",
+            "ready": true,
+            "reason": "Completed",
+            "restart_count": 0,
+            "state": "terminated"
+          }
+        ],
+        "name": "django-ray-cgraph-pilot-cpu-workers-worker-mftt9",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "1",
+            "semantic_value": "1"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "worker",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "894c7b01-af05-46a7-88a3-c23a5fc28486"
+      },
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://75960cffde6167c21d3c10a89a8f9480295d486a5b2c61b9b5297f2857d644d7",
+        "container_name": "ray-worker",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [
+          {
+            "container_id": "docker://dccbc99bc5f9a85afea7ca8942840eb7d48cea7baaeacb099762598760846c8b",
+            "exit_code": 0,
+            "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+            "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "name": "wait-gcs-ready",
+            "ready": true,
+            "reason": "Completed",
+            "restart_count": 0,
+            "state": "terminated"
+          }
+        ],
+        "name": "django-ray-cgraph-pilot-cpu-workers-worker-zp77r",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "1",
+            "semantic_value": "1"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "worker",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "9172a726-0baf-45cc-9508-617b0ab54e9b"
+      }
+    ],
+    "final_capture_before": [
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://e510bff8d61312a9d7799348aaaef0cae376a2b174135824ab3fa429b1111e6e",
+        "container_name": "ray-head",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [],
+        "name": "django-ray-cgraph-pilot-head-fdsz9",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "dashboard-host": {
+            "lexical_form": "equals-value",
+            "lexical_value": "0.0.0.0",
+            "semantic_value": "0.0.0.0"
+          },
+          "disable-usage-stats": {
+            "lexical_form": "valueless-switch",
+            "lexical_value": null,
+            "semantic_value": true
+          },
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "0",
+            "semantic_value": "0"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "head",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "ac79e1b5-2258-4165-9c26-22549883f046"
+      },
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://d676f77d7a405875edd8ca741a4750e0a77214256fdc4b065b65d459a8448794",
+        "container_name": "ray-worker",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [
+          {
+            "container_id": "docker://8f2333ddf5a0ee1491b9cedadcb91cd6299e328ef71c04a20f492d31e2edb6b6",
+            "exit_code": 0,
+            "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+            "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "name": "wait-gcs-ready",
+            "ready": true,
+            "reason": "Completed",
+            "restart_count": 0,
+            "state": "terminated"
+          }
+        ],
+        "name": "django-ray-cgraph-pilot-cpu-workers-worker-mftt9",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "1",
+            "semantic_value": "1"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "worker",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "894c7b01-af05-46a7-88a3-c23a5fc28486"
+      },
+      {
+        "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+        "container_id": "docker://75960cffde6167c21d3c10a89a8f9480295d486a5b2c61b9b5297f2857d644d7",
+        "container_name": "ray-worker",
+        "container_state": "running",
+        "deletion_timestamp": null,
+        "identity_environment": {
+          "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_COMPILED_GRAPH_OBJECT_STORE_PROFILE": "plasma:268435456",
+          "DJANGO_RAY_COMPILED_GRAPH_SHARED_MEMORY_PROFILE": "tmpfs:/dev/shm:size=536870912",
+          "DJANGO_RAY_PILOT_CONFIG_ID": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "DJANGO_RAY_PILOT_IMAGE_ID": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "DJANGO_RAY_PILOT_KUBERAY_VERSION": "1.6.2",
+          "DJANGO_RAY_PILOT_NAMESPACE_UID": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+          "DJANGO_RAY_PILOT_RUN_TOKEN": "cdd37f0b04111b9ac38550e4dc897a10"
+        },
+        "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+        "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+        "init_containers": [
+          {
+            "container_id": "docker://dccbc99bc5f9a85afea7ca8942840eb7d48cea7baaeacb099762598760846c8b",
+            "exit_code": 0,
+            "image": "django-ray-cgraph-pilot:e03208f7b3a0",
+            "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "name": "wait-gcs-ready",
+            "ready": true,
+            "reason": "Completed",
+            "restart_count": 0,
+            "state": "terminated"
+          }
+        ],
+        "name": "django-ray-cgraph-pilot-cpu-workers-worker-zp77r",
+        "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+        "node": "docker-desktop",
+        "node_selector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "docker-desktop",
+          "kubernetes.io/os": "linux"
+        },
+        "owner_reference_verified": true,
+        "phase": "Running",
+        "ray_start_parameters": {
+          "num-cpus": {
+            "lexical_form": "equals-value",
+            "lexical_value": "1",
+            "semantic_value": "1"
+          },
+          "object-store-memory": {
+            "lexical_form": "equals-value",
+            "lexical_value": "268435456",
+            "semantic_value": "268435456"
+          }
+        },
+        "raycluster_uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "requests": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          }
+        },
+        "restart_count": 0,
+        "role": "worker",
+        "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+        "shared_memory_volume": {
+          "medium": "Memory",
+          "sizeLimit": "512Mi"
+        },
+        "uid": "9172a726-0baf-45cc-9508-617b0ab54e9b"
+      }
+    ],
+    "final_capture_identity": {
+      "configuration_ids_unchanged": true,
+      "container_ids_unchanged": true,
+      "identity_environments_unchanged": true,
+      "image_ids_unchanged": true,
+      "init_container_inventories_unchanged": true,
+      "pod_lifecycle_unchanged": true,
+      "pod_set_unchanged": true,
+      "pod_uids_unchanged": true,
+      "ray_start_parameters_unchanged": true,
+      "restart_counts_unchanged": true,
+      "status": "success"
+    },
+    "identity": {
+      "configuration_ids_unchanged": true,
+      "container_ids_unchanged": true,
+      "identity_environments_unchanged": true,
+      "image_ids_unchanged": true,
+      "init_container_inventories_unchanged": true,
+      "pod_lifecycle_unchanged": true,
+      "pod_set_unchanged": true,
+      "pod_uids_unchanged": true,
+      "ray_start_parameters_unchanged": true,
+      "restart_counts_unchanged": true,
+      "status": "success"
+    },
+    "runtime_after": {
+      "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+        "pilot_child_process_count": 0,
+        "pilot_child_processes": [],
+        "runtime": {
+          "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "kernel": "6.6.87.2-microsoft-standard-WSL2",
+          "machine": "x86_64",
+          "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+        },
+        "schema_version": 1,
+        "shared_memory": {
+          "available_bytes": 530812928,
+          "entry_bytes": 384,
+          "entry_count": 12,
+          "entry_identity_digest": "8cb9a1b16217efdd029b1d85540bbd009f97f1056cdccc359439e672e15d11d4",
+          "ray_mutable_object_semaphores": {
+            "fully_paired_and_exclusive": true,
+            "header_count": 6,
+            "object_count": 6,
+            "other_entry_count": 0,
+            "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "pair_count": 6,
+            "pair_identity_digest": "205e821a03d1921e538c90c31dc13ac9ee9a0815cf5b135ce02f8a34e274f90c",
+            "paired_entry_count": 12,
+            "semaphore_identity_digest": "ccf2c5c88464e417d2885af2561e42f7ea1a260579b760bbae02614d8b230f47",
+            "unpaired_entry_count": 0,
+            "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "total_bytes": 536870912
+        },
+        "status": "success"
+      },
+      "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+        "pilot_child_process_count": 0,
+        "pilot_child_processes": [],
+        "runtime": {
+          "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "kernel": "6.6.87.2-microsoft-standard-WSL2",
+          "machine": "x86_64",
+          "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+        },
+        "schema_version": 1,
+        "shared_memory": {
+          "available_bytes": 526782464,
+          "entry_bytes": 640,
+          "entry_count": 20,
+          "entry_identity_digest": "ad0515e356c6b4b4a63c7e3e9966145d2f4c8f98b0e3c977ab306884295b0401",
+          "ray_mutable_object_semaphores": {
+            "fully_paired_and_exclusive": true,
+            "header_count": 10,
+            "object_count": 10,
+            "other_entry_count": 0,
+            "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "pair_count": 10,
+            "pair_identity_digest": "968232befa98cb4b363a1ac664d847be875926ea8bed7710262c56fa45f7ce1e",
+            "paired_entry_count": 20,
+            "semaphore_identity_digest": "bdf3b0fdc0a8b31875979c32a8cea9c7b6fd7ba845ef2925b8db8404c71416bb",
+            "unpaired_entry_count": 0,
+            "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "total_bytes": 536870912
+        },
+        "status": "success"
+      },
+      "django-ray-cgraph-pilot-head-fdsz9": {
+        "pilot_child_process_count": 0,
+        "pilot_child_processes": [],
+        "runtime": {
+          "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "kernel": "6.6.87.2-microsoft-standard-WSL2",
+          "machine": "x86_64",
+          "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+        },
+        "schema_version": 1,
+        "shared_memory": {
+          "available_bytes": 524787712,
+          "entry_bytes": 384,
+          "entry_count": 12,
+          "entry_identity_digest": "12a8ff6814871a2260a7f67eee4418453b379a028a9f38ada775158979a17fa7",
+          "ray_mutable_object_semaphores": {
+            "fully_paired_and_exclusive": true,
+            "header_count": 6,
+            "object_count": 6,
+            "other_entry_count": 0,
+            "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "pair_count": 6,
+            "pair_identity_digest": "3ad916218b7c9f95b472ce2a582088c02d5d9013717bba765add99239bbf51f3",
+            "paired_entry_count": 12,
+            "semaphore_identity_digest": "f7ca1794831b1f7b67a0c4d0556e643526fa2198d1ae7a24d0bfac234e616c5c",
+            "unpaired_entry_count": 0,
+            "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "total_bytes": 536870912
+        },
+        "status": "success"
+      }
+    },
+    "runtime_before": {
+      "django-ray-cgraph-pilot-cpu-workers-worker-mftt9": {
+        "pilot_child_process_count": 0,
+        "pilot_child_processes": [],
+        "runtime": {
+          "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "kernel": "6.6.87.2-microsoft-standard-WSL2",
+          "machine": "x86_64",
+          "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+        },
+        "schema_version": 1,
+        "shared_memory": {
+          "available_bytes": 536862720,
+          "entry_bytes": 0,
+          "entry_count": 0,
+          "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "ray_mutable_object_semaphores": {
+            "fully_paired_and_exclusive": false,
+            "header_count": 0,
+            "object_count": 0,
+            "other_entry_count": 0,
+            "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "pair_count": 0,
+            "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "paired_entry_count": 0,
+            "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "unpaired_entry_count": 0,
+            "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "total_bytes": 536870912
+        },
+        "status": "success"
+      },
+      "django-ray-cgraph-pilot-cpu-workers-worker-zp77r": {
+        "pilot_child_process_count": 0,
+        "pilot_child_processes": [],
+        "runtime": {
+          "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "kernel": "6.6.87.2-microsoft-standard-WSL2",
+          "machine": "x86_64",
+          "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+        },
+        "schema_version": 1,
+        "shared_memory": {
+          "available_bytes": 536862720,
+          "entry_bytes": 0,
+          "entry_count": 0,
+          "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "ray_mutable_object_semaphores": {
+            "fully_paired_and_exclusive": false,
+            "header_count": 0,
+            "object_count": 0,
+            "other_entry_count": 0,
+            "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "pair_count": 0,
+            "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "paired_entry_count": 0,
+            "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "unpaired_entry_count": 0,
+            "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "total_bytes": 536870912
+        },
+        "status": "success"
+      },
+      "django-ray-cgraph-pilot-head-fdsz9": {
+        "pilot_child_process_count": 0,
+        "pilot_child_processes": [],
+        "runtime": {
+          "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "kernel": "6.6.87.2-microsoft-standard-WSL2",
+          "machine": "x86_64",
+          "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+        },
+        "schema_version": 1,
+        "shared_memory": {
+          "available_bytes": 536862720,
+          "entry_bytes": 0,
+          "entry_count": 0,
+          "entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "ray_mutable_object_semaphores": {
+            "fully_paired_and_exclusive": false,
+            "header_count": 0,
+            "object_count": 0,
+            "other_entry_count": 0,
+            "other_entry_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "pair_count": 0,
+            "pair_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "paired_entry_count": 0,
+            "semaphore_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "unpaired_entry_count": 0,
+            "unpaired_identity_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "total_bytes": 536870912
+        },
+        "status": "success"
+      }
+    }
+  },
+  "profile": {
+    "architecture": "linux/amd64",
+    "base_image": "rayproject/ray:2.56.0-py312@sha256:2951c07de396a8b746f9c678b52c6e2282e614e00f80e6846a9ccd12945ae6b0",
+    "cluster": {
+      "head": {
+        "cpu_limit": "1",
+        "cpu_request": "250m",
+        "init_containers": [],
+        "memory_limit": "2Gi",
+        "memory_request": "1Gi",
+        "ray_cpus": 0,
+        "ray_start_parameters": {
+          "dashboard-host": {
+            "kind": "value",
+            "value": "0.0.0.0"
+          },
+          "disable-usage-stats": {
+            "kind": "valueless-true-switch",
+            "value": "true"
+          },
+          "num-cpus": {
+            "kind": "value",
+            "value": "0"
+          },
+          "object-store-memory": {
+            "kind": "value",
+            "value": "268435456"
+          }
+        },
+        "replicas": 1
+      },
+      "namespace": "django-ray-cgraph-pilot",
+      "object_store_bytes_per_pod": 268435456,
+      "raycluster_name": "django-ray-cgraph-pilot",
+      "shared_memory_bytes_per_pod": 536870912,
+      "workers": {
+        "cpu_limit": "1",
+        "cpu_request": "500m",
+        "init_containers": [
+          "wait-gcs-ready"
+        ],
+        "max_replicas": 2,
+        "memory_limit": "2Gi",
+        "memory_request": "1Gi",
+        "min_replicas": 2,
+        "ray_cpus_per_pod": 1,
+        "ray_start_parameters": {
+          "num-cpus": {
+            "kind": "value",
+            "value": "1"
+          },
+          "object-store-memory": {
+            "kind": "value",
+            "value": "268435456"
+          }
+        },
+        "replicas": 2
+      }
+    },
+    "compiled_graph_distribution": "ray[cgraph]==2.56.0 (preinstalled in the pinned base image)",
+    "dependency_profile": {
+      "asgiref": "3.11.1",
+      "cupy": "absent",
+      "cupy-cuda11x": "absent",
+      "cupy-cuda12x": "13.4.0",
+      "django": "6.0.7",
+      "django-ray": "0.3.1",
+      "fastrlock": "0.8.3",
+      "numpy": "1.26.4",
+      "pyarrow": "19.0.1",
+      "ray": "2.56.0",
+      "sqlparse": "0.5.5"
+    },
+    "docker": {
+      "context": "desktop-linux",
+      "endpoint": "npipe:////./pipe/dockerDesktopLinuxEngine",
+      "engine": {
+        "architecture": "amd64",
+        "kernel_version": "6.6.87.2-microsoft-standard-WSL2",
+        "operating_system": "linux",
+        "version": "29.4.3"
+      }
+    },
+    "kuberay": {
+      "autoscaling": false,
+      "operator_container_name": "kuberay-operator",
+      "operator_deployment_labels": {
+        "app.kubernetes.io/instance": "kuberay-operator",
+        "app.kubernetes.io/managed-by": "Helm",
+        "app.kubernetes.io/name": "kuberay-operator",
+        "helm.sh/chart": "kuberay-operator-1.6.2"
+      },
+      "operator_deployment_name": "kuberay-operator",
+      "operator_image": "quay.io/kuberay/operator@sha256:f9eb07d0d3384554763d739f0eed27aa5d0c2ed4c727ceb075930c1f3f4b9f47",
+      "operator_namespace": "kuberay-system",
+      "operator_pod_labels": {
+        "app.kubernetes.io/component": "kuberay-operator",
+        "app.kubernetes.io/instance": "kuberay-operator",
+        "app.kubernetes.io/name": "kuberay-operator"
+      },
+      "operator_selector": {
+        "app.kubernetes.io/instance": "kuberay-operator",
+        "app.kubernetes.io/name": "kuberay-operator"
+      },
+      "operator_service_account": "kuberay-operator",
+      "operator_strategy": "Recreate",
+      "operator_version": "1.6.2"
+    },
+    "kubernetes": {
+      "context": "docker-desktop",
+      "node": {
+        "architecture": "amd64",
+        "container_runtime_version": "docker://29.4.3",
+        "kernel_version": "6.6.87.2-microsoft-standard-WSL2",
+        "name": "docker-desktop",
+        "operating_system": "linux"
+      },
+      "node_selector": {
+        "kubernetes.io/arch": "amd64",
+        "kubernetes.io/hostname": "docker-desktop",
+        "kubernetes.io/os": "linux"
+      },
+      "server_version": "v1.34.1"
+    },
+    "probe": {
+      "application_exception": true,
+      "channel_transport": "cpu_shared_memory",
+      "cleanup_retry_delays_seconds": [
+        0,
+        5,
+        15,
+        30
+      ],
+      "explicit_teardown": true,
+      "hard_timeout_seconds": 180,
+      "hard_timeout_self_test_seconds": 0.25,
+      "max_buffered_results": 1,
+      "max_inflight_executions": 1,
+      "nested_owner_max_retries": 0,
+      "repeated_invocations": 3,
+      "result_timeout": true,
+      "submission_transport": "direct_ray_core",
+      "topologies": [
+        "direct-driver",
+        "nested-ray-task"
+      ]
+    },
+    "profile_name": "django-ray-cgraph-kuberay-cpu-v1",
+    "python_version": "3.12.12",
+    "ray_version": "2.56.0",
+    "runtime_expectations": {
+      "architecture": "x86_64",
+      "kernel_release": "6.6.87.2-microsoft-standard-WSL2",
+      "libc": [
+        "glibc",
+        "2.35"
+      ],
+      "operating_system": "linux",
+      "os_release": {
+        "ID": "ubuntu",
+        "PRETTY_NAME": "Ubuntu 22.04.5 LTS",
+        "VERSION_ID": "22.04"
+      },
+      "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+      "python_abi": "cpython-312-x86_64-linux-gnu",
+      "python_implementation": "cpython"
+    },
+    "schema_version": 1
+  },
+  "profile_id": "sha256:0d95a99dfd7fe8c4bf8258d937e034bb917fb4fb7bd9079961fed63bc551ae99",
+  "profile_name": "django-ray-cgraph-kuberay-cpu-v1",
+  "promotion_eligible": false,
+  "raycluster_lease": {
+    "name": "django-ray-cgraph-pilot",
+    "namespace_uid": "2c2649b7-01b5-4af2-82f2-0c794fa8b857",
+    "profile_name": "django-ray-cgraph-kuberay-cpu-v1",
+    "run_token": "cdd37f0b04111b9ac38550e4dc897a10",
+    "uid": "bb0b8caa-0c96-464d-b298-46f24f2b70fa"
+  },
+  "rendered_manifest_id": "sha256:3ddecb07cbacb6b8edcd171020854547d651ec3111e0fe256fc093a8f3db818c",
+  "schema_version": 1,
+  "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b",
+  "started_at": "2026-07-22T04:38:29.293652+00:00",
+  "status": "blocked",
+  "supported_product_execution": false,
+  "topologies": [
+    {
+      "candidate_native": true,
+      "decision": {
+        "beta": true,
+        "candidate": true,
+        "capability_set": "ray-cgraph-policy-v2:55710130886e943e07e033901812d4162b807b839be38ce48b34c2ced7bd8fee",
+        "eligible": false,
+        "message": "Runtime matches a candidate Compiled Graph row, but no reviewed native subprocess smoke verifies this exact capability tuple. Dynamic execution remains available.",
+        "plan_rejection_code": "INCOMPATIBLE_PLATFORM",
+        "policy_version": 2,
+        "reason": "CANDIDATE_REQUIRES_SMOKE",
+        "runtime": {
+          "architecture": "x86_64",
+          "container_profile": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "dependency_profile": "ray=2.56.0;numpy=1.26.4;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=13.4.0",
+          "deployment_profile": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "libc_profile": "glibc-2.35",
+          "object_store_profile": "plasma:268435456",
+          "operating_system": "linux",
+          "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+          "python_abi": "cpython-312-x86_64-linux-gnu",
+          "python_implementation": "cpython",
+          "python_version": "3.12.12",
+          "ray_version": "2.56.0",
+          "shared_memory_profile": "tmpfs:/dev/shm:size=536870912"
+        },
+        "schema_version": 2,
+        "submission_transport": "direct-ray-core",
+        "topology": "direct-driver",
+        "transport": "cpu-shared-memory",
+        "verified": false
+      },
+      "duration_seconds": 5.124844,
+      "hardened_subprocess": {
+        "bounded_private_control_record": true,
+        "decision": {
+          "beta": true,
+          "candidate": true,
+          "capability_set": "ray-cgraph-policy-v2:55710130886e943e07e033901812d4162b807b839be38ce48b34c2ced7bd8fee",
+          "eligible": false,
+          "message": "Runtime matches a candidate Compiled Graph row, but no reviewed native subprocess smoke verifies this exact capability tuple. Dynamic execution remains available.",
+          "plan_rejection_code": "INCOMPATIBLE_PLATFORM",
+          "policy_version": 2,
+          "reason": "CANDIDATE_REQUIRES_SMOKE",
+          "runtime": {
+            "architecture": "x86_64",
+            "container_profile": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "dependency_profile": "ray=2.56.0;numpy=1.26.4;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=13.4.0",
+            "deployment_profile": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+            "libc_profile": "glibc-2.35",
+            "object_store_profile": "plasma:268435456",
+            "operating_system": "linux",
+            "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+            "python_abi": "cpython-312-x86_64-linux-gnu",
+            "python_implementation": "cpython",
+            "python_version": "3.12.12",
+            "ray_version": "2.56.0",
+            "shared_memory_profile": "tmpfs:/dev/shm:size=536870912"
+          },
+          "schema_version": 2,
+          "submission_transport": "direct-ray-core",
+          "topology": "direct-driver",
+          "transport": "cpu-shared-memory",
+          "verified": false
+        },
+        "duration_seconds": 5.124844,
+        "exit_code": 0,
+        "native_exit_code": null,
+        "process_tree_terminated_after_child_exit": true,
+        "schema_version": 2,
+        "status": "success",
+        "successful": true,
+        "termination_signal": null
+      },
+      "observation": {
+        "payload": {
+          "driver_pid": 914,
+          "suite": {
+            "application_exception": {
+              "actor_state_observations": [
+                {
+                  "actor_id": "2dbeb35baf5f1ac3952e149302000000",
+                  "name": "cgraph-failure-ceb24e2c4eeb469f92a9f9cc856a864b",
+                  "state": "DEAD"
+                }
+              ],
+              "actors_terminated": true,
+              "error_type": "RayTaskError(PilotApplicationError)",
+              "marker_preserved": true,
+              "result_consumed": true,
+              "results_consumed": 1,
+              "results_discarded_by_teardown": 0,
+              "results_submitted": 1,
+              "teardown_returned": true
+            },
+            "normal": {
+              "actor_state_observations": [
+                {
+                  "actor_id": "dca0ecb8b1689eed1578e4d202000000",
+                  "name": "cgraph-normal-fb6baaa204a449468676b501e62bf6a9-left",
+                  "state": "DEAD"
+                },
+                {
+                  "actor_id": "becab4bef79a13373c5ea07a02000000",
+                  "name": "cgraph-normal-fb6baaa204a449468676b501e62bf6a9-right",
+                  "state": "DEAD"
+                }
+              ],
+              "actors_terminated": true,
+              "compile_seconds": 1.074351,
+              "invocations": [
+                {
+                  "index": 0,
+                  "trace": [
+                    {
+                      "invocation": 1,
+                      "stage": "left"
+                    },
+                    {
+                      "invocation": 1,
+                      "stage": "right"
+                    }
+                  ],
+                  "value": 2
+                },
+                {
+                  "index": 1,
+                  "trace": [
+                    {
+                      "invocation": 2,
+                      "stage": "left"
+                    },
+                    {
+                      "invocation": 2,
+                      "stage": "right"
+                    }
+                  ],
+                  "value": 3
+                },
+                {
+                  "index": 2,
+                  "trace": [
+                    {
+                      "invocation": 3,
+                      "stage": "left"
+                    },
+                    {
+                      "invocation": 3,
+                      "stage": "right"
+                    }
+                  ],
+                  "value": 4
+                }
+              ],
+              "max_buffered_results": 1,
+              "max_inflight_executions": 1,
+              "ordered_results_consumed": true,
+              "results_consumed": 3,
+              "results_discarded_by_teardown": 0,
+              "results_submitted": 3,
+              "teardown_returned": true
+            },
+            "result_accounting": {
+              "consumed": 4,
+              "discarded_by_teardown": 1,
+              "submitted": 5,
+              "unconsumed": 0
+            },
+            "result_timeout": {
+              "actor_state_observations": [
+                {
+                  "actor_id": "7a579a52196e93803055090902000000",
+                  "name": "cgraph-delay-0827170cd8384268a95ead1c30cec03e",
+                  "state": "DEAD"
+                }
+              ],
+              "actors_terminated": true,
+              "result_consumption_attempted_once": true,
+              "results_consumed": 0,
+              "results_discarded_by_teardown": 1,
+              "results_submitted": 1,
+              "teardown_returned": true,
+              "timed_out_result_discarded_by_teardown": true,
+              "timeout_type": "RayChannelTimeoutError"
+            },
+            "teardown_completed": true,
+            "unconsumed_results": 0
+          }
+        },
+        "runtime": {
+          "alive_ray_nodes": 3,
+          "cluster_resources": {
+            "CPU": 2.0,
+            "memory": 6442450944.0,
+            "object_store_memory": 805306368.0
+          },
+          "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "dependencies": {
+            "asgiref": "3.11.1",
+            "cupy": "absent",
+            "cupy-cuda11x": "absent",
+            "cupy-cuda12x": "13.4.0",
+            "django": "6.0.7",
+            "django-ray": "0.3.1",
+            "fastrlock": "0.8.3",
+            "numpy": "1.26.4",
+            "pyarrow": "19.0.1",
+            "ray": "2.56.0",
+            "sqlparse": "0.5.5"
+          },
+          "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "kernel": "6.6.87.2-microsoft-standard-WSL2",
+          "kuberay_version": "1.6.2",
+          "libc": [
+            "glibc",
+            "2.35"
+          ],
+          "machine": "x86_64",
+          "os_release": {
+            "ID": "ubuntu",
+            "PRETTY_NAME": "Ubuntu 22.04.5 LTS",
+            "VERSION_ID": "22.04"
+          },
+          "python_implementation": "CPython",
+          "python_version": "3.12.12",
+          "runtime_identity": {
+            "architecture": "x86_64",
+            "container_profile": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "dependency_profile": "ray=2.56.0;numpy=1.26.4;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=13.4.0",
+            "deployment_profile": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+            "libc_profile": "glibc-2.35",
+            "object_store_profile": "plasma:268435456",
+            "operating_system": "linux",
+            "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+            "python_abi": "cpython-312-x86_64-linux-gnu",
+            "python_implementation": "cpython",
+            "python_version": "3.12.12",
+            "ray_version": "2.56.0",
+            "shared_memory_profile": "tmpfs:/dev/shm:size=536870912"
+          },
+          "shared_memory_bytes": 536870912,
+          "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+        },
+        "schema_version": 1
+      },
+      "schema_version": 1,
+      "status": "success",
+      "supported_product_execution": false,
+      "topology": "direct-driver"
+    },
+    {
+      "candidate_native": true,
+      "decision": {
+        "beta": true,
+        "candidate": true,
+        "capability_set": "ray-cgraph-policy-v2:6fdd74483dfad9804f1e461af9666997f34769d72e2e7fb40dd58fa0f844863f",
+        "eligible": false,
+        "message": "Runtime matches a candidate Compiled Graph row, but no reviewed native subprocess smoke verifies this exact capability tuple. Dynamic execution remains available.",
+        "plan_rejection_code": "INCOMPATIBLE_PLATFORM",
+        "policy_version": 2,
+        "reason": "CANDIDATE_REQUIRES_SMOKE",
+        "runtime": {
+          "architecture": "x86_64",
+          "container_profile": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "dependency_profile": "ray=2.56.0;numpy=1.26.4;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=13.4.0",
+          "deployment_profile": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "libc_profile": "glibc-2.35",
+          "object_store_profile": "plasma:268435456",
+          "operating_system": "linux",
+          "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+          "python_abi": "cpython-312-x86_64-linux-gnu",
+          "python_implementation": "cpython",
+          "python_version": "3.12.12",
+          "ray_version": "2.56.0",
+          "shared_memory_profile": "tmpfs:/dev/shm:size=536870912"
+        },
+        "schema_version": 2,
+        "submission_transport": "direct-ray-core",
+        "topology": "nested-ray-task",
+        "transport": "cpu-shared-memory",
+        "verified": false
+      },
+      "duration_seconds": 6.61802,
+      "hardened_subprocess": {
+        "bounded_private_control_record": true,
+        "decision": {
+          "beta": true,
+          "candidate": true,
+          "capability_set": "ray-cgraph-policy-v2:6fdd74483dfad9804f1e461af9666997f34769d72e2e7fb40dd58fa0f844863f",
+          "eligible": false,
+          "message": "Runtime matches a candidate Compiled Graph row, but no reviewed native subprocess smoke verifies this exact capability tuple. Dynamic execution remains available.",
+          "plan_rejection_code": "INCOMPATIBLE_PLATFORM",
+          "policy_version": 2,
+          "reason": "CANDIDATE_REQUIRES_SMOKE",
+          "runtime": {
+            "architecture": "x86_64",
+            "container_profile": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "dependency_profile": "ray=2.56.0;numpy=1.26.4;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=13.4.0",
+            "deployment_profile": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+            "libc_profile": "glibc-2.35",
+            "object_store_profile": "plasma:268435456",
+            "operating_system": "linux",
+            "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+            "python_abi": "cpython-312-x86_64-linux-gnu",
+            "python_implementation": "cpython",
+            "python_version": "3.12.12",
+            "ray_version": "2.56.0",
+            "shared_memory_profile": "tmpfs:/dev/shm:size=536870912"
+          },
+          "schema_version": 2,
+          "submission_transport": "direct-ray-core",
+          "topology": "nested-ray-task",
+          "transport": "cpu-shared-memory",
+          "verified": false
+        },
+        "duration_seconds": 6.61802,
+        "exit_code": 0,
+        "native_exit_code": null,
+        "process_tree_terminated_after_child_exit": true,
+        "schema_version": 2,
+        "status": "success",
+        "successful": true,
+        "termination_signal": null
+      },
+      "observation": {
+        "payload": {
+          "owner_max_retries": 0,
+          "owner_pid": 1220,
+          "owner_task_name": "cgraph-owner-adf076b13f644cccb47a7705b40f36c2",
+          "suite": {
+            "application_exception": {
+              "actor_state_observations": [
+                {
+                  "actor_id": "cebe219b1119167264b0a1b003000000",
+                  "name": "cgraph-failure-9b7dbe54570a4184aec3c6c9b57887d1",
+                  "state": "DEAD"
+                }
+              ],
+              "actors_terminated": true,
+              "error_type": "RayTaskError(PilotApplicationError)",
+              "marker_preserved": true,
+              "result_consumed": true,
+              "results_consumed": 1,
+              "results_discarded_by_teardown": 0,
+              "results_submitted": 1,
+              "teardown_returned": true
+            },
+            "normal": {
+              "actor_state_observations": [
+                {
+                  "actor_id": "7e1d60b5d4e99f12fab9988803000000",
+                  "name": "cgraph-normal-1be0cda3383045078e6d755d43a45bac-left",
+                  "state": "DEAD"
+                },
+                {
+                  "actor_id": "df129e0a2ce19737dc2dfc3103000000",
+                  "name": "cgraph-normal-1be0cda3383045078e6d755d43a45bac-right",
+                  "state": "DEAD"
+                }
+              ],
+              "actors_terminated": true,
+              "compile_seconds": 1.03405,
+              "invocations": [
+                {
+                  "index": 0,
+                  "trace": [
+                    {
+                      "invocation": 1,
+                      "stage": "left"
+                    },
+                    {
+                      "invocation": 1,
+                      "stage": "right"
+                    }
+                  ],
+                  "value": 2
+                },
+                {
+                  "index": 1,
+                  "trace": [
+                    {
+                      "invocation": 2,
+                      "stage": "left"
+                    },
+                    {
+                      "invocation": 2,
+                      "stage": "right"
+                    }
+                  ],
+                  "value": 3
+                },
+                {
+                  "index": 2,
+                  "trace": [
+                    {
+                      "invocation": 3,
+                      "stage": "left"
+                    },
+                    {
+                      "invocation": 3,
+                      "stage": "right"
+                    }
+                  ],
+                  "value": 4
+                }
+              ],
+              "max_buffered_results": 1,
+              "max_inflight_executions": 1,
+              "ordered_results_consumed": true,
+              "results_consumed": 3,
+              "results_discarded_by_teardown": 0,
+              "results_submitted": 3,
+              "teardown_returned": true
+            },
+            "result_accounting": {
+              "consumed": 4,
+              "discarded_by_teardown": 1,
+              "submitted": 5,
+              "unconsumed": 0
+            },
+            "result_timeout": {
+              "actor_state_observations": [
+                {
+                  "actor_id": "81f7136acecaf720f0ac571503000000",
+                  "name": "cgraph-delay-f5c4678c205f494c90c336f01f1ba19d",
+                  "state": "DEAD"
+                }
+              ],
+              "actors_terminated": true,
+              "result_consumption_attempted_once": true,
+              "results_consumed": 0,
+              "results_discarded_by_teardown": 1,
+              "results_submitted": 1,
+              "teardown_returned": true,
+              "timed_out_result_discarded_by_teardown": true,
+              "timeout_type": "RayChannelTimeoutError"
+            },
+            "teardown_completed": true,
+            "unconsumed_results": 0
+          }
+        },
+        "runtime": {
+          "alive_ray_nodes": 3,
+          "cluster_resources": {
+            "CPU": 2.0,
+            "memory": 6442450944.0,
+            "object_store_memory": 805306368.0
+          },
+          "configuration_id": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+          "dependencies": {
+            "asgiref": "3.11.1",
+            "cupy": "absent",
+            "cupy-cuda11x": "absent",
+            "cupy-cuda12x": "13.4.0",
+            "django": "6.0.7",
+            "django-ray": "0.3.1",
+            "fastrlock": "0.8.3",
+            "numpy": "1.26.4",
+            "pyarrow": "19.0.1",
+            "ray": "2.56.0",
+            "sqlparse": "0.5.5"
+          },
+          "image_id": "sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+          "kernel": "6.6.87.2-microsoft-standard-WSL2",
+          "kuberay_version": "1.6.2",
+          "libc": [
+            "glibc",
+            "2.35"
+          ],
+          "machine": "x86_64",
+          "os_release": {
+            "ID": "ubuntu",
+            "PRETTY_NAME": "Ubuntu 22.04.5 LTS",
+            "VERSION_ID": "22.04"
+          },
+          "python_implementation": "CPython",
+          "python_version": "3.12.12",
+          "runtime_identity": {
+            "architecture": "x86_64",
+            "container_profile": "django-ray-cgraph-pilot:e03208f7b3a0@sha256:b9ace4b8cc89f586442f4c83cacd8a2bb8875ea473f6d135b42d6508bb81ab7b",
+            "dependency_profile": "ray=2.56.0;numpy=1.26.4;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=13.4.0",
+            "deployment_profile": "sha256:cad1f9c5633873bec6bb53f9cea8f40175213fcc19b6b4196553eec3014c332a",
+            "libc_profile": "glibc-2.35",
+            "object_store_profile": "plasma:268435456",
+            "operating_system": "linux",
+            "platform_profile": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+            "python_abi": "cpython-312-x86_64-linux-gnu",
+            "python_implementation": "cpython",
+            "python_version": "3.12.12",
+            "ray_version": "2.56.0",
+            "shared_memory_profile": "tmpfs:/dev/shm:size=536870912"
+          },
+          "shared_memory_bytes": 536870912,
+          "source_revision": "e03208f7b3a0a1eb6a54611d4bc43efb17dddf7b"
+        },
+        "schema_version": 1
+      },
+      "schema_version": 1,
+      "status": "success",
+      "supported_product_execution": false,
+      "topology": "nested-ray-task"
+    }
+  ],
+  "zero_residual_state": {
+    "active_pilot_actor_count": 0,
+    "active_pilot_task_count": 0,
+    "object_bytes": 0,
+    "object_count": 0,
+    "pilot_child_process_count": 0
+  }
+}
