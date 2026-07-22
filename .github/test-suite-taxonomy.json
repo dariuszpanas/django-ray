@@ -1,0 +1,451 @@
+{
+  "schema_version": 2,
+  "execution_contracts": [
+    {
+      "id": "hermetic",
+      "owner": "Pure-Python and mocked-boundary tests",
+      "contract": "Runs without Django database access, a local Ray runtime, PostgreSQL, or a live cluster.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Portable profiles preserve explicit platform or optional-capability skips and report them as outcomes."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "exclude_markers": ["django_db", "live_cluster", "postgresql", "real_ray"],
+        "exclude_fixtures": [
+          "admin_client",
+          "admin_user",
+          "db",
+          "django_db_reset_sequences",
+          "django_db_serialized_rollback",
+          "live_server",
+          "transactional_db"
+        ]
+      }
+    },
+    {
+      "id": "sqlite-django",
+      "owner": "Django ORM and application integration tests",
+      "contract": "Uses pytest-django's default SQLite database but no external database or Ray runtime.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "SQLite profiles preserve optional-capability skips unrelated to database availability and report them as outcomes."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_any_markers": ["django_db"],
+        "include_any_fixtures": [
+          "admin_client",
+          "admin_user",
+          "db",
+          "django_db_reset_sequences",
+          "django_db_serialized_rollback",
+          "live_server",
+          "transactional_db"
+        ],
+        "exclude_markers": ["live_cluster", "postgresql", "real_ray"]
+      }
+    },
+    {
+      "id": "local-ray",
+      "owner": "Ray Core and worker integration tests",
+      "contract": "Starts and stops a real local Ray runtime and therefore remains serial.",
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "A local-Ray observation is valid only when every selected runtime case executes."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["real_ray"],
+        "exclude_markers": ["live_cluster", "postgresql"]
+      }
+    },
+    {
+      "id": "postgresql",
+      "owner": "Database coordination and PostgreSQL persistence tests",
+      "contract": "Requires the disposable PostgreSQL service and tests backend-specific behavior serially.",
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "PostgreSQL evidence must prove the configured database rather than skip unavailable resources."
+      },
+      "django_settings_modules": ["tests.postgres_settings"],
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["postgresql"],
+        "exclude_markers": ["live_cluster", "real_ray"]
+      }
+    },
+    {
+      "id": "live-cluster",
+      "owner": "Ray cluster fault and transport integration tests",
+      "contract": "Requires the explicitly enabled disposable two-node Ray cluster.",
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "Live-cluster evidence must execute every selected fault and transport case."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["live_cluster"]
+      }
+    }
+  ],
+  "domains": [
+    {
+      "id": "workflow-progress",
+      "owner": "Workflow progress preparation, persistence, reads, summaries, cleanup, and API",
+      "contract": "Tracks the end-to-end workflow-progress feature family across pure, SQLite, and PostgreSQL boundaries.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles retain test-declared resource skips; dedicated resource lanes own mandatory execution proof."
+      },
+      "selection": {
+        "paths": [
+          "tests/integration/test_postgresql_workflow_progress_reads.py",
+          "tests/integration/test_postgresql_workflow_progress_storage.py",
+          "tests/integration/test_workflow_progress_api.py",
+          "tests/integration/test_workflow_progress_detail_storage_migration.py",
+          "tests/integration/test_workflow_progress_migration.py",
+          "tests/integration/test_workflow_progress_summary_migration.py",
+          "tests/unit/test_workflow_progress.py",
+          "tests/unit/test_workflow_progress_benchmark_command.py",
+          "tests/unit/test_workflow_progress_cleanup.py",
+          "tests/unit/test_workflow_progress_cleanup_command.py",
+          "tests/unit/test_workflow_progress_preparation.py",
+          "tests/unit/test_workflow_progress_preparation_prototype.py",
+          "tests/unit/test_workflow_progress_reads.py",
+          "tests/unit/test_workflow_progress_storage_audit.py",
+          "tests/unit/test_workflow_progress_storage_boundaries.py",
+          "tests/unit/test_workflow_progress_storage_models.py",
+          "tests/unit/test_workflow_progress_storage_persistence.py",
+          "tests/unit/test_workflow_progress_storage_records.py",
+          "tests/unit/test_workflow_progress_storage_scaling.py",
+          "tests/unit/test_workflow_progress_summary.py",
+          "tests/unit/test_workflow_progress_terminal_expiry.py"
+        ]
+      }
+    },
+    {
+      "id": "compiled-graph-and-kuberay",
+      "owner": "Compiled Graph capability and guarded KubeRay evidence",
+      "contract": "Tracks candidate lifecycle, probes, pinned pilot policy, local gate, and Kubernetes web probes.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles retain test-declared capability skips and expose them in timing outcomes."
+      },
+      "selection": {
+        "paths": [
+          "tests/unit/test_compiled_graph.py",
+          "tests/unit/test_compiled_graph_lifecycle.py",
+          "tests/unit/test_compiled_graph_probe.py",
+          "tests/unit/test_kuberay_compiled_graph_pilot.py",
+          "tests/unit/test_kubernetes_web_probes.py",
+          "tests/unit/test_local_kuberay_gate.py"
+        ]
+      }
+    },
+    {
+      "id": "repository-policy-and-release",
+      "owner": "Repository policy, coverage review, packaging, and release",
+      "contract": "Tracks local policy parsers and release/package invariants rather than deployed runtime behavior.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles retain explicit platform skips and expose them in timing outcomes."
+      },
+      "selection": {
+        "paths": [
+          "tests/unit/test_check_conventional_commits.py",
+          "tests/unit/test_ci_workflow_policy.py",
+          "tests/unit/test_coverage_debt.py",
+          "tests/unit/test_package_metadata.py",
+          "tests/unit/test_release.py",
+          "tests/unit/test_test_suite_inventory.py"
+        ]
+      }
+    },
+    {
+      "id": "worker-and-ray-runtime",
+      "owner": "Worker command, runner, distributed helper, and remote execution",
+      "contract": "Tracks worker orchestration and Ray runtime behavior across mocked, local-Ray, and SQLite contracts.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Mixed domain profiles may select optional runtime cases; execution contracts own mandatory resource proof."
+      },
+      "selection": {
+        "paths": [
+          "tests/integration/test_worker.py",
+          "tests/unit/test_distributed.py",
+          "tests/unit/test_distributed_mocked.py",
+          "tests/unit/test_ray_core.py",
+          "tests/unit/test_ray_core_runner.py",
+          "tests/unit/test_ray_job.py",
+          "tests/unit/test_remote.py",
+          "tests/unit/test_worker_command_coverage.py",
+          "tests/unit/test_worker_command_runtime.py",
+          "tests/unit/test_worker_mode_selection.py",
+          "tests/unit/test_worker_reconnect_poll_reconcile.py"
+        ]
+      }
+    },
+    {
+      "id": "coordination-polling-and-recovery",
+      "owner": "Coordination leases, polling, recovery, priority, and fault handling",
+      "contract": "Tracks scheduler coordination and recovery behavior across pure, SQLite, PostgreSQL, and live-cluster boundaries.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles retain test-declared resource skips; dedicated resource lanes own mandatory execution proof."
+      },
+      "selection": {
+        "paths": [
+          "tests/integration/test_failure_injection.py",
+          "tests/integration/test_live_failure_injection.py",
+          "tests/integration/test_postgresql_coordination.py",
+          "tests/integration/test_postgresql_polling.py",
+          "tests/unit/test_leasing.py",
+          "tests/unit/test_polling.py",
+          "tests/unit/test_polling_benchmark_command.py",
+          "tests/unit/test_reconciliation.py",
+          "tests/unit/test_worker_reconnect_poll_reconcile.py"
+        ]
+      }
+    },
+    {
+      "id": "schema-migrations-and-bootstrap",
+      "owner": "Persisted-schema compatibility and application bootstrap",
+      "contract": "Tracks forward migration semantics and the installed command-line bootstrap boundary.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Migration and bootstrap profiles report explicit environment skips while their owning CI lanes retain execution proof."
+      },
+      "selection": {
+        "paths": [
+          "tests/integration/test_input_payload_migration.py",
+          "tests/integration/test_priority_migration.py",
+          "tests/integration/test_workflow_plan_migration.py",
+          "tests/integration/test_workflow_progress_detail_storage_migration.py",
+          "tests/integration/test_workflow_progress_migration.py",
+          "tests/integration/test_workflow_progress_summary_migration.py",
+          "tests/unit/test_entrypoint.py"
+        ]
+      }
+    },
+    {
+      "id": "workflow-plan-and-task-runtime",
+      "owner": "Workflow plans, workflow execution, and Django task backend",
+      "contract": "Tracks public plan validation and the task/workflow lifecycle independent of progress storage.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles preserve test-declared optional-capability skips and report them as outcomes."
+      },
+      "selection": {
+        "paths": [
+          "tests/integration/test_task_execution.py",
+          "tests/unit/test_backends.py",
+          "tests/unit/test_cancellation.py",
+          "tests/unit/test_lifecycle.py",
+          "tests/unit/test_retry.py",
+          "tests/unit/test_workflow_plans.py",
+          "tests/unit/test_workflows.py"
+        ]
+      }
+    },
+    {
+      "id": "configuration-storage-and-observability",
+      "owner": "Configuration, durable payload/result storage, and observability",
+      "contract": "Tracks settings and portable storage, buffering, serialization, metrics, logging, and redaction behavior.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles preserve test-declared optional-capability skips and report them as outcomes."
+      },
+      "selection": {
+        "paths": [
+          "tests/unit/test_input_storage.py",
+          "tests/unit/test_logging.py",
+          "tests/unit/test_metrics.py",
+          "tests/unit/test_observability.py",
+          "tests/unit/test_redaction.py",
+          "tests/unit/test_result_buffer.py",
+          "tests/unit/test_result_fold.py",
+          "tests/unit/test_result_storage.py",
+          "tests/unit/test_runtime_env.py",
+          "tests/unit/test_serialization.py",
+          "tests/unit/test_settings.py"
+        ]
+      }
+    },
+    {
+      "id": "django-admin-and-api",
+      "owner": "Django admin and bundled HTTP API",
+      "contract": "Tracks the framework-facing admin, API, and URL presentation boundaries.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Domain profiles preserve test-declared browser or platform skips; the bundled CI lane forbids them."
+      },
+      "selection": {
+        "paths": [
+          "tests/integration/test_admin.py",
+          "tests/integration/test_admin_coverage.py",
+          "tests/integration/test_api.py",
+          "tests/integration/test_workflow_progress_api.py"
+        ]
+      }
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "bundled-testproject",
+      "owner": "Bundled Django sample application",
+      "contract": "Re-executes the user-facing API, security, URL, and workflow boundary with testproject coverage.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Ad hoc boundary profiles expose environment skips; the dedicated testproject CI lane forbids them."
+      },
+      "selection": {
+        "paths": [
+          "tests/integration/test_api.py",
+          "tests/integration/test_workflow_progress_api.py",
+          "tests/unit/test_sample_security.py",
+          "tests/unit/test_testproject_workflows.py"
+        ]
+      }
+    }
+  ],
+  "profiles": [
+    {
+      "id": "portable-local",
+      "owner": "Cross-platform local suite profiling",
+      "contract": "Measures the broad local path without live-cluster or real-Ray resource ownership.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The broad local profile intentionally includes backend and optional-capability cases that self-skip without dedicated resources."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "exclude_markers": ["live_cluster", "real_ray"]
+      }
+    }
+  ],
+  "ci_lanes": [
+    {
+      "id": "supported-python",
+      "owner": "Required Python compatibility and source coverage gate",
+      "contract": "Runs the normal suite with source coverage on every supported Python version.",
+      "variants": 3,
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "exclude_markers": ["live_cluster"]
+      }
+    },
+    {
+      "id": "postgresql-evidence",
+      "owner": "Required PostgreSQL coordination gate",
+      "contract": "Runs the backend-specific coordination, storage, read, polling, and metrics evidence.",
+      "variants": 1,
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "The PostgreSQL service job must execute every selected backend case."
+      },
+      "django_settings_modules": ["tests.postgres_settings"],
+      "selection": {
+        "paths": [
+          "tests/integration/test_postgresql_coordination.py",
+          "tests/integration/test_postgresql_metrics.py",
+          "tests/integration/test_postgresql_polling.py",
+          "tests/integration/test_postgresql_workflow_progress_reads.py",
+          "tests/integration/test_postgresql_workflow_progress_storage.py"
+        ],
+        "include_markers": ["postgresql"]
+      }
+    },
+    {
+      "id": "live-cluster-evidence",
+      "owner": "Required live-cluster fault gate",
+      "contract": "Runs fault and transport behavior against a disposable two-node Ray cluster.",
+      "variants": 1,
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "The enabled live-cluster job must execute every selected fault case."
+      },
+      "selection": {
+        "paths": ["tests/integration/test_live_failure_injection.py"],
+        "include_markers": ["live_cluster"]
+      }
+    },
+    {
+      "id": "testproject-contract",
+      "owner": "Required bundled-application gate",
+      "contract": "Runs the bundled-testproject boundary again with its own coverage floor.",
+      "variants": 1,
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "The bundled-application gate provisions its browser runtime and must not skip selected cases."
+      },
+      "selection": {
+        "paths": [
+          "tests/integration/test_api.py",
+          "tests/integration/test_workflow_progress_api.py",
+          "tests/unit/test_sample_security.py",
+          "tests/unit/test_testproject_workflows.py"
+        ]
+      }
+    },
+    {
+      "id": "dependency-compatibility",
+      "owner": "Required minimum and latest dependency gate",
+      "contract": "Repeats the portable subset under minimum-direct and latest dependency resolutions.",
+      "variants": 2,
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Dependency jobs intentionally select backend-specific and optional-capability cases that self-skip without their dedicated resources."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "exclude_markers": ["live_cluster", "real_ray"]
+      }
+    }
+  ],
+  "overlap_candidates": [
+    {
+      "id": "workflow-progress-protocol",
+      "owner": "Workflow progress summary protocol and read fixtures",
+      "paths": [
+        "tests/unit/test_workflow_progress_reads.py",
+        "tests/unit/test_workflow_progress_summary.py"
+      ],
+      "reason": "Pure summary codec cases pay for a database identity, while several read-order cases construct larger workflows than their cursor boundary requires.",
+      "review": "Split DB-free protocol cases from ORM/lifecycle cases and right-size read cardinalities without merging HTTP adapter coverage."
+    },
+    {
+      "id": "workflow-progress-preparation",
+      "owner": "Workflow progress preparation and prototype",
+      "paths": [
+        "tests/unit/test_workflow_progress_preparation.py",
+        "tests/unit/test_workflow_progress_preparation_prototype.py"
+      ],
+      "reason": "Production and prototype suites have similar ordering and reporting shapes but retain different end-to-end topology and detachment contracts.",
+      "review": "Do not consolidate until a scheduled benchmark or replacement harness proves both production and prototype invariants."
+    },
+    {
+      "id": "bundled-browser-contract",
+      "owner": "Bundled dashboard authentication",
+      "paths": [
+        "tests/integration/test_api.py",
+        "tests/javascript/landing_auth.test.mjs"
+      ],
+      "reason": "Authentication setup overlaps endpoint cases, and one collected pytest case launches a nested Node suite whose subtests are repeated by every CI variant.",
+      "review": "Share the configured token fixture, remove only proven endpoint overlap, and keep browser behavior as a distinct contract."
+    },
+    {
+      "id": "kuberay-overlay-render",
+      "owner": "Guarded local KubeRay overlay policy",
+      "paths": [
+        "tests/unit/test_local_kuberay_gate.py"
+      ],
+      "reason": "Two overlay-policy tests copy and render the same immutable Kustomize overlay independently.",
+      "review": "Share one module-scoped raw render and deep-copy parsed data while retaining separate source-binding and topology assertions."
+    }
+  ]
+}

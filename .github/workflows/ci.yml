@@ -105,7 +105,43 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
+      - name: Run tests with suite timing
+        if: matrix.python-version == '3.12'
+        run: >-
+          uv run --python ${{ matrix.python-version }} python
+          scripts/test_suite_inventory.py run
+          --lane supported-python
+          --observation github-actions-ubuntu-py312
+          --variant locked-dependencies
+          --timing-output artifacts/test-suite-inventory/github-actions-py312.json
+          --external-note "GitHub Actions queue and environment setup are recorded by workflow metadata; this record starts at pytest instrumentation"
+          --
+          --cov=src
+          --cov-report=xml
+          --cov-report=term
+          --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }}
+          -v
+
+      - name: Validate suite timing evidence
+        if: matrix.python-version == '3.12'
+        run: >-
+          uv run --python ${{ matrix.python-version }} python
+          scripts/test_suite_inventory.py collect
+          --timing artifacts/test-suite-inventory/github-actions-py312.json
+          --json-output artifacts/test-suite-inventory/github-actions-py312-inventory.json
+          --markdown-output artifacts/test-suite-inventory/github-actions-py312-inventory.md
+
+      - name: Upload suite timing evidence
+        if: always() && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-suite-timing-python-3.12
+          path: artifacts/test-suite-inventory/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Run tests
+        if: matrix.python-version != '3.12'
         run: uv run --python ${{ matrix.python-version }} pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} -v
 
       - name: Enforce worker module coverage

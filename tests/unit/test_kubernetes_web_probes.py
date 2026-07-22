@@ -34,7 +34,10 @@ def _kubectl_executable() -> str:
     pytest.skip("kubectl is not installed; skipping Kustomize probe regression tests")
 
 
-@pytest.fixture(scope="session", params=KUSTOMIZATIONS, ids=str)
+@pytest.fixture(
+    scope="session",
+    params=tuple(pytest.param(path, id=path.as_posix()) for path in KUSTOMIZATIONS),
+)
 def rendered_kustomization(request: pytest.FixtureRequest) -> tuple[Path, list[dict[str, Any]]]:
     path: Path = request.param
     result = subprocess.run(
