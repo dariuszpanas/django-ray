@@ -37,11 +37,13 @@ run the gate and choose the cold Ray restart.
 | Package behavior with no container, Kubernetes, RuntimeEnv, HTTP, worker, or task-lifecycle effect | Recommended before a release; otherwise not applicable | `skip` | The normal CI matrix is the primary gate. |
 | Documentation, issue templates, repository policy, comments, or tests that do not change deployed behavior | Not applicable | N/A | Do not turn deployment-independent work into a cluster requirement. |
 
-The gate decision and exact evidence belong in every material retained commit and PR to which a
-**Required** row applies. For a **Recommended** row, record either the passing evidence or a specific
-reason it was not run. The evidence binds to the immutable Git tree rather than relying on a commit
-SHA that changes when the evidence is added to the commit message. Never copy a token, Secret
-payload, unbounded log, or browser credential into history.
+The gate decision and a concise semantic validation summary belong in every material retained commit
+and PR to which a **Required** row applies. Record the exact gate command and result, the explicit
+cold-Ray decision, the verified source-tree match, and the relevant workload, API/task-smoke, and
+preservation outcomes. For a **Recommended** row, record either the same passing summary or a
+specific reason it was not run. The detailed evidence still binds the run to the immutable Git tree
+rather than relying on a commit SHA that changes when only the commit message is amended. Never copy
+a token, Secret payload, unbounded log, or browser credential into history.
 
 ## Prerequisites
 
@@ -211,22 +213,24 @@ ID is required for every source-bound container; upstream/helper containers reta
 runtime image IDs in the exact identity contract. Ray-node checks additionally prove the generic-image
 and RuntimeEnv boundary.
 
-## Evidence to retain
+## Runtime evidence and durable validation summary
 
-On success, copy the complete `=== Local KubeRay final gate evidence ===` block into the PR and amend
-only the retained commit message to include it. The amend changes the commit SHA, so
-`source_commit_at_run` is an invocation reference, not the durable source identity. Verify that the
-recorded `source_tree` still equals `git rev-parse HEAD^{tree}` after the amend. Any tracked file or
-tree change invalidates the run and requires a new gate. The block contains no token and is
-deliberately concise. The gate prepares this block during its final identity check but emits neither
-the final success line nor any evidence until its private workspace and kubeconfig have been removed
-successfully. A workspace creation or cleanup failure therefore cannot leave a false passing block.
-Every emitted line is at most 72 characters, so the complete block can be copied into a commit
-without reflowing it. A long value is emitted as `key_parts=<count>` followed by ordered
-`key_part_001=...` lines; concatenate the numbered parts without a separator to recover the original
-value. Do not omit, wrap, or reorder those lines.
+On success, the gate prints a complete `=== Local KubeRay final gate evidence ===` block for immediate
+diagnosis. It prepares the block during its final identity check but emits neither the final success
+line nor any evidence until its private workspace and kubeconfig have been removed successfully. A
+workspace creation or cleanup failure therefore cannot leave a false passing block. The block is
+secret-free and bounded, but it contains ephemeral image IDs, pod hashes, cluster UIDs, checksums,
+and other run-specific identifiers. Do not copy the complete block into a retained commit or PR by
+default.
 
-The block records:
+Each emitted line is at most 72 characters for bounded terminal output and stable diagnostic
+artifacts. A long value is emitted as `key_parts=<count>` followed by ordered `key_part_001=...`
+lines; concatenate the numbered parts without a separator to recover the original value. Preserve
+the complete ordered block when attaching it as a diagnostic artifact. If an investigation genuinely
+needs a run-specific identifier, retain the focused value or artifact in an issue or PR comment and
+explain how it will be used.
+
+The runtime block records:
 
 - commit at run time, stable source tree, context, namespace, private kubeconfig digest, local API
   server, and pinned Docker endpoint;
@@ -238,6 +242,34 @@ The block records:
 - unauthenticated/authenticated status summary plus the fresh task ID, `SUCCEEDED`, and result `5`;
 - probe path/Host, web restart count, and Prometheus pool counts;
 - the preservation statement.
+
+After a full pass, retain a concise semantic summary in the material commit and PR. It must include:
+
+- the exact `uv run make k8s-final-gate` command and arguments plus its pass/fail result;
+- the explicit cold-Ray choice: `required` means replacement was performed and verified, while
+  `skip` means the existing pinned topology was preserved;
+- confirmation that the emitted `source_tree` matched `git rev-parse HEAD^{tree}` after any
+  message-only amend, without copying the tree hash into history; and
+- the behavior and preservation outcomes relevant to the change, such as application readiness,
+  authenticated API status, smoke-task state and result, probes, Prometheus targets, preserved Ray
+  topology, Secret, PostgreSQL data, or PVCs.
+
+For example, portable commit validation can say:
+
+```text
+- `uv run make k8s-final-gate` with
+  `K8S_CONTEXT=docker-desktop`, `K8S_NAMESPACE=django-ray`, and
+  `K8S_RAY_RESTART=skip`: passed; the emitted source tree matched
+  HEAD, all application workloads were ready, authenticated API smoke
+  returned 200, the task succeeded with result 5, and the existing
+  four-worker Ray topology and data-bearing resources were preserved.
+```
+
+The PR should carry the same facts in natural Markdown without artificial 72-column wrapping. The
+summary is intentionally useful without access to the original local cluster; raw identifiers are
+not. `source_commit_at_run` remains only an invocation reference because a message-only amend changes
+the commit SHA while preserving the tested tree. Any tracked file or tree change invalidates the run
+and requires a new gate.
 
 Do not paraphrase a partial run as passing. A preflight-only result is useful preparation but is not
 final-gate evidence.

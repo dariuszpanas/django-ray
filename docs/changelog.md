@@ -165,6 +165,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Local KubeRay handoffs now retain concise semantic validation summaries with the exact command,
+  cold-Ray decision, source-tree match, behavior, and preservation outcomes instead of copying raw
+  image IDs, pod hashes, cluster UIDs, and checksums into commits and pull requests. The complete
+  bounded secret-free evidence block remains available at runtime for focused diagnostics.
 - Queue names now serve only as workload-isolation boundaries and no longer imply
   scheduling precedence.
 - Commit-history validation now requires descriptive body context without prescribing section
