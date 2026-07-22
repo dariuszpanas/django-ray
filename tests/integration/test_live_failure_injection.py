@@ -48,23 +48,23 @@ def live_ray_cluster():
     import ray
 
     if ray.is_initialized():
-        ray.shutdown()
+        raise RuntimeError("Required live Ray fixture found an initialized driver")
 
     try:
-        ray.init(address=LIVE_RAY_ADDRESS, ignore_reinit_error=True)
-    except Exception as e:  # pragma: no cover - this is environment-dependent
-        pytest.skip(f"unable to connect to live Ray cluster at {LIVE_RAY_ADDRESS}: {e}")
-
-    alive_nodes = [node for node in ray.nodes() if node.get("Alive")]
-    if len(alive_nodes) < LIVE_MIN_NODES:
+        ray.init(address=LIVE_RAY_ADDRESS)
+    except Exception as exc:  # pragma: no cover - environment-dependent
         ray.shutdown()
-        pytest.skip(
-            f"live cluster has {len(alive_nodes)} alive node(s), requires at least {LIVE_MIN_NODES}"
-        )
+        raise RuntimeError(f"Required live Ray connection failed at {LIVE_RAY_ADDRESS}") from exc
 
-    yield ray
-
-    if ray.is_initialized():
+    try:
+        alive_nodes = [node for node in ray.nodes() if node.get("Alive")]
+        if len(alive_nodes) < LIVE_MIN_NODES:
+            raise RuntimeError(
+                "Required live Ray cluster has "
+                f"{len(alive_nodes)} alive node(s); requires at least {LIVE_MIN_NODES}"
+            )
+        yield ray
+    finally:
         ray.shutdown()
 
 

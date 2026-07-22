@@ -543,6 +543,55 @@ src/django_ray/
 
 ## Testing Guidelines
 
+### External-resource ownership
+
+Pytest markers describe execution contracts, not whether a test lives under `unit` or
+`integration`. Tests that use only in-process Django, SQLite, mocks, or local files do not need an
+external-resource marker. Keep these resource-owning contracts explicit:
+
+| Contract | Ownership and supported execution |
+|---|---|
+| Required `real_ray` | Starts a local Ray runtime. Use `uv run pytest -m "real_ray and not compiled_graph_opt_in" -v` only for serial debugging without pytest-xdist. The manifest-backed evidence command below makes startup errors and skips fail. |
+| `compiled_graph_opt_in` | Marks the one native Compiled Graph topology probe, also requires `real_ray`, and permits its deliberate environment-gated skip until the upstream capability gate passes. Run it separately with `uv run pytest -m compiled_graph_opt_in -v`. |
+| `postgresql` | Uses the dedicated PostgreSQL coordination database. Run `uv run make test-postgres` as one serial evidence lane so lock, timing, row, and WAL observations are not distorted. |
+| `live_cluster` | Connects to the shared external Ray cluster. The module skips only while opt-in is disabled; once enabled, connection or readiness failure fails the serial lane. |
+| Testproject contract | Exercises the bundled application boundary through `uv run make test-testproject`; it is path-selected rather than marker-selected. |
+
+Plain pytest reports selected skips without failing its exit status. Record required local-Ray evidence
+through the manifest runner so its `forbid` skip policy proves that all 22 selected cases executed:
+
+```bash
+uv run python scripts/test_suite_inventory.py run \
+  --lane local-ray \
+  --observation local-required-ray \
+  --variant locked-dependencies \
+  --timing-output artifacts/test-suite-inventory/local-ray-timing.json \
+  --external-note "uv environment already synchronized; setup time excluded" \
+  -- -v
+```
+
+Tests that request `ray_cluster` or `live_ray_cluster` are checked during collection for the
+matching marker. Add a new external-resource fixture to `EXTERNAL_RESOURCE_FIXTURE_MARKERS` in
+`tests/conftest.py` so an unmarked consumer cannot silently enter another lane.
+`compiled_graph_opt_in` also fails collection unless the same case carries `real_ray`.
+
+The current post-#168 collection has 23 raw `real_ray` marker cases: 22 required local-Ray cases and
+one separately owned `compiled_graph_opt_in` case. It also has 32 `postgresql` cases, 3
+`live_cluster` cases, and 85 path-selected testproject cases. This is distinct from issue #166's
+frozen 2026-07-22 comparison snapshot, which records 33 `local-ray` cases before this ownership
+correction and must remain unchanged. The five required real-Ray cases in
+`TestRayRemoteExecution` share one module-scoped runtime and dashboard on port 8265; the other ten
+tests in that module are ordinary in-process Django tests. Recheck marker counts without executing
+their resources:
+
+```bash
+uv run pytest --collect-only -q -m real_ray
+uv run pytest --collect-only -q -m "real_ray and not compiled_graph_opt_in"
+uv run pytest --collect-only -q -m compiled_graph_opt_in
+uv run pytest --collect-only -q -m postgresql
+uv run pytest --collect-only -q -m live_cluster
+```
+
 ### Unit Tests
 
 Test individual components in isolation. Use the existing

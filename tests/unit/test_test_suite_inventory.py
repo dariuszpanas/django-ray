@@ -174,6 +174,11 @@ def test_checked_in_manifest_partitions_representative_execution_contracts() -> 
         _item("test_sqlite", "django_db"),
         _item("test_sqlite_fixture", fixtures=("db", "request")),
         _item("test_ray", "django_db", "real_ray"),
+        _item(
+            "test_compiled_graph_opt_in",
+            "compiled_graph_opt_in",
+            "real_ray",
+        ),
         _item("test_postgresql", "django_db", "postgresql"),
         _item(
             "test_live",
@@ -196,9 +201,12 @@ def test_checked_in_manifest_partitions_representative_execution_contracts() -> 
         items[1].nodeid: ["sqlite-django"],
         items[2].nodeid: ["sqlite-django"],
         items[3].nodeid: ["local-ray"],
-        items[4].nodeid: ["postgresql"],
-        items[5].nodeid: ["live-cluster"],
+        items[4].nodeid: ["compiled-graph-opt-in"],
+        items[5].nodeid: ["postgresql"],
+        items[6].nodeid: ["live-cluster"],
     }
+    assert manifest.group("local-ray").skip_policy.mode == "forbid"
+    assert manifest.group("compiled-graph-opt-in").skip_policy.mode == "allow"
     assert manifest.group("supported-python").selection.pytest_arguments() == [
         "tests",
         "-m",

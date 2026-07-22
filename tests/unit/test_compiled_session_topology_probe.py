@@ -147,6 +147,7 @@ def test_main_emits_structured_failure(
     assert '"error_type": "RuntimeError"' in output
 
 
+@pytest.mark.compiled_graph_opt_in
 @pytest.mark.real_ray
 @pytest.mark.skipif(
     os.environ.get(probe.OPT_IN_ENV) != "1",

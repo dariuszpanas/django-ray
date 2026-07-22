@@ -123,9 +123,10 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
 markers = [
-    "live_cluster: Requires DJANGO_RAY_LIVE_CLUSTER_TESTS and a real Ray cluster",
-    "postgresql: Requires the PostgreSQL coordination test database",
-    "real_ray: Starts a real local Ray runtime (ray.init/ray.shutdown)",
+    "compiled_graph_opt_in: Runs the capability-gated native Compiled Graph probe on local Ray",
+    "live_cluster: Uses a shared external Ray cluster and must run in its serial opt-in lane",
+    "postgresql: Uses the PostgreSQL coordination database and must run in its serial evidence lane",
+    "real_ray: Starts local Ray and must run serially without pytest-xdist",
 ]
 filterwarnings = [
     # Suppress Ray's FutureWarning about accelerator env var override

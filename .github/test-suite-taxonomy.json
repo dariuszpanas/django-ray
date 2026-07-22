@@ -57,6 +57,20 @@
       "selection": {
         "paths": ["tests"],
         "include_markers": ["real_ray"],
+        "exclude_markers": ["compiled_graph_opt_in", "live_cluster", "postgresql"]
+      }
+    },
+    {
+      "id": "compiled-graph-opt-in",
+      "owner": "Native Compiled Graph topology capability probe",
+      "contract": "Starts local Ray only when the post-capability-gate Compiled Graph probe is explicitly enabled.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The native topology probe remains a deliberate opt-in until its upstream capability gate passes."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["compiled_graph_opt_in", "real_ray"],
         "exclude_markers": ["live_cluster", "postgresql"]
       }
     },
