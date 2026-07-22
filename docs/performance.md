@@ -278,6 +278,14 @@ growth only after the retained node, edge, and detail caps are reached, and keep
 wire, mailbox, and producer allocations separate from this preparation-only
 measurement.
 
+The production adapter's required WSL2 Linux
+[summary](benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.md)
+and [JSON](benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.json)
+record all six `production-topology` cases at the exact issue-#141 implementation
+revision. Bounded-phase memory plateaued after V1 retention caps while spill grew with
+observed node and edge identity state. The separate end-to-end fields and legacy-ID
+counts preserve #142's remaining O(observed) compatibility boundary.
+
 In `production-topology` reports, detail fields are `null`, spill-item counts cover
 only nodes and edges, and `legacy_observed_node_ids` records the compatibility set
 materialized after the bounded candidate is sealed. The `bounded_phase_*` fields are

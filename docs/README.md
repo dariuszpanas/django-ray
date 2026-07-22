@@ -62,8 +62,8 @@ django-ray is a **library** that provides:
   Always-bounded summaries, immutable topology pages, normalized latest-state detail,
   fenced publication, pagination, retention, and legacy snapshot rollout
 - [ADR-0005: Bounded Workflow Progress Preparation](design/adr-0005-bounded-workflow-preparation.md) -
-  Selected non-production contract and prototype for exact one-shot preparation through
-  a private, budgeted SQLite spill workspace; #141/#142 still own runtime integration
+  Selected contract, prototype, and #141 spill-backed production topology adapter for
+  exact one-shot preparation; #142 owns the remaining composite topology/detail lifetime
 - [Ray Serve Integration Boundary](design/ray-serve-boundary.md) - Deferred ownership,
   lifecycle, security, and packaging decision
 - [Changelog](changelog.md) - Release history
