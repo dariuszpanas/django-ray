@@ -1,0 +1,11 @@
+# Deny by default. The application image needs only these reviewed inputs.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!docker-entrypoint.sh
+!src/
+!src/**
+!testproject/
+!testproject/**

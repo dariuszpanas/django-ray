@@ -28,6 +28,7 @@ nav = [
   ] },
   { "Deployment" = [
     { "Kubernetes" = "deployment/kubernetes.md" },
+    { "Local KubeRay Final Gate" = "deployment/local-kuberay-gate.md" },
     { "Docker" = "deployment/docker.md" },
     { "TLS" = "deployment/tls.md" },
     { "Operator Runbook" = "runbook.md" },

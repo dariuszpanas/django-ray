@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
-from urllib.request import Request, urlopen
+from urllib.request import OpenerDirector, Request, urlopen
 
 EXPECTED_JOBS = ("django-ray", "ray-head", "ray-workers")
 REMOVED_WORKER_JOB = "django-ray-worker"
@@ -68,7 +68,12 @@ def inspect_target_health(payload: object) -> tuple[dict[str, int], list[str]]:
     return counts, problems
 
 
-def fetch_active_targets(base_url: str, *, request_timeout: float = 10.0) -> object:
+def fetch_active_targets(
+    base_url: str,
+    *,
+    request_timeout: float = 10.0,
+    opener: OpenerDirector | None = None,
+) -> object:
     """Fetch active targets from the Prometheus HTTP API."""
     endpoint = f"{base_url.rstrip('/')}/api/v1/targets?state=active"
     request = Request(
@@ -78,7 +83,8 @@ def fetch_active_targets(base_url: str, *, request_timeout: float = 10.0) -> obj
             "User-Agent": "django-ray-prometheus-target-check/1",
         },
     )
-    with urlopen(request, timeout=request_timeout) as response:
+    open_request = urlopen if opener is None else opener.open
+    with open_request(request, timeout=request_timeout) as response:
         return json.load(response)
 
 
@@ -87,6 +93,7 @@ def wait_for_healthy_targets(
     *,
     timeout: float,
     interval: float,
+    expected_counts: Mapping[str, int] | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, int]:
@@ -96,6 +103,14 @@ def wait_for_healthy_targets(
     while True:
         try:
             counts, last_problems = inspect_target_health(fetch())
+            if not last_problems and expected_counts is not None:
+                for job, expected in expected_counts.items():
+                    observed = counts.get(job, 0)
+                    if observed != expected:
+                        last_problems.append(
+                            f"scrape job {job!r} has {observed} active target(s), "
+                            f"expected exactly {expected}"
+                        )
         except (OSError, ValueError) as error:
             counts = {}
             last_problems = [str(error)]

@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A manual and monthly line-coverage debt report now records exact JSON and Markdown evidence,
   classifies every uncovered range, and idempotently updates one marked GitHub tracker comment while
   preserving the existing global, worker, Ray Job, and testproject coverage floors.
+- A guarded, repeatable local Docker Desktop/Kind KubeRay final integration gate with a checked-in
+  trigger matrix, one commit-bound archive for rendering and deny-by-default Docker contexts,
+  private digest-checked and credential-redacted kubeconfig routing, sanitized subprocess routing,
+  a local-only explicitly pinned Docker endpoint, namespace and context confinement, fail-closed
+  setup before workload reconciliation, UID-owned namespace-wide application inventory, retained
+  Ray pod UID/container/image identity, exact application/Ray topology and image contracts, owned and
+  timeout-bounded cold Ray replacement, redirect/proxy-safe bounded API task smoke, live image-ID,
+  probe, RuntimeEnv, and Prometheus checks, bounded redacted diagnostics, and explicit
+  data-preservation guarantees. Prometheus discovery RBAC is now namespace-scoped to match the gate
+  boundary.
 - Canonical, bounded, secret-free effective workflow plan snapshots with SHA-256
   identities, per-step RuntimeEnv resolution, deterministic strategy diagnostics,
   retry pinning, future-owner cache-key and stale-owner validation helpers, and
