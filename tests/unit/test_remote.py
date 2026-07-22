@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -240,6 +241,9 @@ def test_execute_workflow_step_exposes_run_identity_to_leaf(monkeypatch) -> None
 
 
 def test_execute_workflow_step_reports_failure() -> None:
+    import ray
+
+    assert not ray.is_initialized()
     actor = _ProgressActor()
 
     with pytest.raises(RuntimeError, match="failed:3"):
@@ -257,6 +261,7 @@ def test_execute_workflow_step_reports_failure() -> None:
 
     assert actor.failed.calls == [("0.1", "failing_workflow_target", "failed:3")]
     assert actor.completed.calls == []
+    assert not ray.is_initialized()
 
 
 def test_ray_execution_metadata_handles_context_and_runtime_errors(monkeypatch) -> None:
@@ -270,7 +275,10 @@ def test_ray_execution_metadata_handles_context_and_runtime_errors(monkeypatch) 
     monkeypatch.setitem(
         sys.modules,
         "ray",
-        SimpleNamespace(get_runtime_context=lambda: context),
+        SimpleNamespace(
+            is_initialized=lambda: True,
+            get_runtime_context=lambda: context,
+        ),
     )
 
     assert remote_module._ray_execution_metadata() == {
@@ -285,10 +293,103 @@ def test_ray_execution_metadata_handles_context_and_runtime_errors(monkeypatch) 
         sys.modules,
         "ray",
         SimpleNamespace(
-            get_runtime_context=lambda: (_ for _ in ()).throw(RuntimeError("outside Ray"))
+            is_initialized=lambda: True,
+            get_runtime_context=lambda: (_ for _ in ()).throw(RuntimeError("outside Ray")),
         ),
     )
     assert remote_module._ray_execution_metadata() == {}
+
+
+def test_ray_execution_metadata_skips_context_when_ray_is_uninitialized(
+    monkeypatch,
+) -> None:
+    context_lookups: list[bool] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "ray",
+        SimpleNamespace(
+            is_initialized=lambda: False,
+            get_runtime_context=lambda: context_lookups.append(True),
+        ),
+    )
+
+    assert remote_module._ray_execution_metadata() == {}
+    assert context_lookups == []
+
+
+def test_ray_execution_metadata_does_not_import_ray() -> None:
+    probe = """
+import json
+import sys
+
+ray_loaded_before = "ray" in sys.modules
+from django_ray.runtime.remote import _ray_execution_metadata
+
+payload = {
+    "ray_loaded_before": ray_loaded_before,
+    "ray_loaded_after_module_import": "ray" in sys.modules,
+    "metadata": _ray_execution_metadata(),
+    "ray_loaded_after_metadata": "ray" in sys.modules,
+}
+print("DJANGO_RAY_COLD_METADATA_PROBE=" + json.dumps(payload, sort_keys=True))
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    marker = "DJANGO_RAY_COLD_METADATA_PROBE="
+    payload_line = next(line for line in result.stdout.splitlines() if line.startswith(marker))
+    assert json.loads(payload_line.removeprefix(marker)) == {
+        "metadata": {},
+        "ray_loaded_after_metadata": False,
+        "ray_loaded_after_module_import": False,
+        "ray_loaded_before": False,
+    }
+
+
+def test_ray_execution_metadata_does_not_initialize_local_ray() -> None:
+    probe = """
+import json
+
+import ray
+
+from django_ray.runtime.remote import _ray_execution_metadata
+
+payload = {
+    "initialized_before": ray.is_initialized(),
+    "metadata": _ray_execution_metadata(),
+    "initialized_after": ray.is_initialized(),
+}
+print("DJANGO_RAY_METADATA_PROBE=" + json.dumps(payload, sort_keys=True))
+"""
+    environment = os.environ.copy()
+    environment.pop("RAY_ADDRESS", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    marker = "DJANGO_RAY_METADATA_PROBE="
+    payload_line = next(line for line in result.stdout.splitlines() if line.startswith(marker))
+    assert json.loads(payload_line.removeprefix(marker)) == {
+        "initialized_after": False,
+        "initialized_before": False,
+        "metadata": {},
+    }
+    combined_output = f"{result.stdout}\n{result.stderr}".lower()
+    assert "local ray instance" not in combined_output
 
 
 def test_progress_actor_updates_registration_and_terminal_states() -> None:
