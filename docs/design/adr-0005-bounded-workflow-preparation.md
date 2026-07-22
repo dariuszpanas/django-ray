@@ -512,6 +512,17 @@ fault paths, normal cleanup paths, and the forced-termination cleanup control pa
 This accepts the preparation contract only; by itself it does not satisfy #141, #142, #79, or the
 schema-v3 activation gate.
 
+The issue-#141 production adapter has its own required WSL2 Linux
+[evidence summary](../benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.md)
+and [authoritative JSON](../benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.json).
+At clean revision `fd08ab21373c0bf1e0586e54ec0a564e3d4ce4d5`, all six
+production-topology cases, exact source checks, schema-v2 phase evidence, normal
+cleanup paths, and forced-termination cleanup passed. Sparse bounded-phase
+tracemalloc stayed at 55.67 MiB and high-edge tracemalloc stayed from 101.21 to
+101.22 MiB while observed input grew from 25,000 to 250,000 nodes. Spill grew with
+the exact external identity state. This satisfies #141's topology integration gate;
+the explicit 25,000/100,000/250,000 legacy identity counts remain owned by #142.
+
 ## Alternatives considered
 
 ### Keep bounded top-k values in Python
