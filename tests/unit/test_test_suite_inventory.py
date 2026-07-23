@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 import scripts.test_suite_inventory as inventory_module
+import scripts.test_suite_taxonomy as taxonomy_module
 from scripts.test_suite_inventory import (
     CollectedTest,
     InventoryError,
@@ -51,14 +52,37 @@ def _mini_inventory_repository(tmp_path: Path) -> Path:
     allow_skips = {"mode": "allow", "reason": "Miniature profile exposes skips."}
     forbid_skips = {"mode": "forbid", "reason": "Miniature gate must execute all cases."}
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "execution_contracts": [
             {
                 "id": "hermetic",
                 "owner": "Miniature pure tests",
                 "contract": "Does not request the database fixture.",
                 "skip_policy": allow_skips,
-                "selection": {"paths": ["tests"], "exclude_fixtures": ["db"]},
+                "execution": {
+                    "mode": "xdist",
+                    "workers": 2,
+                    "distribution": "worksteal",
+                    "max_worker_restart": 0,
+                },
+                "selection": {
+                    "paths": ["tests"],
+                    "exclude_markers": [
+                        "django_db",
+                        "live_cluster",
+                        "postgresql",
+                        "real_ray",
+                    ],
+                    "exclude_fixtures": [
+                        "admin_client",
+                        "admin_user",
+                        "db",
+                        "django_db_reset_sequences",
+                        "django_db_serialized_rollback",
+                        "live_server",
+                        "transactional_db",
+                    ],
+                },
             },
             {
                 "id": "database",
@@ -119,7 +143,13 @@ def _mini_inventory_repository(tmp_path: Path) -> Path:
         ".gitignore": "artifacts/\n__pycache__/\n.pytest_cache/\n.coverage*\n*.pyc\n",
         ".github/test-suite-taxonomy.json": json.dumps(manifest, indent=2) + "\n",
         "pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
-        "tests/conftest.py": ("import pytest\n\n@pytest.fixture\ndef db():\n    return object()\n"),
+        "tests/conftest.py": (
+            'pytest_plugins = ("scripts.pytest_taxonomy",)\n\n'
+            "import pytest\n\n"
+            "@pytest.fixture\n"
+            "def db():\n"
+            "    return object()\n"
+        ),
         "tests/test_sample.py": (
             "import pytest\n\n"
             '@pytest.mark.parametrize("value", [1, 2])\n'
@@ -140,6 +170,10 @@ def _mini_inventory_repository(tmp_path: Path) -> Path:
     script = tmp_path / "scripts" / "test_suite_inventory.py"
     script.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / "scripts" / "test_suite_inventory.py", script)
+    shutil.copyfile(
+        ROOT / "scripts" / "test_suite_taxonomy.py", script.with_name("test_suite_taxonomy.py")
+    )
+    shutil.copyfile(ROOT / "scripts" / "pytest_taxonomy.py", script.with_name("pytest_taxonomy.py"))
     tracked_paths = sorted(
         path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file()
     )
@@ -207,11 +241,29 @@ def test_checked_in_manifest_partitions_representative_execution_contracts() -> 
     }
     assert manifest.group("local-ray").skip_policy.mode == "forbid"
     assert manifest.group("compiled-graph-opt-in").skip_policy.mode == "allow"
+    assert manifest.group("hermetic").execution.as_mapping() == {
+        "mode": "xdist",
+        "workers": 2,
+        "distribution": "worksteal",
+        "max_worker_restart": 0,
+    }
+    assert all(
+        contract.execution.mode == "serial"
+        for contract in manifest.execution_contracts
+        if contract.id != "hermetic"
+    )
     assert manifest.group("supported-python").selection.pytest_arguments() == [
         "tests",
         "-m",
         "not live_cluster",
     ]
+
+
+def test_inventory_reexports_the_extracted_taxonomy_contract() -> None:
+    assert inventory_module.CollectedTest is taxonomy_module.CollectedTest
+    assert inventory_module.InventoryError is taxonomy_module.InventoryError
+    assert inventory_module.Selection is taxonomy_module.Selection
+    assert inventory_module.load_manifest is taxonomy_module.load_manifest
 
 
 def test_cli_select_and_collect_use_fixture_aware_taxonomy_and_atomic_outputs(
@@ -225,7 +277,7 @@ def test_cli_select_and_collect_use_fixture_aware_taxonomy_and_atomic_outputs(
     selected_payload = json.loads(selected.stdout)
     assert selected_payload["lane"] == "hermetic"
     assert selected_payload["pytest_arguments"] is None
-    assert selected_payload["selection"]["exclude_fixtures"] == ["db"]
+    assert "db" in selected_payload["selection"]["exclude_fixtures"]
     assert selected_payload["django_settings_modules"] == ["unset"]
     assert selected_payload["skip_policy"]["mode"] == "allow"
     assert selected_payload["owner"] == "Miniature pure tests"
@@ -275,6 +327,15 @@ def test_cli_run_records_completed_outcomes_and_merges_valid_timing(tmp_path: Pa
     assert run.returncode == 0, run.stderr
     timing = json.loads((root / "artifacts/timing.json").read_text(encoding="utf-8"))
     assert timing["integrity"] == {"errors": [], "valid": True}
+    assert timing["schema_version"] == 3
+    assert timing["execution"] == {
+        "mode": "serial",
+        "workers": 0,
+        "distribution": "no",
+        "max_worker_restart": 0,
+    }
+    assert timing["collection"]["mode"] == "serial"
+    assert timing["collection"]["valid"] is True
     assert timing["source_after_digest"] == timing["source"]["digest"]
     assert timing["pytest"]["selected_count"] == 3
     assert timing["pytest"]["completed_count"] == 3
@@ -294,25 +355,23 @@ def test_cli_run_records_completed_outcomes_and_merges_valid_timing(tmp_path: Pa
     ):
         assert timing["pytest"][field] >= 0
 
-    selected_items = [
-        CollectedTest(
-            nodeid=record["nodeid"],
-            path=record["nodeid"].split("::", maxsplit=1)[0],
-            markers=(),
-            fixtures=(),
-            parameter_keys=(),
-        )
-        for record in timing["slowest_tests"]
-    ]
     wrong_settings = copy.deepcopy(timing)
     wrong_settings["environment"]["django_settings_module"] = "other.settings"
-    with pytest.raises(InventoryError, match="Django settings identity"):
-        inventory_module._validate_timing_record(
-            wrong_settings,
-            timing["source"],
-            load_manifest(root / ".github/test-suite-taxonomy.json"),
-            selected_items,
-        )
+    (root / "artifacts/wrong-settings.json").write_text(
+        json.dumps(wrong_settings), encoding="utf-8"
+    )
+    rejected_settings = _inventory_cli(
+        root,
+        "collect",
+        "--timing",
+        "artifacts/wrong-settings.json",
+        "--json-output",
+        "artifacts/wrong-settings-report.json",
+        "--markdown-output",
+        "artifacts/wrong-settings-report.md",
+    )
+    assert rejected_settings.returncode == 2
+    assert "Django settings identity" in rejected_settings.stderr
 
     positional = _inventory_cli(
         root,
@@ -368,6 +427,78 @@ def test_cli_run_records_completed_outcomes_and_merges_valid_timing(tmp_path: Pa
     assert not list((root / "artifacts").glob(".*.pending"))
 
 
+def test_direct_cli_xdist_run_consumes_worker_collection_report(tmp_path: Path) -> None:
+    root = _mini_inventory_repository(tmp_path)
+
+    run = _inventory_cli(
+        root,
+        "run",
+        "--lane",
+        "hermetic",
+        "--execution",
+        "xdist",
+        "--observation",
+        "mini-xdist",
+        "--variant",
+        "two-workers",
+        "--timing-output",
+        "artifacts/xdist-timing.json",
+        "--external-note",
+        "Miniature worker-loaded selector regression.",
+        "--",
+        "-q",
+    )
+
+    assert run.returncode == 0, run.stderr
+    timing = json.loads((root / "artifacts/xdist-timing.json").read_text(encoding="utf-8"))
+    assert timing["execution"] == {
+        "mode": "xdist",
+        "workers": 2,
+        "distribution": "worksteal",
+        "max_worker_restart": 0,
+    }
+    assert timing["collection"]["valid"] is True
+    assert timing["collection"]["selected_count"] == 2
+    assert timing["collection"]["collected_count"] == 3
+    assert len(timing["collection"]["worker_collections"]) == 2
+    assert all(
+        worker["collected_count"] == 3 for worker in timing["collection"]["worker_collections"]
+    )
+    assert timing["pytest"]["selected_count"] == 2
+    assert timing["pytest"]["completed_count"] == 2
+    assert timing["pytest"]["outcomes"]["passed"] == 2
+    assert "outcome_digest" not in timing["pytest"]
+
+    tampered_records = []
+    wrong_execution_type = copy.deepcopy(timing)
+    wrong_execution_type["execution"]["workers"] = 2.0
+    tampered_records.append((wrong_execution_type, "exact execution policy"))
+    wrong_collection_digest = copy.deepcopy(timing)
+    wrong_collection_digest["collection"]["collected_nodeid_digest"] = "0" * 64
+    tampered_records.append((wrong_collection_digest, "does not match current collection"))
+    wrong_worker_digest = copy.deepcopy(timing)
+    wrong_worker_digest["collection"]["worker_collections"][0]["collected_contract_digest"] = (
+        "0" * 64
+    )
+    tampered_records.append((wrong_worker_digest, "xdist worker"))
+    for index, (tampered, expected_error) in enumerate(tampered_records):
+        evidence_path = root / f"artifacts/tampered-{index}.json"
+        evidence_path.write_text(json.dumps(tampered), encoding="utf-8")
+        rejected = _inventory_cli(
+            root,
+            "collect",
+            "--timing",
+            evidence_path.relative_to(root).as_posix(),
+            "--json-output",
+            f"artifacts/tampered-{index}-report.json",
+            "--markdown-output",
+            f"artifacts/tampered-{index}-report.md",
+        )
+
+        assert rejected.returncode == 2
+        assert expected_error in rejected.stderr
+
+
 def test_selection_and_output_guards_fail_closed_without_running_pytest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -378,6 +509,12 @@ def test_selection_and_output_guards_fail_closed_without_running_pytest(
         ["-k", "test_parameter"],
         ["--sw-skip"],
         ["--sw-reset"],
+        ["--taxonomy-lane", "local-ray"],
+        ["--taxonomy-lane=local-ray"],
+        ["--taxonomy-execution", "serial"],
+        ["--taxonomy-execution=serial"],
+        ["--taxonomy-manifest", "other.json"],
+        ["--taxonomy-manifest=other.json"],
     ):
         with pytest.raises(InventoryError, match="change taxonomy selection"):
             inventory_module._validate_pytest_passthrough(pytest_arguments)
@@ -387,7 +524,7 @@ def test_selection_and_output_guards_fail_closed_without_running_pytest(
         ["-nlogical"],
         ["-d", "--tx", "popen"],
     ):
-        with pytest.raises(InventoryError, match="issue #169"):
+        with pytest.raises(InventoryError, match="execution policy"):
             inventory_module._validate_pytest_passthrough(pytest_arguments)
     with pytest.raises(InventoryError, match="must be ignored"):
         inventory_module._validate_output_path(root, Path("timing.json"), "timing output")
@@ -433,10 +570,14 @@ def test_selection_and_output_guards_fail_closed_without_running_pytest(
     with pytest.raises(InventoryError, match="outcome distribution"):
         inventory_module._validate_timing_detail_records(
             {
+                "test_outcomes": [
+                    {"nodeid": "tests/unit/test_example.py::test_a", "outcome": "skipped"},
+                    {"nodeid": "tests/unit/test_example.py::test_b", "outcome": "xfailed"},
+                ],
                 "skipped_tests": [
                     {"nodeid": "tests/unit/test_example.py::test_a", "outcome": "skipped"},
                     {"nodeid": "tests/unit/test_example.py::test_b", "outcome": "skipped"},
-                ]
+                ],
             },
             {"passed": 0, "failed": 0, "skipped": 1, "xfailed": 1, "xpassed": 0},
             [_item("test_a"), _item("test_b")],
@@ -449,6 +590,62 @@ def test_selection_and_output_guards_fail_closed_without_running_pytest(
     with pytest.raises(InventoryError, match="portable JSON"):
         inventory_module._write_json(invalid_json, {"seconds": math.nan})
     assert not invalid_json.exists()
+
+
+def test_runtime_paths_are_exact_ignored_siblings(tmp_path: Path) -> None:
+    root = _mini_inventory_repository(tmp_path)
+    timing = Path("artifacts/benchmark/hermetic.json")
+
+    coverage, ray_tmp = inventory_module._validated_runtime_paths(
+        root,
+        timing,
+        Path("artifacts/benchmark/.coverage"),
+        Path("artifacts/benchmark/ray-tmp"),
+    )
+
+    assert coverage == (root / "artifacts/benchmark/.coverage").resolve()
+    assert ray_tmp == (root / "artifacts/benchmark/ray-tmp").resolve()
+    if os.name != "nt":
+        output_directory = root / "artifacts" / "benchmark"
+        output_directory.mkdir(parents=True)
+        short_alias = tmp_path / "ray-alias"
+        short_alias.symlink_to(output_directory, target_is_directory=True)
+
+        _, aliased_ray_tmp = inventory_module._validated_runtime_paths(
+            root,
+            timing,
+            Path("artifacts/benchmark/.coverage"),
+            short_alias / "ray-tmp",
+        )
+
+        assert aliased_ray_tmp == short_alias / "ray-tmp"
+        assert aliased_ray_tmp.resolve() == (output_directory / "ray-tmp").resolve()
+
+        wrong_output = root / "artifacts" / "other"
+        wrong_output.mkdir()
+        wrong_alias = tmp_path / "wrong-ray-alias"
+        wrong_alias.symlink_to(wrong_output, target_is_directory=True)
+        with pytest.raises(InventoryError, match="sibling ray-tmp"):
+            inventory_module._validated_runtime_paths(
+                root,
+                timing,
+                Path("artifacts/benchmark/.coverage"),
+                wrong_alias / "ray-tmp",
+            )
+    with pytest.raises(InventoryError, match="sibling .coverage"):
+        inventory_module._validated_runtime_paths(
+            root,
+            timing,
+            Path("artifacts/other/.coverage"),
+            Path("artifacts/benchmark/ray-tmp"),
+        )
+    with pytest.raises(InventoryError, match="provided together"):
+        inventory_module._validated_runtime_paths(
+            root,
+            timing,
+            Path("artifacts/benchmark/.coverage"),
+            None,
+        )
 
 
 def test_cli_run_enforces_group_skip_policy(tmp_path: Path) -> None:
@@ -522,7 +719,17 @@ def test_run_lane_rejects_source_changes_even_when_pytest_passes(
         ]
     )
     monkeypatch.setattr(inventory_module, "_source_digest", lambda *_args: next(sources))
-    monkeypatch.setattr(inventory_module.pytest, "main", lambda *_args, **_kwargs: 0)
+    coverage_file = ROOT / "artifacts" / "runtime-paths" / ".coverage"
+    ray_tmp_dir = ROOT / "artifacts" / "runtime-paths" / "ray-tmp"
+    monkeypatch.setenv("COVERAGE_FILE", "previous-coverage")
+    monkeypatch.setenv("RAY_TMPDIR", "previous-ray")
+
+    def _pytest_main(*_args: object, **_kwargs: object) -> int:
+        assert os.environ["COVERAGE_FILE"] == str(coverage_file)
+        assert os.environ["RAY_TMPDIR"] == str(ray_tmp_dir)
+        return 0
+
+    monkeypatch.setattr(inventory_module.pytest, "main", _pytest_main)
 
     exit_code, timing = run_lane(
         ROOT,
@@ -535,6 +742,8 @@ def test_run_lane_rejects_source_changes_even_when_pytest_passes(
         runner_queue_seconds=None,
         environment_setup_seconds=None,
         external_note="Intentional source mutation fixture.",
+        coverage_file=coverage_file,
+        ray_tmp_dir=ray_tmp_dir,
     )
 
     assert exit_code == 2
@@ -542,6 +751,8 @@ def test_run_lane_rejects_source_changes_even_when_pytest_passes(
     assert timing["source_after_digest"] == "b" * 64
     assert "source changed" in " ".join(timing["integrity"]["errors"])
     assert "promised timing phases" in " ".join(timing["integrity"]["errors"])
+    assert os.environ["COVERAGE_FILE"] == "previous-coverage"
+    assert os.environ["RAY_TMPDIR"] == "previous-ray"
 
 
 def test_source_digest_covers_binary_inputs_but_excludes_generated_baseline(
@@ -750,10 +961,86 @@ def test_manifest_rejects_duplicate_ids(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("workers", 3),
+        ("workers", 2.0),
+        ("workers", False),
+        ("distribution", "load"),
+        ("max_worker_restart", 1),
+        ("max_worker_restart", False),
+    ),
+)
+def test_manifest_rejects_unbounded_hermetic_xdist_policy(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    document["execution_contracts"][0]["execution"][field] = value
+    path = tmp_path / "taxonomy.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(InventoryError, match="fixed xdist topology"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("exclude_markers", "real_ray"), ("exclude_fixtures", "db")),
+)
+def test_manifest_rejects_xdist_selection_without_resource_exclusion(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    document["execution_contracts"][0]["selection"][field].remove(value)
+    path = tmp_path / "taxonomy.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(InventoryError, match="must exclude every external or database owner"):
+        load_manifest(path)
+
+
+def test_manifest_rejects_xdist_for_nonhermetic_contract(tmp_path: Path) -> None:
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    document["execution_contracts"][1]["execution"] = document["execution_contracts"][0][
+        "execution"
+    ]
+    path = tmp_path / "taxonomy.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(InventoryError, match="only the hermetic"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize("schema_version", (True, 3.0))
+def test_manifest_and_timing_loaders_reject_coerced_schema_versions(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    document["schema_version"] = schema_version
+    manifest_path = tmp_path / "taxonomy.json"
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+    timing_path = tmp_path / "timing.json"
+    timing_path.write_text(
+        json.dumps({"schema_version": schema_version}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InventoryError, match="manifest schema"):
+        load_manifest(manifest_path)
+    with pytest.raises(InventoryError, match="unsupported timing evidence"):
+        inventory_module._load_timing(timing_path)
+
+
 def test_inventory_refuses_timing_from_another_source_digest() -> None:
     manifest = load_manifest(MANIFEST_PATH)
     timing = {
-        "schema_version": 2,
+        "schema_version": 3,
         "sample_id": "00000000-0000-4000-8000-000000000001",
         "measured_at_utc": "2026-07-22T00:00:00+00:00",
         "source": {"digest": "0" * 64},
@@ -769,7 +1056,7 @@ def test_inventory_refuses_failed_timing_evidence() -> None:
     item = _item("test_plain")
     source = _source_digest(ROOT, MANIFEST_PATH)
     timing = {
-        "schema_version": 2,
+        "schema_version": 3,
         "sample_id": "00000000-0000-4000-8000-000000000002",
         "measured_at_utc": "2026-07-22T00:00:00+00:00",
         "source": source,

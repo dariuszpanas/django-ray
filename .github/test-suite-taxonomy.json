@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "execution_contracts": [
     {
       "id": "hermetic",
@@ -8,6 +8,12 @@
       "skip_policy": {
         "mode": "allow",
         "reason": "Portable profiles preserve explicit platform or optional-capability skips and report them as outcomes."
+      },
+      "execution": {
+        "mode": "xdist",
+        "workers": 2,
+        "distribution": "worksteal",
+        "max_worker_restart": 0
       },
       "selection": {
         "paths": ["tests"],
@@ -335,6 +341,20 @@
       "selection": {
         "paths": ["tests"],
         "exclude_markers": ["live_cluster", "real_ray"]
+      }
+    },
+    {
+      "id": "default-serial-remainder",
+      "owner": "Default-settings canonical remainder",
+      "contract": "Preserves backend-specific and opt-in self-skip outcomes outside parallel and required resource phases.",
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The default canonical suite retains PostgreSQL and Compiled Graph cases as explicit self-skip outcomes while dedicated jobs own execution proof."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_any_markers": ["compiled_graph_opt_in", "postgresql"],
+        "exclude_markers": ["live_cluster"]
       }
     }
   ],

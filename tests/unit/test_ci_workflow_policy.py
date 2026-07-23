@@ -19,6 +19,10 @@ REQUIRED_CHECK_JOBS = {
 }
 REQUIRED_CHECK_NAMES = set(REQUIRED_CHECK_JOBS.values())
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {}
+EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS = {
+    ("ci.yml", "pytest-xdist-benchmark-pair"): "pair",
+    ("ci.yml", "pytest-xdist-benchmark-aggregate"): "aggregate",
+}
 
 
 def _workflow_paths() -> list[Path]:
@@ -97,12 +101,47 @@ def _contains_key(value: object, key: str) -> bool:
 def test_ci_gate_covers_every_pr_ci_job_and_runs_after_failures() -> None:
     jobs = _jobs()
     gate = jobs["ci-gate"]
+    dispatch_only = {
+        job_id
+        for workflow_name, job_id in EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS
+        if workflow_name == CI_WORKFLOW.name
+    }
+    blocking = set(jobs) - {"build", "ci-gate"} - dispatch_only
 
     assert gate["name"] == "CI Gate"
     assert gate["if"] == "always()"
     assert gate["steps"][0]["env"]["BLOCKING_JOB_RESULTS_JSON"] == "${{ toJSON(needs) }}"
-    assert _needs(gate) == set(jobs) - {"ci-gate"}
-    assert _needs(jobs["build"]) == set(jobs) - {"build", "ci-gate"}
+    assert _needs(gate) == blocking | {"build"}
+    assert _needs(jobs["build"]) == blocking
+
+
+def test_optional_benchmark_jobs_are_exactly_workflow_dispatch_only() -> None:
+    jobs = _jobs()
+    gate_needs = _needs(jobs["ci-gate"])
+    build_needs = _needs(jobs["build"])
+
+    assert set(EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS) == {
+        ("ci.yml", "pytest-xdist-benchmark-pair"),
+        ("ci.yml", "pytest-xdist-benchmark-aggregate"),
+    }
+    for (workflow_name, job_id), mode in EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS.items():
+        assert workflow_name == CI_WORKFLOW.name
+        assert job_id not in gate_needs
+        assert job_id not in build_needs
+        assert jobs[job_id]["if"] == (
+            f"github.event_name == 'workflow_dispatch' && inputs.xdist_benchmark_mode == '{mode}'"
+        )
+        install_uv = next(
+            step for step in jobs[job_id]["steps"] if step.get("name") == "Install uv"
+        )
+        assert install_uv["with"]["version"] == "0.9.18"
+
+    minimum_install = next(
+        step
+        for step in jobs["dependency-compatibility"]["steps"]
+        if step.get("name") == "Install minimum supported dependencies"
+    )
+    assert '"pytest-xdist==3.8.0"' in minimum_install["run"]
 
 
 def test_required_check_names_are_globally_unique() -> None:
@@ -134,6 +173,7 @@ def test_blocking_ci_jobs_cannot_tolerate_job_or_step_failures() -> None:
 def test_pull_request_jobs_are_gated_required_or_explicitly_nonblocking() -> None:
     gate_needs = _needs(_gate_job())
     observed_nonblocking: set[tuple[str, str]] = set()
+    observed_dispatch_only: set[tuple[str, str]] = set()
 
     for path in _workflow_paths():
         if not _events(path) & {"pull_request", "pull_request_target"}:
@@ -145,11 +185,15 @@ def test_pull_request_jobs_are_gated_required_or_explicitly_nonblocking() -> Non
                 continue
             gated = path == CI_WORKFLOW and job_id in gate_needs
             nonblocking = key in EXPLICIT_NONBLOCKING_PR_JOBS
-            assert gated != nonblocking, key
+            dispatch_only = key in EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS
+            assert sum((gated, nonblocking, dispatch_only)) == 1, key
             if nonblocking:
                 observed_nonblocking.add(key)
+            if dispatch_only:
+                observed_dispatch_only.add(key)
 
     assert observed_nonblocking == set(EXPLICIT_NONBLOCKING_PR_JOBS)
+    assert observed_dispatch_only == set(EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS)
 
 
 def test_ci_gate_accepts_only_complete_success(
