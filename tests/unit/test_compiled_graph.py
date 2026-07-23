@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -795,9 +796,12 @@ def test_policy_module_does_not_import_ray_before_guard() -> None:
 def test_ci_smoke_matches_candidate_versions_and_installs_cgraph_extra() -> None:
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     candidate_versions = {row["ray_version"] for row in candidate_compiled_graph_runtime_rows()}
-    smoke_job = workflow.split("  compiled-graph-candidate-smoke:\n", maxsplit=1)[1].split(
-        "\n  build:\n", maxsplit=1
-    )[0]
+    smoke_match = re.search(
+        r"(?ms)^  compiled-graph-candidate-smoke:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+        workflow,
+    )
+    assert smoke_match is not None
+    smoke_job = smoke_match.group("body")
 
     assert 'ray-version: ["2.53.0", "2.56.0", "2.56.1"]' in workflow
     assert candidate_versions == {"2.53.0", "2.56.0", "2.56.1"}

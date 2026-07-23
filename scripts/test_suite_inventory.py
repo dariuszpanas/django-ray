@@ -18,17 +18,36 @@ import tempfile
 import time
 import uuid
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-MANIFEST_SCHEMA_VERSION = 2
-REPORT_SCHEMA_VERSION = 2
-TIMING_SCHEMA_VERSION = 2
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from scripts import pytest_taxonomy  # noqa: E402
+from scripts.test_suite_taxonomy import (  # noqa: E402
+    CollectedTest,
+    ExecutionPolicy,
+    Group,
+    InventoryError,
+    Manifest,
+    Selection,
+    collection_contract_digest,
+    load_manifest,
+    nodeid_digest,
+    path_matches,
+)
+
+__all__ = ("CollectedTest", "InventoryError", "Selection", "load_manifest")
+
+REPORT_SCHEMA_VERSION = 3
+TIMING_SCHEMA_VERSION = 3
 DEFAULT_MANIFEST = Path(".github/test-suite-taxonomy.json")
 GENERATED_BASELINE_RE = re.compile(
     r"^docs/investigations/test-suite-baseline-\d{4}-\d{2}-\d{2}\.(?:json|md)$"
@@ -65,368 +84,6 @@ PROMISED_RUNTIME_INTERVAL_FIELDS = tuple(
     for field in TIMING_INTERVAL_FIELDS
     if field not in {"setup_phase_seconds", "call_phase_seconds", "teardown_phase_seconds"}
 )
-
-
-class InventoryError(ValueError):
-    """Raised when taxonomy input or collected evidence is inconsistent."""
-
-
-def _normalized_path(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise InventoryError(f"{label} must be a non-empty path")
-    normalized = value.strip().replace("\\", "/")
-    if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
-        raise InventoryError(f"{label} must be repository-relative")
-    normalized = normalized.strip("/")
-    parts = PurePosixPath(normalized).parts
-    if not parts or ".." in parts:
-        raise InventoryError(f"{label} must stay inside the repository")
-    return PurePosixPath(*parts).as_posix()
-
-
-def _string_tuple(value: object, label: str, *, required: bool = False) -> tuple[str, ...]:
-    if value is None and not required:
-        return ()
-    if not isinstance(value, list) or (required and not value):
-        qualifier = "a non-empty" if required else "a"
-        raise InventoryError(f"{label} must be {qualifier} list")
-    if not all(isinstance(item, str) and item.strip() for item in value):
-        raise InventoryError(f"{label} entries must be non-empty strings")
-    normalized = tuple(cast(str, item).strip() for item in value)
-    if len(normalized) != len(set(normalized)):
-        raise InventoryError(f"{label} contains duplicate entries")
-    return normalized
-
-
-@dataclass(frozen=True)
-class Selection:
-    """Declarative path and marker selection shared by reports and later CI work."""
-
-    paths: tuple[str, ...]
-    include_markers: tuple[str, ...] = ()
-    include_any_markers: tuple[str, ...] = ()
-    exclude_markers: tuple[str, ...] = ()
-    include_fixtures: tuple[str, ...] = ()
-    include_any_fixtures: tuple[str, ...] = ()
-    exclude_fixtures: tuple[str, ...] = ()
-
-    @classmethod
-    def from_mapping(cls, value: object, label: str) -> Selection:
-        if not isinstance(value, dict):
-            raise InventoryError(f"{label} must be an object")
-        paths = tuple(
-            _normalized_path(path, f"{label} path")
-            for path in _string_tuple(value.get("paths"), f"{label} paths", required=True)
-        )
-        if len(paths) != len(set(paths)):
-            raise InventoryError(f"{label} paths contain canonical duplicates")
-        include = _string_tuple(value.get("include_markers"), f"{label} include_markers")
-        include_any = _string_tuple(
-            value.get("include_any_markers"), f"{label} include_any_markers"
-        )
-        exclude = _string_tuple(value.get("exclude_markers"), f"{label} exclude_markers")
-        if (set(include) | set(include_any)) & set(exclude):
-            raise InventoryError(f"{label} includes and excludes the same marker")
-        include_fixtures = _string_tuple(value.get("include_fixtures"), f"{label} include_fixtures")
-        include_any_fixtures = _string_tuple(
-            value.get("include_any_fixtures"), f"{label} include_any_fixtures"
-        )
-        exclude_fixtures = _string_tuple(value.get("exclude_fixtures"), f"{label} exclude_fixtures")
-        if (set(include_fixtures) | set(include_any_fixtures)) & set(exclude_fixtures):
-            raise InventoryError(f"{label} includes and excludes the same fixture")
-        return cls(
-            paths,
-            include,
-            include_any,
-            exclude,
-            include_fixtures,
-            include_any_fixtures,
-            exclude_fixtures,
-        )
-
-    def matches(self, item: CollectedTest) -> bool:
-        markers = set(item.markers)
-        fixtures = set(item.fixtures)
-        include_any = bool(self.include_any_markers or self.include_any_fixtures)
-        matches_any = bool(
-            set(self.include_any_markers) & markers or set(self.include_any_fixtures) & fixtures
-        )
-        return (
-            any(_path_matches(item.path, path) for path in self.paths)
-            and set(self.include_markers) <= markers
-            and set(self.include_fixtures) <= fixtures
-            and (not include_any or matches_any)
-            and not bool(set(self.exclude_markers) & markers)
-            and not bool(set(self.exclude_fixtures) & fixtures)
-        )
-
-    def expression(self) -> str:
-        path_expression = " OR ".join(f"path:{path}" for path in self.paths)
-        clauses = [f"({path_expression})"]
-        clauses.extend(f"marker:{marker}" for marker in self.include_markers)
-        clauses.extend(f"fixture:{fixture}" for fixture in self.include_fixtures)
-        if self.include_any_markers or self.include_any_fixtures:
-            any_expression = " OR ".join(
-                [f"marker:{marker}" for marker in self.include_any_markers]
-                + [f"fixture:{fixture}" for fixture in self.include_any_fixtures]
-            )
-            clauses.append(f"({any_expression})")
-        clauses.extend(f"NOT marker:{marker}" for marker in self.exclude_markers)
-        clauses.extend(f"NOT fixture:{fixture}" for fixture in self.exclude_fixtures)
-        return " AND ".join(clauses)
-
-    def pytest_arguments(self) -> list[str]:
-        if self.include_fixtures or self.include_any_fixtures or self.exclude_fixtures:
-            raise InventoryError("fixture-aware selection requires the manifest-backed run command")
-        arguments = list(self.paths)
-        marker_clauses = list(self.include_markers)
-        if self.include_any_markers:
-            marker_clauses.append("(" + " or ".join(self.include_any_markers) + ")")
-        marker_clauses.extend(f"not {marker}" for marker in self.exclude_markers)
-        if marker_clauses:
-            arguments.extend(["-m", " and ".join(marker_clauses)])
-        return arguments
-
-    def as_mapping(self) -> dict[str, list[str]]:
-        return {
-            "paths": list(self.paths),
-            "include_markers": list(self.include_markers),
-            "include_any_markers": list(self.include_any_markers),
-            "exclude_markers": list(self.exclude_markers),
-            "include_fixtures": list(self.include_fixtures),
-            "include_any_fixtures": list(self.include_any_fixtures),
-            "exclude_fixtures": list(self.exclude_fixtures),
-        }
-
-
-def _path_matches(item_path: str, selected_path: str) -> bool:
-    return item_path == selected_path or item_path.startswith(f"{selected_path.rstrip('/')}/")
-
-
-@dataclass(frozen=True)
-class SkipPolicy:
-    """Whether a successful timing observation may contain skipped cases."""
-
-    mode: str
-    reason: str
-
-
-@dataclass(frozen=True)
-class Group:
-    """One named execution contract, product boundary, or CI lane."""
-
-    id: str
-    kind: str
-    owner: str
-    contract: str
-    selection: Selection
-    skip_policy: SkipPolicy
-    django_settings_modules: tuple[str, ...]
-    variants: int = 1
-
-
-@dataclass(frozen=True)
-class OverlapCandidate:
-    """A review target, not a claim that cases are redundant."""
-
-    id: str
-    owner: str
-    paths: tuple[str, ...]
-    reason: str
-    review: str
-
-
-@dataclass(frozen=True)
-class Manifest:
-    """Validated taxonomy manifest."""
-
-    execution_contracts: tuple[Group, ...]
-    domains: tuple[Group, ...]
-    boundaries: tuple[Group, ...]
-    profiles: tuple[Group, ...]
-    ci_lanes: tuple[Group, ...]
-    overlap_candidates: tuple[OverlapCandidate, ...]
-
-    @property
-    def groups(self) -> tuple[Group, ...]:
-        return (
-            self.execution_contracts
-            + self.domains
-            + self.boundaries
-            + self.profiles
-            + self.ci_lanes
-        )
-
-    def group(self, group_id: str) -> Group:
-        matches = [group for group in self.groups if group.id == group_id]
-        if len(matches) != 1:
-            raise InventoryError(f"unknown taxonomy group: {group_id}")
-        return matches[0]
-
-
-def _group(value: object, kind: str, index: int) -> Group:
-    label = f"{kind} {index}"
-    if not isinstance(value, dict):
-        raise InventoryError(f"{label} must be an object")
-    group_id = value.get("id")
-    owner = value.get("owner")
-    contract = value.get("contract")
-    if not isinstance(group_id, str) or not group_id.strip():
-        raise InventoryError(f"{label} needs a non-empty id")
-    if not isinstance(owner, str) or not owner.strip():
-        raise InventoryError(f"{label} needs a non-empty owner")
-    if not isinstance(contract, str) or not contract.strip():
-        raise InventoryError(f"{label} needs a non-empty contract")
-    variants = value.get("variants", 1)
-    if isinstance(variants, bool) or not isinstance(variants, int) or variants < 1:
-        raise InventoryError(f"{label} variants must be a positive integer")
-    if kind != "ci_lane" and variants != 1:
-        raise InventoryError(f"{label} may only set variants for a CI lane")
-    raw_skip_policy = value.get("skip_policy")
-    if raw_skip_policy is None:
-        raise InventoryError(f"{label} needs an explicit skip_policy")
-    else:
-        if not isinstance(raw_skip_policy, dict):
-            raise InventoryError(f"{label} skip_policy must be an object")
-        mode = raw_skip_policy.get("mode")
-        reason = raw_skip_policy.get("reason")
-        if mode not in {"allow", "forbid"}:
-            raise InventoryError(f"{label} skip_policy mode must be allow or forbid")
-        if not isinstance(reason, str) or not reason.strip():
-            raise InventoryError(f"{label} skip_policy needs a non-empty reason")
-        skip_policy = SkipPolicy(mode=mode, reason=" ".join(reason.split()))
-    django_settings_modules = _string_tuple(
-        value.get("django_settings_modules", ["unset"]),
-        f"{label} django_settings_modules",
-        required=True,
-    )
-    if not all(
-        module == "unset" or re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", module)
-        for module in django_settings_modules
-    ):
-        raise InventoryError(f"{label} has an invalid Django settings module identity")
-    return Group(
-        id=group_id.strip(),
-        kind=kind,
-        owner=" ".join(owner.split()),
-        contract=" ".join(contract.split()),
-        selection=Selection.from_mapping(value.get("selection"), f"{label} selection"),
-        skip_policy=skip_policy,
-        django_settings_modules=django_settings_modules,
-        variants=variants,
-    )
-
-
-def load_manifest(path: Path) -> Manifest:
-    """Load and fail closed on a malformed taxonomy manifest."""
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise InventoryError(f"cannot load taxonomy manifest from {path}") from error
-    if not isinstance(document, dict) or document.get("schema_version") != MANIFEST_SCHEMA_VERSION:
-        raise InventoryError("unsupported taxonomy manifest schema")
-
-    def groups(key: str, kind: str, *, required: bool = True) -> tuple[Group, ...]:
-        raw = document.get(key)
-        if not isinstance(raw, list) or (required and not raw):
-            raise InventoryError(f"manifest {key} must be a non-empty list")
-        return tuple(_group(item, kind, index) for index, item in enumerate(raw))
-
-    execution_contracts = groups("execution_contracts", "execution_contract")
-    domains = groups("domains", "domain")
-    boundaries = groups("boundaries", "boundary")
-    profiles = groups("profiles", "profile")
-    ci_lanes = groups("ci_lanes", "ci_lane")
-    raw_candidates = document.get("overlap_candidates")
-    if not isinstance(raw_candidates, list) or not raw_candidates:
-        raise InventoryError("manifest overlap_candidates must be a non-empty list")
-    candidates: list[OverlapCandidate] = []
-    for index, value in enumerate(raw_candidates):
-        label = f"overlap candidate {index}"
-        if not isinstance(value, dict):
-            raise InventoryError(f"{label} must be an object")
-        candidate_id = value.get("id")
-        owner = value.get("owner")
-        reason = value.get("reason")
-        review = value.get("review")
-        if not all(
-            isinstance(field, str) and field.strip()
-            for field in (candidate_id, owner, reason, review)
-        ):
-            raise InventoryError(f"{label} needs non-empty id, owner, reason, and review")
-        paths = tuple(
-            _normalized_path(item, f"{label} path")
-            for item in _string_tuple(value.get("paths"), f"{label} paths", required=True)
-        )
-        if len(paths) != len(set(paths)):
-            raise InventoryError(f"{label} paths contain canonical duplicates")
-        candidates.append(
-            OverlapCandidate(
-                id=cast(str, candidate_id).strip(),
-                owner=" ".join(cast(str, owner).split()),
-                paths=paths,
-                reason=" ".join(cast(str, reason).split()),
-                review=" ".join(cast(str, review).split()),
-            )
-        )
-    manifest = Manifest(
-        execution_contracts,
-        domains,
-        boundaries,
-        profiles,
-        ci_lanes,
-        tuple(candidates),
-    )
-    ids = [group.id for group in manifest.groups] + [candidate.id for candidate in candidates]
-    if len(ids) != len(set(ids)):
-        raise InventoryError("taxonomy ids must be unique across groups and candidates")
-    return manifest
-
-
-@dataclass(frozen=True)
-class CollectedTest:
-    """Stable pytest collection metadata used for classification."""
-
-    nodeid: str
-    path: str
-    markers: tuple[str, ...]
-    fixtures: tuple[str, ...]
-    parameter_keys: tuple[str, ...] = ()
-
-    @classmethod
-    def from_pytest_item(cls, item: pytest.Item, root: Path) -> CollectedTest:
-        """Build one shared collection record for inventory and runtime selection."""
-        try:
-            relative_path = Path(item.path).resolve().relative_to(root.resolve()).as_posix()
-        except ValueError as error:
-            raise InventoryError(f"collected path leaves repository: {item.path}") from error
-        callspec = getattr(item, "callspec", None)
-        parameter_keys = tuple(sorted(callspec.params)) if callspec is not None else ()
-        fixture_info = getattr(item, "_fixtureinfo", None)
-        fixture_defs = getattr(fixture_info, "name2fixturedefs", {})
-        fixtures: list[str] = []
-        for name in item.fixturenames:
-            definitions = fixture_defs.get(name) or ()
-            active_definition = definitions[-1] if definitions else None
-            fixture_function = getattr(active_definition, "func", None)
-            if getattr(fixture_function, "__name__", "") == "get_direct_param_fixture_func":
-                continue
-            fixtures.append(name)
-        return cls(
-            nodeid=item.nodeid.replace("\\", "/"),
-            path=relative_path,
-            markers=tuple(sorted({marker.name for marker in item.iter_markers()})),
-            fixtures=tuple(sorted(set(fixtures))),
-            parameter_keys=parameter_keys,
-        )
-
-    @property
-    def parameterized(self) -> bool:
-        return bool(self.parameter_keys)
-
-    @property
-    def family(self) -> str:
-        return self.nodeid.split("[", maxsplit=1)[0]
 
 
 class _CollectionPlugin:
@@ -495,8 +152,7 @@ def _validate_pytest_passthrough(arguments: list[str]) -> None:
         for option in xdist_options
     ):
         raise InventoryError(
-            "xdist is not supported by the serial taxonomy runner; issue #169 owns "
-            "worker-loaded selection"
+            "xdist options are owned by the manifest-backed taxonomy execution policy"
         )
     forbidden = (
         "--co",
@@ -527,6 +183,9 @@ def _validate_pytest_passthrough(arguments: list[str]) -> None:
         "--sw",
         "--sw-reset",
         "--sw-skip",
+        "--taxonomy-execution",
+        "--taxonomy-lane",
+        "--taxonomy-manifest",
         "-k",
         "-m",
         "-o",
@@ -660,6 +319,53 @@ def _validate_collect_path_aliases(
         raise InventoryError("collection outputs must not overwrite timing inputs")
 
 
+def _validated_runtime_paths(
+    root: Path,
+    timing_output: Path,
+    coverage_file: Path | None,
+    ray_tmp_dir: Path | None,
+) -> tuple[Path | None, Path | None]:
+    if (coverage_file is None) != (ray_tmp_dir is None):
+        raise InventoryError("coverage file and Ray temporary directory must be provided together")
+    if coverage_file is None or ray_tmp_dir is None:
+        return None, None
+
+    repository = root.resolve()
+    resolved_timing = (
+        timing_output.resolve()
+        if timing_output.is_absolute()
+        else (repository / timing_output).resolve()
+    )
+    output_directory = resolved_timing.parent
+    try:
+        output_directory.relative_to(repository)
+    except ValueError as error:
+        raise InventoryError("runtime evidence paths must stay inside the repository") from error
+    if output_directory == repository:
+        raise InventoryError("runtime evidence directory cannot be the repository root")
+    resolved_coverage = (
+        coverage_file.resolve()
+        if coverage_file.is_absolute()
+        else (repository / coverage_file).resolve()
+    )
+    absolute_ray_tmp = (
+        ray_tmp_dir.absolute()
+        if ray_tmp_dir.is_absolute()
+        else (repository / ray_tmp_dir).absolute()
+    )
+    resolved_ray_tmp = absolute_ray_tmp.resolve()
+    if resolved_coverage != output_directory / ".coverage":
+        raise InventoryError("coverage data must use the timing output's sibling .coverage path")
+    if resolved_ray_tmp != output_directory / "ray-tmp":
+        raise InventoryError("Ray temporary data must use the timing output's sibling ray-tmp path")
+    _validate_output_path(repository, resolved_coverage, "coverage data")
+    _validate_output_path(repository, resolved_ray_tmp, "Ray temporary directory")
+    # Ray must receive the lexical path so a short, validated symlink can keep
+    # Unix-domain socket paths below the platform limit. Cleanup continues to
+    # own the resolved repository sibling validated above.
+    return resolved_coverage, absolute_ray_tmp
+
+
 def _environment_record(*, include_processor_count: bool = False) -> dict[str, object]:
     packages: dict[str, str] = {}
     for package in ENVIRONMENT_PACKAGES:
@@ -691,12 +397,15 @@ def _group_record(group: Group, items: list[CollectedTest]) -> dict[str, object]
         "contract": group.contract,
         "skip_policy": asdict(group.skip_policy),
         "django_settings_modules": list(group.django_settings_modules),
+        "execution": group.execution.as_mapping(),
         "variants": group.variants,
         "selection": {
             "expression": group.selection.expression(),
             "pytest_arguments": pytest_arguments,
         },
         "selected_count": len(selected),
+        "nodeid_digest": nodeid_digest([item.nodeid for item in selected]),
+        "contract_digest": collection_contract_digest(selected),
         "file_count": len({item.path for item in selected}),
         "estimated_ci_selected_case_slots": len(selected) * group.variants
         if group.kind == "ci_lane"
@@ -780,6 +489,29 @@ def _validate_timing_detail_records(
 ) -> None:
     selected_nodeids = {item.nodeid for item in selected_items}
     selected_files = {item.path for item in selected_items}
+    test_outcomes = timing.get("test_outcomes")
+    if not isinstance(test_outcomes, list) or len(test_outcomes) != len(selected_nodeids):
+        raise InventoryError("timing evidence needs one outcome for every selected test")
+    observed_outcomes: Counter[str] = Counter()
+    observed_nodeids: set[str] = set()
+    for record in test_outcomes:
+        if not isinstance(record, dict):
+            raise InventoryError("timing test-outcome entries must be objects")
+        nodeid = record.get("nodeid")
+        outcome = record.get("outcome")
+        if not isinstance(nodeid, str) or nodeid not in selected_nodeids:
+            raise InventoryError("timing test-outcome nodeids must belong to the selection")
+        if nodeid in observed_nodeids:
+            raise InventoryError("timing test-outcome nodeids must be unique")
+        if outcome not in OUTCOME_NAMES:
+            raise InventoryError("timing test-outcome entries need normalized outcomes")
+        observed_nodeids.add(nodeid)
+        observed_outcomes[outcome] += 1
+    if observed_nodeids != selected_nodeids:
+        raise InventoryError("timing test outcomes do not cover the exact selected node IDs")
+    if observed_outcomes != Counter(outcome_counts):
+        raise InventoryError("timing test outcomes do not match aggregate outcome counts")
+
     skipped = timing.get("skipped_tests")
     if not isinstance(skipped, list):
         raise InventoryError("timing evidence needs skipped-test detail")
@@ -852,13 +584,87 @@ def _validate_timing_detail_records(
                 raise InventoryError(f"timing {field} total must equal its phase sum")
 
 
+def _validate_execution_evidence(
+    value: object,
+    expected: ExecutionPolicy,
+    label: str,
+) -> None:
+    expected_mapping = expected.as_mapping()
+    if not isinstance(value, dict) or set(value) != set(expected_mapping):
+        raise InventoryError(f"{label} must declare the complete execution policy")
+    for field, expected_value in expected_mapping.items():
+        actual_value = value.get(field)
+        if type(actual_value) is not type(expected_value) or actual_value != expected_value:
+            raise InventoryError(f"{label} does not match the exact execution policy")
+
+
+def _validate_collection_evidence(
+    value: object,
+    execution: ExecutionPolicy,
+    selected_items: list[CollectedTest],
+    items: list[CollectedTest],
+) -> None:
+    if not isinstance(value, dict):
+        raise InventoryError("timing evidence needs taxonomy collection evidence")
+    if value.get("valid") is not True or value.get("errors") != []:
+        raise InventoryError("timing taxonomy collection evidence is not valid")
+    if value.get("mode") != execution.mode:
+        raise InventoryError("timing taxonomy collection mode differs from execution policy")
+    _validate_execution_evidence(
+        value.get("execution"), execution, "timing taxonomy collection execution"
+    )
+
+    selected_nodeids = [item.nodeid for item in selected_items]
+    collected_nodeids = [item.nodeid for item in items]
+    expected_values: tuple[tuple[str, object], ...] = (
+        ("selected_count", len(selected_items)),
+        ("deselected_count", len(items) - len(selected_items)),
+        ("nodeid_digest", nodeid_digest(selected_nodeids)),
+        ("contract_digest", collection_contract_digest(selected_items)),
+        ("collected_count", len(items)),
+        ("collected_nodeid_digest", nodeid_digest(collected_nodeids)),
+        ("collected_contract_digest", collection_contract_digest(items)),
+    )
+    for field, expected_value in expected_values:
+        actual_value = value.get(field)
+        if type(actual_value) is not type(expected_value) or actual_value != expected_value:
+            raise InventoryError(
+                f"timing taxonomy collection {field} does not match current collection"
+            )
+
+    worker_collections = value.get("worker_collections")
+    if execution.mode == "serial":
+        if worker_collections != []:
+            raise InventoryError("serial timing evidence cannot contain worker collections")
+        return
+    if not isinstance(worker_collections, list) or len(worker_collections) != execution.workers:
+        raise InventoryError("xdist timing evidence needs every fixed worker collection")
+    worker_ids: set[str] = set()
+    for record in worker_collections:
+        if not isinstance(record, dict):
+            raise InventoryError("xdist worker collection evidence must contain objects")
+        worker_id = record.get("worker")
+        if not isinstance(worker_id, str) or not worker_id.strip() or worker_id in worker_ids:
+            raise InventoryError("xdist worker collection identities must be non-empty and unique")
+        worker_ids.add(worker_id)
+        for field, expected_value in expected_values:
+            actual_value = record.get(field)
+            if type(actual_value) is not type(expected_value) or actual_value != expected_value:
+                raise InventoryError(
+                    f"xdist worker {worker_id} {field} does not match current collection"
+                )
+
+
 def _validate_timing_record(
     timing: dict[str, Any],
     source: dict[str, object],
     manifest: Manifest,
     items: list[CollectedTest],
 ) -> str:
-    if timing.get("schema_version") != TIMING_SCHEMA_VERSION:
+    if (
+        type(timing.get("schema_version")) is not int
+        or timing.get("schema_version") != TIMING_SCHEMA_VERSION
+    ):
         raise InventoryError("timing evidence has an unsupported schema")
     measured_at = timing.get("measured_at_utc")
     if not isinstance(measured_at, str):
@@ -910,10 +716,22 @@ def _validate_timing_record(
     pytest_record = timing.get("pytest")
     if not isinstance(pytest_record, dict) or pytest_record.get("exit_code") != 0:
         raise InventoryError("timing evidence must come from a successful pytest run")
+    selected_items = [item for item in items if group.selection.matches(item)]
+    execution_value = timing.get("execution")
+    if not isinstance(execution_value, dict):
+        raise InventoryError("timing evidence needs an execution policy")
+    execution_mode = execution_value.get("mode")
+    if execution_mode == "serial":
+        execution = ExecutionPolicy()
+    elif execution_mode == "xdist" and group.execution.mode == "xdist":
+        execution = group.execution
+    else:
+        raise InventoryError("timing execution mode is not allowed for the taxonomy group")
+    _validate_execution_evidence(execution_value, execution, "timing execution")
+    _validate_collection_evidence(timing.get("collection"), execution, selected_items, items)
     selected_count = _require_nonnegative_integer(
         pytest_record.get("selected_count"), "timing selected_count"
     )
-    selected_items = [item for item in items if group.selection.matches(item)]
     expected_count = len(selected_items)
     if selected_count != expected_count:
         raise InventoryError("timing evidence selected count does not match current collection")
@@ -1034,9 +852,7 @@ def build_inventory(
     overlap_records: list[dict[str, object]] = []
     for candidate in manifest.overlap_candidates:
         selected = [
-            item
-            for item in items
-            if any(_path_matches(item.path, path) for path in candidate.paths)
+            item for item in items if any(path_matches(item.path, path) for path in candidate.paths)
         ]
         overlap_records.append(
             {
@@ -1290,8 +1106,6 @@ class _RuntimePlugin:
         self.session_finished: float | None = None
         self.terminal_started: float | None = None
         self.terminal_finished: float | None = None
-        self.selected_count = 0
-        self.deselected_count = 0
         self.phase_seconds: Counter[str] = Counter()
         self.test_phases: dict[str, Counter[str]] = defaultdict(Counter)
         self.outcomes: dict[str, str] = {}
@@ -1320,23 +1134,18 @@ class _RuntimePlugin:
             getattr(config.option, "no_cov", False)
         )
 
-    def pytest_collection(self) -> None:
+    def pytest_sessionstart(self) -> None:
         self.collection_started = time.perf_counter()
 
-    @pytest.hookimpl(trylast=True)
-    def pytest_collection_modifyitems(
-        self, config: pytest.Config, items: list[pytest.Item]
-    ) -> None:
-        selected: list[pytest.Item] = []
-        deselected: list[pytest.Item] = []
-        for item in items:
-            collected = CollectedTest.from_pytest_item(item, self.root)
-            (selected if self.group.selection.matches(collected) else deselected).append(item)
-        if deselected:
-            config.hook.pytest_deselected(items=deselected)
-        items[:] = selected
-        self.selected_count = len(selected)
-        self.deselected_count = len(deselected)
+    def pytest_collection(self) -> None:
+        if self.collection_started is None:
+            self.collection_started = time.perf_counter()
+
+    def pytest_collection_finish(self) -> None:
+        self.collection_finished = time.perf_counter()
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_xdist_node_collection_finished(self) -> None:
         self.collection_finished = time.perf_counter()
 
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
@@ -1389,15 +1198,51 @@ def run_lane(
     runner_queue_seconds: float | None,
     environment_setup_seconds: float | None,
     external_note: str,
+    execution_mode: str = "serial",
+    coverage_file: Path | None = None,
+    ray_tmp_dir: Path | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run one named selection and retain phase-level timing evidence."""
     group = manifest.group(lane_id)
     _reject_pytest_environment(group.django_settings_modules)
     _validate_pytest_passthrough(pytest_arguments)
+    if execution_mode not in {"serial", "xdist"}:
+        raise InventoryError("taxonomy execution mode must be serial or xdist")
+    execution = ExecutionPolicy() if execution_mode == "serial" else group.execution
+    if execution_mode == "xdist" and execution.mode != "xdist":
+        raise InventoryError(f"taxonomy group {lane_id!r} does not declare xdist execution")
+    try:
+        manifest_relative = manifest_path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as error:
+        raise InventoryError("taxonomy manifest must stay inside the repository") from error
     source_before = _source_digest(root, manifest_path)
     plugin = _RuntimePlugin(root, group)
-    arguments = [str(root / "tests"), *pytest_arguments]
-    exit_code = pytest.main(arguments, plugins=[plugin])
+    pytest_taxonomy.consume_last_run_report()
+    arguments = [
+        f"--taxonomy-manifest={manifest_relative}",
+        f"--taxonomy-lane={lane_id}",
+        f"--taxonomy-execution={execution_mode}",
+        *execution.pytest_arguments(),
+        str(root / "tests"),
+        *pytest_arguments,
+    ]
+    previous_environment = {
+        "COVERAGE_FILE": os.environ.get("COVERAGE_FILE"),
+        "RAY_TMPDIR": os.environ.get("RAY_TMPDIR"),
+    }
+    try:
+        if coverage_file is not None:
+            os.environ["COVERAGE_FILE"] = str(coverage_file)
+        if ray_tmp_dir is not None:
+            os.environ["RAY_TMPDIR"] = str(ray_tmp_dir)
+        exit_code = pytest.main(arguments, plugins=[plugin])
+    finally:
+        for name, previous in previous_environment.items():
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
+    collection_report = pytest_taxonomy.consume_last_run_report()
     finished = time.perf_counter()
     source_after = _source_digest(root, manifest_path)
     per_test = [
@@ -1425,10 +1270,22 @@ def run_lane(
     per_file.sort(key=lambda record: (-cast(float, record["total_seconds"]), record["path"]))
     outcome_counts = Counter(plugin.outcomes.values())
     rendered_outcomes = {name: outcome_counts[name] for name in OUTCOME_NAMES}
+    selected_count = (
+        int(collection_report["selected_count"])
+        if isinstance(collection_report, dict)
+        and isinstance(collection_report.get("selected_count"), int)
+        else 0
+    )
+    deselected_count = (
+        int(collection_report["deselected_count"])
+        if isinstance(collection_report, dict)
+        and isinstance(collection_report.get("deselected_count"), int)
+        else 0
+    )
     pytest_timing = {
         "exit_code": int(exit_code),
-        "selected_count": plugin.selected_count,
-        "deselected_count": plugin.deselected_count,
+        "selected_count": selected_count,
+        "deselected_count": deselected_count,
         "completed_count": len(plugin.outcomes),
         "logfinished_count": len(plugin.logfinished),
         "outcomes": rendered_outcomes,
@@ -1452,12 +1309,19 @@ def run_lane(
     integrity_errors: list[str] = []
     if source_before["digest"] != source_after["digest"]:
         integrity_errors.append("Git-visible source changed while pytest was running")
+    if collection_report is None:
+        integrity_errors.append("worker-loaded taxonomy plugin produced no collection report")
+    elif not collection_report.get("valid"):
+        integrity_errors.extend(
+            f"taxonomy collection: {error}"
+            for error in cast(list[str], collection_report.get("errors", []))
+        )
     if int(exit_code) == 0:
-        if plugin.selected_count < 1:
+        if selected_count < 1:
             integrity_errors.append("the selected taxonomy group contained no tests")
-        if len(plugin.logfinished) != plugin.selected_count:
+        if len(plugin.logfinished) != selected_count:
             integrity_errors.append("not every selected test reached pytest_runtest_logfinish")
-        if len(plugin.outcomes) != plugin.selected_count:
+        if len(plugin.outcomes) != selected_count:
             integrity_errors.append("not every selected test produced a final outcome")
         if group.skip_policy.mode == "forbid" and (
             rendered_outcomes["skipped"] or rendered_outcomes["xfailed"]
@@ -1481,6 +1345,8 @@ def run_lane(
         "variant": variant,
         "selection": group.selection.expression(),
         "skip_policy": asdict(group.skip_policy),
+        "execution": execution.as_mapping(),
+        "collection": collection_report,
         "pytest_arguments": pytest_arguments,
         "environment": _environment_record(include_processor_count=True),
         "external": {
@@ -1493,6 +1359,10 @@ def run_lane(
             "valid": int(exit_code) == 0 and not integrity_errors,
             "errors": integrity_errors,
         },
+        "test_outcomes": [
+            {"nodeid": nodeid, "outcome": outcome}
+            for nodeid, outcome in sorted(plugin.outcomes.items())
+        ],
         "skipped_tests": [
             {"nodeid": nodeid, "outcome": outcome}
             for nodeid, outcome in sorted(plugin.outcomes.items())
@@ -1517,7 +1387,11 @@ def _load_timing(path: Path) -> dict[str, Any]:
         )
     except (OSError, ValueError) as error:
         raise InventoryError(f"cannot load timing evidence from {path}") from error
-    if not isinstance(value, dict) or value.get("schema_version") != TIMING_SCHEMA_VERSION:
+    if (
+        not isinstance(value, dict)
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != TIMING_SCHEMA_VERSION
+    ):
         raise InventoryError(f"unsupported timing evidence in {path}")
     return cast(dict[str, Any], value)
 
@@ -1563,9 +1437,12 @@ def _parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser("run", help="run and time one manifest-backed selection")
     run.add_argument("--lane", required=True)
+    run.add_argument("--execution", choices=("serial", "xdist"), default="serial")
     run.add_argument("--observation", required=True)
     run.add_argument("--variant", required=True)
     run.add_argument("--timing-output", type=Path, required=True)
+    run.add_argument("--coverage-file", type=Path)
+    run.add_argument("--ray-tmp-dir", type=Path)
     run.add_argument("--runner-queue-seconds", type=float)
     run.add_argument("--environment-setup-seconds", type=float)
     run.add_argument("--external-note", required=True)
@@ -1597,6 +1474,7 @@ def main(argv: list[str] | None = None) -> int:
                             "selection": group.selection.as_mapping(),
                             "skip_policy": asdict(group.skip_policy),
                             "django_settings_modules": list(group.django_settings_modules),
+                            "execution": group.execution.as_mapping(),
                             "pytest_arguments": pytest_arguments,
                             "manifest_runner": [
                                 "python",
@@ -1614,6 +1492,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if arguments.command == "run":
             _validate_output_path(root, arguments.timing_output, "timing output")
+            coverage_file, ray_tmp_dir = _validated_runtime_paths(
+                root,
+                arguments.timing_output,
+                arguments.coverage_file,
+                arguments.ray_tmp_dir,
+            )
             pytest_arguments = list(arguments.pytest_arguments)
             if pytest_arguments[:1] == ["--"]:
                 pytest_arguments = pytest_arguments[1:]
@@ -1639,6 +1523,9 @@ def main(argv: list[str] | None = None) -> int:
                 runner_queue_seconds=arguments.runner_queue_seconds,
                 environment_setup_seconds=arguments.environment_setup_seconds,
                 external_note=external_note,
+                execution_mode=arguments.execution,
+                coverage_file=coverage_file,
+                ray_tmp_dir=ray_tmp_dir,
             )
             _write_json(arguments.timing_output, timing)
             print(f"Wrote {arguments.timing_output} for taxonomy lane {arguments.lane}.")

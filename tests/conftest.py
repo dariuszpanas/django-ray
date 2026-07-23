@@ -10,6 +10,8 @@ import django
 import pytest
 from django.conf import settings
 
+pytest_plugins = ("scripts.pytest_taxonomy",)
+
 # Add testproject to path so it can be imported
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
