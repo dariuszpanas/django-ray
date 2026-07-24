@@ -1124,10 +1124,13 @@ def test_overlay_copy_replaces_tags_without_editing_repository(tmp_path: Path) -
     ) == original
 
 
-def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def rendered_kuberay_overlay(tmp_path_factory: pytest.TempPathFactory) -> list[dict[str, Any]]:
     kubectl = shutil.which("kubectl")
     if kubectl is None:
         pytest.skip("kubectl is required to render the KubeRay overlay")
+
+    tmp_path = tmp_path_factory.mktemp("kuberay_overlay")
     overlay = configure_overlay_copy(
         source_k8s=ROOT / "k8s",
         destination_k8s=tmp_path / "k8s",
@@ -1140,8 +1143,13 @@ def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(tmp_path: Pat
         text=True,
         check=True,
     )
+    return load_rendered_resources(result.stdout)
 
-    resources = load_rendered_resources(result.stdout)
+
+def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(
+    rendered_kuberay_overlay: list[dict[str, Any]],
+) -> None:
+    resources = rendered_kuberay_overlay
     inspect_rendered_resources(resources, namespace=EXPECTED_NAMESPACE, tag=TAG)
 
     assert all(
@@ -1152,27 +1160,13 @@ def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(tmp_path: Pat
     assert not any(resource["kind"].startswith("ClusterRole") for resource in resources)
 
 
-def test_real_kuberay_overlay_pins_exact_static_ray_topology(tmp_path: Path) -> None:
-    kubectl = shutil.which("kubectl")
-    if kubectl is None:
-        pytest.skip("kubectl is required to render the KubeRay overlay")
-    overlay = configure_overlay_copy(
-        source_k8s=ROOT / "k8s",
-        destination_k8s=tmp_path / "k8s",
-        tag=TAG,
-    )
-    rendered = subprocess.run(
-        [kubectl, "kustomize", str(overlay)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    ray_cluster = next(
-        resource
-        for resource in load_rendered_resources(rendered)
-        if resource.get("kind") == "RayCluster"
-    )
+def test_real_kuberay_overlay_pins_exact_static_ray_topology(
+    rendered_kuberay_overlay: list[dict[str, Any]],
+) -> None:
+    import copy
+
+    resources = copy.deepcopy(rendered_kuberay_overlay)
+    ray_cluster = next(resource for resource in resources if resource.get("kind") == "RayCluster")
 
     assert expected_ray_topology(ray_cluster) == (1, 4)
 

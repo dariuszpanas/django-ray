@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -45,6 +46,20 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 raise pytest.UsageError(
                     f"{item.nodeid} uses {fixture_name!r} but is not marked {marker_name!r}"
                 )
+
+        nodeid = item.nodeid
+        if item.get_closest_marker("live_cluster"):
+            pass  # Keep it isolated from the core CI test domains
+        elif "compiled_graph" in nodeid or "kuberay" in nodeid:
+            item.add_marker(pytest.mark.compiled_graph)
+        elif "workflow" in nodeid:
+            bucket = int(hashlib.md5(nodeid.encode("utf-8")).hexdigest(), 16) % 2
+            item.add_marker(getattr(pytest.mark, f"workflow_{bucket}"))
+        elif "worker" in nodeid or "ray" in nodeid or "result" in nodeid or "runner" in nodeid:
+            item.add_marker(pytest.mark.runner)
+        else:
+            bucket = int(hashlib.md5(nodeid.encode("utf-8")).hexdigest(), 16) % 3
+            item.add_marker(getattr(pytest.mark, f"core_{bucket}"))
 
 
 def pytest_configure(config: object) -> None:

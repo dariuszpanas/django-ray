@@ -207,10 +207,17 @@ def test_checked_in_manifest_partitions_representative_execution_contracts() -> 
     }
     assert manifest.group("local-ray").skip_policy.mode == "forbid"
     assert manifest.group("compiled-graph-opt-in").skip_policy.mode == "allow"
-    assert manifest.group("supported-python").selection.pytest_arguments() == [
+
+
+def test_manifest_lanes_enforce_valid_skip_policies_and_group_definitions() -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+    assert len(manifest.execution_contracts) == 6
+    assert len(manifest.overlap_candidates) == 4
+    assert len(manifest.ci_lanes) == 11
+    assert manifest.group("supported-python-core_0").selection.pytest_arguments() == [
         "tests",
         "-m",
-        "not live_cluster",
+        "core_0",
     ]
 
 
@@ -577,38 +584,50 @@ def test_python312_ci_generates_validated_source_fenced_timing_artifact() -> Non
     timed = by_name["Run tests with suite timing"]
     assert timed["if"] == "matrix.python-version == '3.12'"
     assert "scripts/test_suite_inventory.py run" in timed["run"]
-    assert "--lane supported-python" in timed["run"]
+    assert "--lane supported-python-${{ matrix.test-domain }}" in timed["run"]
     assert "--observation github-actions-ubuntu-py312" in timed["run"]
     assert "--variant locked-dependencies" in timed["run"]
     assert "--runner-queue-seconds" not in timed["run"]
     assert "--environment-setup-seconds" not in timed["run"]
-
-    validated = by_name["Validate suite timing evidence"]
-    assert "scripts/test_suite_inventory.py collect" in validated["run"]
-    assert "--timing artifacts/test-suite-inventory/github-actions-py312.json" in validated["run"]
+    assert (
+        "--timing-output artifacts/test-suite-inventory/github-actions-py312-${{ matrix.test-domain }}.json"
+        in timed["run"]
+    )
 
     uploaded = by_name["Upload suite timing evidence"]
     assert uploaded["if"] == "always() && matrix.python-version == '3.12'"
     assert uploaded["with"]["if-no-files-found"] == "warn"
     assert uploaded["with"]["path"] == "artifacts/test-suite-inventory/"
 
+    gate_steps = workflow["jobs"]["test-inventory-gate"]["steps"]
+    gate_by_name = {step["name"]: step for step in gate_steps if "name" in step}
+    validated = gate_by_name["Validate suite timing evidence"]
+    assert "scripts/test_suite_inventory.py collect" in validated["run"]
+    assert (
+        "--timing artifacts/test-suite-inventory/github-actions-py312-compiled_graph.json"
+        in validated["run"]
+    )
+
 
 def test_inventory_reports_counts_parameterization_and_ci_duplication() -> None:
     manifest = load_manifest(MANIFEST_PATH)
     items = [
-        _item("test_plain"),
+        _item("test_plain", "core_0"),
         _item(
             "test_matrix[first]",
+            "core_0",
             "parametrize",
             parameter_keys=("scenario",),
         ),
         _item(
             "test_matrix[second]",
+            "core_0",
             "parametrize",
             parameter_keys=("scenario",),
         ),
         _item(
             "test_api",
+            "core_0",
             "django_db",
             path="tests/integration/test_api.py",
             fixtures=("client", "db", "request"),
@@ -646,7 +665,7 @@ def test_inventory_reports_counts_parameterization_and_ci_duplication() -> None:
 
     report["timings"] = [
         {
-            "lane": "supported-python",
+            "lane": "supported-python-core_0",
             "measured_at_utc": "2026-07-22T00:00:00+00:00",
             "observation": "representative-observation",
             "variant": "locked",
@@ -684,10 +703,11 @@ def test_inventory_reports_counts_parameterization_and_ci_duplication() -> None:
     ]
     markdown = render_markdown(report)
     assert "Estimated blocking CI selected case slots" in markdown
-    assert "`supported-python`" in markdown
+
+    assert "`supported-python-core_0`" in markdown
     assert "Most-used fixtures" in markdown
     assert (
-        "`supported-python` / `representative-observation` / `locked` slow paths at "
+        "`supported-python-core_0` / `representative-observation` / `locked` slow paths at "
         "`2026-07-22T00:00:00+00:00`"
     ) in markdown
     assert "representative fixture" in markdown

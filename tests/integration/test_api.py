@@ -23,9 +23,29 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
-def client():
+def client(settings):
     """Django test client."""
-    return Client(HTTP_AUTHORIZATION="Bearer test-api-token-for-pytest")
+    return Client(HTTP_AUTHORIZATION=f"Bearer {settings.DJANGO_API_TOKEN}")
+
+
+def test_browser_auth_javascript_executes_credentialed_actions():
+    """Exercise event wiring, bearer headers, and stale credential responses."""
+    node = shutil.which("node")
+    if node is None:
+        if os.environ.get("CI"):
+            pytest.fail("Node.js is required for the dashboard browser contract in CI")
+        pytest.skip("Node.js is unavailable for the dashboard browser contract")
+
+    result = subprocess.run(
+        [node, "--test", "tests/javascript/landing_auth.test.mjs"],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.django_db
@@ -108,63 +128,6 @@ class TestLandingPage:
         for static_asset in static_root.rglob("*"):
             if static_asset.is_file():
                 assert token_bytes not in static_asset.read_bytes()
-
-    def test_browser_auth_javascript_executes_credentialed_actions(self):
-        """Exercise event wiring, bearer headers, and stale credential responses."""
-        node = shutil.which("node")
-        if node is None:
-            if os.environ.get("CI"):
-                pytest.fail("Node.js is required for the dashboard browser contract in CI")
-            pytest.skip("Node.js is unavailable for the dashboard browser contract")
-
-        result = subprocess.run(
-            [node, "--test", "tests/javascript/landing_auth.test.mjs"],
-            cwd=REPOSITORY_ROOT,
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=30,
-        )
-
-        assert result.returncode == 0, result.stdout + result.stderr
-
-    @pytest.mark.parametrize(
-        "authorization",
-        [None, "Bearer invalid-browser-token"],
-        ids=["missing", "invalid"],
-    )
-    def test_browser_actions_reject_missing_and_invalid_credentials(self, authorization):
-        """Every dashboard action remains protected for missing or invalid tokens."""
-        client_kwargs = {}
-        if authorization is not None:
-            client_kwargs["HTTP_AUTHORIZATION"] = authorization
-        browser_client = Client(**client_kwargs)
-
-        responses = (
-            browser_client.get("/api/executions/stats"),
-            browser_client.post("/api/enqueue/add/2/3"),
-            browser_client.get("/api/metrics"),
-            browser_client.get("/api/executions"),
-        )
-
-        assert [response.status_code for response in responses] == [401, 401, 401, 401]
-
-    def test_browser_actions_accept_valid_credentials(self, settings):
-        """The shared browser bearer flow can use every protected dashboard action."""
-        browser_client = Client(
-            HTTP_AUTHORIZATION=f"Bearer {settings.DJANGO_API_TOKEN}",
-        )
-
-        stats_response = browser_client.get("/api/executions/stats")
-        enqueue_response = browser_client.post("/api/enqueue/add/2/3")
-        metrics_response = browser_client.get("/api/metrics")
-        executions_response = browser_client.get("/api/executions")
-
-        assert stats_response.status_code == 200
-        assert enqueue_response.status_code == 200
-        assert enqueue_response.json()["status"] == "READY"
-        assert metrics_response.status_code == 200
-        assert executions_response.status_code == 200
 
 
 @pytest.mark.django_db
@@ -265,18 +228,26 @@ class TestHealthAPI:
         assert response.status_code == 200
         assert len(queries) <= 8
 
-    def test_operational_routes_require_bearer_token(self):
+    @pytest.mark.parametrize(
+        "authorization",
+        [None, "Bearer invalid-browser-token"],
+        ids=["missing", "invalid"],
+    )
+    def test_operational_routes_require_bearer_token(self, authorization):
         """Only health probes are public; task/metrics data needs explicit auth."""
-        unauthenticated_client = Client()
+        client_kwargs = {}
+        if authorization is not None:
+            client_kwargs["HTTP_AUTHORIZATION"] = authorization
+        unauthenticated_client = Client(**client_kwargs)
 
-        response = unauthenticated_client.get("/api/executions/stats")
-        assert response.status_code == 401
+        assert unauthenticated_client.get("/api/executions/stats").status_code == 401
+        assert unauthenticated_client.post("/api/enqueue/add/2/3").status_code == 401
+        assert unauthenticated_client.get("/api/metrics").status_code == 401
+        assert unauthenticated_client.get("/api/executions").status_code == 401
 
-        response = unauthenticated_client.get("/api/metrics")
-        assert response.status_code == 401
-
-        response = unauthenticated_client.get("/api/health")
-        assert response.status_code == 200
+        # Health is public (only tested without auth header)
+        if authorization is None:
+            assert unauthenticated_client.get("/api/health").status_code == 200
 
 
 @pytest.mark.django_db

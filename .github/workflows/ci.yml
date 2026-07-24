@@ -8,10 +8,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  lint:
+  project-contract:
     if: github.event_name != 'pull_request_target'
-    name: Lint & Format
+    name: Project Contract
     runs-on: ubuntu-latest
+    env:
+      COVERAGE_TESTPROJECT_MIN: "80"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -33,49 +35,23 @@ jobs:
       - name: Check linting
         run: uv run ruff check .
 
-  docs:
-    if: github.event_name != 'pull_request_target'
-    name: Docs Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
       - name: Build docs
         run: make docs-build-strict
 
-  typecheck:
-    if: github.event_name != 'pull_request_target'
-    name: Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
       - name: Type check
         run: uv run ty check
+
+      - name: Validate sample project
+        run: uv run make test-testproject
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
 
   test:
     if: github.event_name != 'pull_request_target'
@@ -90,6 +66,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
+        test-domain: ["compiled_graph", "workflow_0", "workflow_1", "runner", "core_0", "core_1", "core_2"]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -110,47 +87,41 @@ jobs:
         run: >-
           uv run --python ${{ matrix.python-version }} python
           scripts/test_suite_inventory.py run
-          --lane supported-python
+          --lane supported-python-${{ matrix.test-domain }}
           --observation github-actions-ubuntu-py312
           --variant locked-dependencies
-          --timing-output artifacts/test-suite-inventory/github-actions-py312.json
+          --timing-output artifacts/test-suite-inventory/github-actions-py312-${{ matrix.test-domain }}.json
           --external-note "GitHub Actions queue and environment setup are recorded by workflow metadata; this record starts at pytest instrumentation"
           --
           --cov=src
           --cov-report=xml
           --cov-report=term
-          --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }}
+          --cov-fail-under=0
           -v
-
-      - name: Validate suite timing evidence
-        if: matrix.python-version == '3.12'
-        run: >-
-          uv run --python ${{ matrix.python-version }} python
-          scripts/test_suite_inventory.py collect
-          --timing artifacts/test-suite-inventory/github-actions-py312.json
-          --json-output artifacts/test-suite-inventory/github-actions-py312-inventory.json
-          --markdown-output artifacts/test-suite-inventory/github-actions-py312-inventory.md
 
       - name: Upload suite timing evidence
         if: always() && matrix.python-version == '3.12'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: test-suite-timing-python-3.12
+          name: test-suite-timing-python-3.12-${{ matrix.test-domain }}
           path: artifacts/test-suite-inventory/
           if-no-files-found: warn
           retention-days: 14
 
       - name: Run tests
         if: matrix.python-version != '3.12'
-        run: uv run --python ${{ matrix.python-version }} pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} -v
+        run: uv run --python ${{ matrix.python-version }} pytest -m "${{ matrix.test-domain }}" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=0 -v
 
-      - name: Enforce worker module coverage
-        if: matrix.python-version == '3.12'
-        run: uv run coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=${{ env.COVERAGE_WORKER_MIN }}
 
-      - name: Enforce ray job module coverage
-        if: matrix.python-version == '3.12'
-        run: uv run coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=${{ env.COVERAGE_RAY_JOB_MIN }}
+      - name: Upload partial coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.python-version }}-${{ matrix.test-domain }}
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 1
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
@@ -330,29 +301,6 @@ jobs:
           docker rm --force ray-worker ray-head || true
           docker network rm django-ray-live-cluster || true
 
-  testproject:
-    name: Testproject Smoke
-    runs-on: ubuntu-latest
-    env:
-      COVERAGE_TESTPROJECT_MIN: "80"
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
-      - name: Validate sample project
-        run: uv run make test-testproject
-
   dependency-compatibility:
     if: github.event_name != 'pull_request_target'
     name: Dependencies (${{ matrix.resolution }}, Python ${{ matrix.python-version }})
@@ -405,13 +353,9 @@ jobs:
 
   compiled-graph-candidate-smoke:
     if: github.event_name != 'pull_request_target'
-    name: Compiled Graph Candidate (Ray ${{ matrix.ray-version }})
+    name: Compiled Graph Candidate Smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        ray-version: ["2.53.0", "2.56.0", "2.56.1"]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -424,95 +368,126 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install candidate with Compiled Graph dependencies
-        run: |
-          uv sync --frozen --python 3.12
-          uv pip install --python .venv/bin/python "ray[cgraph]==${{ matrix.ray-version }}"
-
-      - name: Record candidate environment
+      - name: Test Compiled Graph candidates sequentially
         run: |
           mkdir -p compiled-graph-evidence
-          .venv/bin/python -c \
-            "import json, platform, ray, sys; print(json.dumps({'python': sys.version, 'ray': ray.__version__, 'platform': platform.platform(), 'machine': platform.machine()}, indent=2, sort_keys=True))" \
-            > compiled-graph-evidence/environment.json
-          uv pip freeze --python .venv/bin/python \
-            > compiled-graph-evidence/packages.txt
-
-      - name: Probe production-intended nested owner
-        run: >-
-          .venv/bin/python -m
-          django_ray.runtime.compiled_graph_probe
-          --topology nested-ray-task
-          --submission-transport direct-ray-core
-          --candidate-native
-          --require-success
-          --timeout-seconds 90
-          > compiled-graph-evidence/probe.json
-
-      - name: Show Compiled Graph evidence
-        if: always()
-        run: |
-          cat compiled-graph-evidence/environment.json || true
-          cat compiled-graph-evidence/probe.json || true
+          for version in "2.53.0" "2.56.0" "2.56.1"; do
+            echo "::group::Testing Ray ${version}"
+            
+            uv sync --frozen --python 3.12
+            uv pip install --python .venv/bin/python "ray[cgraph]==${version}"
+            
+            .venv/bin/python -c \
+              "import json, platform, ray, sys; print(json.dumps({'python': sys.version, 'ray': ray.__version__, 'platform': platform.platform(), 'machine': platform.machine()}, indent=2, sort_keys=True))" \
+              > compiled-graph-evidence/environment-${version}.json
+            uv pip freeze --python .venv/bin/python \
+              > compiled-graph-evidence/packages-${version}.txt
+            
+            .venv/bin/python -m \
+              django_ray.runtime.compiled_graph_probe \
+              --topology nested-ray-task \
+              --submission-transport direct-ray-core \
+              --candidate-native \
+              --require-success \
+              --timeout-seconds 90 \
+              > compiled-graph-evidence/probe-${version}.json
+              
+            cat compiled-graph-evidence/environment-${version}.json || true
+            cat compiled-graph-evidence/probe-${version}.json || true
+            
+            echo "::endgroup::"
+          done
 
       - name: Upload Compiled Graph evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: compiled-graph-ray-${{ matrix.ray-version }}
+          name: compiled-graph-ray-all
           path: compiled-graph-evidence/
 
-  build:
+  coverage-gate:
     if: github.event_name != 'pull_request_target'
-    name: Build Package
+    name: Coverage Gate
+    needs: test
     runs-on: ubuntu-latest
-    needs:
-      [
-        lint,
-        docs,
-        typecheck,
-        test,
-        postgresql-coordination,
-        live-cluster,
-        testproject,
-        dependency-compatibility,
-        compiled-graph-candidate-smoke,
-      ]
+    env:
+      COVERAGE_GLOBAL_MIN: "95"
+      COVERAGE_WORKER_MIN: "90"
+      COVERAGE_RAY_JOB_MIN: "90"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "latest"
           enable-cache: "false"
-
-      - name: Set up Python
+      - name: Set up Python 3.12
         run: uv python install 3.12
-
-      - name: Build package
-        run: uv build
-
-      - name: Upload dist artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.12
+      - name: Download all coverage artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
-          name: dist
-          path: dist/
+          pattern: coverage-*
+          path: coverage-data
+      - name: Combine coverage
+        run: |
+          # Move all downloaded .coverage files into the root directory with unique names
+          find coverage-data -type f -name ".coverage" | awk '{printf "mv %s .coverage.%d\n", $0, NR}' | sh
+          uv run --python 3.12 coverage combine
+      - name: Enforce global coverage
+        run: uv run --python 3.12 coverage report --fail-under=${{ env.COVERAGE_GLOBAL_MIN }}
+      - name: Enforce worker module coverage
+        run: uv run --python 3.12 coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=${{ env.COVERAGE_WORKER_MIN }}
+      - name: Enforce ray job module coverage
+        run: uv run --python 3.12 coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=${{ env.COVERAGE_RAY_JOB_MIN }}
+
+  test-inventory-gate:
+    if: github.event_name != 'pull_request_target'
+    name: Validate Suite Inventory
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "latest"
+          enable-cache: "false"
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.12
+      - name: Download suite timing artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: test-suite-timing-python-3.12-*
+          path: artifacts/test-suite-inventory
+          merge-multiple: true
+      - name: Validate suite timing evidence
+        run: >-
+          uv run --python 3.12 python
+          scripts/test_suite_inventory.py collect
+          --timing artifacts/test-suite-inventory/github-actions-py312-compiled_graph.json
+          --timing artifacts/test-suite-inventory/github-actions-py312-workflow.json
+          --timing artifacts/test-suite-inventory/github-actions-py312-runner.json
+          --timing artifacts/test-suite-inventory/github-actions-py312-core.json
+          --json-output artifacts/test-suite-inventory/github-actions-py312-inventory.json
+          --markdown-output artifacts/test-suite-inventory/github-actions-py312-inventory.md
+
 
   ci-gate:
     name: CI Gate
     if: always()
     needs:
-      - lint
-      - docs
-      - typecheck
+      - project-contract
       - test
+      - coverage-gate
+      - test-inventory-gate
       - postgresql-coordination
       - live-cluster
-      - testproject
       - dependency-compatibility
       - compiled-graph-candidate-smoke
-      - build
     runs-on: ubuntu-latest
     steps:
       - name: Require every blocking CI job to succeed
@@ -533,16 +508,14 @@ jobs:
               raise SystemExit("CI Gate blocked: no blocking job results")
 
           expected_jobs = {
-              "build",
               "compiled-graph-candidate-smoke",
               "dependency-compatibility",
-              "docs",
-              "lint",
               "live-cluster",
               "postgresql-coordination",
+              "project-contract",
               "test",
-              "testproject",
-              "typecheck",
+              "coverage-gate",
+              "test-inventory-gate",
           }
           received_jobs = set(results)
           if received_jobs != expected_jobs:

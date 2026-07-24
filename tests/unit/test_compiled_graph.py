@@ -796,19 +796,19 @@ def test_ci_smoke_matches_candidate_versions_and_installs_cgraph_extra() -> None
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     candidate_versions = {row["ray_version"] for row in candidate_compiled_graph_runtime_rows()}
     smoke_job = workflow.split("  compiled-graph-candidate-smoke:\n", maxsplit=1)[1].split(
-        "\n  build:\n", maxsplit=1
+        "\n  coverage-gate:\n", maxsplit=1
     )[0]
 
-    assert 'ray-version: ["2.53.0", "2.56.0", "2.56.1"]' in workflow
+    assert 'for version in "2.53.0" "2.56.0" "2.56.1"; do' in workflow
     assert candidate_versions == {"2.53.0", "2.56.0", "2.56.1"}
-    assert '"ray[cgraph]==${{ matrix.ray-version }}"' in smoke_job
+    assert '"ray[cgraph]==${version}"' in smoke_job
     assert ".venv/bin/python -c" in smoke_job
     assert ".venv/bin/python -m" in smoke_job
     assert "uv run" not in smoke_job
     assert "--topology nested-ray-task" in smoke_job
     assert "--submission-transport direct-ray-core" in smoke_job
     assert "--candidate-native" in smoke_job
-    assert "compiled-graph-evidence/probe.json" in smoke_job
+    assert "compiled-graph-evidence/probe-${version}.json" in smoke_job
 
 
 def test_gpu_dependencies_are_not_mandatory_application_dependencies() -> None:

@@ -127,6 +127,13 @@ markers = [
     "live_cluster: Uses a shared external Ray cluster and must run in its serial opt-in lane",
     "postgresql: Uses the PostgreSQL coordination database and must run in its serial evidence lane",
     "real_ray: Starts local Ray and must run serially without pytest-xdist",
+    "compiled_graph: Logical domain covering compiled graph operations",
+    "workflow_0: Logical domain covering workflow and plan management bucket 0",
+    "workflow_1: Logical domain covering workflow and plan management bucket 1",
+    "runner: Logical domain covering workers and distributed execution",
+    "core_0: Logical domain covering core logic, backend, and storage bucket 0",
+    "core_1: Logical domain covering core logic, backend, and storage bucket 1",
+    "core_2: Logical domain covering core logic, backend, and storage bucket 2",
 ]
 filterwarnings = [
     # Suppress Ray's FutureWarning about accelerator env var override

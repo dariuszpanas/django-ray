@@ -102,7 +102,6 @@ def test_ci_gate_covers_every_pr_ci_job_and_runs_after_failures() -> None:
     assert gate["if"] == "always()"
     assert gate["steps"][0]["env"]["BLOCKING_JOB_RESULTS_JSON"] == "${{ toJSON(needs) }}"
     assert _needs(gate) == set(jobs) - {"ci-gate"}
-    assert _needs(jobs["build"]) == set(jobs) - {"build", "ci-gate"}
 
 
 def test_required_check_names_are_globally_unique() -> None:
@@ -170,9 +169,9 @@ def test_ci_gate_rejects_every_non_success_result(
     result: str,
 ) -> None:
     results = _all_successful_results()
-    results["lint"] = result
+    results["project-contract"] = result
 
-    with pytest.raises(SystemExit, match=rf"CI Gate blocked: lint={result}"):
+    with pytest.raises(SystemExit, match=rf"CI Gate blocked: project-contract={result}"):
         _execute_gate(monkeypatch, results)
 
 
@@ -187,8 +186,8 @@ def test_ci_gate_rejects_partial_or_unexpected_result_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     partial = _all_successful_results()
-    partial.pop("build")
-    with pytest.raises(SystemExit, match="missing=build; unexpected=-"):
+    partial.pop("project-contract")
+    with pytest.raises(SystemExit, match="missing=project-contract; unexpected=-"):
         _execute_gate(monkeypatch, partial)
 
     unexpected = _all_successful_results() | {"unreviewed-job": "success"}

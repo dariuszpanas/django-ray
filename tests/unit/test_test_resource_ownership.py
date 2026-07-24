@@ -21,6 +21,9 @@ class _CollectedItem:
     def get_closest_marker(self, name: str) -> object | None:
         return object() if name in self.markers else None
 
+    def add_marker(self, marker: object) -> None:
+        pass
+
 
 @dataclass
 class _FakeRay:

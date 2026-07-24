@@ -340,9 +340,9 @@
   ],
   "ci_lanes": [
     {
-      "id": "supported-python",
-      "owner": "Required Python compatibility and source coverage gate",
-      "contract": "Runs the normal suite with source coverage on every supported Python version.",
+      "id": "supported-python-compiled_graph",
+      "owner": "Required Python compatibility and source coverage gate for compiled_graph domain",
+      "contract": "Runs the compiled_graph domain with source coverage on every supported Python version.",
       "variants": 3,
       "skip_policy": {
         "mode": "allow",
@@ -350,7 +350,91 @@
       },
       "selection": {
         "paths": ["tests"],
-        "exclude_markers": ["live_cluster"]
+        "include_markers": ["compiled_graph"]
+      }
+    },
+    {
+      "id": "supported-python-workflow_0",
+      "owner": "Required Python compatibility and source coverage gate for workflow domain bucket 0",
+      "contract": "Runs the workflow domain with source coverage on every supported Python version.",
+      "variants": 3,
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["workflow_0"]
+      }
+    },
+    {
+      "id": "supported-python-workflow_1",
+      "owner": "Required Python compatibility and source coverage gate for workflow domain bucket 1",
+      "contract": "Runs the workflow domain with source coverage on every supported Python version.",
+      "variants": 3,
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["workflow_1"]
+      }
+    },
+    {
+      "id": "supported-python-runner",
+      "owner": "Required Python compatibility and source coverage gate for runner domain",
+      "contract": "Runs the runner domain with source coverage on every supported Python version.",
+      "variants": 3,
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["runner"]
+      }
+    },
+    {
+      "id": "supported-python-core_0",
+      "owner": "Required Python compatibility and source coverage gate for core domain bucket 0",
+      "contract": "Runs the core domain with source coverage on every supported Python version.",
+      "variants": 3,
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["core_0"]
+      }
+    },
+    {
+      "id": "supported-python-core_1",
+      "owner": "Required Python compatibility and source coverage gate for core domain bucket 1",
+      "contract": "Runs the core domain with source coverage on every supported Python version.",
+      "variants": 3,
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["core_1"]
+      }
+    },
+    {
+      "id": "supported-python-core_2",
+      "owner": "Required Python compatibility and source coverage gate for core domain bucket 2",
+      "contract": "Runs the core domain with source coverage on every supported Python version.",
+      "variants": 3,
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+      },
+      "selection": {
+        "paths": ["tests"],
+        "include_markers": ["core_2"]
       }
     },
     {
