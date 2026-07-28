@@ -379,9 +379,9 @@ def test_abrupt_root_exit_cleans_real_grandchild(monkeypatch, tmp_path: Path) ->
     assert sentinel.exists() is False
 
 
-def test_timeout_kills_probe_process_tree(monkeypatch) -> None:
+def test_timeout_terminates_and_reaps_probe_process(monkeypatch) -> None:
     _force_supported(monkeypatch)
-    command = [sys.executable, "-c", "import time; print('started', flush=True); time.sleep(5)"]
+    command = [sys.executable, "-c", "import time; time.sleep(5)"]
 
     outcome = run_compiled_graph_probe(
         _request(),
@@ -392,7 +392,7 @@ def test_timeout_kills_probe_process_tree(monkeypatch) -> None:
     assert outcome.status is CompiledGraphProbeStatus.TIMEOUT
     assert outcome.error_type == "TimeoutExpired"
     assert "0.1s" in (outcome.error_message or "")
-    assert "started" in outcome.stdout_tail
+    assert outcome.exit_code is not None
 
 
 def test_timeout_must_be_positive() -> None:

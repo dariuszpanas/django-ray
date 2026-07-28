@@ -160,9 +160,13 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert "--lane supported-python" in steps["Run tests with suite timing"]["run"]
     assert steps["Run tests with suite timing"]["run"].endswith("-v")
     assert steps["Run tests"]["run"].endswith("-v")
-    assert "test-cov-phased" not in "\n".join(
+    test_commands = "\n".join(
         str(step.get("run", "")) for step in test_job["steps"] if isinstance(step, dict)
     )
+    assert "test-cov-phased" not in test_commands
+    assert "test-xdist" not in test_commands
+    assert "pytest -n" not in test_commands
+    assert "--execution xdist" not in test_commands
 
 
 def test_proven_external_test_jobs_remain_separate_and_visible() -> None:

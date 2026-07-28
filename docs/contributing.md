@@ -150,6 +150,12 @@ uv run make check
 # All tests
 make test
 
+# Default-resource local subset with four pytest-xdist workers
+uv run make test-xdist
+
+# Override the local worker count when useful
+uv run make test-xdist TEST_XDIST_WORKERS=8
+
 # Unit tests only
 make test-unit
 
@@ -169,6 +175,13 @@ uv run make test-cov
 `uv run make ci` runs the required format, lint, type, coverage, strict-documentation, and package-build
 checks for the current interpreter. GitHub Actions additionally repeats tests across supported Python
 versions and minimum/latest dependency resolutions.
+
+`test-xdist` is a fast local iteration target, not the full test or release gate. It invokes pytest
+once with `-n 4` by default and selects tests without the resource-owning `real_ray`, `postgresql`,
+and `live_cluster` markers. It does not define marker-derived phases or CI jobs, and tests must not
+communicate or depend on execution order. Run the excluded resource contracts separately using the
+commands under [External-resource ownership](#external-resource-ownership), and run
+`uv run make ci` before handoff. Change the worker count with `TEST_XDIST_WORKERS=<count>`.
 
 ### Coverage debt review
 
@@ -556,6 +569,12 @@ external-resource marker. Keep these resource-owning contracts explicit:
 | `postgresql` | Uses the dedicated PostgreSQL coordination database. Run `uv run make test-postgres` as one serial evidence lane so lock, timing, row, and WAL observations are not distorted. |
 | `live_cluster` | Connects to the shared external Ray cluster. The module skips only while opt-in is disabled; once enabled, connection or readiness failure fails the serial lane. |
 | Testproject contract | Exercises the bundled application boundary through `uv run make test-testproject`; it is path-selected rather than marker-selected. |
+
+Tests without one of the three external-resource markers above form the default-resource
+`test-xdist` selection. They are expected to run independently under ordinary pytest-xdist;
+pytest-django gives workers separate test databases. Treat failures caused by shared temporary
+paths, ports, subprocesses, or global state as isolation defects to fix, not as reasons to add
+inter-test synchronization or split CI by marker.
 
 Plain pytest reports selected skips without failing its exit status. Record required local-Ray evidence
 through the manifest runner so its `forbid` skip policy proves that all 22 selected cases executed:

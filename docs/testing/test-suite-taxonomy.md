@@ -2,9 +2,10 @@
 
 The pytest suite is classified by the resources and isolation each case requires. The checked-in
 [manifest](https://github.com/dariuszpanas/django-ray/blob/main/.github/test-suite-taxonomy.json)
-is the shared contract for measurement, worker-loaded selection, the bounded xdist experiment, and
-future CI lanes. Directory names still describe test intent, but they do not determine whether a
-case can run concurrently.
+is the shared selection contract for source-fenced inventory evidence and the existing full-suite
+CI lane. It does not schedule ordinary pytest runs, control `test-xdist`, or define marker-derived
+CI shards. Directory names still describe test intent, but they do not determine whether a case can
+run concurrently.
 
 The dated generated [baseline](../investigations/test-suite-baseline-2026-07-22.md) records exact
 counts, large files and parameterized families, fixture usage, CI repetition, and candidate overlap
@@ -88,8 +89,8 @@ against a fresh collection. Collection baselines require an unset `DJANGO_SETTIN
 PostgreSQL run permits and records only `tests.postgres_settings`. Timing evidence never records
 database credentials.
 
-Only `hermetic` may request xdist, and its manifest policy is exactly two workers with work stealing
-and no restart:
+Within manifest-backed benchmark evidence, only `hermetic` may request xdist, and its policy is
+exactly two workers with work stealing and no restart:
 
 ```bash
 uv run python scripts/test_suite_inventory.py run \
@@ -107,14 +108,18 @@ arguments through pytest passthrough. It fails closed if a worker starts or rest
 topology, applies a different configuration, or reports different selected or complete
 pre-selection node IDs and fixture contracts.
 
+That fixed topology belongs only to the optional evidence runner. `uv run make test-xdist` bypasses
+taxonomy lanes and invokes ordinary pytest once with a configurable worker count and the
+external-resource marker exclusions.
+
 ## Execution contracts
 
 Each collected pytest case belongs to exactly one execution contract:
 
-| Contract | Resource and scheduling boundary | Selection ownership |
+| Contract | Resource and manifest-evidence scheduling boundary | Selection ownership |
 |---|---|---|
-| `hermetic` | No Django database, local Ray runtime, PostgreSQL, or live cluster; serial by default and eligible for the fixed two-worker experiment | External markers and database fixture closure excluded |
-| `sqlite-django` | pytest-django's default SQLite database; always serial | Inherited/direct `django_db` or a database-owning fixture; external markers excluded |
+| `hermetic` | No Django database, local Ray runtime, PostgreSQL, or live cluster; serial by default in manifest evidence and eligible for its fixed benchmark | External markers and database fixture closure excluded |
+| `sqlite-django` | pytest-django's default SQLite database; serial in phased manifest evidence and eligible for ordinary local `test-xdist` | Inherited/direct `django_db` or a database-owning fixture; external markers excluded |
 | `local-ray` | Starts and stops required local Ray; always serial | Explicit `real_ray` without `compiled_graph_opt_in`; skips forbidden |
 | `compiled-graph-opt-in` | Starts local Ray for the capability-gated native topology probe; always serial | Both `compiled_graph_opt_in` and `real_ray`; deliberate opt-in skip allowed |
 | `postgresql` | Disposable PostgreSQL service; always serial | Explicit `postgresql`; dedicated evidence lane |
@@ -140,11 +145,11 @@ many unit-directory files use the SQLite database. We therefore reserve explicit
 resource or isolation behavior and rely on module/class inheritance where possible; adding a marker
 to every test would create maintenance work without improving the contract.
 
-## Opt-in phased canonical coverage
+## Legacy opt-in phased canonical coverage
 
-`make test-cov-phased` is an evidence target for the bounded experiment. It is not the default
-`test-cov` target and is not called by the blocking supported-Python matrix. Keep the single outer
-environment boundary:
+`make test-cov-phased` is legacy, opt-in measurement machinery for the bounded experiment. It is not
+the default `test-cov` target, does not control ordinary local `test-xdist`, and is not called by the
+blocking supported-Python matrix. Keep the single outer environment boundary:
 
 ```bash
 uv run make test-cov-phased
@@ -254,11 +259,12 @@ cases may later skip, so it is not labeled completed execution. The JavaScript s
 from the bundled API suite are real gate work, but they are outside that selected-slot count rather
 than disguised as additional pytest cases. Public CI does not run native Compiled Graph probes.
 
-## Hosted paired benchmark and retention decision
+## Legacy hosted paired benchmark and retention decision
 
 The `CI` workflow exposes optional `workflow_dispatch` jobs for comparable Linux evidence. They are
-not pull-request checks and do not replace the serial supported-Python matrix. Keep the selected ref
-unchanged until the complete procedure finishes so every dispatch checks out the same commit.
+not pull-request checks, do not control ordinary local `test-xdist`, and do not replace the serial
+supported-Python matrix. Keep the selected ref unchanged until the complete procedure finishes so
+every dispatch checks out the same commit.
 
 Run three pair dispatches:
 
@@ -328,17 +334,9 @@ Queue delay and dependency/environment setup remain external intervals and never
 canonical-plan speed. The aggregate runs with `--require-retention`: it exits with status 3 when
 valid evidence says to reject xdist, and with status 2 when evidence is incomplete or inconsistent.
 
-A passing aggregate for the opt-in candidate is preliminary retention evidence, not authorization
-to promote it. The blocking supported-Python jobs and the default `make test-cov` path remain serial,
-and neither dispatch mode edits them. If this issue delivers only the harness, activation remains a
-separately reviewed and gated change. Because changing the Makefile or workflow changes the source
-identity, the proposed activation must already be present in one source-frozen candidate branch
-commit used for all three pair runs and the authoritative aggregate. A retained aggregate from an
-earlier groundwork commit cannot cross that source fence, and any later tracked tree edit requires
-the complete procedure to be repeated. A rebase merge may change the commit SHA without changing
-the evidence-bearing source: before promotion, verify that merged `main` preserves the candidate's
-complete Git tree and source digest exactly. Until that final-source evidence passes both
-performance gates, xdist stays opt-in and the serial gate remains authoritative.
+These optional dispatch jobs preserve historical measurement evidence only. They neither authorize
+nor block ordinary local `test-xdist`, and they must not change the supported-Python matrix or create
+marker-derived blocking jobs. Any proposal to activate xdist in blocking CI is a separate change.
 
 ## Ownership and overlap review
 
