@@ -100,6 +100,7 @@ from django_ray.workflows import step
 def run_inference(features: list[float]) -> float:
     return sum(features)
 
+
 gpu_inference = step(
     run_inference,
     ray_options={"num_gpus": 1},

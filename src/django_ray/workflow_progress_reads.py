@@ -1499,7 +1499,7 @@ def _expected_detail_count(
         or total < 0
         or record.get("detail_revision") != context.summary["detail_revision"]
         or any(type(value) is not int or value < 0 for value in counts.values())
-        or sum(counts.values()) != total
+        or sum(cast(int, value) for value in counts.values()) != total
         or summary_counts["retained_detail"] != total
         or not detail_reasons.issubset(_DETAIL_TRUNCATION_REASONS)
         or not topology_reasons.issubset(_TOPOLOGY_TRUNCATION_REASONS)

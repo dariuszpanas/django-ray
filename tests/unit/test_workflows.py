@@ -1258,7 +1258,9 @@ def test_ray_executor_flushes_failed_progress_snapshot() -> None:
         get=lambda ref: snapshot,
     )
 
-    assert executor._flush_progress(failed=True)["state"] == "FAILED"
+    flushed = executor._flush_progress(failed=True)
+    assert flushed is not None
+    assert flushed["state"] == "FAILED"
 
     execution.refresh_from_db()
     assert json.loads(execution.progress_data)["state"] == "FAILED"
