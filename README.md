@@ -178,6 +178,7 @@ uv run make fix       # Format and apply safe Ruff lint fixes
 uv run make lint      # Check lint without modifying files
 uv run make typecheck # Type check with ty
 uv run make test      # Run tests
+uv run make test-xdist # Run the default-resource subset with four xdist workers
 uv run make test-cov  # Run tests with CI coverage floors
 uv run make check     # Check formatting, lint, and types without changes
 uv run make ci        # Check coverage, docs, and package build for this interpreter

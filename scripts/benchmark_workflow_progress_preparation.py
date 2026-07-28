@@ -41,6 +41,7 @@ DEFAULT_PROFILES = ("sparse", "high-edge")
 IMPLEMENTATIONS = ("prototype-composite", "production-topology")
 DEFAULT_TIMEOUT_SECONDS = 1_800.0
 REQUIRED_SCALE_TIMEOUT_SECONDS = 7_200.0
+FORCED_TERMINATION_READY_TIMEOUT_SECONDS = 60.0
 SCENARIO_PREFIX = "django-ray-preparation-benchmark-"
 WORKER_READY_NAME = "worker-ready.json"
 RSS_SAMPLE_INTERVAL_SECONDS = 0.01
@@ -1932,7 +1933,10 @@ def _forced_termination_probe(args: argparse.Namespace) -> dict[str, Any]:
     workspace_open_before_kill = False
     candidate_exists_before_cleanup = False
     try:
-        deadline = time.monotonic() + min(args.timeout_seconds, 30.0)
+        deadline = time.monotonic() + min(
+            args.timeout_seconds,
+            FORCED_TERMINATION_READY_TIMEOUT_SECONDS,
+        )
         while time.monotonic() < deadline:
             if ready.is_file():
                 readiness = json.loads(ready.read_text(encoding="utf-8"))

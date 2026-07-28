@@ -5,7 +5,7 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install format fix lint typecheck test test-unit test-integration test-postgres test-testproject test-cov test-cov-phased _test-cov-phased-body test-suite-inventory coverage-debt check ci build clean help
+.PHONY: all install format fix lint typecheck test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-cov-phased _test-cov-phased-body test-suite-inventory coverage-debt check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
@@ -29,6 +29,7 @@ TEST_SUITE_HERMETIC_EXECUTION ?= serial
 TEST_SUITE_OBSERVATION ?= local-canonical
 TEST_SUITE_VARIANT ?= locked-dependencies
 TEST_SUITE_EXTERNAL_NOTE ?= Queue and environment setup are outside pytest timing.
+TEST_XDIST_WORKERS ?= 4
 
 # =============================================================================
 # Development
@@ -61,6 +62,11 @@ typecheck:
 # Run all tests
 test:
 	pytest
+
+# Run the default-resource local subset with ordinary pytest-xdist.
+test-xdist:
+	pytest -n $(TEST_XDIST_WORKERS) --max-worker-restart=0 \
+		-m "not real_ray and not live_cluster and not postgresql"
 
 # Run unit tests only
 test-unit:
@@ -295,6 +301,7 @@ help:
 	@echo ""
 	@echo "Testing:"
 	@echo "  test           - Run all tests"
+	@echo "  test-xdist     - Run the default-resource subset with configurable xdist workers"
 	@echo "  test-unit      - Run unit tests only"
 	@echo "  test-integration - Run integration tests only"
 	@echo "  test-postgres  - Run PostgreSQL coordination tests"

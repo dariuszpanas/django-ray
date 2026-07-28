@@ -3023,7 +3023,7 @@ def test_production_topology_subprocess_benchmark_reports_resource_boundary(
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "production-topology-report.json"
-    subprocess.run(
+    completed = subprocess.run(
         [
             sys.executable,
             str(Path(benchmark.__file__).resolve()),
@@ -3043,11 +3043,15 @@ def test_production_topology_subprocess_benchmark_reports_resource_boundary(
             "--output",
             str(output),
         ],
-        check=True,
+        check=False,
         cwd=Path(__file__).resolve().parents[2],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=120,
+    )
+    assert completed.returncode == 0, (
+        "production topology benchmark failed"
+        f"\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     )
     report = json.loads(output.read_text(encoding="utf-8"))
 
