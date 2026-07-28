@@ -679,41 +679,57 @@ generated `site/` directory into `$READTHEDOCS_OUTPUT/html`.
 
 ## Releasing
 
-Releases are automated via GitHub Actions:
+Releases are automated via GitHub Actions, but preparation and publication are separate
+operations.
 
-1. Update the same version in `pyproject.toml` and `src/django_ray/__init__.py`.
-2. Update `docs/changelog.md` and run the release checks locally:
+### Prepare a release candidate
+
+1. Fetch `origin` and prepare the candidate from current `origin/main`.
+2. Update the same version in `pyproject.toml`, `src/django_ray/__init__.py`, `uv.lock`,
+   the release assertion, and `docs/changelog.md`.
+3. Run the release checks locally against the built wheel:
 
 ```bash
+uv run make ci
 uv run python scripts/validate_release.py vX.Y.Z
 uv build
-uv venv --clear
-uv pip install dist/*.whl
-uv run --no-sync python scripts/verify_wheel.py --version X.Y.Z
+uv run --isolated --no-project --python 3.12 \
+  --with ./dist/django_ray-X.Y.Z-py3-none-any.whl \
+  python scripts/verify_wheel.py --version X.Y.Z
 ```
 
-3. Create and push a tag:
+4. Merge the preparation PR only after its required checks pass. Fetch `origin` again,
+   wait for the complete `origin/main` CI run, and record the exact full candidate SHA.
+5. Stop until a maintainer explicitly authorizes that exact SHA. Preparation does not
+   authorize a TestPyPI dispatch, tag push, PyPI upload, or GitHub Release.
+
+The validator requires the requested version, package sources, editable lock entry, and
+dated changelog section to agree. The installed-wheel smoke checks metadata, import
+provenance, management-command discovery, the exact migration leaf, and a fresh database
+migration. The release workflow repeats that wheel smoke on every supported Python
+version.
+
+### Publish an authorized candidate
+
+After authorization, re-fetch `origin` and prove that the authorized SHA is still the
+exact green `origin/main` candidate. A manual workflow dispatch is TestPyPI-only and is
+an optional publication check. A `v*` tag push publishes to production PyPI and then
+creates the GitHub Release.
+
+Create an annotated tag on the exact authorized commit:
 
 ```bash
-git tag vX.Y.Z
+git tag -a vX.Y.Z -m "Release vX.Y.Z" <authorized-full-sha>
 git push origin vX.Y.Z
 ```
 
-The workflow validates that the tag (or the manual `version` input) matches both
-package version sources before building. It then tests the installed wheel's metadata,
-migrations, management-command discovery, and expected package contents on every
-supported Python version before publishing.
-
-For a manual dispatch, enter the exact version already committed to the branch. Manual
-dispatches publish to TestPyPI; versioned tag pushes publish to PyPI and create the
-GitHub release.
-
 ### Release failure recovery
 
-- If validation or build fails, fix the source or workflow and push a new commit; do not
-  move a tag to a different commit.
-- If a tag build fails before publishing, re-run the failed workflow after the fix or
-  push a new patch-version tag once the commit is ready.
+- If candidate validation or build fails, fix the source or workflow, create a new
+  candidate commit, and repeat the required checks and authorization.
+- A transient infrastructure failure may be rerun against the same immutable tag.
+- If a source or workflow change is required, the old tag cannot acquire that fix.
+  Never move a tag to a different commit; prepare and authorize a corrected new version.
 - PyPI versions are immutable. If publishing succeeds but a later test or GitHub release
   step fails, keep the published version, re-run the failed downstream job, and use a
   new version for any corrected artifacts. Never upload a replacement wheel under the

@@ -1,6 +1,6 @@
 """Django Ray - Ray.io integration with Django for distributed computing."""
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 # Default app config for Django
 default_app_config = "django_ray.apps.DjangoRayConfig"

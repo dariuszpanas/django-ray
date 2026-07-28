@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-28
+
+### Release scope
+
+- Supported execution remains synchronous, dynamic Ray Core, and Ray Job. This release adds
+  durable priority scheduling, bounded worker polling, opt-in durable oversized inputs,
+  coroutine tasks, workflow plan and bounded map/reduce improvements, and authenticated
+  observability without changing those default execution paths.
+- Compiled Graph compatibility policy, lifecycle, probe containment, and the guarded KubeRay
+  pilot ship as experimental, default-off groundwork. No capability row or native product
+  execution is enabled. Public native candidate jobs and the scheduled hosted canary were
+  removed; public CI is hermetic, and native evidence is produced only by the guarded local
+  KubeRay pilot. A functional native probe does not make the current profile promotable because
+  Ray 2.56 teardown still violates the residual-resource invariant.
+- Schema-v3 workflow-progress readers and dormant storage are present, but the production
+  coordinator remains a schema-v2 writer. Static-actor and Compiled Graph workflow strategies,
+  schema-v3 publication, and a resident prepared-graph cache remain inactive.
+
 ### Added
 
 - A manual and monthly line-coverage debt report now records exact JSON and Markdown evidence,
@@ -155,9 +173,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disabled, and #79 still owns live transfer, mailbox, and concurrent-workspace
   admission limits.
 - A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
-  with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
-  capability identity includes immutable deployment, shared-memory, and object-store
-  profiles; no native capability tuple is enabled yet.
+  with a dedicated bounded control-record channel, hermetic public policy coverage, and
+  guarded local KubeRay evidence tooling. Exact capability identity includes immutable
+  deployment, shared-memory, and object-store profiles; the verified capability set is
+  empty.
 - A machine-readable review of fresh Linux Compiled Graph candidate artifacts, retaining
   exact provenance and hashes while making an explicit no-promotion decision. Release
   validation now enforces runtime/review parity and future evidence revalidation and
@@ -165,6 +184,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `make test-xdist` provides an ordinary four-worker local speed path for the
+  default-resource subset. Markers identify tests that own real Ray, live-cluster, or
+  PostgreSQL resources; they do not create CI shards or cross-test coordination, and
+  supported-Python CI remains non-xdist.
 - CI retains one visible test job per supported Python version and cancels superseded
   pull-request workflows as a unit. Public hosted native Compiled Graph candidate jobs
   and the scheduled canary are removed; native evidence now belongs exclusively to the
@@ -180,9 +203,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before rebase merges.
 - Worker heartbeat, completion, reconciliation, timeout, cancellation, and lease
   cleanup schedules now remain independent from idle claim polling.
+- Workflow metadata inspection no longer imports or initializes Ray before execution
+  actually needs it.
+- Legacy `ray_core:<pk>` task handles remain readable in 0.4.0. This release is only
+  the earliest review point for a future removal; it does not remove or deprecate that
+  compatibility path.
 
 ### Fixed
 
+- Minimum-supported `django-ninja` versions now render the bundled testproject
+  responses correctly.
+- PostgreSQL cancellation and terminal coordination now fence updates by execution
+  generation.
 - The bundled testproject dashboard now retains a successfully verified operator-supplied bearer
   token in tab-scoped `sessionStorage`, so statistics, smoke-task enqueue, metrics, and execution
   views remain authenticated across reloads. It clears credentials rejected with 401 or explicitly
@@ -198,17 +230,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migration
 
-- Apply `0012_workflow_progress_summary` before deploying upgraded readers. The two new
-  columns are nullable, so existing rows and rolling old writers remain valid. Keep the
-  schema-v3 producer disabled through the public-reader rollout, #79 live-ingestion
-  bound, and #142 composite preparation, then drain old workflow writers before
-  activation. Reversing this migration drops the new summary history columns but does
-  not modify legacy `progress_data`.
-- Apply `0013_workflow_progress_detail_storage` after `0012` to add dormant run,
-  manifest, page, link, and normalized-detail tables. It does not backfill or rewrite
-  legacy snapshots, so old schema-v2 writers remain valid during the reader-first rollout.
-  Reverse it only after disabling schema-v3 publication and exporting any retained
-  topology/detail needed for audit; reversal deletes those package-owned detail tables.
+- Apply migrations `0007` through `0013` before starting upgraded workers:
+  `python manage.py migrate django_ray`.
+- `0007_raytaskexecution_priority` adds task priority and gives existing rows the
+  neutral default `0`.
+- `0008_raytaskexecution_priority_constraint` enforces the `-100` through `100`
+  database range. It is intentionally non-atomic: PostgreSQL adds the constraint as
+  `NOT VALID` and then validates it, while other databases add the check directly.
+  Its PostgreSQL operations are rerunnable.
+- `0009_taskinputpayload_and_input_reference` adds the durable input
+  registry and nullable task reference. Existing inline inputs remain valid; keep
+  spillover opt-in until upgraded code is deployed and old Ray Job drivers are drained.
+- `0010_raytaskexecution_workflow_run_id` adds nullable workflow-run identity without
+  rewriting legacy progress. `0011_raytaskexecution_workflow_plan`
+  adds nullable plan identity, selection, and pinned-attempt fields, so old rows and
+  rolling old writers remain valid.
+- `0012_workflow_progress_summary` adds nullable current/per-attempt schema-v3 summary
+  fields reader-first. It does not modify legacy `progress_data`.
+- `0013_workflow_progress_detail_storage` adds dormant run, manifest, page, link, and
+  normalized-detail tables without backfilling or reinterpreting legacy snapshots.
+  Reverse it only after disabling schema-v3 publication and exporting retained detail
+  needed for audit; reversal deletes those package-owned tables.
+- Keep the schema-v3 producer disabled through the public-reader rollout, #79
+  live-ingestion bound, #142 composite preparation, and old-writer drain. The current
+  schema-v2 coordinator remains the production writer throughout the 0.4.0 rollout.
 
 ## [0.3.1] - 2026-07-18
 
@@ -392,7 +437,8 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dariuszpanas/django-ray/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dariuszpanas/django-ray/compare/v0.1.1...v0.2.0

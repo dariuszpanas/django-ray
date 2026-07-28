@@ -352,30 +352,46 @@ contain arbitrary application output.
 
 ### Rolling upgrades
 
-The completion envelope and `execution_generation` fields are part of the Ray
-Job protocol. Drain Ray Job workers before deploying a version that introduces
-or changes this protocol: let submitted jobs finish (or explicitly mark them
-for retry), stop the old workers, apply database migrations, and then start the
-new workers. Do not leave old and new workers reconciling the same in-flight
-jobs, because an old driver may not write the envelope or generation metadata
-required for the new worker to prove which execution produced a terminal state.
+Apply the linear `django_ray` migration sequence through
+`0013_workflow_progress_detail_storage` before starting upgraded workers:
 
-Durable input transport has a separate opt-in boundary. Apply its additive migration
-and deploy the new code everywhere while `MAX_INLINE_INPUT_SIZE_BYTES` remains `None`.
-Drain old Ray Job drivers before enabling spillover. Existing inline rows remain valid;
+```bash
+python manage.py migrate django_ray
+```
+
+Migrations `0007` and `0008` add priority with a neutral default and enforce its
+`-100` through `100` range. Migration `0008` is intentionally non-atomic:
+PostgreSQL adds the constraint as `NOT VALID` before validating it, while other
+databases add the check directly.
+
+Migration `0009` adds the durable input registry and nullable task reference. Deploy
+the new code everywhere while `MAX_INLINE_INPUT_SIZE_BYTES` remains `None`, then drain
+old Ray Job drivers before enabling spillover. Existing inline rows remain valid;
 referenced Ray Jobs use transport version 2 and contain only `input_reference`. Before
-rolling back, disable spillover and drain all tasks that already have a reference.
+rolling back, disable spillover and drain every task that already has a reference.
 
-Bounded progress storage uses an additive reader-first rollout. Apply migration
-`0012_workflow_progress_summary` before deploying upgraded summary readers, then apply
-`0013_workflow_progress_detail_storage` for the dormant package-owned detail tables.
-Existing rows and older writers continue using `progress_data`; migration `0013` does
-not backfill or reinterpret legacy snapshots. Keep schema-v3 producer activation
-disabled until the authorized bounded readers are deployed, #79 bounds live ingestion,
-and #142 completes composite bounded preparation. Then drain old workflow writers before
-activation. Reversing `0013` discards normalized detail tables, while reversing `0012`
-drops the summary columns. Export any retained schema-v3 data needed for audit before
-either rollback; legacy progress remains unchanged.
+Migrations `0010` and `0011` add nullable workflow-run and effective-plan identity,
+selection, and pinned-attempt fields. They do not rewrite legacy progress, and older
+writers can continue inserting rows during the rollout.
+
+Migrations `0012` and `0013` implement the additive reader-first progress-storage
+boundary: nullable schema-v3 summaries followed by dormant package-owned topology and
+detail tables. Existing rows and older writers continue using `progress_data`;
+`0013` does not backfill or reinterpret legacy snapshots. Keep schema-v3 producer
+activation disabled until authorized bounded readers are deployed, #79 bounds live
+ingestion, #142 completes composite bounded preparation, and old workflow writers are
+drained. The schema-v2 coordinator remains the production writer in 0.4.0. Reversing
+`0013` discards normalized detail tables, while reversing `0012` drops the summary
+columns. Export any retained schema-v3 data needed for audit before either rollback;
+legacy progress remains unchanged.
+
+The completion envelope and `execution_generation` fields are part of the Ray Job
+protocol. Drain Ray Job workers before deploying a version that introduces or changes
+this protocol: let submitted jobs finish (or explicitly mark them for retry), stop the
+old workers, apply database migrations, and then start the new workers. Do not leave
+old and new workers reconciling the same in-flight jobs, because an old driver may not
+write the envelope or generation metadata required for the new worker to prove which
+execution produced a terminal state.
 
 ## Reliability Controls
 
