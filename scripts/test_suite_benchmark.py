@@ -35,13 +35,21 @@ XDIST_EXECUTION = {
     "max_worker_restart": 0,
 }
 GLOBAL_COVERAGE_MIN = 95.0
+SOURCE_COVERAGE_PREFIX = "src/django_ray/"
 MODULE_COVERAGE_FLOORS = {
     "src/django_ray/management/commands/django_ray_worker.py": 90.0,
     "src/django_ray/runner/ray_job.py": 90.0,
 }
+TESTPROJECT_COVERAGE_PATHS = (
+    "testproject/api.py",
+    "testproject/views.py",
+    "testproject/urls.py",
+)
+TESTPROJECT_COVERAGE_MIN = 80.0
 RETENTION_IMPROVEMENT_MIN = 25.0
 OUTCOME_NAMES = frozenset({"passed", "failed", "skipped", "xfailed", "xpassed"})
-BENCHMARK_JOB = "pytest-xdist-benchmark-pair"
+BENCHMARK_WORKFLOW_PATH = ".github/workflows/pytest-xdist-retention.yml"
+BENCHMARK_PAIR_JOB_ID = "pytest-xdist-benchmark-pair"
 
 
 class BenchmarkError(ValueError):
@@ -342,11 +350,20 @@ def _coverage(directory: Path, label: str) -> dict[str, Any]:
             "excluded": excluded,
             "statements": executed | missing,
         }
-    statements = sum(len(record["statements"]) for record in normalized.values())
-    covered = sum(len(record["executed"]) for record in normalized.values())
+    source_files = {
+        path: record
+        for path, record in normalized.items()
+        if path.startswith(SOURCE_COVERAGE_PREFIX)
+    }
+    if not source_files:
+        raise BenchmarkError(f"{label} coverage omits django-ray source")
+    statements = sum(len(record["statements"]) for record in source_files.values())
+    covered = sum(len(record["executed"]) for record in source_files.values())
     global_percent = 100.0 if not statements else 100.0 * covered / statements
     if global_percent + 1e-9 < GLOBAL_COVERAGE_MIN:
-        raise BenchmarkError(f"{label} global coverage is below {GLOBAL_COVERAGE_MIN:.0f}%")
+        raise BenchmarkError(
+            f"{label} django-ray source coverage is below {GLOBAL_COVERAGE_MIN:.0f}%"
+        )
     module_percent: dict[str, float] = {}
     for path, floor in MODULE_COVERAGE_FLOORS.items():
         record = normalized.get(path)
@@ -356,6 +373,23 @@ def _coverage(directory: Path, label: str) -> dict[str, Any]:
         if percent + 1e-9 < floor:
             raise BenchmarkError(f"{label} coverage for {path} is below {floor:.0f}%")
         module_percent[path] = percent
+    missing_testproject = [path for path in TESTPROJECT_COVERAGE_PATHS if path not in normalized]
+    if missing_testproject:
+        raise BenchmarkError(
+            f"{label} coverage omits testproject floor modules: " + ", ".join(missing_testproject)
+        )
+    testproject_records = [normalized[path] for path in TESTPROJECT_COVERAGE_PATHS]
+    testproject_statements = sum(len(record["statements"]) for record in testproject_records)
+    testproject_covered = sum(len(record["executed"]) for record in testproject_records)
+    testproject_percent = (
+        100.0
+        if not testproject_statements
+        else 100.0 * testproject_covered / testproject_statements
+    )
+    if testproject_percent + 1e-9 < TESTPROJECT_COVERAGE_MIN:
+        raise BenchmarkError(
+            f"{label} combined testproject coverage is below {TESTPROJECT_COVERAGE_MIN:.0f}%"
+        )
     xml_path = directory / "coverage.xml"
     try:
         ET.parse(xml_path)
@@ -367,7 +401,15 @@ def _coverage(directory: Path, label: str) -> dict[str, Any]:
         "missing_lines": statements - covered,
         "statement_lines": statements,
         "percent": global_percent,
+        "source_prefix": SOURCE_COVERAGE_PREFIX,
         "module_percent": module_percent,
+        "testproject": {
+            "paths": list(TESTPROJECT_COVERAGE_PATHS),
+            "covered_lines": testproject_covered,
+            "missing_lines": testproject_statements - testproject_covered,
+            "statement_lines": testproject_statements,
+            "percent": testproject_percent,
+        },
         "statement_line_digest": _coverage_line_digest(normalized, "statements"),
         "covered_line_digest": _coverage_line_digest(normalized, "executed"),
         "missing_line_digest": _coverage_line_digest(normalized, "missing"),
@@ -475,8 +517,8 @@ def record_run(
         raise BenchmarkError("canonical run Git tree SHA must be a full tree identity")
     if not run_id.isdecimal():
         raise BenchmarkError("canonical run GitHub run ID must be numeric")
-    if job != BENCHMARK_JOB:
-        raise BenchmarkError(f"canonical run GitHub job must be {BENCHMARK_JOB}")
+    if job != BENCHMARK_PAIR_JOB_ID:
+        raise BenchmarkError(f"canonical run GitHub job must be {BENCHMARK_PAIR_JOB_ID}")
     if isinstance(run_attempt, bool) or not isinstance(run_attempt, int) or run_attempt < 1:
         raise BenchmarkError("canonical run GitHub attempt must be a positive integer")
     return {
@@ -531,7 +573,7 @@ def _run_record(directory: Path, execution: str) -> dict[str, Any]:
     if (
         set(github) != expected_fields
         or github.get("runner_os") != "Linux"
-        or github.get("job") != BENCHMARK_JOB
+        or github.get("job") != BENCHMARK_PAIR_JOB_ID
     ):
         raise BenchmarkError(f"{execution} canonical run is not Linux GitHub evidence")
     record_run(
@@ -846,7 +888,7 @@ def aggregate_pairs(
             or not run_id.isdecimal()
             or type(run_attempt) is not int
             or run_attempt < 1
-            or github.get("job") != BENCHMARK_JOB
+            or github.get("job") != BENCHMARK_PAIR_JOB_ID
             or github.get("runner_os") != "Linux"
             or not isinstance(runner_image_os, str)
             or not runner_image_os
@@ -947,7 +989,7 @@ def aggregate_pairs(
             "repository": repository,
             "sha": sha,
             "tree_sha": tree_sha,
-            "pair_job": BENCHMARK_JOB,
+            "pair_job": BENCHMARK_PAIR_JOB_ID,
             "runner_os": "Linux",
         },
         "runner_image": {
@@ -991,10 +1033,13 @@ def render_pair_markdown(report: dict[str, Any]) -> str:
             f"| Full canonical plan wall | "
             f"{performance['serial_canonical_plan_seconds']:.3f}s | "
             f"{performance['xdist_canonical_plan_seconds']:.3f}s |",
-            f"| Combined covered lines | {serial_coverage['covered_lines']} | "
+            f"| django-ray source covered lines | {serial_coverage['covered_lines']} | "
             f"{xdist_coverage['covered_lines']} |",
-            f"| Combined missing lines | {serial_coverage['missing_lines']} | "
+            f"| django-ray source missing lines | {serial_coverage['missing_lines']} | "
             f"{xdist_coverage['missing_lines']} |",
+            f"| Combined testproject coverage | "
+            f"{serial_coverage['testproject']['percent']:.2f}% | "
+            f"{xdist_coverage['testproject']['percent']:.2f}% |",
             "",
             f"Hermetic improvement: **{performance['improvement_percent']:.2f}%**.",
             f"Full-plan improvement: **{performance['canonical_plan_improvement_percent']:.2f}%**.",

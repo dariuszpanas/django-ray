@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import json
-import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -793,26 +792,13 @@ def test_policy_module_does_not_import_ray_before_guard() -> None:
     assert "ray" not in imported_roots
 
 
-def test_ci_smoke_matches_candidate_versions_and_installs_cgraph_extra() -> None:
+def test_public_ci_does_not_run_native_compiled_graph() -> None:
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    candidate_versions = {row["ray_version"] for row in candidate_compiled_graph_runtime_rows()}
-    smoke_match = re.search(
-        r"(?ms)^  compiled-graph-candidate-smoke:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
-        workflow,
-    )
-    assert smoke_match is not None
-    smoke_job = smoke_match.group("body")
 
-    assert 'ray-version: ["2.53.0", "2.56.0", "2.56.1"]' in workflow
-    assert candidate_versions == {"2.53.0", "2.56.0", "2.56.1"}
-    assert '"ray[cgraph]==${{ matrix.ray-version }}"' in smoke_job
-    assert ".venv/bin/python -c" in smoke_job
-    assert ".venv/bin/python -m" in smoke_job
-    assert "uv run" not in smoke_job
-    assert "--topology nested-ray-task" in smoke_job
-    assert "--submission-transport direct-ray-core" in smoke_job
-    assert "--candidate-native" in smoke_job
-    assert "compiled-graph-evidence/probe.json" in smoke_job
+    assert "compiled-graph-candidates" not in workflow
+    assert "compiled_graph_probe" not in workflow
+    assert "--candidate-native" not in workflow
+    assert "DJANGO_RAY_ALLOW_UNSAFE_COMPILED_GRAPH_PROBE" not in workflow
 
 
 def test_gpu_dependencies_are_not_mandatory_application_dependencies() -> None:
@@ -823,27 +809,24 @@ def test_gpu_dependencies_are_not_mandatory_application_dependencies() -> None:
     assert '"ray[cgraph]' not in project
 
 
-def test_nonblocking_canary_uses_trusted_schedule_or_manual_double_opt_in() -> None:
-    workflow = (PROJECT_ROOT / ".github" / "workflows" / "compiled-graph-canary.yml").read_text(
-        encoding="utf-8"
-    )
+def test_public_workflows_have_no_native_compiled_graph_canary() -> None:
+    workflows = PROJECT_ROOT / ".github" / "workflows"
 
-    assert "continue-on-error: true" in workflow
-    unsafe_input = workflow.split("unsafe-native:", maxsplit=1)[1].split("jobs:", maxsplit=1)[0]
-    assert "default: false" in unsafe_input
-    assert "RAY_SPEC: ${{ inputs['ray-spec'] || 'ray[cgraph]' }}" in workflow
-    assert ".venv/bin/python -c" in workflow
-    assert ".venv/bin/python -m" in workflow
-    assert "uv run" not in workflow
-    assert "--candidate-native" in workflow
-    assert "--submission-transport direct-ray-core" in workflow
-    assert "DJANGO_RAY_ALLOW_UNSAFE_COMPILED_GRAPH_PROBE=1" in workflow
-    assert "probe_args+=(--unsafe-native)" in workflow
-    assert (
-        "ALLOW_UNSAFE_NATIVE: ${{ github.event_name == 'schedule' || "
-        "inputs['unsafe-native'] || false }}"
-    ) in workflow
-    assert "compiled-graph-evidence/probe.json" in workflow
+    assert not (workflows / "compiled-graph-canary.yml").exists()
+    public_workflow_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for pattern in ("*.yml", "*.yaml")
+        for path in sorted(workflows.glob(pattern))
+    )
+    forbidden = (
+        "django_ray.runtime.compiled_graph_probe",
+        "compiled_session_topology_probe",
+        "--candidate-native",
+        "--unsafe-native",
+        "DJANGO_RAY_ALLOW_UNSAFE_COMPILED_GRAPH_PROBE",
+        "DJANGO_RAY_RUN_COMPILED_SESSION_TOPOLOGY_PROBE",
+    )
+    assert all(value not in public_workflow_text for value in forbidden)
 
 
 def _capability_id(capability: compiled_graph._CapabilityIdentity) -> str:

@@ -106,10 +106,12 @@ logical commits as the change needs; one large atomic commit is valid, while unr
 in a separate change.
 
 The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
-every commit in the PR. The separate required `CI Gate` check fails unless lint, docs, typing,
-supported-Python tests, PostgreSQL, live-cluster faults, testproject, minimum/latest dependencies,
-Compiled Graph candidates, and package build all succeed. Use one of `build`, `chore`, `ci`, `docs`,
-`feat`, `fix`, `perf`, `refactor`,
+every commit in the PR. The separate required `CI Gate` check depends on exactly four blocking roots:
+`Canonical Project`, `Compatibility`, `PostgreSQL Coordination & Polling`, and `Live Cluster Fault
+Tests`. Those roots keep lint, docs, typing, serial canonical tests and coverage, the bundled
+testproject contract, package build, four fresh compatibility environments, and the dedicated
+external-resource checks in one compact workflow without a job matrix. Use one of `build`, `chore`,
+`ci`, `docs`, `feat`, `fix`, `perf`, `refactor`,
 `revert`, `style`, or `test`, optionally add a scope and `!`, and include a summary after `:`. The
 check enforces meaningful body context, validation evidence or a specific not-run reason, and the
 wrappable commit-prose line limit without prescribing section headings. A failed check prints the
@@ -130,10 +132,12 @@ through the read-only `pull_request_target` event. `CI Gate` runs with `always()
 cancelled, timed-out, or skipped blocking jobs, including a package build skipped after an upstream
 failure.
 
-Scheduled/manual Compiled Graph canary, coverage-debt review, and benchmark workflows,
-post-merge/manual documentation builds, and tag/manual release workflows remain outside the PR merge
-gate. PR-facing equivalents that protect correctness live in the blocking CI workflow; Codecov
-upload is advisory within the otherwise blocking Python 3.12 job.
+The guarded local KubeRay Compiled Graph pilot, coverage-debt review, manual pytest-xdist retention,
+and weekly/manual real-Ray compatibility workflows remain outside the PR merge gate. Public GitHub
+Actions workflows never opt into native Compiled Graph execution; canonical CI covers its
+fail-closed policy and harness code. Post-merge/manual documentation builds and tag/manual release
+workflows also remain outside the gate. Codecov upload is advisory within the otherwise blocking
+canonical job.
 
 Before every push and again before enabling auto-merge, fetch and inspect the exact history that the
 rebase merge will retain:
@@ -204,8 +208,9 @@ uv run make ci
 
 This command checks formatting, lint, types, the CI coverage floors, strict documentation, and the
 package build for the current interpreter without modifying tracked files. GitHub Actions additionally
-tests the supported Python and dependency-resolution matrix. Use `uv run make format` or
-`uv run make fix` explicitly when files should be changed.
+checks locked Python 3.13 and 3.14, minimum Python 3.12, and latest Python 3.14 dependency
+environments sequentially inside one compatibility job. Use `uv run make format` or `uv run make
+fix` explicitly when files should be changed.
 
 Changes that cross the local deployment boundary also follow the
 [local KubeRay final-gate trigger matrix](docs/deployment/local-kuberay-gate.md). Run a required gate

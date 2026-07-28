@@ -16,6 +16,10 @@ venv/
 .coverage
 coverage.xml
 artifacts/coverage-debt/
+artifacts/canonical-project/
+artifacts/compatibility/
+artifacts/compiled-graph-candidates/
+artifacts/real-ray-compatibility/
 artifacts/test-suite-inventory/
 artifacts/test-suite-phased-coverage/
 artifacts/pytest-xdist-*/

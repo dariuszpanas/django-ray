@@ -41,7 +41,7 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   a private, budgeted SQLite spill workspace; #141/#142 still own runtime integration.
 - [Compiled Graph compatibility](https://django-ray.readthedocs.io/en/latest/compiled-graph-compatibility/):
   fail-closed candidate and verified tuples, native probe outcomes, topology,
-  transport, dependencies, and canary maintenance.
+  transport, dependencies, and guarded local evidence maintenance.
 - [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
   named profiles, code delivery, cache behavior, and security boundaries.
 - [Ray Serve integration boundary](https://django-ray.readthedocs.io/en/latest/design/ray-serve-boundary/):

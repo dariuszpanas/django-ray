@@ -23,7 +23,7 @@ django-ray is a **library** that provides:
 - [Observability](observability.md) - Versioned services, metrics, and live admin updates
 - [Compatibility](compatibility.md) - Supported versions and dependency policy
 - [Compiled Graph Compatibility](compiled-graph-compatibility.md) - Fail-closed native
-  capability policy and canary evidence
+  capability policy and guarded local evidence
 - [Task Definition](tasks.md) - Defining and enqueueing tasks
 - [Queues](queues.md) - Working with task queues
 - [Retry & Error Handling](retry.md) - Configuring retries and handling failures

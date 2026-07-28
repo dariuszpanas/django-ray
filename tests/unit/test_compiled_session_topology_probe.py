@@ -151,7 +151,10 @@ def test_main_emits_structured_failure(
 @pytest.mark.real_ray
 @pytest.mark.skipif(
     os.environ.get(probe.OPT_IN_ENV) != "1",
-    reason=f"set {probe.OPT_IN_ENV}=1 after the #86 capability gate passes",
+    reason=(
+        f"public CI must not set {probe.OPT_IN_ENV}; "
+        "use guarded local KubeRay for promotion evidence"
+    ),
 )
 def test_opt_in_native_nested_owner_topology() -> None:
     config = probe.ProbeConfig(address="local", invocations=2, timeout_seconds=60)

@@ -257,6 +257,65 @@ def test_checked_in_manifest_partitions_representative_execution_contracts() -> 
         "-m",
         "not live_cluster",
     ]
+    assert manifest.group("supported-python").variants == 1
+    assert manifest.group("dependency-compatibility").variants == 4
+    assert manifest.group("dependency-compatibility").selection.pytest_arguments() == [
+        "tests",
+        "-m",
+        "not live_cluster and not real_ray",
+    ]
+    assert manifest.group("ray-compat-smoke").variants == 4
+    assert manifest.group("ray-compat-smoke").skip_policy.mode == "forbid"
+    assert manifest.group("ray-compat-smoke").selection.pytest_arguments() == [
+        "tests/integration/test_task_execution.py",
+        "-m",
+        "real_ray",
+    ]
+    assert manifest.group("testproject-contract").kind == "boundary"
+    assert manifest.group("testproject-contract").skip_policy.mode == "forbid"
+
+
+def test_checked_in_ray_compat_smoke_selects_exact_remote_execution_cases() -> None:
+    environment = os.environ.copy()
+    for variable in (
+        "DJANGO_SETTINGS_MODULE",
+        "PYTEST_ADDOPTS",
+        "PYTEST_PLUGINS",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    ):
+        environment.pop(variable, None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-qq",
+            "tests",
+            "--taxonomy-lane=ray-compat-smoke",
+            "--taxonomy-execution=serial",
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    nodeids = [line for line in result.stdout.splitlines() if line.startswith("tests/")]
+    assert nodeids == [
+        "tests/integration/test_task_execution.py::"
+        "TestRayRemoteExecution::test_ray_worker_reports_execution_metadata",
+        "tests/integration/test_task_execution.py::TestRayRemoteExecution::test_ray_remote_task",
+        "tests/integration/test_task_execution.py::"
+        "TestRayRemoteExecution::test_ray_remote_entrypoint",
+        "tests/integration/test_task_execution.py::"
+        "TestRayRemoteExecution::test_ray_core_runs_async_task_through_package_entrypoint",
+        "tests/integration/test_task_execution.py::"
+        "TestRayRemoteExecution::test_ray_job_runs_async_task_through_cli_entrypoint",
+    ]
 
 
 def test_inventory_reexports_the_extracted_taxonomy_contract() -> None:
@@ -264,6 +323,117 @@ def test_inventory_reexports_the_extracted_taxonomy_contract() -> None:
     assert inventory_module.InventoryError is taxonomy_module.InventoryError
     assert inventory_module.Selection is taxonomy_module.Selection
     assert inventory_module.load_manifest is taxonomy_module.load_manifest
+
+
+def test_exact_once_validator_rejects_missing_repeated_and_skipped_work(
+    tmp_path: Path,
+) -> None:
+    root = _mini_inventory_repository(tmp_path)
+    manifest = load_manifest(root / ".github/test-suite-taxonomy.json")
+    item = _item("test_boundary", path="tests/test_sample.py")
+
+    with pytest.raises(InventoryError, match="must be unique"):
+        inventory_module._validate_exact_once_requirements(
+            manifest,
+            [item],
+            [],
+            ["sample-boundary", "sample-boundary"],
+        )
+    with pytest.raises(InventoryError, match="missing"):
+        inventory_module._validate_exact_once_requirements(
+            manifest,
+            [item],
+            [],
+            ["sample-boundary"],
+        )
+    with pytest.raises(InventoryError, match="repeated"):
+        inventory_module._validate_exact_once_requirements(
+            manifest,
+            [item],
+            [
+                {
+                    "lane": "portable",
+                    "test_outcomes": [
+                        {"nodeid": item.nodeid, "outcome": "passed"},
+                        {"nodeid": item.nodeid, "outcome": "passed"},
+                    ],
+                }
+            ],
+            ["sample-boundary"],
+        )
+    with pytest.raises(InventoryError, match="skipped or incomplete"):
+        inventory_module._validate_exact_once_requirements(
+            manifest,
+            [item],
+            [
+                {
+                    "lane": "portable",
+                    "test_outcomes": [{"nodeid": item.nodeid, "outcome": "skipped"}],
+                }
+            ],
+            ["sample-boundary"],
+        )
+
+
+def test_exact_partition_validator_accepts_skips_and_rejects_missing_or_repeated(
+    tmp_path: Path,
+) -> None:
+    root = _mini_inventory_repository(tmp_path)
+    manifest = load_manifest(root / ".github/test-suite-taxonomy.json")
+    passed = _item("test_passed")
+    skipped = _item("test_skipped")
+    complete_timings = [
+        {
+            "lane": "hermetic",
+            "test_outcomes": [{"nodeid": passed.nodeid, "outcome": "passed"}],
+        },
+        {
+            "lane": "database",
+            "test_outcomes": [{"nodeid": skipped.nodeid, "outcome": "skipped"}],
+        },
+    ]
+
+    requirements = inventory_module._validate_exact_partition_requirements(
+        manifest,
+        [passed, skipped],
+        complete_timings,
+        ["sample-profile"],
+    )
+
+    assert requirements == [
+        {
+            "id": "sample-profile",
+            "selected_count": 2,
+            "nodeid_digest": inventory_module.nodeid_digest([passed.nodeid, skipped.nodeid]),
+            "contract_digest": inventory_module.collection_contract_digest([passed, skipped]),
+            "outcomes": {"passed": 1, "skipped": 1},
+            "timing_lanes": {"database": 1, "hermetic": 1},
+            "valid": True,
+        }
+    ]
+
+    with pytest.raises(InventoryError, match="missing"):
+        inventory_module._validate_exact_partition_requirements(
+            manifest,
+            [passed, skipped],
+            complete_timings[:1],
+            ["sample-profile"],
+        )
+
+    repeated_timings = copy.deepcopy(complete_timings)
+    repeated_timings.append(
+        {
+            "lane": "database",
+            "test_outcomes": [{"nodeid": skipped.nodeid, "outcome": "xfailed"}],
+        }
+    )
+    with pytest.raises(InventoryError, match="repeated"):
+        inventory_module._validate_exact_partition_requirements(
+            manifest,
+            [passed, skipped],
+            repeated_timings,
+            ["sample-profile"],
+        )
 
 
 def test_cli_select_and_collect_use_fixture_aware_taxonomy_and_atomic_outputs(
@@ -318,6 +488,8 @@ def test_cli_run_records_completed_outcomes_and_merges_valid_timing(tmp_path: Pa
         "locked",
         "--timing-output",
         "artifacts/timing.json",
+        "--ray-tmp-dir",
+        "artifacts/ray-tmp",
         "--external-note",
         "Miniature environment was already prepared; external intervals excluded.",
         "--",
@@ -340,6 +512,7 @@ def test_cli_run_records_completed_outcomes_and_merges_valid_timing(tmp_path: Pa
     assert timing["pytest"]["selected_count"] == 3
     assert timing["pytest"]["completed_count"] == 3
     assert timing["pytest"]["logfinished_count"] == 3
+    assert timing["pytest"]["coverage_enabled"] is False
     assert timing["pytest"]["outcomes"] == {
         "failed": 0,
         "passed": 3,
@@ -354,6 +527,41 @@ def test_cli_run_records_completed_outcomes_and_merges_valid_timing(tmp_path: Pa
         "terminal_reporting_seconds",
     ):
         assert timing["pytest"][field] >= 0
+
+    exact_once = _inventory_cli(
+        root,
+        "collect",
+        "--timing",
+        "artifacts/timing.json",
+        "--require-exact-once",
+        "sample-boundary",
+        "--require-exact-partition",
+        "portable",
+        "--json-output",
+        "artifacts/exact-once.json",
+        "--markdown-output",
+        "artifacts/exact-once.md",
+    )
+
+    assert exact_once.returncode == 0, exact_once.stderr
+    exact_report = json.loads((root / "artifacts/exact-once.json").read_text(encoding="utf-8"))
+    assert len(exact_report["exact_once_requirements"]) == 1
+    requirement = exact_report["exact_once_requirements"][0]
+    assert requirement["id"] == "sample-boundary"
+    assert requirement["selected_count"] == 3
+    assert len(requirement["nodeid_digest"]) == 64
+    assert len(requirement["contract_digest"]) == 64
+    assert requirement["outcomes"] == {"passed": 3}
+    assert requirement["timing_lanes"] == {"portable": 3}
+    assert requirement["valid"] is True
+    partition = exact_report["exact_partition_requirements"][0]
+    assert partition["id"] == "portable"
+    assert partition["selected_count"] == 3
+    assert partition["outcomes"] == {"passed": 3}
+    assert partition["timing_lanes"] == {"portable": 3}
+    markdown = (root / "artifacts/exact-once.md").read_text(encoding="utf-8")
+    assert "## Exact-once execution requirements" in markdown
+    assert "## Exact-partition requirements" in markdown
 
     wrong_settings = copy.deepcopy(timing)
     wrong_settings["environment"]["django_settings_module"] = "other.settings"
@@ -403,6 +611,24 @@ def test_cli_run_records_completed_outcomes_and_merges_valid_timing(tmp_path: Pa
         json.dumps(repeated_timing), encoding="utf-8"
     )
     assert repeated_timing["sample_id"] != timing["sample_id"]
+
+    repeated_exact_once = _inventory_cli(
+        root,
+        "collect",
+        "--timing",
+        "artifacts/timing.json",
+        "--timing",
+        "artifacts/timing-repeat.json",
+        "--require-exact-once",
+        "sample-boundary",
+        "--json-output",
+        "artifacts/repeated-exact-once.json",
+        "--markdown-output",
+        "artifacts/repeated-exact-once.md",
+    )
+
+    assert repeated_exact_once.returncode == 2
+    assert "repeated" in repeated_exact_once.stderr
 
     merged = _inventory_cli(
         root,
@@ -629,7 +855,7 @@ def test_runtime_paths_are_exact_ignored_siblings(tmp_path: Path) -> None:
             inventory_module._validated_runtime_paths(
                 root,
                 timing,
-                Path("artifacts/benchmark/.coverage"),
+                None,
                 wrong_alias / "ray-tmp",
             )
     with pytest.raises(InventoryError, match="sibling .coverage"):
@@ -637,15 +863,25 @@ def test_runtime_paths_are_exact_ignored_siblings(tmp_path: Path) -> None:
             root,
             timing,
             Path("artifacts/other/.coverage"),
-            Path("artifacts/benchmark/ray-tmp"),
-        )
-    with pytest.raises(InventoryError, match="provided together"):
-        inventory_module._validated_runtime_paths(
-            root,
-            timing,
-            Path("artifacts/benchmark/.coverage"),
             None,
         )
+    coverage_only, no_ray_tmp = inventory_module._validated_runtime_paths(
+        root,
+        timing,
+        Path("artifacts/benchmark/.coverage"),
+        None,
+    )
+    no_coverage, ray_tmp_only = inventory_module._validated_runtime_paths(
+        root,
+        timing,
+        None,
+        Path("artifacts/benchmark/ray-tmp"),
+    )
+
+    assert coverage_only == (root / "artifacts/benchmark/.coverage").resolve()
+    assert no_ray_tmp is None
+    assert no_coverage is None
+    assert ray_tmp_only == (root / "artifacts/benchmark/ray-tmp").resolve()
 
 
 def test_cli_run_enforces_group_skip_policy(tmp_path: Path) -> None:
@@ -780,28 +1016,69 @@ def test_source_digest_covers_binary_inputs_but_excludes_generated_baseline(
     assert deleted["digest"] != changed["digest"]
 
 
-def test_python312_ci_generates_validated_source_fenced_timing_artifact() -> None:
+def test_canonical_make_gate_uses_one_source_and_testproject_coverage_dataset() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert (
+        "TEST_SUITE_COVERAGE_ARGS ?= --cov=src --cov=testproject.api "
+        "--cov=testproject.views --cov=testproject.urls"
+    ) in makefile
+    assert makefile.count("-- $(TEST_SUITE_COVERAGE_ARGS) --cov-config=pyproject.toml") == 4
+    assert "--require-exact-partition supported-python" in makefile
+    assert "--require-exact-once testproject-contract" in makefile
+    assert '--include="src/django_ray/*" --fail-under=$(COVERAGE_GLOBAL_MIN)' in makefile
+    assert (
+        '--include="src/django_ray/management/commands/django_ray_worker.py" '
+        "--fail-under=$(COVERAGE_WORKER_MIN)"
+    ) in makefile
+    assert (
+        '--include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)'
+    ) in makefile
+    assert (
+        '--include="testproject/api.py,testproject/views.py,testproject/urls.py" '
+        "--fail-under=$(COVERAGE_TESTPROJECT_MIN)"
+    ) in makefile
+    assert (
+        'coverage xml --data-file="$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" '
+        '--fail-under=0 -o "$(TEST_SUITE_PHASED_OUTPUT_DIR)/coverage.xml"'
+    ) in makefile
+    assert (
+        'coverage json --data-file="$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" '
+        "--fail-under=0 --pretty-print "
+        '-o "$(TEST_SUITE_PHASED_OUTPUT_DIR)/coverage.json"'
+    ) in makefile
+    assert "uuid.uuid4().hex[:8]" in makefile
+    ci_body = makefile.split("\nci:\n", maxsplit=1)[1].split("\n# Build the package", maxsplit=1)[0]
+    assert "$(MAKE) test-cov-phased" in ci_body
+    assert "TEST_SUITE_HERMETIC_EXECUTION=serial" in ci_body
+    assert "$(MAKE) test-testproject" not in ci_body
+
+
+def test_canonical_project_ci_uses_one_source_fenced_nonmatrix_gate() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["test"]["steps"]
-    by_name = {step["name"]: step for step in steps if "name" in step}
+    job = workflow["jobs"]["canonical-project"]
+    steps = job["steps"]
+    run_text = "\n".join(str(step.get("run", "")) for step in steps)
 
-    timed = by_name["Run tests with suite timing"]
-    assert timed["if"] == "matrix.python-version == '3.12'"
-    assert "scripts/test_suite_inventory.py run" in timed["run"]
-    assert "--lane supported-python" in timed["run"]
-    assert "--observation github-actions-ubuntu-py312" in timed["run"]
-    assert "--variant locked-dependencies" in timed["run"]
-    assert "--runner-queue-seconds" not in timed["run"]
-    assert "--environment-setup-seconds" not in timed["run"]
+    assert "strategy" not in job
+    assert "matrix." not in json.dumps(job)
+    assert "make test-cov-phased" in run_text
+    assert "test-testproject" not in run_text
 
-    validated = by_name["Validate suite timing evidence"]
-    assert "scripts/test_suite_inventory.py collect" in validated["run"]
-    assert "--timing artifacts/test-suite-inventory/github-actions-py312.json" in validated["run"]
+    codecov_steps = [
+        step for step in steps if str(step.get("uses", "")).startswith("codecov/codecov-action@")
+    ]
+    assert len(codecov_steps) == 1
+    assert codecov_steps[0]["with"]["files"] == "artifacts/canonical-project/coverage.xml"
 
-    uploaded = by_name["Upload suite timing evidence"]
-    assert uploaded["if"] == "always() && matrix.python-version == '3.12'"
-    assert uploaded["with"]["if-no-files-found"] == "warn"
-    assert uploaded["with"]["path"] == "artifacts/test-suite-inventory/"
+    evidence_uploads = [
+        step
+        for step in steps
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        and "artifacts/canonical-project" in str(step.get("with", {}).get("path", ""))
+    ]
+    assert len(evidence_uploads) == 1
+    assert evidence_uploads[0]["with"]["retention-days"] == 14
 
 
 def test_inventory_reports_counts_parameterization_and_ci_duplication() -> None:
@@ -838,14 +1115,16 @@ def test_inventory_reports_counts_parameterization_and_ci_duplication() -> None:
         "files": 3,
         "parameterized_cases": 2,
         "parameterized_families": 1,
-        "estimated_blocking_ci_selected_case_slots": 22,
+        "estimated_blocking_ci_selected_case_slots": 21,
     }
     groups = {group["id"]: group for group in report["groups"]}
     assert groups["hermetic"]["selected_count"] == 3
     assert groups["sqlite-django"]["selected_count"] == 1
     assert groups["live-cluster"]["selected_count"] == 1
-    assert groups["bundled-testproject"]["selected_count"] == 1
-    assert groups["dependency-compatibility"]["estimated_ci_selected_case_slots"] == 8
+    assert groups["testproject-contract"]["selected_count"] == 1
+    assert groups["testproject-contract"]["estimated_ci_selected_case_slots"] is None
+    assert groups["dependency-compatibility"]["estimated_ci_selected_case_slots"] == 16
+    assert groups["ray-compat-smoke"]["estimated_ci_selected_case_slots"] == 0
     assert report["parameterized_families"] == [
         {
             "nodeid": "tests/unit/test_example.py::test_matrix",

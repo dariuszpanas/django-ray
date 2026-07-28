@@ -28,7 +28,7 @@ project resources, task stats, and a smoke-task trigger:
 - [Observability](observability.md) - Versioned services, metrics, and live admin updates
 - [Compatibility](compatibility.md) - Supported versions, CI policy, and platform limits
 - [Compiled Graph Compatibility](compiled-graph-compatibility.md) - Candidate and
-  verified native capability tuples, probes, and canaries
+  verified native capability tuples, probes, and guarded local evidence
 - [Task Definition](tasks.md) - Defining and enqueueing tasks
 - [Queues](queues.md) - Working with task queues
 - [Retry & Error Handling](retry.md) - Configuring retries and handling failures

@@ -130,7 +130,7 @@ Collection also enforces that `compiled_graph_opt_in` implies `real_ray`. This k
 capability probe out of in-process lanes while allowing required local-Ray evidence to remain
 fail-closed.
 
-A boundary such as `bundled-testproject` intentionally overlaps an execution contract: it answers
+A boundary such as `testproject-contract` intentionally overlaps an execution contract: it answers
 which product surface is being proven, while the execution contract answers what resources the case
 consumes. `portable-local` is a measurement profile, not a product boundary or CI topology promise.
 
@@ -140,24 +140,29 @@ many unit-directory files use the SQLite database. We therefore reserve explicit
 resource or isolation behavior and rely on module/class inheritance where possible; adding a marker
 to every test would create maintenance work without improving the contract.
 
-## Opt-in phased canonical coverage
+## Serial phased canonical coverage
 
-`make test-cov-phased` is an evidence target for the bounded experiment. It is not the default
-`test-cov` target and is not called by the blocking supported-Python matrix. Keep the single outer
-environment boundary:
+`make test-cov-phased` is the source-fenced canonical test and coverage plan. The blocking
+`Canonical Project` job and `make ci` run it serially. Keep the single outer environment boundary:
 
 ```bash
 uv run make test-cov-phased
 ```
 
-The default keeps the hermetic phase serial. To exercise the candidate topology, use a new ignored
-output directory and select xdist explicitly:
+The default keeps the hermetic phase serial. pytest-xdist is not active in the merge gate. To collect
+focused local candidate evidence, use a new ignored output directory and select xdist explicitly:
 
 ```bash
 uv run make test-cov-phased \
   TEST_SUITE_PHASED_OUTPUT_DIR=artifacts/test-suite-phased-coverage/xdist-sample \
   TEST_SUITE_HERMETIC_EXECUTION=xdist
 ```
+
+`make ci` chooses a fresh ignored `artifacts/canonical-project/local-ci-<8-hex>` child for every
+invocation and explicitly pins the hermetic phase to serial execution even if an ambient
+`TEST_SUITE_HERMETIC_EXECUTION` value is present. Direct `test-cov-phased` evidence remains
+fail-closed and requires its selected output directory to be new or empty, preventing observations
+from different runs from being combined.
 
 Ray's Unix-domain sockets can exceed the platform path limit when hosted-runner artifact paths are
 deep. The paired benchmark therefore gives Ray a short `/tmp` symlink through
@@ -176,21 +181,27 @@ selection:
 4. `default-serial-remainder`, serially, retaining the PostgreSQL and Compiled Graph cases as their
    intentional default-settings self-skips.
 
-The remainder preserves the normal suite's collected outcomes; it is not PostgreSQL or Compiled
-Graph execution evidence. Dedicated PostgreSQL jobs and Compiled Graph candidate jobs continue to
-own those resource proofs. `live-cluster` remains outside the normal supported-Python selection and
-keeps its dedicated serial opt-in lane.
+The remainder preserves the normal suite's collected outcomes; it is not PostgreSQL or native
+Compiled Graph execution evidence. `PostgreSQL Coordination & Polling` owns its CI resource proof.
+Native Compiled Graph evidence is intentionally local-KubeRay-only. `live-cluster` remains outside
+the canonical selection and keeps its dedicated serial lane in `Live Cluster Fault Tests`.
 
-Coverage is erased once before the first phase. Every phase, including hermetic, uses
-`--cov-append` against that proven-empty data path and does not enforce an intermediate floor. Only
-after all four timing records merge successfully does the target enforce global 95%, worker-command
-90%, and Ray Job runner 90% coverage, then write `coverage.xml` and line-level `coverage.json`. This
-prevents a partial phase from passing or failing against a dataset that is not the canonical union.
+Coverage is erased once before the first phase. Every phase, including hermetic, measures
+`src`, `testproject.api`, `testproject.views`, and `testproject.urls`, uses `--cov-append` against
+that proven-empty data path, and does not enforce an intermediate floor. Only after all four timing
+records merge successfully does the target enforce 95% across `src/django_ray/`, worker-command
+90%, Ray Job runner 90%, and 80% across the three testproject modules combined. It then writes
+`coverage.xml` and line-level `coverage.json` with `--fail-under=0`; those serialization commands do
+not introduce an implicit fifth floor from the global Coverage.py report setting. This prevents a
+partial phase from passing or failing against a dataset that is not the canonical union.
 
 Every phase retains the schema-3 source fence, collection identity, and exact test outcomes. The
-merged inventory must contain all four timing records, prove that their node IDs do not overlap, and
-match the current `supported-python` node-ID digest. Serial and xdist comparisons also require the
-same statement and excluded-line sets, with every serial covered line still covered by xdist.
+merged inventory applies `--require-exact-partition supported-python`: all outcomes from the four
+timing records must equal that selection, with no missing, unexpected, or repeated node IDs. Valid
+skips and expected failures remain outcomes in this partition. The separate
+`--require-exact-once testproject-contract` requirement proves that every bundled-project case
+completed exactly once without a skip. Serial and xdist comparisons also require the same statement
+and excluded-line sets, with every serial covered line still covered by xdist.
 
 The target snapshots Ray processes, listening sockets, shared-memory objects, and global Ray
 temporary entries before execution. That baseline must be a clean fresh-runner state. All phases use
@@ -240,24 +251,53 @@ Two Linux GitHub Actions observations show why queue delay must not be attribute
 | [PR #163 during the hosted-runner incident](https://github.com/dariuszpanas/django-ray/actions/runs/29960404522) | 301 s | 11 s | 248 s | 2 s |
 
 Those older Actions observations deliberately preserve their coarse step boundary instead of
-inventing unavailable precision. The blocking Python 3.12 job now uses the manifest runner, validates
-its source digest, selected count, completed outcomes, pytest status, and skip policy, then uploads
-any emitted timing diagnostics when the test step fails. Queue and environment setup remain unset
-in that JSON because Actions metadata owns those intervals. The dated baseline records source-fenced
-local observations and merges hosted Linux observations from exact-branch CI artifacts when
-available. The absence of a hosted record explicitly means that evidence is pending. Merging it does
-not change the source digest because dated baseline files are excluded from it.
+inventing unavailable precision. The blocking `Canonical Project` root now uses the manifest runner,
+validates its source digest, selected count, completed outcomes, pytest status, and skip policy, then
+uploads bounded timing diagnostics. Queue and environment setup remain unset in that JSON because
+Actions metadata owns those intervals. The dated baseline records source-fenced local observations
+and merges hosted Linux observations from exact-branch CI artifacts when available. The absence of a
+hosted record explicitly means that evidence is pending. Merging it does not change the source
+digest because dated baseline files are excluded from it.
 
 The estimated CI total is selected pytest case slots multiplied by current lane variants. Selected
-cases may later skip, so it is not labeled completed execution. Compiled Graph candidate probes and
-the JavaScript subtests launched from the bundled API suite are real gate work, but they are outside
-that selected-slot count rather than disguised as additional pytest cases.
+cases may later skip, so it is not labeled completed execution. JavaScript subtests launched from
+the bundled API suite are real gate work outside that selected-slot count rather than disguised as
+additional pytest cases.
+
+## Compact CI ownership
+
+The blocking `CI` workflow has no job matrix. `CI Gate` depends on exactly four root jobs:
+`Canonical Project`, `Compatibility`, `PostgreSQL Coordination & Polling`, and `Live Cluster Fault
+Tests`. Each root owns one coherent serial sequence:
+
+- `Canonical Project` owns formatting, lint, types, source-fenced canonical coverage, the bundled
+  application check, strict documentation, package build, and advisory Codecov upload.
+- `Compatibility` creates four fresh environments in order: locked Python 3.13, locked Python 3.14,
+  minimum Python 3.12 dependencies, and latest Python 3.14 dependencies. Every environment runs
+  `dependency-compatibility` and the five-case `ray-compat-smoke` lane.
+- `PostgreSQL Coordination & Polling` owns the serial PostgreSQL contract.
+- `Live Cluster Fault Tests` owns the disposable two-node cluster contract.
+
+An ordinary compatibility failure, including safe pre-Ray environment setup, is accumulated so
+later isolated variants still produce evidence. Alias ownership or post-Ray cleanup contamination
+fails closed and suppresses successors because their observations would no longer be independent.
+All compact-gate evidence artifacts are retained for 14 days.
+
+Public workflows never set the Compiled Graph native opt-in or invoke the native probe. Canonical
+coverage retains its explicit self-skip plus the fail-closed policy, lifecycle, subprocess, and
+KubeRay-harness tests. The guarded local KubeRay pilot is the sole promotion-evidence path.
+
+The separate `Real-Ray Compatibility` workflow is weekly/manual real-Ray compatibility evidence.
+It has no matrix and uses fresh environments sequentially for Python 3.12, 3.13, and 3.14. It owns
+the broader required local-Ray contract and cleanup evidence without multiplying every pull request
+job. Its failures inform follow-up work but it is not a protected merge check.
 
 ## Hosted paired benchmark and retention decision
 
-The `CI` workflow exposes optional `workflow_dispatch` jobs for comparable Linux evidence. They are
-not pull-request checks and do not replace the serial supported-Python matrix. Keep the selected ref
-unchanged until the complete procedure finishes so every dispatch checks out the same commit.
+The manual-only `pytest-xdist Retention Evidence` workflow in
+`.github/workflows/pytest-xdist-retention.yml` collects comparable Linux evidence. Its jobs are not
+pull-request checks and do not replace the serial canonical gate. Keep the selected ref unchanged
+until the complete procedure finishes so every dispatch checks out the same commit.
 
 Run three pair dispatches:
 
@@ -270,17 +310,17 @@ Run three pair dispatches:
 The equivalent GitHub CLI calls are:
 
 ```bash
-gh workflow run ci.yml --ref <unchanged-branch> \
+gh workflow run pytest-xdist-retention.yml --ref <unchanged-branch> \
   -f xdist_benchmark_mode=pair \
   -f xdist_benchmark_sample=linux-pair-1 \
   -f xdist_benchmark_order=serial-xdist
 
-gh workflow run ci.yml --ref <unchanged-branch> \
+gh workflow run pytest-xdist-retention.yml --ref <unchanged-branch> \
   -f xdist_benchmark_mode=pair \
   -f xdist_benchmark_sample=linux-pair-2 \
   -f xdist_benchmark_order=xdist-serial
 
-gh workflow run ci.yml --ref <unchanged-branch> \
+gh workflow run pytest-xdist-retention.yml --ref <unchanged-branch> \
   -f xdist_benchmark_mode=pair \
   -f xdist_benchmark_sample=linux-pair-3 \
   -f xdist_benchmark_order=serial-xdist
@@ -296,7 +336,7 @@ identity, environment identity, and Ray cleanup. The
 After all three pair jobs pass, dispatch the aggregate job from that same unchanged ref:
 
 ```bash
-gh workflow run ci.yml --ref <unchanged-branch> \
+gh workflow run pytest-xdist-retention.yml --ref <unchanged-branch> \
   -f xdist_benchmark_mode=aggregate \
   -f xdist_benchmark_pair_run_ids=<run-id-1>,<run-id-2>,<run-id-3>
 ```
@@ -328,16 +368,16 @@ canonical-plan speed. The aggregate runs with `--require-retention`: it exits wi
 valid evidence says to reject xdist, and with status 2 when evidence is incomplete or inconsistent.
 
 A passing aggregate for the opt-in candidate is preliminary retention evidence, not authorization
-to promote it. The blocking supported-Python jobs and the default `make test-cov` path remain serial,
-and neither dispatch mode edits them. If this issue delivers only the harness, activation remains a
-separately reviewed and gated change. Because changing the Makefile or workflow changes the source
-identity, the proposed activation must already be present in one source-frozen candidate branch
-commit used for all three pair runs and the authoritative aggregate. A retained aggregate from an
-earlier groundwork commit cannot cross that source fence, and any later tracked tree edit requires
-the complete procedure to be repeated. A rebase merge may change the commit SHA without changing
-the evidence-bearing source: before promotion, verify that merged `main` preserves the candidate's
+to promote it. The blocking `Canonical Project` root and `make ci` remain serial, and neither
+dispatch mode edits them. Issue #187 owns any focused pytest-xdist activation follow-up after this
+compact topology is merged. Because changing the Makefile or workflow changes the source identity,
+the proposed activation must already be present in one source-frozen candidate branch commit used
+for all three pair runs and the authoritative aggregate. A retained aggregate from an earlier
+groundwork commit cannot cross that source fence, and any later tracked tree edit requires the
+complete procedure to be repeated. A rebase merge may change the commit SHA without changing the
+evidence-bearing source: before promotion, verify that merged `main` preserves the candidate's
 complete Git tree and source digest exactly. Until that final-source evidence passes both
-performance gates, xdist stays opt-in and the serial gate remains authoritative.
+performance gates, xdist stays manual-only and the serial gate remains authoritative.
 
 ## Ownership and overlap review
 
@@ -349,7 +389,7 @@ Issue #171 should be split into three focused domain reviews:
 
 1. move workflow-progress protocol cases that only need a fixed run identity out of the database
    contract, and reduce read fixtures to the exact cursor/order cardinality;
-2. share bundled-testproject authentication setup and remove only endpoint overlap proven to assert
+2. share `testproject-contract` authentication setup and remove only endpoint overlap proven to assert
    the same contract;
 3. share one immutable KubeRay overlay render while retaining separate source-binding and topology
    assertions.

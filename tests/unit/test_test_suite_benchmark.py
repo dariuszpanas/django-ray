@@ -119,6 +119,21 @@ def _coverage(extra_core_line: bool) -> dict[str, object]:
                 "missing_lines": core_missing,
                 "excluded_lines": [],
             },
+            "testproject/api.py": {
+                "executed_lines": list(range(1, 9)),
+                "missing_lines": [9, 10],
+                "excluded_lines": [],
+            },
+            "testproject/views.py": {
+                "executed_lines": list(range(1, 9)),
+                "missing_lines": [9, 10],
+                "excluded_lines": [],
+            },
+            "testproject/urls.py": {
+                "executed_lines": list(range(1, 9)),
+                "missing_lines": [9, 10],
+                "excluded_lines": [],
+            },
         },
     }
 
@@ -177,7 +192,7 @@ def _evidence_directory(
         tree_sha="c" * 40,
         run_id=run_id,
         run_attempt=1,
-        job="pytest-xdist-benchmark-pair",
+        job=benchmark.BENCHMARK_PAIR_JOB_ID,
         runner_os="Linux",
         runner_image_os="ubuntu24",
         runner_image_version="20260720.1",
@@ -242,6 +257,19 @@ def test_compare_pair_requires_exact_canonical_parity_and_coverage_non_regressio
     assert report["integrity"] == {"valid": True, "errors": []}
     assert report["performance"]["improvement_percent"] == 30.0
     assert report["coverage"]["non_regression"] is True
+    assert report["coverage"]["serial"]["source_prefix"] == "src/django_ray/"
+    assert report["coverage"]["serial"]["percent"] == 97.0
+    assert report["coverage"]["serial"]["testproject"] == {
+        "paths": [
+            "testproject/api.py",
+            "testproject/views.py",
+            "testproject/urls.py",
+        ],
+        "covered_lines": 24,
+        "missing_lines": 6,
+        "statement_lines": 30,
+        "percent": 80.0,
+    }
     assert set(report["canonical_parity"]) == set(benchmark.PHASES)
     assert benchmark.OWNED_TEMP_SCAN_LIMIT == ray_residue.OWNED_TEMP_SCAN_LIMIT
 
@@ -411,6 +439,46 @@ def test_compare_pair_rejects_exact_outcome_or_covered_line_regression(tmp_path:
         benchmark.compare_pair(serial, xdist, sample="coverage-drift", order="serial-xdist")
 
 
+@pytest.mark.parametrize("mutation", ("below-floor", "missing-module"))
+def test_compare_pair_enforces_combined_testproject_floor(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    serial = _evidence_directory(
+        tmp_path / "serial",
+        "serial",
+        hermetic_wall=10.0,
+        improved_coverage=True,
+        canonical_wall=20.0,
+    )
+    xdist = _evidence_directory(
+        tmp_path / "xdist",
+        "xdist",
+        hermetic_wall=7.0,
+        improved_coverage=True,
+        canonical_wall=18.0,
+    )
+    coverage_path = serial / "coverage.json"
+    coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+    if mutation == "below-floor":
+        api = coverage["files"]["testproject/api.py"]
+        api["executed_lines"].remove(8)
+        api["missing_lines"].append(8)
+        expected = "combined testproject coverage"
+    else:
+        coverage["files"].pop("testproject/urls.py")
+        expected = "omits testproject floor modules"
+    coverage_path.write_text(json.dumps(coverage), encoding="utf-8")
+
+    with pytest.raises(benchmark.BenchmarkError, match=expected):
+        benchmark.compare_pair(
+            serial,
+            xdist,
+            sample=f"testproject-{mutation}",
+            order="serial-xdist",
+        )
+
+
 def test_compare_pair_rejects_zero_xdist_hermetic_wall(tmp_path: Path) -> None:
     serial = _evidence_directory(
         tmp_path / "serial",
@@ -508,7 +576,7 @@ def test_aggregate_uses_three_fresh_pairs_and_median_retention_threshold(
         "repository": "dariuszpanas/django-ray",
         "sha": "b" * 40,
         "tree_sha": "c" * 40,
-        "pair_job": "pytest-xdist-benchmark-pair",
+        "pair_job": benchmark.BENCHMARK_PAIR_JOB_ID,
         "runner_os": "Linux",
     }
     assert report["schema_version"] == 2
@@ -621,7 +689,7 @@ def test_aggregate_uses_three_fresh_pairs_and_median_retention_threshold(
     assert "full canonical plan wall" in " ".join(rejected["retention"]["reasons"])
 
 
-def test_phased_make_target_and_workflow_stay_opt_in() -> None:
+def test_phased_make_target_is_canonical_and_xdist_retention_stays_opt_in() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     public = makefile.split("test-cov-phased:", maxsplit=1)[1].split("# Internal body", maxsplit=1)[
@@ -640,13 +708,26 @@ def test_phased_make_target_and_workflow_stay_opt_in() -> None:
     assert phased.count("--cov-fail-under=0") == 4
     assert phased.count("--coverage-file") == 4
     assert phased.count("--ray-tmp-dir") == 4
-    assert phased.count("--data-file=") == 6
+    assert phased.count("--data-file=") == 7
+    assert (
+        "TEST_SUITE_COVERAGE_ARGS ?= --cov=src --cov=testproject.api "
+        "--cov=testproject.views --cov=testproject.urls"
+    ) in makefile
+    assert phased.count("$(TEST_SUITE_COVERAGE_ARGS)") == 4
     assert "COVERAGE_FILE=" not in phased
     assert "RAY_TMPDIR=" not in phased
     assert "--lane hermetic" in phased
     assert "--lane sqlite-django" in phased
     assert "--lane local-ray" in phased
     assert "--lane default-serial-remainder" in phased
+    assert phased.count("--timing ") == 4
+    assert "--require-exact-partition supported-python" in phased
+    assert "--require-exact-once testproject-contract" in phased
+    assert '--include="src/django_ray/*" --fail-under=$(COVERAGE_GLOBAL_MIN)' in phased
+    assert (
+        '--include="testproject/api.py,testproject/views.py,testproject/urls.py" '
+        "--fail-under=$(COVERAGE_TESTPROJECT_MIN)" in phased
+    )
     assert "scripts/ray_residue.py guard" in public
     assert "$(MAKE) --no-print-directory _test-cov-phased-body" in public
     assert "coverage erase" not in public
@@ -660,14 +741,26 @@ def test_phased_make_target_and_workflow_stay_opt_in() -> None:
     assert '--owned-temp-dir "$(TEST_SUITE_PHASED_OUTPUT_DIR)/ray-tmp"' in public
     assert phased.index("--lane local-ray") < phased.index("coverage report --data-file=")
     assert "uv run" not in phased
-    assert "test-cov-phased" not in ci_target
-    assert '-m "not live_cluster"' in ci_target
+    assert ci_target.count("$(MAKE) test-cov-phased") == 1
+    assert 'TEST_SUITE_PHASED_OUTPUT_DIR="$(CI_TEST_SUITE_PHASED_OUTPUT_DIR)"' in ci_target
+    assert "TEST_SUITE_HERMETIC_EXECUTION=serial" in ci_target
+    assert (
+        "CI_TEST_SUITE_PHASED_OUTPUT_DIR ?= "
+        "artifacts/canonical-project/local-ci-$(shell python -c "
+        '"import uuid; print(uuid.uuid4().hex[:8])")' in makefile
+    )
+    assert '-m "not live_cluster"' not in ci_target
     assert "artifacts/test-suite-phased-coverage/" in gitignore
     assert "artifacts/pytest-xdist-*/" in gitignore
 
-    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    workflow = yaml.safe_load(
+        (ROOT / benchmark.BENCHMARK_WORKFLOW_PATH).read_text(encoding="utf-8")
+    )
+    ci_workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     triggers = workflow.get("on", workflow.get(True))
-    assert "workflow_dispatch" in triggers
+    assert set(triggers) == {"workflow_dispatch"}
+    assert benchmark.BENCHMARK_WORKFLOW_PATH == (".github/workflows/pytest-xdist-retention.yml")
+    assert workflow["name"] == "pytest-xdist Retention Evidence"
     inputs = triggers["workflow_dispatch"]["inputs"]
     assert inputs["xdist_benchmark_mode"]["options"] == ["off", "pair", "aggregate"]
     pair_step = next(
@@ -725,7 +818,18 @@ def test_phased_make_target_and_workflow_stay_opt_in() -> None:
     assert '--repository "$GITHUB_REPOSITORY"' in aggregate_step["run"]
     assert '--sha "$GITHUB_SHA"' in aggregate_step["run"]
     assert "--tree-sha \"$(git rev-parse 'HEAD^{tree}')\"" in aggregate_step["run"]
-    assert "pytest-xdist-benchmark-pair" not in workflow["jobs"]["ci-gate"]["needs"]
+    assert benchmark.BENCHMARK_PAIR_JOB_ID in workflow["jobs"]
+    assert "pytest-xdist-benchmark-aggregate" in workflow["jobs"]
+    assert set(workflow["jobs"]) == {
+        benchmark.BENCHMARK_PAIR_JOB_ID,
+        "pytest-xdist-benchmark-aggregate",
+    }
+    for job in workflow["jobs"].values():
+        for step in job["steps"]:
+            if step.get("uses", "").startswith("actions/upload-artifact@"):
+                assert step["with"]["retention-days"] == 14
+    assert benchmark.BENCHMARK_PAIR_JOB_ID not in ci_workflow["jobs"]
+    assert "pytest-xdist-benchmark-aggregate" not in ci_workflow["jobs"]
 
 
 def test_prepare_rejects_stale_output_and_compiled_graph_opt_in(
@@ -787,7 +891,7 @@ def test_record_run_cli_binds_github_sha_to_checkout(
         "--run-attempt",
         "1",
         "--job",
-        "pytest-xdist-benchmark-pair",
+        benchmark.BENCHMARK_PAIR_JOB_ID,
         "--runner-os",
         "Linux",
         "--runner-image-os",

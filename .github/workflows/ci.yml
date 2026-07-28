@@ -5,115 +5,25 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      xdist_benchmark_mode:
-        description: Optional bounded xdist evidence action
-        type: choice
-        options:
-          - "off"
-          - pair
-          - aggregate
-        default: "off"
-      xdist_benchmark_sample:
-        description: Unique sample label for pair mode
-        type: string
-        default: ""
-      xdist_benchmark_order:
-        description: Same-runner execution order for pair mode
-        type: choice
-        options:
-          - serial-xdist
-          - xdist-serial
-        default: serial-xdist
-      xdist_benchmark_pair_run_ids:
-        description: Three comma-separated pair workflow run IDs for aggregate mode
-        type: string
-        default: ""
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 jobs:
-  lint:
-    if: github.event_name != 'pull_request_target'
-    name: Lint & Format
+  canonical-project:
+    name: Canonical Project
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
-      - name: Check formatting
-        run: uv run ruff format --check .
-
-      - name: Check linting
-        run: uv run ruff check .
-
-  docs:
-    if: github.event_name != 'pull_request_target'
-    name: Docs Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
-      - name: Build docs
-        run: make docs-build-strict
-
-  typecheck:
-    if: github.event_name != 'pull_request_target'
-    name: Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
-      - name: Type check
-        run: uv run ty check
-
-  test:
-    if: github.event_name != 'pull_request_target'
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       COVERAGE_GLOBAL_MIN: "95"
       COVERAGE_WORKER_MIN: "90"
       COVERAGE_RAY_JOB_MIN: "90"
+      COVERAGE_TESTPROJECT_MIN: "80"
       DJANGO_RAY_REQUIRE_KUSTOMIZE_PROBE_TESTS: "1"
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -123,70 +33,442 @@ jobs:
           version: "latest"
           enable-cache: "false"
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Set up Python
+        run: uv python install 3.12.12
 
-      - name: Install dependencies
-        run: uv sync --frozen --python ${{ matrix.python-version }}
+      - name: Install locked dependencies
+        run: uv sync --frozen
 
-      - name: Run tests with suite timing
-        if: matrix.python-version == '3.12'
-        run: >-
-          uv run --python ${{ matrix.python-version }} python
-          scripts/test_suite_inventory.py run
-          --lane supported-python
-          --observation github-actions-ubuntu-py312
-          --variant locked-dependencies
-          --timing-output artifacts/test-suite-inventory/github-actions-py312.json
-          --external-note "GitHub Actions queue and environment setup are recorded by workflow metadata; this record starts at pytest instrumentation"
-          --
-          --cov=src
-          --cov-report=xml
-          --cov-report=term
-          --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }}
-          -v
+      - name: Check formatting
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync ruff format --check .
 
-      - name: Validate suite timing evidence
-        if: matrix.python-version == '3.12'
-        run: >-
-          uv run --python ${{ matrix.python-version }} python
-          scripts/test_suite_inventory.py collect
-          --timing artifacts/test-suite-inventory/github-actions-py312.json
-          --json-output artifacts/test-suite-inventory/github-actions-py312-inventory.json
-          --markdown-output artifacts/test-suite-inventory/github-actions-py312-inventory.md
+      - name: Check linting
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync ruff check .
 
-      - name: Upload suite timing evidence
-        if: always() && matrix.python-version == '3.12'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: test-suite-timing-python-3.12
-          path: artifacts/test-suite-inventory/
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Type check
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync ty check
 
-      - name: Run tests
-        if: matrix.python-version != '3.12'
-        run: uv run --python ${{ matrix.python-version }} pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} -v
-
-      - name: Enforce worker module coverage
-        if: matrix.python-version == '3.12'
-        run: uv run coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=${{ env.COVERAGE_WORKER_MIN }}
-
-      - name: Enforce ray job module coverage
-        if: matrix.python-version == '3.12'
-        run: uv run coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=${{ env.COVERAGE_RAY_JOB_MIN }}
+      - name: Run serial source-fenced canonical coverage
+        id: canonical-coverage
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          ray_alias=/tmp/drc
+          if [[ -e "$ray_alias" || -L "$ray_alias" ]]; then
+            echo "Canonical Ray alias must start absent: $ray_alias" >&2
+            exit 2
+          fi
+          cleanup_ray_alias() {
+            status=$?
+            if [[ -L "$ray_alias" ]]; then
+              unlink -- "$ray_alias" || status=2
+            elif [[ -e "$ray_alias" ]]; then
+              echo "Refusing to remove non-symlink Ray alias: $ray_alias" >&2
+              status=2
+            fi
+            exit "$status"
+          }
+          trap cleanup_ray_alias EXIT
+          ln -s "$PWD/artifacts/canonical-project" "$ray_alias"
+          uv run --no-sync make test-cov-phased \
+            TEST_SUITE_PHASED_OUTPUT_DIR=artifacts/canonical-project \
+            TEST_SUITE_RAY_TMP_DIR=/tmp/drc/ray-tmp \
+            TEST_SUITE_HERMETIC_EXECUTION=serial \
+            TEST_SUITE_OBSERVATION=github-actions-canonical-py312 \
+            TEST_SUITE_VARIANT=locked-dependencies \
+            TEST_SUITE_EXTERNAL_NOTE="Workflow queue and environment setup are recorded by Actions separately from pytest timing."
 
       - name: Upload coverage to Codecov
-        if: matrix.python-version == '3.12'
+        if: ${{ !cancelled() && steps.canonical-coverage.outcome == 'success' }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
-          files: ./coverage.xml
+          files: artifacts/canonical-project/coverage.xml
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+      - name: Check bundled testproject
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync python testproject/manage.py check
+
+      - name: Build strict documentation
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync make docs-build-strict
+
+      - name: Build package
+        id: package-build
+        if: ${{ !cancelled() }}
+        run: uv build
+
+      - name: Validate canonical evidence completeness
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          CANONICAL_OUTCOME: ${{ steps.canonical-coverage.outcome }}
+        run: |
+          evidence=artifacts/canonical-project
+          mkdir -p "$evidence"
+          if [[ "$CANONICAL_OUTCOME" == "success" ]]; then
+            required=(
+              hermetic.json
+              sqlite-django.json
+              local-ray.json
+              default-serial-remainder.json
+              inventory.json
+              inventory.md
+              coverage.xml
+              coverage.json
+              ray-baseline.json
+              ray-residue.json
+            )
+            for relative_path in "${required[@]}"; do
+              test -s "$evidence/$relative_path" || {
+                echo "Missing canonical evidence: $relative_path" >&2
+                exit 2
+              }
+            done
+          fi
+          find "$evidence" -type f -not -path '*/ray-tmp/*' -print \
+            | LC_ALL=C sort > "$evidence/manifest.txt"
+
+      - name: Upload canonical diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canonical-project-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/canonical-project/
+            !artifacts/canonical-project/ray-tmp/**
+            !artifacts/canonical-project/.coverage*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload distribution artifact
+        if: ${{ !cancelled() && steps.package-build.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  compatibility:
+    name: Compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Set up supported Python versions
+        run: uv python install 3.12 3.13 3.14
+
+      - name: Run four fresh compatibility variants
+        id: compatibility-contracts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts/compatibility
+          overall_status=0
+          isolation_failure=86
+
+          run_variant() {
+            local slug=$1
+            local python_version=$2
+            local resolution=$3
+            local env_dir=$4
+            local ray_alias=$5
+            local evidence="artifacts/compatibility/${slug}"
+            local python="${env_dir}/bin/python"
+            local active_path="${env_dir}/bin:${PATH}"
+            local portable_status=0
+            local guard_status=0
+            local alias_status=0
+            local guard_state
+            local ray_body_status
+            local cleanup_status
+            local source_state
+
+            echo "::group::Compatibility ${slug}"
+            if [[ -e "$env_dir" || -L "$env_dir" ]]; then
+              echo "Fresh environment path must start absent: $env_dir" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if [[ -e "$ray_alias" || -L "$ray_alias" ]]; then
+              echo "Ray alias must start absent: $ray_alias" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            mkdir -p "$evidence"
+
+            case "$resolution" in
+              locked)
+                if ! UV_PROJECT_ENVIRONMENT="$env_dir" \
+                  uv sync --frozen --python "$python_version"; then
+                  echo "Locked environment installation failed for $slug" >&2
+                  echo "::endgroup::"
+                  return 1
+                fi
+                ;;
+              minimum)
+                if ! uv venv --python "$python_version" "$env_dir"; then
+                  echo "Minimum environment creation failed for $slug" >&2
+                  echo "::endgroup::"
+                  return 1
+                fi
+                if ! uv pip install --python "$python" \
+                  -e . \
+                  "django==6.0" \
+                  "ray[default]==2.53.0" \
+                  "django-ninja==1.5.1" \
+                  "whitenoise==6.6" \
+                  "pytest==7.0" \
+                  "pytest-django==4.7" \
+                  "pytest-cov==4.0" \
+                  "pytest-xdist==3.8.0" \
+                  "psutil==6.0.0"; then
+                  echo "Minimum dependency installation failed for $slug" >&2
+                  echo "::endgroup::"
+                  return 1
+                fi
+                ;;
+              latest)
+                if ! uv venv --python "$python_version" "$env_dir"; then
+                  echo "Latest environment creation failed for $slug" >&2
+                  echo "::endgroup::"
+                  return 1
+                fi
+                if ! uv pip install --python "$python" -e . --group dev; then
+                  echo "Latest dependency installation failed for $slug" >&2
+                  echo "::endgroup::"
+                  return 1
+                fi
+                ;;
+              *)
+                echo "Unsupported compatibility resolution: $resolution" >&2
+                echo "::endgroup::"
+                return "$isolation_failure"
+                ;;
+            esac
+
+            PATH="$active_path" \
+            COMPATIBILITY_SLUG="$slug" \
+            COMPATIBILITY_RESOLUTION="$resolution" \
+            "$python" - <<'PY' > "$evidence/environment.json" || {
+          import json
+          import os
+          import platform
+          import sys
+
+          print(
+              json.dumps(
+                  {
+                      "platform": platform.platform(),
+                      "python": sys.version,
+                      "resolution": os.environ["COMPATIBILITY_RESOLUTION"],
+                      "variant": os.environ["COMPATIBILITY_SLUG"],
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
+          PY
+              echo "Environment evidence failed for $slug" >&2
+              echo "::endgroup::"
+              return 1
+            }
+            if ! uv pip freeze --python "$python" > "$evidence/packages.txt"; then
+              echo "Package evidence failed for $slug" >&2
+              echo "::endgroup::"
+              return 1
+            fi
+            if ! "$python" scripts/ray_residue.py snapshot \
+              --output "$evidence/ray-baseline.json"; then
+              echo "Ray baseline failed for $slug" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if ! ln -s "$PWD/$evidence" "$ray_alias"; then
+              echo "Ray alias creation failed for $slug" >&2
+              echo "::endgroup::"
+              return 1
+            fi
+
+            env PATH="$active_path" \
+            "$python" scripts/test_suite_inventory.py run \
+              --lane dependency-compatibility \
+              --execution serial \
+              --observation "github-actions-${slug}-portable" \
+              --variant "$slug" \
+              --timing-output "$evidence/dependency-compatibility.json" \
+              --external-note "Actions records queue and fresh-environment setup outside pytest timing." \
+              -- -q || portable_status=$?
+
+            env PATH="$active_path" \
+            "$python" scripts/ray_residue.py guard \
+              --baseline "$evidence/ray-baseline.json" \
+              --owned-temp-dir "$evidence/ray-tmp" \
+              --output "$evidence/ray-residue.json" \
+              -- "$python" scripts/test_suite_inventory.py run \
+                --lane ray-compat-smoke \
+                --execution serial \
+                --observation "github-actions-${slug}-ray-compat" \
+                --variant "$slug" \
+                --timing-output "$evidence/ray-compat-smoke.json" \
+                --ray-tmp-dir "$ray_alias/ray-tmp" \
+                --external-note "Actions records queue and fresh-environment setup outside pytest timing." \
+                -- -q || guard_status=$?
+
+            if [[ -L "$ray_alias" ]]; then
+              unlink -- "$ray_alias" || alias_status=2
+            else
+              echo "Ray alias was replaced or removed during $slug" >&2
+              alias_status=2
+            fi
+            if [[ "$alias_status" -ne 0 ]]; then
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if [[ ! -s "$evidence/ray-residue.json" ]]; then
+              echo "Ray residue evidence is missing for $slug" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            guard_state="$(
+              "$python" - "$evidence/ray-residue.json" <<'PY'
+          import json
+          import sys
+
+          guard = json.load(open(sys.argv[1], encoding="utf-8"))["guard"]
+          print(guard["body_returncode"], guard["cleanup_returncode"])
+          PY
+            )" || {
+              echo "Ray guard evidence is malformed for $slug" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            }
+            read -r ray_body_status cleanup_status <<< "$guard_state"
+            if [[ "$cleanup_status" != "0" ]]; then
+              echo "Ray cleanup failed closed for $slug" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if [[ "$guard_status" != "$ray_body_status" ]]; then
+              echo "Ray guard status mismatch for $slug" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if ! source_state="$(git status --porcelain=v1 --untracked-files=all)"; then
+              echo "Compatibility source-state inspection failed for $slug" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if [[ -n "$source_state" ]]; then
+              echo "Compatibility resolution modified tracked source or lock state" >&2
+              printf '%s\n' "$source_state"
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            echo "::endgroup::"
+
+            if [[ "$portable_status" -ne 0 || "$ray_body_status" -ne 0 ]]; then
+              return 1
+            fi
+            return 0
+          }
+
+          variant_status=0
+          run_variant \
+            locked-py313 3.13 locked \
+            "$RUNNER_TEMP/django-ray-compat-locked-py313" \
+            /tmp/drc313 || variant_status=$?
+          if [[ "$variant_status" -eq "$isolation_failure" ]]; then
+            exit "$variant_status"
+          elif [[ "$variant_status" -ne 0 ]]; then
+            overall_status=1
+          fi
+
+          variant_status=0
+          run_variant \
+            locked-py314 3.14 locked \
+            "$RUNNER_TEMP/django-ray-compat-locked-py314" \
+            /tmp/drc314 || variant_status=$?
+          if [[ "$variant_status" -eq "$isolation_failure" ]]; then
+            exit "$variant_status"
+          elif [[ "$variant_status" -ne 0 ]]; then
+            overall_status=1
+          fi
+
+          variant_status=0
+          run_variant \
+            minimum-py312 3.12 minimum \
+            "$RUNNER_TEMP/django-ray-compat-minimum-py312" \
+            /tmp/drcmin || variant_status=$?
+          if [[ "$variant_status" -eq "$isolation_failure" ]]; then
+            exit "$variant_status"
+          elif [[ "$variant_status" -ne 0 ]]; then
+            overall_status=1
+          fi
+
+          variant_status=0
+          run_variant \
+            latest-py314 3.14 latest \
+            "$RUNNER_TEMP/django-ray-compat-latest-py314" \
+            /tmp/drclat || variant_status=$?
+          if [[ "$variant_status" -eq "$isolation_failure" ]]; then
+            exit "$variant_status"
+          elif [[ "$variant_status" -ne 0 ]]; then
+            overall_status=1
+          fi
+
+          exit "$overall_status"
+
+      - name: Validate compatibility evidence completeness
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          COMPATIBILITY_OUTCOME: ${{ steps.compatibility-contracts.outcome }}
+        run: |
+          evidence=artifacts/compatibility
+          mkdir -p "$evidence"
+          if [[ "$COMPATIBILITY_OUTCOME" == "success" ]]; then
+            for slug in \
+              locked-py313 locked-py314 minimum-py312 latest-py314; do
+              for relative_path in \
+                environment.json packages.txt dependency-compatibility.json \
+                ray-compat-smoke.json ray-baseline.json ray-residue.json; do
+                test -s "$evidence/$slug/$relative_path" || {
+                  echo "Missing compatibility evidence: $slug/$relative_path" >&2
+                  exit 2
+                }
+              done
+            done
+          fi
+          find "$evidence" -type f -not -path '*/ray-tmp/*' -print \
+            | LC_ALL=C sort > "$evidence/manifest.txt"
+
+      - name: Upload compatibility evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compatibility-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/compatibility/
+            !artifacts/compatibility/**/ray-tmp/**
+          if-no-files-found: error
+          retention-days: 14
+
   postgresql-coordination:
-    if: github.event_name != 'pull_request_target'
     name: PostgreSQL Coordination & Polling
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -238,7 +520,7 @@ jobs:
         run: uv run --no-sync --python 3.12 make test-postgres
 
       - name: Show PostgreSQL diagnostics
-        if: failure()
+        if: ${{ failure() && !cancelled() }}
         run: |
           uv run --no-sync --python 3.12 python - <<'PY'
           import os
@@ -271,13 +553,9 @@ jobs:
           PY
 
   live-cluster:
-    if: github.event_name != 'pull_request_target'
     name: Live Cluster Fault Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    concurrency:
-      group: live-cluster-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
     env:
       DJANGO_RAY_LIVE_CLUSTER_TESTS: "1"
       DJANGO_RAY_LIVE_RAY_ADDRESS: ray://127.0.0.1:10001
@@ -334,13 +612,13 @@ jobs:
           enable-cache: "false"
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install 3.12.12
 
       - name: Install dependencies
         run: uv sync --frozen
 
       - name: Run live cluster fault tests
-        run: uv run pytest tests/integration/test_live_failure_injection.py -m live_cluster -v
+        run: uv run --no-sync pytest tests/integration/test_live_failure_injection.py -m live_cluster -v
 
       - name: Show Ray container logs
         if: always()
@@ -354,421 +632,14 @@ jobs:
           docker rm --force ray-worker ray-head || true
           docker network rm django-ray-live-cluster || true
 
-  testproject:
-    name: Testproject Smoke
-    runs-on: ubuntu-latest
-    env:
-      COVERAGE_TESTPROJECT_MIN: "80"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
-      - name: Validate sample project
-        run: uv run make test-testproject
-
-  dependency-compatibility:
-    if: github.event_name != 'pull_request_target'
-    name: Dependencies (${{ matrix.resolution }}, Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - resolution: minimum-direct
-            python-version: "3.12"
-          - resolution: latest
-            python-version: "3.14"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-
-      - name: Install minimum supported dependencies
-        if: matrix.resolution == 'minimum-direct'
-        run: |
-          uv venv --python ${{ matrix.python-version }}
-          uv pip install --python .venv/bin/python \
-            -e . \
-            "django==6.0" \
-            "ray[default]==2.53.0" \
-            "django-ninja==1.5.1" \
-            "whitenoise==6.6" \
-            "pytest==7.0" \
-            "pytest-django==4.7" \
-            "pytest-cov==4.0" \
-            "pytest-xdist==3.8.0"
-
-      - name: Resolve and install latest dependencies
-        if: matrix.resolution == 'latest'
-        run: |
-          uv lock --upgrade --python ${{ matrix.python-version }}
-          uv sync --python ${{ matrix.python-version }}
-
-      - name: Run tests
-        run: >-
-          uv run --no-sync --python ${{ matrix.python-version }}
-          pytest -m "not live_cluster and not real_ray" -q
-
-  compiled-graph-candidate-smoke:
-    if: github.event_name != 'pull_request_target'
-    name: Compiled Graph Candidate (Ray ${{ matrix.ray-version }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        ray-version: ["2.53.0", "2.56.0", "2.56.1"]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install candidate with Compiled Graph dependencies
-        run: |
-          uv sync --frozen --python 3.12
-          uv pip install --python .venv/bin/python "ray[cgraph]==${{ matrix.ray-version }}"
-
-      - name: Record candidate environment
-        run: |
-          mkdir -p compiled-graph-evidence
-          .venv/bin/python -c \
-            "import json, platform, ray, sys; print(json.dumps({'python': sys.version, 'ray': ray.__version__, 'platform': platform.platform(), 'machine': platform.machine()}, indent=2, sort_keys=True))" \
-            > compiled-graph-evidence/environment.json
-          uv pip freeze --python .venv/bin/python \
-            > compiled-graph-evidence/packages.txt
-
-      - name: Probe production-intended nested owner
-        run: >-
-          .venv/bin/python -m
-          django_ray.runtime.compiled_graph_probe
-          --topology nested-ray-task
-          --submission-transport direct-ray-core
-          --candidate-native
-          --require-success
-          --timeout-seconds 90
-          > compiled-graph-evidence/probe.json
-
-      - name: Show Compiled Graph evidence
-        if: always()
-        run: |
-          cat compiled-graph-evidence/environment.json || true
-          cat compiled-graph-evidence/probe.json || true
-
-      - name: Upload Compiled Graph evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: compiled-graph-ray-${{ matrix.ray-version }}
-          path: compiled-graph-evidence/
-
-  pytest-xdist-benchmark-pair:
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.xdist_benchmark_mode == 'pair'
-    name: Optional pytest-xdist paired benchmark
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      COVERAGE_GLOBAL_MIN: "95"
-      COVERAGE_WORKER_MIN: "90"
-      COVERAGE_RAY_JOB_MIN: "90"
-      DJANGO_RAY_REQUIRE_KUSTOMIZE_PROBE_TESTS: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "0.9.18"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install locked dependencies
-        run: uv sync --frozen --python 3.12
-
-      - name: Run same-SHA canonical pair
-        shell: bash
-        env:
-          BENCHMARK_SAMPLE: ${{ inputs.xdist_benchmark_sample }}
-          BENCHMARK_ORDER: ${{ inputs.xdist_benchmark_order }}
-        run: |
-          if [[ -z "$BENCHMARK_SAMPLE" ]]; then
-            echo "xdist_benchmark_sample must be non-empty in pair mode" >&2
-            exit 2
-          fi
-          case "$BENCHMARK_ORDER" in
-            serial-xdist) executions=(serial xdist) ;;
-            xdist-serial) executions=(xdist serial) ;;
-            *) echo "unsupported pair order: $BENCHMARK_ORDER" >&2; exit 2 ;;
-          esac
-          ray_aliases=()
-          cleanup_ray_aliases() {
-            status=$?
-            for ray_alias in "${ray_aliases[@]}"; do
-              if [[ -L "$ray_alias" ]]; then
-                unlink -- "$ray_alias" || status=2
-              elif [[ -e "$ray_alias" ]]; then
-                echo "refusing to remove non-symlink Ray alias: $ray_alias" >&2
-                status=2
-              fi
-            done
-            exit "$status"
-          }
-          trap cleanup_ray_aliases EXIT
-          pair_root="artifacts/pytest-xdist-benchmark/${GITHUB_RUN_ID}"
-          for execution in "${executions[@]}"; do
-            output="${pair_root}/${execution}"
-            case "$execution" in
-              serial) ray_alias="/tmp/drs" ;;
-              xdist) ray_alias="/tmp/drx" ;;
-            esac
-            if [[ -e "$ray_alias" || -L "$ray_alias" ]]; then
-              echo "Ray alias must start absent: $ray_alias" >&2
-              exit 2
-            fi
-            mkdir -p "$output"
-            ln -s "$PWD/$output" "$ray_alias"
-            ray_aliases+=("$ray_alias")
-            started_ns="$(date +%s%N)"
-            echo "::group::Canonical ${execution} execution"
-            uv run --python 3.12 make test-cov-phased \
-              TEST_SUITE_PHASED_OUTPUT_DIR="${output}" \
-              TEST_SUITE_RAY_TMP_DIR="${ray_alias}/ray-tmp" \
-              TEST_SUITE_HERMETIC_EXECUTION="${execution}" \
-              TEST_SUITE_OBSERVATION="github-actions-${GITHUB_RUN_ID}-${execution}" \
-              TEST_SUITE_VARIANT="locked-${BENCHMARK_ORDER}" \
-              TEST_SUITE_EXTERNAL_NOTE="Workflow queue and environment setup are recorded separately from pytest and canonical-plan timing."
-            finished_ns="$(date +%s%N)"
-            uv run --python 3.12 python scripts/test_suite_benchmark.py record-run \
-              --execution "$execution" \
-              --started-ns "$started_ns" \
-              --finished-ns "$finished_ns" \
-              --repository "$GITHUB_REPOSITORY" \
-              --sha "$GITHUB_SHA" \
-              --tree-sha "$(git rev-parse 'HEAD^{tree}')" \
-              --run-id "$GITHUB_RUN_ID" \
-              --run-attempt "$GITHUB_RUN_ATTEMPT" \
-              --job "$GITHUB_JOB" \
-              --runner-os "$RUNNER_OS" \
-              --runner-image-os "$ImageOS" \
-              --runner-image-version "$ImageVersion" \
-              --output "${output}/run.json"
-            echo "::endgroup::"
-          done
-          uv run --python 3.12 python scripts/test_suite_benchmark.py compare \
-            --serial-dir "${pair_root}/serial" \
-            --xdist-dir "${pair_root}/xdist" \
-            --sample "$BENCHMARK_SAMPLE" \
-            --order "$BENCHMARK_ORDER" \
-            --json-output "${pair_root}/pair.json" \
-            --markdown-output "${pair_root}/pair.md"
-
-      - name: Add pair summary
-        if: always()
-        run: |
-          summary="artifacts/pytest-xdist-benchmark/${GITHUB_RUN_ID}/pair.md"
-          if [ -f "$summary" ]; then
-            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Paired benchmark evidence was not produced." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          for execution in serial xdist; do
-            residue="artifacts/pytest-xdist-benchmark/${GITHUB_RUN_ID}/${execution}/ray-residue.json"
-            if [ -f "$residue" ]; then
-              {
-                echo "### ${execution} Ray cleanup evidence"
-                echo '```json'
-                cat "$residue"
-                echo '```'
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
-
-      - name: Upload paired benchmark evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: pytest-xdist-pair-${{ github.run_id }}
-          path: |
-            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/pair.json
-            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/pair.md
-            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/serial/*.json
-            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/serial/*.xml
-            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/serial/*.md
-            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/xdist/*.json
-            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/xdist/*.xml
-            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/xdist/*.md
-            !artifacts/pytest-xdist-benchmark/${{ github.run_id }}/**/ray-tmp/**
-            !artifacts/pytest-xdist-benchmark/${{ github.run_id }}/**/.coverage*
-          if-no-files-found: warn
-          retention-days: 14
-
-  pytest-xdist-benchmark-aggregate:
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.xdist_benchmark_mode == 'aggregate'
-    name: Optional pytest-xdist retention decision
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "0.9.18"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install locked dependencies
-        run: uv sync --frozen --python 3.12
-
-      - name: Download three distinct pair runs
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PAIR_RUN_IDS: ${{ inputs.xdist_benchmark_pair_run_ids }}
-        run: |
-          mapfile -t run_ids < <(printf '%s' "$PAIR_RUN_IDS" | tr ', ' '\n\n' | sed '/^$/d')
-          if [[ "${#run_ids[@]}" -ne 3 ]]; then
-            echo "aggregate mode requires exactly three pair workflow run IDs" >&2
-            exit 2
-          fi
-          if [[ "$(printf '%s\n' "${run_ids[@]}" | sort -u | wc -l)" -ne 3 ]]; then
-            echo "pair workflow run IDs must be distinct" >&2
-            exit 2
-          fi
-          for run_id in "${run_ids[@]}"; do
-            if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
-              echo "invalid pair workflow run ID: $run_id" >&2
-              exit 2
-            fi
-            gh run download "$run_id" \
-              --repo "$GITHUB_REPOSITORY" \
-              --name "pytest-xdist-pair-${run_id}" \
-              --dir "artifacts/pytest-xdist-pairs/${run_id}"
-          done
-
-      - name: Aggregate retention evidence
-        shell: bash
-        run: |
-          pair_arguments=()
-          for pair in artifacts/pytest-xdist-pairs/*/pair.json; do
-            pair_arguments+=(--pair "$pair")
-          done
-          uv run --python 3.12 python scripts/test_suite_benchmark.py aggregate \
-            "${pair_arguments[@]}" \
-            --repository "$GITHUB_REPOSITORY" \
-            --sha "$GITHUB_SHA" \
-            --tree-sha "$(git rev-parse 'HEAD^{tree}')" \
-            --json-output artifacts/pytest-xdist-retention.json \
-            --markdown-output artifacts/pytest-xdist-retention.md \
-            --require-retention
-
-      - name: Add retention summary
-        if: always()
-        run: |
-          if [ -f artifacts/pytest-xdist-retention.md ]; then
-            cat artifacts/pytest-xdist-retention.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Retention evidence was not produced." >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Upload retention evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: pytest-xdist-retention-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            artifacts/pytest-xdist-retention.json
-            artifacts/pytest-xdist-retention.md
-          if-no-files-found: warn
-          retention-days: 14
-
-  build:
-    if: github.event_name != 'pull_request_target'
-    name: Build Package
-    runs-on: ubuntu-latest
-    needs:
-      [
-        lint,
-        docs,
-        typecheck,
-        test,
-        postgresql-coordination,
-        live-cluster,
-        testproject,
-        dependency-compatibility,
-        compiled-graph-candidate-smoke,
-      ]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Build package
-        run: uv build
-
-      - name: Upload dist artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dist
-          path: dist/
-
   ci-gate:
     name: CI Gate
     if: always()
     needs:
-      - lint
-      - docs
-      - typecheck
-      - test
+      - canonical-project
+      - compatibility
       - postgresql-coordination
       - live-cluster
-      - testproject
-      - dependency-compatibility
-      - compiled-graph-candidate-smoke
-      - build
     runs-on: ubuntu-latest
     steps:
       - name: Require every blocking CI job to succeed
@@ -789,16 +660,10 @@ jobs:
               raise SystemExit("CI Gate blocked: no blocking job results")
 
           expected_jobs = {
-              "build",
-              "compiled-graph-candidate-smoke",
-              "dependency-compatibility",
-              "docs",
-              "lint",
+              "canonical-project",
+              "compatibility",
               "live-cluster",
               "postgresql-coordination",
-              "test",
-              "testproject",
-              "typecheck",
           }
           received_jobs = set(results)
           if received_jobs != expected_jobs:
@@ -822,4 +687,3 @@ jobs:
                   "CI Gate blocked: " + ", ".join(unsuccessful)
               )
           PY
-

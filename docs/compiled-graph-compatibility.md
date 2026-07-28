@@ -17,19 +17,24 @@ capability tuple is independently verified.
 
 ## Current support state
 
-Policy version 2 has **no verified native capability rows**. The rows below are canary
-candidates, not a support claim. The required isolated canaries succeeded for all
-three releases, but the 2026-07-20 promotion review retained the empty verified set:
-the hosted runners did not provide the exact container, immutable deployment,
-shared-memory, and object-store profiles required by policy version 2. An incomplete
-candidate returns `INCOMPLETE_CAPABILITY_CONTEXT`; a complete but unpromoted exact
-tuple returns `CANDIDATE_REQUIRES_SMOKE`.
+Policy version 2 has **no verified native capability rows**. The rows below are policy
+candidates, not a support claim. Historical isolated hosted-runner probes returned
+success for all three releases, but the 2026-07-20 promotion review retained the empty
+verified set: the hosted runners did not provide the exact container, immutable
+deployment, shared-memory, and object-store profiles required by policy version 2. An
+incomplete candidate returns `INCOMPLETE_CAPABILITY_CONTEXT`; a complete but
+unpromoted exact tuple returns `CANDIDATE_REQUIRES_SMOKE`.
 
 | Ray | Python | OS and architecture | Status | Why it is listed |
 |---|---|---|---|---|
 | 2.53.0 | 3.12 | Linux x86_64 | Candidate | django-ray's minimum Ray release |
 | 2.56.0 | 3.12 | Linux x86_64 | Candidate | Version in the current lock and initial Windows investigation |
 | 2.56.1 | 3.12 | Linux x86_64 | Candidate | Latest PyPI and Ray release reviewed on 2026-07-19 |
+
+Public GitHub Actions workflows do not invoke native Compiled Graph APIs. They test the fail-closed
+policy, lifecycle reducer, subprocess containment, and local-KubeRay harness while retaining the
+native opt-in case as an explicit self-skip. Native validation and any promotion evidence must use
+the guarded pinned local KubeRay pilot below.
 
 The versions are exact. A new patch, minor, prerelease, or nightly is rejected until it
 is deliberately added as a candidate and then independently verified. Python 3.13 and
@@ -242,14 +247,14 @@ nested-task row.
 
 | Transport | Policy version 2 | Dependencies and limits |
 |---|---|---|
-| CPU shared memory | Candidate | The django-ray runtime keeps its normal `ray[default]` dependency. Native canaries install `ray[cgraph]` as recommended by Ray so a missing Compiled Graph extra cannot produce a false compatibility result. No GPU package becomes an application dependency. |
+| CPU shared memory | Candidate | The django-ray runtime keeps its normal `ray[default]` dependency. Native local investigations install `ray[cgraph]` as recommended by Ray so a missing Compiled Graph extra cannot produce a false compatibility result. No GPU package becomes an application dependency. |
 | GPU/NCCL | Rejected | Requires a separately tested `ray[cgraph]`, CuPy package matching the CUDA major, NVIDIA driver/runtime, NCCL, GPU topology, tensor schema, and peer-to-peer transport matrix. |
 
 Ray 2.56's `cgraph` extra currently selects `cupy-cuda12x` outside macOS, and that
 distribution requires `fastrlock`. The pinned pilot therefore records
 `cupy-cuda12x==13.4.0` and `fastrlock==0.8.3` independently so a changed base image cannot
-silently omit or substitute the transitive package. These remain canary or future
-GPU-strategy dependencies, not mandatory django-ray dependencies. The old `ray[adag]`
+silently omit or substitute the transitive package. These remain local-investigation or
+future GPU-strategy dependencies, not mandatory django-ray dependencies. The old `ray[adag]`
 spelling is not used for the candidate versions. Current tensor paths must use
 `with_tensor_transport`; older `with_type_hint` examples are not the policy.
 
@@ -294,7 +299,7 @@ The capability record contains:
 - a capability-set identifier only for a recognized candidate or verified tuple.
 
 Changing a field changes compatibility identity. Missing context also fails closed;
-the coarse candidate table remains useful for choosing canary versions but can never
+the coarse candidate table remains useful for choosing local investigation versions but can never
 make a runtime eligible. Beta Ray objects are never part of the effective-plan
 fingerprint or durable diagnostics.
 
@@ -321,8 +326,8 @@ non-secret profiles:
   store capacity and spill policy.
 
 Automatically observing `/dev/shm`, a Docker marker, or a host label is useful
-diagnostic context but cannot prove an exact deployable capability. A candidate canary
-may still run with `--candidate-native` to gather missing evidence; its success does
+diagnostic context but cannot prove an exact deployable capability. An explicit local
+candidate investigation may still run with `--candidate-native` to gather missing evidence; its success does
 not make the incomplete identity eligible or promotable.
 
 ## Isolated smoke probe
@@ -331,7 +336,8 @@ The probe always consults the adapter first. A normal invocation on Windows, a R
 Client driver, GPU, an unknown version, or any other unsupported tuple returns
 `unsupported_guard` without spawning a child or importing Ray.
 
-Candidate rows require an explicit canary opt-in:
+Candidate rows require an explicit local investigation opt-in. Public workflows never
+set it:
 
 ```bash
 python -m django_ray.runtime.compiled_graph_probe \
@@ -357,7 +363,7 @@ versioned JSON outcome.
 
 | Outcome | Meaning |
 |---|---|
-| `success` | The exact native smoke returned and teardown completed. |
+| `success` | The exact native smoke returned and the explicit teardown call returned; this does not prove shared-memory reclamation. |
 | `unsupported_guard` | Policy rejected the tuple before native execution. |
 | `python_failure` | The child caught and serialized a normal Python exception. |
 | `timeout` | The parent killed the process tree after the wall-clock bound. |
@@ -419,7 +425,7 @@ neighbor; a nightly run is not a Linux/Kubernetes merge gate.
 
 ### Reviewed Linux promotion decision
 
-The required PR #92 canaries ran the hardened policy-v2 probe again in GitHub Actions
+The historical PR #92 candidate jobs ran the hardened policy-v2 probe again in GitHub Actions
 run [`29759326381`](https://github.com/dariuszpanas/django-ray/actions/runs/29759326381).
 Ray 2.53.0, 2.56.0, and 2.56.1 each completed the local nested owner smoke and verified
 its echo result. Those successes are discovery evidence, not permission to compile.
@@ -479,10 +485,10 @@ following evidence:
    Ray/package versions, platform/kernel/libc, specific container, immutable
    deployment/image, explicit shared-memory and object-store profiles, exit code, and
    reviewed redacted bounded stdout/stderr. A timeout or crash is evidence of failure,
-   not permission to fall back after compilation starts.
-   CI invokes the synced `.venv/bin/python` directly for environment capture and the
-   native probe. Do not wrap those commands in `uv run`: Ray workers inherit the
-   wrapper context and may resolve their worker directory as a separate uv project.
+   not permission to fall back after compilation starts. The guarded local KubeRay
+   pilot invokes its pinned interpreter directly. Do not wrap its native commands in
+   nested `uv run` calls: Ray workers can inherit the wrapper context and resolve their
+   worker directory as a separate uv project.
 5. Unit tests prove exact-tuple matching and rejection of every neighboring unverified
    tuple. Dynamic workflow tests remain green without selecting Compiled Graph.
 6. A dated machine-readable review records provenance, expiry, revalidation, and
@@ -492,14 +498,13 @@ following evidence:
    policy version. Issue #99 completed the first review with `no_promotion`; issue #102
    owns the missing promotion-grade KubeRay evidence.
 
-The required CI smoke exercises the minimum, repository-lock, and reviewed-latest
-candidate releases against the local nested Ray task owner. The repository-controlled
-scheduled canary resolves the official latest stable `ray[cgraph]` release and
-deliberately supplies both unsafe acknowledgements so an unknown new release is
-actually exercised. A manual dispatch supplies neither acknowledgement unless its
-trusted operator enables the `unsafe-native` boolean. An upstream/nightly wheel remains
-manual because its URL and ABI rotate. Candidate smoke without all explicit profiles is
-discovery evidence only and cannot populate issue #99's verified table.
+Public CI deliberately stops before native execution. Its canonical suite proves that
+unsupported and unpromoted tuples fail closed, ordinary dynamic execution remains
+available, the native subprocess boundary stays bounded, and the KubeRay evidence
+harness remains valid. Candidate, newer-stable, upstream, or nightly native probes are
+manual local investigations; only the pinned local KubeRay profile can produce
+promotion evidence. Candidate smoke without every explicit profile remains discovery
+evidence and cannot populate issue #99's verified table.
 
 Review the matrix whenever Ray, Python, operating-system images, channel APIs,
 `ray[cgraph]` dependencies, immutable deployment/image identity, shared-memory or

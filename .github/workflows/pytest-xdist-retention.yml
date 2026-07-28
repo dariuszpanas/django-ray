@@ -1,0 +1,260 @@
+name: pytest-xdist Retention Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      xdist_benchmark_mode:
+        description: Optional bounded xdist evidence action
+        type: choice
+        options:
+          - "off"
+          - pair
+          - aggregate
+        default: "off"
+      xdist_benchmark_sample:
+        description: Unique sample label for pair mode
+        type: string
+        default: ""
+      xdist_benchmark_order:
+        description: Same-runner execution order for pair mode
+        type: choice
+        options:
+          - serial-xdist
+          - xdist-serial
+        default: serial-xdist
+      xdist_benchmark_pair_run_ids:
+        description: Three comma-separated pair workflow run IDs for aggregate mode
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  pytest-xdist-benchmark-pair:
+    if: inputs.xdist_benchmark_mode == 'pair'
+    name: Optional pytest-xdist paired benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COVERAGE_GLOBAL_MIN: "95"
+      COVERAGE_WORKER_MIN: "90"
+      COVERAGE_RAY_JOB_MIN: "90"
+      COVERAGE_TESTPROJECT_MIN: "80"
+      DJANGO_RAY_REQUIRE_KUSTOMIZE_PROBE_TESTS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.9.18"
+          enable-cache: "false"
+
+      - name: Set up Python
+        run: uv python install 3.12.12
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Run same-SHA canonical pair
+        shell: bash
+        env:
+          BENCHMARK_SAMPLE: ${{ inputs.xdist_benchmark_sample }}
+          BENCHMARK_ORDER: ${{ inputs.xdist_benchmark_order }}
+        run: |
+          if [[ -z "$BENCHMARK_SAMPLE" ]]; then
+            echo "xdist_benchmark_sample must be non-empty in pair mode" >&2
+            exit 2
+          fi
+          case "$BENCHMARK_ORDER" in
+            serial-xdist) executions=(serial xdist) ;;
+            xdist-serial) executions=(xdist serial) ;;
+            *) echo "unsupported pair order: $BENCHMARK_ORDER" >&2; exit 2 ;;
+          esac
+          ray_aliases=()
+          cleanup_ray_aliases() {
+            status=$?
+            for ray_alias in "${ray_aliases[@]}"; do
+              if [[ -L "$ray_alias" ]]; then
+                unlink -- "$ray_alias" || status=2
+              elif [[ -e "$ray_alias" ]]; then
+                echo "refusing to remove non-symlink Ray alias: $ray_alias" >&2
+                status=2
+              fi
+            done
+            exit "$status"
+          }
+          trap cleanup_ray_aliases EXIT
+          pair_root="artifacts/pytest-xdist-benchmark/${GITHUB_RUN_ID}"
+          for execution in "${executions[@]}"; do
+            output="${pair_root}/${execution}"
+            case "$execution" in
+              serial) ray_alias="/tmp/drs" ;;
+              xdist) ray_alias="/tmp/drx" ;;
+            esac
+            if [[ -e "$ray_alias" || -L "$ray_alias" ]]; then
+              echo "Ray alias must start absent: $ray_alias" >&2
+              exit 2
+            fi
+            mkdir -p "$output"
+            ln -s "$PWD/$output" "$ray_alias"
+            ray_aliases+=("$ray_alias")
+            started_ns="$(date +%s%N)"
+            echo "::group::Canonical ${execution} execution"
+            uv run --no-sync make test-cov-phased \
+              TEST_SUITE_PHASED_OUTPUT_DIR="${output}" \
+              TEST_SUITE_RAY_TMP_DIR="${ray_alias}/ray-tmp" \
+              TEST_SUITE_HERMETIC_EXECUTION="${execution}" \
+              TEST_SUITE_OBSERVATION="github-actions-${GITHUB_RUN_ID}-${execution}" \
+              TEST_SUITE_VARIANT="locked-${BENCHMARK_ORDER}" \
+              TEST_SUITE_EXTERNAL_NOTE="Workflow queue and environment setup are recorded separately from pytest and canonical-plan timing."
+            finished_ns="$(date +%s%N)"
+            uv run --no-sync python scripts/test_suite_benchmark.py record-run \
+              --execution "$execution" \
+              --started-ns "$started_ns" \
+              --finished-ns "$finished_ns" \
+              --repository "$GITHUB_REPOSITORY" \
+              --sha "$GITHUB_SHA" \
+              --tree-sha "$(git rev-parse 'HEAD^{tree}')" \
+              --run-id "$GITHUB_RUN_ID" \
+              --run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --job "$GITHUB_JOB" \
+              --runner-os "$RUNNER_OS" \
+              --runner-image-os "$ImageOS" \
+              --runner-image-version "$ImageVersion" \
+              --output "${output}/run.json"
+            echo "::endgroup::"
+          done
+          uv run --no-sync python scripts/test_suite_benchmark.py compare \
+            --serial-dir "${pair_root}/serial" \
+            --xdist-dir "${pair_root}/xdist" \
+            --sample "$BENCHMARK_SAMPLE" \
+            --order "$BENCHMARK_ORDER" \
+            --json-output "${pair_root}/pair.json" \
+            --markdown-output "${pair_root}/pair.md"
+
+      - name: Add pair summary
+        if: always()
+        run: |
+          summary="artifacts/pytest-xdist-benchmark/${GITHUB_RUN_ID}/pair.md"
+          if [ -f "$summary" ]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Paired benchmark evidence was not produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          for execution in serial xdist; do
+            residue="artifacts/pytest-xdist-benchmark/${GITHUB_RUN_ID}/${execution}/ray-residue.json"
+            if [ -f "$residue" ]; then
+              {
+                echo "### ${execution} Ray cleanup evidence"
+                echo '```json'
+                cat "$residue"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Upload paired benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pytest-xdist-pair-${{ github.run_id }}
+          path: |
+            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/pair.json
+            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/pair.md
+            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/serial/*.json
+            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/serial/*.xml
+            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/serial/*.md
+            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/xdist/*.json
+            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/xdist/*.xml
+            artifacts/pytest-xdist-benchmark/${{ github.run_id }}/xdist/*.md
+            !artifacts/pytest-xdist-benchmark/${{ github.run_id }}/**/ray-tmp/**
+            !artifacts/pytest-xdist-benchmark/${{ github.run_id }}/**/.coverage*
+          if-no-files-found: warn
+          retention-days: 14
+
+  pytest-xdist-benchmark-aggregate:
+    if: inputs.xdist_benchmark_mode == 'aggregate'
+    name: Optional pytest-xdist retention decision
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.9.18"
+          enable-cache: "false"
+
+      - name: Set up Python
+        run: uv python install 3.12.12
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Download three distinct pair runs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAIR_RUN_IDS: ${{ inputs.xdist_benchmark_pair_run_ids }}
+        run: |
+          mapfile -t run_ids < <(printf '%s' "$PAIR_RUN_IDS" | tr ', ' '\n\n' | sed '/^$/d')
+          if [[ "${#run_ids[@]}" -ne 3 ]]; then
+            echo "aggregate mode requires exactly three pair workflow run IDs" >&2
+            exit 2
+          fi
+          if [[ "$(printf '%s\n' "${run_ids[@]}" | sort -u | wc -l)" -ne 3 ]]; then
+            echo "pair workflow run IDs must be distinct" >&2
+            exit 2
+          fi
+          for run_id in "${run_ids[@]}"; do
+            if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+              echo "invalid pair workflow run ID: $run_id" >&2
+              exit 2
+            fi
+            gh run download "$run_id" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "pytest-xdist-pair-${run_id}" \
+              --dir "artifacts/pytest-xdist-pairs/${run_id}"
+          done
+
+      - name: Aggregate retention evidence
+        shell: bash
+        run: |
+          pair_arguments=()
+          for pair in artifacts/pytest-xdist-pairs/*/pair.json; do
+            pair_arguments+=(--pair "$pair")
+          done
+          uv run --no-sync python scripts/test_suite_benchmark.py aggregate \
+            "${pair_arguments[@]}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$GITHUB_SHA" \
+            --tree-sha "$(git rev-parse 'HEAD^{tree}')" \
+            --json-output artifacts/pytest-xdist-retention.json \
+            --markdown-output artifacts/pytest-xdist-retention.md \
+            --require-retention
+
+      - name: Add retention summary
+        if: always()
+        run: |
+          if [ -f artifacts/pytest-xdist-retention.md ]; then
+            cat artifacts/pytest-xdist-retention.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Retention evidence was not produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload retention evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pytest-xdist-retention-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/pytest-xdist-retention.json
+            artifacts/pytest-xdist-retention.md
+          if-no-files-found: warn
+          retention-days: 14

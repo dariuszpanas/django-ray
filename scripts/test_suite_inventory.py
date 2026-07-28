@@ -325,9 +325,7 @@ def _validated_runtime_paths(
     coverage_file: Path | None,
     ray_tmp_dir: Path | None,
 ) -> tuple[Path | None, Path | None]:
-    if (coverage_file is None) != (ray_tmp_dir is None):
-        raise InventoryError("coverage file and Ray temporary directory must be provided together")
-    if coverage_file is None or ray_tmp_dir is None:
+    if coverage_file is None and ray_tmp_dir is None:
         return None, None
 
     repository = root.resolve()
@@ -343,23 +341,33 @@ def _validated_runtime_paths(
         raise InventoryError("runtime evidence paths must stay inside the repository") from error
     if output_directory == repository:
         raise InventoryError("runtime evidence directory cannot be the repository root")
-    resolved_coverage = (
-        coverage_file.resolve()
-        if coverage_file.is_absolute()
-        else (repository / coverage_file).resolve()
-    )
-    absolute_ray_tmp = (
-        ray_tmp_dir.absolute()
-        if ray_tmp_dir.is_absolute()
-        else (repository / ray_tmp_dir).absolute()
-    )
-    resolved_ray_tmp = absolute_ray_tmp.resolve()
-    if resolved_coverage != output_directory / ".coverage":
-        raise InventoryError("coverage data must use the timing output's sibling .coverage path")
-    if resolved_ray_tmp != output_directory / "ray-tmp":
-        raise InventoryError("Ray temporary data must use the timing output's sibling ray-tmp path")
-    _validate_output_path(repository, resolved_coverage, "coverage data")
-    _validate_output_path(repository, resolved_ray_tmp, "Ray temporary directory")
+
+    resolved_coverage: Path | None = None
+    if coverage_file is not None:
+        resolved_coverage = (
+            coverage_file.resolve()
+            if coverage_file.is_absolute()
+            else (repository / coverage_file).resolve()
+        )
+        if resolved_coverage != output_directory / ".coverage":
+            raise InventoryError(
+                "coverage data must use the timing output's sibling .coverage path"
+            )
+        _validate_output_path(repository, resolved_coverage, "coverage data")
+
+    absolute_ray_tmp: Path | None = None
+    if ray_tmp_dir is not None:
+        absolute_ray_tmp = (
+            ray_tmp_dir.absolute()
+            if ray_tmp_dir.is_absolute()
+            else (repository / ray_tmp_dir).absolute()
+        )
+        resolved_ray_tmp = absolute_ray_tmp.resolve()
+        if resolved_ray_tmp != output_directory / "ray-tmp":
+            raise InventoryError(
+                "Ray temporary data must use the timing output's sibling ray-tmp path"
+            )
+        _validate_output_path(repository, resolved_ray_tmp, "Ray temporary directory")
     # Ray must receive the lexical path so a short, validated symlink can keep
     # Unix-domain socket paths below the platform limit. Cleanup continues to
     # own the resolved repository sibling validated above.
@@ -802,12 +810,134 @@ def _validate_timing_record(
     return sample_id
 
 
+def _validate_exact_once_requirements(
+    manifest: Manifest,
+    items: list[CollectedTest],
+    timings: list[dict[str, Any]],
+    group_ids: list[str],
+) -> list[dict[str, object]]:
+    """Prove selected boundary cases completed exactly once across timing evidence."""
+    if len(group_ids) != len(set(group_ids)):
+        raise InventoryError("exact-once taxonomy requirements must be unique")
+    requirements: list[dict[str, object]] = []
+    for group_id in group_ids:
+        group = manifest.group(group_id)
+        selected = sorted(
+            (item for item in items if group.selection.matches(item)),
+            key=lambda item: item.nodeid,
+        )
+        if not selected:
+            raise InventoryError(f"exact-once taxonomy requirement {group_id!r} selects no tests")
+        expected_nodeids = {item.nodeid for item in selected}
+        observed: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for timing in timings:
+            lane = cast(str, timing["lane"])
+            for raw_record in cast(list[dict[str, str]], timing["test_outcomes"]):
+                nodeid = raw_record["nodeid"]
+                if nodeid in expected_nodeids:
+                    observed[nodeid].append((lane, raw_record["outcome"]))
+
+        missing = sorted(expected_nodeids - set(observed))
+        repeated = sorted(nodeid for nodeid, records in observed.items() if len(records) != 1)
+        incomplete = sorted(
+            nodeid
+            for nodeid, records in observed.items()
+            if any(outcome not in {"passed", "xpassed"} for _, outcome in records)
+        )
+        if missing or repeated or incomplete:
+            details: list[str] = []
+            if missing:
+                details.append("missing " + ", ".join(missing[:5]))
+            if repeated:
+                details.append("repeated " + ", ".join(repeated[:5]))
+            if incomplete:
+                details.append("skipped or incomplete " + ", ".join(incomplete[:5]))
+            raise InventoryError(
+                f"exact-once taxonomy requirement {group_id!r} failed: " + "; ".join(details)
+            )
+
+        outcomes = Counter(records[0][1] for records in observed.values())
+        lanes = Counter(records[0][0] for records in observed.values())
+        requirements.append(
+            {
+                "id": group.id,
+                "selected_count": len(selected),
+                "nodeid_digest": nodeid_digest([item.nodeid for item in selected]),
+                "contract_digest": collection_contract_digest(selected),
+                "outcomes": dict(sorted(outcomes.items())),
+                "timing_lanes": dict(sorted(lanes.items())),
+                "valid": True,
+            }
+        )
+    return requirements
+
+
+def _validate_exact_partition_requirements(
+    manifest: Manifest,
+    items: list[CollectedTest],
+    timings: list[dict[str, Any]],
+    group_ids: list[str],
+) -> list[dict[str, object]]:
+    """Prove timing outcomes partition selected cases while preserving valid skips."""
+    if len(group_ids) != len(set(group_ids)):
+        raise InventoryError("exact-partition taxonomy requirements must be unique")
+    requirements: list[dict[str, object]] = []
+    for group_id in group_ids:
+        group = manifest.group(group_id)
+        selected = sorted(
+            (item for item in items if group.selection.matches(item)),
+            key=lambda item: item.nodeid,
+        )
+        if not selected:
+            raise InventoryError(
+                f"exact-partition taxonomy requirement {group_id!r} selects no tests"
+            )
+        expected_nodeids = {item.nodeid for item in selected}
+        observed: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for timing in timings:
+            lane = cast(str, timing["lane"])
+            for raw_record in cast(list[dict[str, str]], timing["test_outcomes"]):
+                observed[raw_record["nodeid"]].append((lane, raw_record["outcome"]))
+
+        missing = sorted(expected_nodeids - set(observed))
+        unexpected = sorted(set(observed) - expected_nodeids)
+        repeated = sorted(nodeid for nodeid, records in observed.items() if len(records) != 1)
+        if missing or unexpected or repeated:
+            details: list[str] = []
+            if missing:
+                details.append("missing " + ", ".join(missing[:5]))
+            if unexpected:
+                details.append("unexpected " + ", ".join(unexpected[:5]))
+            if repeated:
+                details.append("repeated " + ", ".join(repeated[:5]))
+            raise InventoryError(
+                f"exact-partition taxonomy requirement {group_id!r} failed: " + "; ".join(details)
+            )
+
+        outcomes = Counter(records[0][1] for records in observed.values())
+        lanes = Counter(records[0][0] for records in observed.values())
+        requirements.append(
+            {
+                "id": group.id,
+                "selected_count": len(selected),
+                "nodeid_digest": nodeid_digest([item.nodeid for item in selected]),
+                "contract_digest": collection_contract_digest(selected),
+                "outcomes": dict(sorted(outcomes.items())),
+                "timing_lanes": dict(sorted(lanes.items())),
+                "valid": True,
+            }
+        )
+    return requirements
+
+
 def build_inventory(
     root: Path,
     manifest_path: Path,
     manifest: Manifest,
     items: list[CollectedTest],
     timing_records: list[dict[str, Any]] | None = None,
+    exact_once_group_ids: list[str] | None = None,
+    exact_partition_group_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic classification and overlap evidence."""
     invalid: list[tuple[str, list[str]]] = []
@@ -871,6 +1001,18 @@ def build_inventory(
         if identity in timing_identities:
             raise InventoryError("timing evidence sample IDs must be unique")
         timing_identities.add(identity)
+    exact_once_requirements = _validate_exact_once_requirements(
+        manifest,
+        items,
+        timings,
+        exact_once_group_ids or [],
+    )
+    exact_partition_requirements = _validate_exact_partition_requirements(
+        manifest,
+        items,
+        timings,
+        exact_partition_group_ids or [],
+    )
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "source": source,
@@ -892,6 +1034,8 @@ def build_inventory(
         "files": _file_records(items, manifest.execution_contracts, manifest.domains),
         "parameterized_families": parameterized_families,
         "overlap_candidates": overlap_records,
+        "exact_once_requirements": exact_once_requirements,
+        "exact_partition_requirements": exact_partition_requirements,
         "timings": timings,
     }
 
@@ -943,6 +1087,54 @@ def render_markdown(report: dict[str, Any]) -> str:
             "contracts intentionally. The estimate multiplies selected cases by current CI variants;",
             "it measures selected pytest case slots before runtime skips, not completed execution",
             "or wall-clock time. Nested JavaScript subtests are outside this estimate.",
+        ]
+    )
+    exact_once_requirements = cast(
+        list[dict[str, object]], report.get("exact_once_requirements", [])
+    )
+    if exact_once_requirements:
+        lines.extend(
+            [
+                "",
+                "## Exact-once execution requirements",
+                "",
+                "| Boundary | Cases | Node-ID digest | Outcomes | Timing lanes |",
+                "|---|---:|---|---|---|",
+            ]
+        )
+        for requirement in exact_once_requirements:
+            outcomes = cast(dict[str, int], requirement["outcomes"])
+            lanes = cast(dict[str, int], requirement["timing_lanes"])
+            lines.append(
+                f"| `{requirement['id']}` | {requirement['selected_count']} | "
+                f"`{requirement['nodeid_digest']}` | "
+                f"{_markdown_cell(', '.join(f'{key}: {value}' for key, value in outcomes.items()))} | "
+                f"{_markdown_cell(', '.join(f'{key}: {value}' for key, value in lanes.items()))} |"
+            )
+    exact_partition_requirements = cast(
+        list[dict[str, object]], report.get("exact_partition_requirements", [])
+    )
+    if exact_partition_requirements:
+        lines.extend(
+            [
+                "",
+                "## Exact-partition requirements",
+                "",
+                "| Selection | Cases | Node-ID digest | Outcomes | Timing lanes |",
+                "|---|---:|---|---|---|",
+            ]
+        )
+        for requirement in exact_partition_requirements:
+            outcomes = cast(dict[str, int], requirement["outcomes"])
+            lanes = cast(dict[str, int], requirement["timing_lanes"])
+            lines.append(
+                f"| `{requirement['id']}` | {requirement['selected_count']} | "
+                f"`{requirement['nodeid_digest']}` | "
+                f"{_markdown_cell(', '.join(f'{key}: {value}' for key, value in outcomes.items()))} | "
+                f"{_markdown_cell(', '.join(f'{key}: {value}' for key, value in lanes.items()))} |"
+            )
+    lines.extend(
+        [
             "",
             "## Largest files",
             "",
@@ -1430,6 +1622,23 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--json-output", type=Path, required=True)
     collect.add_argument("--markdown-output", type=Path, required=True)
     collect.add_argument("--timing", action="append", type=Path, default=[])
+    collect.add_argument(
+        "--require-exact-once",
+        action="append",
+        default=[],
+        metavar="TAXONOMY_ID",
+        help="prove a taxonomy group's exact selected node IDs completed once across timings",
+    )
+    collect.add_argument(
+        "--require-exact-partition",
+        action="append",
+        default=[],
+        metavar="TAXONOMY_ID",
+        help=(
+            "prove all timing outcomes exactly partition a taxonomy selection while "
+            "preserving valid skips"
+        ),
+    )
 
     select = subparsers.add_parser("select", help="show one reusable manifest selection")
     select.add_argument("--lane", required=True)
@@ -1558,6 +1767,8 @@ def main(argv: list[str] | None = None) -> int:
             manifest,
             collect_tests(root),
             timings,
+            arguments.require_exact_once,
+            arguments.require_exact_partition,
         )
         rendered_json = _render_json(arguments.json_output, report)
         rendered_markdown = render_markdown(report)

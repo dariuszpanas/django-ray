@@ -79,6 +79,7 @@ dev = [
     "pytest-xdist==3.8.0",
     "pyyaml>=6.0",
     "locust>=2.20",
+    "psutil>=6.0",
     "zensical>=0.0.42",
 ]
 

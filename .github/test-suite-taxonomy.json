@@ -69,10 +69,10 @@
     {
       "id": "compiled-graph-opt-in",
       "owner": "Native Compiled Graph topology capability probe",
-      "contract": "Starts local Ray only when the post-capability-gate Compiled Graph probe is explicitly enabled.",
+      "contract": "Starts local Ray only for an explicit local investigation; public CI never enables the native probe.",
       "skip_policy": {
         "mode": "allow",
-        "reason": "The native topology probe remains a deliberate opt-in until its upstream capability gate passes."
+        "reason": "The native topology probe remains self-skipped in public CI while the guarded local KubeRay pilot owns promotion evidence."
       },
       "selection": {
         "paths": ["tests"],
@@ -312,12 +312,12 @@
   ],
   "boundaries": [
     {
-      "id": "bundled-testproject",
+      "id": "testproject-contract",
       "owner": "Bundled Django sample application",
-      "contract": "Re-executes the user-facing API, security, URL, and workflow boundary with testproject coverage.",
+      "contract": "Identifies the user-facing API, security, URL, and workflow cases that the canonical four-phase suite must execute exactly once with bundled-application coverage.",
       "skip_policy": {
-        "mode": "allow",
-        "reason": "Ad hoc boundary profiles expose environment skips; the dedicated testproject CI lane forbids them."
+        "mode": "forbid",
+        "reason": "Canonical evidence must execute every bundled-application case exactly once without a skip or incomplete outcome."
       },
       "selection": {
         "paths": [
@@ -349,7 +349,7 @@
       "contract": "Preserves backend-specific and opt-in self-skip outcomes outside parallel and required resource phases.",
       "skip_policy": {
         "mode": "allow",
-        "reason": "The default canonical suite retains PostgreSQL and Compiled Graph cases as explicit self-skip outcomes while dedicated jobs own execution proof."
+        "reason": "The default canonical suite retains PostgreSQL and Compiled Graph cases as explicit self-skip outcomes; PostgreSQL has a dedicated CI root while guarded local KubeRay owns native Compiled Graph evidence."
       },
       "selection": {
         "paths": ["tests"],
@@ -361,9 +361,9 @@
   "ci_lanes": [
     {
       "id": "supported-python",
-      "owner": "Required Python compatibility and source coverage gate",
-      "contract": "Runs the normal suite with source coverage on every supported Python version.",
-      "variants": 3,
+      "owner": "Required canonical source and bundled-application coverage gate",
+      "contract": "Runs one four-phase canonical suite on Python 3.12 while compatibility is exercised sequentially by the dedicated compatibility root.",
+      "variants": 1,
       "skip_policy": {
         "mode": "allow",
         "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
@@ -409,28 +409,10 @@
       }
     },
     {
-      "id": "testproject-contract",
-      "owner": "Required bundled-application gate",
-      "contract": "Runs the bundled-testproject boundary again with its own coverage floor.",
-      "variants": 1,
-      "skip_policy": {
-        "mode": "forbid",
-        "reason": "The bundled-application gate provisions its browser runtime and must not skip selected cases."
-      },
-      "selection": {
-        "paths": [
-          "tests/integration/test_api.py",
-          "tests/integration/test_workflow_progress_api.py",
-          "tests/unit/test_sample_security.py",
-          "tests/unit/test_testproject_workflows.py"
-        ]
-      }
-    },
-    {
       "id": "dependency-compatibility",
-      "owner": "Required minimum and latest dependency gate",
-      "contract": "Repeats the portable subset under minimum-direct and latest dependency resolutions.",
-      "variants": 2,
+      "owner": "Required sequential Python and dependency compatibility gate",
+      "contract": "Repeats the portable subset in four fresh locked, minimum-direct, and latest dependency environments.",
+      "variants": 4,
       "skip_policy": {
         "mode": "allow",
         "reason": "Dependency jobs intentionally select backend-specific and optional-capability cases that self-skip without their dedicated resources."
@@ -438,6 +420,20 @@
       "selection": {
         "paths": ["tests"],
         "exclude_markers": ["live_cluster", "real_ray"]
+      }
+    },
+    {
+      "id": "ray-compat-smoke",
+      "owner": "Required sequential real-Ray compatibility gate",
+      "contract": "Executes the five TestRayRemoteExecution cases in every fresh compatibility environment.",
+      "variants": 4,
+      "skip_policy": {
+        "mode": "forbid",
+        "reason": "Every compatibility environment must start local Ray and execute all five remote-execution cases."
+      },
+      "selection": {
+        "paths": ["tests/integration/test_task_execution.py"],
+        "include_markers": ["real_ray"]
       }
     }
   ],

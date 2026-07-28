@@ -630,6 +630,7 @@ sample = [
 dev = [
     { name = "django-ninja" },
     { name = "locust" },
+    { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-django" },
@@ -660,6 +661,7 @@ provides-extras = ["postgres", "s3", "gcs", "object-storage", "sample"]
 dev = [
     { name = "django-ninja", specifier = ">=1.5.1" },
     { name = "locust", specifier = ">=2.20" },
+    { name = "psutil", specifier = ">=6.0" },
     { name = "pytest", specifier = ">=7.0" },
     { name = "pytest-cov", specifier = ">=4.0" },
     { name = "pytest-django", specifier = ">=4.7" },

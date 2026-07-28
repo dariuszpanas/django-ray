@@ -155,9 +155,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disabled, and #79 still owns live transfer, mailbox, and concurrent-workspace
   admission limits.
 - A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
-  with a dedicated bounded control-record channel, and Linux candidate canaries. Exact
-  capability identity includes immutable deployment, shared-memory, and object-store
-  profiles; no native capability tuple is enabled yet.
+  with a dedicated bounded control-record channel, and retained historical Linux
+  candidate observations. Exact capability identity includes immutable deployment,
+  shared-memory, and object-store profiles; no native capability tuple is enabled yet.
 - A machine-readable review of fresh Linux Compiled Graph candidate artifacts, retaining
   exact provenance and hashes while making an explicit no-promotion decision. Release
   validation now enforces runtime/review parity and future evidence revalidation and
@@ -165,6 +165,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The required pull-request gate now uses four coherent, matrix-free roots. Native
+  Compiled Graph validation has moved entirely to the guarded local KubeRay pilot;
+  public workflows retain fail-closed policy and harness coverage without opting into
+  Ray's experimental native APIs.
 - Local KubeRay handoffs now retain concise semantic validation summaries with the exact command,
   cold-Ray decision, source-tree match, behavior, and preservation outcomes instead of copying raw
   image IDs, pod hashes, cluster UIDs, and checksums into commits and pull requests. The complete

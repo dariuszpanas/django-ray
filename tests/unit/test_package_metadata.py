@@ -8,6 +8,17 @@ from coverage import Coverage
 from coverage.results import should_fail_under
 
 
+def test_psutil_is_declared_only_for_development_diagnostics() -> None:
+    """Residue and benchmark diagnostics must not enlarge runtime requirements."""
+    project_root = Path(__file__).parents[2]
+    config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "psutil>=6.0" in config["dependency-groups"]["dev"]
+    assert all(
+        not dependency.startswith("psutil") for dependency in config["project"]["dependencies"]
+    )
+
+
 def test_coverage_floor_uses_central_two_decimal_precision() -> None:
     """Coverage must enforce the configured floor at its displayed precision."""
     project_root = Path(__file__).parents[2]

@@ -288,7 +288,8 @@ def main(argv: list[str] | None = None) -> int:
     """Run only after an explicit native-beta opt-in."""
     if os.environ.get(OPT_IN_ENV) != "1":
         print(
-            f"Refusing native probe: set {OPT_IN_ENV}=1 after the #86 capability gate passes.",
+            f"Refusing native probe: public CI must not set {OPT_IN_ENV}; "
+            "promotion evidence must use the guarded local KubeRay pilot.",
             file=sys.stderr,
         )
         return 2

@@ -1,7 +1,7 @@
 # Local KubeRay final gate
 
 The local KubeRay final gate complements, but never replaces, `uv run make ci` and the required
-GitHub Actions matrix. It exercises the Docker Desktop or Kind deployment boundary that unit and
+compact GitHub Actions gate. It exercises the Docker Desktop or Kind deployment boundary that unit and
 disposable CI clusters cannot reproduce: locally built images, Kustomize, the setup Job, the shared
 RuntimeEnv archive, generic Ray nodes, application task managers, protected HTTP APIs, kubelet
 probes, and live Prometheus discovery.
@@ -34,7 +34,7 @@ run the gate and choose the cold Ray restart.
 | Kubernetes application resources, setup Job, web/worker Deployments, probes, Secrets/ConfigMaps, RBAC, services, ingress, Prometheus, or Grafana | Required | `required` when Ray resources or the RuntimeEnv mount changed; otherwise `skip` | Proves rendered resources, rollouts, probes, authentication, and scrape ownership together. |
 | Worker command, queue selection, application image, polling, or database-backed execution behavior | Required | `required` for cluster-mode submission changes; otherwise `skip` | Proves all task-manager Deployments reconnect and consume a real task. |
 | Dependency update plausibly affecting Django, Ray, Gunicorn, Psycopg, Ninja, container packaging, or the sample deployment | Recommended | Match the affected boundary; use `required` for Ray or RuntimeEnv uncertainty | Catches integration drift that focused dependency tests may not expose. |
-| Package behavior with no container, Kubernetes, RuntimeEnv, HTTP, worker, or task-lifecycle effect | Recommended before a release; otherwise not applicable | `skip` | The normal CI matrix is the primary gate. |
+| Package behavior with no container, Kubernetes, RuntimeEnv, HTTP, worker, or task-lifecycle effect | Recommended before a release; otherwise not applicable | `skip` | The normal compact CI workflow is the primary gate. |
 | Documentation, issue templates, repository policy, comments, or tests that do not change deployed behavior | Not applicable | N/A | Do not turn deployment-independent work into a cluster requirement. |
 
 The gate decision and a concise semantic validation summary belong in every material retained commit

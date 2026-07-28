@@ -1,0 +1,251 @@
+name: Real-Ray Compatibility
+
+on:
+  schedule:
+    - cron: "23 10 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-ray-compatibility:
+    name: Sequential real-Ray compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Set up supported Python versions
+        run: uv python install 3.12 3.13 3.14
+
+      - name: Run complete local-Ray contract sequentially
+        id: local-ray-contracts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts/real-ray-compatibility
+          overall_status=0
+          isolation_failure=86
+
+          run_version() {
+            local python_version=$1
+            local slug=$2
+            local env_dir=$3
+            local ray_alias=$4
+            local evidence="artifacts/real-ray-compatibility/${slug}"
+            local python="${env_dir}/bin/python"
+            local active_path="${env_dir}/bin:${PATH}"
+            local guard_status=0
+            local alias_status=0
+            local guard_state
+            local body_status
+            local cleanup_status
+            local source_state
+
+            echo "::group::Local Ray Python ${python_version}"
+            if [[ -e "$env_dir" || -L "$env_dir" ]]; then
+              echo "Fresh real-Ray environment must start absent: $env_dir" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if [[ -e "$ray_alias" || -L "$ray_alias" ]]; then
+              echo "Real-Ray alias must start absent: $ray_alias" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            mkdir -p "$evidence"
+
+            if ! UV_PROJECT_ENVIRONMENT="$env_dir" \
+              uv sync --frozen --python "$python_version"; then
+              echo "Real-Ray environment installation failed for Python $python_version" >&2
+              echo "::endgroup::"
+              return 1
+            fi
+            PATH="$active_path" REAL_RAY_PYTHON="$python_version" "$python" - <<'PY' \
+              > "$evidence/environment.json" || {
+          import json
+          import os
+          import platform
+          import ray
+          import sys
+
+          print(
+              json.dumps(
+                  {
+                      "platform": platform.platform(),
+                      "python": sys.version,
+                      "python_request": os.environ["REAL_RAY_PYTHON"],
+                      "ray": ray.__version__,
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
+          PY
+              echo "Real-Ray environment evidence failed for Python $python_version" >&2
+              echo "::endgroup::"
+              return 1
+            }
+            if ! uv pip freeze --python "$python" > "$evidence/packages.txt"; then
+              echo "Real-Ray package evidence failed for Python $python_version" >&2
+              echo "::endgroup::"
+              return 1
+            fi
+            if ! "$python" scripts/ray_residue.py snapshot \
+              --output "$evidence/ray-baseline.json"; then
+              echo "Real-Ray baseline failed for Python $python_version" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if ! ln -s "$PWD/$evidence" "$ray_alias"; then
+              echo "Real-Ray alias creation failed for Python $python_version" >&2
+              echo "::endgroup::"
+              return 1
+            fi
+
+            env PATH="$active_path" \
+            "$python" scripts/ray_residue.py guard \
+              --baseline "$evidence/ray-baseline.json" \
+              --owned-temp-dir "$evidence/ray-tmp" \
+              --output "$evidence/ray-residue.json" \
+              -- "$python" scripts/test_suite_inventory.py run \
+                --lane local-ray \
+                --execution serial \
+                --observation "github-actions-${slug}-local-ray" \
+                --variant "$slug" \
+                --timing-output "$evidence/local-ray.json" \
+                --ray-tmp-dir "$ray_alias/ray-tmp" \
+                --external-note "Actions records queue and fresh-environment setup outside pytest timing." \
+                -- -q || guard_status=$?
+
+            if [[ -L "$ray_alias" ]]; then
+              unlink -- "$ray_alias" || alias_status=2
+            else
+              echo "Real-Ray alias was replaced or removed" >&2
+              alias_status=2
+            fi
+            if [[ "$alias_status" -ne 0 ]]; then
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if [[ ! -s "$evidence/ray-residue.json" ]]; then
+              echo "Real-Ray residue evidence is missing" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            guard_state="$(
+              "$python" - "$evidence/ray-residue.json" <<'PY'
+          import json
+          import sys
+
+          guard = json.load(open(sys.argv[1], encoding="utf-8"))["guard"]
+          print(guard["body_returncode"], guard["cleanup_returncode"])
+          PY
+            )" || {
+              echo "Real-Ray guard evidence is malformed" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            }
+            read -r body_status cleanup_status <<< "$guard_state"
+            if [[ "$cleanup_status" != "0" ]]; then
+              echo "Real-Ray cleanup failed closed for Python $python_version" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if [[ "$guard_status" != "$body_status" ]]; then
+              echo "Real-Ray guard status mismatch for Python $python_version" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if ! source_state="$(git status --porcelain=v1 --untracked-files=all)"; then
+              echo "Real-Ray source-state inspection failed for Python $python_version" >&2
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            if [[ -n "$source_state" ]]; then
+              echo "Real-Ray compatibility modified tracked source or lock state" >&2
+              printf '%s\n' "$source_state"
+              echo "::endgroup::"
+              return "$isolation_failure"
+            fi
+            echo "::endgroup::"
+
+            if [[ "$body_status" -ne 0 ]]; then
+              return 1
+            fi
+            return 0
+          }
+
+          version_status=0
+          run_version \
+            3.12 python-3.12 \
+            "$RUNNER_TEMP/django-ray-real-py312" /tmp/drr312 || version_status=$?
+          if [[ "$version_status" -eq "$isolation_failure" ]]; then
+            exit "$version_status"
+          elif [[ "$version_status" -ne 0 ]]; then
+            overall_status=1
+          fi
+
+          version_status=0
+          run_version \
+            3.13 python-3.13 \
+            "$RUNNER_TEMP/django-ray-real-py313" /tmp/drr313 || version_status=$?
+          if [[ "$version_status" -eq "$isolation_failure" ]]; then
+            exit "$version_status"
+          elif [[ "$version_status" -ne 0 ]]; then
+            overall_status=1
+          fi
+
+          version_status=0
+          run_version \
+            3.14 python-3.14 \
+            "$RUNNER_TEMP/django-ray-real-py314" /tmp/drr314 || version_status=$?
+          if [[ "$version_status" -eq "$isolation_failure" ]]; then
+            exit "$version_status"
+          elif [[ "$version_status" -ne 0 ]]; then
+            overall_status=1
+          fi
+
+          exit "$overall_status"
+
+      - name: Validate real-Ray evidence completeness
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          REAL_RAY_OUTCOME: ${{ steps.local-ray-contracts.outcome }}
+        run: |
+          evidence=artifacts/real-ray-compatibility
+          mkdir -p "$evidence"
+          if [[ "$REAL_RAY_OUTCOME" == "success" ]]; then
+            for slug in python-3.12 python-3.13 python-3.14; do
+              for relative_path in \
+                environment.json packages.txt local-ray.json \
+                ray-baseline.json ray-residue.json; do
+                test -s "$evidence/$slug/$relative_path" || {
+                  echo "Missing real-Ray evidence: $slug/$relative_path" >&2
+                  exit 2
+                }
+              done
+            done
+          fi
+          find "$evidence" -type f -not -path '*/ray-tmp/*' -print \
+            | LC_ALL=C sort > "$evidence/manifest.txt"
+
+      - name: Upload real-Ray compatibility evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-ray-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/real-ray-compatibility/
+            !artifacts/real-ray-compatibility/**/ray-tmp/**
+          if-no-files-found: error
+          retention-days: 14

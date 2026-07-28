@@ -160,15 +160,22 @@ make test-integration
 uv run make test-cov
 ```
 
-`test-cov` and `ci` enforce the same coverage floors as CI:
+`ci` enforces all four CI coverage floors; `test-cov` enforces the three
+django-ray source floors:
 
-- global coverage: `>= 95%`
+- `src/django_ray/` source coverage: `>= 95%`
 - `src/django_ray/management/commands/django_ray_worker.py`: `>= 90%`
 - `src/django_ray/runner/ray_job.py`: `>= 90%`
+- combined `testproject/api.py`, `testproject/views.py`, and `testproject/urls.py`: `>= 80%`
 
 `uv run make ci` runs the required format, lint, type, coverage, strict-documentation, and package-build
-checks for the current interpreter. GitHub Actions additionally repeats tests across supported Python
-versions and minimum/latest dependency resolutions.
+checks for the current interpreter. GitHub Actions keeps that canonical project run serial, then
+checks locked Python 3.13 and 3.14, minimum Python 3.12, and latest Python 3.14 dependencies
+sequentially in fresh environments inside one compatibility job. The compact gate deliberately uses
+no job matrix. Each local `ci` invocation writes canonical evidence to a fresh ignored
+`artifacts/canonical-project/local-ci-<8-hex>` directory and pins its hermetic phase to serial
+execution, so rerunning the full gate cannot mix with an earlier observation or inherit a local
+xdist experiment.
 
 ### Coverage debt review
 
@@ -195,10 +202,10 @@ it. Classify each remaining path using one of these policies:
 1. **Testable behavior**: add assertion-rich unit, integration, subprocess, or real-Ray coverage for
    a meaningful contract, error, cleanup, or recovery path.
 2. **Environment-specific**: exercise the path in the matching Linux, PostgreSQL, live-cluster,
-   canary, or platform job. Windows-only Ray behavior remains visible but does not block the primary
-   Linux/Kubernetes delivery target.
-3. **Upstream/native constraint**: link upstream evidence or the applicable canary and record when
-   the constraint should be reconsidered.
+   guarded local KubeRay, or platform evidence path. Windows-only Ray behavior remains visible but
+   does not block the primary Linux/Kubernetes delivery target.
+3. **Upstream/native constraint**: link upstream evidence or the applicable guarded local/platform
+   evidence issue and record when the constraint should be reconsidered.
 4. **Defensive invariant**: demonstrate why normal inputs cannot reach the path. Prefer simplifying
    or deleting the redundant branch; use only a narrow, explained exclusion when it must remain.
 5. **Dead or non-behavioral code**: delete the code or justify a narrowly scoped exclusion.
@@ -237,17 +244,19 @@ cluster logs. Add the summary by amending only the retained commit message, then
 emitted `source_tree` still equals `git rev-parse HEAD^{tree}` without recording the hash. A tracked
 tree change invalidates the evidence and requires a new run.
 
-### Testproject Smoke Test
+### Testproject application contract
 
-The bundled `testproject` is validated as an application boundary rather than only as task fixtures:
+The bundled `testproject` is validated as an application boundary rather than only as task fixtures.
+The canonical phased run requires every `testproject-contract` case exactly once across its four
+nonoverlapping phases and includes the application modules in the same coverage dataset:
 
 ```bash
-uv run make test-testproject
+uv run make test-cov-phased
 ```
 
-This runs Django's system checks, the sample API/security/workflow tests, and requires at least 80%
-coverage across the user-facing API, landing view, and URL configuration. CI runs it as the
-`Testproject Smoke` job before building the package.
+The canonical CI job also runs Django's system checks and requires at least 80% combined coverage
+across the user-facing API, landing view, and URL configuration. This is one serial application
+boundary inside `Canonical Project`, not a duplicate standalone matrix or smoke job.
 
 ### Live Cluster Fault Tests (Opt-In)
 
@@ -275,19 +284,18 @@ Environment variables:
 
 CI strategy:
 
-- The default test matrix excludes `live_cluster` tests to keep its coverage runs deterministic.
+- The canonical project run excludes `live_cluster` tests to keep its coverage deterministic.
 - The CI workflow runs these tests separately against a disposable two-node Docker Ray cluster and
   stages the checked-out project archive on both generic Ray nodes.
-- CI also supports `workflow_dispatch` for a manual rerun; it does not need a repository variable
-  or an externally reachable Ray cluster.
+- The lane does not need a repository variable or an externally reachable Ray cluster.
 
 ### Pinned Compiled Graph KubeRay Pilot (Opt-In)
 
-The Compiled Graph candidate matrix in ordinary CI is discovery evidence. It does not replace the
-exact Linux/KubeRay profile required by the fail-closed capability policy. Maintainers collecting
-promotion-grade issue #102 evidence must use a clean commit, the pinned `desktop-linux` Docker CLI
-context, the `docker-desktop` Kubernetes context, KubeRay operator 1.6.2, and the dedicated pilot
-namespace:
+Public GitHub Actions workflows do not invoke Ray's native Compiled Graph APIs. Canonical CI covers
+the fail-closed capability policy, lifecycle reducer, subprocess containment, and KubeRay harness
+without setting the native opt-in. Maintainers collecting promotion-grade issue #102 evidence must
+use a clean commit, the pinned `desktop-linux` Docker CLI context, the `docker-desktop` Kubernetes
+context, KubeRay operator 1.6.2, and the dedicated pilot namespace:
 
 ```powershell
 uv run python scripts/kuberay_compiled_graph_pilot.py run `
@@ -328,9 +336,9 @@ The same immutable local image ID first runs in a network-isolated one-shot cont
 reject the changed identity as `PILOT_PROFILE_MISMATCH` before the hardened probe or any native
 command can run. Successful cluster evidence also requires exact shared-memory entry and object
 identity restoration, no active named owner task, and no surviving pilot child process.
-Ray 2.56.0 currently leaves mutable-object shared-memory channels behind after otherwise
-successful Compiled Graph teardown. To retain a fresh, bounded failure record without
-weakening that invariant, use a new date-stamped path:
+Ray 2.56.0 currently leaves mutable-object shared-memory channels behind after the native smoke
+and explicit teardown call otherwise return successfully. To retain a fresh, bounded failure
+record without weakening that invariant, use a new date-stamped path:
 
 ```powershell
 uv run python scripts/kuberay_compiled_graph_pilot.py run `
@@ -446,18 +454,20 @@ gh pr merge --auto --rebase <PR-number>
 
 The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and every full
 commit message, and reports a required status check without needing secrets from the PR. The separate
-required `CI Gate` runs after every blocking job and passes only when lint, docs, typing, all supported
-Python tests, PostgreSQL coordination, live-cluster faults, testproject, minimum/latest dependencies,
-Compiled Graph candidates, and package build all report `success`. Its `always()` condition makes a
-failed, cancelled, timed-out, or skipped dependency visible as a failed gate instead of a successful
-skip. This repository is private, so use rebase auto-merge rather than merge queue: auto-merge waits
-for both protected checks and then applies the rebase method.
+required `CI Gate` depends on exactly four root jobs: `Canonical Project`, `Compatibility`,
+`PostgreSQL Coordination & Polling`, and `Live Cluster Fault Tests`.
+It passes only when all four report `success`. Its `always()` condition makes a failed, cancelled,
+timed-out, or skipped dependency visible as a failed gate instead of a successful skip. Each root
+owns a coherent serial lane; the workflow has no job matrix. This repository is private, so use
+rebase auto-merge rather than merge queue: auto-merge waits for both protected checks and then
+applies the rebase method.
 
-Scheduled/manual Compiled Graph canary, coverage-debt review, and benchmark workflows are evidence
-producers, not merge checks. Documentation builds outside pull requests and release workflows run
-after merge, manually, or from tags. Codecov upload is advisory inside the otherwise blocking Python
-3.12 job. Add future PR CI jobs to `CI Gate` unless contributor policy explicitly documents why they
-are non-blocking.
+The guarded local KubeRay Compiled Graph pilot is the only native Compiled Graph validation path.
+Coverage-debt review, manual pytest-xdist retention, and weekly/manual real-Ray compatibility
+workflows are evidence producers, not merge checks. Documentation builds outside pull requests and
+release workflows run after merge, manually, or from tags. Codecov upload is advisory inside the
+otherwise blocking canonical job. Add future PR CI work to one of the four roots unless contributor
+policy explicitly documents why it is non-blocking.
 
 Before each push and again before enabling auto-merge, inspect and validate the exact commit range that
 will be retained:
@@ -552,10 +562,10 @@ external-resource marker. Keep these resource-owning contracts explicit:
 | Contract | Ownership and supported execution |
 |---|---|
 | Required `real_ray` | Starts a local Ray runtime. Use `uv run pytest -m "real_ray and not compiled_graph_opt_in" -v` only for serial debugging without pytest-xdist. The manifest-backed evidence command below makes startup errors and skips fail. |
-| `compiled_graph_opt_in` | Marks the one native Compiled Graph topology probe, also requires `real_ray`, and permits its deliberate environment-gated skip until the upstream capability gate passes. Run it separately with `uv run pytest -m compiled_graph_opt_in -v`. |
+| `compiled_graph_opt_in` | Marks the one native Compiled Graph topology probe, also requires `real_ray`, and deliberately self-skips in public CI. Run it only for an explicit local investigation; promotion evidence must use the guarded local KubeRay pilot. |
 | `postgresql` | Uses the dedicated PostgreSQL coordination database. Run `uv run make test-postgres` as one serial evidence lane so lock, timing, row, and WAL observations are not distorted. |
 | `live_cluster` | Connects to the shared external Ray cluster. The module skips only while opt-in is disabled; once enabled, connection or readiness failure fails the serial lane. |
-| Testproject contract | Exercises the bundled application boundary through `uv run make test-testproject`; it is path-selected rather than marker-selected. |
+| Testproject contract | Exercises the bundled application boundary exactly once across `uv run make test-cov-phased`; it is path-selected rather than marker-selected. |
 
 Plain pytest reports selected skips without failing its exit status. Record required local-Ray evidence
 through the manifest runner so its `forbid` skip policy proves that all 22 selected cases executed:
