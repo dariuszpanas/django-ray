@@ -84,6 +84,7 @@ test-postgres:
 		tests/integration/test_postgresql_workflow_progress_reads.py \
 		tests/integration/test_postgresql_polling.py \
 		tests/integration/test_postgresql_metrics.py \
+		tests/integration/test_priority_migration.py \
 		-m postgresql -vv --durations=20
 
 # Validate the bundled sample project's user-facing boundary

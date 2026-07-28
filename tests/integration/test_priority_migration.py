@@ -96,8 +96,7 @@ def test_other_databases_add_priority_constraint_with_schema_editor() -> None:
     assert schema_editor.added[0][1].name == "ray_task_priority_valid_range"
 
 
-@pytest.mark.django_db(transaction=True)
-def test_existing_executions_migrate_to_default_priority_without_reordering() -> None:
+def _assert_priority_migration_round_trip() -> None:
     migrate_from = [("django_ray", "0006_taskattempt")]
     migrate_to = [("django_ray", "0008_raytaskexecution_priority_constraint")]
     executor = MigrationExecutor(connection)
@@ -166,3 +165,17 @@ def test_existing_executions_migrate_to_default_priority_without_reordering() ->
         MigrationExecutor(connection).migrate(
             [("django_ray", "0013_workflow_progress_detail_storage")]
         )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_existing_executions_migrate_to_default_priority_without_reordering() -> None:
+    _assert_priority_migration_round_trip()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.postgresql
+def test_postgresql_priority_migration_uses_the_production_constraint_path() -> None:
+    if connection.vendor != "postgresql":
+        pytest.skip("requires tests.postgres_settings and a PostgreSQL test database")
+
+    _assert_priority_migration_round_trip()
