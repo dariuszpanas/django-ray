@@ -11,6 +11,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).parents[2]
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
+MAKEFILE = PROJECT_ROOT / "Makefile"
 CONTRIBUTING = PROJECT_ROOT / "CONTRIBUTING.md"
 CONTRIBUTING_DOCS = PROJECT_ROOT / "docs" / "contributing.md"
 REQUIRED_CHECK_JOBS = {
@@ -196,6 +197,26 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
         )
         == "uv run --no-sync --python 3.12 make test-postgres"
     )
+    postgres_target = MAKEFILE.read_text(encoding="utf-8").split(
+        "# Validate the bundled sample project's user-facing boundary", maxsplit=1
+    )[0]
+    assert "tests/integration/test_priority_migration.py" in postgres_target
+
+
+def test_package_job_smokes_the_installed_wheel_without_a_new_matrix() -> None:
+    package_job = _jobs()["build"]
+    steps = {
+        step["name"]: step
+        for step in package_job["steps"]
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+
+    assert "strategy" not in package_job
+    smoke = steps["Verify installed wheel and migrations"]["run"]
+    assert "--isolated --no-project --python 3.12" in smoke
+    assert '--with "$wheel"' in smoke
+    assert "scripts/verify_wheel.py" in smoke
+    assert '"$(uv version --short)"' in smoke
 
 
 def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:

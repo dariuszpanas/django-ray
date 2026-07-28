@@ -10,8 +10,13 @@ EXPECTED_FILES = {
     "django_ray/__init__.py",
     "django_ray/models.py",
     "django_ray/migrations/0001_initial.py",
+    "django_ray/migrations/0013_workflow_progress_detail_storage.py",
     "django_ray/management/commands/django_ray_worker.py",
 }
+EXPECTED_MIGRATION_LEAF = (
+    "django_ray",
+    "0013_workflow_progress_detail_storage",
+)
 
 
 def verify_installed_wheel(expected_version: str) -> None:
@@ -27,6 +32,14 @@ def verify_installed_wheel(expected_version: str) -> None:
     if django_ray.__version__ != expected_version:
         raise RuntimeError(
             f"imported __version__ {django_ray.__version__!r} != {expected_version!r}"
+        )
+
+    imported_package = Path(django_ray.__file__).resolve().parent
+    distribution_package = Path(distribution.locate_file("django_ray")).resolve()
+    if imported_package != distribution_package:
+        raise RuntimeError(
+            "imported django_ray does not come from the installed distribution: "
+            f"{imported_package} != {distribution_package}"
         )
 
     files = {str(path).replace("\\", "/") for path in (distribution.files or ())}
@@ -46,14 +59,25 @@ def verify_installed_wheel(expected_version: str) -> None:
         )
     django.setup()
 
-    from django.core.management import get_commands
+    from django.core.management import call_command, get_commands
+    from django.db import connection
+    from django.db.migrations.loader import MigrationLoader
+    from django.db.migrations.recorder import MigrationRecorder
 
     if "django_ray_worker" not in get_commands():
         raise RuntimeError("django_ray_worker management command was not discovered")
 
-    migration = Path(django_ray.__file__).parent / "migrations" / "0001_initial.py"
-    if not migration.is_file():
-        raise RuntimeError(f"installed migration is not importable: {migration}")
+    migration_leaves = set(MigrationLoader(connection).graph.leaf_nodes("django_ray"))
+    if migration_leaves != {EXPECTED_MIGRATION_LEAF}:
+        raise RuntimeError(
+            "installed django_ray migration leaves do not match the release boundary: "
+            f"{sorted(migration_leaves)!r}"
+        )
+
+    call_command("migrate", "django_ray", interactive=False, verbosity=0)
+    applied = MigrationRecorder(connection).applied_migrations()
+    if EXPECTED_MIGRATION_LEAF not in applied:
+        raise RuntimeError(f"installed migration leaf was not applied: {EXPECTED_MIGRATION_LEAF!r}")
 
 
 def main() -> int:

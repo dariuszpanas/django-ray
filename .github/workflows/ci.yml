@@ -690,6 +690,14 @@ jobs:
       - name: Build package
         run: uv build
 
+      - name: Verify installed wheel and migrations
+        run: |
+          wheel="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          uv run --isolated --no-project --python 3.12 \
+            --with "$wheel" \
+            python scripts/verify_wheel.py --version "$(uv version --short)"
+
       - name: Upload dist artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
