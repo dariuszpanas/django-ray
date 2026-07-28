@@ -30,17 +30,81 @@ def test_normalize_version_rejects_unversioned_refs() -> None:
 
 
 def test_release_versions_match_repository_sources() -> None:
-    assert validate_release_version(ROOT, "v0.3.1") == "0.3.1"
+    assert release._read_pyproject_version(ROOT) == "0.4.0"
+    assert release._read_module_version(ROOT) == "0.4.0"
+    assert release._read_lock_version(ROOT) == "0.4.0"
 
 
 def test_release_version_mismatch_is_actionable(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.3.1"\n', encoding="utf-8")
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "django-ray"\nversion = "0.3.1"\nsource = { editable = "." }\n',
+        encoding="utf-8",
+    )
     module = tmp_path / "src" / "django_ray"
     module.mkdir(parents=True)
     (module / "__init__.py").write_text('__version__ = "0.3.1"\n', encoding="utf-8")
 
     with pytest.raises(ValueError, match="do not agree"):
         validate_release_version(tmp_path, "v0.3.0")
+
+
+def test_release_lock_version_mismatch_is_actionable(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.4.0"\n', encoding="utf-8")
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "django-ray"\nversion = "0.3.1"\nsource = { editable = "." }\n',
+        encoding="utf-8",
+    )
+    module = tmp_path / "src" / "django_ray"
+    module.mkdir(parents=True)
+    (module / "__init__.py").write_text('__version__ = "0.4.0"\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"uv\.lock=0\.3\.1"):
+        validate_release_version(tmp_path, "v0.4.0")
+
+
+def test_release_changelog_requires_an_empty_unreleased_section(tmp_path: Path) -> None:
+    changelog = tmp_path / "docs" / "changelog.md"
+    changelog.parent.mkdir()
+    changelog.write_text(
+        "## [Unreleased]\n\n- pending\n\n"
+        "## [0.4.0] - 2026-07-28\n\n- ready\n\n"
+        "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
+        "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Unreleased changelog section must be empty"):
+        release._validate_changelog_release(tmp_path, "0.4.0")
+
+
+def test_release_candidate_validation_accepts_consistent_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.4.0"\n', encoding="utf-8")
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "django-ray"\nversion = "0.4.0"\nsource = { editable = "." }\n',
+        encoding="utf-8",
+    )
+    module = tmp_path / "src" / "django_ray"
+    module.mkdir(parents=True)
+    (module / "__init__.py").write_text('__version__ = "0.4.0"\n', encoding="utf-8")
+    changelog = tmp_path / "docs" / "changelog.md"
+    changelog.parent.mkdir()
+    changelog.write_text(
+        "## [Unreleased]\n\n"
+        "## [0.4.0] - 2026-07-28\n\n- ready\n\n"
+        "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
+        "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        release,
+        "validate_compiled_graph_capability_review",
+        lambda _root: tmp_path / "review.json",
+    )
+
+    assert validate_release_version(tmp_path, "v0.4.0") == "0.4.0"
 
 
 def test_latest_compiled_graph_review_matches_fail_closed_runtime_policy() -> None:

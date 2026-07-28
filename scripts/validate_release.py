@@ -65,6 +65,61 @@ def _read_module_version(root: Path) -> str:
     raise ValueError("src/django_ray/__init__.py does not define __version__")
 
 
+def _read_lock_version(root: Path) -> str:
+    with (root / "uv.lock").open("rb") as handle:
+        packages = tomllib.load(handle).get("package")
+    if not isinstance(packages, list):
+        raise ValueError("uv.lock does not contain a package list")
+    matches = [
+        package
+        for package in packages
+        if isinstance(package, dict)
+        and package.get("name") == "django-ray"
+        and isinstance(package.get("source"), dict)
+        and package["source"].get("editable") == "."
+    ]
+    if len(matches) != 1 or not isinstance(matches[0].get("version"), str):
+        raise ValueError("uv.lock must contain one editable django-ray package version")
+    return str(matches[0]["version"])
+
+
+def _validate_changelog_release(root: Path, version: str) -> None:
+    changelog = (root / "docs" / "changelog.md").read_text(encoding="utf-8")
+    unreleased_heading = re.search(r"^## \[Unreleased\]\s*$", changelog, re.MULTILINE)
+    if unreleased_heading is None:
+        raise ValueError("docs/changelog.md must contain an Unreleased heading")
+
+    heading_pattern = re.compile(
+        rf"^## \[{re.escape(version)}\] - (?P<date>\d{{4}}-\d{{2}}-\d{{2}})\s*$",
+        re.MULTILINE,
+    )
+    release_headings = list(heading_pattern.finditer(changelog))
+    if len(release_headings) != 1:
+        raise ValueError(f"docs/changelog.md must contain one dated [{version}] release heading")
+    release_heading = release_headings[0]
+    if release_heading.start() <= unreleased_heading.end():
+        raise ValueError("the dated release must follow the Unreleased heading")
+    if changelog[unreleased_heading.end() : release_heading.start()].strip():
+        raise ValueError("the Unreleased changelog section must be empty for a release")
+    date.fromisoformat(release_heading.group("date"))
+
+    link_matches = re.findall(r"^\[([^\]]+)\]:\s+(\S+)\s*$", changelog, re.MULTILINE)
+    release_links = [url for label, url in link_matches if label == version]
+    unreleased_links = [url for label, url in link_matches if label == "Unreleased"]
+    if len(unreleased_links) != 1 or not unreleased_links[0].endswith(
+        f"/compare/v{version}...HEAD"
+    ):
+        raise ValueError(f"the Unreleased changelog link must compare v{version} with HEAD")
+    if (
+        len(release_links) != 1
+        or "/compare/" not in release_links[0]
+        or not release_links[0].endswith(f"...v{version}")
+    ):
+        raise ValueError(
+            f"the [{version}] changelog link must compare the previous tag with v{version}"
+        )
+
+
 def normalize_version(value: str) -> str:
     """Return a tag/input version without its optional leading ``v``."""
     match = _VERSION_RE.fullmatch(value.strip())
@@ -409,18 +464,21 @@ def validate_compiled_graph_capability_review(root: Path, *, as_of: date | None 
 
 
 def validate_release_version(root: Path, requested: str) -> str:
-    """Validate a tag/manual input against pyproject and package versions."""
+    """Validate a tag/manual input against every release version source."""
     requested_version = normalize_version(requested)
     pyproject_version = _read_pyproject_version(root)
     module_version = _read_module_version(root)
+    lock_version = _read_lock_version(root)
     versions = {
         "release ref": requested_version,
         "pyproject.toml": pyproject_version,
         "django_ray.__version__": module_version,
+        "uv.lock": lock_version,
     }
     if len(set(versions.values())) != 1:
         details = ", ".join(f"{name}={version}" for name, version in versions.items())
         raise ValueError(f"release versions do not agree: {details}")
+    _validate_changelog_release(root, requested_version)
     validate_compiled_graph_capability_review(root)
     return requested_version
 
