@@ -283,11 +283,11 @@ CI strategy:
 
 ### Pinned Compiled Graph KubeRay Pilot (Opt-In)
 
-The Compiled Graph candidate matrix in ordinary CI is discovery evidence. It does not replace the
-exact Linux/KubeRay profile required by the fail-closed capability policy. Maintainers collecting
-promotion-grade issue #102 evidence must use a clean commit, the pinned `desktop-linux` Docker CLI
-context, the `docker-desktop` Kubernetes context, KubeRay operator 1.6.2, and the dedicated pilot
-namespace:
+Public GitHub-hosted workflows do not invoke native Ray Compiled Graph APIs. They cover the
+default-off policy, subprocess containment and parsing, and the guarded evidence harness
+hermetically. Maintainers collecting native issue #102 evidence must instead use a clean commit, the
+pinned `desktop-linux` Docker CLI context, the `docker-desktop` Kubernetes context, KubeRay operator
+1.6.2, and the dedicated pilot namespace:
 
 ```powershell
 uv run python scripts/kuberay_compiled_graph_pilot.py run `
@@ -448,16 +448,16 @@ The `Commit Messages` workflow runs on `pull_request_target`, validates the PR t
 commit message, and reports a required status check without needing secrets from the PR. The separate
 required `CI Gate` runs after every blocking job and passes only when lint, docs, typing, all supported
 Python tests, PostgreSQL coordination, live-cluster faults, testproject, minimum/latest dependencies,
-Compiled Graph candidates, and package build all report `success`. Its `always()` condition makes a
-failed, cancelled, timed-out, or skipped dependency visible as a failed gate instead of a successful
-skip. This repository is private, so use rebase auto-merge rather than merge queue: auto-merge waits
-for both protected checks and then applies the rebase method.
+and package build all report `success`. Its `always()` condition makes a failed, cancelled, timed-out,
+or skipped dependency visible as a failed gate instead of a successful skip. This repository is
+private, so use rebase auto-merge rather than merge queue: auto-merge waits for both protected checks
+and then applies the rebase method.
 
-Scheduled/manual Compiled Graph canary, coverage-debt review, and benchmark workflows are evidence
-producers, not merge checks. Documentation builds outside pull requests and release workflows run
-after merge, manually, or from tags. Codecov upload is advisory inside the otherwise blocking Python
-3.12 job. Add future PR CI jobs to `CI Gate` unless contributor policy explicitly documents why they
-are non-blocking.
+Native Compiled Graph evidence is produced only by the guarded local KubeRay pilot, not a public
+hosted workflow. Coverage-debt review and benchmark workflows are evidence producers, not merge
+checks. Documentation builds outside pull requests and release workflows run after merge, manually,
+or from tags. Codecov upload is advisory inside the otherwise blocking Python 3.12 job. Add future PR
+CI jobs to `CI Gate` unless contributor policy explicitly documents why they are non-blocking.
 
 Before each push and again before enabling auto-merge, inspect and validate the exact commit range that
 will be retained:

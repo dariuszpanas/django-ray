@@ -165,6 +165,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI retains one visible test job per supported Python version and cancels superseded
+  pull-request workflows as a unit. Public hosted native Compiled Graph candidate jobs
+  and the scheduled canary are removed; native evidence now belongs exclusively to the
+  guarded local KubeRay pilot.
 - Local KubeRay handoffs now retain concise semantic validation summaries with the exact command,
   cold-Ray decision, source-tree match, behavior, and preservation outcomes instead of copying raw
   image IDs, pod hashes, cluster UIDs, and checksums into commits and pull requests. The complete

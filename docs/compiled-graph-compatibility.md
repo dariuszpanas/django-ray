@@ -25,6 +25,12 @@ shared-memory, and object-store profiles required by policy version 2. An incomp
 candidate returns `INCOMPLETE_CAPABILITY_CONTEXT`; a complete but unpromoted exact
 tuple returns `CANDIDATE_REQUIRES_SMOKE`.
 
+Those hosted observations are historical provenance. Repository-managed public
+workflows no longer invoke native Compiled Graph APIs; current native validation is
+performed only through the guarded local KubeRay pilot owned by issue #102. Ordinary
+CI still covers the default-off decision policy, probe parsing and containment, and
+the pilot evidence validator without enabling native execution.
+
 | Ray | Python | OS and architecture | Status | Why it is listed |
 |---|---|---|---|---|
 | 2.53.0 | 3.12 | Linux x86_64 | Candidate | django-ray's minimum Ray release |
@@ -480,9 +486,10 @@ following evidence:
    deployment/image, explicit shared-memory and object-store profiles, exit code, and
    reviewed redacted bounded stdout/stderr. A timeout or crash is evidence of failure,
    not permission to fall back after compilation starts.
-   CI invokes the synced `.venv/bin/python` directly for environment capture and the
-   native probe. Do not wrap those commands in `uv run`: Ray workers inherit the
-   wrapper context and may resolve their worker directory as a separate uv project.
+   The pinned KubeRay pilot invokes its in-container interpreter directly for
+   environment capture and the native probe. Do not wrap those in-container commands
+   in `uv run`: Ray workers inherit the wrapper context and may resolve their worker
+   directory as a separate uv project.
 5. Unit tests prove exact-tuple matching and rejection of every neighboring unverified
    tuple. Dynamic workflow tests remain green without selecting Compiled Graph.
 6. A dated machine-readable review records provenance, expiry, revalidation, and
@@ -492,19 +499,17 @@ following evidence:
    policy version. Issue #99 completed the first review with `no_promotion`; issue #102
    owns the missing promotion-grade KubeRay evidence.
 
-The required CI smoke exercises the minimum, repository-lock, and reviewed-latest
-candidate releases against the local nested Ray task owner. The repository-controlled
-scheduled canary resolves the official latest stable `ray[cgraph]` release and
-deliberately supplies both unsafe acknowledgements so an unknown new release is
-actually exercised. A manual dispatch supplies neither acknowledgement unless its
-trusted operator enables the `unsafe-native` boolean. An upstream/nightly wheel remains
-manual because its URL and ABI rotate. Candidate smoke without all explicit profiles is
-discovery evidence only and cannot populate issue #99's verified table.
+Public CI exercises only the hermetic policy, guard, parsing, containment, lifecycle,
+and evidence-validation contracts. Native candidate execution is an explicit guarded
+local KubeRay action under issue #102. An unknown stable, upstream, or nightly build
+requires a separately reviewed immutable local profile; a future self-hosted or EKS
+path likewise requires its own issue and may not inherit support from generic hosted
+runner observations.
 
-Review the matrix whenever Ray, Python, operating-system images, channel APIs,
-`ray[cgraph]` dependencies, immutable deployment/image identity, shared-memory or
-object-store configuration, or the workflow owner contract changes. Never widen a
-range from version ordering alone.
+Review the capability candidate table and pinned KubeRay pilot profile whenever Ray,
+Python, operating-system images, channel APIs, `ray[cgraph]` dependencies, immutable
+deployment/image identity, shared-memory or object-store configuration, or the workflow
+owner contract changes. Never widen a range from version ordering alone.
 
 Release validation loads the newest dated capability-review record and compares its
 reviewed capability identities exactly with the runtime verified set. A future verified

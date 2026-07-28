@@ -349,7 +349,7 @@
       "contract": "Preserves backend-specific and opt-in self-skip outcomes outside parallel and required resource phases.",
       "skip_policy": {
         "mode": "allow",
-        "reason": "The default canonical suite retains PostgreSQL and Compiled Graph cases as explicit self-skip outcomes while dedicated jobs own execution proof."
+        "reason": "The default canonical suite retains PostgreSQL and Compiled Graph cases as explicit self-skip outcomes. A dedicated job owns PostgreSQL execution proof; the guarded local KubeRay pilot owns native Compiled Graph proof."
       },
       "selection": {
         "paths": ["tests"],
