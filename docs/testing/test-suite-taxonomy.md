@@ -176,10 +176,11 @@ selection:
 4. `default-serial-remainder`, serially, retaining the PostgreSQL and Compiled Graph cases as their
    intentional default-settings self-skips.
 
-The remainder preserves the normal suite's collected outcomes; it is not PostgreSQL or Compiled
-Graph execution evidence. Dedicated PostgreSQL jobs and Compiled Graph candidate jobs continue to
-own those resource proofs. `live-cluster` remains outside the normal supported-Python selection and
-keeps its dedicated serial opt-in lane.
+The remainder preserves the normal suite's collected outcomes; it is not PostgreSQL or native
+Compiled Graph execution evidence. The dedicated PostgreSQL job owns its backend proof. Native
+Compiled Graph proof belongs to the guarded local KubeRay pilot in issue #102, not a public hosted
+workflow. `live-cluster` remains outside the normal supported-Python selection and keeps its
+dedicated serial opt-in lane.
 
 Coverage is erased once before the first phase. Every phase, including hermetic, uses
 `--cov-append` against that proven-empty data path and does not enforce an intermediate floor. Only
@@ -249,9 +250,9 @@ available. The absence of a hosted record explicitly means that evidence is pend
 not change the source digest because dated baseline files are excluded from it.
 
 The estimated CI total is selected pytest case slots multiplied by current lane variants. Selected
-cases may later skip, so it is not labeled completed execution. Compiled Graph candidate probes and
-the JavaScript subtests launched from the bundled API suite are real gate work, but they are outside
-that selected-slot count rather than disguised as additional pytest cases.
+cases may later skip, so it is not labeled completed execution. The JavaScript subtests launched
+from the bundled API suite are real gate work, but they are outside that selected-slot count rather
+than disguised as additional pytest cases. Public CI does not run native Compiled Graph probes.
 
 ## Hosted paired benchmark and retention decision
 

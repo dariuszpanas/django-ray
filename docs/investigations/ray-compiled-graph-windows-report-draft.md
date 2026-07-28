@@ -28,8 +28,9 @@ same failure reproduces on Ray 2.53.0, 2.56.0, and 2.56.1.
   `ray.experimental.channel.shared_memory_channel.ensure_registered_as_writer`
   during `DAGNode.experimental_compile()`.
 
-The equivalent Linux candidate jobs are tracked separately. This report does not
-claim that every Windows, Python, Ray, or Compiled Graph topology is affected.
+The retained historical Linux candidate observations are documented separately. This
+report does not claim that every Windows, Python, Ray, or Compiled Graph topology is
+affected.
 
 ## Environment
 

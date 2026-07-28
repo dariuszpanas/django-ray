@@ -31,6 +31,10 @@ on:
         type: string
         default: ""
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     if: github.event_name != 'pull_request_target'
@@ -275,9 +279,6 @@ jobs:
     name: Live Cluster Fault Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    concurrency:
-      group: live-cluster-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
     env:
       DJANGO_RAY_LIVE_CLUSTER_TESTS: "1"
       DJANGO_RAY_LIVE_RAY_ADDRESS: ray://127.0.0.1:10001
@@ -427,65 +428,6 @@ jobs:
         run: >-
           uv run --no-sync --python ${{ matrix.python-version }}
           pytest -m "not live_cluster and not real_ray" -q
-
-  compiled-graph-candidate-smoke:
-    if: github.event_name != 'pull_request_target'
-    name: Compiled Graph Candidate (Ray ${{ matrix.ray-version }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        ray-version: ["2.53.0", "2.56.0", "2.56.1"]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-          enable-cache: "false"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install candidate with Compiled Graph dependencies
-        run: |
-          uv sync --frozen --python 3.12
-          uv pip install --python .venv/bin/python "ray[cgraph]==${{ matrix.ray-version }}"
-
-      - name: Record candidate environment
-        run: |
-          mkdir -p compiled-graph-evidence
-          .venv/bin/python -c \
-            "import json, platform, ray, sys; print(json.dumps({'python': sys.version, 'ray': ray.__version__, 'platform': platform.platform(), 'machine': platform.machine()}, indent=2, sort_keys=True))" \
-            > compiled-graph-evidence/environment.json
-          uv pip freeze --python .venv/bin/python \
-            > compiled-graph-evidence/packages.txt
-
-      - name: Probe production-intended nested owner
-        run: >-
-          .venv/bin/python -m
-          django_ray.runtime.compiled_graph_probe
-          --topology nested-ray-task
-          --submission-transport direct-ray-core
-          --candidate-native
-          --require-success
-          --timeout-seconds 90
-          > compiled-graph-evidence/probe.json
-
-      - name: Show Compiled Graph evidence
-        if: always()
-        run: |
-          cat compiled-graph-evidence/environment.json || true
-          cat compiled-graph-evidence/probe.json || true
-
-      - name: Upload Compiled Graph evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: compiled-graph-ray-${{ matrix.ray-version }}
-          path: compiled-graph-evidence/
 
   pytest-xdist-benchmark-pair:
     if: >-
@@ -732,7 +674,6 @@ jobs:
         live-cluster,
         testproject,
         dependency-compatibility,
-        compiled-graph-candidate-smoke,
       ]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -767,7 +708,6 @@ jobs:
       - live-cluster
       - testproject
       - dependency-compatibility
-      - compiled-graph-candidate-smoke
       - build
     runs-on: ubuntu-latest
     steps:
@@ -790,7 +730,6 @@ jobs:
 
           expected_jobs = {
               "build",
-              "compiled-graph-candidate-smoke",
               "dependency-compatibility",
               "docs",
               "lint",

@@ -108,8 +108,8 @@ in a separate change.
 The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
 every commit in the PR. The separate required `CI Gate` check fails unless lint, docs, typing,
 supported-Python tests, PostgreSQL, live-cluster faults, testproject, minimum/latest dependencies,
-Compiled Graph candidates, and package build all succeed. Use one of `build`, `chore`, `ci`, `docs`,
-`feat`, `fix`, `perf`, `refactor`,
+and package build all succeed. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`,
+`refactor`,
 `revert`, `style`, or `test`, optionally add a scope and `!`, and include a summary after `:`. The
 check enforces meaningful body context, validation evidence or a specific not-run reason, and the
 wrappable commit-prose line limit without prescribing section headings. A failed check prints the
@@ -130,7 +130,8 @@ through the read-only `pull_request_target` event. `CI Gate` runs with `always()
 cancelled, timed-out, or skipped blocking jobs, including a package build skipped after an upstream
 failure.
 
-Scheduled/manual Compiled Graph canary, coverage-debt review, and benchmark workflows,
+Native Compiled Graph validation is not run on public GitHub-hosted runners; use the guarded local
+KubeRay pilot when issue #102 requires that evidence. Coverage-debt review and benchmark workflows,
 post-merge/manual documentation builds, and tag/manual release workflows remain outside the PR merge
 gate. PR-facing equivalents that protect correctness live in the blocking CI workflow; Codecov
 upload is advisory within the otherwise blocking Python 3.12 job.

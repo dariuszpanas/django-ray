@@ -144,6 +144,87 @@ def test_optional_benchmark_jobs_are_exactly_workflow_dispatch_only() -> None:
     assert '"pytest-xdist==3.8.0"' in minimum_install["run"]
 
 
+def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
+    test_job = _jobs()["test"]
+    strategy = test_job["strategy"]
+    matrix = strategy["matrix"]
+    steps = {
+        step["name"]: step
+        for step in test_job["steps"]
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+
+    assert test_job["name"] == "Test (Python ${{ matrix.python-version }})"
+    assert strategy["fail-fast"] == "false"
+    assert matrix == {"python-version": ["3.12", "3.13", "3.14"]}
+    assert "--lane supported-python" in steps["Run tests with suite timing"]["run"]
+    assert steps["Run tests with suite timing"]["run"].endswith("-v")
+    assert steps["Run tests"]["run"].endswith("-v")
+    assert "test-cov-phased" not in "\n".join(
+        str(step.get("run", "")) for step in test_job["steps"] if isinstance(step, dict)
+    )
+
+
+def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
+    jobs = _jobs()
+    testproject = jobs["testproject"]
+    live_cluster = jobs["live-cluster"]
+    postgresql = jobs["postgresql-coordination"]
+
+    assert testproject["name"] == "Testproject Smoke"
+    assert testproject["steps"][-1] == {
+        "name": "Validate sample project",
+        "run": "uv run make test-testproject",
+    }
+    assert live_cluster["name"] == "Live Cluster Fault Tests"
+    assert "concurrency" not in live_cluster
+    assert next(
+        step["run"]
+        for step in live_cluster["steps"]
+        if step.get("name") == "Run live cluster fault tests"
+    ) == ("uv run pytest tests/integration/test_live_failure_injection.py -m live_cluster -v")
+    assert postgresql["name"] == "PostgreSQL Coordination & Polling"
+    assert (
+        next(
+            step["run"]
+            for step in postgresql["steps"]
+            if step.get("name") == "Run PostgreSQL coordination and polling tests"
+        )
+        == "uv run --no-sync --python 3.12 make test-postgres"
+    )
+
+
+def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
+    ci = _workflow()
+    commit_messages = _workflow(WORKFLOWS / "commit-messages.yml")
+
+    assert ci["concurrency"] == {
+        "group": "ci-${{ github.event.pull_request.number || github.run_id }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
+    assert commit_messages["concurrency"] == {
+        "group": "commit-messages-${{ github.event.pull_request.number }}",
+        "cancel-in-progress": "true",
+    }
+
+
+def test_public_workflows_do_not_invoke_native_compiled_graph() -> None:
+    assert not (WORKFLOWS / "compiled-graph-canary.yml").exists()
+    forbidden = {
+        "django_ray.runtime.compiled_graph_probe",
+        "scripts/compiled_session_topology_probe.py",
+        "--candidate-native",
+        "--unsafe-native",
+        "DJANGO_RAY_ALLOW_UNSAFE_COMPILED_GRAPH_PROBE",
+        "DJANGO_RAY_RUN_COMPILED_SESSION_TOPOLOGY_PROBE",
+    }
+
+    for path in _workflow_paths():
+        workflow = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            assert token not in workflow, (path.name, token)
+
+
 def test_required_check_names_are_globally_unique() -> None:
     for (workflow_name, job_id), check_name in REQUIRED_CHECK_JOBS.items():
         required_job = _jobs(WORKFLOWS / workflow_name)[job_id]
@@ -247,7 +328,7 @@ def test_required_and_nonblocking_workflows_are_documented() -> None:
 
     assert "`CI Gate`" in documentation
     assert "`Commit Messages`" in documentation
-    assert "Compiled Graph canary" in documentation
+    assert "guarded local KubeRay" in documentation
     assert "benchmark workflows" in documentation
     for reason in EXPLICIT_NONBLOCKING_PR_JOBS.values():
         assert reason.strip()
