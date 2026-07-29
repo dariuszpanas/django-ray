@@ -23,7 +23,10 @@ from ninja.security import HttpBearer
 from pydantic import Field, field_validator
 
 from django_ray import __version__ as django_ray_version
-from django_ray.lifecycle import cancel_task, record_failure, retry_task
+from django_ray.lifecycle import (
+    request_task_cancellation,
+    retry_task,
+)
 from django_ray.metrics import render_prometheus_metrics
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.observability import (
@@ -738,43 +741,38 @@ def get_stats(request):
 @api.post("/executions/reset", response=MessageSchema, tags=["Admin"])
 def reset_executions(
     request,
-    state: Literal["RUNNING", "FAILED", "LOST"] | None = None,
+    state: Literal["FAILED", "CANCELLED", "LOST"] | None = None,
 ):
-    """Reset task executions to QUEUED state."""
+    """Retry terminal task executions through the locked lifecycle service."""
+    retryable_states = (TaskState.FAILED, TaskState.CANCELLED, TaskState.LOST)
     if state:
         queryset = RayTaskExecution.objects.filter(state=state.upper())
     else:
-        queryset = RayTaskExecution.objects.exclude(
-            state__in=[TaskState.SUCCEEDED, TaskState.QUEUED]
-        )
+        queryset = RayTaskExecution.objects.filter(state__in=retryable_states)
 
     execution_ids = list(queryset.values_list("pk", flat=True))
     count = 0
     for execution_id in execution_ids:
         execution = (
-            RayTaskExecution.objects.only("pk", "state", "execution_generation")
+            RayTaskExecution.objects.only(
+                "pk",
+                "state",
+                "attempt_number",
+                "execution_generation",
+            )
             .filter(pk=execution_id)
             .first()
         )
         if execution is None:
             continue
-        if execution.state == TaskState.RUNNING:
-            reset = record_failure(
-                execution,
-                error_message="Task reset through the bundled operations API",
-                retry=True,
+        reset = (
+            retry_task(
+                execution.pk,
+                expected_attempt_number=execution.attempt_number,
                 expected_execution_generation=execution.execution_generation,
             )
-        elif execution.state == TaskState.CANCELLING:
-            reset = (
-                cancel_task(
-                    execution,
-                    expected_execution_generation=execution.execution_generation,
-                )
-                and retry_task(execution.pk) is not None
-            )
-        else:
-            reset = retry_task(execution.pk) is not None
+            is not None
+        )
         count += int(reset)
 
     return {"message": f"Reset {count} execution(s) to QUEUED state"}
@@ -800,21 +798,28 @@ def cancel_execution(request, execution_id: int):
     """Cancel a queued or running task execution."""
     task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
 
-    if task.state == TaskState.QUEUED:
-        task.state = TaskState.CANCELLED
-        task.save(update_fields=["state"])
-    elif task.state == TaskState.RUNNING:
-        task.state = TaskState.CANCELLING
-        task.save(update_fields=["state"])
-
+    request_task_cancellation(
+        task.pk,
+        expected_attempt_number=task.attempt_number,
+        expected_execution_generation=task.execution_generation,
+    )
+    task.refresh_from_db()
     return task
 
 
 @api.post("/executions/{execution_id}/retry", response=TaskExecutionSchema, tags=["Admin"])
 def retry_execution(request, execution_id: int):
-    """Retry a failed task execution."""
+    """Retry a failed, cancelled, or lost task execution."""
     task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
-    return retry_task(task) or task
+    retried = retry_task(
+        task.pk,
+        expected_attempt_number=task.attempt_number,
+        expected_execution_generation=task.execution_generation,
+    )
+    if retried is not None:
+        return retried
+    task.refresh_from_db()
+    return task
 
 
 # ============================================================================

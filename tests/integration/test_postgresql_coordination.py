@@ -16,7 +16,13 @@ from django.utils import timezone
 
 import django_ray.workflow_progress as workflow_progress_module
 from django_ray.input_storage import load_task_input, prepare_task_input, register_task_input
-from django_ray.lifecycle import record_failure, retry_task, succeed_task
+from django_ray.lifecycle import (
+    TaskCancellationRequestStatus,
+    record_failure,
+    request_task_cancellation,
+    retry_task,
+    succeed_task,
+)
 from django_ray.management.commands.django_ray_purge_inputs import Command as PurgeInputsCommand
 from django_ray.models import (
     InputPayloadState,
@@ -27,7 +33,7 @@ from django_ray.models import (
     TaskWorkerLease,
     WorkflowProgressRunStorage,
 )
-from django_ray.runner.cancellation import finalize_cancellation, request_cancellation
+from django_ray.runner.cancellation import finalize_cancellation
 from django_ray.runner.leasing import get_active_workers
 from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
 from django_ray.runtime.context import WorkflowRunIdentity
@@ -232,6 +238,84 @@ def test_skip_locked_claims_available_row_then_locked_row_without_starvation() -
     assert RayTaskExecution.objects.filter(state=TaskState.QUEUED).count() == 0
 
 
+def test_external_result_storage_and_cancellation_share_the_execution_lock(
+    settings, tmp_path, monkeypatch
+) -> None:
+    from django_ray.management.commands.django_ray_worker import Command
+    from django_ray.result_storage import FilesystemResultStorage, load_result_reference
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "MAX_RESULT_SIZE_BYTES": 1,
+        "RESULT_STORAGE_BACKEND": "filesystem",
+        "RESULT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    task = _execution(
+        "postgres-result-storage-cancellation-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=5,
+    )
+    store_started = Event()
+    release_store = Event()
+    original_store = FilesystemResultStorage.store
+
+    def blocking_store(
+        storage: FilesystemResultStorage,
+        *,
+        serialized_result: str,
+    ) -> str:
+        store_started.set()
+        if not release_store.wait(timeout=10):
+            raise TimeoutError("test did not release external result storage")
+        return original_store(storage, serialized_result=serialized_result)
+
+    monkeypatch.setattr(FilesystemResultStorage, "store", blocking_store)
+
+    def publish_result() -> bool:
+        close_old_connections()
+        try:
+            current = RayTaskExecution.objects.get(pk=task.pk)
+            command = Command()
+            command.stdout = StringIO()
+            return command._store_and_succeed_task(
+                current,
+                {"message": "x" * 128},
+                expected_attempt_number=2,
+                expected_execution_generation=5,
+            )
+        finally:
+            close_old_connections()
+
+    def cancel_result() -> object:
+        close_old_connections()
+        try:
+            return request_task_cancellation(
+                task.pk,
+                expected_attempt_number=2,
+                expected_execution_generation=5,
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publish_future = executor.submit(publish_result)
+        assert store_started.wait(timeout=10)
+        cancel_future = executor.submit(cancel_result)
+        release_store.set()
+        assert publish_future.result(timeout=20) is True
+        cancellation = cancel_future.result(timeout=20)
+
+    task.refresh_from_db()
+    assert cancellation.status == TaskCancellationRequestStatus.ALREADY_TERMINAL
+    assert task.state == TaskState.SUCCEEDED
+    assert task.result_data is None
+    assert task.result_reference is not None
+    stored_result = load_result_reference(task.result_reference)
+    assert stored_result is not None
+    assert json.loads(stored_result) == {"message": "x" * 128}
+
+
 def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:
     now = datetime.now(UTC)
     TaskWorkerLease.objects.create(
@@ -277,6 +361,191 @@ def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:
     assert winner in {"adopter-a", "adopter-b"}
     winning_command = adopters[0] if winner == "adopter-a" else adopters[1]
     assert winning_command.active_tasks == {task.pk: "raysubmit_postgres_orphan"}
+
+
+def test_orphan_adoption_invalidates_waiting_stale_lost_transition() -> None:
+    now = datetime.now(UTC)
+    task = _execution(
+        "postgres-orphan-adoption-lost-race-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker="expired-owner",
+        ray_job_id="raysubmit_postgres_orphan_lost_race",
+        started_at=now - timedelta(minutes=5),
+        last_heartbeat_at=now - timedelta(minutes=5),
+        attempt_number=2,
+        execution_generation=7,
+    )
+    stale_lost_snapshot = RayTaskExecution.objects.get(pk=task.pk)
+    adopter = _claim_command("replacement-owner", [])
+    adoption_locked = Event()
+    release_adoption = Event()
+    lost_started = Event()
+
+    def adopt_while_holding_execution_lock() -> bool:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                current = RayTaskExecution.objects.select_for_update().get(pk=task.pk)
+                adopted = adopter._adopt_orphaned_ray_job_task(current, now=now)
+                adoption_locked.set()
+                if not release_adoption.wait(timeout=10):
+                    raise TimeoutError("test did not release orphan adoption")
+                return adopted
+        finally:
+            close_old_connections()
+
+    def mark_stale_snapshot_lost() -> bool:
+        close_old_connections()
+        try:
+            if not adoption_locked.wait(timeout=10):
+                raise TimeoutError("test did not acquire orphan adoption lock")
+            lost_started.set()
+            return mark_task_lost(stale_lost_snapshot)
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        adoption_future = executor.submit(adopt_while_holding_execution_lock)
+        assert adoption_locked.wait(timeout=10)
+        lost_future = executor.submit(mark_stale_snapshot_lost)
+        assert lost_started.wait(timeout=10)
+        release_adoption.set()
+        assert adoption_future.result(timeout=20) is True
+        assert lost_future.result(timeout=20) is False
+
+    task.refresh_from_db()
+    assert task.state == TaskState.RUNNING
+    assert task.claimed_by_worker == "replacement-owner"
+    assert task.last_heartbeat_at == now
+    assert task.attempt_number == 2
+    assert task.execution_generation == 7
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+def test_completion_publication_invalidates_waiting_stale_lost_transition() -> None:
+    from django_ray.runtime.entrypoint import _persist_task_completion
+
+    now = datetime.now(UTC)
+    task = _execution(
+        "postgres-completion-publication-lost-race-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker="expired-owner",
+        ray_job_id="raysubmit_postgres_completed_lost_race",
+        started_at=now - timedelta(minutes=5),
+        last_heartbeat_at=now - timedelta(minutes=5),
+        attempt_number=2,
+        execution_generation=7,
+    )
+    stale_lost_snapshot = RayTaskExecution.objects.get(pk=task.pk)
+    completion_data = '{"success": true, "result": 3}'
+    publication_locked = Event()
+    release_publication = Event()
+    lost_started = Event()
+
+    def publish_while_holding_execution_lock() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                RayTaskExecution.objects.select_for_update().get(pk=task.pk)
+                _persist_task_completion(
+                    task.pk,
+                    task.attempt_number,
+                    task.execution_generation,
+                    completion_data,
+                )
+                publication_locked.set()
+                if not release_publication.wait(timeout=10):
+                    raise TimeoutError("test did not release completion publication")
+        finally:
+            close_old_connections()
+
+    def mark_stale_snapshot_lost() -> bool:
+        close_old_connections()
+        try:
+            if not publication_locked.wait(timeout=10):
+                raise TimeoutError("test did not acquire completion publication lock")
+            lost_started.set()
+            return mark_task_lost(stale_lost_snapshot)
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publication_future = executor.submit(publish_while_holding_execution_lock)
+        assert publication_locked.wait(timeout=10)
+        lost_future = executor.submit(mark_stale_snapshot_lost)
+        assert lost_started.wait(timeout=10)
+        release_publication.set()
+        publication_future.result(timeout=20)
+        assert lost_future.result(timeout=20) is False
+
+    task.refresh_from_db()
+    assert task.state == TaskState.RUNNING
+    assert task.completion_data == completion_data
+    assert task.attempt_number == 2
+    assert task.execution_generation == 7
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+def test_progress_publication_invalidates_waiting_stale_lost_transition() -> None:
+    now = datetime.now(UTC)
+    task = _execution(
+        "postgres-progress-publication-lost-race-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker="expired-owner",
+        ray_job_id="raysubmit_postgres_progress_lost_race",
+        started_at=now - timedelta(minutes=5),
+        last_heartbeat_at=now - timedelta(minutes=5),
+        attempt_number=2,
+        execution_generation=7,
+    )
+    identity = _workflow_identity(task, "00000000-0000-0000-0000-00000000012b")
+    assert claim_workflow_run(identity) is True
+    stale_lost_snapshot = RayTaskExecution.objects.get(pk=task.pk)
+    progress_snapshot = _workflow_snapshot(identity, 1)
+    publication_locked = Event()
+    release_publication = Event()
+    lost_started = Event()
+
+    def publish_while_holding_execution_lock() -> bool:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                RayTaskExecution.objects.select_for_update().get(pk=task.pk)
+                published = persist_workflow_progress(identity, progress_snapshot)
+                publication_locked.set()
+                if not release_publication.wait(timeout=10):
+                    raise TimeoutError("test did not release workflow progress publication")
+                return published
+        finally:
+            close_old_connections()
+
+    def mark_stale_snapshot_lost() -> bool:
+        close_old_connections()
+        try:
+            if not publication_locked.wait(timeout=10):
+                raise TimeoutError("test did not acquire workflow progress publication lock")
+            lost_started.set()
+            return mark_task_lost(stale_lost_snapshot)
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publication_future = executor.submit(publish_while_holding_execution_lock)
+        assert publication_locked.wait(timeout=10)
+        lost_future = executor.submit(mark_stale_snapshot_lost)
+        assert lost_started.wait(timeout=10)
+        release_publication.set()
+        assert publication_future.result(timeout=20) is True
+        assert lost_future.result(timeout=20) is False
+
+    task.refresh_from_db()
+    assert task.state == TaskState.RUNNING
+    assert json.loads(task.progress_data or "{}") == progress_snapshot
+    assert task.last_heartbeat_at is not None
+    assert task.last_heartbeat_at > stale_lost_snapshot.last_heartbeat_at
+    assert task.attempt_number == 2
+    assert task.execution_generation == 7
+    assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
 def test_completion_retry_and_timeout_race_has_one_winner() -> None:
@@ -332,12 +601,12 @@ def test_cancellation_and_completion_race_cannot_overwrite_winner() -> None:
     cancellation = RayTaskExecution.objects.get(pk=task.pk)
     completion = RayTaskExecution.objects.get(pk=task.pk)
 
-    class Runner:
-        def cancel(self, _handle: object) -> bool:
-            return True
-
     results = _run_concurrently(
-        lambda: request_cancellation(cancellation, Runner()),
+        lambda: request_task_cancellation(
+            cancellation.pk,
+            expected_attempt_number=1,
+            expected_execution_generation=3,
+        ),
         lambda: succeed_task(
             completion,
             result_data="3",
@@ -346,19 +615,285 @@ def test_cancellation_and_completion_race_cannot_overwrite_winner() -> None:
         ),
     )
 
-    assert results.count(True) == 1
+    cancellation_result = results[0]
+    completion_result = results[1]
     task.refresh_from_db()
-    if task.state == TaskState.CANCELLING:
+    if cancellation_result.accepted:
+        assert completion_result is False
+        assert task.state == TaskState.CANCELLING
         assert finalize_cancellation(task, expected_worker_id="cancellation-owner") is True
         task.refresh_from_db()
         assert task.state == TaskState.CANCELLED
         assert task.result_data is None
     else:
+        assert cancellation_result.status is TaskCancellationRequestStatus.ALREADY_TERMINAL
+        assert completion_result is True
         assert task.state == TaskState.SUCCEEDED
         assert task.result_data == "3"
-        assert request_cancellation(cancellation, Runner()) is False
+        duplicate = request_task_cancellation(
+            cancellation.pk,
+            expected_attempt_number=1,
+            expected_execution_generation=3,
+        )
+        assert duplicate.status is TaskCancellationRequestStatus.ALREADY_TERMINAL
         task.refresh_from_db()
         assert task.state == TaskState.SUCCEEDED
+
+
+def test_cancellation_and_entrypoint_publication_preserve_lock_winner() -> None:
+    from django_ray.runtime.entrypoint import _persist_task_completion
+
+    task = _execution(
+        "postgres-cancellation-publication-race-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker="cancellation-owner",
+        attempt_number=2,
+        execution_generation=3,
+        started_at=datetime.now(UTC),
+    )
+    completion_data = '{"success": true, "result": 3}'
+
+    results = _run_concurrently(
+        lambda: request_task_cancellation(
+            task.pk,
+            expected_attempt_number=2,
+            expected_execution_generation=3,
+        ),
+        lambda: _persist_task_completion(
+            task.pk,
+            2,
+            3,
+            completion_data,
+        ),
+    )
+
+    cancellation_result = results[0]
+    task.refresh_from_db()
+    if cancellation_result.accepted:
+        assert cancellation_result.state == TaskState.CANCELLING
+        assert task.state == TaskState.CANCELLING
+        assert task.completion_data is None
+    else:
+        assert cancellation_result.status is TaskCancellationRequestStatus.COMPLETION_PENDING
+        assert task.state == TaskState.RUNNING
+        assert task.completion_data == completion_data
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+def test_concurrent_manual_retry_advances_attempt_and_generation_once() -> None:
+    task = _execution(
+        "postgres-manual-retry-race-001",
+        state=TaskState.FAILED,
+        attempt_number=3,
+        execution_generation=7,
+        error_message="retryable failure",
+    )
+
+    results = _run_concurrently(
+        lambda: retry_task(
+            task.pk,
+            expected_attempt_number=3,
+            expected_execution_generation=7,
+        ),
+        lambda: retry_task(
+            task.pk,
+            expected_attempt_number=3,
+            expected_execution_generation=7,
+        ),
+    )
+
+    assert sum(result is not None for result in results) == 1
+    task.refresh_from_db()
+    assert task.state == TaskState.QUEUED
+    assert task.attempt_number == 4
+    assert task.execution_generation == 8
+    history = TaskAttempt.objects.get(execution=task, attempt_number=3)
+    assert history.state == TaskState.FAILED
+    assert history.error_message == "retryable failure"
+    assert (
+        retry_task(
+            task.pk,
+            expected_attempt_number=3,
+            expected_execution_generation=7,
+        )
+        is None
+    )
+
+
+def test_stale_unknown_stop_holds_execution_lock_until_outcome_is_durable(
+    monkeypatch,
+) -> None:
+    import time
+    from threading import get_ident
+
+    import django_ray.lifecycle as lifecycle_module
+    from django_ray.management.commands.django_ray_worker import Command
+    from django_ray.runner.base import JobInfo, JobStatus
+    from django_ray.runner.cancellation import (
+        CancellationOutcome,
+        CancellationOutcomeStatus,
+    )
+
+    task = _execution(
+        "postgres-unknown-stop-retry-race-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker="postgres-unknown-worker",
+        ray_job_id="raysubmit_postgres_unknown_stop_retry",
+        ray_address="http://ray-dashboard:8265",
+        started_at=datetime.now(UTC) - timedelta(minutes=10),
+        last_heartbeat_at=datetime.now(UTC) - timedelta(minutes=10),
+        attempt_number=2,
+        execution_generation=7,
+    )
+    stop_started = Event()
+    release_stop = Event()
+    retry_started = Event()
+    retry_backend_pid: list[int] = []
+    retry_thread_id: list[int] = []
+    retry_observed_cancellation_status: list[str | None] = []
+    original_record_attempt = lifecycle_module._record_attempt
+
+    def capture_retry_snapshot(execution: RayTaskExecution) -> None:
+        if retry_thread_id and get_ident() == retry_thread_id[0]:
+            retry_observed_cancellation_status.append(execution.cancellation_status)
+        original_record_attempt(execution)
+
+    monkeypatch.setattr(lifecycle_module, "_record_attempt", capture_retry_snapshot)
+
+    class BlockingRunner:
+        def get_status(self, _handle) -> JobInfo:
+            return JobInfo(
+                job_id=task.ray_job_id or "",
+                status=JobStatus.UNKNOWN,
+                message="status unavailable",
+            )
+
+        def cancel_with_status(self, _handle) -> CancellationOutcome:
+            stop_started.set()
+            if not release_stop.wait(timeout=10):
+                raise TimeoutError("test did not release the exact stop request")
+            return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+    def reconcile_unknown() -> None:
+        close_old_connections()
+        try:
+            current = RayTaskExecution.objects.get(pk=task.pk)
+            command = Command()
+            command.stdout = StringIO()
+            command.worker_id = "postgres-unknown-worker"
+            command.active_tasks = {task.pk: task.ray_job_id or ""}
+            command.active_task_identities = {
+                task.pk: (task.attempt_number, task.execution_generation)
+            }
+            command._reconcile_ray_job_task(
+                current,
+                BlockingRunner(),
+                ray_job_id=task.ray_job_id or "",
+                completed_tasks=[],
+                orphaned=False,
+                tracked_identity=(task.attempt_number, task.execution_generation),
+            )
+        finally:
+            close_old_connections()
+
+    def retry_lost() -> RayTaskExecution | None:
+        close_old_connections()
+        try:
+            retry_thread_id.append(get_ident())
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                retry_backend_pid.append(int(cursor.fetchone()[0]))
+            retry_started.set()
+            return retry_task(
+                task.pk,
+                allowed_states=(TaskState.LOST,),
+                expected_attempt_number=2,
+                expected_execution_generation=7,
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reconciliation_future = executor.submit(reconcile_unknown)
+        assert stop_started.wait(timeout=10)
+        retry_future = executor.submit(retry_lost)
+        assert retry_started.wait(timeout=10)
+
+        try:
+            lock_wait: tuple[str | None, str | None] | None = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT wait_event_type, wait_event
+                        FROM pg_stat_activity
+                        WHERE pid = %s
+                        """,
+                        [retry_backend_pid[0]],
+                    )
+                    lock_wait = cursor.fetchone()
+                if lock_wait is not None and lock_wait[0] == "Lock":
+                    break
+                time.sleep(0.01)
+
+            assert lock_wait is not None
+            assert lock_wait[0] == "Lock"
+            assert retry_future.done() is False
+            visible = RayTaskExecution.objects.get(pk=task.pk)
+            assert visible.state == TaskState.RUNNING
+            assert visible.cancellation_status is None
+        finally:
+            release_stop.set()
+
+        reconciliation_future.result(timeout=20)
+        retried = retry_future.result(timeout=20)
+
+    assert retried is not None
+    assert retry_observed_cancellation_status == ["REQUESTED"]
+    task.refresh_from_db()
+    assert task.state == TaskState.QUEUED
+    assert task.attempt_number == 3
+    assert task.execution_generation == 8
+    assert task.cancellation_status is None
+
+
+def test_automatic_retry_and_stale_cancellation_cannot_control_same_attempt() -> None:
+    task = _execution(
+        "postgres-auto-retry-cancel-race-001",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=7,
+    )
+    retry_execution = RayTaskExecution.objects.get(pk=task.pk)
+
+    results = _run_concurrently(
+        lambda: record_failure(
+            retry_execution,
+            error_message="automatic retry",
+            retry=True,
+            expected_execution_generation=7,
+        ),
+        lambda: request_task_cancellation(
+            task.pk,
+            expected_attempt_number=2,
+            expected_execution_generation=7,
+        ),
+    )
+
+    retry_result = results[0]
+    cancellation_result = results[1]
+    task.refresh_from_db()
+    if retry_result:
+        assert cancellation_result.status is TaskCancellationRequestStatus.STALE_ATTEMPT
+        assert task.state == TaskState.QUEUED
+        assert task.attempt_number == 3
+        assert task.execution_generation == 7
+        assert TaskAttempt.objects.get(execution=task, attempt_number=2).state == TaskState.FAILED
+    else:
+        assert cancellation_result.status is TaskCancellationRequestStatus.ACCEPTED
+        assert task.state == TaskState.CANCELLING
+        assert task.attempt_number == 2
 
 
 def test_stale_generation_cannot_write_over_replacement_execution() -> None:
@@ -574,8 +1109,12 @@ def test_v3_conflicting_terminal_writer_cannot_override_lost_outcome() -> None:
         lambda: persist_workflow_progress_summary(identity, succeeded),
     )
 
-    assert results[0] is True
-    assert results[1] in {True, False}
+    assert results in ([True, False], [False, True])
+    if results[0] is False:
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert mark_task_lost(task) is True
+
     task.refresh_from_db()
     attempt = TaskAttempt.objects.get(execution=task, attempt_number=1)
     archived = deserialize_workflow_progress_summary(attempt.workflow_progress_summary_json)
@@ -639,16 +1178,16 @@ def test_workflow_progress_cancellation_race_disables_late_writer() -> None:
     assert claim_workflow_run(identity) is True
     cancellation = RayTaskExecution.objects.get(pk=task.pk)
 
-    class Runner:
-        def cancel(self, _handle: object) -> bool:
-            return True
-
     results = _run_concurrently(
-        lambda: request_cancellation(cancellation, Runner()),
+        lambda: request_task_cancellation(
+            cancellation.pk,
+            expected_attempt_number=2,
+            expected_execution_generation=4,
+        ),
         lambda: persist_workflow_progress(identity, _workflow_snapshot(identity, 1)),
     )
 
-    assert results[0] is True
+    assert results[0].accepted is True
     task.refresh_from_db()
     assert task.state == TaskState.CANCELLING
     assert persist_workflow_progress(identity, _workflow_snapshot(identity, 2)) is False
@@ -692,14 +1231,39 @@ def test_workflow_progress_lost_recovery_clears_obsolete_run() -> None:
 
     def recover_lost() -> bool:
         mark_task_lost(lost)
-        return retry_task(lost, allowed_states=(TaskState.LOST,)) is not None
+        return (
+            retry_task(
+                lost.pk,
+                allowed_states=(TaskState.LOST,),
+                expected_attempt_number=lost.attempt_number,
+                expected_execution_generation=lost.execution_generation,
+            )
+            is not None
+        )
 
     results = _run_concurrently(
         recover_lost,
         lambda: persist_workflow_progress(identity, _workflow_snapshot(identity, 1)),
     )
 
-    assert results[0] is True
+    # Either exact fence may win: a fresh progress publication invalidates the
+    # stale LOST snapshot, while a committed LOST/retry invalidates the writer.
+    assert results in ([True, False], [False, True])
+    if results[0] is False:
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert json.loads(task.progress_data or "{}") == _workflow_snapshot(identity, 1)
+        assert mark_task_lost(task) is True
+        assert (
+            retry_task(
+                task.pk,
+                allowed_states=(TaskState.LOST,),
+                expected_attempt_number=task.attempt_number,
+                expected_execution_generation=task.execution_generation,
+            )
+            is not None
+        )
+
     task.refresh_from_db()
     assert task.state == TaskState.QUEUED
     assert task.attempt_number == 2

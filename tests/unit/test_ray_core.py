@@ -44,13 +44,16 @@ def _install_fake_ray(monkeypatch, results: dict[object, str | Exception] | None
         exceptions=SimpleNamespace(RayTaskError=RuntimeError),
     )
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.setitem(sys.modules, "ray.exceptions", fake_ray.exceptions)
     return cancelled
 
 
 class TestRayCoreHandleFormats:
     """Tests for legacy and composite Ray Core handle IDs."""
 
-    def test_get_status_accepts_legacy_handle_format(self, monkeypatch) -> None:
+    def test_reconstructed_legacy_handle_fails_closed_while_task_is_pending(
+        self, monkeypatch
+    ) -> None:
         _install_fake_ray(monkeypatch, results={})
         runner = _make_runner(monkeypatch)
 
@@ -60,6 +63,8 @@ class TestRayCoreHandleFormats:
             object_ref=obj_ref,
             submitted_at=datetime.now(UTC),
             task_name="task",
+            attempt_number=1,
+            execution_generation=0,
         )
 
         info = runner.get_status(
@@ -70,8 +75,19 @@ class TestRayCoreHandleFormats:
             )
         )
 
-        assert info.status == JobStatus.RUNNING
+        assert info.status == JobStatus.UNKNOWN
         assert info.job_id == "ray_core:42"
+        assert (
+            runner.cancel(
+                SubmissionHandle(
+                    ray_job_id="ray_core:42",
+                    ray_address="auto",
+                    submitted_at=datetime.now(UTC),
+                )
+            )
+            is False
+        )
+        assert runner._pending_tasks[42].object_ref is obj_ref
 
     def test_get_status_accepts_composite_handle_format(self, monkeypatch) -> None:
         obj_ref = object()
@@ -83,6 +99,8 @@ class TestRayCoreHandleFormats:
             object_ref=obj_ref,
             submitted_at=datetime.now(UTC),
             task_name="task",
+            attempt_number=1,
+            execution_generation=0,
             ray_job_id="02000000",
             ray_task_id="abcdef123456",
         )
@@ -110,6 +128,8 @@ class TestRayCoreHandleFormats:
             object_ref=obj_ref,
             submitted_at=datetime.now(UTC),
             task_name="task",
+            attempt_number=1,
+            execution_generation=0,
             ray_job_id="02000000",
             ray_task_id="feedbeef1234",
         )

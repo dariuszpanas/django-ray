@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.runner.ray_core import RayCoreCompletion, RayCoreHandle
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
@@ -44,11 +45,21 @@ class TestFailureInjection:
             claimed_by_worker="failure-worker",
         )
 
-        pending = {task.pk: object()}
+        pending = {
+            task.pk: RayCoreHandle(
+                task_pk=task.pk,
+                object_ref=object(),
+                submitted_at=datetime.now(UTC),
+                task_name="test",
+                attempt_number=task.attempt_number,
+                execution_generation=task.execution_generation,
+            )
+        }
         runner = SimpleNamespace(
             _pending_tasks=pending,
             pending_count=len(pending),
             pending_task_ids=tuple(pending),
+            pending_task_handles=tuple(pending.values()),
             clear_pending_tasks=pending.clear,
         )
 
@@ -136,9 +147,29 @@ class TestFailureInjection:
             def pending_task_ids(self):
                 return tuple(self._pending_tasks)
 
+            @property
+            def pending_task_handles(self):
+                return (
+                    RayCoreHandle(
+                        task_pk=task.pk,
+                        object_ref=self._pending_tasks[task.pk],
+                        submitted_at=datetime.now(UTC),
+                        task_name="test",
+                        attempt_number=task.attempt_number,
+                        execution_generation=task.execution_generation,
+                    ),
+                )
+
             def poll_completed(self):
                 self._pending_tasks.clear()
-                return [(task.pk, '{"success": true, "result": 11}')]
+                return [
+                    RayCoreCompletion(
+                        task_pk=task.pk,
+                        attempt_number=task.attempt_number,
+                        execution_generation=task.execution_generation,
+                        result_json='{"success": true, "result": 11}',
+                    )
+                ]
 
         cmd = self._make_command()
         cmd.ray_core_runner = FakeRunner()

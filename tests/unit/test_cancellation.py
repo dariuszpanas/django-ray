@@ -7,12 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.cancellation import (
     CancellationOutcome,
     CancellationOutcomeStatus,
     finalize_cancellation,
+    prepare_remote_cancellation,
     request_cancellation,
     request_remote_cancellation,
 )
@@ -117,6 +118,104 @@ class TestCancellationHelpers:
         assert seen[0].ray_job_id == "raysubmit_cancel_001"
         assert seen[0].ray_address == "ray://cluster:10001"
 
+    def test_request_cancellation_uses_exact_pending_ray_core_handle(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-ray-core-exact-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            attempt_number=3,
+            execution_generation=7,
+            ray_job_id="ray_core:123",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        exact_handle = object()
+        lookups: list[tuple[int, int, int]] = []
+        cancelled: list[object] = []
+
+        class Runner:
+            def get_pending_handle(
+                self,
+                task_pk: int,
+                *,
+                attempt_number: int,
+                execution_generation: int,
+            ) -> object:
+                lookups.append((task_pk, attempt_number, execution_generation))
+                return exact_handle
+
+            def cancel_pending(self, handle: object) -> bool:
+                cancelled.append(handle)
+                return True
+
+            def cancel(self, _handle: object) -> bool:
+                pytest.fail("legacy Ray Core cancellation must use the exact capability")
+
+        assert request_cancellation(task, runner=Runner()) is True
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLING
+        assert lookups == [(task.pk, 3, 7)]
+        assert cancelled == [exact_handle]
+
+    def test_request_cancellation_fails_closed_without_exact_ray_core_handle(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-ray-core-missing-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            attempt_number=2,
+            execution_generation=5,
+            ray_job_id="ray_core:456",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        lookups: list[tuple[int, int, int]] = []
+
+        class Runner:
+            def get_pending_handle(
+                self,
+                task_pk: int,
+                *,
+                attempt_number: int,
+                execution_generation: int,
+            ) -> None:
+                lookups.append((task_pk, attempt_number, execution_generation))
+                return None
+
+            def cancel_pending(self, _handle: object) -> bool:
+                pytest.fail("no replacement handle may be cancelled")
+
+            def cancel(self, _handle: object) -> bool:
+                pytest.fail("PK-only fallback cancellation is ambiguous")
+
+        assert request_cancellation(task, runner=Runner()) is True
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLING
+        assert lookups == [(task.pk, 2, 5)]
+
+    def test_request_cancellation_finalizes_queued_without_runner(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-queued-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.QUEUED,
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        seen: list[object] = []
+
+        ok = request_cancellation(
+            task,
+            runner=SimpleNamespace(cancel=lambda handle: seen.append(handle) or True),
+        )
+
+        assert ok is True
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLED
+        assert task.finished_at is not None
+        assert TaskAttempt.objects.get(execution=task).state == TaskState.CANCELLED
+        assert seen == []
+
     def test_request_cancellation_ignores_runner_errors(self) -> None:
         task = RayTaskExecution.objects.create(
             task_id="cancel-003",
@@ -191,3 +290,59 @@ class TestCancellationHelpers:
 
         assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
         assert "ray unavailable" in (outcome.message or "")
+
+    def test_request_remote_cancellation_records_status_aware_exception(self) -> None:
+        class Runner:
+            def cancel_with_status(self, _handle):
+                raise RuntimeError("status-aware client unavailable")
+
+        outcome = request_remote_cancellation(
+            Runner(), SubmissionHandle("job", "", datetime.now(UTC))
+        )
+
+        assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+        assert "status-aware client unavailable" in (outcome.message or "")
+
+    def test_request_remote_cancellation_uses_prepared_capability(self) -> None:
+        expected = CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+        capability = object()
+        handle = SubmissionHandle("job", "ray://cluster:10001", datetime.now(UTC))
+
+        class Runner:
+            def prepare_cancellation(self, prepared_handle):
+                assert prepared_handle is handle
+                return capability
+
+            def cancel_prepared_with_status(self, prepared_handle, prepared_capability):
+                assert prepared_handle is handle
+                assert prepared_capability is capability
+                return expected
+
+            def cancel_with_status(self, _handle):
+                pytest.fail("prepared cancellation must not resolve the client again")
+
+        runner = Runner()
+        prepared = prepare_remote_cancellation(runner, handle)
+        outcome = request_remote_cancellation(runner, handle, prepared=prepared)
+
+        assert prepared.supported is True
+        assert prepared.error is None
+        assert outcome == expected
+
+    def test_prepared_cancellation_records_resolution_timeout(self) -> None:
+        handle = SubmissionHandle("job", "ray://cluster:10001", datetime.now(UTC))
+
+        class Runner:
+            def prepare_cancellation(self, _handle):
+                raise TimeoutError("Ray address resolution timed out")
+
+            def cancel_prepared_with_status(self, _handle, _capability):
+                pytest.fail("failed preparation must not execute a stop")
+
+        runner = Runner()
+        prepared = prepare_remote_cancellation(runner, handle)
+        outcome = request_remote_cancellation(runner, handle, prepared=prepared)
+
+        assert prepared.supported is True
+        assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+        assert "Ray address resolution timed out" in (outcome.message or "")

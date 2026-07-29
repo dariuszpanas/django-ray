@@ -7,12 +7,14 @@ import pickle
 import sys
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from django_ray.lifecycle import record_failure
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.observability import get_task_summary, get_workflow_plan
+from django_ray.runner.reconciliation import mark_task_lost
 from django_ray.runtime.compiled_graph import (
     CompiledGraphRuntimeIdentity,
     CompiledGraphSubmissionTransport,
@@ -46,7 +48,7 @@ from django_ray.workflow_plans import (
     runtime_env_plan_identity_from_transport,
     validate_plan_selection_manifest,
 )
-from django_ray.workflow_progress import claim_workflow_run
+from django_ray.workflow_progress import claim_workflow_run, pin_workflow_plan
 from django_ray.workflows import chain, group, map_step, step
 
 
@@ -198,6 +200,37 @@ def _materialize(signature, *args, context=BASE_CONTEXT, **kwargs):
         invocation_kwargs=kwargs,
         build_context=context,
     )
+
+
+@pytest.mark.django_db
+def test_idempotent_plan_pin_refreshes_activity_and_fences_stale_lost() -> None:
+    observed_heartbeat = datetime.now(UTC) - timedelta(minutes=10)
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-plan-pin-activity",
+        callable_path=f"{__name__}.increment",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=5,
+        last_heartbeat_at=observed_heartbeat,
+    )
+    plan = _materialize(step(increment), 1).plan
+    selection = plan.eligibility.select("dynamic_tasks", requested_policy="auto")
+    context = DurableTaskContext(
+        task_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+    assert pin_workflow_plan(context, plan, selection) is True
+    RayTaskExecution.objects.filter(pk=execution.pk).update(last_heartbeat_at=observed_heartbeat)
+    stale_lost_snapshot = RayTaskExecution.objects.get(pk=execution.pk)
+
+    assert pin_workflow_plan(context, plan, selection) is True
+    assert mark_task_lost(stale_lost_snapshot) is False
+
+    execution.refresh_from_db()
+    assert execution.state == TaskState.RUNNING
+    assert execution.last_heartbeat_at is not None
+    assert execution.last_heartbeat_at > observed_heartbeat
 
 
 def test_semantically_equal_plans_have_byte_equal_canonical_identity() -> None:

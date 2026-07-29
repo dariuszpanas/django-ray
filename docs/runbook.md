@@ -148,8 +148,26 @@ Notes:
 
 - A fresh `last_heartbeat_at` can mean either the owning worker is healthy or another
   worker is still actively monitoring/reconciling the task.
-- `UNKNOWN` Ray Job states are intentionally allowed to age into stuck-task recovery
-  once monitor heartbeats stop advancing.
+- An exact active Ray Job with `UNKNOWN` status is not generically requeued. Once its
+  monitor heartbeat exceeds the stuck-task timeout, reconciliation marks it `LOST`,
+  requests a stop for the exact persisted job ID, and suppresses automatic retry
+  because the remote execution is not proven quiescent. Inspect
+  `cancellation_status`/`cancellation_error` and Ray before retrying it manually.
+- An expired malformed or invalid completion envelope follows that same exact-stop,
+  `LOST`, no-auto-retry path while Ray still reports `PENDING` or `RUNNING`. A terminal
+  Ray status may instead use the configured failure/retry policy.
+- Ray Job version, status, stop, and log HTTP requests used by lifecycle control are
+  bounded to five seconds. A timeout can therefore leave `cancellation_status` as
+  `INDETERMINATE`; verify the exact persisted Ray Job before manually retrying. Ray
+  Client, `auto`, and GCS address discovery happens before the execution row lock, so
+  slow discovery cannot block completion, adoption, or retry coordination.
+- A worker warning that submission acceptance is uncertain refers to a deterministic
+  job ID that was persisted before the request. Let reconciliation resolve that exact
+  ID; do not manually start another attempt while its Ray state is unknown.
+- A `RUNNING` row with non-null `completion_data` is between entrypoint publication
+  and worker reconciliation. Cancellation reports `COMPLETION_PENDING`, and timeout
+  recovery leaves it alone; let reconciliation consume the envelope even if Ray still
+  reports the wrapper process as running.
 
 Optional targeted SQL (use carefully):
 
@@ -330,24 +348,49 @@ Recovery:
 
 ## Safe Manual Actions
 
-Prefer Django admin actions for retries/cancellations before direct SQL updates.
+Prefer Django admin actions for retries and cancellations. Both actions use package-owned,
+row-locked lifecycle services; do not reproduce them with direct model or SQL updates.
 
-If scripting is necessary, use Django shell and narrow filters:
+If scripting is necessary, use Django shell, narrow authorized filters, and retain the
+attempt number and execution generation observed during authorization:
 
 ```python
+from django_ray.lifecycle import request_task_cancellation, retry_task
 from django_ray.models import RayTaskExecution, TaskState
 
-qs = RayTaskExecution.objects.filter(state=TaskState.FAILED, queue_name="default")[:100]
-for task in qs:
-    task.state = TaskState.QUEUED
-    task.started_at = None
-    task.finished_at = None
-    task.error_message = None
-    task.error_traceback = None
-    task.claimed_by_worker = None
-    task.ray_job_id = None
-    task.save()
+failed = RayTaskExecution.objects.filter(
+    state=TaskState.FAILED,
+    queue_name="default",
+).only("pk", "attempt_number", "execution_generation")[:100]
+for execution in failed:
+    retry_task(
+        execution.pk,
+        expected_attempt_number=execution.attempt_number,
+        expected_execution_generation=execution.execution_generation,
+    )
+
+# Apply the application's object/tenant authorization before selecting this row.
+running = RayTaskExecution.objects.only(
+    "pk",
+    "attempt_number",
+    "execution_generation",
+).get(
+    task_id="authorized-task-id",
+)
+outcome = request_task_cancellation(
+    running.pk,
+    expected_attempt_number=running.attempt_number,
+    expected_execution_generation=running.execution_generation,
+)
+print(outcome.status, outcome.state)
 ```
+
+Cancellation is a durable request, not a guarantee that already-running synchronous
+Python code was interrupted. A queued task becomes `CANCELLED` immediately; running
+work becomes `CANCELLING` until a worker makes its best-effort backend request and
+finalizes the row. A stale attempt or generation, terminal task, duplicate request,
+invalid state, or missing row returns a bounded no-op result rather than overwriting
+newer work.
 
 ## Escalation Guidance
 

@@ -7,6 +7,9 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from django_ray.lifecycle import request_task_cancellation
+from django_ray.models import TaskState
+
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
     from django_ray.runner.base import BaseRunner
@@ -29,13 +32,63 @@ class CancellationOutcome:
     message: str | None = None
 
 
-def request_remote_cancellation(runner: BaseRunner, handle: object) -> CancellationOutcome:
-    """Request a remote stop and preserve whether the result is known."""
-    cancel_with_status = getattr(runner, "cancel_with_status", None)
-    if callable(cancel_with_status):
-        return cancel_with_status(handle)
+@dataclass(frozen=True)
+class PreparedRemoteCancellation:
+    """A backend-specific cancellation capability resolved before a row lock."""
 
+    supported: bool
+    capability: object | None = None
+    error: CancellationOutcome | None = None
+
+
+def prepare_remote_cancellation(
+    runner: BaseRunner,
+    handle: object,
+) -> PreparedRemoteCancellation:
+    """Resolve a backend control client before entering a database row lock."""
+    prepare = getattr(runner, "prepare_cancellation", None)
+    if not callable(prepare):
+        return PreparedRemoteCancellation(supported=False)
     try:
+        return PreparedRemoteCancellation(supported=True, capability=prepare(handle))
+    except Exception as exc:
+        return PreparedRemoteCancellation(
+            supported=True,
+            error=CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                f"Cancellation preparation raised {type(exc).__name__}: {exc}",
+            ),
+        )
+
+
+def request_remote_cancellation(
+    runner: BaseRunner,
+    handle: object,
+    *,
+    prepared: PreparedRemoteCancellation | None = None,
+) -> CancellationOutcome:
+    """Request a remote stop and preserve whether the result is known."""
+    if prepared is not None and prepared.supported:
+        if prepared.error is not None:
+            return prepared.error
+        cancel_prepared = getattr(runner, "cancel_prepared_with_status", None)
+        if not callable(cancel_prepared):
+            return CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                "Backend prepared cancellation but cannot execute the prepared capability",
+            )
+        try:
+            return cancel_prepared(handle, prepared.capability)
+        except Exception as exc:
+            return CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                f"Prepared cancellation request raised {type(exc).__name__}: {exc}",
+            )
+
+    cancel_with_status = getattr(runner, "cancel_with_status", None)
+    try:
+        if callable(cancel_with_status):
+            return cancel_with_status(handle)
         accepted = runner.cancel(handle)  # type: ignore[arg-type]
     except Exception as exc:  # pragma: no cover - exercised by backend implementations
         return CancellationOutcome(
@@ -67,24 +120,21 @@ def request_cancellation(
     Returns:
         True if cancellation was initiated.
     """
-    if task_execution.state not in ("QUEUED", "RUNNING"):
+    execution_id = task_execution.pk
+    if execution_id is None:
+        return False
+    result = request_task_cancellation(
+        execution_id,
+        expected_attempt_number=task_execution.attempt_number,
+        expected_execution_generation=task_execution.execution_generation,
+    )
+    if not result.accepted:
         return False
 
-    # Make the state transition conditional in the database. The caller's model
-    # instance may be stale while a completion or timeout is committing in another
-    # worker, and an unconditional save would overwrite that newer terminal state.
-    updated = (
-        type(task_execution)
-        .objects.filter(
-            pk=task_execution.pk,
-            state__in=("QUEUED", "RUNNING"),
-            execution_generation=task_execution.execution_generation,
-        )
-        .update(state="CANCELLING")
-    )
-    if not updated:
-        return False
-    task_execution.state = "CANCELLING"
+    assert result.state is not None
+    task_execution.state = result.state
+    if result.state != TaskState.CANCELLING:
+        return True
 
     # If we have a Ray job ID, try to stop it
     if task_execution.ray_job_id:
@@ -98,7 +148,19 @@ def request_cancellation(
         )
 
         try:
-            runner.cancel(handle)
+            if str(task_execution.ray_job_id).startswith("ray_core:"):
+                get_pending_handle = getattr(runner, "get_pending_handle", None)
+                cancel_pending = getattr(runner, "cancel_pending", None)
+                if callable(get_pending_handle) and callable(cancel_pending):
+                    pending_handle = get_pending_handle(
+                        execution_id,
+                        attempt_number=task_execution.attempt_number,
+                        execution_generation=task_execution.execution_generation,
+                    )
+                    if pending_handle is not None:
+                        cancel_pending(pending_handle)
+            else:
+                runner.cancel(handle)
         except (RuntimeError, ConnectionError, TimeoutError):
             # Best effort - cancellation may fail due to Ray connection issues
             pass
@@ -110,6 +172,8 @@ def finalize_cancellation(
     task_execution: RayTaskExecution,
     *,
     expected_worker_id: str | None = None,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
 ) -> bool:
@@ -127,6 +191,8 @@ def finalize_cancellation(
     return cancel_task(
         task_execution,
         expected_worker_id=expected_worker_id,
+        expected_attempt_number=expected_attempt_number,
+        expected_execution_generation=expected_execution_generation,
         cancellation_status=cancellation_status,
         cancellation_error=cancellation_error,
     )

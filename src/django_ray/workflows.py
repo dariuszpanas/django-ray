@@ -583,9 +583,9 @@ class _RayExecutor(_Executor):
                 "The durable task attempt is stale; workflow plan claim was rejected"
             )
         prepared_plan = prepare_materialized_plan_for_ray(materialized_plan)
-        from django_ray.workflow_progress import workflow_run_is_current
+        from django_ray.workflow_progress import refresh_workflow_run_activity
 
-        if not workflow_run_is_current(identity):
+        if not refresh_workflow_run_activity(identity):
             from django_ray.workflow_plans import WorkflowPlanMismatchError
 
             raise WorkflowPlanMismatchError(

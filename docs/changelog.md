@@ -213,9 +213,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanup schedules now remain independent from idle claim polling.
 - Workflow metadata inspection no longer imports or initializes Ray before execution
   actually needs it.
-- Legacy `ray_core:<pk>` task handles remain readable in 0.4.0. This release is only
-  the earliest review point for a future removal; it does not remove or deprecate that
-  compatibility path.
+- Legacy `ray_core:<pk>` task handles remain readable in 0.4.0. Reconstructed PK-only
+  handles now fail closed for low-level polling and cancellation when a pending
+  submission occupies that row; identity-aware task controls remain supported. This
+  release is only the earliest review point for a future removal.
 
 ### Fixed
 
@@ -224,6 +225,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata. New tasks snapshot the global django-ray address when an alias does not
   override it. The selected target also takes precedence over Ray's ambient address
   variables when clients are constructed.
+- Public cancellation and retry examples now use package-owned, attempt-and-generation
+  fenced, row-locked control services. Queued cancellation archives the attempt
+  immediately; running cancellation remains a best-effort worker request, and terminal
+  or racing completion cannot be overwritten by a stale API or admin save. A Ray Job
+  stop response of `false` is recorded as `NOT_APPLICABLE` instead of incorrectly
+  claiming that interruption was requested.
+- Ray Job submission now reserves a deterministic per-execution job ID and selected
+  cluster address before making the remote request. Accepted requests whose responses
+  are lost retain that exact identity for reconciliation instead of starting a duplicate;
+  definite pre-request failures release the reservation, and post-request tracking
+  failures retain the durable capability without automatic retry. Ownership-only
+  handoff drops the expired submitter's local tracker without stopping the adopted job,
+  while genuine identity replacement receives an exact stop.
+- A stale Ray Job whose status remains `UNKNOWN` now consumes a valid durable
+  completion first. Otherwise it becomes `LOST` only after the stuck-task timeout,
+  receives an exact best-effort stop, persists that outcome before manual retry can
+  proceed, and is never retried automatically. Expired malformed or invalid envelopes
+  receive the same treatment while Ray still reports `PENDING` or `RUNNING`; normal
+  failure/retry handling is reserved for terminal Ray states. Failure, success, stop,
+  grace-expiry, and timeout decisions now revalidate the observed completion envelope
+  so publication during status, log, or cancellation work wins the next reconciliation
+  pass. Reconciliation consumes that envelope even while Ray still reports the wrapper
+  as running; cancellation returns `COMPLETION_PENDING` and timeout recovery leaves the
+  row untouched when publication already won.
+- Address-pinned Ray Job version checks and lifecycle status, stop, and log requests
+  now have a five-second HTTP timeout. Status timeouts reconcile as `UNKNOWN`; stop
+  timeouts persist as `INDETERMINATE` instead of holding an execution row lock
+  indefinitely. Ray Client, `auto`, and GCS address discovery now occurs before the
+  row lock; the prepared exact-stop capability executes only after ownership and
+  identity are revalidated.
 - Minimum-supported `django-ninja` versions now render the bundled testproject
   responses correctly.
 - PostgreSQL cancellation and terminal coordination now fence updates by execution
@@ -245,6 +276,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Apply migrations `0007` through `0014` before starting upgraded workers:
   `python manage.py migrate django_ray`.
+- Drain and stop every pre-0.4.0 Ray Job task manager before starting upgraded
+  task managers. Let in-flight jobs finish and reconcile, or explicitly verify
+  remote quiescence before retrying them; do not run a mixed old/new worker fleet.
+  The deterministic pre-reserved submission ID, `UNKNOWN` no-auto-retry policy,
+  and completion-envelope fences form one lifecycle recovery protocol.
 - `0007_raytaskexecution_priority` adds task priority and gives existing rows the
   neutral default `0`.
 - `0008_raytaskexecution_priority_constraint` enforces the `-100` through `100`

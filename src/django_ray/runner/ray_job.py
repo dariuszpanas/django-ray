@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from django_ray.conf.settings import get_settings
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
+from django_ray.runner.errors import RayJobSubmissionUncertainError
 from django_ray.runtime.runtime_env import (
     normalize_runtime_env,
     runtime_env_for_execution,
@@ -19,6 +23,11 @@ from django_ray.runtime.serialization import serialize_args
 
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
+
+
+_SUBMISSION_ID_PREFIX = "raysubmit_django_ray_v1_"
+_CONTROL_REQUEST_TIMEOUT_SECONDS = 5.0
+_REQUEST_TIMEOUT_ATTRIBUTE = "_django_ray_request_timeout_seconds"
 
 
 def _find_auto_ray_address() -> str:
@@ -72,19 +81,55 @@ def _address_pinned_job_client(ray_address: str) -> Any:
     from ray.dashboard.modules.dashboard_sdk import SubmissionClient
     from ray.job_submission import JobSubmissionClient
 
+    class _BoundedJobSubmissionClient(JobSubmissionClient):
+        def _do_request(
+            self,
+            method: str,
+            endpoint: str,
+            *,
+            data: bytes | None = None,
+            json_data: dict[str, Any] | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            timeout = getattr(self, _REQUEST_TIMEOUT_ATTRIBUTE, None)
+            if timeout is not None:
+                kwargs.setdefault("timeout", timeout)
+            return super()._do_request(
+                method,
+                endpoint,
+                data=data,
+                json_data=json_data,
+                **kwargs,
+            )
+
     api_server_url = _resolve_submission_address(ray_address)
-    client = JobSubmissionClient.__new__(JobSubmissionClient)
+    client = _BoundedJobSubmissionClient.__new__(_BoundedJobSubmissionClient)
     client._client_ray_version = ray.__version__
     SubmissionClient.__init__(client, address=api_server_url)
-    client._check_connection_and_version(
-        min_version="2.0",
-        version_error_message=(
-            f"Client Ray version {client._client_ray_version} is not compatible "
-            "with the Ray cluster. Please ensure the cluster is running Ray 2.0 "
-            "or higher or downgrade the client Ray version."
-        ),
-    )
+    setattr(client, _REQUEST_TIMEOUT_ATTRIBUTE, _CONTROL_REQUEST_TIMEOUT_SECONDS)
+    try:
+        client._check_connection_and_version(
+            min_version="2.0",
+            version_error_message=(
+                f"Client Ray version {client._client_ray_version} is not compatible "
+                "with the Ray cluster. Please ensure the cluster is running Ray 2.0 "
+                "or higher or downgrade the client Ray version."
+            ),
+        )
+    finally:
+        setattr(client, _REQUEST_TIMEOUT_ATTRIBUTE, None)
     return client
+
+
+@contextmanager
+def _bounded_control_requests(client: Any) -> Iterator[None]:
+    """Bound Ray dashboard control calls that may run under a database row lock."""
+    previous_timeout = getattr(client, _REQUEST_TIMEOUT_ATTRIBUTE, None)
+    setattr(client, _REQUEST_TIMEOUT_ATTRIBUTE, _CONTROL_REQUEST_TIMEOUT_SECONDS)
+    try:
+        yield
+    finally:
+        setattr(client, _REQUEST_TIMEOUT_ATTRIBUTE, previous_timeout)
 
 
 class RayJobRunner(BaseRunner):
@@ -105,6 +150,39 @@ class RayJobRunner(BaseRunner):
         """
         return _address_pinned_job_client(ray_address or self.ray_address)
 
+    @staticmethod
+    def submission_id(task_execution: RayTaskExecution) -> str:
+        """Return the stable Ray submission ID for one execution generation."""
+        if task_execution.pk is None:
+            raise ValueError("Ray Job submission requires a persisted task execution")
+
+        identity = json.dumps(
+            {
+                "attempt_number": int(task_execution.attempt_number),
+                "execution_generation": int(task_execution.execution_generation),
+                "task_execution_pk": int(task_execution.pk),
+                "task_id": str(task_execution.task_id),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return f"{_SUBMISSION_ID_PREFIX}{digest}"
+
+    def submission_handle(self, task_execution: RayTaskExecution) -> SubmissionHandle:
+        """Build the exact handle that :meth:`submit` will give to Ray."""
+        ray_address = (
+            getattr(task_execution, "ray_target_address", None)
+            or getattr(task_execution, "ray_address", None)
+            or self.ray_address
+        )
+        return SubmissionHandle(
+            ray_job_id=self.submission_id(task_execution),
+            ray_address=ray_address,
+            submitted_at=datetime.now(UTC),
+        )
+
     def submit(
         self,
         task_execution: RayTaskExecution,
@@ -113,12 +191,8 @@ class RayJobRunner(BaseRunner):
         kwargs: dict[str, Any],
     ) -> SubmissionHandle:
         """Submit a task via Ray Job Submission API."""
-        ray_address = (
-            getattr(task_execution, "ray_target_address", None)
-            or getattr(task_execution, "ray_address", None)
-            or self.ray_address
-        )
-        client = self._get_client(ray_address)
+        handle = self.submission_handle(task_execution)
+        client = self._get_client(handle.ray_address)
 
         runtime_env = runtime_env_for_execution(task_execution)
         from django_ray.conf.settings import get_settings
@@ -129,101 +203,115 @@ class RayJobRunner(BaseRunner):
             runtime_env,
             trust_identity=trust_identity,
         )
-        with snapshot_local_runtime_env(runtime_env) as immutable_snapshot:
-            snapshot_runtime_env_identity = runtime_env_plan_identity(
-                immutable_snapshot,
-                trust_identity=trust_identity,
-            )
-            if (
-                snapshot_runtime_env_identity.manifest["digest"]
-                != source_runtime_env_identity.manifest["digest"]
-            ):
-                from django_ray.workflow_plans import WorkflowPlanMismatchError
-
-                raise WorkflowPlanMismatchError(
-                    "Outer RuntimeEnv immutable snapshot differs from its effective plan"
+        request_started = False
+        try:
+            with snapshot_local_runtime_env(runtime_env) as immutable_snapshot:
+                snapshot_runtime_env_identity = runtime_env_plan_identity(
+                    immutable_snapshot,
+                    trust_identity=trust_identity,
                 )
-            submitted_spec = json.loads(immutable_snapshot.serialized)
-            client._upload_working_dir_if_needed(submitted_spec)
-            client._upload_py_modules_if_needed(submitted_spec)
-            from ray.runtime_env import RuntimeEnv
+                if (
+                    snapshot_runtime_env_identity.manifest["digest"]
+                    != source_runtime_env_identity.manifest["digest"]
+                ):
+                    from django_ray.workflow_plans import WorkflowPlanMismatchError
 
-            submitted_runtime_env = normalize_runtime_env(
-                RuntimeEnv(**submitted_spec).to_dict(),
-                profile=runtime_env.profile,
-                source=f"prepared Ray Job RuntimeEnv for task {task_execution.pk}",
-            )
-            verified_source_identity = runtime_env_plan_identity(
-                runtime_env,
-                trust_identity=trust_identity,
-            )
-            if (
-                verified_source_identity.manifest["digest"]
-                != source_runtime_env_identity.manifest["digest"]
-            ):
-                from django_ray.workflow_plans import WorkflowPlanMismatchError
+                    raise WorkflowPlanMismatchError(
+                        "Outer RuntimeEnv immutable snapshot differs from its effective plan"
+                    )
+                submitted_spec = json.loads(immutable_snapshot.serialized)
+                client._upload_working_dir_if_needed(submitted_spec)
+                client._upload_py_modules_if_needed(submitted_spec)
+                from ray.runtime_env import RuntimeEnv
 
-                raise WorkflowPlanMismatchError(
-                    "Outer RuntimeEnv local content changed while it was being snapshotted"
+                submitted_runtime_env = normalize_runtime_env(
+                    RuntimeEnv(**submitted_spec).to_dict(),
+                    profile=runtime_env.profile,
+                    source=f"prepared Ray Job RuntimeEnv for task {task_execution.pk}",
                 )
-
-            # Inline tasks retain the unversioned v1 transport during rolling
-            # upgrades. Referenced tasks use v2 so the command line remains small.
-            payload: dict[str, Any] = {
-                "callable_path": callable_path,
-                "task_execution_pk": task_execution.pk,
-                "attempt_number": task_execution.attempt_number,
-                "execution_generation": task_execution.execution_generation,
-                "runtime_env_profile": runtime_env.profile,
-                "runtime_env_hash": runtime_env.digest,
-                "runtime_env_plan_identity": snapshot_runtime_env_identity.as_transport_dict(),
-            }
-            input_reference = getattr(task_execution, "input_reference", None)
-            if input_reference:
-                payload.update(
-                    {
-                        "transport_version": 2,
-                        "input_reference": input_reference,
-                    }
+                verified_source_identity = runtime_env_plan_identity(
+                    runtime_env,
+                    trust_identity=trust_identity,
                 )
-            else:
-                payload.update(
-                    {
-                        "serialized_args": serialize_args(list(args)),
-                        "serialized_kwargs": serialize_args(kwargs),
-                    }
-                )
-            payload_json = json.dumps(payload, separators=(",", ":"))
-            payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
+                if (
+                    verified_source_identity.manifest["digest"]
+                    != source_runtime_env_identity.manifest["digest"]
+                ):
+                    from django_ray.workflow_plans import WorkflowPlanMismatchError
 
-            entrypoint = f"python -m django_ray.runtime.entrypoint --payload-b64 {payload_b64}"
+                    raise WorkflowPlanMismatchError(
+                        "Outer RuntimeEnv local content changed while it was being snapshotted"
+                    )
 
-            job_id = client.submit_job(
-                entrypoint=entrypoint,
-                runtime_env=submitted_runtime_env.spec,
-                metadata={
-                    "django_ray_task_id": str(task_execution.pk),
-                    "django_ray_attempt_number": str(task_execution.attempt_number),
-                    "django_ray_execution_generation": str(task_execution.execution_generation),
+                # Inline tasks retain the unversioned v1 transport during rolling
+                # upgrades. Referenced tasks use v2 so the command line remains small.
+                payload: dict[str, Any] = {
                     "callable_path": callable_path,
-                    "runtime_env_profile": runtime_env.profile or "",
+                    "task_execution_pk": task_execution.pk,
+                    "attempt_number": task_execution.attempt_number,
+                    "execution_generation": task_execution.execution_generation,
+                    "runtime_env_profile": runtime_env.profile,
                     "runtime_env_hash": runtime_env.digest,
-                },
-            )
+                    "runtime_env_plan_identity": snapshot_runtime_env_identity.as_transport_dict(),
+                }
+                input_reference = getattr(task_execution, "input_reference", None)
+                if input_reference:
+                    payload.update(
+                        {
+                            "transport_version": 2,
+                            "input_reference": input_reference,
+                        }
+                    )
+                else:
+                    payload.update(
+                        {
+                            "serialized_args": serialize_args(list(args)),
+                            "serialized_kwargs": serialize_args(kwargs),
+                        }
+                    )
+                payload_json = json.dumps(payload, separators=(",", ":"))
+                payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
 
-        return SubmissionHandle(
-            ray_job_id=job_id,
-            ray_address=ray_address,
-            submitted_at=datetime.now(UTC),
-        )
+                entrypoint = f"python -m django_ray.runtime.entrypoint --payload-b64 {payload_b64}"
+
+                request_started = True
+                returned_submission_id = client.submit_job(
+                    entrypoint=entrypoint,
+                    runtime_env=submitted_runtime_env.spec,
+                    submission_id=handle.ray_job_id,
+                    metadata={
+                        "django_ray_task_id": str(task_execution.pk),
+                        "django_ray_attempt_number": str(task_execution.attempt_number),
+                        "django_ray_execution_generation": str(task_execution.execution_generation),
+                        "callable_path": callable_path,
+                        "runtime_env_profile": runtime_env.profile or "",
+                        "runtime_env_hash": runtime_env.digest,
+                    },
+                )
+        except Exception as exc:
+            if request_started:
+                raise RayJobSubmissionUncertainError(
+                    handle.ray_job_id,
+                    f"submission request or post-request cleanup raised "
+                    f"{type(exc).__name__}: {exc}",
+                ) from exc
+            raise
+
+        if returned_submission_id != handle.ray_job_id:
+            raise RayJobSubmissionUncertainError(
+                handle.ray_job_id,
+                f"submit_job returned the unexpected ID {returned_submission_id!r}",
+                observed_submission_id=returned_submission_id,
+            )
+        return handle
 
     def get_status(self, handle: SubmissionHandle) -> JobInfo:
         """Get status of a Ray job."""
-        client = self._get_client(handle.ray_address)
-
         try:
-            status = client.get_job_status(handle.ray_job_id)
-            info = client.get_job_info(handle.ray_job_id)
+            client = self._get_client(handle.ray_address)
+            with _bounded_control_requests(client):
+                status = client.get_job_status(handle.ray_job_id)
+                info = client.get_job_info(handle.ray_job_id)
 
             status_map = {
                 "PENDING": JobStatus.PENDING,
@@ -251,24 +339,47 @@ class RayJobRunner(BaseRunner):
         """Cancel a Ray job."""
         return self.cancel_with_status(handle).status == CancellationOutcomeStatus.REQUESTED
 
-    def cancel_with_status(self, handle: SubmissionHandle) -> CancellationOutcome:
-        """Request a Ray Job stop while preserving an indeterminate API result."""
-        client = self._get_client(handle.ray_address)
+    def prepare_cancellation(self, handle: SubmissionHandle) -> Any:
+        """Resolve the address-pinned control client before a caller takes a row lock."""
+        return self._get_client(handle.ray_address)
 
+    def cancel_prepared_with_status(
+        self,
+        handle: SubmissionHandle,
+        client: Any,
+    ) -> CancellationOutcome:
+        """Stop a Ray Job through a previously resolved, address-pinned client."""
         try:
-            client.stop_job(handle.ray_job_id)
-            return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+            with _bounded_control_requests(client):
+                stopped = client.stop_job(handle.ray_job_id)
+            if stopped:
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+            return CancellationOutcome(
+                CancellationOutcomeStatus.NOT_APPLICABLE,
+                "Ray Job was not running when the stop request arrived",
+            )
         except Exception as exc:
             return CancellationOutcome(
                 CancellationOutcomeStatus.INDETERMINATE,
                 f"Ray Job stop request raised {type(exc).__name__}: {exc}",
             )
 
+    def cancel_with_status(self, handle: SubmissionHandle) -> CancellationOutcome:
+        """Request a Ray Job stop while preserving an indeterminate API result."""
+        try:
+            client = self.prepare_cancellation(handle)
+        except Exception as exc:
+            return CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                f"Ray Job stop request raised {type(exc).__name__}: {exc}",
+            )
+        return self.cancel_prepared_with_status(handle, client)
+
     def get_logs(self, handle: SubmissionHandle) -> str | None:
         """Get logs from a Ray job."""
-        client = self._get_client(handle.ray_address)
-
         try:
-            return client.get_job_logs(handle.ray_job_id)
+            client = self._get_client(handle.ray_address)
+            with _bounded_control_requests(client):
+                return client.get_job_logs(handle.ray_job_id)
         except Exception:
             return None

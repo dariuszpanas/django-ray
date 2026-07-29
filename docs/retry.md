@@ -88,6 +88,19 @@ row-locked transition service, so a racing retry request is rejected rather than
 applied twice. Success, permanent failure, timeout, LOST recovery, cancellation, and
 Ray Job `STOPPED` reconciliation use that same terminal archival boundary.
 
+Application APIs should call `django_ray.lifecycle.retry_task()` with the attempt number
+and execution generation observed during object authorization. Manual retry archives the
+terminal attempt, increments both values, and clears only attempt-local data.
+`django_ray.lifecycle.request_task_cancellation()` provides the matching
+authorization-neutral cancellation service: it immediately archives queued work as
+`CANCELLED`, or moves running work to `CANCELLING` for worker-owned, best-effort backend
+interruption. Its stable result distinguishes accepted, duplicate, terminal, missing,
+stale-attempt, stale-generation, completion-pending, and invalid-state requests. A
+running row whose Ray Job entrypoint has already published its durable completion
+returns `COMPLETION_PENDING` and remains owned by reconciliation. Cancellation does
+not discard that terminal channel. It does not guarantee immediate interruption of
+already-running synchronous Python code.
+
 Tasks with durable external inputs keep the same immutable `input_reference` across
 automatic and manual retries; a retry does not upload a replacement. Corrupt,
 unauthorized, or unsupported input envelopes fail before user code and are marked
@@ -167,7 +180,12 @@ DJANGO_RAY = {
 Worker leases detect dead task managers. Task-monitor heartbeats show that a live
 manager is still reconciling active work. For persisted Ray Job handles, another
 manager first tries to adopt or reconcile the existing job. Work is marked `LOST` only
-after no live owner or recoverable execution remains past the timeout.
+after no live owner or recoverable execution remains past the timeout. A Ray Job whose
+status remains `UNKNOWN` receives an exact best-effort stop request and is left `LOST`
+without automatic retry; verify the remote job is quiescent before using a manual
+retry. The same rule applies to an expired malformed or invalid completion envelope
+while Ray still reports `PENDING` or `RUNNING`; only terminal Ray states can use the
+normal failure/retry policy.
 
 ## Inspect Failures
 

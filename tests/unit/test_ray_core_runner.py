@@ -130,6 +130,21 @@ def _make_handle(job_id: str) -> SubmissionHandle:
     )
 
 
+def _task_execution(
+    pk: int,
+    *,
+    attempt_number: int = 1,
+    execution_generation: int = 0,
+    **attributes: Any,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        pk=pk,
+        attempt_number=attempt_number,
+        execution_generation=execution_generation,
+        **attributes,
+    )
+
+
 class TestRayCoreRunnerRuntime:
     """Coverage for RayCoreRunner execution branches."""
 
@@ -161,7 +176,7 @@ class TestRayCoreRunnerRuntime:
 
         runner = RayCoreRunner()
         handle = runner.submit(
-            task_execution=SimpleNamespace(pk=11),
+            task_execution=_task_execution(11),
             callable_path="testproject.tasks.add_numbers",
             args=(3, 4),
             kwargs={"x": 1},
@@ -171,8 +186,34 @@ class TestRayCoreRunnerRuntime:
         assert handle.ray_address == "ray://unit-submit:10001"
         assert runner.pending_count == 1
         pending = runner._pending_tasks[11]
+        assert pending.attempt_number == 1
+        assert pending.execution_generation == 0
         assert pending.ray_job_id == "02000000"
         assert pending.ray_task_id == fake.default_hex[:48]
+
+    def test_submit_rejects_duplicate_pk_before_remote_submission(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        execution = _task_execution(11)
+        runner.submit(
+            task_execution=execution,
+            callable_path="testproject.tasks.add_numbers",
+            args=(3, 4),
+            kwargs={},
+        )
+        pending = runner.pending_task_handles
+        remote_call_count = len(fake.remote_calls)
+
+        with pytest.raises(RuntimeError, match="already has a pending Ray Core submission"):
+            runner.submit(
+                task_execution=execution,
+                callable_path="testproject.tasks.add_numbers",
+                args=(5, 6),
+                kwargs={},
+            )
+
+        assert runner.pending_task_handles == pending
+        assert len(fake.remote_calls) == remote_call_count
 
     def test_submit_transports_external_input_by_reference(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
@@ -195,8 +236,8 @@ class TestRayCoreRunnerRuntime:
 
         monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", fake_execute)
         reference = "resultfs://sha256/" + "a" * 64 + "?rel=aa/aa/" + "a" * 64 + ".json&bytes=4"
-        task_execution = SimpleNamespace(
-            pk=14,
+        task_execution = _task_execution(
+            14,
             input_reference=reference,
             args_json="null",
             kwargs_json="null",
@@ -239,8 +280,8 @@ class TestRayCoreRunnerRuntime:
         monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", fake_execute)
 
         RayCoreRunner().submit(
-            task_execution=SimpleNamespace(
-                pk=15,
+            task_execution=_task_execution(
+                15,
                 attempt_number=3,
                 execution_generation=9,
             ),
@@ -299,7 +340,7 @@ class TestRayCoreRunnerRuntime:
 
         runner = RayCoreRunner()
         runner.submit(
-            task_execution=SimpleNamespace(pk=23),
+            task_execution=_task_execution(23),
             callable_path="testproject.tasks.echo_task",
             args=("hello",),
             kwargs={},
@@ -322,7 +363,7 @@ class TestRayCoreRunnerRuntime:
         runner = RayCoreRunner()
         with pytest.raises(ModuleNotFoundError, match="django_ray"):
             runner.submit(
-                task_execution=SimpleNamespace(pk=24),
+                task_execution=_task_execution(24),
                 callable_path="testproject.tasks.echo_task",
                 args=("hello",),
                 kwargs={},
@@ -332,7 +373,7 @@ class TestRayCoreRunnerRuntime:
 
         fake.remote_error = None
         handle = runner.submit(
-            task_execution=SimpleNamespace(pk=24),
+            task_execution=_task_execution(24),
             callable_path="testproject.tasks.echo_task",
             args=("hello",),
             kwargs={},
@@ -353,8 +394,8 @@ class TestRayCoreRunnerRuntime:
 
         runner = RayCoreRunner()
         runner.submit(
-            task_execution=SimpleNamespace(
-                pk=12,
+            task_execution=_task_execution(
+                12,
                 runtime_env_profile="thin",
                 runtime_env_json='{"env_vars":{"MODE":"thin"}}',
                 runtime_env_hash="",
@@ -378,7 +419,7 @@ class TestRayCoreRunnerRuntime:
 
         runner = RayCoreRunner()
         handle = runner.submit(
-            task_execution=SimpleNamespace(pk=13),
+            task_execution=_task_execution(13),
             callable_path="testproject.tasks.echo_task",
             args=("hello",),
             kwargs={},
@@ -399,13 +440,52 @@ class TestRayCoreRunnerRuntime:
 
         runner = RayCoreRunner()
         handle = runner.submit(
-            task_execution=SimpleNamespace(pk=22),
+            task_execution=_task_execution(22),
             callable_path="testproject.tasks.echo_task",
             args=("a",),
             kwargs={},
         )
 
         assert handle.ray_job_id == "ray_core:22"
+        assert runner.get_status(handle).status == JobStatus.RUNNING
+        assert runner.cancel(handle) is True
+        status_after_cancel = runner.get_status(handle)
+        assert status_after_cancel.status == JobStatus.UNKNOWN
+        assert status_after_cancel.message == "Submission handle is no longer tracked"
+
+    def test_returned_legacy_handle_does_not_poll_or_cancel_replacement(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        fake.runtime_context_error = RuntimeError("no runtime context")
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda callable_path, args_json, kwargs_json: json.dumps(
+                {"success": True, "result": callable_path}
+            ),
+        )
+
+        runner = RayCoreRunner()
+        stale_submission = runner.submit(
+            task_execution=_task_execution(23),
+            callable_path="testproject.tasks.echo_task",
+            args=("a",),
+            kwargs={},
+        )
+        replacement = RayCoreHandle(
+            task_pk=23,
+            object_ref=_FakeObjectRef("replacement"),
+            submitted_at=datetime.now(UTC),
+            task_name="replacement",
+            attempt_number=2,
+            execution_generation=1,
+        )
+        runner._pending_tasks[23] = replacement
+
+        info = runner.get_status(stale_submission)
+
+        assert info.status == JobStatus.UNKNOWN
+        assert runner.cancel(stale_submission) is False
+        assert fake.cancelled == []
+        assert runner._pending_tasks[23] is replacement
 
     def test_build_composite_id_returns_none_without_ids(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
@@ -415,21 +495,53 @@ class TestRayCoreRunnerRuntime:
             object_ref=object(),
             submitted_at=datetime.now(UTC),
             task_name="task",
+            attempt_number=1,
+            execution_generation=0,
         )
         assert runner._build_composite_id(core_handle) is None
+
+    def test_ray_core_handle_preserves_legacy_positional_id_slots(self) -> None:
+        submitted_at = datetime.now(UTC)
+        object_ref = object()
+
+        handle = RayCoreHandle(
+            1,
+            object_ref,
+            submitted_at,
+            "task",
+            "02000000",
+            "abcdef",
+            attempt_number=2,
+            execution_generation=3,
+        )
+
+        assert handle.ray_job_id == "02000000"
+        assert handle.ray_task_id == "abcdef"
+        assert handle.attempt_number == 2
+        assert handle.execution_generation == 3
 
     def test_resolve_task_pk_returns_none_for_invalid_legacy_id(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
         runner = RayCoreRunner()
         assert runner._resolve_task_pk("ray_core:not-an-int") is None
 
-    def test_get_status_returns_succeeded_when_pending_missing(self, monkeypatch) -> None:
+    def test_reconstructed_legacy_status_is_unknown_when_pending_missing(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
         runner = RayCoreRunner()
 
         info = runner.get_status(_make_handle("ray_core:999"))
 
-        assert info.status == JobStatus.SUCCEEDED
+        assert info.status == JobStatus.UNKNOWN
+        assert info.message == "Legacy handle lacks exact submission identity"
+
+    def test_canonical_status_is_unknown_when_pending_missing(self, monkeypatch) -> None:
+        _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+
+        info = runner.get_status(_make_handle("02000000:abcdef"))
+
+        assert info.status == JobStatus.UNKNOWN
+        assert info.message == "Submission handle is not tracked by this runner"
 
     def test_get_status_returns_failed_for_unsuccessful_payload(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
@@ -442,9 +554,13 @@ class TestRayCoreRunnerRuntime:
             object_ref=ref,
             submitted_at=datetime.now(UTC),
             task_name="task",
+            attempt_number=1,
+            execution_generation=0,
+            ray_job_id="02000000",
+            ray_task_id="deadbeef",
         )
 
-        info = runner.get_status(_make_handle("ray_core:3"))
+        info = runner.get_status(_make_handle("02000000:deadbeef"))
 
         assert info.status == JobStatus.FAILED
         assert info.message == "boom"
@@ -461,9 +577,13 @@ class TestRayCoreRunnerRuntime:
             object_ref=ref,
             submitted_at=datetime.now(UTC),
             task_name="task",
+            attempt_number=1,
+            execution_generation=0,
+            ray_job_id="02000000",
+            ray_task_id="feedface",
         )
 
-        info = runner.get_status(_make_handle("ray_core:4"))
+        info = runner.get_status(_make_handle("02000000:feedface"))
 
         assert info.status == JobStatus.FAILED
         assert "ray get failed" in (info.message or "")
@@ -485,12 +605,90 @@ class TestRayCoreRunnerRuntime:
             object_ref=ref,
             submitted_at=datetime.now(UTC),
             task_name="task",
+            attempt_number=1,
+            execution_generation=0,
+            ray_job_id="02000000",
+            ray_task_id="cafebabe",
         )
 
-        ok = runner.cancel(_make_handle("ray_core:5"))
+        ok = runner.cancel(_make_handle("02000000:cafebabe"))
 
         assert ok is False
         assert 5 not in runner._pending_tasks
+
+    def test_cancel_pending_rejects_replaced_handle(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        stale = RayCoreHandle(
+            task_pk=5,
+            object_ref=_FakeObjectRef("stale"),
+            submitted_at=datetime.now(UTC),
+            task_name="task",
+            attempt_number=1,
+            execution_generation=7,
+        )
+        replacement = RayCoreHandle(
+            task_pk=5,
+            object_ref=_FakeObjectRef("replacement"),
+            submitted_at=datetime.now(UTC),
+            task_name="task",
+            attempt_number=2,
+            execution_generation=7,
+        )
+        runner._pending_tasks[5] = replacement
+
+        assert runner.cancel_pending(stale) is False
+        assert fake.cancelled == []
+        assert runner._pending_tasks[5] is replacement
+        assert (
+            runner.get_pending_handle(
+                5,
+                attempt_number=1,
+                execution_generation=7,
+            )
+            is None
+        )
+        assert (
+            runner.get_pending_handle(
+                5,
+                attempt_number=2,
+                execution_generation=7,
+            )
+            is replacement
+        )
+
+    def test_cancel_pending_preserves_replacement_installed_during_ray_cancel(
+        self, monkeypatch
+    ) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        stale = RayCoreHandle(
+            task_pk=6,
+            object_ref=_FakeObjectRef("stale-in-flight"),
+            submitted_at=datetime.now(UTC),
+            task_name="stale",
+            attempt_number=1,
+            execution_generation=7,
+        )
+        replacement = RayCoreHandle(
+            task_pk=6,
+            object_ref=_FakeObjectRef("replacement-in-flight"),
+            submitted_at=datetime.now(UTC),
+            task_name="replacement",
+            attempt_number=2,
+            execution_generation=8,
+        )
+        runner._pending_tasks[6] = stale
+
+        def replace_during_cancel(ref: _FakeObjectRef, force: bool = False) -> None:
+            fake.cancelled.append((ref, force))
+            runner._pending_tasks[6] = replacement
+
+        fake.cancel = replace_during_cancel  # type: ignore[method-assign]
+
+        assert runner.cancel_pending(stale) is True
+        assert fake.cancelled == [(stale.object_ref, False)]
+        assert runner._pending_tasks[6] is replacement
 
     def test_get_logs_returns_none(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
@@ -515,21 +713,27 @@ class TestRayCoreRunnerRuntime:
             object_ref=ref_ok,
             submitted_at=datetime.now(UTC),
             task_name="ok",
+            attempt_number=2,
+            execution_generation=3,
         )
         runner._pending_tasks[20] = RayCoreHandle(
             task_pk=20,
             object_ref=ref_err,
             submitted_at=datetime.now(UTC),
             task_name="err",
+            attempt_number=4,
+            execution_generation=5,
         )
 
         completed = runner.poll_completed()
-        completed_map = dict(completed)
+        completed_by_pk = {completion.task_pk: completion for completion in completed}
 
-        assert 10 in completed_map
-        assert completed_map[10] == '{"success": true, "result": 1}'
-        assert 20 in completed_map
-        assert "task crashed" in completed_map[20]
+        assert completed_by_pk[10].attempt_number == 2
+        assert completed_by_pk[10].execution_generation == 3
+        assert completed_by_pk[10].result_json == '{"success": true, "result": 1}'
+        assert completed_by_pk[20].attempt_number == 4
+        assert completed_by_pk[20].execution_generation == 5
+        assert "task crashed" in completed_by_pk[20].result_json
         assert runner.pending_count == 0
 
     def test_pending_tracking_api_returns_snapshot_and_clears(self, monkeypatch) -> None:
@@ -540,11 +744,17 @@ class TestRayCoreRunnerRuntime:
             object_ref=object(),
             submitted_at=datetime.now(UTC),
             task_name="task",
+            attempt_number=2,
+            execution_generation=7,
         )
 
         pending_ids = runner.pending_task_ids
+        pending_handles = runner.pending_task_handles
         runner.clear_pending_tasks()
 
         assert pending_ids == (10,)
+        assert pending_handles[0].attempt_number == 2
+        assert pending_handles[0].execution_generation == 7
         assert runner.pending_task_ids == ()
+        assert runner.pending_task_handles == ()
         assert runner.pending_count == 0

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
 from django.db import transaction
@@ -43,6 +45,35 @@ def promote_legacy_ray_target(execution: RayTaskExecution) -> bool:
         return False
     execution.ray_target_address = address
     return True
+
+
+class TaskCancellationRequestStatus(StrEnum):
+    """Bounded result of requesting cancellation for one durable execution."""
+
+    ACCEPTED = "ACCEPTED"
+    ALREADY_REQUESTED = "ALREADY_REQUESTED"
+    ALREADY_TERMINAL = "ALREADY_TERMINAL"
+    COMPLETION_PENDING = "COMPLETION_PENDING"
+    NOT_FOUND = "NOT_FOUND"
+    STALE_ATTEMPT = "STALE_ATTEMPT"
+    STALE_GENERATION = "STALE_GENERATION"
+    INVALID_STATE = "INVALID_STATE"
+
+
+@dataclass(frozen=True)
+class TaskCancellationRequestResult:
+    """Stable cancellation-request result without authorization policy."""
+
+    status: TaskCancellationRequestStatus
+    execution_id: int
+    state: str | None
+    attempt_number: int | None
+    execution_generation: int | None
+
+    @property
+    def accepted(self) -> bool:
+        """Return whether this call owns the cancellation transition."""
+        return self.status is TaskCancellationRequestStatus.ACCEPTED
 
 
 def _canonical_utc(value: datetime) -> str:
@@ -174,23 +205,138 @@ def _record_attempt(execution: RayTaskExecution) -> None:
     )
 
 
+def request_task_cancellation(
+    execution_id: int,
+    *,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
+) -> TaskCancellationRequestResult:
+    """Request cancellation under the durable execution row lock.
+
+    Authorization belongs to the caller. A queued execution is cancelled and
+    archived immediately. A running execution moves to ``CANCELLING`` so its
+    worker can request best-effort backend interruption and finalize it. The
+    request is rejected as ``COMPLETION_PENDING`` when the Ray Job entrypoint
+    has already published its terminal envelope for worker reconciliation. The
+    optional attempt and generation fences prevent a stale caller from
+    controlling either a replacement attempt or a replacement execution.
+    """
+    with transaction.atomic():
+        current = RayTaskExecution.objects.select_for_update().filter(pk=execution_id).first()
+        if current is None:
+            return TaskCancellationRequestResult(
+                status=TaskCancellationRequestStatus.NOT_FOUND,
+                execution_id=execution_id,
+                state=None,
+                attempt_number=None,
+                execution_generation=None,
+            )
+
+        state = str(current.state)
+        attempt_number = int(current.attempt_number)
+        generation = int(current.execution_generation)
+        if expected_attempt_number is not None and attempt_number != expected_attempt_number:
+            return TaskCancellationRequestResult(
+                status=TaskCancellationRequestStatus.STALE_ATTEMPT,
+                execution_id=execution_id,
+                state=state,
+                attempt_number=attempt_number,
+                execution_generation=generation,
+            )
+        if (
+            expected_execution_generation is not None
+            and generation != expected_execution_generation
+        ):
+            return TaskCancellationRequestResult(
+                status=TaskCancellationRequestStatus.STALE_GENERATION,
+                execution_id=execution_id,
+                state=state,
+                attempt_number=attempt_number,
+                execution_generation=generation,
+            )
+
+        if current.state == TaskState.QUEUED:
+            current.state = TaskState.CANCELLED
+            current.finished_at = datetime.now(UTC)
+            _record_attempt(current)
+            current.save(update_fields=["state", "finished_at"])
+            return TaskCancellationRequestResult(
+                status=TaskCancellationRequestStatus.ACCEPTED,
+                execution_id=execution_id,
+                state=TaskState.CANCELLED,
+                attempt_number=attempt_number,
+                execution_generation=generation,
+            )
+
+        if current.state == TaskState.RUNNING:
+            if current.completion_data is not None:
+                return TaskCancellationRequestResult(
+                    status=TaskCancellationRequestStatus.COMPLETION_PENDING,
+                    execution_id=execution_id,
+                    state=TaskState.RUNNING,
+                    attempt_number=attempt_number,
+                    execution_generation=generation,
+                )
+            current.state = TaskState.CANCELLING
+            current.save(update_fields=["state"])
+            return TaskCancellationRequestResult(
+                status=TaskCancellationRequestStatus.ACCEPTED,
+                execution_id=execution_id,
+                state=TaskState.CANCELLING,
+                attempt_number=attempt_number,
+                execution_generation=generation,
+            )
+
+        if current.state == TaskState.CANCELLING:
+            status = TaskCancellationRequestStatus.ALREADY_REQUESTED
+        elif current.state in {
+            TaskState.SUCCEEDED,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+            TaskState.LOST,
+        }:
+            status = TaskCancellationRequestStatus.ALREADY_TERMINAL
+        else:
+            status = TaskCancellationRequestStatus.INVALID_STATE
+        return TaskCancellationRequestResult(
+            status=status,
+            execution_id=execution_id,
+            state=state,
+            attempt_number=attempt_number,
+            execution_generation=generation,
+        )
+
+
 def retry_task(
     execution: RayTaskExecution | int,
     *,
     allowed_states: Iterable[str] = (TaskState.FAILED, TaskState.CANCELLED, TaskState.LOST),
     next_attempt_at: Any | None = None,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
 ) -> RayTaskExecution | None:
     """Queue a failed execution for its next one-based attempt.
 
     The row lock makes retries from the admin, API, and workers mutually
-    exclusive. ``None`` means another transition won the race or the current
-    state is not retryable.
+    exclusive. ``None`` means another transition won the race, the current
+    state is not retryable, or an optional attempt/generation fence is stale.
     """
     execution_id = execution.pk if isinstance(execution, RayTaskExecution) else execution
     allowed = tuple(allowed_states)
     with transaction.atomic():
         current = RayTaskExecution.objects.select_for_update().filter(pk=execution_id).first()
-        if current is None or current.state not in allowed:
+        if (
+            current is None
+            or current.state not in allowed
+            or (
+                expected_attempt_number is not None
+                and current.attempt_number != expected_attempt_number
+            )
+            or (
+                expected_execution_generation is not None
+                and current.execution_generation != expected_execution_generation
+            )
+        ):
             return None
         _record_attempt(current)
         current.state = TaskState.QUEUED
@@ -252,7 +398,11 @@ def record_failure(
     retry: bool,
     next_attempt_at: Any | None = None,
     expected_ray_job_id: str | None = None,
+    expected_claimed_by_worker: str | None = None,
+    expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
+    expected_completion_data: str | None = None,
+    require_completion_data_match: bool = False,
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
 ) -> bool:
@@ -261,8 +411,14 @@ def record_failure(
         filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
         if expected_ray_job_id is not None:
             filters["ray_job_id"] = expected_ray_job_id
+        if expected_claimed_by_worker is not None:
+            filters["claimed_by_worker"] = expected_claimed_by_worker
+        if expected_attempt_number is not None:
+            filters["attempt_number"] = expected_attempt_number
         if expected_execution_generation is not None:
             filters["execution_generation"] = expected_execution_generation
+        if require_completion_data_match:
+            filters["completion_data"] = expected_completion_data
         current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
         if current is None:
             return False
@@ -315,10 +471,24 @@ def record_lost(
     execution: RayTaskExecution,
     *,
     error_message: str,
+    expected_completion_data: str | None = None,
+    expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
 ) -> bool:
     """Persist a LOST transition and its bounded terminal attempt summary."""
-    filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
+    filters: dict[str, Any] = {
+        "pk": execution.pk,
+        "state": TaskState.RUNNING,
+        # LOST recovery is based on an observed lack of activity. Revalidate
+        # that exact observation after acquiring the row lock so a stale
+        # detector cannot overwrite a concurrent heartbeat or orphan adoption.
+        "claimed_by_worker": execution.claimed_by_worker,
+        "ray_job_id": execution.ray_job_id,
+        "last_heartbeat_at": execution.last_heartbeat_at,
+        "completion_data": expected_completion_data,
+    }
+    if expected_attempt_number is not None:
+        filters["attempt_number"] = expected_attempt_number
     if expected_execution_generation is not None:
         filters["execution_generation"] = expected_execution_generation
     with transaction.atomic():
@@ -340,14 +510,21 @@ def succeed_task(
     result_data: str | None,
     result_reference: str | None,
     expected_ray_job_id: str | None = None,
+    expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
+    expected_completion_data: str | None = None,
+    require_completion_data_match: bool = False,
 ) -> bool:
     """Persist a successful terminal transition with stale-write protection."""
     filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
     if expected_ray_job_id is not None:
         filters["ray_job_id"] = expected_ray_job_id
+    if expected_attempt_number is not None:
+        filters["attempt_number"] = expected_attempt_number
     if expected_execution_generation is not None:
         filters["execution_generation"] = expected_execution_generation
+    if require_completion_data_match:
+        filters["completion_data"] = expected_completion_data
     with transaction.atomic():
         current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
         if current is None:
@@ -378,8 +555,11 @@ def cancel_task(
     *,
     expected_worker_id: str | None = None,
     expected_ray_job_id: str | None = None,
+    expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
     allowed_states: Iterable[str] = (TaskState.CANCELLING,),
+    expected_completion_data: str | None = None,
+    require_completion_data_match: bool = False,
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
 ) -> bool:
@@ -393,8 +573,12 @@ def cancel_task(
             filters["claimed_by_worker"] = expected_worker_id
         if expected_ray_job_id is not None:
             filters["ray_job_id"] = expected_ray_job_id
+        if expected_attempt_number is not None:
+            filters["attempt_number"] = expected_attempt_number
         if expected_execution_generation is not None:
             filters["execution_generation"] = expected_execution_generation
+        if require_completion_data_match:
+            filters["completion_data"] = expected_completion_data
         current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
         if current is None:
             return False

@@ -15,6 +15,8 @@ from django_ray.models import (
     TaskState,
     TaskWorkerLease,
 )
+from django_ray.runner.base import SubmissionHandle
+from django_ray.runner.ray_core import RayCoreHandle
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
@@ -719,7 +721,7 @@ class TestWorkerRayJobRouting:
             def submit_job(self, **kwargs) -> str:
                 task_pk = int(kwargs["metadata"]["django_ray_task_id"])
                 submissions.append((self.address, task_pk))
-                return f"raysubmit_{task_pk}"
+                return str(kwargs["submission_id"])
 
         monkeypatch.setattr(
             RayJobRunner,
@@ -789,7 +791,16 @@ class TestWorkerRayJobFailureHandling:
             ray_target_address="ray://retry-target:10001",
         )
 
+        reserved_handle = SubmissionHandle(
+            ray_job_id="raysubmit_submit_retry_001",
+            ray_address="ray://retry-target:10001",
+            submitted_at=datetime.now(UTC),
+        )
+
         class FailingRunner:
+            def submission_handle(self, _task):
+                return reserved_handle
+
             def submit(self, **kwargs):
                 raise RuntimeError("submission exploded")
 
@@ -822,7 +833,16 @@ class TestWorkerRayJobFailureHandling:
             attempt_number=1,
         )
 
+        reserved_handle = SubmissionHandle(
+            ray_job_id="raysubmit_submit_plan_mismatch_001",
+            ray_address="ray://cluster:10001",
+            submitted_at=datetime.now(UTC),
+        )
+
         class FailingRunner:
+            def submission_handle(self, _task):
+                return reserved_handle
+
             def submit(self, **kwargs):
                 raise WorkflowPlanMismatchError("pinned plan changed")
 
@@ -1069,6 +1089,58 @@ class TestWorkerOrphanRecovery:
         assert task.state == TaskState.RUNNING
         assert task.attempt_number == 1
 
+    def test_stuck_recovery_does_not_retry_a_newer_lost_attempt(self, monkeypatch):
+        """An old retry decision cannot cross an attempt/generation boundary."""
+        from django_ray.lifecycle import retry_task
+        from django_ray.runner.reconciliation import mark_task_lost as real_mark_task_lost
+
+        task = RayTaskExecution.objects.create(
+            task_id="test-orphan-lost-aba-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[10, 20]",
+            kwargs_json="{}",
+            attempt_number=1,
+            execution_generation=0,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+            claimed_by_worker="missing-worker",
+        )
+
+        def replace_lost_attempt(stale: RayTaskExecution) -> bool:
+            assert real_mark_task_lost(stale) is True
+            replacement = RayTaskExecution.objects.get(pk=stale.pk)
+            assert (
+                retry_task(
+                    replacement.pk,
+                    allowed_states=(TaskState.LOST,),
+                    expected_attempt_number=replacement.attempt_number,
+                    expected_execution_generation=replacement.execution_generation,
+                )
+                is not None
+            )
+            RayTaskExecution.objects.filter(pk=stale.pk).update(
+                state=TaskState.RUNNING,
+                started_at=datetime.now(UTC) - timedelta(minutes=10),
+                claimed_by_worker="replacement-worker",
+            )
+            replacement.refresh_from_db()
+            assert real_mark_task_lost(replacement) is True
+            return True
+
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.mark_task_lost",
+            replace_lost_attempt,
+        )
+
+        assert self._make_command().detect_stuck_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 2
+        assert task.execution_generation == 1
+        assert TaskAttempt.objects.filter(execution=task).count() == 2
+
     def test_does_not_recover_task_from_active_other_worker(self):
         """Tasks owned by healthy workers should not be recovered by this worker."""
         from datetime import datetime, timedelta
@@ -1233,6 +1305,68 @@ class TestWorkerOrphanRecovery:
         assert task.state == TaskState.SUCCEEDED
         assert task.cancellation_status is None
 
+    def test_timeout_does_not_overwrite_running_completion_publication(self, monkeypatch):
+        """Entrypoint publication fences timeout even before terminal consumption."""
+        task = RayTaskExecution.objects.create(
+            task_id="test-timeout-ray-job-completion-publication-race-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 60}',
+            timeout_seconds=5,
+            started_at=datetime.now(UTC) - timedelta(seconds=10),
+            claimed_by_worker="recovery-worker",
+            ray_job_id="raysubmit_timeout_completion_publication_race_001",
+        )
+        completion_data = '{"success": true, "result": 42}'
+
+        class FakeRunner:
+            def cancel(self, _handle):
+                RayTaskExecution.objects.filter(pk=task.pk).update(completion_data=completion_data)
+                return True
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        self._make_command().detect_stuck_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.completion_data == completion_data
+        assert task.cancellation_status is None
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    def test_timeout_skips_completion_published_before_detection(self, monkeypatch):
+        """A preexisting terminal envelope belongs to reconciliation, not timeout."""
+        completion_data = '{"success": true, "result": 42}'
+        task = RayTaskExecution.objects.create(
+            task_id="test-timeout-ray-job-preexisting-completion-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 60}',
+            timeout_seconds=5,
+            started_at=datetime.now(UTC) - timedelta(seconds=10),
+            claimed_by_worker="recovery-worker",
+            ray_job_id="raysubmit_timeout_preexisting_completion_001",
+            completion_data=completion_data,
+        )
+
+        class UnexpectedRunner:
+            def __init__(self):
+                pytest.fail("timeout recovery must not contact Ray after completion publication")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", UnexpectedRunner)
+
+        self._make_command().detect_stuck_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.completion_data == completion_data
+        assert task.cancellation_status is None
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
     def test_timeout_cancels_ray_core_task_without_ray_job_request(self):
         """Ray Core timeout handling must not call the Ray Job API."""
         from datetime import datetime, timedelta
@@ -1252,14 +1386,29 @@ class TestWorkerOrphanRecovery:
         cancelled: list[str] = []
 
         class FakeCoreRunner:
-            _pending_tasks = {task.pk: object()}
+            pending_handle = RayCoreHandle(
+                task_pk=task.pk,
+                object_ref=object(),
+                submitted_at=datetime.now(UTC),
+                task_name="test",
+                attempt_number=task.attempt_number,
+                execution_generation=task.execution_generation,
+            )
+            _pending_tasks = {task.pk: pending_handle}
 
             @property
             def pending_task_ids(self):
                 return tuple(self._pending_tasks)
 
-            def cancel(self, handle):
-                cancelled.append(handle.ray_job_id)
+            @property
+            def pending_task_handles(self):
+                return tuple(self._pending_tasks.values())
+
+            def get_pending_handle(self, *_args, **_kwargs):
+                return self.pending_handle
+
+            def cancel_pending(self, handle):
+                cancelled.append(f"ray_core:{handle.task_pk}")
                 return True
 
         cmd = self._make_command()
@@ -1271,7 +1420,7 @@ class TestWorkerOrphanRecovery:
         task.refresh_from_db()
         assert cancelled == [f"ray_core:{task.pk}"]
         assert task.state == TaskState.FAILED
-        assert task.cancellation_status == CancellationStatus.NOT_APPLICABLE
+        assert task.cancellation_status == CancellationStatus.REQUESTED
         assert task.pk not in cmd.active_tasks
 
 
@@ -1387,6 +1536,50 @@ class TestWorkerResultStorage:
         assert stored_payload is not None
         stored_result = json.loads(stored_payload)
         assert stored_result["args"] == [large_text]
+
+    def test_result_diagnostic_failure_cannot_rollback_published_reference(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from django_ray.result_storage import FilesystemResultStorage
+
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {
+                "MAX_RESULT_SIZE_BYTES": 1,
+                "RESULT_STORAGE_BACKEND": "filesystem",
+                "RESULT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+            },
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="test-result-diagnostic-failure-001",
+            callable_path="testproject.tasks.echo_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json="{}",
+            attempt_number=1,
+            execution_generation=4,
+        )
+
+        class BrokenStdout:
+            def write(self, _message: str) -> None:
+                raise RuntimeError("stdout unavailable")
+
+        cmd = self._make_command()
+        cmd.stdout = BrokenStdout()
+
+        with pytest.raises(RuntimeError, match="stdout unavailable"):
+            cmd._store_and_succeed_task(
+                task,
+                {"message": "x" * 128},
+                expected_attempt_number=1,
+                expected_execution_generation=4,
+            )
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_reference is not None
+        assert FilesystemResultStorage(tmp_path).load(reference=task.result_reference) is not None
 
     def test_sync_mode_storage_backend_error_falls_back_to_digest_reference(
         self, monkeypatch

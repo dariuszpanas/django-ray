@@ -15,7 +15,7 @@ from django.utils.html import format_html
 from django.utils.http import quote, unquote
 from django.utils.text import Truncator
 
-from django_ray.lifecycle import retry_task
+from django_ray.lifecycle import request_task_cancellation, retry_task
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.redaction import redact_text, safe_json_dumps
 from django_ray.workflow_progress_reads import (
@@ -740,7 +740,16 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             )
             return
 
-        count = sum(1 for task in tasks_to_retry.only("pk") if retry_task(task))
+        count = 0
+        for task in tasks_to_retry.only("pk", "attempt_number", "execution_generation"):
+            if task.pk is None:  # pragma: no cover - querysets contain persisted rows
+                continue
+            retried = retry_task(
+                task.pk,
+                expected_attempt_number=task.attempt_number,
+                expected_execution_generation=task.execution_generation,
+            )
+            count += int(retried is not None)
 
         self.message_user(
             request,
@@ -749,72 +758,24 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
 
     @admin.action(description="Cancel selected tasks")
     def cancel_tasks(self, request: HttpRequest, queryset: QuerySet[RayTaskExecution]) -> None:
-        """Cancel queued or running tasks.
-
-        For QUEUED tasks: Marks as CANCELLED immediately.
-        For RUNNING tasks with Ray Job API: Attempts to stop the Ray job.
-        For RUNNING tasks with Ray Core: Marks as CANCELLED (worker will skip on next poll).
-        """
-        cancellable_states = [TaskState.QUEUED, TaskState.RUNNING]
-        tasks_to_cancel = queryset.filter(state__in=cancellable_states)
-
-        if not tasks_to_cancel.exists():
-            self.message_user(
-                request,
-                "No queued or running tasks found in selection.",
+        """Request package-owned cancellation for each authorized selection."""
+        accepted_count = 0
+        for task in queryset.only("pk", "attempt_number", "execution_generation"):
+            if task.pk is None:  # pragma: no cover - querysets contain persisted rows
+                continue
+            result = request_task_cancellation(
+                task.pk,
+                expected_attempt_number=task.attempt_number,
+                expected_execution_generation=task.execution_generation,
             )
-            return
-
-        cancelled_count = 0
-        ray_job_cancel_attempted = 0
-
-        for task in tasks_to_cancel:
-            now = timezone.now()
-
-            if task.state == TaskState.QUEUED:
-                # Queued tasks can be cancelled directly
-                task.state = TaskState.CANCELLED
-                task.finished_at = now
-                task.save(update_fields=["state", "finished_at"])
-                cancelled_count += 1
-
-            elif task.state == TaskState.RUNNING:
-                # Check if this is a Ray Job API task
-                # Ray Job API: starts with "raysubmit_"
-                # Ray Core old format: starts with "ray_core:"
-                # Ray Core new format: "job_id:task_id" (neither starts with raysubmit_ nor ray_core:)
-                ray_job_id = task.ray_job_id
-                is_ray_job_api = ray_job_id and str(ray_job_id).startswith("raysubmit_")
-
-                if is_ray_job_api:
-                    # Try to stop the Ray job
-                    try:
-                        from django_ray.runner.ray_job import RayJobRunner
-
-                        runner = RayJobRunner()
-                        from datetime import UTC, datetime
-
-                        from django_ray.runner.base import SubmissionHandle
-
-                        handle = SubmissionHandle(
-                            ray_job_id=str(ray_job_id),
-                            ray_address=str(task.ray_address or ""),
-                            submitted_at=task.started_at or datetime.now(UTC),
-                        )
-                        runner.cancel(handle)
-                        ray_job_cancel_attempted += 1
-                    except Exception:
-                        pass  # Best effort
-
-                # Mark as CANCELLING - worker will finalize on next poll
-                task.state = TaskState.CANCELLING
-                task.save(update_fields=["state"])
-                cancelled_count += 1
-
-        message = f"Marked {cancelled_count} task(s) for cancellation."
-        if ray_job_cancel_attempted:
-            message += f" Attempted to stop {ray_job_cancel_attempted} Ray job(s)."
-
+            accepted_count += int(result.accepted)
+        if accepted_count:
+            message = (
+                f"Accepted cancellation for {accepted_count} task(s). "
+                "Workers will attempt best-effort interruption for running work."
+            )
+        else:
+            message = "No selected tasks accepted cancellation."
         self.message_user(request, message)
 
 
