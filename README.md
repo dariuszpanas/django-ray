@@ -172,7 +172,7 @@ Run development targets through `uv run` unless the virtual environment is alrea
 named `lint`, `check`, and `ci` are non-mutating; use `format` or `fix` when files should change.
 
 ```bash
-make install          # Install dependencies
+uv sync               # Install locked dependencies
 uv run make format    # Format code with Ruff
 uv run make fix       # Format and apply safe Ruff lint fixes
 uv run make lint      # Check lint without modifying files
@@ -182,72 +182,101 @@ uv run make test-xdist # Run the default-resource subset with four xdist workers
 uv run make test-cov  # Run tests with CI coverage floors
 uv run make check     # Check formatting, lint, and types without changes
 uv run make ci        # Check coverage, docs, and package build for this interpreter
-make docs-build       # Build docs (Zensical)
-make docs-build-strict # Build docs in strict mode
-make docs-serve       # Serve docs locally
+uv run make docs-build       # Build docs (Zensical)
+uv run make docs-build-strict # Build docs in strict mode
+uv run make docs-serve       # Serve docs locally
 ```
 
 ### Django Commands
 
 ```bash
-make migrate          # Run migrations
-make runserver        # Start dev server
-make shell            # Django shell
-make createsuperuser  # Create admin user
+uv run make migrate          # Run migrations
+uv run make runserver        # Start dev server
+uv run make shell            # Django shell
+uv run make createsuperuser  # Create admin user
 ```
 
 ### Worker Commands
 
 ```bash
-make worker           # Ray Job API mode
-make worker-local     # Local Ray (recommended)
-make worker-sync      # Sync mode (no Ray)
-make worker-all       # All queues, local Ray
-make worker-cluster   # Connect to cluster
+uv run make worker           # Ray Job API mode
+uv run make worker-local     # Local Ray (recommended)
+uv run make worker-sync      # Sync mode (no Ray)
+uv run make worker-all       # All queues, local Ray
+uv run make worker-cluster   # Connect to cluster
 ```
 
 ### Quick Start (End-to-End Testing)
 
-**Terminal 1 - Start Django server:**
+Generate a disposable bearer token in the shell that will start Django, then migrate the database.
+On POSIX:
+
 ```bash
-make runserver
+export DJANGO_API_TOKEN="$(
+  uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+)"
+uv run make migrate
 ```
 
-**Terminal 2 - Start worker:**
+On PowerShell:
+
+```powershell
+$env:DJANGO_API_TOKEN = uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+uv run make migrate
+```
+
+Start the web process and worker in separate terminals that share the same project checkout and
+database:
+
 ```bash
-make worker-all
+uv run make runserver
+uv run make worker-all
 ```
 
 **Browser - Test via API:**
+
 1. Open http://127.0.0.1:8000/api/docs (Swagger UI)
-2. Try `POST /api/enqueue/add/100/200`
-3. Check `GET /api/executions` - see task completed with result `300`
-4. View in Admin: http://127.0.0.1:8000/admin/django_ray/raytaskexecution/
+2. Select **Authorize** and paste the generated token value
+3. Try `POST /api/enqueue/add/100/200`
+4. Refresh `GET /api/tasks/{task_id}`, then check `GET /api/executions`
+5. View in Admin: http://127.0.0.1:8000/admin/django_ray/raytaskexecution/
+
+The tracked Docker Compose path below is the reproducible bundled-application smoke, including
+PostgreSQL and migration ordering.
 
 ### Queue Configuration
 
 ```bash
 # Single queue
-python manage.py django_ray_worker --queue=default
+uv run python testproject/manage.py django_ray_worker --queue=default
 
 # Multiple queues
-python manage.py django_ray_worker --queue=default,high-priority,low-priority
+uv run python testproject/manage.py django_ray_worker --queue=default,high-priority,low-priority
 
 # All configured queues
-python manage.py django_ray_worker --all-queues
+uv run python testproject/manage.py django_ray_worker --all-queues
 ```
 
 ## Docker
 
-```bash
-make docker-build
+The canonical local evaluation path is the tracked Compose application. Generate the required
+disposable credentials, start the web and worker services, then run the bounded end-to-end smoke:
 
-# Run modes:
-docker run -p 8000:8000 django-ray:latest web          # Production
-docker run -p 8000:8000 django-ray:latest web-dev      # Development
-docker run django-ray:latest worker                     # Worker (local Ray)
-docker run django-ray:latest worker-cluster             # Worker (cluster)
+```bash
+export DJANGO_API_TOKEN="$(
+  uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+)"
+export POSTGRES_PASSWORD="$(
+  uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+)"
+
+docker compose up --build --detach web worker
+docker compose --profile smoke run --rm --no-deps smoke
 ```
+
+PowerShell, authenticated request, result-refresh, admin, and cleanup commands are in the
+[bundled testproject quickstart](testproject/README.md). The local Compose topology and its generated
+credentials are not production hardening.
 
 ## Kubernetes Deployment
 

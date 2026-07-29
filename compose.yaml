@@ -1,0 +1,109 @@
+x-application-environment: &application-environment
+  DJANGO_DEPLOYMENT_MODE: demo
+  DJANGO_DEBUG: "True"
+  DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,web"
+  DATABASE_ENGINE: django.db.backends.postgresql
+  DATABASE_NAME: django_ray
+  DATABASE_USER: django_ray
+  DATABASE_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD before running Compose}"
+  DATABASE_HOST: postgres
+  DATABASE_PORT: "5432"
+  DJANGO_RAY_CONCURRENCY: "1"
+
+x-api-environment: &api-environment
+  <<: *application-environment
+  DJANGO_API_TOKEN: "${DJANGO_API_TOKEN:?Set DJANGO_API_TOKEN before running Compose}"
+
+x-application-service: &application-service
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: django-ray-quickstart:local
+  environment: *application-environment
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: django_ray
+      POSTGRES_USER: django_ray
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD before running Compose}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready --username=$${POSTGRES_USER} --dbname=$${POSTGRES_DB}",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  migrate:
+    <<: *application-service
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    <<: *application-service
+    command: ["web-dev"]
+    environment: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json, urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8000/api/readyz', timeout=2); assert json.load(response)['status'] == 'healthy'",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  worker:
+    <<: *application-service
+    command: ["worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    init: true
+    shm_size: 1gb
+    stop_grace_period: 30s
+
+  smoke:
+    <<: *application-service
+    command:
+      [
+        "python",
+        "-m",
+        "testproject.docker_smoke",
+        "--base-url",
+        "http://web:8000",
+        "--timeout",
+        "180",
+      ]
+    environment: *api-environment
+    depends_on:
+      web:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    profiles: ["smoke"]
+    restart: "no"
+
+volumes:
+  postgres-data:

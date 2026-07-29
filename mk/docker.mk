@@ -1,25 +1,30 @@
-# Docker and Kubernetes deployment commands
-# Include in main Makefile with: include mk/docker.mk
+# Tracked Docker Compose quickstart commands.
+#
+# DJANGO_API_TOKEN and POSTGRES_PASSWORD must be generated in the calling shell.
+# See testproject/README.md for copyable POSIX and PowerShell setup.
 
-.PHONY: docker-build docker-build-dev docker-run docker-run-dev docker-run-worker
+.PHONY: docker-build docker-build-dev docker-up docker-smoke docker-down
+.PHONY: docker-run docker-run-dev docker-run-worker
 
-# Build Docker image
 docker-build:
-	docker build -t django-ray:latest .
+	docker compose build
 
-# Build Docker dev image
 docker-build-dev:
 	docker build -f Dockerfile.dev -t django-ray:dev .
 
-# Run Docker container (Django web - production with gunicorn)
-docker-run:
-	docker run -p 8000:8000 django-ray:latest web
+docker-up:
+	docker compose up --build --detach web worker
 
-# Run Docker container (Django web - development server)
-docker-run-dev:
-	docker run -p 8000:8000 -v $(PWD)/db.sqlite3:/app/db.sqlite3 django-ray:latest web-dev
+docker-smoke:
+	docker compose --profile smoke run --rm --no-deps smoke
 
-# Run Docker container (Django-Ray worker - local Ray)
+docker-down:
+	docker compose --profile smoke down --volumes --remove-orphans
+
+# Backward-compatible aliases now use the migrated shared-PostgreSQL topology.
+docker-run: docker-up
+
+docker-run-dev: docker-up
+
 docker-run-worker:
-	docker run django-ray:latest worker
-
+	docker compose up --build --detach worker

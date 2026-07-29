@@ -2,13 +2,9 @@
 # Django-Ray Docker Image
 # Multi-stage build for optimized production image
 #
-# Usage:
-#   docker run django-ray web          # Production web server (gunicorn)
-#   docker run django-ray web-dev      # Development web server
-#   docker run django-ray worker       # Django-Ray task worker (local Ray)
-#   docker run django-ray worker-cluster  # Worker connecting to Ray cluster
-#   docker run django-ray migrate      # Run migrations
-#   docker run django-ray shell        # Django shell
+# The tracked compose.yaml is the canonical local application path. These entrypoint
+# modes remain available to orchestrators that provide one shared database and run
+# exactly one migration job before starting web or worker replicas.
 
 ARG PYTHON_VERSION=3.12
 
@@ -44,6 +40,11 @@ COPY README.md ./
 # Install the project itself
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra postgres --extra sample
+
+# Ray clones the active virtual environment before installing task-specific
+# runtime_env requirements. uv intentionally creates environments without pip,
+# so seed the bundled, offline copy after the final sync.
+RUN /app/.venv/bin/python -m ensurepip --upgrade --default-pip
 
 # =============================================================================
 # Stage 2: Runtime stage - minimal production image
@@ -87,7 +88,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import django; django.setup()" || exit 1
 
-# Entrypoint handles different modes
+# Entrypoint handles the explicit web, worker, migration, and shell modes.
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 # Default mode is production web server
