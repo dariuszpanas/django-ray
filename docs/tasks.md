@@ -223,14 +223,31 @@ The object returned by `enqueue()` is an enqueue-time snapshot. Fetch it again t
 worker updates:
 
 ```python
-from django.tasks import TaskResultStatus, task_backends
+from django.tasks import TaskResultStatus
 
-current = task_backends["default"].get_result(task_id)
+from myapp.tasks import send_email
 
-if current.status == TaskResultStatus.SUCCESSFUL:
-    print(current.return_value)
-elif current.status == TaskResultStatus.FAILED:
-    print(current.errors)
+enqueued = send_email.enqueue(
+    to="user@example.com",
+    subject="Hello",
+    body="Your report is ready.",
+)
+
+# Later, for example in a polling service or management command.
+enqueued.refresh()
+
+if enqueued.status == TaskResultStatus.SUCCESSFUL:
+    print(enqueued.return_value)
+elif enqueued.status == TaskResultStatus.FAILED:
+    print(enqueued.errors)
+```
+
+`TaskResult.refresh()` updates the snapshot through its configured backend. It does not
+subscribe to changes or wait for completion. When only the ID remains, retrieve a fresh
+matching snapshot from the task definition:
+
+```python
+current = send_email.get_result(enqueued.id)
 ```
 
 For operations, graph progress, attempts, and Ray identifiers, query
@@ -365,3 +382,4 @@ retry, cancellation, audit record, or schedule.
 - [Queues](queues.md) for workload isolation
 - [Retry and Error Handling](retry.md) for recovery behavior
 - [Ray-Native Workflows](workflows.md) for dependent fan-out
+- [Migrating from Celery](celery-migration.md) for compatibility classification and coexistence
