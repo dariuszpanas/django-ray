@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import time
+from datetime import datetime
 from typing import Any
 
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
-    WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION,
+)
+from django_ray.workflow_progress_protocol import (
+    WORKFLOW_PROGRESS_LIMITS_V1,
+    WorkflowProgressEvent,
+    WorkflowProgressEventKind,
+    WorkflowProgressLimits,
+    WorkflowProgressProtocolError,
+    decode_workflow_progress_event,
+    send_workflow_progress_event,
 )
 
 
@@ -103,8 +113,16 @@ def execute_workflow_step_remote(
         workflow_execution_generation=(workflow_run_identity or {}).get("execution_generation"),
         **execution,
     )
-    if progress_actor is not None:
-        progress_actor.started.remote(node_id, label, execution)
+    _send_step_progress_event(
+        progress_actor,
+        workflow_run_identity,
+        WorkflowProgressEventKind.STARTED,
+        {
+            "node_id": node_id,
+            "label": label,
+            "execution": execution,
+        },
+    )
     logger.info("Workflow step started")
     try:
         with workflow_step_execution(
@@ -114,14 +132,57 @@ def execute_workflow_step_remote(
         ):
             result = callable_obj(*input_args, *bound_args, **kwargs)
     except BaseException as error:
-        if progress_actor is not None:
-            progress_actor.failed.remote(node_id, label, str(error))
+        try:
+            failure_payload = {
+                "node_id": node_id,
+                "label": label,
+                "error": str(error),
+            }
+        except Exception:
+            failure_payload = {
+                "node_id": node_id,
+                "label": label,
+                "error": "Workflow step failed",
+            }
+        _send_step_progress_event(
+            progress_actor,
+            workflow_run_identity,
+            WorkflowProgressEventKind.FAILED,
+            failure_payload,
+        )
         logger.exception("Workflow step failed")
         raise
-    if progress_actor is not None:
-        progress_actor.completed.remote(node_id, label)
+    _send_step_progress_event(
+        progress_actor,
+        workflow_run_identity,
+        WorkflowProgressEventKind.COMPLETED,
+        {
+            "node_id": node_id,
+            "label": label,
+        },
+    )
     logger.info("Workflow step completed")
     return result
+
+
+def _send_step_progress_event(
+    progress_actor: Any | None,
+    workflow_run_identity: dict[str, Any] | None,
+    kind: WorkflowProgressEventKind,
+    payload: dict[str, Any],
+) -> None:
+    """Report one leaf event without making observability task-critical."""
+    if progress_actor is None or workflow_run_identity is None:
+        return
+    try:
+        send_workflow_progress_event(
+            progress_actor,
+            workflow_run_identity,
+            kind,
+            payload,
+        )
+    except Exception:
+        return
 
 
 def _ray_execution_metadata() -> dict[str, Any]:
@@ -149,104 +210,124 @@ def collect_workflow_results_remote(*values: Any) -> list[Any]:
     return list(values)
 
 
-class WorkflowProgressActor:
-    """In-memory progress collector for one active workflow."""
+class _WorkflowProgressCollector:
+    """Private bounded state machine behind the three-method Ray actor."""
 
     def __init__(
         self,
-        task_execution_pk: int | None = None,
-        attempt_number: int | None = None,
-        execution_generation: int | None = None,
-        workflow_run_id: str | None = None,
-        plan_summary: dict[str, Any] | None = None,
+        initialization_event: bytes,
+        *,
+        limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
     ) -> None:
+        event = decode_workflow_progress_event(initialization_event, limits=limits)
+        if event.kind is not WorkflowProgressEventKind.INITIALIZED:
+            raise WorkflowProgressProtocolError(
+                "workflow progress actor requires an initialized event"
+            )
+
         self.started_at = time.time()
         self.updated_at = self.started_at
-        self.task_execution_pk = task_execution_pk
-        self.run_identity = (
-            {
-                "schema_version": WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION,
-                "run_id": workflow_run_id,
-                "task_execution_pk": task_execution_pk,
-                "attempt_number": attempt_number,
-                "execution_generation": execution_generation,
-            }
-            if task_execution_pk is not None
-            and attempt_number is not None
-            and execution_generation is not None
-            and workflow_run_id is not None
-            else None
-        )
+        self._limits = limits
+        self.task_execution_pk = int(event.run_identity["task_execution_pk"])
+        self.run_identity = copy.deepcopy(event.run_identity)
         self.accepting_updates = True
-        self.plan_summary = json.loads(json.dumps(plan_summary)) if plan_summary else None
+        self.plan_summary = copy.deepcopy(event.payload["plan"])
         self.revision = 0
         self.nodes: dict[str, dict[str, Any]] = {}
+        self.edges: set[tuple[str, str]] = set()
         self.events: list[dict[str, Any]] = []
+        self._node_sizes: dict[str, int] = {}
+        self._edge_sizes: dict[tuple[str, str], int] = {}
+        self._event_sizes: list[int] = []
+        self._node_payload_bytes = 0
+        self._edge_payload_bytes = 0
+        self._event_payload_bytes = 0
+        self._plan_size = _canonical_retained_size(self.plan_summary)
+        self._retained_bytes = _canonical_retained_state_size(
+            plan_bytes=self._plan_size,
+            node_bytes=0,
+            node_count=0,
+            edge_bytes=0,
+            edge_count=0,
+            event_bytes=0,
+            event_count=0,
+        )
+        if self._retained_bytes > self._retained_bytes_limit:
+            raise WorkflowProgressProtocolError(
+                "workflow progress initialization exceeds the retained-byte limit"
+            )
+
+        self._accepted = 1
+        self._rejected = 0
+        self._truncated = int(event.truncated)
+        self._accepted_by_kind = {kind.value: 0 for kind in WorkflowProgressEventKind}
+        self._accepted_by_kind[WorkflowProgressEventKind.INITIALIZED.value] = 1
+        self._rejected_by_reason = {
+            "protocol_error": 0,
+            "fence_mismatch": 0,
+            "unexpected_initialized": 0,
+            "node_limit": 0,
+            "edge_limit": 0,
+            "retained_bytes_limit": 0,
+        }
+
+    @property
+    def _node_limit(self) -> int:
+        return self._limits.topology_node_max_items
+
+    @property
+    def _edge_limit(self) -> int:
+        return self._limits.topology_edge_max_items
+
+    @property
+    def _retained_bytes_limit(self) -> int:
+        return self._limits.combined_max_decoded_bytes
+
+    @property
+    def _recent_event_limit(self) -> int:
+        return self._limits.recent_event_max_items
+
+    @property
+    def _counter_max(self) -> int:
+        return self._limits.identity_max_integer
 
     def _touch(self) -> None:
-        self.revision += 1
+        self.revision = min(self._counter_max, self.revision + 1)
         self.updated_at = time.time()
 
-    def _event(
-        self,
-        node_id: str,
-        event: str,
-        label: str,
-        *,
-        state: str | None = None,
-    ) -> None:
-        self._touch()
-        self.events.append(
-            {
-                "node_id": node_id,
-                "event": event,
-                "state": state or event,
-                "label": label,
-                "timestamp": self.updated_at,
-            }
-        )
-        self.events = self.events[-50:]
+    def _increment_counter(self, attribute: str) -> None:
+        value = int(getattr(self, attribute))
+        setattr(self, attribute, min(self._counter_max, value + 1))
 
-    def register(
-        self,
-        node_id: str,
-        label: str,
-        callable_path: str | None = None,
-        dependencies: list[str] | None = None,
-        runtime_env: dict[str, Any] | None = None,
-        ray_options: dict[str, Any] | None = None,
-    ) -> None:
-        if not self.accepting_updates:
-            return
-        if node_id in self.nodes:
-            node = self.nodes[node_id]
-            changed = False
-            if label is not None and node["label"] != label:
-                node["label"] = label
-                changed = True
-            if callable_path is not None and node["callable_path"] != callable_path:
-                node["callable_path"] = callable_path
-                changed = True
-            if dependencies is not None and node["dependencies"] != dependencies:
-                node["dependencies"] = dependencies
-                changed = True
-            if runtime_env is not None and node["runtime_env"] != runtime_env:
-                node["runtime_env"] = runtime_env
-                changed = True
-            if ray_options is not None and node["ray_options"] != ray_options:
-                node["ray_options"] = ray_options
-                changed = True
-            if changed:
-                self._touch()
-            return
-        self.nodes[node_id] = {
+    def _reject(self, reason: str) -> bool:
+        self._increment_counter("_rejected")
+        self._rejected_by_reason[reason] = min(
+            self._counter_max,
+            self._rejected_by_reason[reason] + 1,
+        )
+        return False
+
+    def _accept(self, event: WorkflowProgressEvent) -> bool:
+        self._increment_counter("_accepted")
+        kind = event.kind.value
+        self._accepted_by_kind[kind] = min(
+            self._counter_max,
+            self._accepted_by_kind[kind] + 1,
+        )
+        if event.truncated:
+            self._increment_counter("_truncated")
+        self._touch()
+        return True
+
+    def _placeholder(self, node_id: str, label: str | None = None) -> dict[str, Any]:
+        return {
             "node_id": node_id,
             "kind": "task",
-            "label": label,
-            "callable_path": callable_path,
-            "dependencies": dependencies or [],
-            "runtime_env": runtime_env or {"mode": "inherit"},
-            "ray_options": ray_options or {},
+            "label": label or node_id,
+            "callable_path": None,
+            "dependencies": [],
+            "runtime_env": {"mode": "inherit"},
+            "ray_options": {},
             "state": "PENDING",
             "progress": None,
             "execution": {},
@@ -254,149 +335,275 @@ class WorkflowProgressActor:
             "finished_at": None,
             "error": None,
         }
-        self._touch()
 
-    def register_map(
+    def _candidate_node(self, node_id: str, label: str | None = None) -> dict[str, Any]:
+        node = self.nodes.get(node_id)
+        return copy.deepcopy(node) if node is not None else self._placeholder(node_id, label)
+
+    def _recent_event(
         self,
-        node_id: str,
-        label: str,
-        dependencies: list[str],
-        max_concurrency: int | None,
-        max_items: int | None,
-    ) -> None:
-        """Register one aggregate node for a bounded dynamic map."""
-        if not self.accepting_updates:
-            return
-        self.register(node_id, label, dependencies=dependencies)
-        node = self.nodes[node_id]
-        node["kind"] = "map"
-        node["state"] = "RUNNING"
-        node["started_at"] = time.time()
-        node["fanout"] = {
-            "max_concurrency": max_concurrency,
-            "max_items": max_items,
-            "submitted_items": 0,
-            "completed_items": 0,
-            "in_flight_items": 0,
-            "input_exhausted": False,
+        node: dict[str, Any],
+        event: str,
+        occurred_at: float,
+    ) -> dict[str, Any]:
+        return {
+            "node_id": node["node_id"],
+            "event": event,
+            "state": node["state"],
+            "label": node["label"],
+            "timestamp": occurred_at,
         }
-        self._event(node_id, "STARTED", label, state="RUNNING")
 
-    def map_progress(
+    def _commit(
         self,
-        node_id: str,
-        label: str,
-        submitted: int,
-        completed: int,
-        input_exhausted: bool,
-    ) -> None:
-        """Update aggregate counters without retaining one node per map item."""
-        if not self.accepting_updates:
-            return
-        if node_id not in self.nodes:
-            self.register_map(node_id, label, [], None, None)
-        node = self.nodes[node_id]
-        node["fanout"].update(
-            {
-                "submitted_items": submitted,
-                "completed_items": completed,
-                "in_flight_items": submitted - completed,
-                "input_exhausted": input_exhausted,
-            }
+        *,
+        node_updates: dict[str, dict[str, Any]] | None = None,
+        edge_additions: set[tuple[str, str]] | None = None,
+        recent_event: dict[str, Any] | None = None,
+    ) -> str | None:
+        node_updates = {} if node_updates is None else node_updates
+        edge_additions = set() if edge_additions is None else edge_additions
+        new_node_count = sum(node_id not in self.nodes for node_id in node_updates)
+        if len(self.nodes) + new_node_count > self._node_limit:
+            return "node_limit"
+        new_edges = edge_additions - self.edges
+        if len(self.edges) + len(new_edges) > self._edge_limit:
+            return "edge_limit"
+
+        node_sizes = {
+            node_id: _canonical_retained_size(node) for node_id, node in node_updates.items()
+        }
+        edge_sizes = {
+            edge: _canonical_retained_size({"source": edge[0], "target": edge[1]})
+            for edge in new_edges
+        }
+        candidate_events = list(self.events)
+        candidate_event_sizes = list(self._event_sizes)
+        event_payload_bytes = self._event_payload_bytes
+        if recent_event is not None and self._recent_event_limit:
+            candidate_events.append(recent_event)
+            recent_event_size = _canonical_retained_size(recent_event)
+            candidate_event_sizes.append(recent_event_size)
+            event_payload_bytes += recent_event_size
+            excess = len(candidate_events) - self._recent_event_limit
+            if excess > 0:
+                event_payload_bytes -= sum(candidate_event_sizes[:excess])
+                del candidate_events[:excess]
+                del candidate_event_sizes[:excess]
+
+        node_payload_bytes = self._node_payload_bytes
+        for node_id, size in node_sizes.items():
+            node_payload_bytes += size - self._node_sizes.get(node_id, 0)
+        edge_payload_bytes = self._edge_payload_bytes + sum(edge_sizes.values())
+        retained_bytes = _canonical_retained_state_size(
+            plan_bytes=self._plan_size,
+            node_bytes=node_payload_bytes,
+            node_count=len(self.nodes) + new_node_count,
+            edge_bytes=edge_payload_bytes,
+            edge_count=len(self.edges) + len(new_edges),
+            event_bytes=event_payload_bytes,
+            event_count=len(candidate_events),
         )
-        if input_exhausted:
-            percent = 100.0 if submitted == 0 else round(completed / submitted * 100, 1)
-            node["progress"] = {
-                "current": completed,
-                "total": submitted,
-                "percent": percent,
-                "message": "Collecting bounded map results",
-                "metrics": dict(node["fanout"]),
-                "updated_at": time.time(),
-            }
-        self._event(node_id, "PROGRESS", label, state=node["state"])
+        if retained_bytes > self._retained_bytes_limit:
+            return "retained_bytes_limit"
 
-    def started(
+        for node_id, node in node_updates.items():
+            self.nodes[node_id] = node
+            self._node_sizes[node_id] = node_sizes[node_id]
+        self.edges.update(new_edges)
+        self._edge_sizes.update(edge_sizes)
+        self.events = candidate_events
+        self._event_sizes = candidate_event_sizes
+        self._node_payload_bytes = node_payload_bytes
+        self._edge_payload_bytes = edge_payload_bytes
+        self._event_payload_bytes = event_payload_bytes
+        self._retained_bytes = retained_bytes
+        return None
+
+    def _node_event_candidate(
         self,
-        node_id: str,
-        label: str,
-        execution: dict[str, Any] | None = None,
-    ) -> None:
-        if not self.accepting_updates:
-            return
-        self.register(node_id, label)
-        node = self.nodes[node_id]
-        node["state"] = "RUNNING"
-        node["started_at"] = time.time()
-        node["execution"] = execution or {}
-        self._event(node_id, "STARTED", label, state="RUNNING")
+        event: WorkflowProgressEvent,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+        payload = event.payload
+        node_id = payload["node_id"]
+        label = payload.get("label")
+        node = self._candidate_node(node_id, label)
+        occurred_at = _event_timestamp(event.occurred_at)
+        terminal = node["state"] in _TERMINAL_NODE_STATES
+        recent_event: dict[str, Any] | None = None
 
-    def submitted(self, node_id: str, label: str, ray_task_id: str) -> None:
-        if not self.accepting_updates:
-            return
-        self.register(node_id, label)
-        node = self.nodes[node_id]
-        node["execution"] = {
-            **node["execution"],
-            "ray_task_id": ray_task_id,
-        }
-        self._event(node_id, "SUBMITTED", label, state=node["state"])
-
-    def completed(self, node_id: str, label: str) -> None:
-        if not self.accepting_updates:
-            return
-        self.register(node_id, label)
-        node = self.nodes[node_id]
-        node["state"] = "SUCCEEDED"
-        node["finished_at"] = time.time()
-        if node["kind"] == "map":
-            submitted = node["fanout"]["submitted_items"]
-            node["fanout"].update(
-                {
-                    "completed_items": submitted,
+        if event.kind is WorkflowProgressEventKind.NODE_REGISTERED:
+            node["label"] = label
+            node["callable_path"] = payload["callable_path"]
+            node["runtime_env"] = copy.deepcopy(payload["runtime_env"])
+            node["ray_options"] = copy.deepcopy(payload["ray_options"])
+        elif event.kind is WorkflowProgressEventKind.MAP_REGISTERED:
+            node["kind"] = "map"
+            node["label"] = label
+            fanout = node.get("fanout")
+            if not isinstance(fanout, dict):
+                fanout = {
+                    "submitted_items": 0,
+                    "completed_items": 0,
                     "in_flight_items": 0,
-                    "input_exhausted": True,
+                    "input_exhausted": False,
+                }
+            fanout.update(
+                {
+                    "max_concurrency": payload["max_concurrency"],
+                    "max_items": payload["max_items"],
                 }
             )
-        if node["progress"] is not None:
-            node["progress"]["current"] = node["progress"]["total"]
-            node["progress"]["percent"] = 100.0
-            if node["kind"] == "map":
-                node["progress"]["metrics"] = dict(node["fanout"])
-        self._event(node_id, "COMPLETED", label, state="SUCCEEDED")
+            node["fanout"] = fanout
+            if not terminal:
+                node["state"] = "RUNNING"
+                node["started_at"] = node["started_at"] or occurred_at
+                recent_event = self._recent_event(node, "STARTED", occurred_at)
+        elif event.kind is WorkflowProgressEventKind.SUBMITTED:
+            node["label"] = label
+            node["execution"] = {
+                **node["execution"],
+                "ray_task_id": payload["ray_task_id"],
+            }
+            if not terminal:
+                recent_event = self._recent_event(node, "SUBMITTED", occurred_at)
+        elif event.kind is WorkflowProgressEventKind.STARTED:
+            node["label"] = label
+            node["execution"] = {
+                **node["execution"],
+                **copy.deepcopy(payload["execution"]),
+            }
+            node["started_at"] = node["started_at"] or occurred_at
+            if not terminal:
+                node["state"] = "RUNNING"
+                recent_event = self._recent_event(node, "STARTED", occurred_at)
+        elif event.kind is WorkflowProgressEventKind.APPLICATION_PROGRESS:
+            if not terminal:
+                current = payload["current"]
+                total = payload["total"]
+                node["progress"] = {
+                    "current": current,
+                    "total": total,
+                    "percent": round(current / total * 100, 1),
+                    "message": payload["message"],
+                    "metrics": copy.deepcopy(payload["metrics"]),
+                    "updated_at": occurred_at,
+                }
+                recent_event = self._recent_event(node, "PROGRESS", occurred_at)
+        elif event.kind is WorkflowProgressEventKind.MAP_PROGRESS:
+            node["kind"] = "map"
+            node["label"] = label
+            fanout = node.get("fanout")
+            if not isinstance(fanout, dict):
+                fanout = {
+                    "max_concurrency": None,
+                    "max_items": None,
+                    "submitted_items": 0,
+                    "completed_items": 0,
+                    "in_flight_items": 0,
+                    "input_exhausted": False,
+                }
+            if not terminal:
+                submitted = payload["submitted"]
+                completed = payload["completed"]
+                input_exhausted = payload["input_exhausted"]
+                if node["state"] == "PENDING":
+                    node["state"] = "RUNNING"
+                    node["started_at"] = node["started_at"] or occurred_at
+                fanout.update(
+                    {
+                        "submitted_items": submitted,
+                        "completed_items": completed,
+                        "in_flight_items": submitted - completed,
+                        "input_exhausted": input_exhausted,
+                    }
+                )
+                node["fanout"] = fanout
+                if input_exhausted:
+                    percent = 100.0 if submitted == 0 else round(completed / submitted * 100, 1)
+                    node["progress"] = {
+                        "current": completed,
+                        "total": submitted,
+                        "percent": percent,
+                        "message": "Collecting bounded map results",
+                        "metrics": copy.deepcopy(fanout),
+                        "updated_at": occurred_at,
+                    }
+                recent_event = self._recent_event(node, "PROGRESS", occurred_at)
+            else:
+                node["fanout"] = fanout
+        elif event.kind is WorkflowProgressEventKind.COMPLETED:
+            node["label"] = label
+            if not terminal:
+                node["state"] = "SUCCEEDED"
+                node["finished_at"] = occurred_at
+                if node["kind"] == "map":
+                    fanout = node["fanout"]
+                    submitted = fanout["submitted_items"]
+                    fanout.update(
+                        {
+                            "completed_items": submitted,
+                            "in_flight_items": 0,
+                            "input_exhausted": True,
+                        }
+                    )
+                if node["progress"] is not None:
+                    node["progress"]["current"] = node["progress"]["total"]
+                    node["progress"]["percent"] = 100.0
+                    node["progress"]["updated_at"] = occurred_at
+                    if node["kind"] == "map":
+                        node["progress"]["metrics"] = copy.deepcopy(node["fanout"])
+                recent_event = self._recent_event(node, "COMPLETED", occurred_at)
+        elif event.kind is WorkflowProgressEventKind.FAILED:
+            node["label"] = label
+            if not terminal:
+                node["state"] = "FAILED"
+                node["finished_at"] = occurred_at
+                node["error"] = payload["error"]
+                recent_event = self._recent_event(node, "FAILED", occurred_at)
+        return {node_id: node}, recent_event
 
-    def failed(self, node_id: str, label: str, error: str) -> None:
+    def ingest(self, wire: bytes) -> bool:
+        """Decode, fence, and atomically retain one bounded event."""
         if not self.accepting_updates:
-            return
-        self.register(node_id, label)
-        node = self.nodes[node_id]
-        node["state"] = "FAILED"
-        node["finished_at"] = time.time()
-        node["error"] = error
-        self._event(node_id, "FAILED", label, state="FAILED")
+            return False
+        try:
+            event = decode_workflow_progress_event(
+                wire,
+                expected_run_identity=self.run_identity,
+                limits=self._limits,
+            )
+        except WorkflowProgressProtocolError as error:
+            reason = (
+                "fence_mismatch"
+                if getattr(error, "reason", None) == "fence_mismatch"
+                else "protocol_error"
+            )
+            return self._reject(reason)
+        if event.run_identity != self.run_identity:
+            return self._reject("fence_mismatch")
+        if event.kind is WorkflowProgressEventKind.INITIALIZED:
+            return self._reject("unexpected_initialized")
 
-    def progress(
-        self,
-        node_id: str,
-        current: float,
-        total: float,
-        message: str | None,
-        metrics: dict[str, Any],
-    ) -> None:
-        if not self.accepting_updates:
-            return
-        if node_id not in self.nodes:
-            self.register(node_id, node_id)
-        node = self.nodes[node_id]
-        node["progress"] = {
-            "current": current,
-            "total": total,
-            "percent": round(current / total * 100, 1),
-            "message": message,
-            "metrics": metrics,
-            "updated_at": time.time(),
-        }
-        self._event(node_id, "PROGRESS", node["label"], state=node["state"])
+        node_updates: dict[str, dict[str, Any]] = {}
+        edge_additions: set[tuple[str, str]] = set()
+        recent_event = None
+        if event.kind is WorkflowProgressEventKind.EDGES_REGISTERED:
+            for edge in event.payload["edges"]:
+                source = edge["source"]
+                target = edge["target"]
+                edge_additions.add((source, target))
+        else:
+            node_updates, recent_event = self._node_event_candidate(event)
+
+        rejection = self._commit(
+            node_updates=node_updates,
+            edge_additions=edge_additions,
+            recent_event=recent_event,
+        )
+        if rejection is not None:
+            return self._reject(rejection)
+        return self._accept(event)
 
     def disable(self) -> None:
         """Drain future leaf reports without mutating this obsolete snapshot."""
@@ -408,21 +615,20 @@ class WorkflowProgressActor:
         failed = states.count("FAILED")
         total = len(states)
         terminal = completed + failed
-        nodes = list(self.nodes.values())
-        edges = [
-            {"source": dependency, "target": node["node_id"]}
-            for node in nodes
-            for dependency in node["dependencies"]
-        ]
+        dependencies: dict[str, list[str]] = {node_id: [] for node_id in self.nodes}
+        for source, target in self.edges:
+            dependencies.setdefault(target, []).append(source)
+        nodes = []
+        for node_id in sorted(self.nodes):
+            node = copy.deepcopy(self.nodes[node_id])
+            node["dependencies"] = sorted(dependencies.get(node_id, []))
+            nodes.append(node)
+        edges = [{"source": source, "target": target} for source, target in sorted(self.edges)]
         return {
             "schema_version": WORKFLOW_PROGRESS_SCHEMA_VERSION,
-            "workflow_id": (
-                f"django-ray:{self.task_execution_pk}"
-                if self.task_execution_pk is not None
-                else None
-            ),
-            "run_identity": self.run_identity,
-            "plan": self.plan_summary,
+            "workflow_id": f"django-ray:{self.task_execution_pk}",
+            "run_identity": copy.deepcopy(self.run_identity),
+            "plan": copy.deepcopy(self.plan_summary),
             "revision": self.revision,
             "state": "FAILED"
             if failed
@@ -439,5 +645,93 @@ class WorkflowProgressActor:
                 "nodes": nodes,
                 "edges": edges,
             },
-            "recent_events": list(self.events),
+            "recent_events": copy.deepcopy(self.events),
+            "ingress": {
+                "accepted": self._accepted,
+                "rejected": self._rejected,
+                "truncated": self._truncated,
+                "accepted_by_kind": dict(self._accepted_by_kind),
+                "rejected_by_reason": dict(self._rejected_by_reason),
+                "retained_bytes": self._retained_bytes,
+                "retained_nodes": len(self.nodes),
+                "retained_edges": len(self.edges),
+            },
         }
+
+
+class WorkflowProgressActor:
+    """Ingest-only Ray surface for one bounded, fenced progress collector."""
+
+    def __init__(
+        self,
+        initialization_event: bytes,
+        *,
+        limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
+    ) -> None:
+        self.__collector = _WorkflowProgressCollector(
+            initialization_event,
+            limits=limits,
+        )
+
+    def ingest(self, wire: bytes) -> bool:
+        """Ingest one canonical event through the only data-bearing actor RPC."""
+        return self.__collector.ingest(wire)
+
+    def disable(self) -> None:
+        """Disable the collector without exposing a data-mutation control."""
+        self.__collector.disable()
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return one detached schema-v2 snapshot and bounded diagnostics."""
+        return self.__collector.snapshot()
+
+
+_TERMINAL_NODE_STATES = frozenset({"SUCCEEDED", "FAILED"})
+
+
+def _canonical_retained_size(value: Any) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+
+_RETAINED_STATE_FRAME_BYTES = _canonical_retained_size(
+    {
+        "edges": [],
+        "nodes": [],
+        "plan": None,
+        "recent_events": [],
+    }
+) - len(b"null")
+
+
+def _canonical_retained_state_size(
+    *,
+    plan_bytes: int,
+    node_bytes: int,
+    node_count: int,
+    edge_bytes: int,
+    edge_count: int,
+    event_bytes: int,
+    event_count: int,
+) -> int:
+    return (
+        _RETAINED_STATE_FRAME_BYTES
+        + plan_bytes
+        + node_bytes
+        + max(0, node_count - 1)
+        + edge_bytes
+        + max(0, edge_count - 1)
+        + event_bytes
+        + max(0, event_count - 1)
+    )
+
+
+def _event_timestamp(value: str) -> float:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()

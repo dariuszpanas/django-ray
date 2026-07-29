@@ -463,7 +463,10 @@ def normalize_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
 `report_progress()` is a no-op that returns `False` during local workflow
 execution. On Ray it updates the node through the in-memory coordinator and
-returns `True`. Metrics must be JSON-serializable.
+returns `True`. Metrics are bounded operational metadata: use at most 32 scalar
+string, number, boolean, or null values. Keys are capped at 64 UTF-8 bytes, strings at
+256 UTF-8 bytes, and the normalized mapping at 4 KiB; sensitive or oversized values
+are redacted or replaced before the event crosses Ray.
 
 ## Graph and Progress Schema
 
@@ -559,6 +562,22 @@ collection remain later #79 work; changing
 `WORKFLOW_PROGRESS_FLUSH_SECONDS` only throttles full-mode database snapshots and does
 not remove producer or actor overhead.
 
+Full reporting prepares every data event as canonical identity-bound JSON before the
+Ray call. Event payloads are capped at 16 KiB, complete wire and decoded envelopes at
+32 KiB, and dependency-edge batches at 32 edges. The actor revalidates the complete
+task, attempt, generation, and workflow-run fence before mutation. Its node, edge,
+recent-event, and retained-byte state uses the same V1 limits as durable workflow
+progress, with bounded accepted, rejected, and truncated diagnostics. Descriptive
+metadata is redacted before it crosses Ray.
+
+These bounds close the individual producer-to-actor and retained-collector gap. They
+do not bound the aggregate number or bytes of events already queued in Ray's actor
+mailbox, coalesce repeated producer updates, provide producer backpressure, or provide
+the bounded actor-to-preparation drain needed at the hard V1 ceilings. Those remain
+separate #79 scale and default-activation work. They do not block #212 from proving a
+default-off schema-v3 pilot under stricter admission limits. A bounded event or actor
+snapshot is observational state, not a recovery or flow-control protocol.
+
 ## Durability Semantics
 
 The outer Django task is the durability and retry boundary:
@@ -567,9 +586,11 @@ The outer Django task is the durability and retry boundary:
 - In full reporting mode, an in-memory Ray coordinator collects node events. The outer
   task currently writes a complete progress snapshot to
   `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
-  Recent events have a count cap, but the current node/edge graph and its serialized
-  bytes are not size-bounded. Disabled mode bypasses that coordinator and snapshot
-  path while leaving the durable outer-task boundary intact.
+  Individual producer envelopes and retained actor nodes, edges, events, and bytes are
+  bounded. The aggregate Ray mailbox, snapshot-to-preparer drain, and transient
+  snapshot materialization are not yet governed by the later admission/backpressure
+  contract. Disabled mode bypasses the coordinator, codec, actor, and snapshot path
+  while leaving the durable outer-task boundary intact.
 - A separate nullable `workflow_progress_summary_json` field and schema-v3 codec are
   deployed reader-first. The field is fixed-shape and capped at 16 KiB of canonical
   UTF-8 JSON. Package-owned topology/detail tables and the internal storage writer can
@@ -578,10 +599,13 @@ The outer Django task is the durability and retry boundary:
   topology/detail pointers; it is the only path for an intentional summary-only
   `DISABLED` or `OMITTED_BY_POLICY` record, which creates no empty detail storage.
   Current coordinators intentionally remain schema-v2 writers. Authorized public
-  readers are implemented, but activation still requires #79's live-ingestion bound,
-  #142's composite bounded preparation, and an old-writer drain. Topology preparation
-  already uses ADR-0005's spill-backed package path, while the compatibility result
-  still carries complete observed membership for materialized initial detail.
+  readers are implemented. Issue #212 owns a default-off initial producer that applies
+  admission limits below the hard V1 ceilings, uses the existing compatibility
+  preparer, and is proved through the bundled project and local KubeRay. General or
+  default activation still requires #79's mailbox controls, #142's composite bounded
+  preparation, aggregate spill capacity ownership, and an old-writer drain. Topology
+  preparation already uses ADR-0005's spill-backed package path, while the compatibility
+  result still carries complete observed membership for materialized initial detail.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -646,9 +670,11 @@ Apply database migrations before starting upgraded workers. Migration
 `0013_workflow_progress_detail_storage` adds dormant package-owned topology and detail
 tables. Neither migration rewrites existing `progress_data`; older writers continue to
 work and upgraded readers retain the 64 MiB schema-v1/v2 compatibility cap. Do not
-enable schema-v3 production yet. Deploy the authorized public facade, complete #79's
-live-ingestion bound and #142's composite preparation work, drain old workflow writers,
-and only then activate the new producer.
+enable unguarded schema-v3 production yet. Deploy the authorized public facade and
+bounded ingress first, then use #212's default-off pilot and stricter admission profile
+while old workflow writers drain. Complete #79's remaining mailbox controls, #142's
+composite preparation, and aggregate spill ownership before enabling schema v3 by
+default or admitting workloads near the hard V1 ceilings.
 
 Existing rows start with `workflow_run_id = NULL` and a nullable plan identity so an
 older writer can still insert during the rollout; the first upgraded, fully identified
