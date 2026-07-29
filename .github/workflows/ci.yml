@@ -455,6 +455,7 @@ jobs:
             "django==6.0" \
             "ray[default]==2.53.0" \
             "django-ninja==1.5.1" \
+            "django-unfold==0.102.0" \
             "whitenoise==6.6" \
             "pytest==7.0" \
             "pytest-django==4.7" \

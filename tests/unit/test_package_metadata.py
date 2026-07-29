@@ -69,3 +69,20 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
     assert "textContent" in script
     assert "innerHTML" not in script
     assert all(state in script for state in ("SUCCEEDED", "FAILED", "CANCELLED", "LOST"))
+
+
+def test_unfold_is_testproject_only_and_reproducibly_pinned() -> None:
+    """The modern sample admin must not become a required package dependency."""
+    project_root = Path(__file__).parents[2]
+    config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = config["project"]
+    unfold_requirement = "django-unfold==0.102.0"
+
+    assert all("django-unfold" not in requirement for requirement in project["dependencies"])
+    assert unfold_requirement in project["optional-dependencies"]["sample"]
+    assert unfold_requirement in config["dependency-groups"]["dev"]
+    assert all(
+        all("django-unfold" not in requirement for requirement in requirements)
+        for extra, requirements in project["optional-dependencies"].items()
+        if extra != "sample"
+    )

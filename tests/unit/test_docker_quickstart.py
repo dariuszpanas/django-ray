@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,6 +30,19 @@ class _Response:
 
     def __exit__(self, *_args: object) -> None:
         return None
+
+
+class _TextResponse(_Response):
+    def __init__(
+        self,
+        value: str,
+        *,
+        status: int = 200,
+        content_type: str = "text/html; charset=utf-8",
+    ) -> None:
+        self.status = status
+        self.headers = {"Content-Type": content_type}
+        self._body = io.BytesIO(value.encode())
 
 
 def _compose() -> dict[str, Any]:
@@ -164,6 +178,159 @@ def test_request_json_sends_bearer_token_without_putting_it_in_url(
     assert captured_request.full_url == "http://web:8000/api/executions"
     assert captured_request.get_header("Authorization") == "Bearer private-token"
     assert "private-token" not in captured_request.full_url
+
+
+def test_admin_text_request_keeps_session_cookie_out_of_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_request: Any = None
+
+    def open_request(request, *, timeout):
+        nonlocal captured_request
+        captured_request = request
+        assert timeout == docker_smoke._REQUEST_TIMEOUT_SECONDS
+        return _TextResponse("<html>django-ray</html>")
+
+    monkeypatch.setattr(docker_smoke.urllib.request, "urlopen", open_request)
+
+    body = docker_smoke._request_text(
+        "http://web:8000",
+        "/admin/",
+        headers={"Cookie": "sessionid=private-session"},
+    )
+
+    assert body == "<html>django-ray</html>"
+    assert captured_request is not None
+    assert captured_request.full_url == "http://web:8000/admin/"
+    assert captured_request.get_header("Cookie") == "sessionid=private-session"
+    assert "private-session" not in captured_request.full_url
+
+
+@pytest.mark.parametrize("path", ["admin/", "https://example.com/admin/"])
+def test_admin_text_request_rejects_nonlocal_paths(path: str) -> None:
+    with pytest.raises(docker_smoke.DockerSmokeError, match="local absolute path"):
+        docker_smoke._request_text("http://web:8000", path)
+
+
+def test_unfold_stylesheet_match_accepts_manifest_hash() -> None:
+    match = docker_smoke._UNFOLD_STYLESHEET_RE.search(
+        '<link href="/static/unfold/css/styles.0123456789ab.css" rel="stylesheet">'
+    )
+
+    assert match is not None
+    assert match.group("path") == "/static/unfold/css/styles.0123456789ab.css"
+
+
+def test_admin_text_request_uses_remaining_shared_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_time = 100.0
+
+    def open_request(_request, *, timeout):
+        assert timeout == pytest.approx(0.25)
+        return _TextResponse("body", content_type="text/css; charset=utf-8")
+
+    monkeypatch.setattr(docker_smoke.time, "monotonic", lambda: current_time)
+    monkeypatch.setattr(docker_smoke.urllib.request, "urlopen", open_request)
+
+    assert (
+        docker_smoke._request_text(
+            "http://web:8000",
+            "/static/unfold/css/styles.0123456789ab.css",
+            expected_content_type="text/css",
+            deadline=current_time + 0.25,
+        )
+        == "body"
+    )
+
+
+def test_admin_text_request_rejects_expired_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(docker_smoke.time, "monotonic", lambda: 100.0)
+
+    with pytest.raises(docker_smoke.DockerSmokeError, match="deadline expired"):
+        docker_smoke._request_text(
+            "http://web:8000",
+            "/admin/",
+            deadline=99.0,
+        )
+
+
+def test_admin_text_request_rejects_wrong_static_content_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        docker_smoke.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _TextResponse("<html>redirected</html>"),
+    )
+
+    with pytest.raises(docker_smoke.DockerSmokeError, match="expected text/css"):
+        docker_smoke._request_text(
+            "http://web:8000",
+            "/static/unfold/css/styles.0123456789ab.css",
+            expected_content_type="text/css",
+        )
+
+
+def test_admin_smoke_cleanup_attempts_user_delete_when_session_delete_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import django.contrib.auth
+    import django.contrib.sessions.backends.db
+
+    cleanup_events: list[str] = []
+
+    class FakeUser:
+        pk = 1
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def set_unusable_password(self) -> None:
+            pass
+
+        def save(self) -> None:
+            cleanup_events.append("user-save")
+
+        def delete(self) -> None:
+            cleanup_events.append("user-delete")
+
+        def get_session_auth_hash(self) -> str:
+            return "session-hash"
+
+    class FakeSession(dict[str, str]):
+        session_key = "session-key"
+
+        def save(self) -> None:
+            cleanup_events.append("session-save")
+
+        def delete(self, session_key: str) -> None:
+            assert session_key == self.session_key
+            cleanup_events.append("session-delete")
+            raise RuntimeError("session cleanup failed")
+
+    def fail_request(*_args: object, **_kwargs: object) -> str:
+        raise docker_smoke.DockerSmokeError("admin request failed")
+
+    monkeypatch.setattr(django.contrib.auth, "get_user_model", lambda: FakeUser)
+    monkeypatch.setattr(django.contrib.sessions.backends.db, "SessionStore", FakeSession)
+    monkeypatch.setattr(docker_smoke, "_request_text", fail_request)
+
+    with pytest.raises(RuntimeError, match="session cleanup failed"):
+        docker_smoke._verify_unfold_admin_contract(
+            base_url="http://web:8000",
+            deadline=docker_smoke.time.monotonic() + 5,
+            execution=SimpleNamespace(pk=1, state="QUEUED"),
+        )
+
+    assert cleanup_events == [
+        "user-save",
+        "session-save",
+        "session-delete",
+        "user-delete",
+    ]
 
 
 def test_response_json_rejects_oversized_payload() -> None:

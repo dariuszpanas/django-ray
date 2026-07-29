@@ -622,6 +622,7 @@ s3 = [
 ]
 sample = [
     { name = "django-ninja" },
+    { name = "django-unfold" },
     { name = "gunicorn" },
     { name = "whitenoise" },
 ]
@@ -629,6 +630,7 @@ sample = [
 [package.dev-dependencies]
 dev = [
     { name = "django-ninja" },
+    { name = "django-unfold" },
     { name = "locust" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -647,6 +649,7 @@ requires-dist = [
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
     { name = "django", specifier = ">=6.0" },
     { name = "django-ninja", marker = "extra == 'sample'", specifier = ">=1.5.1" },
+    { name = "django-unfold", marker = "extra == 'sample'", specifier = "==0.102.0" },
     { name = "google-cloud-storage", marker = "extra == 'gcs'", specifier = ">=2.18" },
     { name = "google-cloud-storage", marker = "extra == 'object-storage'", specifier = ">=2.18" },
     { name = "gunicorn", marker = "extra == 'sample'", specifier = ">=23.0" },
@@ -659,6 +662,7 @@ provides-extras = ["postgres", "s3", "gcs", "object-storage", "sample"]
 [package.metadata.requires-dev]
 dev = [
     { name = "django-ninja", specifier = ">=1.5.1" },
+    { name = "django-unfold", specifier = "==0.102.0" },
     { name = "locust", specifier = ">=2.20" },
     { name = "pytest", specifier = ">=7.0" },
     { name = "pytest-cov", specifier = ">=4.0" },
@@ -669,6 +673,18 @@ dev = [
     { name = "ty", specifier = ">=0.0.12" },
     { name = "whitenoise", specifier = ">=6.6" },
     { name = "zensical", specifier = ">=0.0.42" },
+]
+
+[[package]]
+name = "django-unfold"
+version = "0.102.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6f/97/55babd6f07f510bb94adb95998fc302d28eaa33c4ef8a1e8015645b5c0ab/django_unfold-0.102.0.tar.gz", hash = "sha256:85162f48e402588863d9ae3c963d589535499f7326965899108c705f6b2586cf", size = 1125669, upload-time = "2026-07-27T08:49:55.239Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/a4/005e13a319d04eeba442f7923a63ce6a438939e209644671598ddcfb0f8f/django_unfold-0.102.0-py3-none-any.whl", hash = "sha256:08ac9f05331a8923b62f26fe7c82758cfd15cebc5c686e262127dab2553b43ab", size = 1252897, upload-time = "2026-07-27T08:49:53.501Z" },
 ]
 
 [[package]]
