@@ -876,15 +876,6 @@ class TestRayTaskExecutionAdmin:
             kwargs_json="{}",
         )
 
-        seen_handles: list[str] = []
-
-        class FakeRunner:
-            def cancel(self, handle) -> bool:
-                seen_handles.append(str(handle.ray_job_id))
-                return True
-
-        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
-
         qs = RayTaskExecution.objects.filter(
             pk__in=[queued.pk, running_ray_job.pk, running_core.pk]
         )
@@ -898,8 +889,11 @@ class TestRayTaskExecutionAdmin:
         assert queued.finished_at is not None
         assert running_ray_job.state == TaskState.CANCELLING
         assert running_core.state == TaskState.CANCELLING
-        assert seen_handles == ["raysubmit_cancel_admin"]
-        assert messages[-1] == "Marked 3 task(s) for cancellation. Attempted to stop 1 Ray job(s)."
+        assert TaskAttempt.objects.get(execution=queued).state == TaskState.CANCELLED
+        assert messages[-1] == (
+            "Accepted cancellation for 3 task(s). "
+            "Workers will attempt best-effort interruption for running work."
+        )
 
     def test_cancel_tasks_noop_when_nothing_cancellable(self, monkeypatch) -> None:
         admin_obj = _task_admin()
@@ -917,9 +911,9 @@ class TestRayTaskExecutionAdmin:
         )
 
         admin_obj.cancel_tasks(_request(), RayTaskExecution.objects.filter(pk=failed.pk))
-        assert messages[-1] == "No queued or running tasks found in selection."
+        assert messages[-1] == "No selected tasks accepted cancellation."
 
-    def test_cancel_tasks_continues_when_ray_job_cancellation_fails(self, monkeypatch) -> None:
+    def test_cancel_tasks_reports_duplicate_request_as_noop(self, monkeypatch) -> None:
         admin_obj = _task_admin()
         messages: list[str] = []
         monkeypatch.setattr(
@@ -927,24 +921,18 @@ class TestRayTaskExecutionAdmin:
         )
 
         task = RayTaskExecution.objects.create(
-            task_id="admin-cancel-failure-001",
+            task_id="admin-cancel-duplicate-001",
             callable_path="testproject.tasks.slow_task",
-            state=TaskState.RUNNING,
-            ray_job_id="raysubmit_cancel_failure",
+            state=TaskState.CANCELLING,
             args_json="[]",
             kwargs_json="{}",
         )
 
-        class FailingRunner:
-            def cancel(self, handle) -> bool:
-                raise RuntimeError("Ray is unavailable")
-
-        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FailingRunner)
         admin_obj.cancel_tasks(_request(), RayTaskExecution.objects.filter(pk=task.pk))
 
         task.refresh_from_db()
         assert task.state == TaskState.CANCELLING
-        assert messages[-1] == "Marked 1 task(s) for cancellation."
+        assert messages[-1] == "No selected tasks accepted cancellation."
 
 
 @pytest.mark.django_db

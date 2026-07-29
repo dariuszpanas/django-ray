@@ -585,7 +585,10 @@ def test_fenced_summary_writer_is_monotonic_idempotent_and_exact(running_executi
     identity = _identity(running_execution)
     first = _summary(identity)
 
+    assert running_execution.last_heartbeat_at is None
     assert persist_workflow_progress_summary(identity, first) is True
+    running_execution.refresh_from_db()
+    assert running_execution.last_heartbeat_at is not None
     assert persist_workflow_progress_summary(identity, first) is True
 
     conflicting = _summary(identity)
@@ -1275,6 +1278,7 @@ def test_terminal_lifecycle_transitions_derive_one_bounded_terminal_summary(
         running_execution.save(update_fields=["timeout_seconds"])
         assert mark_task_timed_out(running_execution)
     else:
+        running_execution.refresh_from_db()
         assert mark_task_lost(running_execution)
 
     running_execution.refresh_from_db()
@@ -1372,6 +1376,7 @@ def test_lifecycle_reserves_final_revision_and_sets_published_detail_expiry(
     )
     assert _persist_locked_summary(identity, running)
 
+    running_execution.refresh_from_db()
     assert mark_task_lost(running_execution)
 
     attempt = TaskAttempt.objects.get(execution=running_execution, attempt_number=2)
@@ -1395,6 +1400,7 @@ def test_lifecycle_derives_expiry_at_protocol_timestamp_boundary(running_executi
     running["retention"]["detail_days"] = WORKFLOW_PROGRESS_DETAIL_RETENTION_MAX_DAYS
     assert _persist_locked_summary(identity, running)
 
+    running_execution.refresh_from_db()
     assert mark_task_lost(running_execution)
 
     attempt = TaskAttempt.objects.get(execution=running_execution, attempt_number=2)
@@ -1441,6 +1447,7 @@ def test_outer_terminal_outcome_overrides_conflicting_accepted_summary(
         _summary(identity, state="SUCCEEDED"),
     )
 
+    running_execution.refresh_from_db()
     assert mark_task_lost(running_execution)
 
     running_execution.refresh_from_db()
@@ -1458,6 +1465,7 @@ def test_retry_preserves_an_already_archived_terminal_summary(running_execution)
     terminal = _summary(identity, state="LOST")
     serialized = serialize_workflow_progress_summary(terminal)
     assert persist_workflow_progress_summary(identity, terminal)
+    running_execution.refresh_from_db()
     assert mark_task_lost(running_execution)
     RayTaskExecution.objects.filter(pk=running_execution.pk).update(
         workflow_progress_summary_json="{}"

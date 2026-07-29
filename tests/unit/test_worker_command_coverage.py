@@ -13,6 +13,7 @@ import pytest
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.runner.cancellation import CancellationOutcomeStatus
+from django_ray.runner.ray_core import RayCoreCompletion, RayCoreHandle
 
 
 class CapturingStdout:
@@ -41,6 +42,17 @@ def _make_command(worker_id: str = "worker-coverage") -> Command:
     cmd.sync_mode = False
     cmd.ray_core_runner = None
     return cmd
+
+
+def _pending_handle(task: RayTaskExecution) -> RayCoreHandle:
+    return RayCoreHandle(
+        task_pk=task.pk,
+        object_ref=object(),
+        submitted_at=datetime.now(UTC),
+        task_name="test",
+        attempt_number=task.attempt_number,
+        execution_generation=task.execution_generation,
+    )
 
 
 def _worker_options(**overrides: Any) -> dict[str, Any]:
@@ -346,6 +358,8 @@ class TestWorkerCommandCoverage:
             ray_job_id="raysubmit_coverage",
             ray_address="ray://cluster:10001",
             started_at=None,
+            attempt_number=1,
+            execution_generation=0,
         )
 
         class UnavailableRayJobRunner:
@@ -356,13 +370,23 @@ class TestWorkerCommandCoverage:
         remote_outcome = cmd._request_cancellation_for_task(remote_task)
 
         class FailingRayCoreRunner:
-            pending_task_ids = (2,)
+            pending_handle = object()
 
-            def cancel(self, _handle: object) -> bool:
+            def get_pending_handle(self, *_args: Any, **_kwargs: Any) -> object:
+                return self.pending_handle
+
+            def cancel_pending(self, _handle: object) -> bool:
                 raise RuntimeError("driver disconnected")
 
         cmd.ray_core_runner = cast(Any, FailingRayCoreRunner())
-        core_task = SimpleNamespace(pk=2, ray_job_id="", ray_address="", started_at=None)
+        core_task = SimpleNamespace(
+            pk=2,
+            ray_job_id="",
+            ray_address="",
+            started_at=None,
+            attempt_number=1,
+            execution_generation=0,
+        )
         core_outcome = cmd._request_cancellation_for_task(core_task)
 
         assert remote_outcome.status == CancellationOutcomeStatus.INDETERMINATE
@@ -385,8 +409,19 @@ class TestWorkerCommandCoverage:
 
         class RayCoreRunner:
             pending_task_ids = (999999, queued_task.pk)
+            pending_task_handles = (
+                RayCoreHandle(
+                    task_pk=999999,
+                    object_ref=object(),
+                    submitted_at=datetime.now(UTC),
+                    task_name="missing",
+                    attempt_number=1,
+                    execution_generation=0,
+                ),
+                _pending_handle(queued_task),
+            )
 
-            def cancel(self, handle: object) -> bool:
+            def cancel_pending(self, handle: object) -> bool:
                 cancellation_calls.append(handle)
                 return True
 
@@ -397,6 +432,44 @@ class TestWorkerCommandCoverage:
         cmd._prepare_shutdown_handoff()
 
         assert cancellation_calls == []
+
+    @pytest.mark.django_db
+    def test_shutdown_handoff_does_not_cancel_replacement_attempt(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="coverage-shutdown-stale-attempt-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            claimed_by_worker="worker-coverage",
+            attempt_number=2,
+            execution_generation=7,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        stale_handle = RayCoreHandle(
+            task_pk=task.pk,
+            object_ref=object(),
+            submitted_at=datetime.now(UTC),
+            task_name="stale",
+            attempt_number=1,
+            execution_generation=7,
+        )
+
+        class RayCoreRunner:
+            pending_task_handles = (stale_handle,)
+
+            def cancel_pending(self, _handle: object) -> bool:
+                pytest.fail("shutdown must not cancel a replacement attempt")
+
+        cmd = _make_command()
+        cmd.execution_mode = "local"
+        cmd.ray_core_runner = cast(Any, RayCoreRunner())
+
+        cmd._prepare_shutdown_handoff()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.attempt_number == 2
 
     def test_shutdown_logs_lease_and_ray_disconnect_failures(self, monkeypatch) -> None:
         cmd = _make_command()
@@ -454,35 +527,44 @@ class TestWorkerCommandCoverage:
         assert task.state == TaskState.QUEUED
         assert processed == []
 
-    def test_sync_execution_stops_when_a_stale_success_cannot_be_persisted(
-        self, monkeypatch
-    ) -> None:
-        task = SimpleNamespace(
-            pk=1,
+    @pytest.mark.django_db
+    def test_sync_execution_ignores_replacement_completion(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="coverage-sync-stale-success-001",
             callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
             args_json="[1, 2]",
             kwargs_json="{}",
-            result_data=None,
-            result_reference=None,
+            attempt_number=1,
+            execution_generation=7,
         )
         cmd = _make_command()
-        monkeypatch.setattr(
-            "django_ray.runtime.entrypoint.execute_task",
-            lambda **_kwargs: '{"success": true, "result": 3}',
-        )
+
+        def replace_before_return(**_kwargs: Any) -> str:
+            RayTaskExecution.objects.filter(pk=task.pk).update(
+                attempt_number=2,
+                claimed_by_worker="replacement-worker",
+            )
+            return '{"success": true, "result": 3}'
+
+        monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", replace_before_return)
         monkeypatch.setattr(
             cmd,
             "_store_task_result",
-            lambda current, result: setattr(current, "result_data", str(result)),
-        )
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.succeed_task",
-            lambda *_args, **_kwargs: False,
+            lambda *_args, **_kwargs: pytest.fail(
+                "a stale synchronous result must not reach result storage"
+            ),
         )
 
         cmd.execute_task_sync(task)
 
-        assert task.result_data == "3"
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.attempt_number == 2
+        assert task.execution_generation == 7
+        assert task.claimed_by_worker == "replacement-worker"
+        assert task.result_data is None
+        assert "Ignoring stale synchronous result" in cmd.stdout.getvalue()
 
     def test_failure_handler_reports_unhandled_stale_task_update(self, monkeypatch) -> None:
         cmd = _make_command()
@@ -499,7 +581,9 @@ class TestWorkerCommandCoverage:
         assert cmd._handle_task_failure(task, "stale update") is False
 
     @pytest.mark.django_db
-    def test_polling_stops_after_stale_success_update(self, monkeypatch) -> None:
+    def test_polling_terminal_write_rejects_replacement_after_result_storage(
+        self, monkeypatch
+    ) -> None:
         task = RayTaskExecution.objects.create(
             task_id="coverage-poll-stale-success-001",
             callable_path="testproject.tasks.add_numbers",
@@ -512,26 +596,40 @@ class TestWorkerCommandCoverage:
         class RayCoreRunner:
             pending_count = 1
             pending_task_ids = (task.pk,)
+            pending_task_handles = (_pending_handle(task),)
 
-            def poll_completed(self) -> list[tuple[int, str]]:
-                return [(task.pk, '{"success": true, "result": 3}')]
+            def poll_completed(self) -> list[RayCoreCompletion]:
+                return [
+                    RayCoreCompletion(
+                        task_pk=task.pk,
+                        attempt_number=task.attempt_number,
+                        execution_generation=task.execution_generation,
+                        result_json='{"success": true, "result": 3}',
+                    )
+                ]
 
         cmd = _make_command()
         cmd.ray_core_runner = cast(Any, RayCoreRunner())
         monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
-        monkeypatch.setattr(
-            cmd,
-            "_store_task_result",
-            lambda current, result: setattr(current, "result_data", str(result)),
-        )
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.succeed_task",
-            lambda *_args, **_kwargs: False,
-        )
+
+        def replace_during_result_storage(current, result) -> None:
+            current.result_data = str(result)
+            RayTaskExecution.objects.filter(pk=current.pk).update(
+                attempt_number=2,
+                claimed_by_worker="replacement-worker",
+            )
+
+        monkeypatch.setattr(cmd, "_store_task_result", replace_during_result_storage)
 
         cmd.poll_ray_core_tasks()
 
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.attempt_number == 2
+        assert task.claimed_by_worker == "replacement-worker"
+        assert task.result_data is None
         assert "completed:" not in cmd.stdout.getvalue()
+        assert "changed while its Ray Core result was being stored" in cmd.stdout.getvalue()
 
     @pytest.mark.django_db
     def test_reconciliation_skips_healthy_owners_and_logs_orphan_errors(self, monkeypatch) -> None:
@@ -605,6 +703,7 @@ class TestWorkerCommandCoverage:
 
         class RayCoreRunner:
             pending_task_ids = (task.pk,)
+            pending_task_handles = (_pending_handle(task),)
 
         cmd = _make_command()
         cmd.ray_core_runner = cast(Any, RayCoreRunner())
@@ -622,6 +721,46 @@ class TestWorkerCommandCoverage:
 
         task.refresh_from_db()
         assert task.state == TaskState.RUNNING
+
+    @pytest.mark.django_db
+    def test_stale_monitored_ray_core_task_remains_owned_by_exact_handle(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="coverage-stale-ray-core-monitor-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            claimed_by_worker="worker-coverage",
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        pending_handle = _pending_handle(task)
+
+        class RayCoreRunner:
+            pending_task_ids = (task.pk,)
+            pending_task_handles = (pending_handle,)
+
+        cmd = _make_command()
+        cmd.ray_core_runner = cast(Any, RayCoreRunner())
+        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.is_task_timed_out",
+            lambda _task: False,
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.is_task_stuck",
+            lambda _task: True,
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.mark_task_lost",
+            lambda _task: pytest.fail("an exact pending handle must bypass LOST recovery"),
+        )
+
+        assert cmd.detect_stuck_tasks() == 0
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.attempt_number == pending_handle.attempt_number
+        assert task.execution_generation == pending_handle.execution_generation
 
     @pytest.mark.django_db
     def test_orphan_cancellation_claim_does_not_overwrite_a_concurrent_owner(self) -> None:
@@ -649,18 +788,52 @@ class TestWorkerCommandCoverage:
 
     def test_ray_core_cancellation_reports_an_accepted_request(self) -> None:
         class RayCoreRunner:
-            pending_task_ids = (1,)
+            pending_handle = object()
 
-            def cancel(self, _handle: object) -> bool:
+            def get_pending_handle(self, *_args: Any, **_kwargs: Any) -> object:
+                return self.pending_handle
+
+            def cancel_pending(self, _handle: object) -> bool:
                 return True
 
         cmd = _make_command()
         cmd.ray_core_runner = cast(Any, RayCoreRunner())
-        task = SimpleNamespace(pk=1, ray_job_id="", ray_address="", started_at=None)
+        task = SimpleNamespace(
+            pk=1,
+            ray_job_id="",
+            ray_address="",
+            started_at=None,
+            attempt_number=1,
+            execution_generation=0,
+        )
 
         outcome = cmd._request_cancellation_for_task(task)
 
         assert outcome.status == CancellationOutcomeStatus.REQUESTED
+
+    def test_ray_core_cancellation_does_not_target_mismatched_handle(self) -> None:
+        class RayCoreRunner:
+            def get_pending_handle(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+            def cancel_pending(self, _handle: object) -> bool:
+                pytest.fail("a mismatched Ray Core handle must not be cancelled")
+
+        cmd = _make_command()
+        cmd.ray_core_runner = cast(Any, RayCoreRunner())
+        task = SimpleNamespace(
+            pk=1,
+            ray_job_id="ray_core:1",
+            ray_address="ray://old-driver:10001",
+            started_at=None,
+            attempt_number=2,
+            execution_generation=7,
+        )
+
+        outcome = cmd._request_cancellation_for_task(task)
+
+        assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+        assert "Exact Ray Core handle unavailable" in (outcome.message or "")
 
     def test_sync_shutdown_handoff_is_a_noop(self) -> None:
         cmd = _make_command()
@@ -683,8 +856,9 @@ class TestWorkerCommandCoverage:
 
         class FailingRayCoreRunner:
             pending_task_ids = (task.pk,)
+            pending_task_handles = (_pending_handle(task),)
 
-            def cancel(self, _handle: object) -> bool:
+            def cancel_pending(self, _handle: object) -> bool:
                 raise RuntimeError("driver disconnected")
 
         cmd = _make_command()

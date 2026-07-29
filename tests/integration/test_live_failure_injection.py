@@ -180,6 +180,8 @@ class TestLiveFailureInjection:
             object_ref=object_ref,
             submitted_at=datetime.now(UTC),
             task_name="live_sleep",
+            attempt_number=task.attempt_number,
+            execution_generation=task.execution_generation,
         )
 
         live_ray_cluster.shutdown()
@@ -213,6 +215,8 @@ class TestLiveFailureInjection:
             object_ref=object_ref,
             submitted_at=datetime.now(UTC),
             task_name="live_sleep",
+            attempt_number=task.attempt_number,
+            execution_generation=task.execution_generation,
         )
         cmd.active_tasks[task.pk] = f"ray_core:{task.pk}"
 

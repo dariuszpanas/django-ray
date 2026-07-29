@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 import pytest
@@ -15,6 +16,7 @@ from django_ray.models import (
     WorkflowProgressNodeState,
     WorkflowProgressRunStorage,
 )
+from django_ray.runner.reconciliation import mark_task_lost
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
     DurableTaskContext,
@@ -25,6 +27,7 @@ from django_ray.workflow_progress import (
     claim_workflow_run,
     persist_workflow_progress,
     pin_workflow_plan,
+    refresh_workflow_run_activity,
 )
 
 
@@ -181,13 +184,64 @@ def test_new_invocation_fences_an_older_writer_in_the_same_attempt() -> None:
     replacement = _identity(execution, "00000000-0000-0000-0000-000000000002")
 
     assert claim_workflow_run(old) is True
+    RayTaskExecution.objects.filter(pk=execution.pk).update(last_heartbeat_at=None)
     assert persist_workflow_progress(old, _snapshot(old)) is True
+    execution.refresh_from_db()
+    assert execution.last_heartbeat_at is not None
     assert claim_workflow_run(replacement) is True
     assert persist_workflow_progress(old, _snapshot(old, revision=2)) is False
 
     execution.refresh_from_db()
     assert str(execution.workflow_run_id) == replacement.run_id
     assert execution.progress_data is None
+
+
+@pytest.mark.django_db
+def test_workflow_run_claim_refreshes_activity_and_fences_stale_lost() -> None:
+    observed_heartbeat = datetime.now(UTC) - timedelta(minutes=10)
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-run-claim-activity",
+        callable_path="tests.unit.test_workflows.increment",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=5,
+        last_heartbeat_at=observed_heartbeat,
+    )
+    stale_lost_snapshot = RayTaskExecution.objects.get(pk=execution.pk)
+    identity = _identity(execution, "00000000-0000-0000-0000-000000000008")
+
+    assert claim_workflow_run(identity) is True
+    assert mark_task_lost(stale_lost_snapshot) is False
+
+    execution.refresh_from_db()
+    assert execution.state == TaskState.RUNNING
+    assert execution.last_heartbeat_at is not None
+    assert execution.last_heartbeat_at > observed_heartbeat
+
+
+@pytest.mark.django_db
+def test_current_run_activity_refresh_fences_stale_lost_before_leaf_submission() -> None:
+    observed_heartbeat = datetime.now(UTC) - timedelta(minutes=10)
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-run-post-package-activity",
+        callable_path="tests.unit.test_workflows.increment",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=5,
+        last_heartbeat_at=observed_heartbeat,
+    )
+    identity = _identity(execution, "00000000-0000-0000-0000-000000000009")
+    assert claim_workflow_run(identity) is True
+    RayTaskExecution.objects.filter(pk=execution.pk).update(last_heartbeat_at=observed_heartbeat)
+    stale_lost_snapshot = RayTaskExecution.objects.get(pk=execution.pk)
+
+    assert refresh_workflow_run_activity(identity) is True
+    assert mark_task_lost(stale_lost_snapshot) is False
+
+    execution.refresh_from_db()
+    assert execution.state == TaskState.RUNNING
+    assert execution.last_heartbeat_at is not None
+    assert execution.last_heartbeat_at > observed_heartbeat
 
 
 @pytest.mark.django_db

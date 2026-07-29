@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
 
 
-@dataclass
+@dataclass(frozen=True)
 class RayCoreHandle:
     """Handle for tracking Ray Core task execution."""
 
@@ -24,6 +24,25 @@ class RayCoreHandle:
     task_name: str
     ray_job_id: str = ""  # The worker's Ray job ID (e.g., "02000000")
     ray_task_id: str = ""  # The task's Ray ID (e.g., "67a2e8cfa5a06db3ffff...")
+    attempt_number: int = field(kw_only=True)
+    execution_generation: int = field(kw_only=True)
+
+
+@dataclass(frozen=True)
+class RayCoreCompletion:
+    """Result envelope tied to the exact durable execution submitted to Ray."""
+
+    task_pk: int
+    attempt_number: int
+    execution_generation: int
+    result_json: str
+
+
+@dataclass
+class _RayCoreSubmissionHandle(SubmissionHandle):
+    """Submission handle carrying an in-memory capability for one exact task."""
+
+    pending_handle: RayCoreHandle
 
 
 # Global remote function cache to prevent Ray GCS memory leaks.
@@ -128,6 +147,14 @@ class RayCoreRunner(BaseRunner):
         Returns:
             SubmissionHandle for tracking the task.
         """
+        existing_handle = self._pending_tasks.get(task_execution.pk)
+        if existing_handle is not None:
+            raise RuntimeError(
+                f"Task execution {task_execution.pk} already has a pending Ray Core "
+                f"submission for attempt {existing_handle.attempt_number}, generation "
+                f"{existing_handle.execution_generation}"
+            )
+
         import ray
 
         from django_ray.runtime.serialization import serialize_args
@@ -205,6 +232,8 @@ class RayCoreRunner(BaseRunner):
 
         # Submit to Ray (non-blocking)
         submitted_at = datetime.now(UTC)
+        submitted_attempt_number = int(task_execution.attempt_number)
+        submitted_execution_generation = int(task_execution.execution_generation)
         try:
             object_ref = execute_django_task.remote(
                 callable_path,
@@ -214,8 +243,8 @@ class RayCoreRunner(BaseRunner):
                 runtime_env.profile,
                 runtime_env.digest,
                 input_reference,
-                attempt_number=getattr(task_execution, "attempt_number", None),
-                execution_generation=getattr(task_execution, "execution_generation", None),
+                attempt_number=submitted_attempt_number,
+                execution_generation=submitted_execution_generation,
                 runtime_env_plan_identity=snapshot_runtime_env_identity.as_transport_dict(),
                 compiled_graph_submission_transport=_compiled_graph_submission_transport(ray),
             )
@@ -246,6 +275,8 @@ class RayCoreRunner(BaseRunner):
             object_ref=object_ref,
             submitted_at=submitted_at,
             task_name=task_name,
+            attempt_number=submitted_attempt_number,
+            execution_generation=submitted_execution_generation,
             ray_job_id=ray_job_id,
             ray_task_id=ray_task_id,
         )
@@ -260,10 +291,11 @@ class RayCoreRunner(BaseRunner):
         )
 
         # Return a SubmissionHandle for compatibility with BaseRunner interface
-        return SubmissionHandle(
+        return _RayCoreSubmissionHandle(
             ray_job_id=composite_id,
             ray_address=os.environ.get("RAY_ADDRESS", "auto"),
             submitted_at=submitted_at,
+            pending_handle=handle,
         )
 
     @staticmethod
@@ -290,6 +322,14 @@ class RayCoreRunner(BaseRunner):
 
         return None
 
+    @staticmethod
+    def _is_canonical_handle_id(handle_id: str) -> bool:
+        """Return whether an ID has the supported Ray job/task composite shape."""
+        if handle_id.startswith(("ray_core:", "raysubmit_")):
+            return False
+        job_id, separator, task_id = handle_id.partition(":")
+        return bool(separator and job_id and task_id)
+
     def get_status(self, handle: SubmissionHandle) -> JobInfo:
         """Get status of a Ray Core task.
 
@@ -301,17 +341,48 @@ class RayCoreRunner(BaseRunner):
         """
         import ray
 
-        task_pk = self._resolve_task_pk(handle.ray_job_id)
-        if task_pk is None:
-            return JobInfo(
-                job_id=handle.ray_job_id, status=JobStatus.FAILED, message="Invalid handle format"
-            )
+        if isinstance(handle, _RayCoreSubmissionHandle):
+            core_handle = handle.pending_handle
+            current_handle = self._pending_tasks.get(core_handle.task_pk)
+            if current_handle is not core_handle:
+                return JobInfo(
+                    job_id=handle.ray_job_id,
+                    status=JobStatus.UNKNOWN,
+                    message=(
+                        "Submission handle is no longer tracked"
+                        if current_handle is None
+                        else "Submission handle no longer identifies the pending task"
+                    ),
+                )
+            task_pk = core_handle.task_pk
+        else:
+            task_pk = self._resolve_task_pk(handle.ray_job_id)
+            if task_pk is None:
+                if self._is_canonical_handle_id(handle.ray_job_id):
+                    return JobInfo(
+                        job_id=handle.ray_job_id,
+                        status=JobStatus.UNKNOWN,
+                        message="Submission handle is not tracked by this runner",
+                    )
+                return JobInfo(
+                    job_id=handle.ray_job_id,
+                    status=JobStatus.FAILED,
+                    message="Invalid handle format",
+                )
 
-        if task_pk not in self._pending_tasks:
-            # Task not tracked - might be completed and removed
-            return JobInfo(job_id=handle.ray_job_id, status=JobStatus.SUCCEEDED)
-
-        core_handle = self._pending_tasks[task_pk]
+            if handle.ray_job_id.startswith("ray_core:"):
+                if task_pk not in self._pending_tasks:
+                    return JobInfo(
+                        job_id=handle.ray_job_id,
+                        status=JobStatus.UNKNOWN,
+                        message="Legacy handle lacks exact submission identity",
+                    )
+                return JobInfo(
+                    job_id=handle.ray_job_id,
+                    status=JobStatus.UNKNOWN,
+                    message="Legacy handle lacks exact submission identity",
+                )
+            core_handle = self._pending_tasks[task_pk]
 
         # Check if task is ready (non-blocking)
         ready, _ = ray.wait([core_handle.object_ref], timeout=0)
@@ -325,7 +396,8 @@ class RayCoreRunner(BaseRunner):
             result = json.loads(result_json)
 
             # Remove from pending
-            del self._pending_tasks[task_pk]
+            if self._pending_tasks.get(task_pk) is core_handle:
+                self._pending_tasks.pop(task_pk, None)
 
             if result.get("success"):
                 return JobInfo(
@@ -339,7 +411,8 @@ class RayCoreRunner(BaseRunner):
                 )
         except Exception as e:
             # Remove from pending on error
-            self._pending_tasks.pop(task_pk, None)
+            if self._pending_tasks.get(task_pk) is core_handle:
+                self._pending_tasks.pop(task_pk, None)
             return JobInfo(job_id=handle.ray_job_id, status=JobStatus.FAILED, message=str(e))
 
     def cancel(self, handle: SubmissionHandle) -> bool:
@@ -354,28 +427,60 @@ class RayCoreRunner(BaseRunner):
         Returns:
             True if cancellation was initiated.
         """
-        import ray
-        from ray.exceptions import RayTaskError
+        if isinstance(handle, _RayCoreSubmissionHandle):
+            return self.cancel_pending(handle.pending_handle)
 
         task_pk = self._resolve_task_pk(handle.ray_job_id)
         if task_pk is None:
             return False
 
+        # A persisted legacy ID names only a database row, not one exact
+        # in-memory Ray submission. Durable task controls resolve the current
+        # attempt and generation through get_pending_handle()/cancel_pending().
+        if handle.ray_job_id.startswith("ray_core:"):
+            return False
+
         if task_pk not in self._pending_tasks:
             return False
 
-        core_handle = self._pending_tasks[task_pk]
+        return self.cancel_pending(self._pending_tasks[task_pk])
 
+    def cancel_pending(self, handle: RayCoreHandle) -> bool:
+        """Cancel exactly one still-current pending handle."""
+        import ray
+        from ray.exceptions import RayTaskError
+
+        if self._pending_tasks.get(handle.task_pk) is not handle:
+            return False
         try:
             # Use force=False for graceful cancellation
             # This raises TaskCancelledError in the task instead of killing the worker
-            ray.cancel(core_handle.object_ref, force=False)
-            del self._pending_tasks[task_pk]
+            ray.cancel(handle.object_ref, force=False)
+            if self._pending_tasks.get(handle.task_pk) is handle:
+                self._pending_tasks.pop(handle.task_pk, None)
             return True
         except (RuntimeError, RayTaskError):
             # Task may have already completed or failed
-            self._pending_tasks.pop(task_pk, None)
+            if self._pending_tasks.get(handle.task_pk) is handle:
+                self._pending_tasks.pop(handle.task_pk, None)
             return False
+
+    def get_pending_handle(
+        self,
+        task_pk: int,
+        *,
+        attempt_number: int,
+        execution_generation: int,
+    ) -> RayCoreHandle | None:
+        """Return a pending handle only when its full execution identity matches."""
+        handle = self._pending_tasks.get(task_pk)
+        if (
+            handle is None
+            or handle.attempt_number != attempt_number
+            or handle.execution_generation != execution_generation
+        ):
+            return None
+        return handle
 
     def get_logs(self, handle: SubmissionHandle) -> str | None:
         """Get logs from a Ray Core task.
@@ -388,14 +493,14 @@ class RayCoreRunner(BaseRunner):
         """
         return None
 
-    def poll_completed(self) -> list[tuple[int, str]]:
+    def poll_completed(self) -> list[RayCoreCompletion]:
         """Poll for completed tasks and return their results.
 
         This is a convenience method for the worker to efficiently
         check multiple pending tasks at once.
 
         Returns:
-            List of (task_pk, result_json) tuples for completed tasks.
+            Completion envelopes carrying the exact submitted execution identity.
         """
         import ray
 
@@ -404,17 +509,24 @@ class RayCoreRunner(BaseRunner):
 
         # Get all pending object refs
         refs = [h.object_ref for h in self._pending_tasks.values()]
-        pk_by_ref = {h.object_ref: h.task_pk for h in self._pending_tasks.values()}
+        handle_by_ref = {h.object_ref: h for h in self._pending_tasks.values()}
 
         # Check for completed tasks (non-blocking)
         ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
 
         completed = []
         for ref in ready:
-            task_pk = pk_by_ref[ref]
+            handle = handle_by_ref[ref]
             try:
                 result_json = ray.get(ref)
-                completed.append((task_pk, result_json))
+                completed.append(
+                    RayCoreCompletion(
+                        task_pk=handle.task_pk,
+                        attempt_number=handle.attempt_number,
+                        execution_generation=handle.execution_generation,
+                        result_json=result_json,
+                    )
+                )
             except Exception as e:
                 # Return error as JSON
                 error_result = json.dumps(
@@ -426,10 +538,18 @@ class RayCoreRunner(BaseRunner):
                         "exception_type": type(e).__module__ + "." + type(e).__name__,
                     }
                 )
-                completed.append((task_pk, error_result))
+                completed.append(
+                    RayCoreCompletion(
+                        task_pk=handle.task_pk,
+                        attempt_number=handle.attempt_number,
+                        execution_generation=handle.execution_generation,
+                        result_json=error_result,
+                    )
+                )
 
             # Remove from pending
-            del self._pending_tasks[task_pk]
+            if self._pending_tasks.get(handle.task_pk) is handle:
+                self._pending_tasks.pop(handle.task_pk, None)
 
         return completed
 
@@ -447,6 +567,11 @@ class RayCoreRunner(BaseRunner):
         poll or shutdown operation can safely mutate the runner afterward.
         """
         return tuple(self._pending_tasks)
+
+    @property
+    def pending_task_handles(self) -> tuple[RayCoreHandle, ...]:
+        """Return pending handles with their immutable submission identities."""
+        return tuple(self._pending_tasks.values())
 
     def clear_pending_tasks(self) -> None:
         """Forget all locally tracked tasks after a connection loss or handoff."""

@@ -44,11 +44,23 @@ cancellation helpers. The runner classes own mode-specific submission and pollin
 the command coordinates when to claim, reconcile, or hand off work. Broader extraction
 of those orchestration paths into separate services remains future work.
 
-This boundary is explicit for Ray Core tracking: `RayCoreRunner.pending_task_ids` returns
-a stable task-ID snapshot and `clear_pending_tasks()` clears local tracking. The command
-does not reach into the runner's private object-reference registry, so connection-loss
-and shutdown paths can manage local state without coupling lifecycle code to runner
-storage.
+This boundary is explicit for Ray Core tracking:
+`RayCoreRunner.pending_task_handles` returns stable, immutable handles carrying the
+task ID, attempt number, and execution generation, while `pending_task_ids` remains a
+convenience snapshot for identity-insensitive diagnostics. Completion, heartbeat,
+connection-loss, cancellation, timeout, and shutdown paths compare the full identity
+before changing durable state. `cancel_pending()` cancels only the exact handle still
+owned by the runner. Handles returned directly from Ray Core submission retain that
+in-memory capability; a reconstructed `ray_core:<pk>` value cannot select whichever
+submission currently occupies the same database row. `clear_pending_tasks()` clears
+local tracking without exposing the private object-reference registry.
+
+When the worker prepares a successful inline or external result, preparation and the
+terminal state transition run while holding the execution row lock. This prevents
+cancellation, retry, or replacement from winning between that worker-owned write and
+reference publication. Ray Job completion envelopes may contain a reference prepared
+remotely before reconciliation; the lock fences adoption of that reference, while
+writer-owned staging and crash-retention cleanup remain separate follow-up work.
 
 ### Ray Runtime
 
@@ -208,6 +220,53 @@ same row lock derives a terminal envelope from the last accepted running summary
 archives it before cleanup. Legacy complete graphs and malformed or noncanonical
 summaries are never copied into attempt history.
 
+Cancellation entry points likewise use one authorization-neutral, row-locked package
+service. Queued work becomes terminal and is archived under that lock. Running work
+moves to `CANCELLING`, after which a worker owns best-effort backend interruption and
+terminal finalization. The caller supplies its observed attempt number and execution
+generation, so an older API or admin request cannot control a replacement attempt.
+Both values matter because automatic retries advance the attempt number without
+replacing the execution generation.
+
+Stuck-task recovery also revalidates the observed worker owner, backend handle, last
+task-monitor heartbeat, and absence of a durable completion envelope under that row
+lock. Accepted current-run workflow progress advances that same task-monitor heartbeat.
+Workflow-run claims and plan pins do so as well, including idempotent plan verification.
+The exact current-run fence after RuntimeEnv preparation refreshes activity before any
+workflow leaves are submitted.
+A concurrent heartbeat, Ray Job orphan adoption, workflow activity, or completion
+publication therefore invalidates a stale `LOST` decision instead of retrying work that
+has become live or has already completed. An exact locally tracked Ray Core handle also
+bypasses generic heartbeat-based loss recovery; Ray Core polling, timeout, disconnect,
+and shutdown paths own that capability. Ray Job submission derives a deterministic ID
+from the durable task, attempt, and execution generation and reserves that exact ID and
+cluster address before making the submission request. A response timeout therefore
+retains one reconcilable identity instead of launching another attempt; definite
+pre-request failures release the reservation, while post-request confirmation errors
+retain the durable capability for reconciliation and cannot retry automatically.
+Only a genuine execution-identity replacement receives an exact stop. Exact active
+Ray Jobs likewise bypass generic loss recovery. If their status remains `UNKNOWN`
+past the stuck-task timeout, reconciliation marks the fenced execution `LOST`,
+requests an exact best-effort stop, and suppresses automatic retry because remote
+quiescence is not proven. An expired malformed or invalid envelope while Ray still
+reports `PENDING` or `RUNNING` follows the same exact-stop, no-auto-retry path; only
+a terminal Ray state can enter normal failure/retry handling. A submitter that outlives
+its worker lease distinguishes a same-identity ownership handoff from
+an execution replacement: it drops only its local tracker after handoff and never
+stops the adopted job. Ray Job success, failure, stop, missing-envelope, and timeout
+decisions also revalidate the exact observed completion envelope under the task row
+lock, so a concurrently published completion remains available to reconciliation.
+The address-pinned Ray Job client applies a five-second HTTP request timeout to its
+version check and lifecycle status, stop, and log calls. A timed-out status becomes
+`UNKNOWN`; a timed-out stop becomes `INDETERMINATE`, allowing any held execution-row
+lock to be released with a durable outcome. Ray Client, `auto`, and GCS address
+discovery are prepared before acquiring that row lock; the exact already-prepared
+stop capability is used only after the lock revalidates ownership and execution
+identity.
+Reconciliation consumes a valid durable envelope even while Ray briefly still reports
+the wrapper process as running. Cancellation returns `COMPLETION_PENDING`, and timeout
+recovery skips the row, when publication already won the lock.
+
 If lifecycle owns a successful transition before the producer publishes terminal node
 states, it preserves authoritative aggregate success while marking retained detail
 `TRUNCATED` with `terminal_state_unreported`. The normalized rows remain last-observed
@@ -331,7 +390,9 @@ while running:
   nested workflows, giving Ray Job and Ray Core the same graph/progress protocol.
 - The driver persists a structured completion envelope on `RayTaskExecution` before
   exiting. Reconciliation uses this durable channel for success/failure and treats
-  missing or malformed envelopes as non-terminal; Ray stdout/stderr is diagnostic only.
+  missing or malformed envelopes as initially non-terminal, then applies bounded
+  recovery without duplicating a still-active Ray Job; Ray stdout/stderr is diagnostic
+  only.
 - Workers can adopt orphaned persisted Ray Job handles from inactive workers and continue reconciliation
   instead of immediately retrying duplicate work.
 
@@ -405,11 +466,12 @@ backend alias.
 
 The completion envelope and `execution_generation` fields are part of the Ray Job
 protocol. Drain Ray Job workers before deploying a version that introduces or changes
-this protocol: let submitted jobs finish (or explicitly mark them for retry), stop the
-old workers, apply database migrations, and then start the new workers. Do not leave
-old and new workers reconciling the same in-flight jobs, because an old driver may not
-write the envelope or generation metadata required for the new worker to prove which
-execution produced a terminal state.
+this protocol: let submitted jobs finish and reconcile, or explicitly verify remote
+quiescence before retrying them; then stop the old workers, apply database migrations,
+and start the new workers. Do not run a mixed old/new task-manager fleet or leave old
+and new workers reconciling the same in-flight jobs, because an old driver may not write
+the envelope or generation metadata required for the new worker to prove which execution
+produced a terminal state.
 
 ## Reliability Controls
 

@@ -87,6 +87,7 @@ def mark_task_lost(task_execution: RayTaskExecution) -> bool:
     return record_lost(
         task_execution,
         error_message="Task marked as LOST due to missing heartbeats",
+        expected_attempt_number=task_execution.attempt_number,
         expected_execution_generation=task_execution.execution_generation,
     )
 
@@ -97,7 +98,10 @@ def mark_task_timed_out(
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
     expected_ray_job_id: str | None = None,
+    expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
+    expected_completion_data: str | None = None,
+    require_completion_data_match: bool = False,
 ) -> bool:
     """Mark a task execution as FAILED due to timeout.
 
@@ -116,7 +120,10 @@ def mark_task_timed_out(
         error_message=error_message,
         retry=False,
         expected_ray_job_id=expected_ray_job_id,
+        expected_attempt_number=expected_attempt_number,
         expected_execution_generation=expected_execution_generation,
+        expected_completion_data=expected_completion_data,
+        require_completion_data_match=require_completion_data_match,
         cancellation_status=cancellation_status,
         cancellation_error=cancellation_error,
     )

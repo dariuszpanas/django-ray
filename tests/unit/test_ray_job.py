@@ -5,16 +5,21 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from django_ray.runner import RayJobSubmissionUncertainError
 from django_ray.runner.base import JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcomeStatus
 from django_ray.runner.ray_job import (
+    _CONTROL_REQUEST_TIMEOUT_SECONDS,
     RayJobRunner,
+    _address_pinned_job_client,
+    _bounded_control_requests,
     _find_auto_ray_address,
     _resolve_submission_address,
 )
@@ -31,7 +36,7 @@ class FakeJobClient:
     def submit_job(self, **kwargs: object) -> str:
         """Record submit call and return deterministic job id."""
         self.submissions.append(kwargs)
-        return "raysubmit_test_001"
+        return str(kwargs["submission_id"])
 
     @staticmethod
     def _package_uri(value: object) -> object:
@@ -141,6 +146,53 @@ class TestRayJobAddressResolution:
 class TestRayJobRunnerSubmit:
     """Tests for RayJobRunner.submit."""
 
+    @pytest.mark.parametrize(
+        ("field", "replacement"),
+        [
+            ("task_id", "django-task-replacement"),
+            ("pk", 124),
+            ("attempt_number", 3),
+            ("execution_generation", 12),
+        ],
+    )
+    def test_submission_id_fences_each_execution_identity_field(
+        self,
+        field,
+        replacement,
+    ) -> None:
+        values = {
+            "task_id": "django-task-123",
+            "pk": 123,
+            "attempt_number": 2,
+            "execution_generation": 11,
+        }
+        baseline = RayJobRunner.submission_id(SimpleNamespace(**values))
+        changed_values = values | {field: replacement}
+        changed = RayJobRunner.submission_id(SimpleNamespace(**changed_values))
+
+        assert RayJobRunner.submission_id(SimpleNamespace(**values)) == baseline
+        assert changed != baseline
+        digest = baseline.removeprefix("raysubmit_django_ray_v1_")
+        assert len(digest) == 64
+        assert set(digest) <= set("0123456789abcdef")
+
+    def test_submission_handle_exposes_the_identity_before_submit(self) -> None:
+        runner = RayJobRunner()
+        task_execution = SimpleNamespace(
+            pk=123,
+            task_id="django-task-123",
+            attempt_number=2,
+            execution_generation=11,
+            ray_target_address="ray://selected-cluster:10001",
+            ray_address="ray://stale-cluster:10001",
+        )
+
+        handle = runner.submission_handle(task_execution)
+
+        assert handle.ray_job_id == RayJobRunner.submission_id(task_execution)
+        assert handle.ray_address == "ray://selected-cluster:10001"
+        assert handle.submitted_at.tzinfo is UTC
+
     def test_submit_uses_base64_payload_entrypoint(self, monkeypatch) -> None:
         """Task payload should be transported as base64, not interpolated source."""
         fake_client = FakeJobClient()
@@ -149,6 +201,7 @@ class TestRayJobRunnerSubmit:
 
         task_execution = SimpleNamespace(
             pk=123,
+            task_id="django-task-123",
             runtime_env_profile=None,
             runtime_env_json="{}",
             runtime_env_hash="",
@@ -163,10 +216,13 @@ class TestRayJobRunnerSubmit:
             kwargs={"publisher": "O'Reilly"},
         )
 
-        assert handle.ray_job_id == "raysubmit_test_001"
+        assert handle.ray_job_id == RayJobRunner.submission_id(task_execution)
+        assert handle.ray_job_id.startswith("raysubmit_django_ray_v1_")
+        assert len(handle.ray_job_id) == len("raysubmit_django_ray_v1_") + 64
         assert len(fake_client.submissions) == 1
 
         submission = fake_client.submissions[0]
+        assert submission["submission_id"] == handle.ray_job_id
         entrypoint = str(submission["entrypoint"])
         prefix = "python -m django_ray.runtime.entrypoint --payload-b64 "
 
@@ -203,6 +259,146 @@ class TestRayJobRunnerSubmit:
             ),
         }
 
+    def test_submit_rejects_a_returned_identity_mismatch(self, monkeypatch) -> None:
+        class MismatchedJobClient(FakeJobClient):
+            def submit_job(self, **kwargs: object) -> str:
+                super().submit_job(**kwargs)
+                return "raysubmit_unexpected"
+
+        fake_client = MismatchedJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        task_execution = SimpleNamespace(
+            pk=129,
+            task_id="django-task-129",
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+            attempt_number=4,
+            execution_generation=15,
+        )
+
+        with pytest.raises(
+            RayJobSubmissionUncertainError,
+            match="unexpected ID",
+        ) as exc_info:
+            runner.submit(
+                task_execution=task_execution,
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+
+        expected_id = RayJobRunner.submission_id(task_execution)
+        assert exc_info.value.submission_id == expected_id
+        assert exc_info.value.observed_submission_id == "raysubmit_unexpected"
+        assert exc_info.value.__cause__ is None
+        assert fake_client.submissions[0]["submission_id"] == expected_id
+
+    def test_submit_wraps_only_the_submission_rpc_as_uncertain(self, monkeypatch) -> None:
+        submission_error = TimeoutError("response timed out after acceptance")
+
+        class TimingOutJobClient(FakeJobClient):
+            def submit_job(self, **kwargs: object) -> str:
+                self.submissions.append(kwargs)
+                raise submission_error
+
+        fake_client = TimingOutJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        task_execution = SimpleNamespace(
+            pk=130,
+            task_id="django-task-130",
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+            attempt_number=1,
+            execution_generation=16,
+        )
+
+        with pytest.raises(RayJobSubmissionUncertainError) as exc_info:
+            runner.submit(
+                task_execution=task_execution,
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+
+        expected_id = RayJobRunner.submission_id(task_execution)
+        assert exc_info.value.submission_id == expected_id
+        assert exc_info.value.__cause__ is submission_error
+        assert fake_client.submissions[0]["submission_id"] == expected_id
+
+    def test_submit_treats_post_request_snapshot_cleanup_failure_as_uncertain(
+        self,
+        monkeypatch,
+    ) -> None:
+        import django_ray.runner.ray_job as ray_job_module
+
+        cleanup_error = PermissionError("temporary snapshot cleanup failed")
+        original_snapshot = ray_job_module.snapshot_local_runtime_env
+
+        @contextmanager
+        def cleanup_fails(runtime_env):
+            with original_snapshot(runtime_env) as immutable_snapshot:
+                yield immutable_snapshot
+            raise cleanup_error
+
+        fake_client = FakeJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        monkeypatch.setattr(ray_job_module, "snapshot_local_runtime_env", cleanup_fails)
+        task_execution = SimpleNamespace(
+            pk=132,
+            task_id="django-task-132",
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+            attempt_number=1,
+            execution_generation=18,
+        )
+
+        with pytest.raises(RayJobSubmissionUncertainError) as exc_info:
+            runner.submit(
+                task_execution=task_execution,
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+
+        expected_id = RayJobRunner.submission_id(task_execution)
+        assert exc_info.value.submission_id == expected_id
+        assert exc_info.value.__cause__ is cleanup_error
+        assert fake_client.submissions[0]["submission_id"] == expected_id
+
+    def test_submit_keeps_pre_request_errors_definite(self, monkeypatch) -> None:
+        address_error = ConnectionError("selected Ray dashboard is unavailable")
+        runner = RayJobRunner()
+
+        def fail_before_request(_ray_address=None):
+            raise address_error
+
+        monkeypatch.setattr(runner, "_get_client", fail_before_request)
+        task_execution = SimpleNamespace(
+            pk=131,
+            task_id="django-task-131",
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+            attempt_number=1,
+            execution_generation=17,
+        )
+
+        with pytest.raises(ConnectionError) as exc_info:
+            runner.submit(
+                task_execution=task_execution,
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+
+        assert exc_info.value is address_error
+
     def test_submit_keeps_runtime_env_secrets_out_of_plan_identity_payload(
         self,
         monkeypatch,
@@ -212,6 +408,7 @@ class TestRayJobRunnerSubmit:
         monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
         task_execution = SimpleNamespace(
             pk=125,
+            task_id="django-task-125",
             runtime_env_profile="secret-profile",
             runtime_env_json='{"env_vars":{"API_TOKEN":"do-not-persist"}}',
             runtime_env_hash="",
@@ -244,6 +441,7 @@ class TestRayJobRunnerSubmit:
         )
         task_execution = SimpleNamespace(
             pk=126,
+            task_id="django-task-126",
             runtime_env_profile=None,
             runtime_env_json=runtime_env.serialized,
             runtime_env_hash=runtime_env.digest,
@@ -283,6 +481,7 @@ class TestRayJobRunnerSubmit:
         monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
         task_execution = SimpleNamespace(
             pk=127,
+            task_id="django-task-127",
             runtime_env_profile=None,
             runtime_env_json=runtime_env.serialized,
             runtime_env_hash=runtime_env.digest,
@@ -327,6 +526,7 @@ class TestRayJobRunnerSubmit:
         monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
         task_execution = SimpleNamespace(
             pk=128,
+            task_id="django-task-128",
             runtime_env_profile=None,
             runtime_env_json=runtime_env.serialized,
             runtime_env_hash=runtime_env.digest,
@@ -351,6 +551,7 @@ class TestRayJobRunnerSubmit:
         reference = "s3://inputs/django-ray/inputs/aa/bb/" + "a" * 64 + ".json?bytes=4"
         task_execution = SimpleNamespace(
             pk=124,
+            task_id="django-task-124",
             input_reference=reference,
             args_json="null",
             kwargs_json="null",
@@ -394,6 +595,7 @@ class TestRayJobRunnerSubmit:
         handle = runner.submit(
             task_execution=SimpleNamespace(
                 pk=55,
+                task_id="django-task-55",
                 runtime_env_profile="custom",
                 runtime_env_json='{"env_vars":{"MY_ENV":"1"}}',
                 runtime_env_hash="",
@@ -452,6 +654,54 @@ class TestRayJobRunnerSubmit:
         assert client._ssl_context is None
         assert client._client_ray_version == ray_version
 
+    def test_address_pinned_client_bounds_version_and_control_requests(
+        self,
+        monkeypatch,
+    ) -> None:
+        from ray import __version__ as ray_version
+        from ray.dashboard.modules.dashboard_sdk import SubmissionClient
+
+        requests: list[tuple[str, float | None]] = []
+
+        class VersionResponse:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, str]:
+                return {"ray_version": ray_version}
+
+        def record_request(
+            _client,
+            _method,
+            endpoint,
+            *,
+            data=None,
+            json_data=None,
+            **kwargs,
+        ):
+            del data, json_data
+            requests.append((endpoint, kwargs.get("timeout")))
+            return VersionResponse()
+
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job._resolve_submission_address",
+            lambda _address: "http://alias-dashboard:8265",
+        )
+        monkeypatch.setattr(SubmissionClient, "_do_request", record_request)
+
+        client = _address_pinned_job_client("ray://alias-head:10001")
+        client._do_request("GET", "/unbounded")
+        with _bounded_control_requests(client):
+            client._do_request("GET", "/bounded")
+
+        assert requests == [
+            ("/api/version", _CONTROL_REQUEST_TIMEOUT_SECONDS),
+            ("/unbounded", None),
+            ("/bounded", _CONTROL_REQUEST_TIMEOUT_SECONDS),
+        ]
+
     def test_submit_uses_persisted_backend_target(self, monkeypatch) -> None:
         """Each backend alias must submit against its persisted Ray cluster."""
         addresses: list[str | None] = []
@@ -470,6 +720,7 @@ class TestRayJobRunnerSubmit:
             handle = runner.submit(
                 task_execution=SimpleNamespace(
                     pk=index,
+                    task_id=f"django-task-{index}",
                     ray_target_address=address,
                     ray_address="ray://stale-handle:10001",
                     runtime_env_profile=None,
@@ -499,6 +750,7 @@ class TestRayJobRunnerSubmit:
         handle = runner.submit(
             task_execution=SimpleNamespace(
                 pk=3,
+                task_id="django-task-3",
                 ray_address="ray://legacy:10001",
                 runtime_env_profile=None,
                 runtime_env_json="{}",
@@ -586,6 +838,25 @@ class TestRayJobRunnerStatusAndControl:
         assert info.job_id == "raysubmit_fail_001"
         assert "ray api unavailable" in (info.message or "")
 
+    def test_control_methods_normalize_client_construction_failure(self, monkeypatch) -> None:
+        runner = RayJobRunner()
+
+        def unavailable(_ray_address=None):
+            raise TimeoutError("ray dashboard request timed out")
+
+        monkeypatch.setattr(runner, "_get_client", unavailable)
+        handle = self._make_handle("raysubmit_client_unavailable_001")
+
+        info = runner.get_status(handle)
+        cancellation = runner.cancel_with_status(handle)
+
+        assert info.status == JobStatus.UNKNOWN
+        assert info.job_id == handle.ray_job_id
+        assert "ray dashboard request timed out" in (info.message or "")
+        assert cancellation.status == CancellationOutcomeStatus.INDETERMINATE
+        assert "ray dashboard request timed out" in (cancellation.message or "")
+        assert runner.get_logs(handle) is None
+
     def test_status_logs_and_cancellation_use_handle_address(self, monkeypatch) -> None:
         """Control-plane calls must stay on the cluster recorded in the handle."""
         addresses: list[str | None] = []
@@ -600,8 +871,8 @@ class TestRayJobRunnerStatusAndControl:
             def get_job_logs(self, _job_id: str) -> str:
                 return "logs"
 
-            def stop_job(self, _job_id: str) -> None:
-                return None
+            def stop_job(self, _job_id: str) -> bool:
+                return True
 
         runner = RayJobRunner()
         monkeypatch.setattr(
@@ -620,8 +891,9 @@ class TestRayJobRunnerStatusAndControl:
         stopped: list[str] = []
 
         class Client:
-            def stop_job(self, job_id: str) -> None:
+            def stop_job(self, job_id: str) -> bool:
                 stopped.append(job_id)
+                return True
 
         runner = RayJobRunner()
         monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: Client())
@@ -630,6 +902,20 @@ class TestRayJobRunnerStatusAndControl:
 
         assert ok is True
         assert stopped == ["raysubmit_cancel_001"]
+
+    def test_cancel_returns_false_when_job_was_not_running(self, monkeypatch) -> None:
+        class Client:
+            def stop_job(self, _job_id: str) -> bool:
+                return False
+
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: Client())
+        handle = self._make_handle("raysubmit_cancel_not_running_001")
+
+        assert runner.cancel(handle) is False
+        outcome = runner.cancel_with_status(handle)
+        assert outcome.status == CancellationOutcomeStatus.NOT_APPLICABLE
+        assert "not running" in (outcome.message or "")
 
     def test_cancel_returns_false_on_exception(self, monkeypatch) -> None:
         class Client:

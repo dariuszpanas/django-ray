@@ -855,6 +855,40 @@ class TestExecutionsAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["state"] == "CANCELLED"
+        assert data["finished_at"] is not None
+        assert TaskAttempt.objects.get(execution=task).state == TaskState.CANCELLED
+
+    def test_cancel_running_execution_requests_worker_cancellation(self, client):
+        task = RayTaskExecution.objects.create(
+            task_id="test-cancel-running",
+            callable_path="test.task",
+            state=TaskState.RUNNING,
+            execution_generation=4,
+        )
+
+        response = client.post(f"/api/executions/{task.pk}/cancel")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == "CANCELLING"
+        assert data["execution_generation"] == 4
+        assert data["finished_at"] is None
+
+    def test_cancel_terminal_execution_is_a_bounded_noop(self, client):
+        task = RayTaskExecution.objects.create(
+            task_id="test-cancel-terminal",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            execution_generation=2,
+        )
+
+        first = client.post(f"/api/executions/{task.pk}/cancel")
+        second = client.post(f"/api/executions/{task.pk}/cancel")
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["state"] == "SUCCEEDED"
+        assert second.json()["state"] == "SUCCEEDED"
 
     def test_retry_failed_execution(self, client):
         """Test retrying a failed execution."""
@@ -871,9 +905,16 @@ class TestExecutionsAPI:
         data = response.json()
         assert data["state"] == "QUEUED"
         assert data["attempt_number"] == 2
+        assert data["execution_generation"] == 1
+        assert TaskAttempt.objects.get(execution=task).state == TaskState.FAILED
+
+        duplicate = client.post(f"/api/executions/{task.pk}/retry")
+        assert duplicate.status_code == 200
+        assert duplicate.json()["attempt_number"] == 2
+        assert duplicate.json()["execution_generation"] == 1
 
     def test_reset_executions(self, client):
-        """Test resetting stuck executions."""
+        """Reset only terminal retryable executions and preserve active work."""
         running = RayTaskExecution.objects.create(
             task_id="test-running",
             callable_path="test.task",
@@ -881,15 +922,27 @@ class TestExecutionsAPI:
             progress_data='{"revision":9}',
             workflow_run_id="00000000-0000-0000-0000-000000000125",
         )
-        terminal = serialize_workflow_progress_summary(
-            workflow_progress_summary(running, state="FAILED")
-        )
-        running.workflow_progress_summary_json = terminal
+        running_summary = serialize_workflow_progress_summary(workflow_progress_summary(running))
+        running.workflow_progress_summary_json = running_summary
         running.save(update_fields=["workflow_progress_summary_json"])
-        RayTaskExecution.objects.create(
+        failed = RayTaskExecution.objects.create(
             task_id="test-failed",
             callable_path="test.task",
             state=TaskState.FAILED,
+            progress_data='{"revision":4}',
+            workflow_run_id="00000000-0000-0000-0000-000000000126",
+            error_message="retryable",
+        )
+        terminal = serialize_workflow_progress_summary(
+            workflow_progress_summary(failed, state="FAILED")
+        )
+        failed.workflow_progress_summary_json = terminal
+        failed.save(update_fields=["workflow_progress_summary_json"])
+        lost = RayTaskExecution.objects.create(
+            task_id="test-lost",
+            callable_path="test.task",
+            state=TaskState.LOST,
+            error_message="worker disappeared",
         )
 
         response = client.post("/api/executions/reset")
@@ -897,19 +950,47 @@ class TestExecutionsAPI:
         data = response.json()
         assert "2" in data["message"]
 
-        # Verify all reset to QUEUED
+        # Terminal retryable rows are queued through retry_task().
         assert RayTaskExecution.objects.filter(state=TaskState.QUEUED).count() == 2
-        running.refresh_from_db()
-        assert running.progress_data is None
-        assert running.workflow_progress_summary_json is None
-        assert running.attempt_number == 2
+        failed.refresh_from_db()
+        assert failed.state == TaskState.QUEUED
+        assert failed.progress_data is None
+        assert failed.workflow_progress_summary_json is None
+        assert failed.attempt_number == 2
+        assert failed.execution_generation == 1
         assert (
             TaskAttempt.objects.get(
-                execution=running,
+                execution=failed,
                 attempt_number=1,
             ).workflow_progress_summary_json
             == terminal
         )
+        lost.refresh_from_db()
+        assert lost.state == TaskState.QUEUED
+        assert lost.attempt_number == 2
+        assert TaskAttempt.objects.get(execution=lost, attempt_number=1).state == TaskState.LOST
+
+        # Active work is never converted into a retry by the bulk endpoint.
+        running.refresh_from_db()
+        assert running.state == TaskState.RUNNING
+        assert running.progress_data == '{"revision":9}'
+        assert running.workflow_progress_summary_json == running_summary
+        assert running.attempt_number == 1
+        assert not TaskAttempt.objects.filter(execution=running).exists()
+
+    def test_reset_executions_rejects_active_state_filter(self, client):
+        """The bulk reset endpoint accepts only terminal retryable states."""
+        running = RayTaskExecution.objects.create(
+            task_id="test-reset-running-rejected",
+            callable_path="test.task",
+            state=TaskState.RUNNING,
+        )
+
+        response = client.post("/api/executions/reset?state=RUNNING")
+
+        assert response.status_code == 422
+        running.refresh_from_db()
+        assert running.state == TaskState.RUNNING
 
     def test_get_stats(self, client):
         """Test getting execution statistics."""

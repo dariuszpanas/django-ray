@@ -11,6 +11,7 @@ from uuid import UUID
 
 from django.db import transaction
 from django.db.models import Case, F, Func, IntegerField, Q, TextField, Value, When
+from django.utils import timezone
 
 from django_ray.models import RayTaskExecution, TaskState, WorkflowProgressRunStorage
 from django_ray.runtime.context import (
@@ -183,6 +184,8 @@ def claim_workflow_run(
         execution.workflow_progress_summary_json = None
         if plan is not None and selection is not None:
             update_fields.extend(_pin_plan_fields(execution, plan, selection))
+        execution.last_heartbeat_at = timezone.now()
+        update_fields.append("last_heartbeat_at")
         execution.save(update_fields=list(dict.fromkeys(update_fields)))
         return True
 
@@ -209,8 +212,9 @@ def pin_workflow_plan(
         if execution is None:
             return False
         update_fields = _pin_plan_fields(execution, plan, selection)
-        if update_fields:
-            execution.save(update_fields=list(dict.fromkeys(update_fields)))
+        execution.last_heartbeat_at = timezone.now()
+        update_fields.append("last_heartbeat_at")
+        execution.save(update_fields=list(dict.fromkeys(update_fields)))
         return True
 
 
@@ -223,6 +227,18 @@ def workflow_run_is_current(identity: WorkflowRunIdentity) -> bool:
         execution_generation=identity.execution_generation,
         workflow_run_id=identity.run_id,
     ).exists()
+
+
+def refresh_workflow_run_activity(identity: WorkflowRunIdentity) -> bool:
+    """Refresh activity only while the exact claimed run still owns execution."""
+    updated = RayTaskExecution.objects.filter(
+        pk=identity.task_execution_pk,
+        state=TaskState.RUNNING,
+        attempt_number=identity.attempt_number,
+        execution_generation=identity.execution_generation,
+        workflow_run_id=identity.run_id,
+    ).update(last_heartbeat_at=timezone.now())
+    return updated == 1
 
 
 def _bounded_progress_fields(execution: Any) -> _BoundedProgressFields:
@@ -664,8 +680,11 @@ def _assign_workflow_progress_summary_locked(
         )
     _validate_summary_plan_binding(execution, summary)
 
+    activity_at = timezone.now()
     previous_serialized = execution.workflow_progress_summary_json
     if previous_serialized == serialized_summary:
+        execution.last_heartbeat_at = activity_at
+        execution.save(update_fields=["last_heartbeat_at"])
         return True
     if previous_serialized is not None:
         try:
@@ -687,7 +706,8 @@ def _assign_workflow_progress_summary_locked(
         _validate_revision_advance(previous, summary)
 
     execution.workflow_progress_summary_json = serialized_summary
-    execution.save(update_fields=["workflow_progress_summary_json"])
+    execution.last_heartbeat_at = activity_at
+    execution.save(update_fields=["workflow_progress_summary_json", "last_heartbeat_at"])
     return True
 
 
@@ -753,7 +773,10 @@ def persist_workflow_progress(
         attempt_number=identity.attempt_number,
         execution_generation=identity.execution_generation,
         workflow_run_id=identity.run_id,
-    ).update(progress_data=json.dumps(snapshot))
+    ).update(
+        progress_data=json.dumps(snapshot),
+        last_heartbeat_at=timezone.now(),
+    )
     return updated == 1
 
 
@@ -767,6 +790,7 @@ __all__ = [
     "WorkflowProgressSummaryConflictError",
     "claim_workflow_run",
     "pin_workflow_plan",
+    "refresh_workflow_run_activity",
     "persist_workflow_progress",
     "persist_workflow_progress_summary",
     "read_workflow_progress",

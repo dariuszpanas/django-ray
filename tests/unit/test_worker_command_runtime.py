@@ -15,8 +15,9 @@ from django.core.management import CommandError
 from django.core.management.base import CommandParser
 
 from django_ray.management.commands.django_ray_worker import Command
-from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.runner.polling import AdaptivePollingPolicy
+from django_ray.runner.ray_core import RayCoreHandle
 
 
 class CapturingStdout:
@@ -252,7 +253,7 @@ class TestWorkerCommandRuntime:
 
         cmd.run_loop(queues=["default"], concurrency=2, heartbeat_interval=1)
 
-        assert calls == ["heartbeat", "poll", "claim", "reconcile", "stuck", "cancel", "cleanup"]
+        assert calls == ["heartbeat", "poll", "claim", "cancel", "reconcile", "stuck", "cleanup"]
 
     def test_idle_claim_backoff_does_not_delay_cancellation_schedule(self, monkeypatch) -> None:
         cmd = _make_command()
@@ -724,13 +725,23 @@ class TestWorkerCommandRuntimeDb:
             kwargs_json="{}",
             claimed_by_worker=cmd.worker_id,
         )
-        pending = {task.pk: object()}
+        pending = {
+            task.pk: RayCoreHandle(
+                task_pk=task.pk,
+                object_ref=object(),
+                submitted_at=datetime.now(UTC),
+                task_name="test",
+                attempt_number=task.attempt_number,
+                execution_generation=task.execution_generation,
+            )
+        }
         cmd.ray_core_runner = cast(
             Any,
             SimpleNamespace(
                 _pending_tasks=pending,
                 pending_count=1,
                 pending_task_ids=tuple(pending),
+                pending_task_handles=tuple(pending.values()),
                 clear_pending_tasks=pending.clear,
             ),
         )
@@ -742,6 +753,47 @@ class TestWorkerCommandRuntimeDb:
         assert task.attempt_number == 2
         assert task.run_after is not None
         assert task.finished_at is None
+        assert cmd.ray_core_runner._pending_tasks == {}
+
+    def test_mark_stale_ray_core_tasks_does_not_fail_replacement_attempt(self) -> None:
+        cmd = _make_command(worker_id="stale-worker")
+        task = RayTaskExecution.objects.create(
+            task_id="stale-replacement-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            claimed_by_worker=cmd.worker_id,
+            attempt_number=2,
+            execution_generation=7,
+        )
+        stale_handle = RayCoreHandle(
+            task_pk=task.pk,
+            object_ref=object(),
+            submitted_at=datetime.now(UTC),
+            task_name="stale",
+            attempt_number=1,
+            execution_generation=7,
+        )
+        pending = {task.pk: stale_handle}
+        cmd.ray_core_runner = cast(
+            Any,
+            SimpleNamespace(
+                _pending_tasks=pending,
+                pending_count=1,
+                pending_task_handles=tuple(pending.values()),
+                clear_pending_tasks=pending.clear,
+            ),
+        )
+
+        cmd._mark_stale_ray_core_tasks_as_lost()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.attempt_number == 2
+        assert task.error_message is None
+        assert not TaskAttempt.objects.filter(execution=task, attempt_number=2).exists()
         assert cmd.ray_core_runner._pending_tasks == {}
 
     def test_create_lease_creates_and_reactivates_worker(self) -> None:
@@ -785,12 +837,21 @@ class TestWorkerCommandRuntimeDb:
         )
 
         cancel_calls: list[str] = []
+        pending_handle = RayCoreHandle(
+            task_pk=task.pk,
+            object_ref=object(),
+            submitted_at=datetime.now(UTC),
+            task_name="test",
+            attempt_number=task.attempt_number,
+            execution_generation=task.execution_generation,
+        )
         cmd.ray_core_runner = cast(
             Any,
             SimpleNamespace(
-                _pending_tasks={task.pk: object()},
+                _pending_tasks={task.pk: pending_handle},
                 pending_task_ids=(task.pk,),
-                cancel=lambda _handle: cancel_calls.append("ray-cancel"),
+                get_pending_handle=lambda *_args, **_kwargs: pending_handle,
+                cancel_pending=lambda _handle: cancel_calls.append("ray-cancel") or True,
             ),
         )
         cmd.active_tasks = {task.pk: "raysubmit_1"}
@@ -954,7 +1015,8 @@ class TestWorkerCommandRuntimeDb:
         assert task.state == TaskState.CANCELLED
         assert task.cancellation_status == "INDETERMINATE"
         assert (
-            task.cancellation_error == "Ray Core runner unavailable while recovering cancellation"
+            task.cancellation_error
+            == "Exact Ray Core handle unavailable while recovering cancellation"
         )
 
     def test_shutdown_hands_off_active_ray_job(self) -> None:
@@ -973,6 +1035,7 @@ class TestWorkerCommandRuntimeDb:
             ray_address="ray://cluster:10001",
         )
         cmd.active_tasks = {task.pk: "raysubmit_handoff"}
+        cmd.active_task_identities = {task.pk: (task.attempt_number, task.execution_generation)}
 
         cmd._prepare_shutdown_handoff()
 
@@ -980,6 +1043,37 @@ class TestWorkerCommandRuntimeDb:
         assert task.state == TaskState.RUNNING
         assert task.claimed_by_worker is None
         assert cmd.active_tasks == {}
+
+    def test_shutdown_handoff_does_not_release_replacement_with_same_ray_job_id(
+        self,
+    ) -> None:
+        cmd = _make_command(worker_id="handoff-worker")
+        cmd.execution_mode = "ray"
+        task = RayTaskExecution.objects.create(
+            task_id="handoff-replacement-aba-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json='{"seconds": 5}',
+            attempt_number=2,
+            execution_generation=5,
+            started_at=datetime.now(UTC),
+            claimed_by_worker=cmd.worker_id,
+            ray_job_id="raysubmit_handoff_reused",
+            ray_address="ray://cluster:10001",
+        )
+        cmd.active_tasks = {task.pk: "raysubmit_handoff_reused"}
+        cmd.active_task_identities = {task.pk: (1, 5)}
+
+        cmd._prepare_shutdown_handoff()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.claimed_by_worker == cmd.worker_id
+        assert task.last_heartbeat_at is None
+        assert cmd.active_tasks == {}
+        assert cmd.active_task_identities == {}
 
     def test_shutdown_during_submission_hands_off_claimed_task(self) -> None:
         cmd = _make_command(worker_id="submission-shutdown-worker")
@@ -1037,12 +1131,21 @@ class TestWorkerCommandRuntimeDb:
             claimed_by_worker=cmd.worker_id,
         )
         cancel_calls: list[str] = []
+        pending_handle = RayCoreHandle(
+            task_pk=task.pk,
+            object_ref=object(),
+            submitted_at=datetime.now(UTC),
+            task_name="test",
+            attempt_number=task.attempt_number,
+            execution_generation=task.execution_generation,
+        )
         cmd.ray_core_runner = cast(
             Any,
             SimpleNamespace(
-                _pending_tasks={task.pk: object()},
+                _pending_tasks={task.pk: pending_handle},
                 pending_task_ids=(task.pk,),
-                cancel=lambda _handle: cancel_calls.append("cancel") or True,
+                pending_task_handles=(pending_handle,),
+                cancel_pending=lambda _handle: cancel_calls.append("cancel") or True,
             ),
         )
 
