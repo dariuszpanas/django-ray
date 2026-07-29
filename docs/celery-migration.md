@@ -60,6 +60,53 @@ remain separate delivery systems:
 Keep both sets of workers, scheduler services, monitoring, and result storage running
 until the corresponding workloads have moved and drained.
 
+## Use Django's Tasks API as a bridge
+
+For a Django 6.0 or newer project, the safest default is usually a two-stage
+migration:
+
+1. Keep Celery as the execution backend, but move the portable cohort's task
+   definitions and producers to Django's `@task` and `.enqueue()` API through a
+   compatible Celery-backed Django Tasks backend.
+2. After those call sites and result consumers no longer depend on Celery APIs, route
+   **new** work in that cohort to a django-ray backend alias.
+
+Django deliberately separates the task API from the backend that executes it. A
+Celery-backed adapter such as
+[`django-tasks-celery`](https://oliverhaas.github.io/django-tasks-celery/latest/)
+can therefore provide a useful intermediate state while the existing Celery broker
+and workers remain in service. It is a separate third-party dependency, not part of
+Django, Celery, or django-ray; evaluate and pin it using the same production-readiness
+criteria as any task backend.
+
+This sequence isolates the application-facing rewrite from the executor migration.
+Once a task uses the portable Django contract, switching new submissions can be a
+backend-alias setting or a narrow producer-routing change instead of another
+decorator and call-site rewrite. During a gradual rollout, configure separate Celery
+and django-ray aliases and select one with `.using(backend=...)`. Changing an alias
+does not move messages already published to Celery, import Celery result records, or
+convert existing django-ray rows, so keep each backend available until its own work
+and result-retention obligations have drained.
+
+The bridge simplifies the mechanical change; it does **not** prove execution
+compatibility. Before moving a cohort from the Celery-backed adapter to django-ray,
+inventory and test every executor-specific dependency:
+
+- Celery signatures, chains, groups, chords, callbacks, and errbacks are not portable
+  Django task composition and still need the workflow review below.
+- `AsyncResult`, Celery task IDs, result graphs, backend-specific `get()` behavior,
+  and result retention do not become interchangeable Django `TaskResult` semantics.
+- Exchanges, routing keys, routers, message headers, broadcast, and the full
+  `.apply_async()` option set are not represented by a backend-alias swap. Django
+  queue and priority support remains backend-capability dependent.
+- Beat schedules, periodic-task state, expiry, and Celery ETA behavior are not moved
+  with the task definition. django-ray's `run_after` is only an earliest-run time.
+- Celery events, Flower, inspect/control, revoke, and worker lifecycle signals remain
+  Celery operations rather than portable Django Tasks features.
+- ACK, reject, requeue, redelivery, prefetch, worker-loss, retry, and time-limit
+  behavior still changes with the executor. Revalidate idempotency and every relevant
+  failure window even when task definitions and producers no longer change.
+
 ## Compatibility matrix
 
 The classifications mean:
@@ -152,6 +199,11 @@ task_id = enqueued.id
 This recipe covers only plain function dispatch. Revisit the matrix for every Celery
 decorator option and every `.apply_async()` option the original call used. The
 django-ray task and enqueue contracts are documented in [Defining Tasks](tasks.md).
+
+For the staged path, run this same Django task definition and `.enqueue()` call
+through a Celery-backed Django Tasks alias first. After its application behavior is
+stable and the compatibility inventory is complete, select the django-ray alias for
+new submissions; the definition and producer call can remain unchanged.
 
 ### Transaction-safe enqueue
 
@@ -435,32 +487,43 @@ For each inventory row, capture representative task duration, queue delay, retry
 duplicate rate, failure modes, result consumers, and operational controls. Add a
 workload-specific idempotency test before changing delivery.
 
-### 2. Satisfy django-ray prerequisites
+### 2. Put the portable cohort behind Django Tasks
+
+Keep the Celery broker, workers, result backend, and operational tooling in place.
+Configure a compatible Celery-backed Django Tasks backend, then convert only the
+portable cohort from Celery decorators and producer calls to Django's `@task`,
+`.enqueue()`, and `TaskResult` contract. Exercise the converted paths against Celery
+before changing their executor. Leave workloads that still need direct Celery APIs
+on their existing definitions until they are redesigned or explicitly retained.
+
+### 3. Satisfy django-ray prerequisites
 
 Upgrade the application/runtime where needed, deploy PostgreSQL-backed package
 migrations, configure task backends and RuntimeEnv profiles, deploy Ray, and run
 queue-specific task managers. Prove a small task through the same deployment boundary
 the migrated workload will use.
 
-### 3. Run both systems side by side
+### 4. Run both systems side by side
 
-Keep Celery workers, broker, beat, monitoring, and result backend intact. Add distinct
-django-ray task definitions and switch only identified producers. Do not make Celery
-and Django `TaskResult` objects look interchangeable; store the delivery system and
-task ID together in any application-owned tracking record.
+Keep Celery workers, broker, beat, monitoring, and result backend intact. Add a
+django-ray backend alias and switch only identified cohorts. Reuse the Django task
+definitions for the portable cohort; create a distinct definition only when its
+callable or durability contract must change. Do not make Celery-backed and django-ray
+result IDs or records look interchangeable; store the backend alias and task ID
+together in any application-owned tracking record.
 
 Use a reversible application feature flag or producer routing decision when a cohort
 needs gradual rollout. Rollback sends **new** work back to Celery; it does not convert
 already-enqueued django-ray rows into Celery messages.
 
-### 4. Move simple JSON-only idempotent tasks first
+### 5. Move simple JSON-only idempotent tasks first
 
 Start with coarse tasks that have no Canvas, beat, broker-control, custom serializer,
 or specialized ACK requirements. Pass stable database/object-store identifiers rather
 than model instances and validate result consumers against refreshed Django
 `TaskResult` objects.
 
-### 5. Translate policies explicitly
+### 6. Translate policies explicitly
 
 For each cohort, make and test separate decisions for:
 
@@ -475,20 +538,20 @@ For each cohort, make and test separate decisions for:
 
 Do not accept "same as Celery" as a policy value.
 
-### 6. Redesign each Canvas workflow
+### 7. Redesign each Canvas workflow
 
 Choose one outer django-ray task only when repeating the complete workflow is safe.
 Keep Celery or create application-owned durable stages when child-level retry,
 scheduling, audit, cancellation, or results are requirements. Test failure after a
 subset of children has already produced effects.
 
-### 7. Retain unmatched Celery services
+### 8. Retain unmatched Celery services
 
 It is valid to keep Celery for beat, strict broker delivery, rich routing, rate-limited
 tasks, or independently durable Canvas while django-ray handles Ray-oriented
 workloads. A partial migration is safer than an invented compatibility layer.
 
-### 8. Stop producers, then drain Celery
+### 9. Stop producers, then drain Celery
 
 Drain in this order for each retired cohort:
 
