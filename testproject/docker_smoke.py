@@ -162,6 +162,7 @@ def _verify_unfold_admin_contract(
     base_url: str,
     deadline: float,
     execution: Any,
+    attempt: Any,
 ) -> dict[str, str]:
     from django.conf import settings
     from django.contrib.auth import (
@@ -211,6 +212,13 @@ def _verify_unfold_admin_contract(
             headers=headers,
             deadline=deadline,
         )
+        attempt_detail_path = f"/admin/django_ray/taskattempt/{attempt.pk}/change/"
+        attempt_detail_html = _request_text(
+            base_url,
+            attempt_detail_path,
+            headers=headers,
+            deadline=deadline,
+        )
         observability_text = _request_text(
             base_url,
             f"/admin/django_ray/raytaskexecution/{execution.pk}/observability/",
@@ -220,6 +228,8 @@ def _verify_unfold_admin_contract(
 
         if "django-ray" not in index_html:
             raise DockerSmokeError("admin index did not render django-ray branding")
+        if "/admin/django_ray/taskattempt/" in index_html:
+            raise DockerSmokeError("admin index exposed standalone attempt navigation")
         if "retry_tasks" not in changelist_html or "cancel_tasks" not in changelist_html:
             raise DockerSmokeError("admin changelist did not render task controls")
         if (
@@ -227,6 +237,13 @@ def _verify_unfold_admin_contract(
             or "django_ray/admin/task_live" not in change_html
         ):
             raise DockerSmokeError("admin change view did not render live task diagnostics")
+        if "Attempt history" not in change_html or attempt_detail_path not in change_html:
+            raise DockerSmokeError("admin change view did not render contextual attempt history")
+        if (
+            str(attempt.attempt_number) not in attempt_detail_html
+            or str(attempt.state) not in attempt_detail_html
+        ):
+            raise DockerSmokeError("admin attempt detail did not render the archived attempt")
 
         stylesheet_match = _UNFOLD_STYLESHEET_RE.search(index_html)
         if stylesheet_match is None:
@@ -260,6 +277,8 @@ def _verify_unfold_admin_contract(
 
     return {
         "admin": "unfold-authenticated",
+        "admin_attempt_detail": "verified",
+        "admin_attempt_history": "verified",
         "admin_observability": "verified",
         "admin_static": "served",
     }
@@ -271,7 +290,7 @@ def _run_smoke(*, base_url: str, token: str, timeout_seconds: float) -> dict[str
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "testproject.settings")
     django.setup()
 
-    from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+    from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 
     _verify_database_contract()
     deadline = time.monotonic() + timeout_seconds
@@ -356,11 +375,21 @@ def _run_smoke(*, base_url: str, token: str, timeout_seconds: float) -> dict[str
         raise DockerSmokeError("PostgreSQL stored an invalid result payload") from error
     if database_execution.state != TaskState.SUCCEEDED or database_result != 42:
         raise DockerSmokeError("worker did not persist the expected result in shared PostgreSQL")
+    try:
+        database_attempt = TaskAttempt.objects.get(
+            execution=database_execution,
+            attempt_number=database_execution.attempt_number,
+        )
+    except TaskAttempt.DoesNotExist as error:
+        raise DockerSmokeError("worker did not archive the successful task attempt") from error
+    if database_attempt.state != TaskState.SUCCEEDED:
+        raise DockerSmokeError("worker archived the task attempt with the wrong state")
 
     admin_contract = _verify_unfold_admin_contract(
         base_url=base_url,
         deadline=deadline,
         execution=database_execution,
+        attempt=database_attempt,
     )
 
     return {

@@ -323,6 +323,7 @@ def test_admin_smoke_cleanup_attempts_user_delete_when_session_delete_fails(
             base_url="http://web:8000",
             deadline=docker_smoke.time.monotonic() + 5,
             execution=SimpleNamespace(pk=1, state="QUEUED"),
+            attempt=SimpleNamespace(pk=1, attempt_number=1, state="SUCCEEDED"),
         )
 
     assert cleanup_events == [

@@ -10,7 +10,11 @@ from typing import Any
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from django_ray.conf.defaults import DEFAULTS, WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES
+from django_ray.conf.defaults import (
+    DEFAULTS,
+    TASK_ATTEMPT_ADMIN_MODES,
+    WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES,
+)
 
 
 def get_settings() -> dict[str, Any]:
@@ -70,6 +74,20 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
         raise ImproperlyConfigured(
             "django-ray: WORKFLOW_PROGRESS_REPORTING_POLICY must be one of "
             f"{valid_policies}, got {reporting_policy!r}"
+        )
+
+    task_attempt_admin_mode = config.get(
+        "TASK_ATTEMPT_ADMIN_MODE",
+        DEFAULTS["TASK_ATTEMPT_ADMIN_MODE"],
+    )
+    if (
+        not isinstance(task_attempt_admin_mode, str)
+        or task_attempt_admin_mode not in TASK_ATTEMPT_ADMIN_MODES
+    ):
+        valid_modes = tuple(sorted(TASK_ATTEMPT_ADMIN_MODES))
+        raise ImproperlyConfigured(
+            "django-ray: TASK_ATTEMPT_ADMIN_MODE must be one of "
+            f"{valid_modes}, got {task_attempt_admin_mode!r}"
         )
 
     from django_ray.runtime.runtime_env import validate_runtime_env_profiles

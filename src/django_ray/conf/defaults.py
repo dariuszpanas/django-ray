@@ -7,6 +7,7 @@ from typing import Any
 # Runtime-selectable policies. The durable summary protocol also reserves
 # sampled and terminal-only values for later producer implementations.
 WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES = frozenset({"full", "disabled"})
+TASK_ATTEMPT_ADMIN_MODES = frozenset({"inline", "standalone", "both"})
 
 DEFAULTS: dict[str, Any] = {
     # Ray connection
@@ -39,6 +40,8 @@ DEFAULTS: dict[str, Any] = {
     "WORKFLOW_PROGRESS_REPORTING_POLICY": "full",
     "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
     "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7,
+    # Admin presentation
+    "TASK_ATTEMPT_ADMIN_MODE": "inline",
     # Inputs
     # ``None`` preserves legacy inline args/kwargs storage. Configure a
     # retrievable input backend before setting a spill threshold.

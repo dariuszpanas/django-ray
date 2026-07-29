@@ -18,10 +18,12 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from django_ray.admin import (
+    ADMIN_ATTEMPT_INLINE_MAX_CHARS,
     ADMIN_DIAGNOSTIC_MAX_CHARS,
     ActiveWorkerFilter,
     RayTaskExecutionAdmin,
     TaskAttemptAdmin,
+    TaskAttemptInline,
     TaskWorkerLeaseAdmin,
 )
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
@@ -31,6 +33,12 @@ from django_ray.workflow_progress_reads import (
 )
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
+
+_ADMIN_MIDDLEWARE = [
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+]
 
 
 def _request() -> Any:
@@ -52,6 +60,35 @@ def _attempt_admin() -> TaskAttemptAdmin:
 @pytest.mark.django_db
 class TestRayTaskExecutionAdmin:
     """Tests for task admin formatting and actions."""
+
+    def test_attempt_presentation_mode_is_selected_per_request(
+        self,
+        settings,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-mode-runtime",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        user = get_user_model().objects.create_superuser(username="attempt-mode-runtime")
+        request = RequestFactory().get("/admin/")
+        request.user = user
+        task_admin = _task_admin()
+        attempt_admin = _attempt_admin()
+
+        for mode, has_inline, has_module in (
+            ("inline", True, False),
+            ("standalone", False, True),
+            ("both", True, True),
+        ):
+            settings.DJANGO_RAY = {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "TASK_ATTEMPT_ADMIN_MODE": mode,
+            }
+            inlines = task_admin.get_inlines(request, execution)
+
+            assert (TaskAttemptInline in inlines) is has_inline
+            assert task_admin.get_inlines(request, None) == []
+            assert attempt_admin.has_module_permission(request) is has_module
 
     def test_ray_job_display_variants(self) -> None:
         admin_obj = _task_admin()
@@ -940,10 +977,15 @@ class TestTaskAttemptAdmin:
     def test_attempt_history_cannot_be_added_changed_or_deleted(self) -> None:
         admin_obj = _attempt_admin()
         request = _request()
+        inline = TaskAttemptInline(TaskAttempt, admin.site)
 
         assert admin_obj.has_add_permission(request) is False
         assert admin_obj.has_change_permission(request) is False
         assert admin_obj.has_delete_permission(request) is False
+        assert inline.has_add_permission(request) is False
+        assert inline.has_change_permission(request) is False
+        assert inline.has_delete_permission(request) is False
+        assert inline.can_delete is False
 
     def test_diagnostics_are_redacted_bounded_and_not_raw_model_fields(self, settings) -> None:
         settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
@@ -995,6 +1037,432 @@ class TestTaskAttemptAdmin:
         assert admin_obj.error_traceback_display(attempt) == "-"
         assert admin_obj.result_data_display(attempt) == "-"
         assert admin_obj.result_reference_display(attempt) == "-"
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_default_index_hides_attempt_module_but_detail_remains_linked(
+        self,
+        client,
+    ) -> None:
+        user = get_user_model().objects.create_superuser(username="attempt-inline-admin")
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-inline-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        second = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=2,
+            state=TaskState.FAILED,
+            error_message="second-attempt-marker",
+        )
+        first = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.FAILED,
+            error_message="first-attempt-marker",
+        )
+        client.force_login(user)
+
+        index = client.get(reverse("admin:index"))
+        change = client.get(
+            reverse(
+                "admin:django_ray_raytaskexecution_change",
+                args=[execution.pk],
+            )
+        )
+        first_detail_url = reverse(
+            "admin:django_ray_taskattempt_change",
+            args=[first.pk],
+        )
+        second_detail_url = reverse(
+            "admin:django_ray_taskattempt_change",
+            args=[second.pk],
+        )
+        detail = client.get(first_detail_url)
+        attempt_list = client.get(reverse("admin:django_ray_taskattempt_changelist"))
+
+        index_html = index.content.decode("utf-8")
+        change_html = change.content.decode("utf-8")
+        assert index.status_code == 200
+        assert reverse("admin:django_ray_taskattempt_changelist") not in index_html
+        assert change.status_code == 200
+        assert "Attempt history" in change_html
+        assert first_detail_url in change_html
+        assert second_detail_url in change_html
+        assert change_html.index("first-attempt-marker") < change_html.index(
+            "second-attempt-marker"
+        )
+        assert detail.status_code == 200
+        assert attempt_list.status_code == 200
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_parent_permission_does_not_expose_attempts_without_child_permission(
+        self,
+        client,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-permissions-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        attempt = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.SUCCEEDED,
+        )
+        user = get_user_model().objects.create_user(
+            username="attempt-parent-viewer",
+            is_staff=True,
+        )
+        user.user_permissions.add(
+            Permission.objects.get(
+                content_type__app_label="django_ray",
+                codename="view_raytaskexecution",
+            )
+        )
+        client.force_login(user)
+        change_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[execution.pk],
+        )
+        detail_url = reverse(
+            "admin:django_ray_taskattempt_change",
+            args=[attempt.pk],
+        )
+
+        parent_only = client.get(change_url)
+
+        assert parent_only.status_code == 200
+        assert detail_url not in parent_only.content.decode("utf-8")
+
+        user.user_permissions.add(
+            Permission.objects.get(
+                content_type__app_label="django_ray",
+                codename="view_taskattempt",
+            )
+        )
+        with_child = client.get(change_url)
+
+        assert with_child.status_code == 200
+        assert detail_url in with_child.content.decode("utf-8")
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_empty_attempt_history_change_form_is_usable(self, client) -> None:
+        user = get_user_model().objects.create_superuser(username="attempt-empty-admin")
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-empty-history-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        client.force_login(user)
+
+        response = client.get(
+            reverse(
+                "admin:django_ray_raytaskexecution_change",
+                args=[execution.pk],
+            )
+        )
+
+        content = response.content.decode("utf-8")
+        assert response.status_code == 200
+        assert "Attempt history" in content
+        assert "/admin/django_ray/taskattempt/" not in content
+        assert 'name="attempts-0-DELETE"' not in content
+
+    def test_inline_honors_parent_object_permission(self, monkeypatch) -> None:
+        allowed = RayTaskExecution.objects.create(
+            task_id="admin-attempt-parent-object-allowed",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        denied = RayTaskExecution.objects.create(
+            task_id="admin-attempt-parent-object-denied",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        user = get_user_model().objects.create_user(
+            username="attempt-parent-object-viewer",
+            is_staff=True,
+        )
+
+        def has_perm(permission: str, obj: object | None = None) -> bool:
+            if permission in {
+                "django_ray.view_taskattempt",
+                "django_ray.change_taskattempt",
+            }:
+                return obj is None
+            return (
+                permission
+                in {
+                    "django_ray.view_raytaskexecution",
+                    "django_ray.change_raytaskexecution",
+                }
+                and obj == allowed
+            )
+
+        monkeypatch.setattr(user, "has_perm", has_perm)
+        request = RequestFactory().get("/admin/")
+        request.user = user
+        inline = TaskAttemptInline(TaskAttempt, admin.site)
+
+        assert inline.has_view_permission(request, allowed) is True
+        assert inline.has_view_permission(request, denied) is False
+
+    def test_attempt_detail_honors_object_specific_permission(
+        self,
+        monkeypatch,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-object-permission-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        allowed = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.SUCCEEDED,
+        )
+        denied = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=2,
+            state=TaskState.FAILED,
+        )
+        user = get_user_model().objects.create_user(
+            username="attempt-object-viewer",
+            is_staff=True,
+        )
+
+        def has_perm(permission: str, obj: object | None = None) -> bool:
+            return (
+                permission
+                in {
+                    "django_ray.view_taskattempt",
+                    "django_ray.change_taskattempt",
+                }
+                and obj == allowed
+            )
+
+        monkeypatch.setattr(user, "has_perm", has_perm)
+        admin_obj = _attempt_admin()
+        allowed_request = RequestFactory().get(
+            reverse("admin:django_ray_taskattempt_change", args=[allowed.pk])
+        )
+        allowed_request.user = user
+        denied_request = RequestFactory().get(
+            reverse("admin:django_ray_taskattempt_change", args=[denied.pk])
+        )
+        denied_request.user = user
+
+        assert admin_obj.has_view_permission(allowed_request) is False
+        assert admin_obj.has_view_permission(allowed_request, allowed) is True
+        assert admin_obj.has_view_permission(denied_request, denied) is False
+        assert admin_obj.change_view(allowed_request, str(allowed.pk)).status_code == 200
+        with pytest.raises(PermissionDenied):
+            admin_obj.change_view(denied_request, str(denied.pk))
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_attempt_detail_rejects_forged_mutation(self, client) -> None:
+        user = get_user_model().objects.create_superuser(username="attempt-forged-admin")
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-forged-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        attempt = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.FAILED,
+            error_message="original-error",
+        )
+        client.force_login(user)
+        detail_url = reverse(
+            "admin:django_ray_taskattempt_change",
+            args=[attempt.pk],
+        )
+
+        detail = client.get(detail_url)
+        forged = client.post(
+            detail_url,
+            {
+                "attempt_number": 99,
+                "state": TaskState.SUCCEEDED,
+                "error_message": "forged-error",
+                "_save": "Save",
+            },
+        )
+
+        attempt.refresh_from_db()
+        detail_html = detail.content.decode("utf-8")
+        assert detail.status_code == 200
+        assert 'name="_save"' not in detail_html
+        assert "deletelink" not in detail_html
+        assert forged.status_code == 403
+        assert attempt.attempt_number == 1
+        assert attempt.state == TaskState.FAILED
+        assert attempt.error_message == "original-error"
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_inline_summary_is_bounded_redacted_escaped_and_payload_free(
+        self,
+        settings,
+        client,
+    ) -> None:
+        settings.DJANGO_RAY = {
+            "RAY_ADDRESS": "ray://localhost:10001",
+            "REDACT_PATTERNS": [r"password"],
+        }
+        user = get_user_model().objects.create_superuser(username="attempt-summary-admin")
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-summary-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.FAILED,
+            error_message="password=inline-secret",
+            error_traceback="traceback-heavy-sentinel",
+            result_data='"result-heavy-sentinel"',
+            result_reference="reference-heavy-sentinel",
+            workflow_progress_summary_json='"workflow-heavy-sentinel"',
+        )
+        TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=2,
+            state=TaskState.FAILED,
+            error_message="<script>unsafe</script>",
+        )
+        TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=3,
+            state=TaskState.FAILED,
+            error_message="a" * ADMIN_ATTEMPT_INLINE_MAX_CHARS,
+        )
+        TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=4,
+            state=TaskState.FAILED,
+            error_message="b" * (ADMIN_ATTEMPT_INLINE_MAX_CHARS + 1),
+        )
+        client.force_login(user)
+
+        response = client.get(
+            reverse(
+                "admin:django_ray_raytaskexecution_change",
+                args=[execution.pk],
+            )
+        )
+
+        content = response.content.decode("utf-8")
+        assert response.status_code == 200
+        assert "inline-secret" not in content
+        assert "[REDACTED]" in content
+        assert "&lt;script&gt;unsafe&lt;/script&gt;" in content
+        assert ("a" * ADMIN_ATTEMPT_INLINE_MAX_CHARS) in content
+        assert "Open the attempt detail to view bounded diagnostics." in content
+        assert ("b" * (ADMIN_ATTEMPT_INLINE_MAX_CHARS + 1)) not in content
+        assert "traceback-heavy-sentinel" not in content
+        assert "result-heavy-sentinel" not in content
+        assert "reference-heavy-sentinel" not in content
+        assert "workflow-heavy-sentinel" not in content
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_inline_uses_one_bounded_attempt_query_for_many_rows(
+        self,
+        client,
+    ) -> None:
+        user = get_user_model().objects.create_superuser(username="attempt-query-admin")
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-query-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        for attempt_number in range(1, 13):
+            TaskAttempt.objects.create(
+                execution=execution,
+                attempt_number=attempt_number,
+                state=TaskState.FAILED,
+                error_message=f"attempt-{attempt_number}",
+                error_traceback="traceback-heavy-sentinel",
+                result_data='"result-heavy-sentinel"',
+                result_reference="reference-heavy-sentinel",
+                workflow_progress_summary_json='"workflow-heavy-sentinel"',
+            )
+        client.force_login(user)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get(
+                reverse(
+                    "admin:django_ray_raytaskexecution_change",
+                    args=[execution.pk],
+                )
+            )
+
+        attempt_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and 'FROM "django_ray_taskattempt"' in query["sql"]
+        ]
+        assert response.status_code == 200
+        assert len(attempt_selects) == 1
+        assert "error_message" in attempt_selects[0]
+        assert "error_traceback" not in attempt_selects[0]
+        assert "result_data" not in attempt_selects[0]
+        assert "result_reference" not in attempt_selects[0]
+        assert "workflow_progress_summary_json" not in attempt_selects[0]
+
+    @override_settings(
+        MIDDLEWARE=_ADMIN_MIDDLEWARE,
+        DJANGO_RAY={
+            "RAY_ADDRESS": "ray://localhost:10001",
+            "TASK_ATTEMPT_ADMIN_MODE": "standalone",
+        },
+    )
+    def test_standalone_changelist_avoids_parent_join_and_diagnostics(
+        self,
+        client,
+    ) -> None:
+        user = get_user_model().objects.create_superuser(username="attempt-list-admin")
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-list-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        attempt = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.FAILED,
+            error_message="error-heavy-sentinel",
+            error_traceback="traceback-heavy-sentinel",
+            result_data='"result-heavy-sentinel"',
+            result_reference="reference-heavy-sentinel",
+            workflow_progress_summary_json='"workflow-heavy-sentinel"',
+        )
+        client.force_login(user)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get(reverse("admin:django_ray_taskattempt_changelist"))
+
+        attempt_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and 'FROM "django_ray_taskattempt"' in query["sql"]
+            and "COUNT(" not in query["sql"].upper()
+        ]
+        assert response.status_code == 200
+        assert len(attempt_selects) == 1
+        query = attempt_selects[0]
+        assert "JOIN" not in query.upper()
+        assert "error_message" not in query
+        assert "error_traceback" not in query
+        assert "result_data" not in query
+        assert "result_reference" not in query
+        assert "workflow_progress_summary_json" not in query
+        content = response.content.decode("utf-8")
+        detail_url = reverse(
+            "admin:django_ray_taskattempt_change",
+            args=[attempt.pk],
+        )
+        execution_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[execution.pk],
+        )
+        assert detail_url in content
+        assert execution_url in content
+        assert f'<a href="{detail_url}"><a' not in content
 
 
 @pytest.mark.django_db
