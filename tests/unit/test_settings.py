@@ -28,6 +28,37 @@ class TestValidateSettings:
     def test_workflow_progress_detail_retention_default(self) -> None:
         assert DEFAULTS["WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS"] == 7
 
+    def test_workflow_progress_reporting_defaults_to_full(self) -> None:
+        assert DEFAULTS["WORKFLOW_PROGRESS_REPORTING_POLICY"] == "full"
+
+    @pytest.mark.parametrize("reporting_policy", ["full", "disabled"])
+    def test_validate_workflow_progress_reporting_policy(
+        self,
+        reporting_policy: str,
+    ) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "WORKFLOW_PROGRESS_REPORTING_POLICY": reporting_policy,
+            }
+        )
+
+    @pytest.mark.parametrize("reporting_policy", ["sampled", "terminal_only", "", True, None])
+    def test_validate_workflow_progress_reporting_policy_rejects_unsupported_values(
+        self,
+        reporting_policy: object,
+    ) -> None:
+        with pytest.raises(
+            ImproperlyConfigured,
+            match="WORKFLOW_PROGRESS_REPORTING_POLICY",
+        ):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "WORKFLOW_PROGRESS_REPORTING_POLICY": reporting_policy,
+                }
+            )
+
     @pytest.mark.parametrize("retention_days", [0, 30])
     def test_validate_workflow_progress_detail_retention_boundaries(
         self, retention_days: int

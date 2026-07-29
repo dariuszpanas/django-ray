@@ -10,7 +10,7 @@ from typing import Any
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from django_ray.conf.defaults import DEFAULTS
+from django_ray.conf.defaults import DEFAULTS, WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES
 
 
 def get_settings() -> dict[str, Any]:
@@ -56,6 +56,20 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
     if not isinstance(runner, str) or runner not in valid_runners:
         raise ImproperlyConfigured(
             f"django-ray: RUNNER must be one of {valid_runners}, got '{runner}'"
+        )
+
+    reporting_policy = config.get(
+        "WORKFLOW_PROGRESS_REPORTING_POLICY",
+        DEFAULTS["WORKFLOW_PROGRESS_REPORTING_POLICY"],
+    )
+    if (
+        not isinstance(reporting_policy, str)
+        or reporting_policy not in WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES
+    ):
+        valid_policies = tuple(sorted(WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES))
+        raise ImproperlyConfigured(
+            "django-ray: WORKFLOW_PROGRESS_REPORTING_POLICY must be one of "
+            f"{valid_policies}, got {reporting_policy!r}"
         )
 
     from django_ray.runtime.runtime_env import validate_runtime_env_profiles

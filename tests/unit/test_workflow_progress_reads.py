@@ -23,6 +23,11 @@ from django_ray.models import (
     WorkflowProgressTopologyManifestPage,
     WorkflowProgressTopologyPage,
 )
+from django_ray.workflow_plans import (
+    PLAN_SELECTION_FORMAT,
+    PLAN_SELECTION_FORMAT_VERSION,
+    PLAN_SELECTION_LEGACY_FORMAT_VERSION,
+)
 from django_ray.workflow_progress import (
     WorkflowProgressDiagnosticCode,
     WorkflowProgressReadResult,
@@ -64,6 +69,27 @@ pytestmark = pytest.mark.django_db
 
 def _allow(_execution: RayTaskExecution) -> bool:
     return True
+
+
+def _plan_selection_manifest(
+    *,
+    version: int = PLAN_SELECTION_FORMAT_VERSION,
+    selected_strategy: str = "dynamic_tasks",
+    reporting_policy: str = "full",
+) -> dict[str, Any]:
+    selection: dict[str, Any] = {
+        "plan_selection_format": PLAN_SELECTION_FORMAT,
+        "plan_selection_format_version": version,
+        "requested_policy": "auto",
+        "selected_strategy": selected_strategy,
+        "eligible_strategies": [selected_strategy],
+        "rejections": [],
+        "total_rejections": 0,
+        "rejections_truncated": False,
+    }
+    if version == PLAN_SELECTION_FORMAT_VERSION:
+        selection["reporting_policy"] = reporting_policy
+    return selection
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -425,6 +451,96 @@ def test_no_v3_summary_is_not_reported_and_legacy_compatibility_is_aggregate_onl
     assert "graph" not in compatibility["summary"]
     assert "secret" not in json.dumps(compatibility)
     assert page["availability"] == "NOT_REPORTED"
+
+
+@pytest.mark.parametrize(
+    ("selection_version", "selected_strategy"),
+    [
+        (PLAN_SELECTION_FORMAT_VERSION, "dynamic_tasks"),
+        (PLAN_SELECTION_LEGACY_FORMAT_VERSION, "local"),
+    ],
+)
+def test_disabled_plan_selection_is_a_bounded_summary_only_signal(
+    selection_version: int,
+    selected_strategy: str,
+) -> None:
+    selection = _plan_selection_manifest(
+        version=selection_version,
+        selected_strategy=selected_strategy,
+        reporting_policy="disabled",
+    )
+    execution = RayTaskExecution.objects.create(
+        task_id=f"disabled-selection-{selection_version}-{selected_strategy}",
+        callable_path="tests.disabled.workflow",
+        state=TaskState.RUNNING,
+        workflow_plan_selection=json.dumps(selection),
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        response = get_workflow_progress_summary(execution, authorize=_allow)
+
+    statements = "\n".join(query["sql"] for query in queries.captured_queries).lower()
+    assert response["source_schema_version"] is None
+    assert response["summary"] is None
+    assert response["availability"] == "DISABLED"
+    assert response["complete"] is False
+    assert "progress_data" not in statements
+    assert "workflowprogressnodedetail" not in statements
+    assert "workflowprogresstopolog" not in statements
+    assert "case" in statements
+    assert "length" in statements
+    assert len(queries) == 2
+
+
+def test_dynamic_legacy_selection_without_a_summary_remains_not_reported() -> None:
+    selection = _plan_selection_manifest(version=PLAN_SELECTION_LEGACY_FORMAT_VERSION)
+    execution = RayTaskExecution.objects.create(
+        task_id="full-legacy-selection",
+        callable_path="tests.full.workflow",
+        state=TaskState.RUNNING,
+        workflow_plan_selection=json.dumps(selection),
+    )
+
+    response = get_workflow_progress_summary(execution, authorize=_allow)
+
+    assert response["summary"] is None
+    assert response["availability"] == "NOT_REPORTED"
+
+
+def test_disabled_selection_query_is_fenced_against_a_new_workflow_run(
+    monkeypatch,
+) -> None:
+    old_run_id = "00000000-0000-0000-0000-000000127230"
+    new_run_id = "00000000-0000-0000-0000-000000127231"
+    execution = RayTaskExecution.objects.create(
+        task_id="selection-race",
+        callable_path="tests.racing.workflow",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=1,
+        workflow_run_id=old_run_id,
+        workflow_plan_selection=json.dumps(_plan_selection_manifest()),
+    )
+
+    def advance_run(_execution, **_kwargs):
+        RayTaskExecution.objects.filter(pk=execution.pk).update(
+            attempt_number=2,
+            execution_generation=2,
+            workflow_run_id=new_run_id,
+            workflow_plan_selection=json.dumps(
+                _plan_selection_manifest(reporting_policy="disabled")
+            ),
+        )
+        return None
+
+    monkeypatch.setattr(reads, "_read_schema_v3_summary", advance_run)
+
+    response = get_workflow_progress_summary(execution, authorize=_allow)
+
+    execution.refresh_from_db()
+    assert execution.attempt_number == 2
+    assert response["availability"] == "NOT_REPORTED"
+    assert response["summary"] is None
 
 
 def test_legacy_summary_clamps_untrusted_primitives_and_bounds_the_response() -> None:

@@ -120,9 +120,12 @@ rejects topology/detail pointers. The package-owned storage transaction alone ma
 promote a verified pending manifest, apply sparse latest-state changes, and advance
 the summary pointer together. A summary-only `DISABLED` or `OMITTED_BY_POLICY` update
 creates no topology or detail rows. The current workflow actor deliberately continues
-to publish schema v2. Authorized paginated services are implemented, but producer
-activation still requires the live-ingestion bound from #79, composite bounded
-preparation completion under #142, and an old-writer drain. See
+to publish schema v2 in full mode. An invocation can instead select disabled reporting:
+the versioned bounded plan selection retains the effective policy and execution
+strategy, while no progress actor, node RPC, legacy snapshot, or schema-v3 writer is
+created. Authorized paginated services are implemented, but full-mode producer
+activation still requires the remaining live-ingestion bounds from #79, composite
+bounded preparation completion under #142, and an old-writer drain. See
 [ADR-0004](design/adr-0004-bounded-workflow-progress.md) and
 [ADR-0005](design/adr-0005-bounded-workflow-preparation.md).
 

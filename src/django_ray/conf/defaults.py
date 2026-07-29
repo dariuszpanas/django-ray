@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+# Runtime-selectable policies. The durable summary protocol also reserves
+# sampled and terminal-only values for later producer implementations.
+WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES = frozenset({"full", "disabled"})
+
 DEFAULTS: dict[str, Any] = {
     # Ray connection
     "RAY_ADDRESS": None,  # Required - e.g., "ray://localhost:10001"
@@ -32,6 +36,7 @@ DEFAULTS: dict[str, Any] = {
     "WORKER_LEASE_SECONDS": 60,
     "WORKER_HEARTBEAT_SECONDS": 15,
     "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
+    "WORKFLOW_PROGRESS_REPORTING_POLICY": "full",
     "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
     "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7,
     # Inputs

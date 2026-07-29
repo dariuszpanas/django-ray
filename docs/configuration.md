@@ -77,7 +77,8 @@ monotonic schedules; idle claim backoff does not postpone them.
 | `WORKER_LEASE_SECONDS` | `int` | `60` | Worker lease duration (`1`-`86400` seconds) for distributed coordination |
 | `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval (`1`-`86400` seconds), which must be below the lease duration |
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |
-| `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between workflow progress snapshot writes |
+| `WORKFLOW_PROGRESS_REPORTING_POLICY` | `str` | `"full"` | Default Ray workflow node-reporting policy: `"full"` or `"disabled"` |
+| `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between full-mode workflow progress snapshot writes |
 | `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS` | `int` | `7` | Terminal workflow topology and node-detail retention (`0`-`30` days) |
 
 `django-ray` validates numeric settings at startup, rejects booleans passed as integers, and enforces
@@ -88,8 +89,15 @@ persisted Ray Job handles from inactive workers, another worker will first try t
 reconcile or adopt the existing job before timeout-based stuck recovery marks it lost.
 Task monitor heartbeats are batched into one update for all in-flight tasks and
 throttled by `TASK_MONITOR_HEARTBEAT_SECONDS`.
-Ray-native workflow node events are collected in memory and written as one compact
-snapshot at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
+Ray-native workflow node reporting defaults to `"full"`. Set
+`WORKFLOW_PROGRESS_REPORTING_POLICY` to `"disabled"` when a workload needs the
+durable outer task lifecycle without a workflow progress actor, node-reporting RPCs,
+or `progress_data` writes. Calling
+`WorkflowSignature.with_progress_reporting("disabled").run(...)` overrides the
+setting for one invocation without reserving an application task keyword. Full mode
+collects node events in memory and writes a snapshot no more often than
+`WORKFLOW_PROGRESS_FLUSH_SECONDS`; the interval limits database write frequency, not
+producer RPCs or actor memory.
 Terminal topology and node detail become eligible for cleanup after
 `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`; `0` makes them eligible as soon as the
 terminal state is durably archived. Active current detail is not expired by this

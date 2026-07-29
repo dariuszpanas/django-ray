@@ -528,16 +528,46 @@ assert result["items"] == 4
 
 Set `use_ray=True` to fail instead of falling back when Ray is unavailable.
 
+## Workflow Progress Policy
+
+Ray workflow node reporting defaults to the configured
+`WORKFLOW_PROGRESS_REPORTING_POLICY="full"`. A latency-sensitive or very large
+workflow can opt out for one invocation:
+
+```python
+result = calculation.with_progress_reporting("disabled").run(4, use_ray=True)
+```
+
+Disabled reporting creates no workflow progress actor, sends no node or application
+progress RPCs, and writes no `RayTaskExecution.progress_data`. Calls to
+`report_progress()` return `False`, and the workflow submits the same Ray work. Inside
+a durable task, it still claims and fences its exact run, pins the effective plan and
+selected strategy, and preserves the outer task's state, result/error, retry,
+cancellation, recovery, and monitor heartbeat behavior.
+
+The bounded task summary exposes the effective policy. Authorized bounded workflow
+progress readers return `availability="DISABLED"` with no fabricated summary or graph
+for the current disabled run. The plan selection is the current-attempt signal, so
+historical attempts without an archived schema-v3 summary remain `NOT_REPORTED`.
+Local execution has no progress actor and is recorded as disabled regardless of the
+configured Ray reporting default.
+
+Only `"full"` and `"disabled"` are executable policies today. Sampled and terminal-only
+collection remain later #79 work; changing
+`WORKFLOW_PROGRESS_FLUSH_SECONDS` only throttles full-mode database snapshots and does
+not remove producer or actor overhead.
+
 ## Durability Semantics
 
 The outer Django task is the durability and retry boundary:
 
 - Internal steps do not create individual Django tasks.
-- While a workflow runs, an in-memory Ray coordinator collects node events. The
-  outer task currently writes a complete progress snapshot to
+- In full reporting mode, an in-memory Ray coordinator collects node events. The outer
+  task currently writes a complete progress snapshot to
   `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
   Recent events have a count cap, but the current node/edge graph and its serialized
-  bytes are not size-bounded.
+  bytes are not size-bounded. Disabled mode bypasses that coordinator and snapshot
+  path while leaving the durable outer-task boundary intact.
 - A separate nullable `workflow_progress_summary_json` field and schema-v3 codec are
   deployed reader-first. The field is fixed-shape and capped at 16 KiB of canonical
   UTF-8 JSON. Package-owned topology/detail tables and the internal storage writer can
@@ -682,3 +712,4 @@ the timing/result tree after it completes.
 | `bounded_map.with_result_buffer(max_serialized_bytes=..., actor_options=...)` | Opt into a resource-accounted Ray actor that forwards one ordered payload reference without coordinator decoding |
 | `report_progress(current, total, message=None, metrics=None)` | Report progress from a running leaf |
 | `signature.run(*args, use_ray=None, **kwargs)` | Execute with Ray when initialized, otherwise locally |
+| `signature.with_progress_reporting(policy).run(...)` | Execute one invocation with explicit `"full"` or `"disabled"` node reporting without reserving an application keyword |

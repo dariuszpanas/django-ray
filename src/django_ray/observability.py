@@ -17,6 +17,7 @@ from django_ray.workflow_plans import (
     PLAN_FORMAT,
     PLAN_FORMAT_VERSION,
     WorkflowPlanValidationError,
+    effective_plan_selection_reporting_policy,
     validate_plan_selection_manifest,
 )
 from django_ray.workflow_progress import WorkflowProgressReadSource, read_workflow_progress
@@ -107,9 +108,19 @@ def get_task_summary(
             workflow_revision = progress[revision_field]
 
     try:
-        plan_selection = _workflow_plan_selection(execution)
+        plan_selection = _validated_workflow_plan_selection(execution)
     except WorkflowObservabilityError:
         plan_selection = None
+    selected_strategy = (
+        redact_value(plan_selection.get("selected_strategy"))
+        if plan_selection is not None
+        else None
+    )
+    reporting_policy = (
+        redact_value(effective_plan_selection_reporting_policy(plan_selection))
+        if plan_selection is not None
+        else None
+    )
     error_message, error_message_truncated = _bounded_diagnostic(execution.error_message)
     return {
         **_versioned("task-summary", generated_at=generated_at),
@@ -135,9 +146,8 @@ def get_task_summary(
         "runtime_env_hash": execution.runtime_env_hash,
         "workflow_plan_fingerprint": execution.workflow_plan_fingerprint or None,
         "workflow_plan_pinned_attempt": execution.workflow_plan_pinned_attempt,
-        "workflow_selected_strategy": (
-            plan_selection.get("selected_strategy") if plan_selection is not None else None
-        ),
+        "workflow_selected_strategy": selected_strategy,
+        "workflow_reporting_policy": reporting_policy,
         "workflow_revision": workflow_revision,
         "error_message": error_message,
         "error_message_truncated": error_message_truncated,
@@ -163,7 +173,7 @@ def get_workflow_plan(execution: RayTaskExecution) -> dict[str, Any] | None:
         )
     try:
         manifest = json.loads(serialized)
-    except (TypeError, json.JSONDecodeError) as error:
+    except (TypeError, RecursionError, json.JSONDecodeError) as error:
         raise WorkflowObservabilityError(
             f"Task {execution.task_id} contains invalid workflow plan JSON"
         ) from error
@@ -188,11 +198,19 @@ def get_workflow_plan(execution: RayTaskExecution) -> dict[str, Any] | None:
 
 
 def _workflow_plan_selection(execution: RayTaskExecution) -> dict[str, Any] | None:
+    selection = _validated_workflow_plan_selection(execution)
+    return redact_value(selection) if selection is not None else None
+
+
+def _validated_workflow_plan_selection(
+    execution: RayTaskExecution,
+) -> dict[str, Any] | None:
+    """Return validated selection metadata before presentation redaction."""
     if not execution.workflow_plan_selection:
         return None
     try:
         selection = json.loads(execution.workflow_plan_selection)
-    except (TypeError, json.JSONDecodeError) as error:
+    except (TypeError, RecursionError, json.JSONDecodeError) as error:
         raise WorkflowObservabilityError(
             f"Task {execution.task_id} contains invalid workflow plan selection JSON"
         ) from error
@@ -206,7 +224,7 @@ def _workflow_plan_selection(execution: RayTaskExecution) -> dict[str, Any] | No
         raise WorkflowObservabilityError(
             f"Task {execution.task_id} workflow plan selection has an invalid schema"
         ) from error
-    return redact_value(validated)
+    return validated
 
 
 def get_queue_depths(*, generated_at: datetime | None = None) -> dict[str, Any]:

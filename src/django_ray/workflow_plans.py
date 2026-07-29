@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ImproperlyConfigured
 
+from django_ray.conf.defaults import WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES
 from django_ray.runtime.compiled_graph import (
     CompiledGraphCapabilityDecision,
     CompiledGraphReason,
@@ -48,6 +49,7 @@ from django_ray.runtime.runtime_env import (
     normalize_runtime_env,
     resolve_runtime_env_profile,
 )
+from django_ray.workflow_progress_summary import WORKFLOW_PROGRESS_REPORTING_POLICIES
 
 if TYPE_CHECKING:
     from django_ray.runtime.context import DurableTaskContext
@@ -59,7 +61,8 @@ PLAN_FORMAT_VERSION = 1
 RUNTIME_ENV_PLAN_FORMAT = "django-ray.runtime-env-plan"
 RUNTIME_ENV_PLAN_FORMAT_VERSION = 1
 PLAN_SELECTION_FORMAT = "django-ray.workflow-plan-selection"
-PLAN_SELECTION_FORMAT_VERSION = 1
+PLAN_SELECTION_FORMAT_VERSION = 2
+PLAN_SELECTION_LEGACY_FORMAT_VERSION = 1
 PLAN_DOMAIN_SEPARATOR = b"django-ray.workflow-plan-v1\0"
 RUNTIME_ENV_DOMAIN_SEPARATOR = b"django-ray.runtime-env-plan-v1\0"
 RUNTIME_ENV_TRANSPORT_DOMAIN_SEPARATOR = b"django-ray.runtime-env-plan-transport-v1\0"
@@ -159,10 +162,29 @@ class PlanEligibility:
     rejections: tuple[PlanRejection, ...]
     total_rejections: int
 
-    def select(self, selected_strategy: str, *, requested_policy: str) -> PlanSelection:
+    def select(
+        self,
+        selected_strategy: str,
+        *,
+        requested_policy: str,
+        reporting_policy: str | None = None,
+    ) -> PlanSelection:
         if selected_strategy not in self.eligible_strategies:
             raise WorkflowPlanValidationError(
                 f"Execution strategy {selected_strategy!r} is not eligible for this workflow plan"
+            )
+        if reporting_policy is None:
+            reporting_policy = "disabled" if selected_strategy == "local" else "full"
+        if (
+            not isinstance(reporting_policy, str)
+            or reporting_policy not in WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES
+        ):
+            raise WorkflowPlanValidationError(
+                f"Workflow reporting policy {reporting_policy!r} is unsupported"
+            )
+        if selected_strategy == "local" and reporting_policy != "disabled":
+            raise WorkflowPlanValidationError(
+                "Local workflow execution requires disabled progress reporting"
             )
         return PlanSelection(
             requested_policy=requested_policy,
@@ -170,6 +192,7 @@ class PlanEligibility:
             eligible_strategies=self.eligible_strategies,
             rejections=self.rejections,
             total_rejections=self.total_rejections,
+            reporting_policy=reporting_policy,
         )
 
 
@@ -182,6 +205,7 @@ class PlanSelection:
     eligible_strategies: tuple[str, ...]
     rejections: tuple[PlanRejection, ...]
     total_rejections: int
+    reporting_policy: str
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -189,6 +213,7 @@ class PlanSelection:
             "plan_selection_format_version": PLAN_SELECTION_FORMAT_VERSION,
             "requested_policy": self.requested_policy,
             "selected_strategy": self.selected_strategy,
+            "reporting_policy": self.reporting_policy,
             "eligible_strategies": list(self.eligible_strategies),
             "rejections": [rejection.as_dict() for rejection in self.rejections],
             "total_rejections": self.total_rejections,
@@ -199,7 +224,7 @@ class PlanSelection:
 def validate_plan_selection_manifest(value: Any) -> dict[str, Any]:
     """Validate the bounded durable selection protocol."""
     normalized = _normalize_json(value, path="plan_selection", depth=0)
-    expected_fields = {
+    common_fields = {
         "plan_selection_format",
         "plan_selection_format_version",
         "requested_policy",
@@ -209,12 +234,20 @@ def validate_plan_selection_manifest(value: Any) -> dict[str, Any]:
         "total_rejections",
         "rejections_truncated",
     }
-    if not isinstance(normalized, dict) or set(normalized) != expected_fields:
+    if not isinstance(normalized, dict):
         raise WorkflowPlanValidationError("Workflow plan selection has an unsupported schema")
-    if (
-        normalized["plan_selection_format"] != PLAN_SELECTION_FORMAT
-        or normalized["plan_selection_format_version"] != PLAN_SELECTION_FORMAT_VERSION
-    ):
+    version = normalized.get("plan_selection_format_version")
+    if type(version) is not int:
+        expected_fields = set()
+    elif version == PLAN_SELECTION_LEGACY_FORMAT_VERSION:
+        expected_fields = common_fields
+    elif version == PLAN_SELECTION_FORMAT_VERSION:
+        expected_fields = common_fields | {"reporting_policy"}
+    else:
+        expected_fields = set()
+    if set(normalized) != expected_fields:
+        raise WorkflowPlanValidationError("Workflow plan selection has an unsupported schema")
+    if normalized["plan_selection_format"] != PLAN_SELECTION_FORMAT:
         raise WorkflowPlanValidationError(
             "Workflow plan selection has an unsupported format version"
         )
@@ -224,6 +257,19 @@ def validate_plan_selection_manifest(value: Any) -> dict[str, Any]:
             or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", normalized[field]) is None
         ):
             raise WorkflowPlanValidationError(f"Workflow plan selection has an invalid {field}")
+    if version == PLAN_SELECTION_FORMAT_VERSION and (
+        not isinstance(normalized["reporting_policy"], str)
+        or normalized["reporting_policy"] not in WORKFLOW_PROGRESS_REPORTING_POLICIES
+    ):
+        raise WorkflowPlanValidationError("Workflow plan selection has an invalid reporting_policy")
+    if (
+        version == PLAN_SELECTION_FORMAT_VERSION
+        and normalized["selected_strategy"] == "local"
+        and normalized["reporting_policy"] != "disabled"
+    ):
+        raise WorkflowPlanValidationError(
+            "Local workflow plan selection requires disabled progress reporting"
+        )
     eligible = normalized["eligible_strategies"]
     if (
         not isinstance(eligible, list)
@@ -263,6 +309,16 @@ def validate_plan_selection_manifest(value: Any) -> dict[str, Any]:
             "Workflow plan selection has inconsistent rejection metadata"
         )
     return normalized
+
+
+def effective_plan_selection_reporting_policy(value: Any) -> str:
+    """Return the explicit or legacy-inferred workflow reporting policy."""
+    selection = validate_plan_selection_manifest(value)
+    if selection["plan_selection_format_version"] == PLAN_SELECTION_FORMAT_VERSION:
+        return str(selection["reporting_policy"])
+    if selection["selected_strategy"] == "local":
+        return "disabled"
+    return "full"
 
 
 @dataclass(frozen=True)
@@ -3030,6 +3086,7 @@ __all__ = [
     "PLAN_FORMAT_VERSION",
     "PLAN_SELECTION_FORMAT",
     "PLAN_SELECTION_FORMAT_VERSION",
+    "PLAN_SELECTION_LEGACY_FORMAT_VERSION",
     "PlanEligibility",
     "PlanRejection",
     "PlanSelection",
@@ -3038,6 +3095,7 @@ __all__ = [
     "WorkflowPlanBuildContext",
     "WorkflowPlanMismatchError",
     "WorkflowPlanValidationError",
+    "effective_plan_selection_reporting_policy",
     "materialize_workflow_plan",
     "plan_requires_drain",
     "prepare_materialized_plan_for_ray",
