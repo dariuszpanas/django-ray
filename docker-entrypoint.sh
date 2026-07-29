@@ -103,6 +103,7 @@ case "$MODE" in
 
     migrate)
         echo "Running Django migrations..."
+        wait_for_db
         exec python testproject/manage.py migrate --noinput
         ;;
 

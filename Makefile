@@ -337,7 +337,7 @@ help:
 	@echo "  clean          - Clean cache and build files"
 	@echo ""
 	@echo "Additional modules (if included):"
-	@echo "  Docker:     make docker-build, docker-run"
+	@echo "  Docker:     make docker-up, docker-smoke, docker-down"
 	@echo "  Kubernetes: make k8s-deploy, k8s-urls, k8s-status, k8s-delete"
 	@echo "  Load test:  make loadtest, loadtest-18, loadtest-headless"
 	@echo ""

@@ -1,239 +1,247 @@
-# Docker Deployment
+# Docker deployment
 
-This guide covers running django-ray with Docker.
+The repository includes one tracked Docker Compose application for local evaluation. It uses the
+bundled testproject, one PostgreSQL database, one idempotent migration service, a web service, and a
+django-ray task-manager worker. This topology is intentionally small and is not production
+hardening.
 
-## Images
+## Reproducible local quickstart
 
-### Django Application Image
+Prerequisites are Docker with the Compose v2 plugin and `uv`. Keep the same shell open so Compose
+continues to receive the generated credentials. Neither value is committed to the repository.
 
-```dockerfile
-# Dockerfile
-FROM python:3.12-slim
-# ... Django app with django-ray installed
-```
-
-Build:
+### POSIX
 
 ```bash
-docker build -t django-ray:latest .
+export DJANGO_API_TOKEN="$(
+  uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+)"
+export POSTGRES_PASSWORD="$(
+  uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+)"
+
+docker compose up --build --detach web worker
+docker compose --profile smoke run --rm --no-deps smoke
 ```
 
-### Ray Worker Image
+### PowerShell
 
-```dockerfile
-# Dockerfile.ray
-FROM rayproject/ray:2.53.0-py312
-# ... Ray with django-ray installed for task execution
+```powershell
+$env:DJANGO_API_TOKEN = uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+$env:POSTGRES_PASSWORD = uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+docker compose up --build --detach web worker
+docker compose --profile smoke run --rm --no-deps smoke
 ```
 
-Build:
+Compose fails before creating containers when either required variable is absent. It starts
+PostgreSQL first, waits for its health check, and runs `migrate` as a one-shot service. The web and
+worker services both require that service to exit successfully. Migration is therefore not repeated
+by every application replica, while re-running the one-shot service remains safe.
+
+All four application services receive the same explicit database settings:
+
+- `django.db.backends.postgresql`;
+- database name and user `django_ray`;
+- the generated PostgreSQL password;
+- host `postgres` and port `5432`.
+
+Only `web` and the opt-in `smoke` service receive the generated API bearer token. The migration
+service and task-manager worker do not receive it, so Ray worker processes cannot inherit the
+operator credential.
+
+The local Ray worker receives a 1 GiB shared-memory allocation and concurrency is kept at one for the
+quickstart. That is a bounded evaluation profile, not production sizing guidance.
+
+## What the smoke proves
+
+The opt-in `smoke` service has a three-minute deadline. It fails unless all of these observations
+hold:
+
+1. Django is connected to PostgreSQL and its migration graph has no unapplied leaves.
+2. The web readiness endpoint can query that database.
+3. An active task-manager worker lease appears in the same PostgreSQL database.
+4. Missing and invalid bearer tokens receive HTTP 401.
+5. The configured token enqueues `20 + 22`.
+6. The task result endpoint reaches `SUCCESSFUL`.
+7. The authenticated execution endpoint and a direct PostgreSQL read both contain result `42`.
+
+CI generates fresh disposable credentials and runs this same tracked Compose contract. It does not
+rely on a developer database, token, Python environment, or a prebuilt application image.
+
+Inspect the startup state without dumping container environments:
 
 ```bash
-docker build -f Dockerfile.ray -t django-ray-worker:latest .
+docker compose ps --all
+docker compose logs migrate
 ```
 
-The repository Dockerfiles use the committed `uv.lock` and pin the uv tool image to
-`0.9.18`. Production dependencies for the sample application (Gunicorn, Django Ninja,
-and WhiteNoise) come from the named `sample` project extra, so they are included in the
-locked dependency graph rather than installed ad hoc.
+## Authenticate in the browser
 
-## Running Containers
+Open the [sample landing page](http://127.0.0.1:8000/) and paste the current token value into
+**Browser API access**. The page retains a verified token only in the current tab's
+`sessionStorage`; it does not place the token in rendered HTML, a cookie, `localStorage`, or a URL.
 
-### Django Web Server
+Open [Swagger](http://127.0.0.1:8000/api/docs), select **Authorize**, and paste the token value.
+Swagger adds the `Bearer` scheme automatically, so the dialog should receive the value without the
+word `Bearer`.
+
+Print the value only in a trusted terminal when it needs to be copied:
+
+### POSIX
 
 ```bash
-# Production (gunicorn). Set all production variables from a secret manager.
-docker run -p 8000:8000 \
-  -e DJANGO_DEPLOYMENT_MODE=production \
-  -e DJANGO_SECRET_KEY="$(openssl rand -base64 48)" \
-  -e DJANGO_API_TOKEN="$(openssl rand -base64 32)" \
-  -e DJANGO_ALLOWED_HOSTS=app.example.com \
-  -e DATABASE_ENGINE=django.db.backends.postgresql \
-  django-ray:latest web
-
-# Local demo (not suitable for a shared or internet-facing deployment)
-docker run -p 8000:8000 django-ray:latest web-dev
+printf '%s\n' "$DJANGO_API_TOKEN"
 ```
 
-The image is production-capable only when `DJANGO_DEPLOYMENT_MODE=production` is set and
-the required secret, API token, and explicit host allow-list are supplied. The health
-endpoints (`/api/livez`, `/api/readyz`, and `/api/health`) remain unauthenticated so that
-container and Kubernetes probes can run. Every other API route, including task arguments,
-results, logs, and workflow observability, requires `Authorization: Bearer <DJANGO_API_TOKEN>`.
+### PowerShell
 
-For a local demo, provide a token even when using the development server:
+```powershell
+$env:DJANGO_API_TOKEN
+```
+
+Do not put bearer tokens in query strings. Browser extensions, developer tools, same-origin
+JavaScript, and browser session recovery can expose `sessionStorage`; this operator-token flow is
+only for a trusted local demo. A remotely accessible deployment requires HTTPS and an appropriate
+user identity/session design.
+
+## Make direct API requests
+
+The authorization header carries the token without embedding it in the URL.
+
+### POSIX
 
 ```bash
-docker run -p 8000:8000 \
-  -e DJANGO_DEBUG=True \
-  -e DJANGO_API_TOKEN=local-demo-token \
-  django-ray:latest web-dev
+task_json="$(
+  curl --fail --silent --show-error \
+    --request POST \
+    --header "Authorization: Bearer ${DJANGO_API_TOKEN}" \
+    http://127.0.0.1:8000/api/enqueue/add/20/22
+)"
+task_id="$(
+  printf '%s' "$task_json" |
+    uv run python -c 'import json, sys; print(json.load(sys.stdin)["task_id"])'
+)"
+
+curl --fail --silent --show-error \
+  --header "Authorization: Bearer ${DJANGO_API_TOKEN}" \
+  "http://127.0.0.1:8000/api/tasks/${task_id}"
+curl --fail --silent --show-error \
+  --header "Authorization: Bearer ${DJANGO_API_TOKEN}" \
+  "http://127.0.0.1:8000/api/executions?task_id=${task_id}&limit=1"
 ```
 
-The sample landing page does not embed that environment variable. Paste the same value into
-**Browser API access** to enable authenticated statistics, task enqueue, Metrics, and Executions.
-The page clears the password field after submission. Only after the statistics API verifies the
-credential does the page retain it in this tab's `sessionStorage`, so reloads do not require another
-paste. Select **Forget token** or end the tab session to clear it. A current credential rejected with
-401 is also removed. The token is never written to rendered HTML, `localStorage`, cookies, or
-URLs; an unverified replacement is never persisted.
+### PowerShell
 
-Prefer retrieving the token from the same local secret source used to start the container. For a
-disposable Docker Compose demo, the following command prints only that variable rather than dumping
-the container's complete environment:
+```powershell
+$headers = @{ Authorization = "Bearer $env:DJANGO_API_TOKEN" }
+$task = Invoke-RestMethod `
+  -Method Post `
+  -Headers $headers `
+  -Uri "http://127.0.0.1:8000/api/enqueue/add/20/22"
+
+Invoke-RestMethod `
+  -Headers $headers `
+  -Uri "http://127.0.0.1:8000/api/tasks/$($task.task_id)"
+Invoke-RestMethod `
+  -Headers $headers `
+  -Uri "http://127.0.0.1:8000/api/executions?task_id=$($task.task_id)&limit=1"
+```
+
+The first result refresh may still report an in-progress state. The
+[bundled testproject quickstart](https://github.com/dariuszpanas/django-ray/blob/main/testproject/README.md)
+contains bounded POSIX and PowerShell polling loops, plus the complete admin verification flow.
+
+## Verify through Django admin
+
+Create a superuser interactively so its password is neither committed nor copied into shell
+history:
 
 ```bash
-docker compose exec web printenv DJANGO_API_TOKEN
+docker compose exec web python testproject/manage.py createsuperuser
 ```
 
-Run credential-retrieval commands only in a trusted terminal. Do not put bearer tokens in query
-strings. `sessionStorage` is convenience storage, not a secret vault: same-origin JavaScript,
-extensions, developer tools, browser session recovery, or a compromised page may expose or restore
-it. This browser flow is for trusted local demos; remotely accessible deployments require HTTPS and
-should use an appropriate user identity and session model rather than sharing an operator token.
+Then open [Ray task executions](http://127.0.0.1:8000/admin/django_ray/raytaskexecution/) and inspect
+the task ID returned by the enqueue request. Its final state should be `SUCCEEDED` and its result
+should be `42`.
 
-### Django-Ray Worker
+## Shut down
+
+Remove the disposable containers and PostgreSQL volume:
 
 ```bash
-# Local Ray mode
-docker run django-ray:latest worker
-
-# Cluster mode (connect to external Ray)
-docker run -e RAY_ADDRESS=ray://ray-head:10001 django-ray:latest worker-cluster
+docker compose --profile smoke down --volumes --remove-orphans
 ```
 
-## Docker Compose
+Unset `DJANGO_API_TOKEN` and `POSTGRES_PASSWORD` when the shell no longer needs them.
 
-For local development with all services:
+## Build and entrypoint contract
 
-```yaml
-# docker-compose.yml
-version: '3.8'
-
-services:
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_DB: django_ray
-      POSTGRES_USER: django_ray
-      POSTGRES_PASSWORD: secret
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-  web:
-    build: .
-    command: web-dev
-    ports:
-      - "8000:8000"
-    environment:
-      DJANGO_DEPLOYMENT_MODE: demo
-      DJANGO_DEBUG: "True"
-      DJANGO_SECRET_KEY: local-compose-only-secret
-      DJANGO_API_TOKEN: local-compose-api-token
-      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
-      DATABASE_HOST: postgres
-      DATABASE_PASSWORD: secret
-    depends_on:
-      - postgres
-
-  worker:
-    build: .
-    command: worker
-    environment:
-      DATABASE_HOST: postgres
-      DATABASE_PASSWORD: secret
-    depends_on:
-      - postgres
-
-volumes:
-  postgres_data:
-```
-
-Run:
+The application image uses the committed `uv.lock`, uv `0.9.18`, and the `postgres` and `sample`
+extras. Build it directly when inspecting the image:
 
 ```bash
-docker compose up
+docker build --tag django-ray:latest .
 ```
 
-## Environment Variables
+The entrypoint supports these explicit modes:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DJANGO_DEPLOYMENT_MODE` | `demo` for local examples or `production` for fail-closed deployment checks | `demo` |
-| `DJANGO_SECRET_KEY` | Django secret key; production requires a random value of at least 50 characters | local demo placeholder |
-| `DJANGO_API_TOKEN` | Bearer token for all non-health API routes; production requires a random value of at least 32 characters | unset (all protected routes return 401) |
-| `DJANGO_DEBUG` | Enable debug mode | `False` |
-| `DJANGO_ALLOWED_HOSTS` | Comma-separated allowed hosts; production rejects `*` | `localhost,127.0.0.1` |
-| `DATABASE_ENGINE` | Database backend | `sqlite3` |
+| Command | Behavior |
+|---|---|
+| `web` | Run Gunicorn after database connectivity succeeds |
+| `web-dev` | Run Django's development server after database connectivity succeeds |
+| `worker` | Run a task-manager worker with local Ray |
+| `worker-cluster` | Run a task-manager worker connected to `RAY_ADDRESS` |
+| `migrate` | Apply Django migrations once and exit |
+| `collectstatic` | Collect static files once and exit |
+| `createsuperuser` | Create a superuser from the standard Django environment variables |
+| `shell` | Open the Django shell |
+
+The image does not run migrations implicitly when web or worker replicas start. In production,
+orchestration must provide the same database configuration to every application process, run one
+controlled migration job before traffic or task claiming, and source credentials from the
+deployment's secret manager. Do not copy the local Compose credentials or development topology into
+a shared environment.
+
+## Environment variables
+
+| Variable | Description | Sample default |
+|---|---|---|
+| `DJANGO_DEPLOYMENT_MODE` | `demo` or fail-closed `production` validation | `demo` |
+| `DJANGO_SECRET_KEY` | Django signing key; production requires a strong random value | local demo placeholder |
+| `DJANGO_API_TOKEN` | Bearer token for every non-health sample API route | unset |
+| `DJANGO_DEBUG` | Enable Django debug mode | `False` |
+| `DJANGO_ALLOWED_HOSTS` | Comma-separated host allowlist | `localhost,127.0.0.1` |
+| `DATABASE_ENGINE` | Django database backend | SQLite |
 | `DATABASE_NAME` | Database name | `django_ray` |
 | `DATABASE_USER` | Database user | `django_ray` |
-| `DATABASE_PASSWORD` | Database password | - |
+| `DATABASE_PASSWORD` | Database password | unset |
 | `DATABASE_HOST` | Database host | `localhost` |
 | `DATABASE_PORT` | Database port | `5432` |
 | `RAY_ADDRESS` | Ray cluster address | `auto` |
-| `DJANGO_RAY_QUEUE` | Queue name for Docker worker modes | `default` |
-| `DJANGO_RAY_QUEUES` | Comma-separated queues for Docker worker modes; overrides `DJANGO_RAY_QUEUE` | - |
-| `DJANGO_RAY_CONCURRENCY` | Worker concurrency for Docker worker modes | `10` |
-| `RAY_DASHBOARD_URL` | Ray Dashboard URL for admin deep links | `http://localhost:8265` |
-| `RAY_MAX_RETRIES` | Sample project retry-attempt setting | `3` |
-| `RAY_RETRY_DELAY_SECONDS` | Sample project retry backoff setting | `5` |
+| `DJANGO_RAY_QUEUE` | Queue passed to the Docker worker | `default` |
+| `DJANGO_RAY_QUEUES` | Comma-separated queues; overrides `DJANGO_RAY_QUEUE` | unset |
+| `DJANGO_RAY_CONCURRENCY` | Worker concurrency | `10` |
+| `RAY_DASHBOARD_URL` | Ray dashboard URL used by admin links | `http://localhost:8265` |
 
-## Commands
+Only `/api/livez`, `/api/readyz`, and `/api/health` are unauthenticated. Task arguments, results,
+logs, metrics, and workflow observability require `Authorization: Bearer <DJANGO_API_TOKEN>`.
 
-The Docker entrypoint supports these commands:
+## External Ray cluster
 
-| Command | Description |
-|---------|-------------|
-| `web` | Run gunicorn (production) |
-| `web-dev` | Run Django dev server |
-| `worker` | Run worker (local Ray) |
-| `worker-cluster` | Run worker (connect to Ray cluster) |
-| `migrate` | Run migrations |
-| `shell` | Django shell |
-
-Example:
+Build the separate Ray image when the application will connect to an existing cluster:
 
 ```bash
-# Run migrations
-docker run django-ray:latest migrate
-
-# Open shell
-docker run -it django-ray:latest shell
+docker build --file Dockerfile.ray --tag django-ray-worker:latest .
 ```
 
-## With External Ray Cluster
+The web process, task-manager worker, Ray nodes, and one-shot migration job must still share the same
+durable database settings. Set `RAY_ADDRESS=ray://<head-service>:10001` for `worker-cluster`. The
+tracked Compose quickstart intentionally exercises local Ray and does not model that production
+topology.
 
-If you have an existing Ray cluster:
+## See also
 
-```bash
-docker run \
-  -e RAY_ADDRESS=ray://ray-head:10001 \
-  -e DATABASE_HOST=postgres \
-  -e DATABASE_PASSWORD=secret \
-  django-ray:latest worker-cluster
-```
-
-## Health Checks
-
-```dockerfile
-# In Dockerfile
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
-```
-
-Validate a production container before exposing it:
-
-```bash
-docker run --rm \
-  -e DJANGO_DEPLOYMENT_MODE=production \
-  -e DJANGO_SECRET_KEY="$DJANGO_SECRET_KEY" \
-  -e DJANGO_API_TOKEN="$DJANGO_API_TOKEN" \
-  -e DJANGO_ALLOWED_HOSTS=app.example.com \
-  django-ray:latest python testproject/manage.py check --deploy
-```
-
-## See Also
-
-- [Kubernetes Deployment](kubernetes.md) - Production deployment
-- [TLS Configuration](tls.md) - Securing connections
-
+- [Kubernetes deployment](kubernetes.md)
+- [TLS configuration](tls.md)
+- [Operator runbook](../runbook.md)

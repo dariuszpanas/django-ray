@@ -107,8 +107,9 @@ in a separate change.
 
 The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
 every commit in the PR. The separate required `CI Gate` check fails unless lint, docs, typing,
-supported-Python tests, PostgreSQL, live-cluster faults, testproject, minimum/latest dependencies,
-and package build all succeed. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`,
+supported-Python tests, PostgreSQL, live-cluster faults, testproject, the tracked Docker Compose
+smoke, minimum/latest dependencies, and package build all succeed. Use one of `build`, `chore`, `ci`,
+`docs`, `feat`, `fix`, `perf`,
 `refactor`,
 `revert`, `style`, or `test`, optionally add a scope and `!`, and include a summary after `:`. The
 check enforces meaningful body context, validation evidence or a specific not-run reason, and the

@@ -262,6 +262,12 @@ This runs Django's system checks, the sample API/security/workflow tests, and re
 coverage across the user-facing API, landing view, and URL configuration. CI runs it as the
 `Testproject Smoke` job before building the package.
 
+The separate blocking `Docker Compose Smoke` job builds the tracked application image, generates
+disposable credentials, starts the shared-PostgreSQL Compose topology, and runs the bounded
+authenticated enqueue/worker/result contract from `testproject/docker_smoke.py`. It always removes
+the disposable volume and containers and only prints bounded, credential-redacted diagnostics on
+failure.
+
 ### Live Cluster Fault Tests (Opt-In)
 
 `tests/integration/test_live_failure_injection.py` runs against a real Ray cluster and is skipped by default.
@@ -460,9 +466,10 @@ gh pr merge --auto --rebase <PR-number>
 The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and every full
 commit message, and reports a required status check without needing secrets from the PR. The separate
 required `CI Gate` runs after every blocking job and passes only when lint, docs, typing, all supported
-Python tests, PostgreSQL coordination, live-cluster faults, testproject, minimum/latest dependencies,
-and package build all report `success`. Its `always()` condition makes a failed, cancelled, timed-out,
-or skipped dependency visible as a failed gate instead of a successful skip. This repository is
+Python tests, PostgreSQL coordination, live-cluster faults, testproject, the tracked Docker Compose
+smoke, minimum/latest dependencies, and package build all report `success`. Its `always()` condition
+makes a failed, cancelled, timed-out, or skipped dependency visible as a failed gate instead of a
+successful skip. This repository is
 private, so use rebase auto-merge rather than merge queue: auto-merge waits for both protected checks
 and then applies the rebase method.
 

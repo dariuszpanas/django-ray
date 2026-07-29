@@ -307,6 +307,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make the tracked Docker quickstart a migrated, authenticated Compose application: web, worker,
+  one-shot migration, and bounded smoke services now share PostgreSQL; CI proves fail-closed bearer
+  authentication, enqueue, worker execution, and result retrieval with disposable credentials.
 - Recover task lifecycle edge cases without allowing stale attempts to overwrite newer execution state.
 - Keep Ray Job outcomes independent of operational log output.
 - Avoid leaking credentials, tokens, and large result payloads through operator-facing output.
