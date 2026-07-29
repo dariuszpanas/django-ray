@@ -534,6 +534,7 @@ class _RayExecutor(_Executor):
         self.workflow_run_identity: WorkflowRunIdentity | None = None
         self.last_progress_revision = -1
         self.last_progress_flush_at = time.monotonic()
+        self._pending_progress_snapshot_ref = None
         self._progress_suppression_depth = 0
         self._map_progress_sent_at: dict[str, float] = {}
         self.progress_actor_cls = progress_actor_cls
@@ -726,10 +727,49 @@ class _RayExecutor(_Executor):
             if self.progress_actor is None:
                 return self.ray.get(value)
 
-    def _disable_progress_reporting(self, *, notify_actor: bool = True) -> None:
+    def _progress_warning(
+        self,
+        message: str,
+        *,
+        reason: str,
+        **extra: Any,
+    ) -> None:
+        """Emit one bounded diagnostic without exposing workflow payloads."""
+        from django_ray.logging import get_logger
+
+        identity = self.workflow_run_identity
+        get_logger(
+            __name__,
+            component="workflow_progress",
+            task_execution_pk=(
+                getattr(identity, "task_execution_pk", None)
+                if identity is not None
+                else getattr(self, "task_execution_pk", None)
+            ),
+            workflow_run_id=(getattr(identity, "run_id", None) if identity is not None else None),
+        ).warning(
+            message,
+            extra={
+                "reason": reason,
+                **extra,
+            },
+        )
+
+    def _disable_progress_reporting(
+        self,
+        *,
+        notify_actor: bool = True,
+        reason: str | None = None,
+    ) -> None:
         """Stop local flushing and drain late reports in an obsolete actor."""
         progress_actor = self.progress_actor
         self.progress_actor = None
+        self._pending_progress_snapshot_ref = None
+        if reason is not None:
+            self._progress_warning(
+                "Workflow progress reporting became unavailable",
+                reason=reason,
+            )
         if not notify_actor or progress_actor is None:
             return
         try:
@@ -1284,6 +1324,7 @@ class _RayExecutor(_Executor):
         *,
         bypass_interval: bool = False,
         failed: bool = False,
+        wait_timeout_seconds: float = 0.5,
     ) -> dict[str, Any] | None:
         if self.progress_actor is None or self.workflow_run_identity is None:
             return None
@@ -1299,17 +1340,34 @@ class _RayExecutor(_Executor):
 
         # Avoid blocking the caller indefinitely if the snapshot actor is unhealthy
         # or transiently unavailable under load.
-        snapshot_ref = self.progress_actor.snapshot.remote()
-        ready, _ = self.ray.wait([snapshot_ref], timeout=0.5)
+        snapshot_ref = getattr(self, "_pending_progress_snapshot_ref", None)
+        try:
+            if snapshot_ref is None:
+                snapshot_ref = self.progress_actor.snapshot.remote()
+                self._pending_progress_snapshot_ref = snapshot_ref
+            ready, _ = self.ray.wait(
+                [snapshot_ref],
+                timeout=wait_timeout_seconds,
+            )
+        except Exception:
+            self._disable_progress_reporting(
+                notify_actor=False,
+                reason="snapshot_rpc_failed",
+            )
+            return None
         if not ready:
             return None
+        self._pending_progress_snapshot_ref = None
 
         try:
             snapshot = self.ray.get(ready[0])
         except Exception:
             # If the actor died (e.g. OOM), disable further tracking attempts
             # so we don't crash the workflow or repeatedly timeout.
-            self._disable_progress_reporting(notify_actor=False)
+            self._disable_progress_reporting(
+                notify_actor=False,
+                reason="snapshot_get_failed",
+            )
             return None
 
         if failed:
@@ -1318,8 +1376,20 @@ class _RayExecutor(_Executor):
         if failed or revision != self.last_progress_revision:
             from django_ray.workflow_progress import persist_workflow_progress
 
-            if not persist_workflow_progress(self.workflow_run_identity, snapshot):
-                self._disable_progress_reporting()
+            try:
+                accepted = persist_workflow_progress(
+                    self.workflow_run_identity,
+                    snapshot,
+                )
+            except Exception:
+                self._disable_progress_reporting(
+                    reason="snapshot_persistence_failed",
+                )
+                return None
+            if not accepted:
+                self._disable_progress_reporting(
+                    reason="snapshot_fence_rejected",
+                )
                 return None
             self.last_progress_revision = revision
         return snapshot
@@ -1328,16 +1398,50 @@ class _RayExecutor(_Executor):
         if self.progress_actor is None:
             return
 
+        from django_ray.conf.settings import get_settings
+
+        timeout_seconds = float(
+            get_settings().get(
+                "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS",
+                15,
+            )
+        )
+        deadline = time.monotonic() + timeout_seconds
+        saw_snapshot = False
+
         # Leaf event reporting is asynchronous. Give the in-memory actor a brief
-        # chance to drain its mailbox before writing the terminal snapshot.
-        for _attempt in range(10):
-            snapshot = self._flush_progress(bypass_interval=True, failed=failed)
-            if snapshot is None:
+        # chance to drain its mailbox before writing the terminal snapshot. A
+        # newly scheduled actor can also be transiently unavailable, so keep
+        # polling one pending snapshot request until the explicit total deadline.
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            snapshot = self._flush_progress(
+                bypass_interval=True,
+                failed=failed,
+                wait_timeout_seconds=min(0.5, remaining),
+            )
+            if self.progress_actor is None:
                 return
-            terminal = snapshot["completed_nodes"] + snapshot["failed_nodes"]
-            if failed or terminal == snapshot["total_nodes"]:
-                return
-            time.sleep(0.05)
+            if snapshot is not None:
+                saw_snapshot = True
+                terminal = snapshot["completed_nodes"] + snapshot["failed_nodes"]
+                if failed or terminal == snapshot["total_nodes"]:
+                    return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
+
+        reason = "snapshot_incomplete" if saw_snapshot else "snapshot_unavailable"
+        self._progress_warning(
+            "Workflow terminal progress did not complete before the flush deadline",
+            reason=reason,
+            timeout_seconds=timeout_seconds,
+            failed_workflow=failed,
+        )
+        self._disable_progress_reporting()
 
 
 class WorkflowSignature(ABC):

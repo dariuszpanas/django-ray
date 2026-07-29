@@ -54,6 +54,46 @@ def report_and_increment(value: int) -> tuple[bool, int]:
     return report_progress(1, 2), value + 1
 
 
+class DelayedFirstSnapshotProgressActor(WorkflowProgressActor):
+    """Force the coordinator through its terminal snapshot retry path."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._first_snapshot = True
+
+    def snapshot(self) -> dict[str, Any]:
+        if self._first_snapshot:
+            self._first_snapshot = False
+            time.sleep(0.75)
+        return super().snapshot()
+
+
+@pytest.fixture
+def workflow_progress_warning_records(monkeypatch) -> list[dict[str, Any]]:
+    """Capture structured warning inputs without relying on logger propagation."""
+    records: list[dict[str, Any]] = []
+
+    class _RecordingLogger:
+        def __init__(self, context: dict[str, Any]) -> None:
+            self.context = context
+
+        def warning(self, message: str, *, extra: dict[str, Any]) -> None:
+            records.append(
+                {
+                    "message": message,
+                    **self.context,
+                    **extra,
+                }
+            )
+
+    def get_logger(name: str, **context: Any) -> _RecordingLogger:
+        assert name == "django_ray.workflows"
+        return _RecordingLogger(context)
+
+    monkeypatch.setattr("django_ray.logging.get_logger", get_logger)
+    return records
+
+
 def echo_workflow_progress_policy(*, workflow_progress_policy: str) -> str:
     return workflow_progress_policy
 
@@ -1048,6 +1088,52 @@ def test_ray_executor_progress_flush_handles_unavailable_actor() -> None:
     assert executor.progress_actor is None
 
 
+@pytest.mark.parametrize("failure_point", ["submit", "wait"])
+def test_ray_executor_progress_flush_contains_snapshot_rpc_failures(
+    failure_point,
+    workflow_progress_warning_records,
+) -> None:
+    snapshot_ref = object()
+
+    def submit():
+        if failure_point == "submit":
+            raise RuntimeError("submit failed")
+        return snapshot_ref
+
+    def wait(refs, timeout):
+        del refs, timeout
+        if failure_point == "wait":
+            raise RuntimeError("wait failed")
+        raise AssertionError("wait should fail in this test")
+
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = SimpleNamespace(
+        snapshot=SimpleNamespace(remote=submit),
+    )
+    executor.workflow_run_identity = WorkflowRunIdentity(
+        task_execution_pk=9,
+        attempt_number=1,
+        execution_generation=1,
+        run_id=f"snapshot-{failure_point}-failure",
+    )
+    executor.last_progress_flush_at = 0.0
+    executor.ray = SimpleNamespace(wait=wait)
+
+    assert executor._flush_progress(bypass_interval=True) is None
+
+    assert executor.progress_actor is None
+    assert executor._pending_progress_snapshot_ref is None
+    assert workflow_progress_warning_records == [
+        {
+            "message": "Workflow progress reporting became unavailable",
+            "component": "workflow_progress",
+            "task_execution_pk": 9,
+            "workflow_run_id": f"snapshot-{failure_point}-failure",
+            "reason": "snapshot_rpc_failed",
+        }
+    ]
+
+
 def test_ray_executor_throttles_high_cardinality_progress_snapshots(
     monkeypatch,
     settings,
@@ -1131,6 +1217,59 @@ def test_ray_executor_throttles_high_cardinality_progress_snapshots(
     assert len(persisted) == 1
 
 
+def test_flush_progress_reuses_pending_actor_snapshot_request(monkeypatch) -> None:
+    identity = object()
+    persisted: list[dict[str, Any]] = []
+    snapshot_ref = object()
+    snapshot_calls = 0
+    wait_calls = 0
+
+    def persist(reported_identity, snapshot):
+        assert reported_identity is identity
+        persisted.append(snapshot)
+        return True
+
+    monkeypatch.setattr(
+        "django_ray.workflow_progress.persist_workflow_progress",
+        persist,
+    )
+
+    class _SnapshotMethod:
+        def remote(self):
+            nonlocal snapshot_calls
+            snapshot_calls += 1
+            return snapshot_ref
+
+    snapshot = {
+        "revision": 3,
+        "completed_nodes": 1,
+        "failed_nodes": 0,
+        "total_nodes": 1,
+    }
+
+    def wait(refs, timeout):
+        nonlocal wait_calls
+        assert refs == [snapshot_ref]
+        assert timeout == 0.5
+        wait_calls += 1
+        return ([], refs) if wait_calls == 1 else (refs, [])
+
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = SimpleNamespace(snapshot=_SnapshotMethod())
+    executor.workflow_run_identity = identity
+    executor.last_progress_revision = -1
+    executor.last_progress_flush_at = 0.0
+    executor.ray = SimpleNamespace(wait=wait, get=lambda ref: dict(snapshot))
+
+    assert executor._flush_progress(bypass_interval=True) is None
+    assert executor._flush_progress(bypass_interval=True) == snapshot
+
+    assert snapshot_calls == 1
+    assert wait_calls == 2
+    assert persisted == [snapshot]
+    assert executor._pending_progress_snapshot_ref is None
+
+
 def test_finish_progress_polls_without_rewriting_unchanged_snapshot(monkeypatch) -> None:
     identity = object()
     persisted: list[dict[str, Any]] = []
@@ -1153,12 +1292,6 @@ def test_finish_progress_polls_without_rewriting_unchanged_snapshot(monkeypatch)
             snapshot_calls += 1
             return snapshot_ref
 
-    snapshot = {
-        "revision": 3,
-        "completed_nodes": 0,
-        "failed_nodes": 0,
-        "total_nodes": 1,
-    }
     executor = object.__new__(_RayExecutor)
     executor.progress_actor = SimpleNamespace(snapshot=_SnapshotMethod())
     executor.workflow_run_identity = identity
@@ -1166,24 +1299,285 @@ def test_finish_progress_polls_without_rewriting_unchanged_snapshot(monkeypatch)
     executor.last_progress_flush_at = 0.0
     executor.ray = SimpleNamespace(
         wait=lambda refs, timeout: (refs, []),
-        get=lambda ref: dict(snapshot),
+        get=lambda ref: {
+            "revision": 4 if snapshot_calls >= 3 else 3,
+            "completed_nodes": 1 if snapshot_calls >= 3 else 0,
+            "failed_nodes": 0,
+            "total_nodes": 1,
+        },
     )
     sleeps: list[float] = []
     monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
 
     executor.finish_progress()
 
-    assert snapshot_calls == 10
-    assert len(persisted) == 1
-    assert sleeps == [0.05] * 10
+    assert snapshot_calls == 3
+    assert [snapshot["revision"] for snapshot in persisted] == [3, 4]
+    assert sleeps == [0.05, 0.05]
 
 
-def test_finish_progress_returns_when_snapshot_is_unavailable(monkeypatch) -> None:
+def test_finish_progress_retries_transient_snapshot_unavailability(monkeypatch) -> None:
     executor = object.__new__(_RayExecutor)
     executor.progress_actor = object()
-    monkeypatch.setattr(executor, "_flush_progress", lambda **kwargs: None)
+    snapshots = iter(
+        [
+            None,
+            None,
+            {"completed_nodes": 1, "failed_nodes": 0, "total_nodes": 1},
+        ]
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(executor, "_flush_progress", lambda **kwargs: next(snapshots))
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
 
     executor.finish_progress()
+
+    assert sleeps == [0.05, 0.05]
+
+
+def test_finish_progress_reports_permanent_snapshot_unavailability(
+    monkeypatch,
+    settings,
+    workflow_progress_warning_records,
+) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 1,
+    }
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    executor.workflow_run_identity = WorkflowRunIdentity(
+        task_execution_pk=7,
+        attempt_number=2,
+        execution_generation=3,
+        run_id="terminal-timeout-run",
+    )
+    clock = [0.0]
+    flush_calls = 0
+    sleeps: list[float] = []
+    wait_timeouts: list[float] = []
+
+    def flush(**kwargs):
+        nonlocal flush_calls
+        assert kwargs["bypass_interval"] is True
+        assert kwargs["failed"] is False
+        flush_calls += 1
+        wait_timeout = kwargs["wait_timeout_seconds"]
+        wait_timeouts.append(wait_timeout)
+        clock[0] += wait_timeout
+        return None
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(executor, "_flush_progress", flush)
+    monkeypatch.setattr("django_ray.workflows.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleep)
+
+    executor.finish_progress()
+
+    assert flush_calls == 2
+    assert sleeps == [0.05]
+    assert wait_timeouts == pytest.approx([0.5, 0.45])
+    assert clock[0] == pytest.approx(1.0)
+    assert workflow_progress_warning_records == [
+        {
+            "message": ("Workflow terminal progress did not complete before the flush deadline"),
+            "component": "workflow_progress",
+            "task_execution_pk": 7,
+            "workflow_run_id": "terminal-timeout-run",
+            "reason": "snapshot_unavailable",
+            "timeout_seconds": 1.0,
+            "failed_workflow": False,
+        }
+    ]
+
+
+def test_finish_progress_forwards_remaining_deadline_to_ray_wait(
+    monkeypatch,
+    settings,
+) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 1,
+    }
+    snapshot_ref = object()
+    wait_timeouts: list[float] = []
+    clock = [0.0]
+
+    def wait(refs, timeout):
+        assert refs == [snapshot_ref]
+        wait_timeouts.append(timeout)
+        clock[0] += timeout
+        return [], refs
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = SimpleNamespace(
+        snapshot=SimpleNamespace(remote=lambda: snapshot_ref),
+    )
+    executor.workflow_run_identity = WorkflowRunIdentity(
+        task_execution_pk=7,
+        attempt_number=2,
+        execution_generation=3,
+        run_id="terminal-budget-run",
+    )
+    executor.last_progress_flush_at = 0.0
+    executor.ray = SimpleNamespace(wait=wait)
+    monkeypatch.setattr("django_ray.workflows.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleep)
+
+    executor.finish_progress()
+
+    assert wait_timeouts == pytest.approx([0.5, 0.45])
+    assert clock[0] == pytest.approx(1.0)
+    assert executor._pending_progress_snapshot_ref is None
+
+
+def test_finish_progress_stops_immediately_after_permanent_actor_failure(
+    monkeypatch,
+    workflow_progress_warning_records,
+) -> None:
+    snapshot_ref = object()
+    snapshot_calls = 0
+    sleeps: list[float] = []
+
+    class _SnapshotMethod:
+        def remote(self):
+            nonlocal snapshot_calls
+            snapshot_calls += 1
+            return snapshot_ref
+
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = SimpleNamespace(snapshot=_SnapshotMethod())
+    executor.workflow_run_identity = WorkflowRunIdentity(
+        task_execution_pk=8,
+        attempt_number=1,
+        execution_generation=1,
+        run_id="terminal-actor-failure",
+    )
+    executor.last_progress_flush_at = 0.0
+    executor.ray = SimpleNamespace(
+        wait=lambda refs, timeout: (refs, []),
+        get=lambda ref: (_ for _ in ()).throw(RuntimeError("actor died")),
+    )
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
+
+    executor.finish_progress()
+
+    assert snapshot_calls == 1
+    assert sleeps == []
+    assert executor.progress_actor is None
+    assert workflow_progress_warning_records == [
+        {
+            "message": "Workflow progress reporting became unavailable",
+            "component": "workflow_progress",
+            "task_execution_pk": 8,
+            "workflow_run_id": "terminal-actor-failure",
+            "reason": "snapshot_get_failed",
+        }
+    ]
+
+
+def test_finish_progress_contains_persistence_failure_without_leaking_exception(
+    monkeypatch,
+    workflow_progress_warning_records,
+) -> None:
+    snapshot_ref = object()
+    disabled: list[bool] = []
+    sleeps: list[float] = []
+
+    def persist(reported_identity, snapshot):
+        del reported_identity, snapshot
+        raise RuntimeError("password=do-not-leak")
+
+    monkeypatch.setattr(
+        "django_ray.workflow_progress.persist_workflow_progress",
+        persist,
+    )
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = SimpleNamespace(
+        snapshot=SimpleNamespace(remote=lambda: snapshot_ref),
+        disable=SimpleNamespace(remote=lambda: disabled.append(True)),
+    )
+    executor.workflow_run_identity = WorkflowRunIdentity(
+        task_execution_pk=8,
+        attempt_number=1,
+        execution_generation=1,
+        run_id="terminal-persistence-failure",
+    )
+    executor.last_progress_revision = -1
+    executor.last_progress_flush_at = 0.0
+    executor.ray = SimpleNamespace(
+        wait=lambda refs, timeout: (refs, []),
+        get=lambda ref: {
+            "revision": 1,
+            "completed_nodes": 1,
+            "failed_nodes": 0,
+            "total_nodes": 1,
+        },
+    )
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
+
+    executor.finish_progress()
+
+    assert executor.progress_actor is None
+    assert disabled == [True]
+    assert sleeps == []
+    assert workflow_progress_warning_records == [
+        {
+            "message": "Workflow progress reporting became unavailable",
+            "component": "workflow_progress",
+            "task_execution_pk": 8,
+            "workflow_run_id": "terminal-persistence-failure",
+            "reason": "snapshot_persistence_failed",
+        }
+    ]
+    assert "do-not-leak" not in json.dumps(workflow_progress_warning_records)
+
+
+def test_finish_progress_reports_incomplete_terminal_snapshot(
+    monkeypatch,
+    settings,
+    workflow_progress_warning_records,
+) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 1,
+    }
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    executor.workflow_run_identity = None
+    clock = [0.0]
+
+    def flush(**kwargs):
+        clock[0] += kwargs["wait_timeout_seconds"]
+        return {"completed_nodes": 0, "failed_nodes": 0, "total_nodes": 1}
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(executor, "_flush_progress", flush)
+    monkeypatch.setattr("django_ray.workflows.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleep)
+
+    executor.finish_progress()
+
+    assert clock[0] == pytest.approx(1.0)
+    assert workflow_progress_warning_records == [
+        {
+            "message": ("Workflow terminal progress did not complete before the flush deadline"),
+            "component": "workflow_progress",
+            "task_execution_pk": None,
+            "workflow_run_id": None,
+            "reason": "snapshot_incomplete",
+            "timeout_seconds": 1.0,
+            "failed_workflow": False,
+        }
+    ]
 
 
 def test_finish_progress_waits_for_terminal_snapshot(monkeypatch) -> None:
@@ -1318,7 +1712,10 @@ def test_ray_executor_flushes_failed_progress_snapshot() -> None:
 
 
 @pytest.mark.django_db
-def test_ray_executor_disables_reporter_after_stale_write() -> None:
+def test_ray_executor_disables_reporter_after_stale_write(
+    monkeypatch,
+    workflow_progress_warning_records,
+) -> None:
     from django_ray.models import RayTaskExecution, TaskState
     from django_ray.workflow_progress import claim_workflow_run
 
@@ -1362,10 +1759,23 @@ def test_ray_executor_disables_reporter_after_stale_write() -> None:
         wait=lambda refs, timeout: (refs, []),
         get=lambda ref: snapshot,
     )
+    sleeps: list[float] = []
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
 
-    assert executor._flush_progress() is None
+    executor.finish_progress()
+
     assert executor.progress_actor is None
     assert disabled == [True]
+    assert sleeps == []
+    assert workflow_progress_warning_records == [
+        {
+            "message": "Workflow progress reporting became unavailable",
+            "component": "workflow_progress",
+            "task_execution_pk": execution.pk,
+            "workflow_run_id": identity.run_id,
+            "reason": "snapshot_fence_rejected",
+        }
+    ]
 
 
 @pytest.mark.real_ray
@@ -1537,11 +1947,19 @@ def test_real_ray_mapped_chain_drains_upstream_ref_and_preserves_failure() -> No
 
 @pytest.mark.real_ray
 @pytest.mark.django_db
-def test_real_ray_workflow_persists_graph_and_execution_metadata() -> None:
+def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
+    monkeypatch,
+    settings,
+) -> None:
     import ray
 
+    import django_ray.workflows as workflow_module
     from django_ray.models import RayTaskExecution
 
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_FLUSH_SECONDS": 300,
+    }
     execution = RayTaskExecution.objects.create(
         task_id="real-ray-workflow-graph",
         callable_path="tests.unit.test_workflows.run_nested_workflow",
@@ -1555,6 +1973,13 @@ def test_real_ray_workflow_persists_graph_and_execution_metadata() -> None:
 
     ray.init(ignore_reinit_error=True)
     try:
+        remote_step, remote_collect, _ = workflow_module._get_cached_workflow_remotes()
+        delayed_progress_actor = ray.remote(num_cpus=0)(DelayedFirstSnapshotProgressActor)
+        monkeypatch.setattr(
+            workflow_module,
+            "_get_cached_workflow_remotes",
+            lambda: (remote_step, remote_collect, delayed_progress_actor),
+        )
         with durable_task_execution(
             execution.pk,
             attempt_number=execution.attempt_number,

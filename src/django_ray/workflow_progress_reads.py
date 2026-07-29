@@ -56,6 +56,7 @@ from django_ray.workflow_progress_summary import (
     WORKFLOW_PROGRESS_STATES,
     WORKFLOW_PROGRESS_SUMMARY_MAX_BYTES,
     WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
+    WORKFLOW_PROGRESS_TERMINAL_STATES,
     WorkflowProgressDetailAvailability,
     WorkflowProgressSummaryError,
     WorkflowProgressTruncationReason,
@@ -572,11 +573,12 @@ def _summary_context(
             )
 
     availability = WorkflowProgressDetailAvailability.NOT_REPORTED.value
-    if (
-        selected_attempt_number == execution.attempt_number
-        and _current_workflow_reporting_policy(execution, using=using) == "disabled"
-    ):
-        availability = WorkflowProgressDetailAvailability.DISABLED.value
+    if selected_attempt_number == execution.attempt_number:
+        reporting_policy = _current_workflow_reporting_policy(execution, using=using)
+        if reporting_policy == "disabled":
+            availability = WorkflowProgressDetailAvailability.DISABLED.value
+        elif reporting_policy == "full" and execution.state in WORKFLOW_PROGRESS_TERMINAL_STATES:
+            availability = WorkflowProgressDetailAvailability.MISSING.value
 
     return _SummaryContext(
         execution=execution,

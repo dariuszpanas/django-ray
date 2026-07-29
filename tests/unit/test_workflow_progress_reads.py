@@ -507,6 +507,23 @@ def test_dynamic_legacy_selection_without_a_summary_remains_not_reported() -> No
     assert response["availability"] == "NOT_REPORTED"
 
 
+def test_terminal_full_selection_without_v3_publication_is_missing() -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="terminal-full-selection",
+        callable_path="tests.full.workflow",
+        state=TaskState.SUCCEEDED,
+        workflow_plan_selection=json.dumps(_plan_selection_manifest()),
+    )
+
+    summary = get_workflow_progress_summary(execution, authorize=_allow)
+
+    assert summary["summary"] is None
+    assert summary["availability"] == "MISSING"
+    with pytest.raises(WorkflowProgressReadError) as missing:
+        list_workflow_topology_nodes(execution, authorize=_allow)
+    assert missing.value.code is WorkflowProgressReadErrorCode.MISSING
+
+
 def test_disabled_selection_query_is_fenced_against_a_new_workflow_run(
     monkeypatch,
 ) -> None:

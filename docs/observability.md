@@ -79,8 +79,10 @@ actor still publishes schema v2 in full mode. A workflow using the disabled runt
 policy creates no actor and publishes no legacy snapshot. Its bounded version-2 plan
 selection records the effective policy independently, so current-attempt authorized
 readers return `DISABLED` without fabricating a schema-v3 summary or empty graph.
-Historical attempts need an archived schema-v3 summary to retain that distinction;
-otherwise they remain `NOT_REPORTED`.
+An active full-reporting run without schema v3 remains `NOT_REPORTED`; if that run
+reaches a terminal task state without publishing schema v3, readers return `MISSING`
+instead of presenting an empty graph. Historical attempts need an archived schema-v3
+summary to retain these distinctions; otherwise they remain `NOT_REPORTED`.
 
 Full-mode schema-v3 publication stays disabled until #79 bounds the remaining live
 ingestion path, #142 completes ADR-0005's composite topology/detail preparation after
@@ -267,9 +269,10 @@ state. Responses use `Cache-Control: no-store`.
 The polling queryset defers both progress payload columns. Its follow-up workflow read
 uses a database byte guard for only the 16 KiB schema-v3 summary and explicitly disables
 the legacy fallback. It never selects or parses `progress_data`, topology pages, or
-normalized detail rows. Legacy writers therefore appear as not yet reported in the
-high-frequency panel until they publish a schema-v3 summary; explicit compatibility
-tools may still opt into the separately capped schema-v1/v2 reader.
+normalized detail rows. Active legacy writers therefore appear as not yet reported in
+the high-frequency panel. A terminal full-reporting run without schema v3 is explicitly
+`MISSING`; compatibility tools may still opt into the separately capped schema-v1/v2
+reader.
 
 The change form links to bounded Admin topology and node-detail views. Those views repeat
 the same per-object permission check on every page request and call the package read
