@@ -596,13 +596,73 @@ class _RayExecutor(_Executor):
         self.workflow_run_identity = identity
         if reporting_policy == "disabled":
             return
-        self.progress_actor = self.progress_actor_cls.remote(
-            identity.task_execution_pk,
-            identity.attempt_number,
-            identity.execution_generation,
-            identity.run_id,
-            materialized_plan.plan.summary(),
+        from django_ray.workflow_progress_protocol import (
+            WorkflowProgressEventKind,
+            prepare_workflow_progress_event,
         )
+
+        initialized_event = prepare_workflow_progress_event(
+            identity.as_dict(),
+            WorkflowProgressEventKind.INITIALIZED,
+            {"plan": materialized_plan.plan.summary()},
+        )
+        self.progress_actor = self.progress_actor_cls.remote(initialized_event)
+
+    def _send_progress_event(
+        self,
+        actor: Any | None,
+        kind: Any,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        """Best-effort one validated event while preserving the full run fence."""
+        if actor is None:
+            return False
+        identity = self.workflow_run_identity
+        if identity is None:
+            raise AssertionError("a workflow progress actor requires a complete run identity")
+        from django_ray.workflow_progress_protocol import send_workflow_progress_event
+
+        try:
+            send_workflow_progress_event(actor, identity.as_dict(), kind, payload)
+        except BaseException:
+            # Workflow observability remains best effort. The protocol prepares and
+            # validates before the actor call, so invalid internal metadata cannot
+            # cross Ray or interrupt application work.
+            return False
+        return True
+
+    def _send_progress_edges(
+        self,
+        actor: Any | None,
+        *,
+        node_id: str,
+        dependencies: Sequence[str],
+    ) -> None:
+        """Send dependency edges in independently bounded protocol batches."""
+        if actor is None or not dependencies:
+            return
+        from django_ray.workflow_progress_limits import (
+            WORKFLOW_PROGRESS_EDGE_BATCH_MAX_ITEMS,
+        )
+        from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+
+        edge_batch: list[dict[str, str]] = []
+        for dependency in dependencies:
+            edge_batch.append({"source": dependency, "target": node_id})
+            if len(edge_batch) < WORKFLOW_PROGRESS_EDGE_BATCH_MAX_ITEMS:
+                continue
+            self._send_progress_event(
+                actor,
+                WorkflowProgressEventKind.EDGES_REGISTERED,
+                {"edges": edge_batch},
+            )
+            edge_batch = []
+        if edge_batch:
+            self._send_progress_event(
+                actor,
+                WorkflowProgressEventKind.EDGES_REGISTERED,
+                {"edges": edge_batch},
+            )
 
     def submit_step(
         self,
@@ -662,13 +722,25 @@ class _RayExecutor(_Executor):
             plan_node = (
                 materialized_plan.node_for_id(node_id) if materialized_plan is not None else None
             )
-            progress_actor.register.remote(
-                node_id,
-                label,
-                signature.callable_path,
-                list(dependencies),
-                runtime_env_metadata,
-                _json_safe(plan_node["ray_options"] if plan_node is not None else {}),
+            from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+
+            self._send_progress_event(
+                progress_actor,
+                WorkflowProgressEventKind.NODE_REGISTERED,
+                {
+                    "node_id": node_id,
+                    "label": label,
+                    "callable_path": signature.callable_path,
+                    "runtime_env": runtime_env_metadata,
+                    "ray_options": _json_safe(
+                        plan_node["ray_options"] if plan_node is not None else {}
+                    ),
+                },
+            )
+            self._send_progress_edges(
+                progress_actor,
+                node_id=node_id,
+                dependencies=dependencies,
             )
         options = {
             "name": f"django_ray.workflow:{label}",
@@ -704,7 +776,15 @@ class _RayExecutor(_Executor):
             except (AttributeError, RuntimeError):
                 pass
             else:
-                progress_actor.submitted.remote(node_id, label, ray_task_id)
+                self._send_progress_event(
+                    progress_actor,
+                    WorkflowProgressEventKind.SUBMITTED,
+                    {
+                        "node_id": node_id,
+                        "label": label,
+                        "ray_task_id": ray_task_id,
+                    },
+                )
         return object_ref
 
     def collect(self, values: list[Any]) -> Any:
@@ -1245,18 +1325,25 @@ class _RayExecutor(_Executor):
     ) -> None:
         if self.progress_actor is None or self._progress_suppression_depth:
             return
-        try:
-            self.progress_actor.register_map.remote(
-                node_id,
-                label,
-                list(dependencies),
-                max_concurrency,
-                max_items,
-            )
+        from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+
+        sent = self._send_progress_event(
+            self.progress_actor,
+            WorkflowProgressEventKind.MAP_REGISTERED,
+            {
+                "node_id": node_id,
+                "label": label,
+                "max_concurrency": max_concurrency,
+                "max_items": max_items,
+            },
+        )
+        self._send_progress_edges(
+            self.progress_actor,
+            node_id=node_id,
+            dependencies=dependencies,
+        )
+        if sent:
             self._map_progress_sent_at[node_id] = time.monotonic()
-        except BaseException:
-            # Workflow observability remains best effort.
-            return
 
     def map_progress(
         self,
@@ -1278,17 +1365,20 @@ class _RayExecutor(_Executor):
         last_sent = self._map_progress_sent_at.get(node_id, 0.0)
         if not force and now - last_sent < flush_seconds:
             return
-        try:
-            self.progress_actor.map_progress.remote(
-                node_id,
-                label,
-                submitted,
-                completed,
-                input_exhausted,
-            )
+        from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+
+        if self._send_progress_event(
+            self.progress_actor,
+            WorkflowProgressEventKind.MAP_PROGRESS,
+            {
+                "node_id": node_id,
+                "label": label,
+                "submitted": submitted,
+                "completed": completed,
+                "input_exhausted": input_exhausted,
+            },
+        ):
             self._map_progress_sent_at[node_id] = now
-        except BaseException:
-            return
 
     def map_finished(
         self,
@@ -1303,21 +1393,36 @@ class _RayExecutor(_Executor):
     ) -> None:
         if self.progress_actor is None or self._progress_suppression_depth:
             return
-        try:
-            self.progress_actor.map_progress.remote(
-                node_id,
-                label,
-                submitted,
-                completed,
-                input_exhausted,
-            )
-            if failed:
-                self.progress_actor.failed.remote(node_id, label, error or "Map failed")
-            else:
-                self.progress_actor.completed.remote(node_id, label)
-            self._map_progress_sent_at.pop(node_id, None)
-        except BaseException:
-            return
+        from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+
+        self._send_progress_event(
+            self.progress_actor,
+            WorkflowProgressEventKind.MAP_PROGRESS,
+            {
+                "node_id": node_id,
+                "label": label,
+                "submitted": submitted,
+                "completed": completed,
+                "input_exhausted": input_exhausted,
+            },
+        )
+        self._send_progress_event(
+            self.progress_actor,
+            (WorkflowProgressEventKind.FAILED if failed else WorkflowProgressEventKind.COMPLETED),
+            (
+                {
+                    "node_id": node_id,
+                    "label": label,
+                    "error": error or "Map failed",
+                }
+                if failed
+                else {
+                    "node_id": node_id,
+                    "label": label,
+                }
+            ),
+        )
+        self._map_progress_sent_at.pop(node_id, None)
 
     def _flush_progress(
         self,

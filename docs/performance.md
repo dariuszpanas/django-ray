@@ -54,10 +54,20 @@ A workflow creates one `RayTaskExecution` for the outer Django task. Internal le
 exchange Ray object references. With the default
 `WORKFLOW_PROGRESS_REPORTING_POLICY="full"`, they also report events to an in-memory
 progress actor and django-ray writes a complete graph snapshot when a changed revision
-is flushed. `WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not
-bound producer RPCs, actor mailbox or memory, the encoded snapshot, decoded object,
-task-row, or response size. Those costs currently grow with the graph and its per-node
-metadata.
+is flushed. Each data event is canonical, identity-fenced, and bounded before its Ray
+call: payloads are at most 16 KiB, complete wire and decoded envelopes are at most
+32 KiB, and dependency edges are sent in batches of at most 32. The actor revalidates
+the envelope and caps retained nodes, edges, recent events, and bytes using the durable
+V1 profile.
+
+`WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not bound the
+aggregate Ray actor mailbox, queued bytes, update frequency, or transient snapshot and
+drain allocations. Coalescing, producer backpressure, mailbox admission, and the
+bounded actor-to-preparer drain remain separate scale work. They prevent treating the
+hard V1 ceilings as a safe default production profile, but do not require withholding a
+stricter opt-in schema-v3 pilot. Issue #212 owns that guarded adapter and local KubeRay
+proof. The current durable writer remains the schema-v2 complete snapshot path until
+that pilot lands.
 
 For workloads where that observability cost outweighs its value, set the policy to
 `"disabled"` globally or call

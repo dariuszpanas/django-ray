@@ -213,20 +213,27 @@ def report_workflow_progress(
     context = _current_workflow_step.get()
     if context is None or context.progress_actor is None:
         return False
+    if context.run_identity is None:
+        raise AssertionError("a workflow progress actor requires a complete run identity")
     if total <= 0:
         raise ValueError("total must be greater than zero")
     if current < 0 or current > total:
         raise ValueError("current must be between zero and total")
-    try:
-        safe_metrics = json.loads(json.dumps({} if metrics is None else metrics))
-    except (TypeError, ValueError) as error:
-        raise ValueError("progress metrics must be JSON-serializable") from error
+    from django_ray.workflow_progress_protocol import (
+        WorkflowProgressEventKind,
+        send_workflow_progress_event,
+    )
 
-    context.progress_actor.progress.remote(
-        context.node_id,
-        float(current),
-        float(total),
-        message,
-        safe_metrics,
+    send_workflow_progress_event(
+        context.progress_actor,
+        context.run_identity,
+        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        {
+            "node_id": context.node_id,
+            "current": float(current),
+            "total": float(total),
+            "message": message,
+            "metrics": {} if metrics is None else metrics,
+        },
     )
     return True

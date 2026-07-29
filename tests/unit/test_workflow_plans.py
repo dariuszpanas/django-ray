@@ -49,6 +49,10 @@ from django_ray.workflow_plans import (
     validate_plan_selection_manifest,
 )
 from django_ray.workflow_progress import claim_workflow_run, pin_workflow_plan
+from django_ray.workflow_progress_protocol import (
+    WorkflowProgressEventKind,
+    decode_workflow_progress_event,
+)
 from django_ray.workflows import chain, group, map_step, step
 
 
@@ -1967,7 +1971,55 @@ def test_ray_run_rechecks_fence_after_preparation_before_actor_or_leaf(monkeypat
 
 
 @pytest.mark.django_db
-def test_disabled_ray_reporting_pins_policy_without_creating_actor() -> None:
+def test_ray_bind_plan_creates_actor_from_one_fenced_initialized_event() -> None:
+    from django_ray.workflows import _RayExecutor
+
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-progress-initialized",
+        callable_path=f"{__name__}.increment",
+        state=TaskState.RUNNING,
+        execution_generation=2,
+    )
+    materialized = _materialize(step(increment), 1)
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = DurableTaskContext(
+        task_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+    executor.progress_actor = None
+    actor = object()
+    actor_inputs: list[bytes] = []
+
+    class ProgressActor:
+        @staticmethod
+        def remote(initialized_event: bytes):
+            actor_inputs.append(initialized_event)
+            return actor
+
+    executor.progress_actor_cls = ProgressActor()
+
+    executor.bind_plan(
+        materialized,
+        requested_policy="auto",
+        reporting_policy="full",
+    )
+
+    assert executor.progress_actor is actor
+    assert executor.workflow_run_identity is not None
+    assert len(actor_inputs) == 1
+    event = decode_workflow_progress_event(
+        actor_inputs[0],
+        expected_run_identity=executor.workflow_run_identity.as_dict(),
+    )
+    assert event.kind is WorkflowProgressEventKind.INITIALIZED
+    assert event.payload == {"plan": materialized.plan.summary()}
+
+
+@pytest.mark.django_db
+def test_disabled_ray_reporting_pins_policy_without_actor_or_codec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from django_ray.workflows import _RayExecutor
 
     execution = RayTaskExecution.objects.create(
@@ -1995,6 +2047,11 @@ def test_disabled_ray_reporting_pins_policy_without_creating_actor() -> None:
             return object()
 
     executor.progress_actor_cls = ProgressActor()
+    prepared_events: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        "django_ray.workflow_progress_protocol.prepare_workflow_progress_event",
+        lambda *args, **kwargs: prepared_events.append((*args, kwargs)),
+    )
 
     executor.bind_plan(
         materialized,
@@ -2005,6 +2062,7 @@ def test_disabled_ray_reporting_pins_policy_without_creating_actor() -> None:
     execution.refresh_from_db()
     selection = json.loads(execution.workflow_plan_selection)
     assert actor_creations == 0
+    assert prepared_events == []
     assert executor.progress_actor is None
     assert executor.workflow_run_identity is not None
     assert selection["reporting_policy"] == "disabled"

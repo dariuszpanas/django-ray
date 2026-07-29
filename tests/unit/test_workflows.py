@@ -21,6 +21,11 @@ from django_ray.runtime.context import (
     workflow_step_execution,
 )
 from django_ray.runtime.remote import WorkflowProgressActor
+from django_ray.workflow_progress_protocol import (
+    WorkflowProgressEventKind,
+    decode_workflow_progress_event,
+    prepare_workflow_progress_event,
+)
 from django_ray.workflows import (
     WorkflowDefinitionError,
     _callable_path,
@@ -52,6 +57,18 @@ def increment(value: int) -> int:
 
 def report_and_increment(value: int) -> tuple[bool, int]:
     return report_progress(1, 2), value + 1
+
+
+def report_then_make_range(limit: int) -> list[int]:
+    reported = report_progress(
+        1,
+        2,
+        message="Preparing bounded fan-out",
+        metrics={"items": limit},
+    )
+    if not reported:
+        raise RuntimeError("workflow progress actor was not available")
+    return list(range(limit))
 
 
 class DelayedFirstSnapshotProgressActor(WorkflowProgressActor):
@@ -265,6 +282,75 @@ def run_nested_workflow(limit: int) -> int:
 class _Ref:
     def __init__(self, value: Any) -> None:
         self.value = value
+
+
+class _RecordingIngest:
+    def __init__(self) -> None:
+        self.calls: list[bytes] = []
+
+    def remote(self, wire: bytes) -> None:
+        assert type(wire) is bytes
+        self.calls.append(wire)
+
+
+class _IngestOnlyProgressActor:
+    def __init__(self) -> None:
+        self.ingest = _RecordingIngest()
+
+
+def _workflow_identity(
+    *,
+    task_execution_pk: int = 42,
+    attempt_number: int = 2,
+    execution_generation: int = 5,
+    run_id: str = "00000000-0000-0000-0000-000000000217",
+) -> WorkflowRunIdentity:
+    return WorkflowRunIdentity(
+        task_execution_pk=task_execution_pk,
+        attempt_number=attempt_number,
+        execution_generation=execution_generation,
+        run_id=run_id,
+    )
+
+
+def _workflow_plan_summary() -> dict[str, Any]:
+    return {
+        "plan_format": "django-ray.workflow-plan",
+        "plan_format_version": 1,
+        "fingerprint": "sha256:" + "a" * 64,
+        "definition_name": "workflow:test-progress",
+        "definition_revision": "sha256:" + ("b" * 64),
+        "topology_class": "dynamic",
+        "node_count": 2,
+    }
+
+
+def _ingest_event(
+    actor: WorkflowProgressActor,
+    identity: WorkflowRunIdentity,
+    kind: WorkflowProgressEventKind,
+    payload: Mapping[str, Any],
+) -> None:
+    actor.ingest(
+        prepare_workflow_progress_event(
+            identity.as_dict(),
+            kind,
+            payload,
+        )
+    )
+
+
+def _decoded_ingests(
+    actor: _IngestOnlyProgressActor,
+    identity: WorkflowRunIdentity,
+) -> list[Any]:
+    return [
+        decode_workflow_progress_event(
+            wire,
+            expected_run_identity=identity.as_dict(),
+        )
+        for wire in actor.ingest.calls
+    ]
 
 
 class _RemoteFunction:
@@ -1598,7 +1684,7 @@ def test_finish_progress_waits_for_terminal_snapshot(monkeypatch) -> None:
     assert sleeps == [0.05]
 
 
-def test_ray_executor_submit_ignores_missing_ray_task_id() -> None:
+def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> None:
     class _BadRef:
         def task_id(self):
             raise RuntimeError("task id unavailable")
@@ -1610,21 +1696,210 @@ def test_ray_executor_submit_ignores_missing_ray_task_id() -> None:
         def remote(self, *args, **kwargs):
             return _BadRef()
 
-    class _RemoteMethod:
-        def remote(self, *args):
-            del args
-
+    identity = _workflow_identity()
+    actor = _IngestOnlyProgressActor()
     executor = object.__new__(_RayExecutor)
     executor.task_context = None
-    executor.task_execution_pk = None
-    executor.workflow_run_identity = None
-    executor.progress_actor = SimpleNamespace(
-        register=_RemoteMethod(),
-        submitted=_RemoteMethod(),
-    )
+    executor.task_execution_pk = identity.task_execution_pk
+    executor.workflow_run_identity = identity
+    executor.progress_actor = actor
     executor.remote_step = _RemoteStep()
 
     executor.submit_step(step(increment), (), {}, "0.0", ())
+
+    events = _decoded_ingests(actor, identity)
+    assert [event.kind for event in events] == [WorkflowProgressEventKind.NODE_REGISTERED]
+    assert events[0].payload == {
+        "callable_path": "tests.unit.test_workflows.increment",
+        "label": "increment",
+        "node_id": "0.0",
+        "ray_options": {},
+        "runtime_env": {"mode": "inherit"},
+    }
+
+
+def test_ray_executor_submit_chunks_edges_and_uses_only_bounded_ingest() -> None:
+    class _TaskId:
+        @staticmethod
+        def hex() -> str:
+            return "ray-task-217"
+
+    class _GoodRef:
+        @staticmethod
+        def task_id() -> _TaskId:
+            return _TaskId()
+
+    class _RemoteStep:
+        def options(self, **kwargs):
+            return self
+
+        def remote(self, *args, **kwargs):
+            return _GoodRef()
+
+    identity = _workflow_identity()
+    actor = _IngestOnlyProgressActor()
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = None
+    executor.task_execution_pk = identity.task_execution_pk
+    executor.workflow_run_identity = identity
+    executor.progress_actor = actor
+    executor.remote_step = _RemoteStep()
+    dependencies = tuple(f"0.upstream-{index}" for index in range(65))
+
+    executor.submit_step(step(increment), (), {}, "0.1", dependencies)
+
+    events = _decoded_ingests(actor, identity)
+    assert [event.kind for event in events] == [
+        WorkflowProgressEventKind.NODE_REGISTERED,
+        WorkflowProgressEventKind.EDGES_REGISTERED,
+        WorkflowProgressEventKind.EDGES_REGISTERED,
+        WorkflowProgressEventKind.EDGES_REGISTERED,
+        WorkflowProgressEventKind.SUBMITTED,
+    ]
+    edge_batches = [
+        event.payload["edges"]
+        for event in events
+        if event.kind is WorkflowProgressEventKind.EDGES_REGISTERED
+    ]
+    assert [len(edges) for edges in edge_batches] == [32, 32, 1]
+    assert [edge for batch in edge_batches for edge in batch] == [
+        {"source": dependency, "target": "0.1"} for dependency in dependencies
+    ]
+    assert events[-1].payload == {
+        "label": "increment",
+        "node_id": "0.1",
+        "ray_task_id": "ray-task-217",
+    }
+
+
+def test_ray_executor_invalid_internal_progress_never_calls_actor() -> None:
+    class _TaskId:
+        @staticmethod
+        def hex() -> str:
+            return "ray-task-invalid"
+
+    class _RefWithTaskId:
+        @staticmethod
+        def task_id() -> _TaskId:
+            return _TaskId()
+
+    class _RemoteStep:
+        calls = 0
+
+        def options(self, **kwargs):
+            return self
+
+        def remote(self, *args, **kwargs):
+            self.calls += 1
+            return _RefWithTaskId()
+
+    identity = _workflow_identity()
+    actor = _IngestOnlyProgressActor()
+    remote_step = _RemoteStep()
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = None
+    executor.task_execution_pk = identity.task_execution_pk
+    executor.workflow_run_identity = identity
+    executor.progress_actor = actor
+    executor.remote_step = remote_step
+
+    executor.submit_step(step(increment), (), {}, "x" * 257, ())
+
+    assert remote_step.calls == 1
+    assert actor.ingest.calls == []
+
+
+@pytest.mark.parametrize(
+    ("failed", "terminal_kind"),
+    [
+        (False, WorkflowProgressEventKind.COMPLETED),
+        (True, WorkflowProgressEventKind.FAILED),
+    ],
+)
+def test_ray_executor_map_lifecycle_uses_only_bounded_ingest(
+    failed: bool,
+    terminal_kind: WorkflowProgressEventKind,
+) -> None:
+    identity = _workflow_identity()
+    actor = _IngestOnlyProgressActor()
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = actor
+    executor.workflow_run_identity = identity
+    executor._progress_suppression_depth = 0
+    executor._map_progress_sent_at = {}
+    dependencies = tuple(f"0.upstream-{index}" for index in range(65))
+
+    executor.map_started(
+        "0.1",
+        "map:increment",
+        dependencies,
+        max_concurrency=2,
+        max_items=100,
+    )
+    executor.map_progress(
+        "0.1",
+        "map:increment",
+        submitted=4,
+        completed=2,
+        input_exhausted=False,
+        force=True,
+    )
+    executor.map_finished(
+        "0.1",
+        "map:increment",
+        submitted=4,
+        completed=4 if not failed else 2,
+        input_exhausted=True,
+        failed=failed,
+        error="bounded map failed" if failed else None,
+    )
+
+    events = _decoded_ingests(actor, identity)
+    assert [event.kind for event in events] == [
+        WorkflowProgressEventKind.MAP_REGISTERED,
+        WorkflowProgressEventKind.EDGES_REGISTERED,
+        WorkflowProgressEventKind.EDGES_REGISTERED,
+        WorkflowProgressEventKind.EDGES_REGISTERED,
+        WorkflowProgressEventKind.MAP_PROGRESS,
+        WorkflowProgressEventKind.MAP_PROGRESS,
+        terminal_kind,
+    ]
+    assert [
+        len(event.payload["edges"])
+        for event in events
+        if event.kind is WorkflowProgressEventKind.EDGES_REGISTERED
+    ] == [32, 32, 1]
+    assert events[-2].payload == {
+        "completed": 4 if not failed else 2,
+        "input_exhausted": True,
+        "label": "map:increment",
+        "node_id": "0.1",
+        "submitted": 4,
+    }
+    expected_terminal = {
+        "label": "map:increment",
+        "node_id": "0.1",
+    }
+    if failed:
+        expected_terminal["error"] = "bounded map failed"
+    assert events[-1].payload == expected_terminal
+
+
+def test_progress_actor_requires_complete_run_identity() -> None:
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = _IngestOnlyProgressActor()
+    executor.workflow_run_identity = None
+    executor._progress_suppression_depth = 0
+    executor._map_progress_sent_at = {}
+
+    with pytest.raises(AssertionError, match="complete run identity"):
+        executor.map_started(
+            "0.1",
+            "map:increment",
+            (),
+            max_concurrency=2,
+            max_items=10,
+        )
 
 
 def test_ray_map_cleanup_has_a_hard_deadline() -> None:
@@ -2010,10 +2285,17 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
 
 @pytest.mark.real_ray
 @pytest.mark.django_db
-def test_real_ray_bounded_map_persists_one_aggregate_node() -> None:
+def test_real_ray_cached_actor_ingests_application_progress_and_bounded_map() -> None:
     import ray
 
-    from django_ray.models import RayTaskExecution
+    import django_ray.workflows as workflow_module
+    from django_ray.models import RayTaskExecution, WorkflowProgressRunStorage
+    from django_ray.workflow_progress_limits import (
+        WORKFLOW_PROGRESS_COMBINED_MAX_DECODED_BYTES,
+        WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS,
+        WORKFLOW_PROGRESS_TOPOLOGY_EDGE_MAX_ITEMS,
+        WORKFLOW_PROGRESS_TOPOLOGY_NODE_MAX_ITEMS,
+    )
 
     execution = RayTaskExecution.objects.create(
         task_id="real-ray-bounded-map-graph",
@@ -2022,12 +2304,15 @@ def test_real_ray_bounded_map_persists_one_aggregate_node() -> None:
         execution_generation=1,
     )
     workflow = chain(
-        step(make_range),
+        step(report_then_make_range),
         map_step(increment).with_limits(max_concurrency=2, max_items=10),
     )
 
-    ray.init(ignore_reinit_error=True)
+    assert not ray.is_initialized()
+    ray.init(address="local", include_dashboard=False, num_cpus=2)
     try:
+        _, _, cached_progress_actor = workflow_module._get_cached_workflow_remotes()
+        assert cached_progress_actor is workflow_module._workflow_progress_actor_cached
         with durable_task_execution(
             execution.pk,
             attempt_number=execution.attempt_number,
@@ -2040,18 +2325,55 @@ def test_real_ray_bounded_map_persists_one_aggregate_node() -> None:
     execution.refresh_from_db()
     progress = json.loads(execution.progress_data)
     nodes = progress["graph"]["nodes"]
-    map_node = next(node for node in nodes if node["kind"] == "map")
+    nodes_by_id = {node["node_id"]: node for node in nodes}
+    root_node = nodes_by_id["0.0"]
+    map_node = nodes_by_id["0.1"]
+    ingress = progress["ingress"]
 
     assert progress["state"] == "SUCCEEDED"
     assert progress["schema_version"] == WORKFLOW_PROGRESS_SCHEMA_VERSION
     assert progress["run_identity"]["attempt_number"] == 1
     assert progress["run_identity"]["execution_generation"] == 1
     assert progress["total_nodes"] == 2
+    assert set(nodes_by_id) == {"0.0", "0.1"}
+    assert progress["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]
+    assert root_node["progress"]["message"] == "Preparing bounded fan-out"
+    assert root_node["progress"]["metrics"] == {"items": 6}
     assert map_node["node_id"] == "0.1"
+    assert map_node["kind"] == "map"
     assert map_node["fanout"]["max_concurrency"] == 2
+    assert map_node["fanout"]["max_items"] == 10
     assert map_node["fanout"]["submitted_items"] == 6
     assert map_node["fanout"]["completed_items"] == 6
     assert map_node["fanout"]["in_flight_items"] == 0
+    assert map_node["fanout"]["input_exhausted"] is True
+
+    expected_kinds = {
+        WorkflowProgressEventKind.INITIALIZED,
+        WorkflowProgressEventKind.NODE_REGISTERED,
+        WorkflowProgressEventKind.EDGES_REGISTERED,
+        WorkflowProgressEventKind.MAP_REGISTERED,
+        WorkflowProgressEventKind.SUBMITTED,
+        WorkflowProgressEventKind.STARTED,
+        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        WorkflowProgressEventKind.MAP_PROGRESS,
+        WorkflowProgressEventKind.COMPLETED,
+    }
+    assert set(ingress["accepted_by_kind"]) == {kind.value for kind in WorkflowProgressEventKind}
+    assert all(ingress["accepted_by_kind"][kind.value] >= 1 for kind in expected_kinds)
+    assert ingress["accepted_by_kind"][WorkflowProgressEventKind.FAILED.value] == 0
+    assert ingress["accepted"] == sum(ingress["accepted_by_kind"].values())
+    assert ingress["rejected"] == 0
+    assert ingress["truncated"] == 0
+    assert ingress["retained_nodes"] == 2
+    assert ingress["retained_edges"] == 1
+    assert ingress["retained_nodes"] <= WORKFLOW_PROGRESS_TOPOLOGY_NODE_MAX_ITEMS
+    assert ingress["retained_edges"] <= WORKFLOW_PROGRESS_TOPOLOGY_EDGE_MAX_ITEMS
+    assert 0 < ingress["retained_bytes"] <= WORKFLOW_PROGRESS_COMBINED_MAX_DECODED_BYTES
+    assert 0 < len(progress["recent_events"]) <= WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS
+
+    assert execution.workflow_progress_summary_json is None
+    assert not WorkflowProgressRunStorage.objects.filter(execution=execution).exists()
 
 
 def test_durable_task_context_is_scoped() -> None:
@@ -2062,35 +2384,107 @@ def test_durable_task_context_is_scoped() -> None:
 
 
 def test_progress_actor_builds_node_snapshot() -> None:
+    identity = _workflow_identity(
+        run_id="00000000-0000-0000-0000-000000000010",
+    )
+    plan_summary = _workflow_plan_summary()
     progress = WorkflowProgressActor(
-        task_execution_pk=42,
-        attempt_number=2,
-        execution_generation=5,
-        workflow_run_id="00000000-0000-0000-0000-000000000010",
-        plan_summary={
-            "fingerprint": "sha256:plan",
-            "definition_name": "workflow:prepare",
+        prepare_workflow_progress_event(
+            identity.as_dict(),
+            WorkflowProgressEventKind.INITIALIZED,
+            {"plan": plan_summary},
+        )
+    )
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.NODE_REGISTERED,
+        {
+            "node_id": "0.0",
+            "label": "prepare",
+            "callable_path": "tests.unit.test_workflows.increment",
+            "runtime_env": {"mode": "inherit", "hash": "abc"},
+            "ray_options": {"num_cpus": 1},
         },
     )
-    progress.register(
-        "0.0",
-        "prepare",
-        "tests.unit.test_workflows.increment",
-        [],
-        {"mode": "inherit", "hash": "abc"},
-        {"num_cpus": 1},
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.STARTED,
+        {
+            "node_id": "0.0",
+            "label": "prepare",
+            "execution": {
+                "ray_task_id": "ray-task-1",
+                "ray_job_id": None,
+                "ray_node_id": None,
+                "ray_worker_id": None,
+                "assigned_resources": {},
+            },
+        },
     )
-    progress.started("0.0", "prepare", {"ray_task_id": "ray-task-1"})
-    progress.completed("0.0", "prepare")
-    progress.register(
-        "0.1.m0",
-        "leaf",
-        "tests.unit.test_workflows.multiply",
-        ["0.0"],
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.COMPLETED,
+        {"node_id": "0.0", "label": "prepare"},
     )
-    progress.started("0.1.m0", "leaf")
-    progress.submitted("0.1.m0", "leaf", "ray-task-2")
-    progress.progress("0.1.m0", 2, 4, "half way", {"rows": 10})
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.NODE_REGISTERED,
+        {
+            "node_id": "0.1.m0",
+            "label": "leaf",
+            "callable_path": "tests.unit.test_workflows.multiply",
+            "runtime_env": {"mode": "inherit"},
+            "ray_options": {},
+        },
+    )
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.EDGES_REGISTERED,
+        {"edges": [{"source": "0.0", "target": "0.1.m0"}]},
+    )
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.STARTED,
+        {
+            "node_id": "0.1.m0",
+            "label": "leaf",
+            "execution": {
+                "ray_task_id": None,
+                "ray_job_id": None,
+                "ray_node_id": None,
+                "ray_worker_id": None,
+                "assigned_resources": {},
+            },
+        },
+    )
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.SUBMITTED,
+        {
+            "node_id": "0.1.m0",
+            "label": "leaf",
+            "ray_task_id": "ray-task-2",
+        },
+    )
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        {
+            "node_id": "0.1.m0",
+            "current": 2,
+            "total": 4,
+            "message": "half way",
+            "metrics": {"rows": 10},
+        },
+    )
 
     snapshot = progress.snapshot()
     unchanged = progress.snapshot()
@@ -2104,10 +2498,7 @@ def test_progress_actor_builds_node_snapshot() -> None:
         "execution_generation": 5,
     }
     assert snapshot["state"] == "RUNNING"
-    assert snapshot["plan"] == {
-        "fingerprint": "sha256:plan",
-        "definition_name": "workflow:prepare",
-    }
+    assert snapshot["plan"] == plan_summary
     assert "selection" not in snapshot["plan"]
     assert snapshot["total_nodes"] == 2
     assert snapshot["completed_nodes"] == 1
@@ -2117,15 +2508,58 @@ def test_progress_actor_builds_node_snapshot() -> None:
     assert snapshot["graph"]["nodes"][0]["execution"]["ray_task_id"] == "ray-task-1"
     assert snapshot["graph"]["nodes"][1]["label"] == "leaf"
     assert snapshot["graph"]["nodes"][1]["progress"]["percent"] == 50.0
+    assert snapshot["ingress"]["accepted"] == 9
+    assert snapshot["ingress"]["rejected"] == 0
+    assert snapshot["ingress"]["retained_nodes"] == 2
+    assert snapshot["ingress"]["retained_edges"] == 1
     assert snapshot["revision"] == unchanged["revision"]
     assert snapshot["updated_at"] == unchanged["updated_at"]
 
 
 def test_progress_actor_aggregates_bounded_map_items() -> None:
-    progress = WorkflowProgressActor()
-    progress.register_map("0.1", "map:increment", ["0.0"], 4, 50_000)
-    progress.map_progress("0.1", "map:increment", 50_000, 49_999, True)
-    progress.completed("0.1", "map:increment")
+    identity = _workflow_identity()
+    progress = WorkflowProgressActor(
+        prepare_workflow_progress_event(
+            identity.as_dict(),
+            WorkflowProgressEventKind.INITIALIZED,
+            {"plan": _workflow_plan_summary()},
+        )
+    )
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.MAP_REGISTERED,
+        {
+            "node_id": "0.1",
+            "label": "map:increment",
+            "max_concurrency": 4,
+            "max_items": 50_000,
+        },
+    )
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.EDGES_REGISTERED,
+        {"edges": [{"source": "0.0", "target": "0.1"}]},
+    )
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.MAP_PROGRESS,
+        {
+            "node_id": "0.1",
+            "label": "map:increment",
+            "submitted": 50_000,
+            "completed": 49_999,
+            "input_exhausted": True,
+        },
+    )
+    _ingest_event(
+        progress,
+        identity,
+        WorkflowProgressEventKind.COMPLETED,
+        {"node_id": "0.1", "label": "map:increment"},
+    )
 
     snapshot = progress.snapshot()
     node = snapshot["graph"]["nodes"][0]
@@ -2146,35 +2580,59 @@ def test_progress_actor_aggregates_bounded_map_items() -> None:
 
 
 def test_report_progress_uses_current_workflow_context() -> None:
-    calls: list[tuple] = []
-
-    class _RemoteMethod:
-        def remote(self, *args):
-            calls.append(args)
-
-    actor = type("_Actor", (), {"progress": _RemoteMethod()})()
+    identity = _workflow_identity()
+    actor = _IngestOnlyProgressActor()
 
     assert report_progress(1, 2) is False
-    with workflow_step_execution(actor, "0.1"):
+    with workflow_step_execution(actor, "0.1", identity.as_dict()):
         assert report_progress(1, 2, message="half", metrics={"rows": 5}) is True
 
-    assert calls == [("0.1", 1.0, 2.0, "half", {"rows": 5})]
+    events = _decoded_ingests(actor, identity)
+    assert [event.kind for event in events] == [WorkflowProgressEventKind.APPLICATION_PROGRESS]
+    assert events[0].payload == {
+        "current": 1.0,
+        "message": "half",
+        "metrics": {"rows": 5},
+        "node_id": "0.1",
+        "total": 2.0,
+    }
 
 
 def test_report_progress_validates_values_and_metrics() -> None:
-    class _RemoteMethod:
-        def remote(self, *args):
-            del args
+    from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_METRICS_MAX_ITEMS
 
-    actor = type("_Actor", (), {"progress": _RemoteMethod()})()
-
-    with workflow_step_execution(actor, "0.1"):
+    identity = _workflow_identity()
+    actor = _IngestOnlyProgressActor()
+    with workflow_step_execution(actor, "0.1", identity.as_dict()):
         with pytest.raises(ValueError, match="total must be greater than zero"):
             report_progress(0, 0)
         with pytest.raises(ValueError, match="current must be between zero and total"):
             report_progress(-1, 1)
-        with pytest.raises(ValueError, match="progress metrics must be JSON-serializable"):
+        with pytest.raises(ValueError, match="must be a scalar"):
             report_progress(1, 2, metrics={"bad": object()})
+        with pytest.raises(ValueError):
+            report_progress(float("nan"), 2)
+        with pytest.raises(ValueError):
+            report_progress(
+                1,
+                2,
+                metrics={
+                    f"metric-{index}": index
+                    for index in range(WORKFLOW_PROGRESS_METRICS_MAX_ITEMS + 1)
+                },
+            )
+
+    assert actor.ingest.calls == []
+
+
+def test_report_progress_actor_requires_complete_run_identity() -> None:
+    actor = _IngestOnlyProgressActor()
+
+    with workflow_step_execution(actor, "0.1"):
+        with pytest.raises(AssertionError, match="complete run identity"):
+            report_progress(1, 2)
+
+    assert actor.ingest.calls == []
 
 
 def test_map_accepts_existing_signature() -> None:

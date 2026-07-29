@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workflow progress now crosses Ray through one canonical, identity-fenced bytes
+  envelope. Producers redact and cap every event before submission, dependency
+  edges are chunked, and the collector revalidates the complete run identity while
+  bounding nodes, edges, recent events, retained bytes, and diagnostic counters with
+  the durable V1 limits. The actor exposes only `ingest`, `snapshot`, and `disable`;
+  aggregate mailbox admission, coalescing, and default schema-v3 production remain
+  follow-up work.
 - Ray-native workflows can keep the default full node-progress reporting or disable it
   globally and per invocation. Disabled runs retain the durable outer-task lifecycle
   and bounded plan/strategy metadata while creating no progress actor, node-reporting
