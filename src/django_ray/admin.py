@@ -2,8 +2,9 @@
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
+from django.apps import apps
 from django.contrib import admin
 from django.contrib.auth import get_permission_codename
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -27,6 +28,13 @@ from django_ray.workflow_progress_reads import (
     list_workflow_topology_edges,
     list_workflow_topology_nodes,
 )
+
+if apps.is_installed("unfold"):
+    from unfold.admin import ModelAdmin as _ConfiguredModelAdmin
+else:
+    _ConfiguredModelAdmin = admin.ModelAdmin
+
+DjangoRayModelAdmin = cast(Any, _ConfiguredModelAdmin)
 
 # Ray Dashboard URL fallback for local Ray.
 RAY_DASHBOARD_URL = "http://localhost:8265"
@@ -55,7 +63,7 @@ def _bounded_redacted_json(value: str | None) -> str:
 
 
 @admin.register(RayTaskExecution)
-class RayTaskExecutionAdmin(admin.ModelAdmin):
+class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     """Admin for RayTaskExecution model."""
 
     change_form_template = "admin/django_ray/raytaskexecution/change_form.html"
@@ -780,7 +788,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
 
 
 @admin.register(TaskAttempt)
-class TaskAttemptAdmin(admin.ModelAdmin):
+class TaskAttemptAdmin(DjangoRayModelAdmin):
     """Read-only historical attempt diagnostics."""
 
     list_display = ["execution", "attempt_number", "state", "started_at", "finished_at"]
@@ -868,7 +876,7 @@ class ActiveWorkerFilter(admin.SimpleListFilter):
 
 
 @admin.register(TaskWorkerLease)
-class TaskWorkerLeaseAdmin(admin.ModelAdmin):
+class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
     """Admin for TaskWorkerLease model.
 
     Note: This tracks Django task workers (django_ray_worker command),

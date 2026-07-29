@@ -146,9 +146,26 @@ shell history:
 docker compose exec web python testproject/manage.py createsuperuser
 ```
 
-Open [Ray task executions in Django admin](http://127.0.0.1:8000/admin/django_ray/raytaskexecution/)
-and inspect the completed `add_numbers` record. The task ID should match the API response, its state
-should be `SUCCEEDED`, and its result should be `42`.
+Open the [django-ray administration](http://127.0.0.1:8000/admin/) and sign in. The bundled
+testproject pins [Django Unfold](https://unfoldadmin.com/) for a modern admin shell, forms, and
+navigation. Open
+[Ray task executions](http://127.0.0.1:8000/admin/django_ray/raytaskexecution/) and inspect the
+completed `add_numbers` record. The task ID should match the API response, its state should be
+`SUCCEEDED`, and its result should be `42`. The changelist retains django-ray's retry and cancel
+actions, while the change page retains live durable status and bounded workflow-detail links.
+
+Unfold is a testproject dependency, not a required dependency of the published `django-ray` package.
+Downstream projects that want the same theme can install `django-unfold`, place `"unfold"` before
+`"django.contrib.admin"` in `INSTALLED_APPS`, and configure the optional `UNFOLD` settings. When the
+app is not installed, django-ray's registrations continue to use Django's standard `ModelAdmin`.
+Production deployments using Unfold must run `collectstatic`; the tracked Kubernetes web deployment
+does this in the pod's `collect-static` init container before the application starts.
+
+Before upgrading an already-running copy of the bundled testproject, allow executions in `QUEUED`,
+`RUNNING`, or `CANCELLING` state to finish. Their persisted Ray runtime environments predate the
+Unfold dependency used by the updated testproject settings. Historical failed, cancelled, or lost
+executions from the old testproject must be submitted as new tasks after the upgrade rather than
+retried, because retries intentionally retain the original runtime environment.
 
 ## Shut down
 

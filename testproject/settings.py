@@ -69,6 +69,7 @@ if DEPLOYMENT_MODE == "production" and (
 
 # Application definition
 INSTALLED_APPS = [
+    "unfold",  # Must precede django.contrib.admin so its templates and static assets win.
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -80,6 +81,12 @@ INSTALLED_APPS = [
     # Example apps demonstrating different execution modes
     # (These are in testproject/apps/ for demonstration purposes)
 ]
+
+UNFOLD = {
+    "SITE_TITLE": "django-ray admin",
+    "SITE_HEADER": "django-ray",
+    "SITE_SUBHEADER": "Distributed task testproject",
+}
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -121,7 +128,7 @@ if DATABASE_ENGINE == "django.db.backends.sqlite3":
     DATABASES = {
         "default": {
             "ENGINE": DATABASE_ENGINE,
-            "NAME": BASE_DIR / "db.sqlite3",
+            "NAME": os.environ.get("DATABASE_NAME", str(BASE_DIR / "db.sqlite3")),
         }
     }
 else:
@@ -165,7 +172,7 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = "static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"
+STATIC_ROOT = Path(os.environ.get("DJANGO_STATIC_ROOT", str(BASE_DIR / "staticfiles")))
 STATICFILES_DIRS = [BASE_DIR / "testproject" / "static"]
 
 # Whitenoise for serving static files in production
@@ -234,6 +241,7 @@ DJANGO_RAY = {
             "excludes": [".git", ".venv", "__pycache__", "staticfiles"],
             "pip": [
                 "django>=6.0",
+                "django-unfold==0.102.0",
                 "psycopg[binary]>=3.1",
                 "django-ninja>=1.5.1",
                 "whitenoise>=6.6",

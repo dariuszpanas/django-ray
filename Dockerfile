@@ -28,7 +28,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
 # Install dependencies with postgres support
-# Note: We include dev dependencies because testproject requires django-ninja and whitenoise
+# The sample extra carries the testproject-only API, static, and Unfold dependencies.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev --extra postgres --extra sample
 

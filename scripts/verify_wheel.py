@@ -8,6 +8,7 @@ from pathlib import Path
 
 EXPECTED_FILES = {
     "django_ray/__init__.py",
+    "django_ray/admin.py",
     "django_ray/models.py",
     "django_ray/migrations/0001_initial.py",
     "django_ray/migrations/0014_raytaskexecution_ray_target_address.py",
@@ -47,22 +48,54 @@ def verify_installed_wheel(expected_version: str) -> None:
     if missing:
         raise RuntimeError(f"wheel is missing expected files: {', '.join(missing)}")
 
+    runtime_unfold_requirements = [
+        requirement
+        for requirement in (distribution.requires or ())
+        if requirement.lower().replace("_", "-").startswith("django-unfold")
+        and "extra ==" not in requirement.lower()
+    ]
+    if runtime_unfold_requirements:
+        raise RuntimeError("django-unfold must not be a required wheel dependency")
+
     import django
     from django.conf import settings
 
     if not settings.configured:
         settings.configure(
             SECRET_KEY="release-smoke-test",
-            INSTALLED_APPS=["django_ray"],
+            INSTALLED_APPS=[
+                "django.contrib.admin",
+                "django.contrib.auth",
+                "django.contrib.contenttypes",
+                "django.contrib.sessions",
+                "django.contrib.messages",
+                "django_ray",
+            ],
             DJANGO_RAY={"RAY_ADDRESS": "local"},
             DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
         )
     django.setup()
 
+    from django.contrib import admin
     from django.core.management import call_command, get_commands
     from django.db import connection
     from django.db.migrations.loader import MigrationLoader
     from django.db.migrations.recorder import MigrationRecorder
+
+    from django_ray.admin import RayTaskExecutionAdmin, TaskAttemptAdmin, TaskWorkerLeaseAdmin
+    from django_ray.models import RayTaskExecution, TaskAttempt, TaskWorkerLease
+
+    expected_admins = {
+        RayTaskExecution: RayTaskExecutionAdmin,
+        TaskAttempt: TaskAttemptAdmin,
+        TaskWorkerLease: TaskWorkerLeaseAdmin,
+    }
+    for model, expected_admin in expected_admins.items():
+        registered_admin = admin.site._registry.get(model)
+        if not isinstance(registered_admin, expected_admin):
+            raise RuntimeError(f"{model.__name__} admin was not discovered from the wheel")
+        if not isinstance(registered_admin, admin.ModelAdmin):
+            raise RuntimeError(f"{model.__name__} did not retain standard admin compatibility")
 
     if "django_ray_worker" not in get_commands():
         raise RuntimeError("django_ray_worker management command was not discovered")

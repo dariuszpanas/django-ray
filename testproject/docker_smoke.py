@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
+import re
+import secrets
 import time
 import urllib.error
 import urllib.request
@@ -13,6 +16,9 @@ from typing import Any
 
 _MAX_RESPONSE_BYTES = 1_048_576
 _REQUEST_TIMEOUT_SECONDS = 5.0
+_UNFOLD_STYLESHEET_RE = re.compile(
+    r"""href=["'](?P<path>/static/unfold/css/styles[^"']*\.css)["']"""
+)
 
 
 class DockerSmokeError(RuntimeError):
@@ -30,6 +36,67 @@ def _response_json(response: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise DockerSmokeError("HTTP response must be a JSON object")
     return payload
+
+
+def _response_text(response: Any) -> str:
+    body = response.read(_MAX_RESPONSE_BYTES + 1)
+    if len(body) > _MAX_RESPONSE_BYTES:
+        raise DockerSmokeError("HTTP response exceeded the smoke byte limit")
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise DockerSmokeError("HTTP response was not valid UTF-8") from error
+
+
+def _request_timeout(deadline: float | None) -> float:
+    if deadline is None:
+        return _REQUEST_TIMEOUT_SECONDS
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise DockerSmokeError("the shared smoke deadline expired before the admin request")
+    return min(_REQUEST_TIMEOUT_SECONDS, remaining)
+
+
+def _request_text(
+    base_url: str,
+    path: str,
+    *,
+    headers: dict[str, str] | None = None,
+    expected_status: int = 200,
+    expected_content_type: str | None = None,
+    deadline: float | None = None,
+) -> str:
+    if not path.startswith("/") or "://" in path:
+        raise DockerSmokeError("admin smoke path must be a local absolute path")
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}{path}",
+        headers={"Accept": "text/html", **(headers or {})},
+        method="GET",
+    )
+    try:
+        response = urllib.request.urlopen(request, timeout=_request_timeout(deadline))
+    except urllib.error.HTTPError as error:
+        response = error
+    except (TimeoutError, urllib.error.URLError) as error:
+        raise DockerSmokeError(f"request to {path} failed") from error
+
+    with response:
+        if response.status != expected_status:
+            raise DockerSmokeError(
+                f"request to {path} returned HTTP {response.status}; "
+                f"expected HTTP {expected_status}"
+            )
+        if expected_content_type is not None:
+            content_type = response.headers.get("Content-Type", "").partition(";")[0].strip()
+            if content_type != expected_content_type:
+                raise DockerSmokeError(
+                    f"request to {path} returned content type {content_type or 'missing'}; "
+                    f"expected {expected_content_type}"
+                )
+        body = _response_text(response)
+    if deadline is not None and time.monotonic() > deadline:
+        raise DockerSmokeError(f"the shared smoke deadline expired during the request to {path}")
+    return body
 
 
 def _request_json(
@@ -88,6 +155,114 @@ def _verify_database_contract() -> None:
     targets = executor.loader.graph.leaf_nodes()
     if executor.migration_plan(targets):
         raise DockerSmokeError("the one-shot migration service left unapplied migrations")
+
+
+def _verify_unfold_admin_contract(
+    *,
+    base_url: str,
+    deadline: float,
+    execution: Any,
+) -> dict[str, str]:
+    from django.conf import settings
+    from django.contrib.auth import (
+        BACKEND_SESSION_KEY,
+        HASH_SESSION_KEY,
+        SESSION_KEY,
+        get_user_model,
+    )
+    from django.contrib.sessions.backends.db import SessionStore
+
+    user_model = get_user_model()
+    user = user_model(
+        username=f"django-ray-smoke-{secrets.token_hex(8)}",
+        is_staff=True,
+        is_superuser=True,
+    )
+    user.set_unusable_password()
+    user.save()
+
+    session: Any | None = None
+    try:
+        session = SessionStore()
+        session[SESSION_KEY] = str(user.pk)
+        session[BACKEND_SESSION_KEY] = "django.contrib.auth.backends.ModelBackend"
+        session[HASH_SESSION_KEY] = user.get_session_auth_hash()
+        session.save()
+        if session.session_key is None:
+            raise DockerSmokeError("could not create a disposable admin session")
+
+        cookie = f"{settings.SESSION_COOKIE_NAME}={session.session_key}"
+        headers = {"Cookie": cookie}
+        index_html = _request_text(
+            base_url,
+            "/admin/",
+            headers=headers,
+            deadline=deadline,
+        )
+        changelist_html = _request_text(
+            base_url,
+            "/admin/django_ray/raytaskexecution/",
+            headers=headers,
+            deadline=deadline,
+        )
+        change_html = _request_text(
+            base_url,
+            f"/admin/django_ray/raytaskexecution/{execution.pk}/change/",
+            headers=headers,
+            deadline=deadline,
+        )
+        observability_text = _request_text(
+            base_url,
+            f"/admin/django_ray/raytaskexecution/{execution.pk}/observability/",
+            headers={"Accept": "application/json", "Cookie": cookie},
+            deadline=deadline,
+        )
+
+        if "django-ray" not in index_html:
+            raise DockerSmokeError("admin index did not render django-ray branding")
+        if "retry_tasks" not in changelist_html or "cancel_tasks" not in changelist_html:
+            raise DockerSmokeError("admin changelist did not render task controls")
+        if (
+            "django-ray-live-observability" not in change_html
+            or "django_ray/admin/task_live" not in change_html
+        ):
+            raise DockerSmokeError("admin change view did not render live task diagnostics")
+
+        stylesheet_match = _UNFOLD_STYLESHEET_RE.search(index_html)
+        if stylesheet_match is None:
+            raise DockerSmokeError("admin index did not load the Unfold stylesheet")
+        stylesheet_path = html.unescape(stylesheet_match.group("path"))
+        stylesheet = _request_text(
+            base_url,
+            stylesheet_path,
+            expected_content_type="text/css",
+            deadline=deadline,
+        )
+        if not stylesheet.strip():
+            raise DockerSmokeError("Unfold stylesheet response was empty")
+
+        try:
+            observability = json.loads(observability_text)
+        except json.JSONDecodeError as error:
+            raise DockerSmokeError("admin observability response was not valid JSON") from error
+        if (
+            not isinstance(observability, dict)
+            or observability.get("id") != execution.pk
+            or observability.get("state") != execution.state
+        ):
+            raise DockerSmokeError("admin observability returned the wrong execution")
+    finally:
+        try:
+            if session is not None and session.session_key is not None:
+                session.delete(session.session_key)
+        finally:
+            user.delete()
+
+    return {
+        "admin": "unfold-authenticated",
+        "admin_observability": "verified",
+        "admin_static": "served",
+    }
 
 
 def _run_smoke(*, base_url: str, token: str, timeout_seconds: float) -> dict[str, Any]:
@@ -182,7 +357,14 @@ def _run_smoke(*, base_url: str, token: str, timeout_seconds: float) -> dict[str
     if database_execution.state != TaskState.SUCCEEDED or database_result != 42:
         raise DockerSmokeError("worker did not persist the expected result in shared PostgreSQL")
 
+    admin_contract = _verify_unfold_admin_contract(
+        base_url=base_url,
+        deadline=deadline,
+        execution=database_execution,
+    )
+
     return {
+        **admin_contract,
         "database": "postgresql",
         "migrations": "applied",
         "authentication": "fail-closed-and-valid-token-accepted",

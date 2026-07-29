@@ -91,6 +91,7 @@ test-postgres:
 test-testproject:
 	python testproject/manage.py check
 	pytest tests/integration/test_api.py \
+		tests/integration/test_testproject_admin_theme.py \
 		tests/integration/test_workflow_progress_api.py \
 		tests/unit/test_sample_security.py \
 		tests/unit/test_testproject_workflows.py \
