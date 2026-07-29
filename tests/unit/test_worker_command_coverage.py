@@ -301,6 +301,7 @@ class TestWorkerCommandCoverage:
             kwargs_json="{}",
             ray_job_id="raysubmit_handoff",
             ray_address="ray://cluster:10001",
+            ray_target_address="ray://target:10001",
         )
         cmd = _make_command()
 
@@ -313,6 +314,7 @@ class TestWorkerCommandCoverage:
         assert task.last_heartbeat_at is None
         assert task.ray_job_id is None
         assert task.ray_address is None
+        assert task.ray_target_address == "ray://target:10001"
         assert "handed off before remote submission" in cmd.stdout.getvalue()
 
     @pytest.mark.django_db

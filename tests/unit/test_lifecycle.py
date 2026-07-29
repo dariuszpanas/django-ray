@@ -20,6 +20,8 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
         workflow_plan_selection='{"selected_strategy":"dynamic_tasks"}',
         error_message="boom",
         error_traceback="RuntimeError: boom",
+        ray_target_address="ray://target:10001",
+        ray_address="ray://submitted:10001",
     )
 
     retried = retry_task(task)
@@ -32,9 +34,64 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     assert task.input_reference == "s3://inputs/django-ray/inputs/immutable.json?bytes=42"
     assert task.workflow_plan_selection is None
     assert task.error_message is None
+    assert task.ray_target_address == "ray://target:10001"
+    assert task.ray_address is None
     history = TaskAttempt.objects.get(execution=task, attempt_number=2)
     assert history.state == TaskState.FAILED
     assert history.error_message == "boom"
+
+
+@pytest.mark.django_db
+def test_retry_task_promotes_legacy_submission_address_to_target() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-legacy-routing-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        ray_address="ray://legacy:10001",
+    )
+
+    retried = retry_task(task)
+
+    assert retried is not None
+    task.refresh_from_db()
+    assert task.ray_target_address == "ray://legacy:10001"
+    assert task.ray_address is None
+
+
+@pytest.mark.django_db
+def test_retry_task_keeps_ambiguous_legacy_auto_on_global_fallback() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-legacy-auto-routing-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        ray_address="auto",
+    )
+
+    retried = retry_task(task)
+
+    assert retried is not None
+    task.refresh_from_db()
+    assert task.ray_target_address is None
+    assert task.ray_address is None
+
+
+@pytest.mark.django_db
+def test_retry_task_does_not_promote_ray_core_handle_to_job_target() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-ray-core-routing-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        ray_job_id="ray_core:17",
+        ray_address="ray://core-cluster:10001",
+    )
+
+    retried = retry_task(task)
+
+    assert retried is not None
+    task.refresh_from_db()
+    assert task.ray_target_address is None
+    assert task.ray_job_id is None
+    assert task.ray_address is None
 
 
 @pytest.mark.django_db

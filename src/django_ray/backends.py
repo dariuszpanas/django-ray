@@ -39,6 +39,7 @@ from django.tasks import TaskResult, TaskResultStatus
 from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.exceptions import TaskResultDoesNotExist
 
+from django_ray.conf.settings import get_settings
 from django_ray.input_storage import (
     InputPayloadError,
     load_task_input,
@@ -81,7 +82,7 @@ class RayTaskBackend(BaseTaskBackend):
         - Executes tasks on Ray cluster
 
     Configuration options (in OPTIONS dict):
-        - RAY_ADDRESS: Ray cluster address (default: "auto")
+        - RAY_ADDRESS: Optional Ray Job cluster target (defaults to DJANGO_RAY)
         - RAY_RUNTIME_ENV: Runtime environment for Ray workers
         - TIMEOUT_SECONDS: Optional positive per-task execution timeout
     """
@@ -104,6 +105,15 @@ class RayTaskBackend(BaseTaskBackend):
         # Extract Ray-specific options
         options = params.get("OPTIONS", {})
         self.ray_address = options.get("RAY_ADDRESS", "auto")
+        ray_target_address = options.get(
+            "RAY_ADDRESS",
+            get_settings()["RAY_ADDRESS"],
+        )
+        if not isinstance(ray_target_address, str) or not ray_target_address.strip():
+            raise ImproperlyConfigured(
+                "django-ray: TASKS backend OPTIONS['RAY_ADDRESS'] must be a non-empty string"
+            )
+        self.ray_target_address = ray_target_address
         self.runtime_env_profile = options.get("RUNTIME_ENV_PROFILE")
         self.inline_runtime_env = (
             options["RAY_RUNTIME_ENV"] if "RAY_RUNTIME_ENV" in options else None
@@ -164,7 +174,7 @@ class RayTaskBackend(BaseTaskBackend):
                 kwargs_json=prepared_input.kwargs_json,
                 input_reference=prepared_input.input_reference,
                 run_after=task.run_after,
-                ray_address=self.ray_address,
+                ray_target_address=self.ray_target_address,
                 runtime_env_profile=runtime_env.profile,
                 runtime_env_json=runtime_env.serialized,
                 runtime_env_hash=runtime_env.digest,

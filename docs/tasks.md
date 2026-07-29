@@ -144,6 +144,40 @@ higher priority are claimed first, and tasks at the same priority remain FIFO by
 creation time. Delayed tasks and retries retain their original priority. Values outside
 the supported range, and non-whole-number values, are rejected by Django before enqueue.
 
+## Backend-specific Ray Job routing
+
+Set `RAY_ADDRESS` in a backend alias's `OPTIONS` when Ray Job tasks from that alias
+must stay on a specific cluster:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+    },
+    "analytics": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["analytics"],
+        "OPTIONS": {"RAY_ADDRESS": "ray://analytics-head:10001"},
+    },
+}
+
+result = build_report.using(
+    backend="analytics",
+    queue_name="analytics",
+).enqueue(report_id=42)
+```
+
+The effective target is persisted when the task is enqueued and remains unchanged
+through automatic or manual retry. An explicit `OPTIONS["RAY_ADDRESS"]` wins; when it
+is omitted, django-ray snapshots `DJANGO_RAY["RAY_ADDRESS"]`. The selected address is
+authoritative: Ray's ambient `RAY_API_SERVER_ADDRESS` and `RAY_ADDRESS` variables
+cannot replace it during submission, status checks, cancellation, or log retrieval.
+
+This per-task routing applies to Ray Job mode. A Ray Core task manager connects to one
+cluster when it starts; use queue isolation and a dedicated `--cluster` worker for each
+Ray Core cluster instead of assigning several cluster addresses to one worker.
+
 ## Per-task timeouts
 
 Set `TIMEOUT_SECONDS` in a Ray backend's `OPTIONS` to apply a positive timeout to every

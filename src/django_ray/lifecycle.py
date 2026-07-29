@@ -26,6 +26,25 @@ class LifecycleConflictError(Exception):
     """Raised when a transition's expected current state no longer matches."""
 
 
+def promote_legacy_ray_target(execution: RayTaskExecution) -> bool:
+    """Preserve an old Ray Job route without adopting Ray Core handle metadata.
+
+    Call this while the execution row is locked and before clearing its mutable
+    submission handle. A missing job ID identifies a never-submitted legacy row;
+    submitted Ray Job IDs use Ray's package-owned ``raysubmit_`` prefix.
+    """
+    if execution.ray_target_address:
+        return False
+    address = execution.ray_address
+    if not address or address == "auto":
+        return False
+    job_id = execution.ray_job_id
+    if job_id and not str(job_id).startswith("raysubmit_"):
+        return False
+    execution.ray_target_address = address
+    return True
+
+
 def _canonical_utc(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
@@ -191,6 +210,7 @@ def retry_task(
         current.finished_at = None
         current.last_heartbeat_at = None
         current.claimed_by_worker = None
+        promote_legacy_ray_target(current)
         current.ray_job_id = None
         current.ray_address = None
         current.cancellation_status = None
@@ -215,6 +235,7 @@ def retry_task(
                 "last_heartbeat_at",
                 "claimed_by_worker",
                 "ray_job_id",
+                "ray_target_address",
                 "ray_address",
                 "cancellation_status",
                 "cancellation_error",

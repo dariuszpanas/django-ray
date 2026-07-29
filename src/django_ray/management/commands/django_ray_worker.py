@@ -15,7 +15,13 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import transaction
 
 from django_ray.conf.settings import get_settings
-from django_ray.lifecycle import cancel_task, record_failure, retry_task, succeed_task
+from django_ray.lifecycle import (
+    cancel_task,
+    promote_legacy_ray_target,
+    record_failure,
+    retry_task,
+    succeed_task,
+)
 from django_ray.logging import get_worker_logger
 from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.runner.base import SubmissionHandle
@@ -853,6 +859,7 @@ class Command(BaseCommand):
                 task.workflow_progress_summary_json = None
                 task.workflow_run_id = None
                 task.workflow_plan_selection = None
+                promote_legacy_ray_target(task)
                 task.ray_job_id = None
                 task.ray_address = None
                 task.save(
@@ -868,6 +875,7 @@ class Command(BaseCommand):
                         "workflow_run_id",
                         "workflow_plan_selection",
                         "ray_job_id",
+                        "ray_target_address",
                         "ray_address",
                     ]
                 )

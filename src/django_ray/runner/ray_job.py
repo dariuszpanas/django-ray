@@ -21,6 +21,72 @@ if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
 
 
+def _find_auto_ray_address() -> str:
+    """Resolve ``auto`` without allowing ``RAY_ADDRESS`` to replace it."""
+    from ray._private import services
+
+    gcs_addresses = services.find_gcs_addresses()
+    bootstrap_address = services.find_bootstrap_address(None)
+
+    # Match Ray's ``auto`` discovery order while deliberately omitting its
+    # environment-variable precedence. An explicit backend target must remain
+    # authoritative even when the task-manager process has global Ray settings.
+    if len(gcs_addresses) > 1 and bootstrap_address is not None:
+        return bootstrap_address
+    if gcs_addresses:
+        return next(iter(gcs_addresses))
+    if bootstrap_address is not None:
+        return bootstrap_address
+    raise ConnectionError("Could not find any running Ray instance for the explicit 'auto' target.")
+
+
+def _resolve_submission_address(ray_address: str) -> str:
+    """Resolve one selected Ray target without consulting ambient Ray addresses."""
+    from ray.dashboard.modules.dashboard_sdk import split_address
+    from ray.dashboard.utils import (
+        ray_address_to_api_server_url,
+        ray_client_address_to_api_server_url,
+    )
+
+    if "://" in ray_address:
+        module_name, _ = split_address(ray_address)
+        if module_name == "ray":
+            return ray_client_address_to_api_server_url(ray_address)
+        return ray_address
+
+    if ray_address == "auto":
+        ray_address = _find_auto_ray_address()
+    return ray_address_to_api_server_url(ray_address)
+
+
+def _address_pinned_job_client(ray_address: str) -> Any:
+    """Build a JobSubmissionClient whose explicit address cannot be overridden.
+
+    Ray's public ``JobSubmissionClient`` constructor intentionally gives
+    ``RAY_API_SERVER_ADDRESS`` and ``RAY_ADDRESS`` precedence over its address
+    argument. That conflicts with django-ray's durable backend routing contract,
+    so initialize the inherited HTTP submission client with an independently
+    resolved endpoint instead.
+    """
+    import ray
+    from ray.dashboard.modules.dashboard_sdk import SubmissionClient
+    from ray.job_submission import JobSubmissionClient
+
+    api_server_url = _resolve_submission_address(ray_address)
+    client = JobSubmissionClient.__new__(JobSubmissionClient)
+    client._client_ray_version = ray.__version__
+    SubmissionClient.__init__(client, address=api_server_url)
+    client._check_connection_and_version(
+        min_version="2.0",
+        version_error_message=(
+            f"Client Ray version {client._client_ray_version} is not compatible "
+            "with the Ray cluster. Please ensure the cluster is running Ray 2.0 "
+            "or higher or downgrade the client Ray version."
+        ),
+    )
+    return client
+
+
 class RayJobRunner(BaseRunner):
     """Runner that uses Ray Job Submission API."""
 
@@ -32,14 +98,12 @@ class RayJobRunner(BaseRunner):
     def _get_client(self, ray_address: str | None = None) -> Any:
         """Get a Ray JobSubmissionClient for the requested cluster.
 
-        ``RayTaskExecution.ray_address`` is persisted when a task is queued so
-        backend aliases can target different Ray clusters.  Keep the process
-        setting as a fallback for callers that do not have a persisted address
-        (for example, direct runner usage and older records).
+        ``RayTaskExecution.ray_target_address`` snapshots an explicit backend
+        alias target. Keep the process setting as a fallback when an alias did
+        not select one, and do not let Ray's process environment replace either
+        selected address.
         """
-        from ray.job_submission import JobSubmissionClient
-
-        return JobSubmissionClient(ray_address or self.ray_address)
+        return _address_pinned_job_client(ray_address or self.ray_address)
 
     def submit(
         self,
@@ -49,7 +113,11 @@ class RayJobRunner(BaseRunner):
         kwargs: dict[str, Any],
     ) -> SubmissionHandle:
         """Submit a task via Ray Job Submission API."""
-        ray_address = getattr(task_execution, "ray_address", None) or self.ray_address
+        ray_address = (
+            getattr(task_execution, "ray_target_address", None)
+            or getattr(task_execution, "ray_address", None)
+            or self.ray_address
+        )
         client = self._get_client(ray_address)
 
         runtime_env = runtime_env_for_execution(task_execution)

@@ -123,6 +123,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
         "task_id",
         "callable_path",
         "ray_job_id_display",
+        "ray_target_address",
         "ray_address",
         "runtime_env_profile",
         "runtime_env_json",
@@ -193,6 +194,7 @@ class RayTaskExecutionAdmin(admin.ModelAdmin):
             {
                 "fields": (
                     "ray_job_id_display",
+                    "ray_target_address",
                     "ray_address",
                     "claimed_by_worker",
                     "runtime_env_profile",

@@ -41,6 +41,9 @@ class TestRayTaskBackend:
     def test_backend_advertises_priority_support(self) -> None:
         assert _make_backend().supports_priority is True
 
+    def test_backend_keeps_legacy_address_attribute(self) -> None:
+        assert RayTaskBackend("default", {"QUEUES": ["default"]}).ray_address == "auto"
+
     def test_backend_advertises_and_accepts_coroutine_tasks(self) -> None:
         from django.tasks.base import Task
 
@@ -104,6 +107,8 @@ class TestRayTaskBackend:
         assert json.loads(execution.runtime_env_json) == {}
         assert len(execution.runtime_env_hash) == 64
         assert execution.timeout_seconds is None
+        assert execution.ray_target_address == "auto"
+        assert execution.ray_address is None
 
     def test_enqueue_persists_backend_timeout(self) -> None:
         from testproject.tasks import add_numbers
@@ -129,7 +134,18 @@ class TestRayTaskBackend:
                 },
             )
 
-    def test_enqueue_persists_address_for_each_backend_alias(self) -> None:
+    @pytest.mark.parametrize("ray_address", [None, "", "   ", 123, True])
+    def test_backend_rejects_invalid_ray_target(self, ray_address: object) -> None:
+        with pytest.raises(ImproperlyConfigured, match="RAY_ADDRESS"):
+            RayTaskBackend(
+                "default",
+                {
+                    "QUEUES": ["default"],
+                    "OPTIONS": {"RAY_ADDRESS": ray_address},
+                },
+            )
+
+    def test_enqueue_persists_target_for_each_backend_alias(self) -> None:
         """Backend aliases retain their own Ray cluster for worker submission."""
         from testproject.tasks import add_numbers
 
@@ -146,8 +162,34 @@ class TestRayTaskBackend:
         result_a = backend_a.enqueue(task, args=(1, 2), kwargs={})
         result_b = backend_b.enqueue(task, args=(3, 4), kwargs={})
 
-        assert RayTaskExecution.objects.get(task_id=result_a.id).ray_address == "ray://a:10001"
-        assert RayTaskExecution.objects.get(task_id=result_b.id).ray_address == "ray://b:10001"
+        execution_a = RayTaskExecution.objects.get(task_id=result_a.id)
+        execution_b = RayTaskExecution.objects.get(task_id=result_b.id)
+        assert execution_a.ray_target_address == "ray://a:10001"
+        assert execution_b.ray_target_address == "ray://b:10001"
+        assert execution_a.ray_address is None
+        assert execution_b.ray_address is None
+
+    def test_enqueue_without_backend_target_snapshots_global_fallback(
+        self,
+        settings,
+    ) -> None:
+        from testproject.tasks import add_numbers
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "RAY_ADDRESS": "ray://global:10001",
+        }
+        backend = RayTaskBackend("default", {"QUEUES": ["default"]})
+
+        result = backend.enqueue(
+            add_numbers.using(queue_name="default"),
+            args=(1, 2),
+            kwargs={},
+        )
+
+        execution = RayTaskExecution.objects.get(task_id=result.id)
+        assert execution.ray_target_address == "ray://global:10001"
+        assert execution.ray_address is None
 
     def test_enqueue_snapshots_named_runtime_env_profile(self, settings) -> None:
         from testproject.tasks import add_numbers

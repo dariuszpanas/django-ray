@@ -215,6 +215,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ray Job task claims and retries now preserve the immutable cluster target selected
+  by a Django Tasks backend alias instead of clearing it with stale submission-handle
+  metadata. New tasks snapshot the global django-ray address when an alias does not
+  override it. The selected target also takes precedence over Ray's ambient address
+  variables when clients are constructed.
 - Minimum-supported `django-ninja` versions now render the bundled testproject
   responses correctly.
 - PostgreSQL cancellation and terminal coordination now fence updates by execution
@@ -234,7 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migration
 
-- Apply migrations `0007` through `0013` before starting upgraded workers:
+- Apply migrations `0007` through `0014` before starting upgraded workers:
   `python manage.py migrate django_ray`.
 - `0007_raytaskexecution_priority` adds task priority and gives existing rows the
   neutral default `0`.
@@ -255,6 +260,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   normalized-detail tables without backfilling or reinterpreting legacy snapshots.
   Reverse it only after disabling schema-v3 publication and exporting retained detail
   needed for audit; reversal deletes those package-owned tables.
+- `0014_raytaskexecution_ray_target_address` adds a nullable immutable Ray Job routing
+  target. New enqueues snapshot their effective alias-or-global address. New task
+  managers lazily preserve a legacy non-`"auto"` Ray Job `ray_address` under the claim
+  or retry lock without promoting Ray Core handle metadata; legacy `"auto"` remains on
+  the global fallback because old writers used it even without an alias target. Drain
+  pre-`0014` task managers before relying on alias routing and drain targeted tasks
+  before reversing the migration.
 - Keep the schema-v3 producer disabled through the public-reader rollout, #79
   live-ingestion bound, #142 composite preparation, and old-writer drain. The current
   schema-v2 coordinator remains the production writer throughout the 0.4.0 rollout.

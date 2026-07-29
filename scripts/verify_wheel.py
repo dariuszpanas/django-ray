@@ -10,12 +10,12 @@ EXPECTED_FILES = {
     "django_ray/__init__.py",
     "django_ray/models.py",
     "django_ray/migrations/0001_initial.py",
-    "django_ray/migrations/0013_workflow_progress_detail_storage.py",
+    "django_ray/migrations/0014_raytaskexecution_ray_target_address.py",
     "django_ray/management/commands/django_ray_worker.py",
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0013_workflow_progress_detail_storage",
+    "0014_raytaskexecution_ray_target_address",
 )
 
 

@@ -160,6 +160,7 @@ Primary execution record for one task attempt chain.
 | `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
 | `runtime_env_hash` | SHA-256 content identity used to correlate cache reuse |
 | `error_message`, `error_traceback` | Failure metadata |
+| `ray_target_address` | Immutable Ray Job routing target selected by the enqueueing backend |
 | `ray_job_id`, `ray_address` | Runner-specific execution handle metadata |
 | `claimed_by_worker` | Worker lease owner that currently owns the task |
 | `run_after` | Delayed/retry scheduling timestamp |
@@ -356,7 +357,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0013_workflow_progress_detail_storage` before starting upgraded workers:
+`0014_raytaskexecution_ray_target_address` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -387,6 +388,20 @@ drained. The schema-v2 coordinator remains the production writer in 0.4.0. Rever
 `0013` discards normalized detail tables, while reversing `0012` drops the summary
 columns. Export any retained schema-v3 data needed for audit before either rollback;
 legacy progress remains unchanged.
+
+Migration `0014` adds a nullable immutable Ray Job routing target without rewriting
+existing rows. New enqueues snapshot either the explicit backend-alias address or the
+global `DJANGO_RAY["RAY_ADDRESS"]` fallback. New task managers promote a legacy
+row's non-`"auto"` Ray Job `ray_address` into that target under the existing claim or
+retry lock before clearing stale handle metadata; Ray Core handle addresses are never
+promoted. Legacy writers also used `"auto"` when no alias target was configured, so
+that ambiguous value remains on the global fallback.
+
+Pre-`0014` task managers do not read the new target. Drain and stop them before relying
+on backend-specific Ray Job routing, and drain tasks that contain only the new target
+before reversing `0014`; the reverse migration drops that routing column. Ray Core
+workers still select one cluster at process startup and do not dynamically route by
+backend alias.
 
 The completion envelope and `execution_generation` fields are part of the Ray Job
 protocol. Drain Ray Job workers before deploying a version that introduces or changes

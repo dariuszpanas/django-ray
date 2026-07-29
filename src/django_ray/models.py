@@ -132,7 +132,13 @@ class RayTaskExecution(models.Model):
         help_text="Monotonic token identifying the current execution generation",
     )
 
-    # Ray job tracking
+    # Ray routing and submitted-job tracking
+    ray_target_address = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Immutable Ray cluster target selected when this task was enqueued",
+    )
     ray_job_id = models.CharField(
         max_length=255,
         null=True,

@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +13,11 @@ import pytest
 
 from django_ray.runner.base import JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcomeStatus
-from django_ray.runner.ray_job import RayJobRunner
+from django_ray.runner.ray_job import (
+    RayJobRunner,
+    _find_auto_ray_address,
+    _resolve_submission_address,
+)
 from django_ray.runtime.runtime_env import normalize_runtime_env
 from django_ray.workflow_plans import WorkflowPlanMismatchError
 
@@ -55,6 +58,84 @@ class FakeJobClient:
         modules = runtime_env.get("py_modules")
         if isinstance(modules, list):
             runtime_env["py_modules"] = [self._package_uri(module) for module in modules]
+
+
+class TestRayJobAddressResolution:
+    """Selected Ray targets must be resolved without ambient routing overrides."""
+
+    @pytest.mark.parametrize(
+        ("gcs_addresses", "bootstrap_address", "expected"),
+        [
+            ({"cluster-a:6379", "cluster-b:6379"}, "latest:6379", "latest:6379"),
+            ({"cluster-a:6379"}, "latest:6379", "cluster-a:6379"),
+            (set(), "latest:6379", "latest:6379"),
+        ],
+    )
+    def test_find_auto_ray_address_matches_env_free_discovery(
+        self,
+        monkeypatch,
+        gcs_addresses,
+        bootstrap_address,
+        expected,
+    ) -> None:
+        from ray._private import services
+
+        monkeypatch.setattr(services, "find_gcs_addresses", lambda: gcs_addresses)
+        monkeypatch.setattr(
+            services,
+            "find_bootstrap_address",
+            lambda _temp_dir: bootstrap_address,
+        )
+
+        assert _find_auto_ray_address() == expected
+
+    def test_find_auto_ray_address_requires_a_running_cluster(self, monkeypatch) -> None:
+        from ray._private import services
+
+        monkeypatch.setattr(services, "find_gcs_addresses", set)
+        monkeypatch.setattr(services, "find_bootstrap_address", lambda _temp_dir: None)
+
+        with pytest.raises(ConnectionError, match="explicit 'auto' target"):
+            _find_auto_ray_address()
+
+    def test_resolve_submission_address_keeps_http_target(self, monkeypatch) -> None:
+        monkeypatch.setenv("RAY_ADDRESS", "http://global-dashboard:8265")
+        monkeypatch.setenv("RAY_API_SERVER_ADDRESS", "http://api-override:8265")
+
+        assert (
+            _resolve_submission_address("https://alias-dashboard:8265")
+            == "https://alias-dashboard:8265"
+        )
+
+    @pytest.mark.parametrize(
+        ("selected", "resolved_input"),
+        [
+            ("cluster-head:6379", "cluster-head:6379"),
+            ("auto", "autodetected-head:6379"),
+        ],
+    )
+    def test_resolve_submission_address_uses_selected_bootstrap(
+        self,
+        monkeypatch,
+        selected,
+        resolved_input,
+    ) -> None:
+        from ray.dashboard import utils as dashboard_utils
+
+        inputs: list[str] = []
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job._find_auto_ray_address",
+            lambda: "autodetected-head:6379",
+        )
+        monkeypatch.setattr(
+            dashboard_utils,
+            "ray_address_to_api_server_url",
+            lambda address: inputs.append(address) or "http://alias-dashboard:8265",
+        )
+        monkeypatch.setenv("RAY_ADDRESS", "global-head:6379")
+
+        assert _resolve_submission_address(selected) == "http://alias-dashboard:8265"
+        assert inputs == [resolved_input]
 
 
 class TestRayJobRunnerSubmit:
@@ -298,12 +379,17 @@ class TestRayJobRunnerSubmit:
     def test_submit_uses_runtime_env_and_configured_ray_address(self, monkeypatch) -> None:
         """Submit should pass configured runtime_env and keep configured ray_address."""
         fake_client = FakeJobClient()
+        addresses: list[str | None] = []
         monkeypatch.setattr(
             "django_ray.runner.ray_job.get_settings",
             lambda: {"RAY_ADDRESS": "ray://unit-test:10001"},
         )
         runner = RayJobRunner()
-        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        monkeypatch.setattr(
+            runner,
+            "_get_client",
+            lambda ray_address=None: addresses.append(ray_address) or fake_client,
+        )
 
         handle = runner.submit(
             task_execution=SimpleNamespace(
@@ -320,26 +406,53 @@ class TestRayJobRunnerSubmit:
         )
 
         assert handle.ray_address == "ray://unit-test:10001"
+        assert addresses == ["ray://unit-test:10001"]
         submission = fake_client.submissions[0]
         assert submission["runtime_env"] == {"env_vars": {"MY_ENV": "1"}}
 
-    def test_get_client_uses_configured_address(self, monkeypatch) -> None:
-        created: list[str] = []
+    def test_get_client_pins_configured_address_against_ray_environment(
+        self,
+        monkeypatch,
+    ) -> None:
+        """Ambient Ray variables must not replace durable django-ray routing."""
+        from ray import __version__ as ray_version
+        from ray.dashboard.modules.job import sdk as job_sdk
 
-        class FakeClient:
-            def __init__(self, address: str) -> None:
-                created.append(address)
+        resolved: list[str] = []
 
-        monkeypatch.setitem(
-            sys.modules, "ray.job_submission", SimpleNamespace(JobSubmissionClient=FakeClient)
+        def resolve_submission_address(address: str) -> str:
+            resolved.append(address)
+            return "http://alias-dashboard:8265"
+
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job._resolve_submission_address",
+            resolve_submission_address,
         )
-        runner = RayJobRunner()
+        monkeypatch.setattr(
+            job_sdk.JobSubmissionClient,
+            "_check_connection_and_version",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setenv("RAY_ADDRESS", "http://global-dashboard:8265")
+        monkeypatch.setenv("RAY_API_SERVER_ADDRESS", "http://api-override:8265")
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job.get_settings",
+            lambda: {"RAY_ADDRESS": "ray://alias-head:10001"},
+        )
 
-        runner._get_client()
+        client = RayJobRunner()._get_client()
 
-        assert created == [runner.ray_address]
+        assert isinstance(client, job_sdk.JobSubmissionClient)
+        assert resolved == ["ray://alias-head:10001"]
+        assert client._address == "http://alias-dashboard:8265"
+        assert client._cookies is None
+        assert client._default_metadata == {}
+        assert client._headers == {}
+        assert client._verify is True
+        assert client._ssl_context is None
+        assert client._client_ray_version == ray_version
 
-    def test_submit_uses_persisted_backend_address(self, monkeypatch) -> None:
+    def test_submit_uses_persisted_backend_target(self, monkeypatch) -> None:
         """Each backend alias must submit against its persisted Ray cluster."""
         addresses: list[str | None] = []
         fake_client = FakeJobClient()
@@ -357,7 +470,8 @@ class TestRayJobRunnerSubmit:
             handle = runner.submit(
                 task_execution=SimpleNamespace(
                     pk=index,
-                    ray_address=address,
+                    ray_target_address=address,
+                    ray_address="ray://stale-handle:10001",
                     runtime_env_profile=None,
                     runtime_env_json="{}",
                     runtime_env_hash="",
@@ -371,6 +485,34 @@ class TestRayJobRunnerSubmit:
             assert handle.ray_address == address
 
         assert addresses == ["ray://alias-a:10001", "ray://alias-b:10001"]
+
+    def test_submit_accepts_legacy_address_without_dedicated_target(self, monkeypatch) -> None:
+        addresses: list[str | None] = []
+        fake_client = FakeJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(
+            runner,
+            "_get_client",
+            lambda ray_address=None: addresses.append(ray_address) or fake_client,
+        )
+
+        handle = runner.submit(
+            task_execution=SimpleNamespace(
+                pk=3,
+                ray_address="ray://legacy:10001",
+                runtime_env_profile=None,
+                runtime_env_json="{}",
+                runtime_env_hash="",
+                attempt_number=1,
+                execution_generation=0,
+            ),
+            callable_path="testproject.tasks.echo_task",
+            args=(),
+            kwargs={},
+        )
+
+        assert handle.ray_address == "ray://legacy:10001"
+        assert addresses == ["ray://legacy:10001"]
 
 
 class TestRayJobRunnerStatusAndControl:

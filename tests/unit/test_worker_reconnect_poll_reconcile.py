@@ -258,6 +258,7 @@ class TestWorkerReconnectPollReconcile:
             state=TaskState.RUNNING,
             args_json="[1, 2]",
             kwargs_json="{}",
+            ray_target_address="ray://target:10001",
         )
         cmd = _make_command()
 
@@ -288,6 +289,7 @@ class TestWorkerReconnectPollReconcile:
         task.refresh_from_db()
         assert task.ray_job_id == "ray_core:1"
         assert task.ray_address == "ray://cluster:10001"
+        assert task.ray_target_address == "ray://target:10001"
 
     def test_submit_task_to_ray_core_preserves_external_input_reference(self, monkeypatch) -> None:
         reference = "resultfs://sha256/" + "a" * 64 + "?rel=aa/input.json&bytes=4"
@@ -874,6 +876,7 @@ class TestWorkerReconnectPollReconcile:
             kwargs_json="{}",
             ray_job_id="raysubmit_previous_001",
             ray_address="ray://previous:10001",
+            ray_target_address="ray://target:10001",
             execution_generation=4,
         )
         cmd = _make_command()
@@ -886,6 +889,72 @@ class TestWorkerReconnectPollReconcile:
         task.refresh_from_db()
         assert claimed and claimed[0].pk == task.pk
         assert task.execution_generation == 5
+        assert task.ray_job_id is None
+        assert task.ray_address is None
+        assert task.ray_target_address == "ray://target:10001"
+
+    def test_claim_promotes_legacy_address_before_clearing_handle(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="claim-promotes-legacy-routing-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_address="ray://legacy:10001",
+        )
+        cmd = _make_command()
+        cmd.execution_mode = "ray"
+        monkeypatch.setattr(cmd, "process_task", lambda _task: None)
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert task.ray_target_address == "ray://legacy:10001"
+        assert task.ray_address is None
+
+    def test_claim_keeps_ambiguous_legacy_auto_on_global_fallback(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="claim-keeps-legacy-auto-fallback-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_address="auto",
+        )
+        cmd = _make_command()
+        cmd.execution_mode = "ray"
+        monkeypatch.setattr(cmd, "process_task", lambda _task: None)
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert task.ray_target_address is None
+        assert task.ray_address is None
+
+    def test_claim_does_not_promote_automatic_ray_core_retry_handle(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="claim-keeps-ray-core-routing-metadata-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="ray_core:19",
+            ray_address="ray://core-cluster:10001",
+        )
+        cmd = _make_command()
+        cmd.execution_mode = "ray"
+        monkeypatch.setattr(cmd, "process_task", lambda _task: None)
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert task.ray_target_address is None
         assert task.ray_job_id is None
         assert task.ray_address is None
 
