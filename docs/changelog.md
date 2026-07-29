@@ -102,10 +102,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem/S3/GCS retrieval, immutable retry reuse, and retention-safe cleanup.
 - Versioned package observability services, bounded-cardinality Prometheus metrics,
   byte-bounded live Ray logs, and authenticated live task updates in Django admin.
-- A Django Unfold-themed bundled testproject admin with reproducibly pinned development,
-  sample-image, and RuntimeEnv dependencies, django-ray-specific navigation, authenticated
-  admin/static smoke coverage, and an optional package-side `ModelAdmin` fallback that keeps
-  Unfold out of the published package's required dependencies.
+- A Django Unfold-themed bundled testproject admin that shares the documentation icon and type
+  treatment, adopts the landing page's sky/slate palette and graph artwork, and provides compact
+  execution/attempt layouts. Reproducibly pinned development, sample-image, and RuntimeEnv
+  dependencies, django-ray-specific navigation, authenticated branded-admin/static smoke coverage,
+  and an optional package-side `ModelAdmin` fallback keep Unfold out of the published package's
+  required dependencies.
 - Coroutine-based Django tasks across sync, Ray Core, and Ray Job modes, with
   per-invocation event loops and preserved retry exception classification.
 - A Ray Serve integration boundary that defers package orchestration, keeps deployment
@@ -201,6 +203,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authorized list/detail bookmarks remain valid; `TASK_ATTEMPT_ADMIN_MODE` can restore
   standalone navigation or enable both presentations. The same package registrations
   support Unfold and standard Django admin.
+- Live task status now uses a compact card hierarchy, state badge, and clearly labelled
+  workflow topology actions in both admin implementations. Task detail pages intentionally
+  omit the raw durable RuntimeEnv snapshot because arbitrary environment values and package
+  URIs can contain credentials; the profile and content hash remain available for correlation.
+  Execution rows are otherwise read-only: queue, priority, lifecycle, generation, and worker
+  ownership remain visible, while controlled writes use the fenced Retry and Cancel actions.
 - `make test-xdist` provides an ordinary four-worker local speed path for the
   default-resource subset. Markers identify tests that own real Ray, live-cluster, or
   PostgreSQL resources; they do not create CI shards or cross-test coordination, and

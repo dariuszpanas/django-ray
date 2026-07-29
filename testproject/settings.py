@@ -1,9 +1,11 @@
 """Django settings for testproject."""
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
+from django.templatetags.static import static
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -82,10 +84,61 @@ INSTALLED_APPS = [
     # (These are in testproject/apps/ for demonstration purposes)
 ]
 
+
+def _static_asset(path: str) -> Callable[[object], str]:
+    """Resolve an Unfold asset at request time so manifests remain supported."""
+
+    def resolve(_request: object) -> str:
+        return static(path)
+
+    return resolve
+
+
 UNFOLD = {
     "SITE_TITLE": "django-ray admin",
     "SITE_HEADER": "django-ray",
     "SITE_SUBHEADER": "Distributed task testproject",
+    "SITE_ICON": _static_asset("testproject/django-ray.svg"),
+    "SITE_FAVICONS": [
+        {
+            "href": _static_asset("testproject/django-ray.svg"),
+            "rel": "icon",
+            "type": "image/svg+xml",
+        }
+    ],
+    "STYLES": [_static_asset("testproject/admin.css")],
+    "BORDER_RADIUS": "8px",
+    "COLORS": {
+        "base": {
+            "50": "#f8fafc",
+            "100": "#f1f5f9",
+            "200": "#e2e8f0",
+            "300": "#cbd5e1",
+            "400": "#94a3b8",
+            "500": "#64748b",
+            "600": "#475569",
+            "700": "#334155",
+            "800": "#1e293b",
+            "900": "#0f172a",
+            "950": "#020617",
+        },
+        "primary": {
+            "50": "#f0f9ff",
+            "100": "#e0f2fe",
+            "200": "#bae6fd",
+            "300": "#7dd3fc",
+            "400": "#38bdf8",
+            "500": "#0ea5e9",
+            "600": "#075985",
+            "700": "#0c4a6e",
+            "800": "#082f49",
+            "900": "#062338",
+            "950": "#03151f",
+        },
+    },
+    "LOGIN": {
+        "image": _static_asset("testproject/landing-graph-bg.png"),
+    },
 }
 
 MIDDLEWARE = [

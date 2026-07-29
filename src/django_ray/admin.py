@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any, cast
 
 from django.apps import apps
@@ -13,6 +14,7 @@ from django.db.models.functions import Substr
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.urls import path, reverse
 from django.utils import timezone
+from django.utils.formats import date_format
 from django.utils.html import format_html
 from django.utils.http import quote, unquote
 from django.utils.text import Truncator
@@ -68,6 +70,33 @@ def _bounded_redacted_json(value: str | None) -> str:
     )
 
 
+def _compact_admin_datetime(value: datetime | None) -> str:
+    """Render a sortable timestamp compactly while preserving its full value."""
+    if value is None:
+        return "-"
+    local_value = timezone.localtime(value) if timezone.is_aware(value) else value
+    title = local_value.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+    return format_html(
+        '<time datetime="{}" title="{}">{}</time>',
+        value.isoformat(),
+        title,
+        date_format(local_value, "Y-m-d H:i"),
+    )
+
+
+def _compact_path_suffix(value: str, *, max_chars: int) -> str:
+    """Preserve the distinguishing end of a long dotted path."""
+    if len(value) <= max_chars:
+        return value
+    basename = value.rsplit(".", 1)[-1]
+    if len(basename) < max_chars:
+        return f"…{basename}"
+    available = max_chars - 1
+    prefix_chars = available // 2
+    suffix_chars = available - prefix_chars
+    return f"{basename[:prefix_chars]}…{basename[-suffix_chars:]}"
+
+
 def _task_attempt_admin_mode() -> str:
     """Return the validated request-time attempt presentation mode."""
     return cast(str, get_settings()["TASK_ATTEMPT_ADMIN_MODE"])
@@ -79,17 +108,18 @@ class TaskAttemptInline(DjangoRayTabularInline):
     model = TaskAttempt
     fk_name = "execution"
     fields = (
-        "attempt_number",
+        "attempt_detail_link",
         "state",
-        "started_at",
-        "finished_at",
+        "started_display",
+        "finished_display",
         "error_summary",
     )
     readonly_fields = fields
     ordering = ("attempt_number",)
     extra = 0
     can_delete = False
-    show_change_link = True
+    hide_title = True
+    show_change_link = False
     verbose_name_plural = "Attempt history"
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[TaskAttempt]:
@@ -146,6 +176,27 @@ class TaskAttemptInline(DjangoRayTabularInline):
         parent_admin = self.admin_site._registry.get(RayTaskExecution)
         return parent_admin is not None and parent_admin.has_view_permission(request, obj)
 
+    @admin.display(description="Attempt")
+    def attempt_detail_link(self, obj: TaskAttempt) -> str:
+        """Link the compact attempt label to its immutable detail view."""
+        label = f"#{obj.attempt_number}"
+        if obj.pk is None:
+            return label
+        url = reverse(
+            f"{self.admin_site.name}:django_ray_taskattempt_change",
+            args=[quote(str(obj.pk))],
+            current_app=self.admin_site.name,
+        )
+        return format_html('<a href="{}">{}</a>', url, label)
+
+    @admin.display(description="Started")
+    def started_display(self, obj: TaskAttempt) -> str:
+        return _compact_admin_datetime(obj.started_at)
+
+    @admin.display(description="Finished")
+    def finished_display(self, obj: TaskAttempt) -> str:
+        return _compact_admin_datetime(obj.finished_at)
+
     @admin.display(description="Error")
     def error_summary(self, obj: TaskAttempt) -> str:
         preview = getattr(obj, "admin_error_preview", None)
@@ -199,20 +250,17 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
 
     list_display = [
         "id",
-        "callable_path",
         "state_display",
-        "queue_name",
+        "task_display",
+        "queue_display",
         "priority",
-        "attempt_number",
-        "execution_generation",
-        "workflow_run_id",
-        "workflow_plan_fingerprint",
-        "workflow_plan_pinned_attempt",
+        "attempt_display",
         "ray_dashboard_link",
-        "created_at",
-        "started_at",
-        "finished_at",
+        "created_display",
+        "started_display",
+        "finished_display",
     ]
+    list_fullwidth = True
     list_filter = [
         "state",
         "queue_name",
@@ -227,11 +275,16 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     readonly_fields = [
         "task_id",
         "callable_path",
+        "priority",
+        "queue_name",
+        "state",
+        "attempt_number",
+        "execution_generation",
         "ray_job_id_display",
         "ray_target_address",
         "ray_address",
+        "claimed_by_worker",
         "runtime_env_profile",
-        "runtime_env_json",
         "runtime_env_hash",
         "workflow_run_id",
         "workflow_plan_fingerprint",
@@ -271,6 +324,10 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                     "workflow_plan_display",
                     "workflow_plan_selection_display",
                 ),
+                "description": (
+                    "Execution metadata is read-only. Use the package-owned Retry "
+                    "or Cancel action from the task list for controlled state changes."
+                ),
             },
         ),
         (
@@ -304,9 +361,13 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                     "claimed_by_worker",
                     "runtime_env_profile",
                     "runtime_env_hash",
-                    "runtime_env_json",
                 ),
-                "description": "Ray Job ID is only available for Ray Job API mode.",
+                "description": (
+                    "Ray Job ID is only available for Ray Job API mode. RuntimeEnv "
+                    "values are intentionally not displayed because the durable "
+                    "snapshot can contain sensitive application configuration. Use "
+                    "cluster-mounted secrets; profile and hash identify the snapshot."
+                ),
             },
         ),
         (
@@ -324,6 +385,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             .get_queryset(request)
             .defer(
                 "progress_data",
+                "runtime_env_json",
                 "workflow_progress_summary_json",
             )
         )
@@ -357,6 +419,28 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             f"{opts.app_label}.{get_permission_codename('change', opts)}",
             obj,
         )
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        """Executions must be created through a configured Django task backend."""
+        return False
+
+    def has_change_permission(
+        self,
+        request: HttpRequest,
+        obj: RayTaskExecution | None = None,
+    ) -> bool:
+        """Keep list actions authorized while preventing direct row saves."""
+        if obj is not None:
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(
+        self,
+        request: HttpRequest,
+        obj: RayTaskExecution | None = None,
+    ) -> bool:
+        """Preserve durable execution and attempt history in the admin."""
+        return False
 
     ordering = ["-created_at"]
     actions = ["retry_tasks", "cancel_tasks"]
@@ -404,6 +488,10 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         opts = self.model._meta
         context = {
             **(extra_context or {}),
+            "show_delete": False,
+            "show_save": False,
+            "show_save_and_add_another": False,
+            "show_save_and_continue": False,
             "django_ray_observability_url": reverse(
                 f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_observability",
                 args=[quote(object_id)],
@@ -802,7 +890,43 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             state,
         )
 
-    @admin.display(description="Ray Dashboard")
+    @admin.display(description="Task", ordering="callable_path")
+    def task_display(self, obj: RayTaskExecution) -> str:
+        """Keep callable identity readable without letting it dominate the row."""
+        callable_path = str(obj.callable_path)
+        return format_html(
+            '<span title="{}">{}</span>',
+            callable_path,
+            _compact_path_suffix(callable_path, max_chars=36),
+        )
+
+    @admin.display(description="Queue", ordering="queue_name")
+    def queue_display(self, obj: RayTaskExecution) -> str:
+        """Keep long queue names bounded while preserving the full hover label."""
+        queue_name = str(obj.queue_name)
+        return format_html(
+            '<span title="{}">{}</span>',
+            queue_name,
+            Truncator(queue_name).chars(20),
+        )
+
+    @admin.display(description="Attempt", ordering="attempt_number")
+    def attempt_display(self, obj: RayTaskExecution) -> int:
+        return cast(int, obj.attempt_number)
+
+    @admin.display(description="Created", ordering="created_at")
+    def created_display(self, obj: RayTaskExecution) -> str:
+        return _compact_admin_datetime(obj.created_at)
+
+    @admin.display(description="Started", ordering="started_at")
+    def started_display(self, obj: RayTaskExecution) -> str:
+        return _compact_admin_datetime(obj.started_at)
+
+    @admin.display(description="Finished", ordering="finished_at")
+    def finished_display(self, obj: RayTaskExecution) -> str:
+        return _compact_admin_datetime(obj.finished_at)
+
+    @admin.display(description="Ray")
     def ray_dashboard_link(self, obj: RayTaskExecution) -> str:
         """Display link to Ray Dashboard for the job/task."""
         from django.conf import settings

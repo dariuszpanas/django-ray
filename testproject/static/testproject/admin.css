@@ -1,0 +1,57 @@
+:root {
+  --django-ray-admin-bg: #f7fafc;
+  --django-ray-admin-brand: #111827;
+  --django-ray-admin-accent: #38bdf8;
+}
+
+html:not(.dark) body.login #page {
+  background:
+    radial-gradient(circle at 12% 8%, rgb(56 189 248 / 12%), transparent 28%),
+    linear-gradient(180deg, #fff, var(--django-ray-admin-bg) 42%);
+}
+
+html.dark body.login #page {
+  background:
+    radial-gradient(circle at 12% 8%, rgb(56 189 248 / 8%), transparent 28%),
+    linear-gradient(180deg, #0f172a, #020617 42%);
+}
+
+body.login #page > div:last-child {
+  background-color: #f8fafc;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  border-left: 1px solid #e2e8f0;
+}
+
+html.dark body.login #page > div:last-child {
+  background-color: #0f172a;
+  border-left-color: #1e293b;
+}
+
+body.login h1::before {
+  background: url("./django-ray.svg") center / contain no-repeat;
+  content: "";
+  display: block;
+  filter: drop-shadow(0 12px 24px rgb(15 23 42 / 20%));
+  height: 3rem;
+  margin-bottom: 1.25rem;
+  width: 3rem;
+}
+
+html:not(.dark) body:not(.login) #main {
+  background:
+    radial-gradient(circle at 88% 4%, rgb(56 189 248 / 8%), transparent 22%),
+    linear-gradient(180deg, #fff, var(--django-ray-admin-bg) 34%);
+}
+
+html.dark body:not(.login) #main {
+  background:
+    radial-gradient(circle at 88% 4%, rgb(56 189 248 / 7%), transparent 22%),
+    linear-gradient(180deg, #0f172a, #020617 34%);
+}
+
+#nav-sidebar img[alt="Home"] {
+  border-radius: 10px;
+  box-shadow: 0 8px 18px rgb(15 23 42 / 18%);
+}

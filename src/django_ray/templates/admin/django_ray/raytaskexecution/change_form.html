@@ -1,6 +1,13 @@
 {% extends "admin/change_form.html" %}
 {% load static %}
 
+{% block extrastyle %}
+  {{ block.super }}
+  {% if django_ray_observability_url %}
+    <link rel="stylesheet" href="{% static 'django_ray/admin/task_live.css' %}">
+  {% endif %}
+{% endblock %}
+
 {% block extrahead %}
   {{ block.super }}
   {% if django_ray_observability_url %}
@@ -11,40 +18,63 @@
 {% block after_field_sets %}
   {{ block.super }}
   {% if django_ray_observability_url %}
-    <fieldset
-      class="module aligned"
+    <section
+      class="module aligned django-ray-live"
       id="django-ray-live-observability"
       data-observability-url="{{ django_ray_observability_url }}"
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
+      aria-labelledby="django-ray-live-heading"
     >
-      <h2>Live task status</h2>
-      <div data-field="status">
+      <h2 id="django-ray-live-heading">
+        <span class="django-ray-live__indicator" aria-hidden="true"></span>
+        Live task status
+      </h2>
+      <p
+        class="django-ray-live__summary"
+        data-field="status"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
         Waiting for the first durable status update.
-      </div>
-      <dl>
-        <div class="form-row">
-          <dt>State:</dt>
-          <dd data-field="state">{{ original.state }}</dd>
+      </p>
+      <dl class="django-ray-live__grid">
+        <div class="django-ray-live__metric">
+          <dt>State</dt>
+          <dd
+            class="django-ray-live__state"
+            data-field="state"
+            data-state="{{ original.state }}"
+          >
+            {{ original.state }}
+          </dd>
         </div>
-        <div class="form-row">
-          <dt>Attempt:</dt>
-          <dd data-field="attempt">{{ original.attempt_number }}</dd>
+        <div class="django-ray-live__metric">
+          <dt>Attempt</dt>
+          <dd class="django-ray-live__attempt" data-field="attempt">
+            {{ original.attempt_number }}
+          </dd>
         </div>
-        <div class="form-row">
-          <dt>Workflow:</dt>
+        <div class="django-ray-live__metric django-ray-live__metric--workflow">
+          <dt>Workflow</dt>
           <dd data-field="workflow">No workflow progress available.</dd>
         </div>
       </dl>
       {% if django_ray_workflow_topology_nodes_url %}
-        <p>
-          Bounded workflow detail:
-          <a href="{{ django_ray_workflow_topology_nodes_url }}">topology nodes</a>,
-          <a href="{{ django_ray_workflow_topology_edges_url }}">topology edges</a>,
-          and <a href="{{ django_ray_workflow_node_details_url }}">node details</a>.
-        </p>
+        <nav
+          class="django-ray-live__workflow-links"
+          aria-labelledby="django-ray-workflow-links-heading"
+        >
+          <div class="django-ray-live__workflow-links-copy">
+            <h3 id="django-ray-workflow-links-heading">Workflow topology</h3>
+            <p>Bounded read-only JSON views for this execution.</p>
+          </div>
+          <div class="django-ray-live__workflow-actions">
+            <a href="{{ django_ray_workflow_topology_nodes_url }}">Topology nodes</a>
+            <a href="{{ django_ray_workflow_topology_edges_url }}">Topology edges</a>
+            <a href="{{ django_ray_workflow_node_details_url }}">Node details</a>
+          </div>
+        </nav>
       {% endif %}
-    </fieldset>
+    </section>
   {% endif %}
 {% endblock %}

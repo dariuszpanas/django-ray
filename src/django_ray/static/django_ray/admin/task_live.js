@@ -68,6 +68,7 @@
       const task = payload.task ?? payload;
       const state = String(task.state ?? "UNKNOWN");
       stateNode.textContent = state;
+      stateNode.dataset.state = state;
       attemptNode.textContent = String(task.attempt_number ?? "-");
       const workflowText = renderWorkflow(
         payload.workflow ?? null,

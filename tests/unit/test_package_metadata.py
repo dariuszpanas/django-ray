@@ -44,7 +44,7 @@ def test_readme_logo_uses_pypi_compatible_absolute_url() -> None:
 
 
 def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
-    """Hatch includes the admin template and script through the package selector."""
+    """Hatch includes the admin template and assets through the package selector."""
     project_root = Path(__file__).parents[2]
     config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
     packages = config["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
@@ -58,15 +58,26 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
         / "django_ray"
         / "raytaskexecution"
         / "change_form.html",
+        package_root / "static" / "django_ray" / "admin" / "task_live.css",
         package_root / "static" / "django_ray" / "admin" / "task_live.js",
     ]
     assert all(asset.is_file() and asset.is_relative_to(package_root) for asset in expected_assets)
 
-    script = expected_assets[1].read_text(encoding="utf-8")
+    stylesheet = expected_assets[1].read_text(encoding="utf-8")
+    assert "#django-ray-live-observability" in stylesheet
+    assert "grid-template-columns" in stylesheet
+    assert ":focus-visible" in stylesheet
+    assert 'html[data-theme="dark"]' in stylesheet
+    assert 'html[data-theme="auto"]' in stylesheet
+    assert "@media (prefers-color-scheme: dark)" in stylesheet
+    assert "@media (max-width: 640px)" in stylesheet
+
+    script = expected_assets[2].read_text(encoding="utf-8")
     assert "setTimeout(refresh, 3000)" in script
     assert "document.hidden" in script
     assert 'credentials: "same-origin"' in script
     assert "textContent" in script
+    assert "stateNode.dataset.state = state" in script
     assert "innerHTML" not in script
     assert all(state in script for state in ("SUCCEEDED", "FAILED", "CANCELLED", "LOST"))
 

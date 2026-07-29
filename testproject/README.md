@@ -147,13 +147,20 @@ docker compose exec web python testproject/manage.py createsuperuser
 ```
 
 Open the [django-ray administration](http://127.0.0.1:8000/admin/) and sign in. The bundled
-testproject pins [Django Unfold](https://unfoldadmin.com/) for a modern admin shell, forms, and
-navigation. Open
+testproject pins [Django Unfold](https://unfoldadmin.com/) for a modern admin shell branded with the
+documentation icon and type treatment plus the landing page's sky/slate palette and graph artwork.
+Open
 [Ray task executions](http://127.0.0.1:8000/admin/django_ray/raytaskexecution/) and inspect the
 completed `add_numbers` record. The task ID should match the API response, its state should be
 `SUCCEEDED`, and its result should be `42`. The changelist retains django-ray's retry and cancel
-actions, while the change page retains live durable status, bounded workflow-detail links, and
-ordered read-only attempt history. The default `TASK_ATTEMPT_ADMIN_MODE="inline"` hides the
+actions while prioritizing compact operational state, timestamps, and the Ray link; workflow
+identity remains on the detail page. The change page retains live durable status, bounded
+workflow detail as clearly labelled action links, and ordered read-only attempt history. It
+shows the RuntimeEnv profile and content hash but intentionally omits the raw snapshot because
+environment values and package URIs can contain sensitive application configuration. Execution
+metadata is read-only; the list's Retry and Cancel actions are the supported fenced control paths.
+The default
+`TASK_ATTEMPT_ADMIN_MODE="inline"` hides the
 standalone Task Attempt entry from top-level navigation without invalidating authorized list or
 detail URLs. Select `standalone` to restore the previous navigation or `both` to expose both views.
 
