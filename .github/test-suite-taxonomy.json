@@ -130,6 +130,7 @@
           "tests/unit/test_workflow_progress_benchmark_command.py",
           "tests/unit/test_workflow_progress_cleanup.py",
           "tests/unit/test_workflow_progress_cleanup_command.py",
+          "tests/unit/test_workflow_progress_protocol.py",
           "tests/unit/test_workflow_progress_preparation.py",
           "tests/unit/test_workflow_progress_preparation_prototype.py",
           "tests/unit/test_workflow_progress_reads.py",
