@@ -10,20 +10,14 @@ concurrent task submissions and execution across different modes:
 - Stress Tests: Push the system to its limits
 
 Usage:
-    # Install locust
-    pip install locust
+    # Supply the protected testproject API token without putting it on the
+    # command line, then run the resource-bounded observability demo.
+    export DJANGO_API_TOKEN="<local demo token>"
+    locust -f locustfile.py --host=http://localhost:30080 \
+        --headless -u 1 -r 1 -t 5m ObservabilityDemoUser
 
-    # Run with web UI (default)
-    locust -f locustfile.py --host=http://localhost:8000
-
-    # Run headless
-    locust -f locustfile.py --host=http://localhost:8000 --headless -u 100 -r 10 -t 60s
-
-    # Run with specific user count and spawn rate
-    locust -f locustfile.py --host=http://localhost:8000 --headless -u 50 -r 5 -t 120s
-
-    # Run specific test class only
-    locust -f locustfile.py --host=http://localhost:8000 -u 10 -r 2 ClusterTaskUser
+    # Run the same one-user scenario with the web UI on http://localhost:8089.
+    locust -f locustfile.py --host=http://localhost:30080 ObservabilityDemoUser
 
 Scenarios:
     - BasicTaskUser: Submits quick add_numbers/multiply tasks
@@ -35,6 +29,7 @@ Scenarios:
     - MLPipelineUser: Tests ML pipeline tasks
     - StressTestUser: Pushes system to limits
     - MonitoringUser: Monitors task statistics and health
+    - ObservabilityDemoUser: Rotates through lightweight task families one at a time
 
 Metrics to watch:
     - Response time for task creation (should be fast, just DB insert)
@@ -43,11 +38,59 @@ Metrics to watch:
     - Task completion rate (check /api/executions/stats)
 """
 
+import os
 import random
 import time
 from typing import Any
 
-from locust import HttpUser, between, task
+from locust import HttpUser, between, events, task
+from locust.exception import StopTest
+
+_API_TOKEN_ENV = "DJANGO_API_TOKEN"
+_TERMINAL_SUCCESS_STATES = frozenset({"SUCCESSFUL", "SUCCEEDED"})
+_TERMINAL_FAILURE_STATES = frozenset({"FAILED", "CANCELLED", "LOST"})
+_ACTIVE_STATES = frozenset({"READY", "QUEUED", "RUNNING", "CANCELLING"})
+_REQUEST_TIMEOUT_SECONDS = 10.0
+_EXPLICIT_ONLY_USER_CLASSES = frozenset(
+    {
+        "BurstTaskUser",
+        "DistributedComputingUser",
+        "StressTestUser",
+        "SustainedLoadUser",
+    }
+)
+
+
+def _configured_api_token() -> str | None:
+    token = os.environ.get(_API_TOKEN_ENV)
+    if token is None or not token.strip():
+        return None
+    return token.strip()
+
+
+def _missing_api_token_error() -> RuntimeError:
+    return RuntimeError(
+        "DJANGO_API_TOKEN must be set before running Locust against protected task routes"
+    )
+
+
+@events.test_start.add_listener
+def _require_api_token_before_load(environment: Any, **_kwargs: Any) -> None:
+    """Abort before spawning task users when the protected API token is absent."""
+    if _configured_api_token() is None:
+        environment.process_exit_code = 2
+        raise StopTest(str(_missing_api_token_error()))
+
+
+@events.test_start.add_listener
+def _reject_accidental_broad_capacity_mix(environment: Any, **_kwargs: Any) -> None:
+    """Require burst, sustained, distributed, and stress users to run alone."""
+    selected = {user_class.__name__ for user_class in environment.user_classes}
+    explicit_only = selected & _EXPLICIT_ONLY_USER_CLASSES
+    if explicit_only and len(selected) != 1:
+        environment.process_exit_code = 2
+        names = ", ".join(sorted(explicit_only))
+        raise StopTest(f"{names} must be selected explicitly without other Locust user classes")
 
 
 class TaskCreationMixin:
@@ -58,28 +101,109 @@ class TaskCreationMixin:
     ) -> dict[str, Any] | None:
         """Generic task creation helper."""
         name = name or endpoint
-        kwargs = {"name": name, "catch_response": True}
+        kwargs = {
+            "name": name,
+            "catch_response": True,
+            "timeout": _REQUEST_TIMEOUT_SECONDS,
+        }
         if payload:
             kwargs["json"] = payload
 
         with self.client.post(endpoint, **kwargs) as response:
-            if response.status_code == 200:
-                response.success()
-                return response.json()
-            else:
+            if response.status_code != 200:
                 response.failure(f"Failed to create task: {response.status_code}")
                 return None
+            try:
+                data = response.json()
+            except ValueError:
+                response.failure("Task response was not valid JSON")
+                return None
+            if not isinstance(data, dict) or not isinstance(data.get("task_id"), str):
+                response.failure("Task response did not contain a task_id")
+                return None
+            response.success()
+            return data
 
     def _get(self, endpoint: str, name: str | None = None) -> dict[str, Any] | None:
         """Generic GET helper."""
         name = name or endpoint
-        with self.client.get(endpoint, name=name, catch_response=True) as response:
-            if response.status_code == 200:
-                response.success()
-                return response.json()
-            else:
+        with self.client.get(
+            endpoint,
+            name=name,
+            catch_response=True,
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        ) as response:
+            if response.status_code != 200:
                 response.failure(f"GET failed: {response.status_code}")
                 return None
+            try:
+                data = response.json()
+            except ValueError:
+                response.failure("GET response was not valid JSON")
+                return None
+            if not isinstance(data, dict):
+                response.failure("GET response was not an object")
+                return None
+            response.success()
+            return data
+
+    def _poll_task_to_terminal(
+        self,
+        task_id: str,
+        *,
+        timeout_seconds: float = 60.0,
+        poll_interval_seconds: float = 1.0,
+        scenario_name: str = "task",
+    ) -> dict[str, Any] | None:
+        """Poll one durable task to a bounded terminal result."""
+        deadline = time.monotonic() + timeout_seconds
+        request_name = f"/api/tasks/[task_id] ({scenario_name})"
+
+        while True:
+            remaining_seconds = max(deadline - time.monotonic(), 0.1)
+            with self.client.get(
+                f"/api/tasks/{task_id}",
+                name=request_name,
+                catch_response=True,
+                timeout=min(_REQUEST_TIMEOUT_SECONDS, remaining_seconds),
+            ) as response:
+                if response.status_code != 200:
+                    response.failure(f"{scenario_name} status read failed: {response.status_code}")
+                    return None
+                try:
+                    data = response.json()
+                except ValueError:
+                    response.failure(f"{scenario_name} status response was not valid JSON")
+                    return None
+                if not isinstance(data, dict):
+                    response.failure(f"{scenario_name} status response was not an object")
+                    return None
+
+                if data.get("task_id") != task_id:
+                    response.failure(
+                        f"{scenario_name} status response returned a mismatched task ID"
+                    )
+                    return None
+
+                status = str(data.get("status", "")).upper()
+                if status in _TERMINAL_SUCCESS_STATES:
+                    response.success()
+                    return data
+                if status in _TERMINAL_FAILURE_STATES:
+                    response.failure(f"{scenario_name} reached terminal state {status}")
+                    return data
+                if status not in _ACTIVE_STATES:
+                    response.failure(f"{scenario_name} returned unknown task state")
+                    return None
+                if time.monotonic() >= deadline:
+                    response.failure(
+                        f"{scenario_name} did not reach a terminal state within "
+                        f"{timeout_seconds:.0f}s"
+                    )
+                    return None
+                response.success()
+
+            time.sleep(poll_interval_seconds)
 
     # ========== Health & Monitoring ==========
 
@@ -388,7 +512,19 @@ class TaskCreationMixin:
 # ============================================================================
 
 
-class BasicTaskUser(HttpUser, TaskCreationMixin):
+class AuthenticatedTaskUser(TaskCreationMixin, HttpUser):
+    """Abstract Locust user that authenticates the protected sample API."""
+
+    abstract = True
+
+    def on_start(self) -> None:
+        token = _configured_api_token()
+        if token is None:
+            raise _missing_api_token_error()
+        self.client.headers.update({"Authorization": f"Bearer {token}"})
+
+
+class BasicTaskUser(AuthenticatedTaskUser):
     """
     User that submits basic math tasks.
 
@@ -415,7 +551,7 @@ class BasicTaskUser(HttpUser, TaskCreationMixin):
         self._get_stats()
 
 
-class SyncTaskUser(HttpUser, TaskCreationMixin):
+class SyncTaskUser(AuthenticatedTaskUser):
     """
     User that tests sync mode tasks.
 
@@ -438,11 +574,12 @@ class SyncTaskUser(HttpUser, TaskCreationMixin):
         self._check_health()
 
 
-class LocalRayUser(HttpUser, TaskCreationMixin):
+class LocalRayUser(AuthenticatedTaskUser):
     """
-    User that tests local Ray mode tasks.
+    User that tests the historical ``/local`` sample endpoints.
 
-    Requires worker running with: --local
+    These routes use the default queue and run through whichever Ray-backed
+    worker mode serves it. The local KubeRay stack uses cluster mode.
     """
 
     wait_time = between(0.5, 2.0)
@@ -465,7 +602,7 @@ class LocalRayUser(HttpUser, TaskCreationMixin):
         self._get_stats()
 
 
-class ClusterTaskUser(HttpUser, TaskCreationMixin):
+class ClusterTaskUser(AuthenticatedTaskUser):
     """
     User that tests distributed cluster tasks.
 
@@ -499,7 +636,7 @@ class ClusterTaskUser(HttpUser, TaskCreationMixin):
         self.cluster_batch_http()
 
 
-class WorkflowUser(HttpUser, TaskCreationMixin):
+class WorkflowUser(AuthenticatedTaskUser):
     """
     User that exercises Ray-native workflow composition (0.3.0).
 
@@ -535,7 +672,7 @@ class WorkflowUser(HttpUser, TaskCreationMixin):
         self._get_stats()
 
 
-class RuntimeEnvUser(HttpUser, TaskCreationMixin):
+class RuntimeEnvUser(AuthenticatedTaskUser):
     """
     User that exercises RuntimeEnv profiles (0.3.0).
 
@@ -564,7 +701,114 @@ class RuntimeEnvUser(HttpUser, TaskCreationMixin):
             self.runtime_env_result(result["task_id"])
 
 
-class MLPipelineUser(HttpUser, TaskCreationMixin):
+class ObservabilityDemoUser(AuthenticatedTaskUser):
+    """Run one lightweight, deterministic tour of the local task topology."""
+
+    wait_time = between(2, 4)
+    weight = 1
+    _SCENARIOS = (
+        "show_basic_add",
+        "show_slow_task",
+        "show_priority_task",
+        "show_sync_task",
+        "show_cluster_search",
+        "show_workflow",
+        "show_runtime_env",
+        "show_ml_inference",
+        "show_monitoring",
+    )
+
+    def on_start(self) -> None:
+        super().on_start()
+        self._scenario_index = 0
+
+    def _submit_and_follow(
+        self,
+        result: dict[str, Any] | None,
+        *,
+        scenario_name: str,
+        timeout_seconds: float = 60.0,
+    ) -> None:
+        if result is None:
+            self.environment.process_exit_code = 1
+            raise StopTest(f"{scenario_name} could not be enqueued")
+        terminal_result = self._poll_task_to_terminal(
+            result["task_id"],
+            scenario_name=scenario_name,
+            timeout_seconds=timeout_seconds,
+        )
+        if terminal_result is None:
+            self.environment.process_exit_code = 1
+            raise StopTest(
+                f"{scenario_name} had an indeterminate result; stopping before the next task"
+            )
+
+    @task
+    def run_next_scenario(self) -> None:
+        """Run each task family once before starting the sequence again."""
+        scenario = self._SCENARIOS[self._scenario_index % len(self._SCENARIOS)]
+        self._scenario_index += 1
+        getattr(self, scenario)()
+
+    def show_basic_add(self) -> None:
+        self._submit_and_follow(
+            self.create_add_task(a=21, b=21),
+            scenario_name="basic add",
+        )
+
+    def show_slow_task(self) -> None:
+        self._submit_and_follow(
+            self.create_slow_task(seconds=1.5),
+            scenario_name="slow task",
+        )
+
+    def show_priority_task(self) -> None:
+        self._submit_and_follow(
+            self.local_urgent(message="locust-observability-demo"),
+            scenario_name="priority task",
+        )
+
+    def show_sync_task(self) -> None:
+        self._submit_and_follow(
+            self.sync_calculate(a=42, b=6, operation="divide"),
+            scenario_name="sync task",
+        )
+
+    def show_cluster_search(self) -> None:
+        self._submit_and_follow(
+            self.cluster_search(
+                pattern="demo",
+                sources=["demo-source-a", "other-source", "demo-source-b"],
+            ),
+            scenario_name="cluster search",
+        )
+
+    def show_workflow(self) -> None:
+        self._submit_and_follow(
+            self.workflow_fanout_benchmark(num_items=3, seconds_per_item=0.25),
+            scenario_name="tiny workflow",
+        )
+
+    def show_runtime_env(self) -> None:
+        self._submit_and_follow(
+            self.runtime_env_probe(profile="thin"),
+            scenario_name="RuntimeEnv probe",
+            timeout_seconds=120.0,
+        )
+
+    def show_ml_inference(self) -> None:
+        samples = [{"features": [index / 10, (index + 1) / 10]} for index in range(12)]
+        self._submit_and_follow(
+            self.ml_inference(model_id="locust-demo-model", samples=samples),
+            scenario_name="ML inference",
+        )
+
+    def show_monitoring(self) -> None:
+        self._get_stats()
+        self._get_metrics()
+
+
+class MLPipelineUser(AuthenticatedTaskUser):
     """
     User that tests ML pipeline tasks.
 
@@ -587,7 +831,7 @@ class MLPipelineUser(HttpUser, TaskCreationMixin):
         self.ml_hyperparam_search()
 
 
-class StressTestUser(HttpUser, TaskCreationMixin):
+class StressTestUser(AuthenticatedTaskUser):
     """
     Aggressive stress test user for finding system limits.
 
@@ -598,30 +842,30 @@ class StressTestUser(HttpUser, TaskCreationMixin):
     """
 
     wait_time = between(0.5, 2.0)
-    weight = 0  # Disabled by default
+    weight = 1  # Guarded by _reject_accidental_broad_capacity_mix
 
     @task(3)
-    def stress_cpu(self):
+    def submit_stress_cpu(self):
         self.stress_cpu(duration=random.uniform(2.0, 5.0))
 
     @task(2)
-    def stress_memory(self):
+    def submit_stress_memory(self):
         self.stress_memory(size_mb=random.randint(100, 300))
 
     @task(2)
-    def stress_compute(self):
+    def submit_stress_compute(self):
         self.stress_compute(depth=random.randint(8, 12), width=random.randint(80, 120))
 
     @task(2)
-    def stress_primes(self):
+    def submit_stress_primes(self):
         self.stress_primes(start=random.randint(500000, 2000000), count=random.randint(50, 150))
 
     @task(1)
-    def stress_json(self):
+    def submit_stress_json(self):
         self.stress_json(size_kb=random.randint(100, 500), depth=random.randint(4, 8))
 
 
-class MonitoringUser(HttpUser, TaskCreationMixin):
+class MonitoringUser(AuthenticatedTaskUser):
     """
     User that primarily monitors the system.
 
@@ -653,7 +897,7 @@ class MonitoringUser(HttpUser, TaskCreationMixin):
         self._get("/api/executions?limit=20", "/api/executions")
 
 
-class BurstTaskUser(HttpUser, TaskCreationMixin):
+class BurstTaskUser(AuthenticatedTaskUser):
     """
     User that submits bursts of tasks at once.
 
@@ -687,7 +931,7 @@ class BurstTaskUser(HttpUser, TaskCreationMixin):
 # ============================================================================
 
 
-class DistributedComputingUser(HttpUser, TaskCreationMixin):
+class DistributedComputingUser(AuthenticatedTaskUser):
     """
     Focused testing of distributed computing capabilities.
 
@@ -695,7 +939,7 @@ class DistributedComputingUser(HttpUser, TaskCreationMixin):
     """
 
     wait_time = between(3, 8)
-    weight = 0  # Enable explicitly
+    weight = 1  # Guarded by _reject_accidental_broad_capacity_mix
 
     @task(5)
     def heavy_cpu_benchmark(self):
@@ -709,7 +953,7 @@ class DistributedComputingUser(HttpUser, TaskCreationMixin):
         self.cluster_search(pattern="test", sources=sources)
 
 
-class SustainedLoadUser(HttpUser, TaskCreationMixin):
+class SustainedLoadUser(AuthenticatedTaskUser):
     """
     User for sustained load testing over longer periods.
 
@@ -720,7 +964,7 @@ class SustainedLoadUser(HttpUser, TaskCreationMixin):
     """
 
     wait_time = between(1, 3)
-    weight = 0  # Enable explicitly
+    weight = 1  # Guarded by _reject_accidental_broad_capacity_mix
 
     @task(10)
     def normal_task(self):

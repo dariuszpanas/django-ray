@@ -137,6 +137,78 @@ The automated smoke fails if the success state is not reached by its deadline. W
 commands, confirm the final status is `SUCCESSFUL`; a result still in progress after the bounded loop
 needs investigation.
 
+## Observe a low-resource mixed workload
+
+The guarded local KubeRay stack exposes the application on
+[localhost:30080](http://localhost:30080) and includes consumers for the default and priority
+queues, a synchronous worker, and an ML worker. The tracked `ObservabilityDemoUser` submits only
+one task at a time, waits for its terminal result, pauses for two to four seconds, and then moves to
+the next task family. One cycle covers:
+
+- basic and deliberately slow default-queue tasks;
+- a high-priority task;
+- a synchronous task;
+- a small distributed search and three-leaf workflow;
+- a lightweight `thin` RuntimeEnv probe;
+- a small ML inference task;
+- authenticated execution statistics and Prometheus metrics.
+
+It intentionally excludes failure injection, CPU benchmarks, NumPy RuntimeEnv installation,
+bursts, and stress workloads. Sync tasks are visible in the task worker logs and Django admin but
+do not appear in Ray. The default, priority, cluster/workflow, RuntimeEnv, and ML tasks pass through
+Ray and can be inspected on the [local Ray dashboard](http://localhost:30265).
+
+Load the current Kubernetes secret into the Locust process without printing it, run the five-minute
+one-user demo, and remove the shell variable afterwards.
+
+### POSIX
+
+```bash
+(
+  trap 'unset DJANGO_API_TOKEN' EXIT
+  export DJANGO_API_TOKEN="$(
+    kubectl --context docker-desktop -n django-ray \
+      get secret django-ray-secret \
+      -o jsonpath='{.data.DJANGO_API_TOKEN}' |
+      uv run python -c \
+        'import base64, sys; print(base64.b64decode(sys.stdin.buffer.read()).decode(), end="")'
+  )"
+  make loadtest-demo
+)
+```
+
+### PowerShell
+
+```powershell
+$encodedToken = kubectl --context docker-desktop -n django-ray `
+  get secret django-ray-secret `
+  -o jsonpath='{.data.DJANGO_API_TOKEN}'
+$env:DJANGO_API_TOKEN = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String($encodedToken)
+)
+try {
+    make loadtest-demo
+}
+finally {
+    Remove-Item Env:DJANGO_API_TOKEN -ErrorAction SilentlyContinue
+}
+```
+
+For an interactive Locust session, use `make loadtest` and open
+[localhost:8089](http://localhost:8089). The target explicitly selects
+`ObservabilityDemoUser`, prefills one user at one user per second, and does not silently mix in
+capacity, burst, or stress scenarios.
+
+Follow every worker while the demo runs:
+
+```bash
+kubectl --context docker-desktop -n django-ray logs -l app=django-ray,component=worker -c django-ray-worker --prefix --tail=0 --follow --max-log-requests=8
+```
+
+`make loadtest-quick`, `make loadtest-moderate`, `make loadtest-18`, and
+`make loadtest-stress` are explicit capacity or stress profiles. They are not prerequisites for
+the observability demo and can create substantially more task rows and resource pressure.
+
 ## Verify through Django admin
 
 Create an administrator interactively so the password is not stored in a tracked file or copied into

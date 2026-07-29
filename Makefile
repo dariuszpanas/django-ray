@@ -340,7 +340,7 @@ help:
 	@echo "Additional modules (if included):"
 	@echo "  Docker:     make docker-up, docker-smoke, docker-down"
 	@echo "  Kubernetes: make k8s-deploy, k8s-urls, k8s-status, k8s-delete"
-	@echo "  Load test:  make loadtest, loadtest-18, loadtest-headless"
+	@echo "  Load test:  make loadtest-demo, loadtest, loadtest-headless"
 	@echo ""
 	@echo "For full k8s commands: make -f mk/k8s.mk help"
 

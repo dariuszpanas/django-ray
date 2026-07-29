@@ -663,8 +663,8 @@ provides-extras = ["postgres", "s3", "gcs", "object-storage", "sample"]
 dev = [
     { name = "django-ninja", specifier = ">=1.5.1" },
     { name = "django-unfold", specifier = "==0.102.0" },
-    { name = "locust", specifier = ">=2.20" },
-    { name = "pytest", specifier = ">=7.0" },
+    { name = "locust", specifier = ">=2.43" },
+    { name = "pytest", specifier = ">=8.3.3" },
     { name = "pytest-cov", specifier = ">=4.0" },
     { name = "pytest-django", specifier = ">=4.7" },
     { name = "pytest-xdist", specifier = "==3.8.0" },
