@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections import Counter
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +38,7 @@ OBSERVABILITY_SCHEMA_VERSION = 1
 DEFAULT_DIAGNOSTIC_MAX_CHARS = 4096
 DEFAULT_RAY_LOG_MAX_BYTES = 64 * 1024
 MAX_RAY_LOG_MAX_BYTES = 1024 * 1024
+_STABLE_REJECTION_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 
 
 class WorkflowObservabilityError(RuntimeError):
@@ -81,6 +84,7 @@ def get_task_summary(
     execution: RayTaskExecution,
     *,
     generated_at: datetime | None = None,
+    include_workflow_plan_selection: bool = True,
     workflow_progress: dict[str, Any] | None | _WorkflowProgressNotRead = (
         _WORKFLOW_PROGRESS_NOT_READ
     ),
@@ -88,7 +92,8 @@ def get_task_summary(
     """Return a redacted operational summary without task payloads or topology.
 
     Callers that already performed the bounded progress read may pass its result to
-    avoid a second database round trip.
+    avoid a second database round trip. High-frequency callers may also skip plan
+    selection fields so a deferred raw selection snapshot is never loaded.
     """
     workflow_revision = None
     if isinstance(workflow_progress, _WorkflowProgressNotRead):
@@ -107,10 +112,12 @@ def get_task_summary(
         if isinstance(progress.get(revision_field), int):
             workflow_revision = progress[revision_field]
 
-    try:
-        plan_selection = _validated_workflow_plan_selection(execution)
-    except WorkflowObservabilityError:
-        plan_selection = None
+    plan_selection = None
+    if include_workflow_plan_selection:
+        try:
+            plan_selection = _validated_workflow_plan_selection(execution)
+        except WorkflowObservabilityError:
+            plan_selection = None
     selected_strategy = (
         redact_value(plan_selection.get("selected_strategy"))
         if plan_selection is not None
@@ -154,8 +161,10 @@ def get_task_summary(
     }
 
 
-def get_workflow_plan(execution: RayTaskExecution) -> dict[str, Any] | None:
-    """Return the verified, secret-free effective plan and selection metadata."""
+def _validated_workflow_plan_snapshot(
+    execution: RayTaskExecution,
+) -> dict[str, Any] | None:
+    """Return verified unredacted plan data for internal comparisons."""
     fingerprint = execution.workflow_plan_fingerprint
     serialized = execution.workflow_plan_json
     if not fingerprint and not serialized:
@@ -188,18 +197,173 @@ def get_workflow_plan(execution: RayTaskExecution) -> dict[str, Any] | None:
         raise WorkflowObservabilityError(
             f"Task {execution.task_id} workflow plan has an unsupported format version"
         )
-    return redact_value(
-        {
-            "fingerprint": fingerprint,
-            "manifest": manifest,
-            "selection": _workflow_plan_selection(execution),
-        }
+    return {
+        "fingerprint": fingerprint,
+        "manifest": manifest,
+        "selection": _validated_workflow_plan_selection(execution),
+    }
+
+
+def get_workflow_plan(execution: RayTaskExecution) -> dict[str, Any] | None:
+    """Return the verified, secret-free effective plan and selection metadata."""
+    snapshot = _validated_workflow_plan_snapshot(execution)
+    return redact_value(snapshot) if snapshot is not None else None
+
+
+def _empty_workflow_plan_diagnostics(status: str) -> dict[str, Any]:
+    """Return the fixed compact workflow-plan presentation shape."""
+    return {
+        "status": status,
+        "definition_name": None,
+        "definition_revision": None,
+        "topology_class": None,
+        "declared_node_count": None,
+        "retry_safe": None,
+        "fingerprint": None,
+        "fingerprint_compact": None,
+        "requested_policy": None,
+        "selected_strategy": None,
+        "reporting_policy": None,
+        "eligible_strategies": [],
+        "rejection_counts": {},
+        "retained_rejections": 0,
+        "total_rejections": 0,
+        "unretained_rejections": 0,
+    }
+
+
+def get_workflow_plan_diagnostics(execution: RayTaskExecution) -> dict[str, Any]:
+    """Return compact verified plan diagnostics without rejection paths or messages."""
+    stored_components = (
+        execution.workflow_plan_fingerprint,
+        execution.workflow_plan_json,
+        execution.workflow_plan_selection,
     )
+    if all(component is None for component in stored_components):
+        return _empty_workflow_plan_diagnostics("NOT_RECORDED")
+    if any(not isinstance(component, str) or not component for component in stored_components):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} has an incomplete workflow plan snapshot"
+        )
+
+    workflow_plan = _validated_workflow_plan_snapshot(execution)
+    if workflow_plan is None:
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} has an incomplete workflow plan snapshot"
+        )
+
+    manifest = workflow_plan.get("manifest")
+    selection = workflow_plan.get("selection")
+    fingerprint = workflow_plan.get("fingerprint")
+    if not isinstance(manifest, dict) or selection is None or not isinstance(fingerprint, str):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} has an incomplete workflow plan snapshot"
+        )
+
+    definition = manifest.get("definition")
+    topology = manifest.get("topology")
+    nodes = manifest.get("nodes")
+    retry_safety = manifest.get("retry_safety")
+    if (
+        not isinstance(definition, dict)
+        or not isinstance(definition.get("name"), str)
+        or not definition["name"]
+        or not isinstance(definition.get("revision"), str)
+        or not definition["revision"]
+        or not isinstance(topology, dict)
+        or not isinstance(topology.get("class"), str)
+        or not topology["class"]
+        or not isinstance(nodes, list)
+        or not isinstance(retry_safety, dict)
+        or not isinstance(retry_safety.get("retry_safe"), bool)
+    ):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow plan lacks compact diagnostic fields"
+        )
+
+    snapshot = manifest.get("snapshot")
+    if snapshot is None:
+        declared_node_count = len(nodes)
+    elif (
+        isinstance(snapshot, dict)
+        and type(snapshot.get("observed_node_count")) is int
+        and snapshot["observed_node_count"] >= 0
+    ):
+        declared_node_count = snapshot["observed_node_count"]
+    else:
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow plan has invalid node-count metadata"
+        )
+
+    rejections = selection.get("rejections")
+    if not isinstance(rejections, list):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow plan selection lacks rejection metadata"
+        )
+    rejection_codes: list[str] = []
+    for rejection in rejections:
+        code = rejection.get("code") if isinstance(rejection, dict) else None
+        if not isinstance(code, str) or _STABLE_REJECTION_CODE.fullmatch(code) is None:
+            raise WorkflowObservabilityError(
+                f"Task {execution.task_id} workflow plan selection has an invalid rejection code"
+            )
+        presented_code = redact_value(code)
+        if not isinstance(presented_code, str):
+            raise WorkflowObservabilityError(
+                f"Task {execution.task_id} workflow plan selection has an invalid rejection code"
+            )
+        rejection_codes.append(presented_code)
+
+    total_rejections = selection.get("total_rejections")
+    eligible_strategies = selection.get("eligible_strategies")
+    if (
+        type(total_rejections) is not int
+        or total_rejections < len(rejections)
+        or not isinstance(eligible_strategies, list)
+    ):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} workflow plan selection has inconsistent diagnostics"
+        )
+    compact_fingerprint = redact_value(f"sha256:{fingerprint.removeprefix('sha256:')[:12]}")
+    rejection_counts = dict(sorted(Counter(rejection_codes).items()))
+    return {
+        "status": "AVAILABLE",
+        "definition_name": redact_value(definition["name"]),
+        "definition_revision": redact_value(definition["revision"]),
+        "topology_class": redact_value(topology["class"]),
+        "declared_node_count": declared_node_count,
+        "retry_safe": retry_safety["retry_safe"],
+        "fingerprint": redact_value(fingerprint),
+        "fingerprint_compact": compact_fingerprint,
+        "requested_policy": redact_value(selection.get("requested_policy")),
+        "selected_strategy": redact_value(selection.get("selected_strategy")),
+        "reporting_policy": redact_value(effective_plan_selection_reporting_policy(selection)),
+        "eligible_strategies": redact_value(eligible_strategies),
+        "rejection_counts": rejection_counts,
+        "retained_rejections": len(rejections),
+        "total_rejections": total_rejections,
+        "unretained_rejections": total_rejections - len(rejections),
+    }
 
 
-def _workflow_plan_selection(execution: RayTaskExecution) -> dict[str, Any] | None:
-    selection = _validated_workflow_plan_selection(execution)
-    return redact_value(selection) if selection is not None else None
+def get_workflow_plan_binding(execution: RayTaskExecution) -> dict[str, str]:
+    """Return validated unredacted values used only to bind progress to its plan."""
+    workflow_plan = _validated_workflow_plan_snapshot(execution)
+    if workflow_plan is None:
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} has an incomplete workflow plan snapshot"
+        )
+    selection = workflow_plan.get("selection")
+    fingerprint = workflow_plan.get("fingerprint")
+    if not isinstance(selection, dict) or not isinstance(fingerprint, str):
+        raise WorkflowObservabilityError(
+            f"Task {execution.task_id} has an incomplete workflow plan snapshot"
+        )
+    return {
+        "fingerprint": fingerprint,
+        "selected_strategy": selection["selected_strategy"],
+        "reporting_policy": effective_plan_selection_reporting_policy(selection),
+    }
 
 
 def _validated_workflow_plan_selection(
@@ -614,7 +778,9 @@ __all__ = [
     "get_workflow_graph",
     "get_workflow_node",
     "get_workflow_node_snapshot",
+    "get_workflow_plan_binding",
     "get_workflow_plan",
+    "get_workflow_plan_diagnostics",
     "get_workflow_progress",
     "get_workflow_snapshot",
 ]

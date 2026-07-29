@@ -467,13 +467,15 @@
     },
     {
       "id": "bundled-browser-contract",
-      "owner": "Bundled dashboard authentication",
+      "owner": "Bundled browser interactions",
       "paths": [
         "tests/integration/test_api.py",
-        "tests/javascript/landing_auth.test.mjs"
+        "tests/integration/test_admin.py",
+        "tests/javascript/landing_auth.test.mjs",
+        "tests/javascript/workflow_diagnostics.test.mjs"
       ],
-      "reason": "Authentication setup overlaps endpoint cases, and one collected pytest case launches a nested Node suite whose subtests are repeated by every CI variant.",
-      "review": "Share the configured token fixture, remove only proven endpoint overlap, and keep browser behavior as a distinct contract."
+      "reason": "Two collected pytest cases launch nested Node suites for dashboard authentication and lazy admin diagnostics; browser behavior overlaps surrounding HTTP adapter tests.",
+      "review": "Keep browser behavior distinct while avoiding repeated endpoint assertions; share only proven harness pieces."
     },
     {
       "id": "kuberay-overlay-render",

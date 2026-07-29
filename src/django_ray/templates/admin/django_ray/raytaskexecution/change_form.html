@@ -13,6 +13,9 @@
   {% if django_ray_observability_url %}
     <script defer src="{% static 'django_ray/admin/task_live.js' %}"></script>
   {% endif %}
+  {% if django_ray_workflow_diagnostics_url %}
+    <script defer src="{% static 'django_ray/admin/workflow_diagnostics.js' %}"></script>
+  {% endif %}
 {% endblock %}
 
 {% block after_field_sets %}
@@ -59,21 +62,44 @@
           <dd data-field="workflow">No workflow progress available.</dd>
         </div>
       </dl>
-      {% if django_ray_workflow_topology_nodes_url %}
-        <nav
-          class="django-ray-live__workflow-links"
-          aria-labelledby="django-ray-workflow-links-heading"
+      {% if django_ray_workflow_diagnostics_url %}
+        <details
+          class="django-ray-workflow"
+          id="django-ray-workflow-diagnostics"
+          data-diagnostics-url="{{ django_ray_workflow_diagnostics_url }}"
+          data-plan-download-url="{{ django_ray_workflow_plan_download_url }}"
+          data-selection-download-url="{{ django_ray_workflow_selection_download_url }}"
+          data-topology-nodes-url="{{ django_ray_workflow_topology_nodes_url }}"
+          data-topology-edges-url="{{ django_ray_workflow_topology_edges_url }}"
+          data-node-details-url="{{ django_ray_workflow_node_details_url }}"
         >
-          <div class="django-ray-live__workflow-links-copy">
-            <h3 id="django-ray-workflow-links-heading">Workflow topology</h3>
-            <p>Bounded read-only JSON views for this execution.</p>
+          <summary class="django-ray-workflow__summary">
+            <span class="django-ray-workflow__summary-title">Workflow execution</span>
+            <span class="django-ray-workflow__summary-copy">
+              Plan, strategy, and bounded progress
+            </span>
+            <span class="django-ray-workflow__summary-arrow" aria-hidden="true">
+              &#9656;
+            </span>
+          </summary>
+          <div class="django-ray-workflow__body">
+            <p
+              class="django-ray-workflow__status"
+              data-workflow-diagnostics-status
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              Open this section to load workflow diagnostics.
+            </p>
+            <div
+              class="django-ray-workflow__content"
+              data-workflow-diagnostics-content
+              hidden
+            >
+            </div>
           </div>
-          <div class="django-ray-live__workflow-actions">
-            <a href="{{ django_ray_workflow_topology_nodes_url }}">Topology nodes</a>
-            <a href="{{ django_ray_workflow_topology_edges_url }}">Topology edges</a>
-            <a href="{{ django_ray_workflow_node_details_url }}">Node details</a>
-          </div>
-        </nav>
+        </details>
       {% endif %}
     </section>
   {% endif %}

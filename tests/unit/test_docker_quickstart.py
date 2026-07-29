@@ -258,6 +258,33 @@ def test_admin_text_request_uses_remaining_shared_deadline(
     )
 
 
+@pytest.mark.parametrize(
+    "content_type",
+    ("text/javascript; charset=utf-8", "application/javascript"),
+)
+def test_admin_text_request_accepts_standard_javascript_content_types(
+    monkeypatch: pytest.MonkeyPatch,
+    content_type: str,
+) -> None:
+    monkeypatch.setattr(
+        docker_smoke.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _TextResponse(
+            "window.djangoRay = true;",
+            content_type=content_type,
+        ),
+    )
+
+    assert (
+        docker_smoke._request_text(
+            "http://web:8000",
+            "/static/django_ray/admin/workflow_diagnostics.js",
+            expected_content_type=("text/javascript", "application/javascript"),
+        )
+        == "window.djangoRay = true;"
+    )
+
+
 def test_admin_text_request_rejects_expired_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

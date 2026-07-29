@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
+import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,6 +25,9 @@ from django.urls import reverse
 from django_ray.admin import (
     ADMIN_ATTEMPT_INLINE_MAX_CHARS,
     ADMIN_DIAGNOSTIC_MAX_CHARS,
+    ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES,
+    ADMIN_WORKFLOW_PLAN_DOWNLOAD_MAX_BYTES,
+    ADMIN_WORKFLOW_PLAN_SELECTION_DOWNLOAD_MAX_BYTES,
     ActiveWorkerFilter,
     RayTaskExecutionAdmin,
     TaskAttemptAdmin,
@@ -27,15 +35,36 @@ from django_ray.admin import (
     TaskWorkerLeaseAdmin,
 )
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.workflow_plans import (
+    MAX_PLAN_BYTES,
+    PLAN_DOMAIN_SEPARATOR,
     PLAN_SELECTION_FORMAT,
     PLAN_SELECTION_FORMAT_VERSION,
+    EffectiveWorkflowPlan,
+    PlanEligibility,
+    PlanRejection,
+    materialize_workflow_plan,
 )
+from django_ray.workflow_progress import MAX_PLAN_SELECTION_BYTES
 from django_ray.workflow_progress_reads import (
     WorkflowProgressReadError,
     WorkflowProgressReadErrorCode,
+    get_workflow_progress_summary,
+)
+from django_ray.workflow_progress_storage import (
+    persist_workflow_progress_publication,
+    prepare_workflow_progress_detail,
+    prepare_workflow_progress_topology,
+    stage_workflow_progress_topology,
 )
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from django_ray.workflows import map_step
+from tests.workflow_progress_storage_helpers import (
+    workflow_detail,
+    workflow_node,
+    workflow_summary,
+)
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 _ADMIN_MIDDLEWARE = [
@@ -43,6 +72,7 @@ _ADMIN_MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
 ]
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _request() -> Any:
@@ -59,6 +89,36 @@ def _lease_admin() -> TaskWorkerLeaseAdmin:
 
 def _attempt_admin() -> TaskAttemptAdmin:
     return TaskAttemptAdmin(TaskAttempt, admin.site)
+
+
+def _admin_diagnostic_increment(value: int) -> int:
+    return value + 1
+
+
+@pytest.fixture(scope="module")
+def admin_dynamic_workflow_plan() -> EffectiveWorkflowPlan:
+    return materialize_workflow_plan(
+        map_step(_admin_diagnostic_increment),
+        invocation_args=([1, 2],),
+    ).plan
+
+
+def _stored_plan_fingerprint(serialized: str) -> str:
+    digest = hashlib.sha256(PLAN_DOMAIN_SEPARATOR + serialized.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _plan_selection_json(
+    plan: EffectiveWorkflowPlan,
+    *,
+    reporting_policy: str = "full",
+) -> str:
+    selection = plan.eligibility.select(
+        "dynamic_tasks",
+        requested_policy="auto",
+    ).as_dict()
+    selection["reporting_policy"] = reporting_policy
+    return json.dumps(selection)
 
 
 @pytest.mark.django_db
@@ -389,6 +449,8 @@ class TestRayTaskExecutionAdmin:
             state=TaskState.RUNNING,
             progress_data="legacy-graph" * 10_000,
             workflow_progress_summary_json="summary" * 10_000,
+            workflow_plan_json="plan" * 10_000,
+            workflow_plan_selection="selection" * 10_000,
         )
         admin_obj = _task_admin()
 
@@ -406,7 +468,11 @@ class TestRayTaskExecutionAdmin:
         assert "progress_data" not in task_selects[0]
         assert "runtime_env_json" not in task_selects[0]
         assert "workflow_progress_summary_json" not in task_selects[0]
+        assert "workflow_plan_json" not in task_selects[0]
+        assert "workflow_plan_selection" not in task_selects[0]
         assert "progress_data_display" not in admin_obj.readonly_fields
+        assert "workflow_plan_display" not in admin_obj.readonly_fields
+        assert "workflow_plan_selection_display" not in admin_obj.readonly_fields
 
     @pytest.mark.parametrize(
         "state",
@@ -684,7 +750,9 @@ class TestRayTaskExecutionAdmin:
         assert payload["workflow_availability"] == "NOT_REPORTED"
         assert "secret" not in json.dumps(payload)
 
-    def test_terminal_full_workflow_without_v3_is_missing_not_empty(self) -> None:
+    def test_terminal_full_workflow_polling_stays_generic_but_topology_is_missing(
+        self,
+    ) -> None:
         execution = RayTaskExecution.objects.create(
             task_id="admin-missing-workflow-v3",
             callable_path="testproject.tasks.run_workflow_benchmark",
@@ -707,10 +775,11 @@ class TestRayTaskExecutionAdmin:
         request = RequestFactory().get("/admin/live/")
         request.user = user
 
-        summary_response = _task_admin().observability_view(
-            request,
-            str(execution.pk),
-        )
+        with CaptureQueriesContext(connection) as queries:
+            summary_response = _task_admin().observability_view(
+                request,
+                str(execution.pk),
+            )
         summary = json.loads(summary_response.content)
         topology_response = _task_admin().workflow_topology_nodes_view(
             request,
@@ -720,9 +789,1238 @@ class TestRayTaskExecutionAdmin:
 
         assert summary_response.status_code == 200
         assert summary["workflow"] is None
-        assert summary["workflow_availability"] == "MISSING"
+        assert summary["workflow_availability"] == "NOT_REPORTED"
+        assert summary["workflow_selected_strategy"] is None
+        assert summary["workflow_reporting_policy"] is None
+        assert all(
+            "workflow_plan_selection" not in query["sql"] for query in queries.captured_queries
+        )
         assert topology_response.status_code == 409
         assert topology["code"] == "MISSING"
+
+    @pytest.mark.parametrize(
+        ("reporting_policy", "task_state", "inferred_availability"),
+        [
+            ("disabled", TaskState.RUNNING, "DISABLED"),
+            ("full", TaskState.SUCCEEDED, "MISSING"),
+        ],
+    )
+    def test_progress_read_can_skip_selection_inference_for_routine_polling(
+        self,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+        reporting_policy: str,
+        task_state: str,
+        inferred_availability: str,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id=f"admin-progress-inference-{reporting_policy}",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=task_state,
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(
+                admin_dynamic_workflow_plan,
+                reporting_policy=reporting_policy,
+            ),
+        )
+
+        def authorize(candidate: RayTaskExecution) -> bool:
+            return candidate.pk == execution.pk
+
+        inferred = get_workflow_progress_summary(
+            execution,
+            authorize=authorize,
+        )
+        with CaptureQueriesContext(connection) as queries:
+            polling = get_workflow_progress_summary(
+                execution,
+                authorize=authorize,
+                infer_current_reporting_policy=False,
+            )
+
+        assert inferred["availability"] == inferred_availability
+        assert polling["availability"] == "NOT_REPORTED"
+        assert all(
+            "workflow_plan_selection" not in query["sql"] for query in queries.captured_queries
+        )
+
+    def test_workflow_diagnostics_and_downloads_are_compact_verified_and_redacted(
+        self,
+        settings,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "REDACT_PATTERNS": [
+                r"plan-download-secret",
+                r"selection-download-secret.*",
+            ],
+        }
+        manifest = json.loads(admin_dynamic_workflow_plan.canonical_json)
+        manifest["security"]["trust_identity"] = {
+            "tenant": "plan-download-secret",
+        }
+        serialized_plan = json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        selection = PlanEligibility(
+            ("dynamic_tasks", "local"),
+            (
+                PlanRejection(
+                    "compiled_graph",
+                    "UNRESOLVED_CODE_IDENTITY",
+                    "selection-download-secret.first",
+                    "selection-download-secret first message",
+                ),
+                PlanRejection(
+                    "compiled_graph",
+                    "UNRESOLVED_CODE_IDENTITY",
+                    "selection-download-secret.second",
+                    "selection-download-secret second message",
+                ),
+                PlanRejection(
+                    "static_actors",
+                    "UNSUPPORTED_NODE_MODEL",
+                    "selection-download-secret.third",
+                    "selection-download-secret third message",
+                ),
+            ),
+            4,
+        ).select(
+            "dynamic_tasks",
+            requested_policy="auto",
+            reporting_policy="full",
+        )
+        fingerprint = _stored_plan_fingerprint(serialized_plan)
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-diagnostics-valid",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            workflow_plan_fingerprint=fingerprint,
+            workflow_plan_json=serialized_plan,
+            workflow_plan_selection=json.dumps(selection.as_dict()),
+        )
+        user = get_user_model().objects.create_superuser(
+            username="workflow-diagnostics-valid-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        diagnostics_response = admin_obj.workflow_diagnostics_view(
+            request,
+            str(execution.pk),
+        )
+        plan_response = admin_obj.workflow_plan_download_view(
+            request,
+            str(execution.pk),
+        )
+        selection_response = admin_obj.workflow_plan_selection_download_view(
+            request,
+            str(execution.pk),
+        )
+
+        payload = json.loads(diagnostics_response.content)
+        assert diagnostics_response.status_code == 200
+        assert payload["schema"] == "django-ray.admin-workflow-diagnostics"
+        assert payload["schema_version"] == 1
+        assert payload["plan"] == {
+            "status": "AVAILABLE",
+            "definition_name": manifest["definition"]["name"],
+            "definition_revision": manifest["definition"]["revision"],
+            "topology_class": "dynamic",
+            "declared_node_count": len(manifest["nodes"]),
+            "retry_safe": True,
+            "fingerprint": fingerprint,
+            "fingerprint_compact": (f"sha256:{fingerprint.removeprefix('sha256:')[:12]}"),
+            "requested_policy": "auto",
+            "selected_strategy": "dynamic_tasks",
+            "reporting_policy": "full",
+            "eligible_strategies": ["dynamic_tasks", "local"],
+            "rejection_counts": {
+                "UNRESOLVED_CODE_IDENTITY": 2,
+                "UNSUPPORTED_NODE_MODEL": 1,
+            },
+            "retained_rejections": 3,
+            "total_rejections": 4,
+            "unretained_rejections": 1,
+        }
+        assert payload["progress"] == {
+            "state": "REQUESTED_NOT_REPORTED",
+            "message": (
+                "Full workflow reporting was requested, but no bounded snapshot "
+                "has been published yet."
+            ),
+            "availability": "NOT_REPORTED",
+            "complete": False,
+            "truncation_reasons": [],
+            "actions": {
+                "topology_nodes": False,
+                "topology_edges": False,
+                "node_details": False,
+            },
+        }
+        assert len(diagnostics_response.content) <= ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES
+        downloaded_plan = json.loads(plan_response.content)
+        assert downloaded_plan["fingerprint"] == fingerprint
+        assert downloaded_plan["manifest"]["security"]["trust_identity"] == {
+            "tenant": "[REDACTED]",
+        }
+        downloaded_selection = json.loads(selection_response.content)
+        assert downloaded_selection["fingerprint"] == fingerprint
+        assert downloaded_selection["selection"]["rejections"][0]["path"] == "[REDACTED]"
+        assert downloaded_selection["selection"]["rejections"][0]["message"] == "[REDACTED]"
+        assert len(plan_response.content) <= ADMIN_WORKFLOW_PLAN_DOWNLOAD_MAX_BYTES
+        assert len(selection_response.content) <= ADMIN_WORKFLOW_PLAN_SELECTION_DOWNLOAD_MAX_BYTES
+        assert plan_response["Content-Disposition"] == 'attachment; filename="plan.json"'
+        assert selection_response["Content-Disposition"] == 'attachment; filename="selection.json"'
+        for response in (
+            diagnostics_response,
+            plan_response,
+            selection_response,
+        ):
+            assert response.status_code == 200
+            assert response["Cache-Control"] == "no-store"
+            assert response["X-Content-Type-Options"] == "nosniff"
+            assert response["Content-Type"].startswith("application/json")
+            rendered = response.content.decode("utf-8")
+            assert "plan-download-secret" not in rendered
+            assert "selection-download-secret" not in rendered
+        compact_rendered = diagnostics_response.content.decode("utf-8")
+        assert '"path"' not in compact_rendered
+        assert '"message"' in compact_rendered
+        assert "first message" not in compact_rendered
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "malformed_plan",
+            "incomplete_pair",
+            "selection_only",
+            "fingerprint_mismatch",
+            "unsupported_plan_format",
+            "invalid_selection",
+            "oversized_plan",
+            "oversized_selection",
+        ],
+    )
+    def test_workflow_diagnostics_fail_closed_for_corrupt_and_oversized_storage(
+        self,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+        case: str,
+    ) -> None:
+        marker = f"private-{case}-marker"
+        serialized_plan: str | None = admin_dynamic_workflow_plan.canonical_json
+        fingerprint: str | None = admin_dynamic_workflow_plan.fingerprint
+        serialized_selection: str | None = _plan_selection_json(
+            admin_dynamic_workflow_plan,
+        )
+        if case == "malformed_plan":
+            serialized_plan = f'{{"private":"{marker}"'
+            fingerprint = _stored_plan_fingerprint(serialized_plan)
+        elif case == "incomplete_pair":
+            serialized_selection = None
+        elif case == "selection_only":
+            serialized_plan = None
+            fingerprint = None
+        elif case == "fingerprint_mismatch":
+            fingerprint = "sha256:" + ("0" * 64)
+        elif case == "unsupported_plan_format":
+            manifest = json.loads(admin_dynamic_workflow_plan.canonical_json)
+            manifest["plan_format_version"] = 999
+            manifest["private"] = marker
+            serialized_plan = json.dumps(
+                manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            fingerprint = _stored_plan_fingerprint(serialized_plan)
+        elif case == "invalid_selection":
+            serialized_selection = json.dumps({"private": marker})
+        elif case == "oversized_plan":
+            serialized_plan = marker + ("x" * MAX_PLAN_BYTES)
+            fingerprint = _stored_plan_fingerprint(serialized_plan)
+        elif case == "oversized_selection":
+            serialized_selection = marker + ("x" * MAX_PLAN_SELECTION_BYTES)
+        execution = RayTaskExecution.objects.create(
+            task_id=f"admin-workflow-diagnostics-{case}",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            workflow_plan_fingerprint=fingerprint,
+            workflow_plan_json=serialized_plan,
+            workflow_plan_selection=serialized_selection,
+        )
+        user = get_user_model().objects.create_superuser(
+            username=f"workflow-diagnostics-{case}-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        diagnostics_response = admin_obj.workflow_diagnostics_view(
+            request,
+            str(execution.pk),
+        )
+        download_responses = (
+            admin_obj.workflow_plan_download_view(request, str(execution.pk)),
+            admin_obj.workflow_plan_selection_download_view(
+                request,
+                str(execution.pk),
+            ),
+        )
+
+        diagnostics = json.loads(diagnostics_response.content)
+        assert diagnostics_response.status_code == 200
+        assert diagnostics["plan"]["status"] == "CORRUPT"
+        assert diagnostics["plan"]["fingerprint"] is None
+        assert diagnostics["progress"]["actions"] == {
+            "topology_nodes": False,
+            "topology_edges": False,
+            "node_details": False,
+        }
+        assert len(diagnostics_response.content) <= ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES
+        for response in (diagnostics_response, *download_responses):
+            assert response["Cache-Control"] == "no-store"
+            assert response["X-Content-Type-Options"] == "nosniff"
+            assert marker not in response.content.decode("utf-8")
+        for response in download_responses:
+            assert response.status_code == 503
+            assert json.loads(response.content) == {
+                "code": "CORRUPT",
+                "message": "Workflow diagnostics failed validation.",
+            }
+
+    @pytest.mark.parametrize(
+        "view_method",
+        [
+            "workflow_diagnostics_view",
+            "workflow_plan_download_view",
+            "workflow_plan_selection_download_view",
+        ],
+    )
+    def test_workflow_diagnostics_views_honor_object_permissions(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+        view_method: str,
+    ) -> None:
+        selection = _plan_selection_json(admin_dynamic_workflow_plan)
+        allowed = RayTaskExecution.objects.create(
+            task_id=f"admin-workflow-object-allowed-{view_method}",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=selection,
+        )
+        denied = RayTaskExecution.objects.create(
+            task_id=f"admin-workflow-object-denied-{view_method}",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=selection,
+        )
+        user = get_user_model().objects.create_user(
+            username=f"workflow-object-viewer-{view_method}",
+            is_staff=True,
+        )
+        checked_objects: list[int] = []
+
+        def has_perm(permission: str, obj: Any = None) -> bool:
+            del permission
+            if obj is None:
+                return False
+            checked_objects.append(obj.pk)
+            return obj.pk == allowed.pk
+
+        monkeypatch.setattr(user, "has_perm", has_perm)
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        view = getattr(_task_admin(), view_method)
+
+        assert view(request, str(allowed.pk)).status_code == 200
+        with CaptureQueriesContext(connection) as denied_queries:
+            with pytest.raises(PermissionDenied):
+                view(request, str(denied.pk))
+        assert allowed.pk in checked_objects
+        assert denied.pk in checked_objects
+        assert all(
+            "workflow_plan_json" not in query["sql"]
+            and "workflow_plan_selection" not in query["sql"]
+            for query in denied_queries.captured_queries
+        )
+
+    def test_bounded_workflow_plan_loader_reuses_request_scoped_queryset(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-request-scoped-loader",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(admin_dynamic_workflow_plan),
+        )
+        user = get_user_model().objects.create_superuser(
+            username="workflow-request-scoped-loader-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+        original_get_queryset = admin_obj.get_queryset
+        calls = 0
+
+        def request_scoped_queryset(candidate_request: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            assert candidate_request is request
+            queryset = original_get_queryset(candidate_request)
+            return queryset if calls == 1 else queryset.none()
+
+        monkeypatch.setattr(admin_obj, "get_queryset", request_scoped_queryset)
+
+        authorized = admin_obj._authorized_workflow_read_execution(
+            request,
+            str(execution.pk),
+        )
+
+        with pytest.raises(Http404):
+            admin_obj._load_bounded_workflow_plan_fields(request, authorized)
+        assert calls == 2
+
+    def test_bounded_workflow_plan_loader_rejects_identity_change_after_authorization(
+        self,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-identity-fenced-loader",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(admin_dynamic_workflow_plan),
+        )
+        user = get_user_model().objects.create_superuser(
+            username="workflow-identity-fenced-loader-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+        authorized = admin_obj._authorized_workflow_read_execution(
+            request,
+            str(execution.pk),
+        )
+        RayTaskExecution.objects.filter(pk=execution.pk).update(
+            execution_generation=execution.execution_generation + 1,
+        )
+
+        with pytest.raises(Http404):
+            admin_obj._load_bounded_workflow_plan_fields(request, authorized)
+
+    def test_bounded_workflow_plan_loader_reauthorizes_exact_annotated_row(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-reauthorized-loader",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(admin_dynamic_workflow_plan),
+        )
+        user = get_user_model().objects.create_superuser(
+            username="workflow-reauthorized-loader-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+        checked_objects: list[RayTaskExecution] = []
+
+        def has_view_permission(
+            candidate_request: Any,
+            obj: RayTaskExecution | None = None,
+        ) -> bool:
+            assert candidate_request is request
+            assert obj is not None
+            checked_objects.append(obj)
+            return len(checked_objects) == 1
+
+        monkeypatch.setattr(admin_obj, "has_view_permission", has_view_permission)
+        authorized = admin_obj._authorized_workflow_read_execution(
+            request,
+            str(execution.pk),
+        )
+
+        with pytest.raises(PermissionDenied):
+            admin_obj._load_bounded_workflow_plan_fields(request, authorized)
+        assert [candidate.pk for candidate in checked_objects] == [
+            execution.pk,
+            execution.pk,
+        ]
+        assert hasattr(checked_objects[1], "_admin_bounded_plan")
+
+    @pytest.mark.parametrize(
+        "view_method",
+        [
+            "workflow_diagnostics_view",
+            "workflow_plan_download_view",
+            "workflow_plan_selection_download_view",
+        ],
+    )
+    def test_workflow_diagnostics_views_are_get_only_and_return_404_for_missing_objects(
+        self,
+        view_method: str,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id=f"admin-workflow-method-{view_method}",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+        )
+        user = get_user_model().objects.create_superuser(
+            username=f"workflow-method-admin-{view_method}",
+        )
+        admin_obj = _task_admin()
+        view = getattr(admin_obj, view_method)
+        post = RequestFactory().post("/admin/workflow/diagnostics/")
+        post.user = user
+
+        method_response = view(post, str(execution.pk))
+
+        assert method_response.status_code == 405
+        assert method_response["Allow"] == "GET"
+        assert method_response["Cache-Control"] == "no-store"
+        assert method_response["X-Content-Type-Options"] == "nosniff"
+        missing = RequestFactory().get("/admin/workflow/diagnostics/")
+        missing.user = user
+        with pytest.raises(Http404):
+            view(missing, "999999")
+
+    def test_workflow_diagnostics_reports_not_recorded_without_empty_downloads(
+        self,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-not-recorded",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        user = get_user_model().objects.create_superuser(
+            username="workflow-not-recorded-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        diagnostics = admin_obj.workflow_diagnostics_view(request, str(execution.pk))
+        downloads = (
+            admin_obj.workflow_plan_download_view(request, str(execution.pk)),
+            admin_obj.workflow_plan_selection_download_view(
+                request,
+                str(execution.pk),
+            ),
+        )
+
+        diagnostics_payload = json.loads(diagnostics.content)
+        assert diagnostics_payload["plan"]["status"] == "NOT_RECORDED"
+        assert diagnostics_payload["progress"]["state"] == "NOT_REPORTED"
+        assert diagnostics_payload["progress"]["actions"] == {
+            "topology_nodes": False,
+            "topology_edges": False,
+            "node_details": False,
+        }
+        for response in downloads:
+            assert response.status_code == 404
+            assert json.loads(response.content) == {
+                "code": "NOT_RECORDED",
+                "message": "Workflow diagnostics were not recorded.",
+            }
+            assert response["Cache-Control"] == "no-store"
+            assert response["X-Content-Type-Options"] == "nosniff"
+
+    def test_workflow_diagnostics_distinguishes_every_progress_presentation_state(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        user = get_user_model().objects.create_superuser(
+            username="workflow-progress-presentation-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        def useful_preflight(
+            _request: Any,
+            _execution: RayTaskExecution,
+            *,
+            collection: str,
+        ) -> dict[str, Any]:
+            assert collection in {
+                "topology_nodes",
+                "topology_edges",
+                "node_details",
+            }
+            return {
+                "availability": "AVAILABLE",
+                "returned_count": 1,
+                "items": [{"collection": collection}],
+            }
+
+        monkeypatch.setattr(
+            admin_obj,
+            "_preflight_workflow_collection",
+            useful_preflight,
+        )
+        cases = [
+            (
+                "requested-active",
+                TaskState.RUNNING,
+                "full",
+                "REQUESTED_NOT_REPORTED",
+                None,
+            ),
+            (
+                "requested-terminal",
+                TaskState.SUCCEEDED,
+                "full",
+                "REQUESTED_MISSING",
+                None,
+            ),
+            ("legacy", TaskState.RUNNING, "full", "LEGACY_ONLY", "legacy"),
+            ("disabled", TaskState.RUNNING, "disabled", "DISABLED", "disabled"),
+            (
+                "omitted",
+                TaskState.RUNNING,
+                "sampled",
+                "OMITTED_BY_POLICY",
+                "omitted",
+            ),
+            ("available", TaskState.RUNNING, "full", "AVAILABLE", "available"),
+            ("truncated", TaskState.RUNNING, "full", "TRUNCATED", "truncated"),
+            ("expired", TaskState.SUCCEEDED, "full", "EXPIRED", "expired"),
+            ("missing", TaskState.RUNNING, "full", "MISSING", "missing"),
+            ("corrupt", TaskState.RUNNING, "full", "CORRUPT", "corrupt"),
+        ]
+
+        observed: dict[str, dict[str, Any]] = {}
+        for index, (
+            case_id,
+            task_state,
+            reporting_policy,
+            expected_state,
+            summary_case,
+        ) in enumerate(cases, start=1):
+            execution = RayTaskExecution.objects.create(
+                task_id=f"admin-workflow-progress-{case_id}",
+                callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+                state=task_state,
+                workflow_run_id=f"00000000-0000-0000-0000-{950_000 + index:012d}",
+                workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+                workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+                workflow_plan_selection=_plan_selection_json(
+                    admin_dynamic_workflow_plan,
+                    reporting_policy=reporting_policy,
+                ),
+            )
+            if summary_case == "legacy":
+                execution.progress_data = json.dumps(
+                    {
+                        "schema_version": 1,
+                        "revision": 4,
+                        "state": "RUNNING",
+                        "graph": {
+                            "nodes": [{"node_id": "0.0"}],
+                            "edges": [],
+                        },
+                    }
+                )
+                execution.save(update_fields=["progress_data"])
+            elif summary_case == "corrupt":
+                execution.workflow_progress_summary_json = '{"private":"corrupt-progress-secret"'
+                execution.save(update_fields=["workflow_progress_summary_json"])
+            elif summary_case is not None:
+                terminal = summary_case == "expired"
+                summary = workflow_progress_summary(
+                    execution,
+                    published_detail=(
+                        summary_case in {"available", "truncated", "expired", "missing"}
+                    ),
+                    state="SUCCEEDED" if terminal else "RUNNING",
+                )
+                summary["selected_strategy"] = "dynamic_tasks"
+                summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+                if summary_case == "disabled":
+                    summary["reporting_policy"] = "disabled"
+                    summary["detail"]["availability"] = "DISABLED"
+                elif summary_case == "omitted":
+                    summary["reporting_policy"] = "sampled"
+                    summary["detail"]["availability"] = "OMITTED_BY_POLICY"
+                elif summary_case == "truncated":
+                    summary["detail"] = {
+                        "availability": "TRUNCATED",
+                        "complete": False,
+                        "truncation_reasons": ["detail_count_limit"],
+                    }
+                    summary["edge_counts"] = {
+                        "declared": 1,
+                        "discovered": 1,
+                        "retained_topology": 1,
+                    }
+                elif summary_case in {"missing", "expired"}:
+                    summary["detail"] = {
+                        "availability": summary_case.upper(),
+                        "complete": False,
+                        "truncation_reasons": [],
+                    }
+                execution.workflow_progress_summary_json = serialize_workflow_progress_summary(
+                    summary
+                )
+                execution.save(update_fields=["workflow_progress_summary_json"])
+
+            response = admin_obj.workflow_diagnostics_view(
+                request,
+                str(execution.pk),
+            )
+            assert response.status_code == 200
+            payload = json.loads(response.content)
+            assert payload["plan"]["status"] == "AVAILABLE"
+            assert payload["progress"]["state"] == expected_state
+            assert payload["progress"]["message"]
+            assert "corrupt-progress-secret" not in response.content.decode("utf-8")
+            observed[expected_state] = payload["progress"]
+
+        no_actions = {
+            "topology_nodes": False,
+            "topology_edges": False,
+            "node_details": False,
+        }
+        for state in (
+            "REQUESTED_NOT_REPORTED",
+            "REQUESTED_MISSING",
+            "LEGACY_ONLY",
+            "DISABLED",
+            "OMITTED_BY_POLICY",
+            "EXPIRED",
+            "MISSING",
+            "CORRUPT",
+        ):
+            assert observed[state]["actions"] == no_actions
+            assert observed[state]["complete"] is False
+        assert observed["AVAILABLE"]["actions"] == {
+            "topology_nodes": True,
+            "topology_edges": False,
+            "node_details": True,
+        }
+        assert observed["AVAILABLE"]["complete"] is True
+        assert observed["TRUNCATED"]["actions"] == {
+            "topology_nodes": True,
+            "topology_edges": True,
+            "node_details": True,
+        }
+        assert observed["TRUNCATED"]["complete"] is False
+        assert observed["TRUNCATED"]["truncation_reasons"] == ["detail_count_limit"]
+
+    @pytest.mark.parametrize(
+        ("mismatched_field", "mismatched_value"),
+        [
+            ("plan_fingerprint", "sha256:" + ("0" * 64)),
+            ("selected_strategy", "local"),
+            ("reporting_policy", "sampled"),
+        ],
+    )
+    def test_workflow_diagnostics_rejects_plan_progress_binding_mismatch(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+        mismatched_field: str,
+        mismatched_value: str,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id=f"admin-workflow-progress-mismatch-{mismatched_field}",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            workflow_run_id="00000000-0000-0000-0000-000000960001",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(admin_dynamic_workflow_plan),
+        )
+        summary = workflow_progress_summary(execution, published_detail=True)
+        summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+        summary["selected_strategy"] = "dynamic_tasks"
+        summary["reporting_policy"] = "full"
+        summary[mismatched_field] = mismatched_value
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(summary)
+        execution.save(update_fields=["workflow_progress_summary_json"])
+        user = get_user_model().objects.create_superuser(
+            username=f"workflow-progress-mismatch-{mismatched_field}-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        def unexpected_preflight(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("mismatched progress must not preflight topology")
+
+        monkeypatch.setattr(
+            admin_obj,
+            "_preflight_workflow_collection",
+            unexpected_preflight,
+        )
+
+        response = admin_obj.workflow_diagnostics_view(request, str(execution.pk))
+        payload = json.loads(response.content)
+
+        assert response.status_code == 200
+        assert payload["plan"]["status"] == "AVAILABLE"
+        assert payload["progress"] == {
+            "state": "CORRUPT",
+            "message": "Workflow progress failed validation.",
+            "availability": "CORRUPT",
+            "complete": False,
+            "truncation_reasons": [],
+            "actions": {
+                "topology_nodes": False,
+                "topology_edges": False,
+                "node_details": False,
+            },
+        }
+
+    def test_workflow_progress_binding_uses_validated_values_before_redaction(
+        self,
+        monkeypatch,
+        settings,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "REDACT_PATTERNS": [r"dynamic_tasks", r"full", r"sha256"],
+        }
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-progress-redacted-binding",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            workflow_run_id="00000000-0000-0000-0000-000000960006",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(admin_dynamic_workflow_plan),
+        )
+        summary = workflow_progress_summary(execution, published_detail=True)
+        summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+        summary["selected_strategy"] = "dynamic_tasks"
+        summary["reporting_policy"] = "full"
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(summary)
+        execution.save(update_fields=["workflow_progress_summary_json"])
+        user = get_user_model().objects.create_superuser(
+            username="workflow-progress-redacted-binding-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        def useful_preflight(
+            _request: Any,
+            _execution: RayTaskExecution,
+            *,
+            collection: str,
+        ) -> dict[str, Any]:
+            assert collection in {"topology_nodes", "node_details"}
+            return {
+                "availability": "AVAILABLE",
+                "returned_count": 1,
+                "items": [{"collection": collection}],
+            }
+
+        monkeypatch.setattr(
+            admin_obj,
+            "_preflight_workflow_collection",
+            useful_preflight,
+        )
+
+        response = admin_obj.workflow_diagnostics_view(request, str(execution.pk))
+        payload = json.loads(response.content)
+
+        assert response.status_code == 200
+        assert payload["plan"]["status"] == "AVAILABLE"
+        assert payload["plan"]["fingerprint"] == "[REDACTED]"
+        assert payload["plan"]["selected_strategy"] == "[REDACTED]"
+        assert payload["plan"]["reporting_policy"] == "[REDACTED]"
+        assert payload["progress"]["state"] == "AVAILABLE"
+        assert payload["progress"]["availability"] == "AVAILABLE"
+        assert payload["progress"]["actions"] == {
+            "topology_nodes": True,
+            "topology_edges": False,
+            "node_details": True,
+        }
+
+    @pytest.mark.parametrize(
+        ("plan_case", "expected_plan_status"),
+        [
+            ("not_recorded", "NOT_RECORDED"),
+            ("corrupt", "CORRUPT"),
+        ],
+    )
+    def test_schema_v3_progress_requires_an_available_verified_plan(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+        plan_case: str,
+        expected_plan_status: str,
+    ) -> None:
+        plan_fields: dict[str, str | None] = {
+            "workflow_plan_fingerprint": None,
+            "workflow_plan_json": None,
+            "workflow_plan_selection": None,
+        }
+        if plan_case == "corrupt":
+            plan_fields = {
+                "workflow_plan_fingerprint": "sha256:" + ("0" * 64),
+                "workflow_plan_json": admin_dynamic_workflow_plan.canonical_json,
+                "workflow_plan_selection": _plan_selection_json(
+                    admin_dynamic_workflow_plan,
+                ),
+            }
+        execution = RayTaskExecution.objects.create(
+            task_id=f"admin-workflow-v3-{plan_case}-plan",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            workflow_run_id=(
+                "00000000-0000-0000-0000-000000960002"
+                if plan_case == "not_recorded"
+                else "00000000-0000-0000-0000-000000960003"
+            ),
+            **plan_fields,
+        )
+        summary = workflow_progress_summary(execution, published_detail=True)
+        summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+        summary["selected_strategy"] = "dynamic_tasks"
+        summary["reporting_policy"] = "full"
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(summary)
+        execution.save(update_fields=["workflow_progress_summary_json"])
+        user = get_user_model().objects.create_superuser(
+            username=f"workflow-v3-{plan_case}-plan-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        def unexpected_preflight(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("unverified plans must not preflight topology")
+
+        monkeypatch.setattr(
+            admin_obj,
+            "_preflight_workflow_collection",
+            unexpected_preflight,
+        )
+
+        response = admin_obj.workflow_diagnostics_view(request, str(execution.pk))
+        payload = json.loads(response.content)
+
+        assert response.status_code == 200
+        assert payload["plan"]["status"] == expected_plan_status
+        assert payload["progress"]["state"] == "CORRUPT"
+        assert payload["progress"]["availability"] == "CORRUPT"
+        assert payload["progress"]["actions"] == {
+            "topology_nodes": False,
+            "topology_edges": False,
+            "node_details": False,
+        }
+
+    def test_workflow_diagnostics_does_not_advertise_summary_only_topology(
+        self,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-summary-only-topology",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            workflow_run_id="00000000-0000-0000-0000-000000960004",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(admin_dynamic_workflow_plan),
+        )
+        summary = workflow_progress_summary(execution, published_detail=True)
+        summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+        summary["selected_strategy"] = "dynamic_tasks"
+        summary["reporting_policy"] = "full"
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(summary)
+        execution.save(update_fields=["workflow_progress_summary_json"])
+        user = get_user_model().objects.create_superuser(
+            username="workflow-summary-only-topology-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        diagnostics_response = admin_obj.workflow_diagnostics_view(
+            request,
+            str(execution.pk),
+        )
+        topology_response = admin_obj.workflow_topology_nodes_view(
+            request,
+            str(execution.pk),
+        )
+        diagnostics = json.loads(diagnostics_response.content)
+        topology = json.loads(topology_response.content)
+
+        assert diagnostics_response.status_code == 200
+        assert diagnostics["progress"]["state"] == "MISSING"
+        assert diagnostics["progress"]["availability"] == "MISSING"
+        assert diagnostics["progress"]["actions"] == {
+            "topology_nodes": False,
+            "topology_edges": False,
+            "node_details": False,
+        }
+        assert topology_response.status_code == 409
+        assert topology["code"] == "MISSING"
+
+    def test_workflow_diagnostics_hides_actions_when_preflight_is_corrupt(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-corrupt-topology-preflight",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            workflow_run_id="00000000-0000-0000-0000-000000960005",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(admin_dynamic_workflow_plan),
+        )
+        summary = workflow_progress_summary(execution, published_detail=True)
+        summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+        summary["selected_strategy"] = "dynamic_tasks"
+        summary["reporting_policy"] = "full"
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(summary)
+        execution.save(update_fields=["workflow_progress_summary_json"])
+        user = get_user_model().objects.create_superuser(
+            username="workflow-corrupt-topology-preflight-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        def corrupt_preflight(
+            _request: Any,
+            _execution: RayTaskExecution,
+            *,
+            collection: str,
+        ) -> dict[str, Any]:
+            assert collection == "topology_nodes"
+            raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.CORRUPT)
+
+        monkeypatch.setattr(
+            admin_obj,
+            "_preflight_workflow_collection",
+            corrupt_preflight,
+        )
+
+        response = admin_obj.workflow_diagnostics_view(request, str(execution.pk))
+        payload = json.loads(response.content)
+
+        assert response.status_code == 200
+        assert payload["progress"]["state"] == "CORRUPT"
+        assert payload["progress"]["availability"] == "CORRUPT"
+        assert payload["progress"]["actions"] == {
+            "topology_nodes": False,
+            "topology_edges": False,
+            "node_details": False,
+        }
+
+    @pytest.mark.parametrize(
+        ("preflight_page", "expected_state"),
+        [
+            ({"availability": "AVAILABLE", "returned_count": 1}, "CORRUPT"),
+            (
+                {
+                    "availability": "AVAILABLE",
+                    "returned_count": 1,
+                    "items": None,
+                },
+                "CORRUPT",
+            ),
+            (
+                {
+                    "availability": "AVAILABLE",
+                    "returned_count": 2,
+                    "items": [{}],
+                },
+                "CORRUPT",
+            ),
+            (
+                {
+                    "availability": "AVAILABLE",
+                    "returned_count": 1,
+                    "items": [{}, {}],
+                },
+                "CORRUPT",
+            ),
+            (
+                {
+                    "availability": "AVAILABLE",
+                    "returned_count": 0,
+                    "items": [],
+                },
+                "MISSING",
+            ),
+        ],
+        ids=[
+            "missing-items",
+            "items-not-list",
+            "items-shorter-than-count",
+            "items-longer-than-count",
+            "valid-empty-page",
+        ],
+    )
+    def test_workflow_diagnostics_fails_closed_for_unusable_preflight_pages(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+        preflight_page: dict[str, Any],
+        expected_state: str,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-inconsistent-topology-preflight",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            workflow_run_id="00000000-0000-0000-0000-000000960007",
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(admin_dynamic_workflow_plan),
+        )
+        summary = workflow_progress_summary(execution, published_detail=True)
+        summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+        summary["selected_strategy"] = "dynamic_tasks"
+        summary["reporting_policy"] = "full"
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(summary)
+        execution.save(update_fields=["workflow_progress_summary_json"])
+        user = get_user_model().objects.create_superuser(
+            username="workflow-inconsistent-topology-preflight-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        def inconsistent_preflight(
+            _request: Any,
+            _execution: RayTaskExecution,
+            *,
+            collection: str,
+        ) -> dict[str, Any]:
+            assert collection == "topology_nodes"
+            return preflight_page
+
+        monkeypatch.setattr(
+            admin_obj,
+            "_preflight_workflow_collection",
+            inconsistent_preflight,
+        )
+
+        response = admin_obj.workflow_diagnostics_view(request, str(execution.pk))
+        payload = json.loads(response.content)
+
+        assert response.status_code == 200
+        assert payload["progress"]["state"] == expected_state
+        assert payload["progress"]["availability"] == expected_state
+        assert payload["progress"]["actions"] == {
+            "topology_nodes": False,
+            "topology_edges": False,
+            "node_details": False,
+        }
+
+    def test_workflow_diagnostics_advertises_only_persisted_nonempty_collections(
+        self,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        run_id = "00000000-0000-0000-0000-000000960007"
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-persisted-diagnostics",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            attempt_number=1,
+            execution_generation=1,
+            workflow_run_id=run_id,
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(admin_dynamic_workflow_plan),
+        )
+        identity = WorkflowRunIdentity(
+            task_execution_pk=execution.pk,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+            run_id=run_id,
+        )
+        node_ids = ("admin-node-00001", "admin-node-00002")
+        topology = prepare_workflow_progress_topology(
+            identity,
+            1,
+            tuple(workflow_node(node_id) for node_id in node_ids),
+            ({"source": node_ids[0], "target": node_ids[1]},),
+        )
+        prepared_detail = prepare_workflow_progress_detail(
+            tuple(workflow_detail(node_id) for node_id in node_ids),
+            topology=topology,
+        )
+        manifest_id = stage_workflow_progress_topology(topology)
+        assert manifest_id is not None
+        summary = workflow_summary(
+            identity,
+            summary_revision=1,
+            node_count=len(node_ids),
+            running_count=0,
+        )
+        summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+        summary["selected_strategy"] = "dynamic_tasks"
+        summary["reporting_policy"] = "full"
+        edge_counts = summary["edge_counts"]
+        assert isinstance(edge_counts, dict)
+        edge_counts.update(
+            declared=1,
+            discovered=1,
+        )
+        publication = persist_workflow_progress_publication(
+            identity,
+            summary,
+            manifest_id=manifest_id,
+            prepared_topology=topology,
+            prepared_detail=prepared_detail,
+        )
+        assert publication.accepted is True
+
+        user = get_user_model().objects.create_superuser(
+            username="workflow-persisted-diagnostics-admin",
+        )
+        request = RequestFactory().get("/admin/workflow/diagnostics/")
+        request.user = user
+        admin_obj = _task_admin()
+
+        diagnostics_response = admin_obj.workflow_diagnostics_view(
+            request,
+            str(execution.pk),
+        )
+        diagnostics = json.loads(diagnostics_response.content)
+
+        assert diagnostics_response.status_code == 200
+        assert diagnostics["plan"]["status"] == "AVAILABLE"
+        assert diagnostics["progress"]["state"] == "AVAILABLE"
+        assert diagnostics["progress"]["actions"] == {
+            "topology_nodes": True,
+            "topology_edges": True,
+            "node_details": True,
+        }
+
+        advertised_views = {
+            "topology_nodes": admin_obj.workflow_topology_nodes_view,
+            "topology_edges": admin_obj.workflow_topology_edges_view,
+            "node_details": admin_obj.workflow_node_details_view,
+        }
+        for action, view in advertised_views.items():
+            assert diagnostics["progress"]["actions"][action] is True
+            response = view(request, str(execution.pk))
+            payload = json.loads(response.content)
+            assert response.status_code == 200
+            assert payload["availability"] == "AVAILABLE"
+            assert payload["returned_count"] > 0
+            assert len(payload["items"]) == payload["returned_count"]
 
     def test_observability_endpoint_defers_payloads_and_reads_progress_once(self) -> None:
         execution = RayTaskExecution.objects.create(
@@ -749,6 +2047,8 @@ class TestRayTaskExecutionAdmin:
         assert task_selects
         assert all("progress_data" not in query for query in task_selects)
         assert all("args_json" not in query for query in task_selects)
+        assert all("workflow_plan_json" not in query for query in task_selects)
+        assert all("workflow_plan_selection" not in query for query in task_selects)
         assert any("workflow_progress_summary_json" in query for query in task_selects)
         detail_tables = (
             "django_ray_workflowprogressrunstorage",
@@ -1017,6 +2317,8 @@ class TestRayTaskExecutionAdmin:
             state=TaskState.RUNNING,
             progress_data="legacy-graph" * 10_000,
             workflow_progress_summary_json="summary" * 10_000,
+            workflow_plan_json="raw-workflow-plan-marker" * 1_000,
+            workflow_plan_selection="raw-workflow-selection-marker" * 1_000,
         )
         user_model = get_user_model()
         superuser = user_model.objects.create_superuser(
@@ -1037,20 +2339,47 @@ class TestRayTaskExecutionAdmin:
             "admin:django_ray_raytaskexecution_observability",
             args=[execution.pk],
         )
+        diagnostics_url = reverse(
+            "admin:django_ray_raytaskexecution_workflow_diagnostics",
+            args=[execution.pk],
+        )
+        plan_download_url = reverse(
+            "admin:django_ray_raytaskexecution_workflow_plan_download",
+            args=[execution.pk],
+        )
+        selection_download_url = reverse(
+            "admin:django_ray_raytaskexecution_workflow_plan_selection_download",
+            args=[execution.pk],
+        )
         assert response.status_code == 200
         assert 'id="django-ray-live-observability"' in content
         assert f'data-observability-url="{endpoint}"' in content
         assert 'href="/static/django_ray/admin/task_live.css"' in content
         assert 'src="/static/django_ray/admin/task_live.js"' in content
+        assert 'src="/static/django_ray/admin/workflow_diagnostics.js"' in content
         assert 'aria-labelledby="django-ray-live-heading"' in content
         assert 'id="django-ray-live-heading"' in content
-        assert content.count('role="status"') == 1
+        assert content.count('role="status"') == 2
         assert 'aria-live="polite"' in content
         assert 'class="django-ray-live__grid"' in content
         assert 'class="django-ray-live__state"' in content
         assert 'data-state="RUNNING"' in content
-        assert 'class="django-ray-live__workflow-links"' in content
-        assert 'aria-labelledby="django-ray-workflow-links-heading"' in content
+        assert 'id="django-ray-workflow-diagnostics"' in content
+        assert 'class="django-ray-workflow"' in content
+        assert "data-workflow-diagnostics-status" in content
+        assert "data-workflow-diagnostics-content" in content
+        assert 'aria-atomic="true"' in content
+        assert f'data-diagnostics-url="{diagnostics_url}"' in content
+        assert f'data-plan-download-url="{plan_download_url}"' in content
+        assert f'data-selection-download-url="{selection_download_url}"' in content
+        assert "Workflow execution" in content
+        details_start = content.index("<details")
+        details_opening_tag = content[details_start : content.index(">", details_start)]
+        assert " open" not in details_opening_tag
+        assert "raw-workflow-plan-marker" not in content
+        assert "raw-workflow-selection-marker" not in content
+        assert "Effective workflow plan" not in content
+        assert "Workflow strategy selection" not in content
         topology_nodes_url = reverse(
             "admin:django_ray_raytaskexecution_workflow_topology_nodes",
             args=[execution.pk],
@@ -1063,9 +2392,12 @@ class TestRayTaskExecutionAdmin:
             "admin:django_ray_raytaskexecution_workflow_node_details",
             args=[execution.pk],
         )
-        assert f'href="{topology_nodes_url}">Topology nodes</a>' in content
-        assert f'href="{topology_edges_url}">Topology edges</a>' in content
-        assert f'href="{node_details_url}">Node details</a>' in content
+        assert f'data-topology-nodes-url="{topology_nodes_url}"' in content
+        assert f'data-topology-edges-url="{topology_edges_url}"' in content
+        assert f'data-node-details-url="{node_details_url}"' in content
+        assert f'href="{topology_nodes_url}"' not in content
+        assert f'href="{topology_edges_url}"' not in content
+        assert f'href="{node_details_url}"' not in content
         task_selects = [
             query["sql"]
             for query in queries.captured_queries
@@ -1076,6 +2408,26 @@ class TestRayTaskExecutionAdmin:
         assert all("progress_data" not in query for query in task_selects)
         assert all("runtime_env_json" not in query for query in task_selects)
         assert all("workflow_progress_summary_json" not in query for query in task_selects)
+        assert all("workflow_plan_json" not in query for query in task_selects)
+        assert all("workflow_plan_selection" not in query for query in task_selects)
+
+    def test_workflow_diagnostics_javascript_contract(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            if os.environ.get("CI"):
+                pytest.fail("Node.js is required for the workflow diagnostics contract in CI")
+            pytest.skip("Node.js is unavailable for the workflow diagnostics contract")
+
+        result = subprocess.run(
+            [node, "--test", "tests/javascript/workflow_diagnostics.test.mjs"],
+            cwd=_REPOSITORY_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
 
     def test_retry_tasks_requeues_failed_and_lost(self, monkeypatch) -> None:
         admin_obj = _task_admin()

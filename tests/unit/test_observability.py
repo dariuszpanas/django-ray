@@ -26,10 +26,18 @@ from django_ray.observability import (
     get_workflow_node,
     get_workflow_node_snapshot,
     get_workflow_plan,
+    get_workflow_plan_diagnostics,
     get_workflow_progress,
     get_workflow_snapshot,
 )
-from django_ray.workflow_plans import PLAN_DOMAIN_SEPARATOR, PlanEligibility
+from django_ray.workflow_plans import (
+    PLAN_DOMAIN_SEPARATOR,
+    EffectiveWorkflowPlan,
+    PlanEligibility,
+    PlanRejection,
+    materialize_workflow_plan,
+)
+from django_ray.workflows import map_step
 
 
 @pytest.fixture
@@ -68,6 +76,18 @@ def _workflow_plan_fingerprint(serialized: str) -> str:
     encoded = serialized.encode("utf-8")
     digest = hashlib.sha256(PLAN_DOMAIN_SEPARATOR + encoded).hexdigest()
     return f"sha256:{digest}"
+
+
+def _diagnostic_increment(value: int) -> int:
+    return value + 1
+
+
+@pytest.fixture(scope="module")
+def diagnostic_workflow_plan() -> EffectiveWorkflowPlan:
+    return materialize_workflow_plan(
+        map_step(_diagnostic_increment),
+        invocation_args=([1, 2],),
+    ).plan
 
 
 def test_get_workflow_graph_and_node(workflow_execution) -> None:
@@ -210,6 +230,197 @@ def test_get_workflow_plan_rejects_incomplete_snapshot(db) -> None:
 
     with pytest.raises(WorkflowObservabilityError, match="incomplete workflow plan snapshot"):
         get_workflow_plan(execution)
+
+
+def test_workflow_plan_diagnostics_summarizes_real_dynamic_plan_without_raw_rejections(
+    db,
+    diagnostic_workflow_plan,
+) -> None:
+    selection = PlanEligibility(
+        ("dynamic_tasks", "local"),
+        (
+            PlanRejection(
+                "compiled_graph",
+                "UNRESOLVED_CODE_IDENTITY",
+                "private.first.path",
+                "private first message",
+            ),
+            PlanRejection(
+                "compiled_graph",
+                "UNRESOLVED_CODE_IDENTITY",
+                "private.second.path",
+                "private second message",
+            ),
+            PlanRejection(
+                "static_actors",
+                "UNSUPPORTED_NODE_MODEL",
+                "private.third.path",
+                "private third message",
+            ),
+        ),
+        4,
+    ).select(
+        "dynamic_tasks",
+        requested_policy="auto",
+        reporting_policy="full",
+    )
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-plan-diagnostics-valid",
+        callable_path="tests.unit.test_observability._diagnostic_increment",
+        workflow_plan_fingerprint=diagnostic_workflow_plan.fingerprint,
+        workflow_plan_json=diagnostic_workflow_plan.canonical_json,
+        workflow_plan_selection=json.dumps(selection.as_dict()),
+    )
+
+    diagnostics = get_workflow_plan_diagnostics(execution)
+
+    plan_summary = diagnostic_workflow_plan.summary()
+    assert diagnostics == {
+        "status": "AVAILABLE",
+        "definition_name": plan_summary["definition_name"],
+        "definition_revision": plan_summary["definition_revision"],
+        "topology_class": "dynamic",
+        "declared_node_count": plan_summary["node_count"],
+        "retry_safe": diagnostic_workflow_plan.retry_safe,
+        "fingerprint": diagnostic_workflow_plan.fingerprint,
+        "fingerprint_compact": (
+            f"sha256:{diagnostic_workflow_plan.fingerprint.removeprefix('sha256:')[:12]}"
+        ),
+        "requested_policy": "auto",
+        "selected_strategy": "dynamic_tasks",
+        "reporting_policy": "full",
+        "eligible_strategies": ["dynamic_tasks", "local"],
+        "rejection_counts": {
+            "UNRESOLVED_CODE_IDENTITY": 2,
+            "UNSUPPORTED_NODE_MODEL": 1,
+        },
+        "retained_rejections": 3,
+        "total_rejections": 4,
+        "unretained_rejections": 1,
+    }
+    rendered = json.dumps(diagnostics)
+    assert "private.first.path" not in rendered
+    assert "private second message" not in rendered
+    assert '"path"' not in rendered
+    assert '"message"' not in rendered
+
+
+def test_workflow_plan_diagnostics_redacts_rejection_codes_after_validation(
+    db,
+    settings,
+    diagnostic_workflow_plan,
+) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "REDACT_PATTERNS": [r"UNRESOLVED_CODE_IDENTITY"],
+    }
+    selection = PlanEligibility(
+        ("dynamic_tasks", "local"),
+        (
+            PlanRejection(
+                "compiled_graph",
+                "UNRESOLVED_CODE_IDENTITY",
+                "private.path",
+                "private message",
+            ),
+        ),
+        1,
+    ).select(
+        "dynamic_tasks",
+        requested_policy="auto",
+        reporting_policy="full",
+    )
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-plan-diagnostics-redacted-code",
+        callable_path="tests.unit.test_observability._diagnostic_increment",
+        workflow_plan_fingerprint=diagnostic_workflow_plan.fingerprint,
+        workflow_plan_json=diagnostic_workflow_plan.canonical_json,
+        workflow_plan_selection=json.dumps(selection.as_dict()),
+    )
+
+    diagnostics = get_workflow_plan_diagnostics(execution)
+
+    assert diagnostics["status"] == "AVAILABLE"
+    assert diagnostics["rejection_counts"] == {"[REDACTED]": 1}
+    assert "UNRESOLVED_CODE_IDENTITY" not in json.dumps(diagnostics)
+
+
+def test_workflow_plan_diagnostics_reports_not_recorded_with_fixed_shape(db) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-plan-diagnostics-none",
+        callable_path="tests.unit.test_observability._diagnostic_increment",
+    )
+
+    diagnostics = get_workflow_plan_diagnostics(execution)
+
+    assert diagnostics["status"] == "NOT_RECORDED"
+    assert diagnostics["eligible_strategies"] == []
+    assert diagnostics["rejection_counts"] == {}
+    assert diagnostics["fingerprint"] is None
+    assert diagnostics["declared_node_count"] is None
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "plan_only",
+        "selection_only",
+        "malformed_plan",
+        "fingerprint_mismatch",
+        "invalid_selection",
+        "missing_summary_fields",
+    ],
+)
+def test_workflow_plan_diagnostics_fail_closed_for_unverified_snapshots(
+    db,
+    diagnostic_workflow_plan,
+    case: str,
+) -> None:
+    selection = diagnostic_workflow_plan.eligibility.select(
+        "dynamic_tasks",
+        requested_policy="auto",
+    )
+    serialized_plan = diagnostic_workflow_plan.canonical_json
+    fingerprint = diagnostic_workflow_plan.fingerprint
+    serialized_selection = json.dumps(selection.as_dict())
+    if case == "plan_only":
+        serialized_selection = None
+    elif case == "selection_only":
+        serialized_plan = None
+        fingerprint = None
+    elif case == "malformed_plan":
+        serialized_plan = '{"private":"plan-secret"'
+        fingerprint = _workflow_plan_fingerprint(serialized_plan)
+    elif case == "fingerprint_mismatch":
+        fingerprint = "sha256:" + ("0" * 64)
+    elif case == "invalid_selection":
+        serialized_selection = '{"private":"selection-secret"}'
+    elif case == "missing_summary_fields":
+        serialized_plan = json.dumps(
+            {
+                "plan_format": "django-ray.workflow-plan",
+                "plan_format_version": 1,
+                "private": "missing-summary-secret",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        fingerprint = _workflow_plan_fingerprint(serialized_plan)
+    execution = RayTaskExecution.objects.create(
+        task_id=f"workflow-plan-diagnostics-{case}",
+        callable_path="tests.unit.test_observability._diagnostic_increment",
+        workflow_plan_fingerprint=fingerprint,
+        workflow_plan_json=serialized_plan,
+        workflow_plan_selection=serialized_selection,
+    )
+
+    with pytest.raises(WorkflowObservabilityError) as raised:
+        get_workflow_plan_diagnostics(execution)
+
+    error = str(raised.value)
+    assert "plan-secret" not in error
+    assert "selection-secret" not in error
+    assert "missing-summary-secret" not in error
 
 
 @pytest.mark.parametrize(

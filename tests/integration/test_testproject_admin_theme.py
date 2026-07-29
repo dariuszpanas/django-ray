@@ -70,6 +70,7 @@ assert "/unfold/templates/admin/base.html" in template_origin
 assert finders.find("unfold/css/styles.css")
 assert finders.find("unfold/js/app.js")
 assert finders.find("django_ray/admin/task_live.css")
+assert finders.find("django_ray/admin/workflow_diagnostics.js")
 assert finders.find("testproject/admin.css")
 assert finders.find("testproject/django-ray.svg")
 assert finders.find("testproject/landing-graph-bg.png")
@@ -82,6 +83,7 @@ assert (static_root / "unfold/css/styles.css").is_file()
 assert (static_root / "unfold/js/app.js").is_file()
 assert (static_root / "django_ray/admin/task_live.css").is_file()
 assert (static_root / "django_ray/admin/task_live.js").is_file()
+assert (static_root / "django_ray/admin/workflow_diagnostics.js").is_file()
 assert (static_root / "testproject/admin.css").is_file()
 assert (static_root / "testproject/django-ray.svg").is_file()
 assert (static_root / "testproject/landing-graph-bg.png").is_file()
@@ -211,26 +213,30 @@ for removed_column in (
     assert removed_column not in changelist_html
 assert "django-ray-live-observability" in change_html
 assert "django_ray/admin/task_live" in change_html
+assert "django_ray/admin/workflow_diagnostics" in change_html
 assert "django-ray-live__grid" in change_html
-assert "django-ray-live__workflow-links" in change_html
+assert "django-ray-workflow-diagnostics" in change_html
+assert "django-ray-workflow__summary" in change_html
 assert 'aria-labelledby="django-ray-live-heading"' in change_html
-assert change_html.count('role="status"') == 1
-assert "Workflow topology" in change_html
-for workflow_path in (
-    reverse(
+assert change_html.count('role="status"') == 2
+assert "Workflow execution" in change_html
+workflow_paths = {
+    "data-topology-nodes-url": reverse(
         "admin:django_ray_raytaskexecution_workflow_topology_nodes",
         args=[execution.pk],
     ),
-    reverse(
+    "data-topology-edges-url": reverse(
         "admin:django_ray_raytaskexecution_workflow_topology_edges",
         args=[execution.pk],
     ),
-    reverse(
+    "data-node-details-url": reverse(
         "admin:django_ray_raytaskexecution_workflow_node_details",
         args=[execution.pk],
     ),
-):
-    assert f'href="{workflow_path}"' in change_html
+}
+for attribute, workflow_path in workflow_paths.items():
+    assert f'{attribute}="{workflow_path}"' in change_html
+    assert f'href="{workflow_path}"' not in change_html
 assert "unfold-runtime-profile" in change_html
 assert "c" * 64 in change_html
 assert "Runtime env json" not in change_html
@@ -320,7 +326,27 @@ assert "immutable" in live_stylesheet_response["Cache-Control"]
 live_stylesheet_body = b"".join(live_stylesheet_response.streaming_content)
 live_stylesheet_response.close()
 assert b"#django-ray-live-observability" in live_stylesheet_body
+assert b".django-ray-workflow__summary" in live_stylesheet_body
+assert b"grid-template-columns: repeat(4, minmax(0, 1fr))" in live_stylesheet_body
+assert b".django-ray-workflow__chip" in live_stylesheet_body
 assert b":focus-visible" in live_stylesheet_body
+
+workflow_script_match = re.search(
+    r'''src=["'](?P<path>/static/django_ray/admin/workflow_diagnostics[^"']*\.js)["']''',
+    change_html,
+)
+assert workflow_script_match is not None
+workflow_script_response = authenticated.get(
+    html.unescape(workflow_script_match.group("path")),
+)
+assert workflow_script_response.status_code == 200
+assert "javascript" in workflow_script_response["Content-Type"]
+assert "immutable" in workflow_script_response["Cache-Control"]
+workflow_script_body = b"".join(workflow_script_response.streaming_content)
+workflow_script_response.close()
+assert b"django-ray-workflow-diagnostics" in workflow_script_body
+assert b"credentials: \"same-origin\"" in workflow_script_body
+assert b"innerHTML" not in workflow_script_body
 
 site_icon_response = authenticated.get(site_icon_path)
 assert site_icon_response.status_code == 200

@@ -60,6 +60,7 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
         / "change_form.html",
         package_root / "static" / "django_ray" / "admin" / "task_live.css",
         package_root / "static" / "django_ray" / "admin" / "task_live.js",
+        package_root / "static" / "django_ray" / "admin" / "workflow_diagnostics.js",
     ]
     assert all(asset.is_file() and asset.is_relative_to(package_root) for asset in expected_assets)
 
@@ -80,6 +81,13 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
     assert "stateNode.dataset.state = state" in script
     assert "innerHTML" not in script
     assert all(state in script for state in ("SUCCEEDED", "FAILED", "CANCELLED", "LOST"))
+
+    diagnostics_script = expected_assets[3].read_text(encoding="utf-8")
+    assert "django-ray-workflow-diagnostics" in diagnostics_script
+    assert 'credentials: "same-origin"' in diagnostics_script
+    assert 'cache: "no-store"' in diagnostics_script
+    assert "textContent" in diagnostics_script
+    assert "innerHTML" not in diagnostics_script
 
 
 def test_unfold_is_testproject_only_and_reproducibly_pinned() -> None:
