@@ -221,6 +221,20 @@ def test_unfold_stylesheet_match_accepts_manifest_hash() -> None:
     assert match.group("path") == "/static/unfold/css/styles.0123456789ab.css"
 
 
+def test_django_ray_admin_assets_accept_manifest_hashes() -> None:
+    stylesheet_match = docker_smoke._DJANGO_RAY_STYLESHEET_RE.search(
+        '<link href="/static/testproject/admin.0123456789ab.css" rel="stylesheet">'
+    )
+    icon_match = docker_smoke._DJANGO_RAY_ICON_RE.search(
+        '<img src="/static/testproject/django-ray.abcdef012345.svg" alt="Home">'
+    )
+
+    assert stylesheet_match is not None
+    assert stylesheet_match.group("path") == "/static/testproject/admin.0123456789ab.css"
+    assert icon_match is not None
+    assert icon_match.group("path") == "/static/testproject/django-ray.abcdef012345.svg"
+
+
 def test_admin_text_request_uses_remaining_shared_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

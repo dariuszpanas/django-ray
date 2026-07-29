@@ -19,6 +19,18 @@ _REQUEST_TIMEOUT_SECONDS = 5.0
 _UNFOLD_STYLESHEET_RE = re.compile(
     r"""href=["'](?P<path>/static/unfold/css/styles[^"']*\.css)["']"""
 )
+_DJANGO_RAY_STYLESHEET_RE = re.compile(
+    r"""href=["'](?P<path>/static/testproject/admin[^"']*\.css)["']"""
+)
+_TASK_LIVE_STYLESHEET_RE = re.compile(
+    r"""href=["'](?P<path>/static/django_ray/admin/task_live[^"']*\.css)["']"""
+)
+_TASK_LIVE_SCRIPT_RE = re.compile(
+    r"""src=["'](?P<path>/static/django_ray/admin/task_live[^"']*\.js)["']"""
+)
+_DJANGO_RAY_ICON_RE = re.compile(
+    r"""(?:href|src)=["'](?P<path>/static/testproject/django-ray[^"']*\.svg)["']"""
+)
 
 
 class DockerSmokeError(RuntimeError):
@@ -200,6 +212,11 @@ def _verify_unfold_admin_contract(
             headers=headers,
             deadline=deadline,
         )
+        login_html = _request_text(
+            base_url,
+            "/admin/login/",
+            deadline=deadline,
+        )
         changelist_html = _request_text(
             base_url,
             "/admin/django_ray/raytaskexecution/",
@@ -228,16 +245,79 @@ def _verify_unfold_admin_contract(
 
         if "django-ray" not in index_html:
             raise DockerSmokeError("admin index did not render django-ray branding")
+        if "testproject/landing-graph-bg" not in login_html:
+            raise DockerSmokeError("admin login did not render the branded graph")
         if "/admin/django_ray/taskattempt/" in index_html:
             raise DockerSmokeError("admin index exposed standalone attempt navigation")
         if "retry_tasks" not in changelist_html or "cancel_tasks" not in changelist_html:
             raise DockerSmokeError("admin changelist did not render task controls")
+        compact_columns = [
+            "column-id",
+            "column-state_display",
+            "column-task_display",
+            "column-queue_display",
+            "column-priority",
+            "column-attempt_display",
+            "column-ray_dashboard_link",
+            "column-created_display",
+            "column-started_display",
+            "column-finished_display",
+        ]
+        positions = [changelist_html.find(marker) for marker in compact_columns]
+        if -1 in positions or positions != sorted(positions):
+            raise DockerSmokeError("admin changelist did not render the compact column order")
+        if any(
+            marker in changelist_html
+            for marker in (
+                "column-execution_generation",
+                "column-workflow_run_id",
+                "column-workflow_plan_fingerprint",
+                "column-workflow_plan_pinned_attempt",
+            )
+        ):
+            raise DockerSmokeError("admin changelist exposed detail-only workflow identity")
         if (
             "django-ray-live-observability" not in change_html
-            or "django_ray/admin/task_live" not in change_html
+            or _TASK_LIVE_STYLESHEET_RE.search(change_html) is None
+            or _TASK_LIVE_SCRIPT_RE.search(change_html) is None
+            or 'aria-labelledby="django-ray-live-heading"' not in change_html
+            or change_html.count('role="status"') != 1
+            or "django-ray-live__grid" not in change_html
+            or "django-ray-live__workflow-links" not in change_html
         ):
             raise DockerSmokeError("admin change view did not render live task diagnostics")
-        if "Attempt history" not in change_html or attempt_detail_path not in change_html:
+        workflow_paths = (
+            f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/topology/nodes/",
+            f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/topology/edges/",
+            f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/nodes/",
+        )
+        if any(f'href="{path}"' not in change_html for path in workflow_paths):
+            raise DockerSmokeError("admin change view did not render workflow action links")
+        if "Runtime env json" in change_html or "field-runtime_env_json" in change_html:
+            raise DockerSmokeError("admin change view exposed the raw RuntimeEnv snapshot")
+        if (
+            "Execution metadata is read-only" not in change_html
+            or 'name="_save"' in change_html
+            or 'name="_continue"' in change_html
+            or (f"/admin/django_ray/raytaskexecution/{execution.pk}/delete/" in change_html)
+            or any(
+                f'name="{field}"' in change_html
+                for field in (
+                    "priority",
+                    "queue_name",
+                    "state",
+                    "attempt_number",
+                    "execution_generation",
+                    "claimed_by_worker",
+                )
+            )
+        ):
+            raise DockerSmokeError("admin change view exposed direct execution editing")
+        if (
+            "Attempt history" not in change_html
+            or change_html.count(attempt_detail_path) != 1
+            or str(attempt) in change_html
+        ):
             raise DockerSmokeError("admin change view did not render contextual attempt history")
         if (
             str(attempt.attempt_number) not in attempt_detail_html
@@ -257,6 +337,48 @@ def _verify_unfold_admin_contract(
         )
         if not stylesheet.strip():
             raise DockerSmokeError("Unfold stylesheet response was empty")
+
+        custom_stylesheet_match = _DJANGO_RAY_STYLESHEET_RE.search(index_html)
+        if custom_stylesheet_match is None:
+            raise DockerSmokeError("admin index did not load the django-ray stylesheet")
+        custom_stylesheet_path = html.unescape(custom_stylesheet_match.group("path"))
+        custom_stylesheet = _request_text(
+            base_url,
+            custom_stylesheet_path,
+            expected_content_type="text/css",
+            deadline=deadline,
+        )
+        if "--django-ray-admin-accent" not in custom_stylesheet:
+            raise DockerSmokeError("django-ray stylesheet did not contain theme tokens")
+
+        live_stylesheet_match = _TASK_LIVE_STYLESHEET_RE.search(change_html)
+        if live_stylesheet_match is None:
+            raise DockerSmokeError("admin change view did not load the live status stylesheet")
+        live_stylesheet_path = html.unescape(live_stylesheet_match.group("path"))
+        live_stylesheet = _request_text(
+            base_url,
+            live_stylesheet_path,
+            expected_content_type="text/css",
+            deadline=deadline,
+        )
+        if (
+            "#django-ray-live-observability" not in live_stylesheet
+            or ":focus-visible" not in live_stylesheet
+        ):
+            raise DockerSmokeError("live status stylesheet response was invalid")
+
+        icon_match = _DJANGO_RAY_ICON_RE.search(index_html)
+        if icon_match is None:
+            raise DockerSmokeError("admin index did not render the django-ray icon")
+        icon_path = html.unescape(icon_match.group("path"))
+        icon = _request_text(
+            base_url,
+            icon_path,
+            expected_content_type="image/svg+xml",
+            deadline=deadline,
+        )
+        if 'aria-label="django-ray"' not in icon:
+            raise DockerSmokeError("django-ray admin icon response was invalid")
 
         try:
             observability = json.loads(observability_text)
@@ -279,6 +401,8 @@ def _verify_unfold_admin_contract(
         "admin": "unfold-authenticated",
         "admin_attempt_detail": "verified",
         "admin_attempt_history": "verified",
+        "admin_branding": "verified",
+        "admin_layout": "verified",
         "admin_observability": "verified",
         "admin_static": "served",
     }

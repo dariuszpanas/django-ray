@@ -333,7 +333,10 @@ This separation works well for a shared cluster within one trust boundary:
 
 Mount credentials, certificates, and shared data through the cluster deployment.
 Do not put secrets in profile URIs or `env_vars`: the resolved RuntimeEnv is stored
-on the task row and is visible to operators.
+in plaintext on the task row for exact retry execution and may be available through
+database access, backups, and the Ray runtime. The Django admin intentionally omits
+the raw snapshot and shows only its profile and content hash; that presentation
+boundary does not encrypt the stored value.
 
 RuntimeEnv is packaging and dependency isolation, not a security boundary. Use
 separate Ray clusters for mutually untrusted teams or workloads.

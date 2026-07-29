@@ -214,10 +214,11 @@ the bounded diagnostic fields and custom-`AdminSite` contract.
 
 `REDACT_PATTERNS` is an optional sequence of regular expressions used for
 worker logs, structured log fields, Ray State API/log responses, the sample
-operational API, and the Django admin task detail view. When it is `None`, the
-built-in patterns cover common names such as `password`, `secret`, `token`,
-`authorization`, `cookie`, and `private_key`. A matching mapping key redacts
-its value; a matching string is replaced with `[REDACTED]`.
+operational API, and bounded diagnostic fields in the Django admin task detail
+view. When it is `None`, the built-in patterns cover common names such as
+`password`, `secret`, `token`, `authorization`, `cookie`, and `private_key`.
+A matching mapping key redacts its value; a matching string is replaced with
+`[REDACTED]`.
 
 ```python
 DJANGO_RAY = {
@@ -237,6 +238,16 @@ boundary for operational output, not encryption: task results and arguments
 remain in the database/result backend for authorized readers, and application
 code that prints directly to stdout bypasses this policy. Protect the API,
 admin, Ray dashboard, and result storage with the appropriate access controls.
+The admin never renders the raw durable RuntimeEnv snapshot because arbitrary
+`env_vars`, package references, and URIs cannot be made safe through
+name-pattern redaction alone. It shows only the profile and content hash.
+
+`RayTaskExecution` detail fields are read-only, including queue, priority,
+lifecycle state, attempt/generation identity, and worker ownership. Queue and
+priority influence claim ordering only while work is queued, but changing them
+through a generic model save would bypass state fencing and can race a worker
+claim. Use the task-list Retry and Cancel actions for package-owned control
+transitions.
 
 ## Startup Validation
 

@@ -13,7 +13,7 @@ from django.contrib.auth.models import AnonymousUser, Permission
 from django.core.exceptions import PermissionDenied
 from django.db import connection
 from django.http import Http404
-from django.test import RequestFactory, override_settings
+from django.test import Client, RequestFactory, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
@@ -90,6 +90,65 @@ class TestRayTaskExecutionAdmin:
             assert task_admin.get_inlines(request, None) == []
             assert attempt_admin.has_module_permission(request) is has_module
 
+    def test_changelist_prioritizes_compact_operational_fields(self) -> None:
+        admin_obj = _task_admin()
+
+        assert admin_obj.list_display == [
+            "id",
+            "state_display",
+            "task_display",
+            "queue_display",
+            "priority",
+            "attempt_display",
+            "ray_dashboard_link",
+            "created_display",
+            "started_display",
+            "finished_display",
+        ]
+        assert admin_obj.list_fullwidth is True
+        expected_display_metadata = {
+            "state_display": ("State", "state"),
+            "task_display": ("Task", "callable_path"),
+            "queue_display": ("Queue", "queue_name"),
+            "attempt_display": ("Attempt", "attempt_number"),
+            "created_display": ("Created", "created_at"),
+            "started_display": ("Started", "started_at"),
+            "finished_display": ("Finished", "finished_at"),
+            "ray_dashboard_link": ("Ray", None),
+        }
+        for method_name, (description, ordering) in expected_display_metadata.items():
+            method = getattr(admin_obj, method_name)
+            assert method.short_description == description
+            assert getattr(method, "admin_order_field", None) == ordering
+
+    @override_settings(TIME_ZONE="UTC")
+    def test_compact_changelist_values_preserve_full_context(self) -> None:
+        timestamp = datetime(2026, 7, 29, 21, 53, 12, tzinfo=UTC)
+        task = RayTaskExecution(
+            callable_path="testproject.tasks.a_callable_name_that_is_intentionally_long",
+            queue_name="an-intentionally-long-queue-name",
+            attempt_number=3,
+            created_at=timestamp,
+            started_at=timestamp,
+            finished_at=None,
+        )
+        admin_obj = _task_admin()
+
+        task_display = str(admin_obj.task_display(task))
+        queue_display = str(admin_obj.queue_display(task))
+        created_display = str(admin_obj.created_display(task))
+
+        assert str(task.callable_path) in task_display
+        assert "a_callable_name" in task_display
+        assert "intentionally_long" in task_display
+        assert str(task.queue_name) in queue_display
+        assert "…" in queue_display
+        assert 'datetime="2026-07-29T21:53:12+00:00"' in created_display
+        assert 'title="2026-07-29 21:53:12 UTC"' in created_display
+        assert ">2026-07-29 21:53</time>" in created_display
+        assert admin_obj.attempt_display(task) == 3
+        assert admin_obj.finished_display(task) == "-"
+
     def test_ray_job_display_variants(self) -> None:
         admin_obj = _task_admin()
 
@@ -148,6 +207,149 @@ class TestRayTaskExecutionAdmin:
         assert "error-secret" not in rendered
         assert "[REDACTED]" in rendered
 
+    def test_runtime_env_snapshot_is_not_presented_in_admin(self) -> None:
+        admin_obj = _task_admin()
+        fieldset_fields = {
+            field for _, options in admin_obj.fieldsets for field in options.get("fields", ())
+        }
+
+        assert "runtime_env_json" not in admin_obj.readonly_fields
+        assert "runtime_env_json" not in fieldset_fields
+        assert {"runtime_env_profile", "runtime_env_hash"} <= fieldset_fields
+
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-runtime-env-confidential-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.QUEUED,
+            runtime_env_profile="runtime-env-profile-marker",
+            runtime_env_hash="b" * 64,
+            runtime_env_json=json.dumps(
+                {
+                    "env_vars": {
+                        "DISPLAY_NAME": "ordinary-runtime-secret-marker",
+                    },
+                    "working_dir": (
+                        "https://user:pass@private.example/archive.zip"
+                        "?signature=signed-runtime-query-marker"
+                    ),
+                    "config": "<script>runtime-script-marker</script>",
+                }
+            ),
+        )
+        user = get_user_model().objects.create_superuser(
+            username="runtime-env-confidential-admin",
+        )
+        change_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[execution.pk],
+        )
+        request = RequestFactory().get(change_url)
+        request.user = user
+
+        response = admin_obj.change_view(request, str(execution.pk))
+        response.render()
+        content = response.content.decode("utf-8")
+
+        assert response.status_code == 200
+        assert "runtime-env-profile-marker" in content
+        assert "b" * 64 in content
+        assert "Runtime env json" not in content
+        assert "field-runtime_env_json" not in content
+        assert "ordinary-runtime-secret-marker" not in content
+        assert "user:pass@private.example" not in content
+        assert "signed-runtime-query-marker" not in content
+        assert "runtime-script-marker" not in content
+        assert "RuntimeEnv values are intentionally not displayed" in content
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_execution_change_form_is_read_only_and_rejects_tampering(
+        self,
+        settings,
+    ) -> None:
+        admin_obj = _task_admin()
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-read-only-execution-001",
+            callable_path="testproject.tasks.add_numbers",
+            priority=7,
+            queue_name="default",
+            state=TaskState.QUEUED,
+            attempt_number=2,
+            execution_generation=3,
+            claimed_by_worker=None,
+        )
+        user = get_user_model().objects.create_superuser(
+            username="read-only-execution-admin",
+        )
+        request = RequestFactory().get("/admin/")
+        request.user = user
+        fieldset_fields = {
+            field for _, options in admin_obj.fieldsets for field in options.get("fields", ())
+        }
+
+        assert fieldset_fields <= set(admin_obj.readonly_fields)
+        assert admin_obj.get_form(request, execution).base_fields == {}
+        assert admin_obj.has_add_permission(request) is False
+        assert admin_obj.has_change_permission(request) is True
+        assert admin_obj.has_change_permission(request, execution) is False
+        assert admin_obj.has_delete_permission(request, execution) is False
+        assert set(admin_obj.get_actions(request)) == {"retry_tasks", "cancel_tasks"}
+
+        client = Client()
+        client.force_login(user)
+        change_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[execution.pk],
+        )
+        read_response = client.get(change_url)
+        read_content = read_response.content.decode("utf-8")
+
+        assert read_response.status_code == 200
+        assert "Execution metadata is read-only" in read_content
+        assert 'name="_save"' not in read_content
+        assert 'name="_continue"' not in read_content
+        assert (
+            reverse(
+                "admin:django_ray_raytaskexecution_delete",
+                args=[execution.pk],
+            )
+            not in read_content
+        )
+        for field in (
+            "priority",
+            "queue_name",
+            "state",
+            "attempt_number",
+            "execution_generation",
+            "claimed_by_worker",
+        ):
+            assert f'name="{field}"' not in read_content
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "TASK_ATTEMPT_ADMIN_MODE": "standalone",
+        }
+        tamper_response = client.post(
+            change_url,
+            {
+                "priority": 100,
+                "queue_name": "ml",
+                "state": TaskState.SUCCEEDED,
+                "attempt_number": 99,
+                "execution_generation": 99,
+                "claimed_by_worker": "forged-worker",
+                "_save": "Save",
+            },
+        )
+        execution.refresh_from_db()
+
+        assert tamper_response.status_code == 403
+        assert execution.priority == 7
+        assert execution.queue_name == "default"
+        assert execution.state == TaskState.QUEUED
+        assert execution.attempt_number == 2
+        assert execution.execution_generation == 3
+        assert execution.claimed_by_worker is None
+
     def test_display_helpers_handle_empty_invalid_and_complete_values(self) -> None:
         admin_obj = _task_admin()
         task = RayTaskExecution.objects.create(
@@ -198,6 +400,7 @@ class TestRayTaskExecutionAdmin:
         ]
         assert len(task_selects) == 1
         assert "progress_data" not in task_selects[0]
+        assert "runtime_env_json" not in task_selects[0]
         assert "workflow_progress_summary_json" not in task_selects[0]
         assert "progress_data_display" not in admin_obj.readonly_fields
 
@@ -793,11 +996,32 @@ class TestRayTaskExecutionAdmin:
         assert response.status_code == 200
         assert 'id="django-ray-live-observability"' in content
         assert f'data-observability-url="{endpoint}"' in content
+        assert 'href="/static/django_ray/admin/task_live.css"' in content
         assert 'src="/static/django_ray/admin/task_live.js"' in content
+        assert 'aria-labelledby="django-ray-live-heading"' in content
+        assert 'id="django-ray-live-heading"' in content
+        assert content.count('role="status"') == 1
         assert 'aria-live="polite"' in content
-        assert "topology nodes" in content
-        assert "topology edges" in content
-        assert "node details" in content
+        assert 'class="django-ray-live__grid"' in content
+        assert 'class="django-ray-live__state"' in content
+        assert 'data-state="RUNNING"' in content
+        assert 'class="django-ray-live__workflow-links"' in content
+        assert 'aria-labelledby="django-ray-workflow-links-heading"' in content
+        topology_nodes_url = reverse(
+            "admin:django_ray_raytaskexecution_workflow_topology_nodes",
+            args=[execution.pk],
+        )
+        topology_edges_url = reverse(
+            "admin:django_ray_raytaskexecution_workflow_topology_edges",
+            args=[execution.pk],
+        )
+        node_details_url = reverse(
+            "admin:django_ray_raytaskexecution_workflow_node_details",
+            args=[execution.pk],
+        )
+        assert f'href="{topology_nodes_url}">Topology nodes</a>' in content
+        assert f'href="{topology_edges_url}">Topology edges</a>' in content
+        assert f'href="{node_details_url}">Node details</a>' in content
         task_selects = [
             query["sql"]
             for query in queries.captured_queries
@@ -806,6 +1030,7 @@ class TestRayTaskExecutionAdmin:
         ]
         assert task_selects
         assert all("progress_data" not in query for query in task_selects)
+        assert all("runtime_env_json" not in query for query in task_selects)
         assert all("workflow_progress_summary_json" not in query for query in task_selects)
 
     def test_retry_tasks_requeues_failed_and_lost(self, monkeypatch) -> None:
@@ -986,6 +1211,35 @@ class TestTaskAttemptAdmin:
         assert inline.has_change_permission(request) is False
         assert inline.has_delete_permission(request) is False
         assert inline.can_delete is False
+        assert inline.hide_title is True
+        assert inline.show_change_link is False
+        assert inline.fields == (
+            "attempt_detail_link",
+            "state",
+            "started_display",
+            "finished_display",
+            "error_summary",
+        )
+        assert inline.readonly_fields == inline.fields
+
+    def test_attempt_inline_uses_one_compact_detail_link(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-link-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        attempt = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=2,
+            state=TaskState.SUCCEEDED,
+        )
+        inline = TaskAttemptInline(TaskAttempt, admin.site)
+
+        rendered = str(inline.attempt_detail_link(attempt))
+
+        assert rendered == (
+            f'<a href="{reverse("admin:django_ray_taskattempt_change", args=[attempt.pk])}">#2</a>'
+        )
+        assert inline.attempt_detail_link.short_description == "Attempt"
 
     def test_diagnostics_are_redacted_bounded_and_not_raw_model_fields(self, settings) -> None:
         settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
@@ -1086,8 +1340,8 @@ class TestTaskAttemptAdmin:
         assert reverse("admin:django_ray_taskattempt_changelist") not in index_html
         assert change.status_code == 200
         assert "Attempt history" in change_html
-        assert first_detail_url in change_html
-        assert second_detail_url in change_html
+        assert change_html.count(first_detail_url) == 1
+        assert change_html.count(second_detail_url) == 1
         assert change_html.index("first-attempt-marker") < change_html.index(
             "second-attempt-marker"
         )
