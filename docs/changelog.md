@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ray-native workflows can keep the default full node-progress reporting or disable it
+  globally and per invocation. Disabled runs retain the durable outer-task lifecycle
+  and bounded plan/strategy metadata while creating no progress actor, node-reporting
+  RPCs, or `progress_data` writes.
 - A manual and monthly line-coverage debt report now records exact JSON and Markdown evidence,
   classifies every uncovered range, and idempotently updates one marked GitHub tracker comment while
   preserving the existing global, worker, Ray Job, and testproject coverage floors.

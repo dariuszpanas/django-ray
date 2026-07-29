@@ -29,7 +29,12 @@ from django_ray.models import (
     WorkflowProgressTopologySlot,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
+from django_ray.workflow_plans import (
+    WorkflowPlanValidationError,
+    effective_plan_selection_reporting_policy,
+)
 from django_ray.workflow_progress import (
+    MAX_PLAN_SELECTION_BYTES,
     WorkflowProgressDiagnosticCode,
     WorkflowProgressReadSource,
     _OctetLength,
@@ -566,6 +571,13 @@ def _summary_context(
                 complete=False,
             )
 
+    availability = WorkflowProgressDetailAvailability.NOT_REPORTED.value
+    if (
+        selected_attempt_number == execution.attempt_number
+        and _current_workflow_reporting_policy(execution, using=using) == "disabled"
+    ):
+        availability = WorkflowProgressDetailAvailability.DISABLED.value
+
     return _SummaryContext(
         execution=execution,
         selected_attempt_number=selected_attempt_number,
@@ -573,9 +585,58 @@ def _summary_context(
         summary=None,
         public_summary=None,
         identity=None,
-        availability=WorkflowProgressDetailAvailability.NOT_REPORTED.value,
+        availability=availability,
         complete=False,
     )
+
+
+def _current_workflow_reporting_policy(
+    execution: RayTaskExecution,
+    *,
+    using: str,
+) -> str | None:
+    """Read the current selection policy without loading an unbounded value."""
+    row = (
+        RayTaskExecution.objects.using(using)
+        .filter(
+            pk=execution.pk,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+            workflow_run_id=execution.workflow_run_id,
+        )
+        .annotate(_selection_bytes=_OctetLength("workflow_plan_selection"))
+        .annotate(
+            _bounded_selection=Case(
+                When(
+                    _selection_bytes__lte=MAX_PLAN_SELECTION_BYTES,
+                    then=F("workflow_plan_selection"),
+                ),
+                default=Value(None),
+                output_field=TextField(),
+            )
+        )
+        .values("_selection_bytes", "_bounded_selection")
+        .first()
+    )
+    if row is None or row["_selection_bytes"] is None:
+        return None
+    if (
+        type(row["_selection_bytes"]) is not int
+        or row["_selection_bytes"] <= 0
+        or row["_selection_bytes"] > MAX_PLAN_SELECTION_BYTES
+        or not isinstance(row["_bounded_selection"], str)
+    ):
+        return None
+    try:
+        selection = json.loads(row["_bounded_selection"])
+        return effective_plan_selection_reporting_policy(selection)
+    except (
+        TypeError,
+        RecursionError,
+        json.JSONDecodeError,
+        WorkflowPlanValidationError,
+    ):
+        return None
 
 
 def _isoformat(value: datetime) -> str:

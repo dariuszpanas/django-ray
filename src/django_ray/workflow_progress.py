@@ -23,6 +23,7 @@ from django_ray.workflow_plans import (
     EffectiveWorkflowPlan,
     PlanSelection,
     WorkflowPlanMismatchError,
+    effective_plan_selection_reporting_policy,
     validate_plan_selection_manifest,
 )
 from django_ray.workflow_progress_summary import (
@@ -569,10 +570,12 @@ def _validate_summary_plan_binding(
     serialized_selection = execution.workflow_plan_selection
     if serialized_selection is None:
         selected_strategy = None
+        reporting_policy = None
     else:
         try:
             selection = validate_plan_selection_manifest(json.loads(serialized_selection))
-        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            reporting_policy = effective_plan_selection_reporting_policy(selection)
+        except (TypeError, ValueError, RecursionError, json.JSONDecodeError) as error:
             raise WorkflowProgressSummaryConflictError(
                 "pinned workflow strategy selection is invalid"
             ) from error
@@ -580,6 +583,10 @@ def _validate_summary_plan_binding(
     if summary["selected_strategy"] != selected_strategy:
         raise WorkflowProgressSummaryConflictError(
             "workflow progress summary does not match the pinned execution strategy"
+        )
+    if reporting_policy is not None and summary["reporting_policy"] != reporting_policy:
+        raise WorkflowProgressSummaryConflictError(
+            "workflow progress summary does not match the pinned reporting policy"
         )
 
 

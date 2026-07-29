@@ -60,7 +60,7 @@ node progress is disabled:
   bindings without cross-attempt comparison;
 - `workflow_plan_json` is the bounded canonical secret-free manifest; and
 - `workflow_plan_selection` records the requested policy, selected baseline strategy,
-  eligible strategies, and bounded rejections.
+  effective workflow reporting policy, eligible strategies, and bounded rejections.
 
 Local execution and ordinary dynamic Ray tasks are the only selectable strategies in
 this change. Current task-shaped leaves always receive an `UNSUPPORTED_NODE_MODEL`
@@ -542,9 +542,10 @@ Every strategy returns a structured decision before preparation or submission:
 ```json
 {
   "plan_selection_format": "django-ray.workflow-plan-selection",
-  "plan_selection_format_version": 1,
+  "plan_selection_format_version": 2,
   "requested_policy": "auto",
   "selected_strategy": "dynamic_tasks",
+  "reporting_policy": "full",
   "eligible_strategies": ["local", "dynamic_tasks"],
   "rejections": [
     {
@@ -556,6 +557,13 @@ Every strategy returns a structured decision before preparation or submission:
   ]
 }
 ```
+
+Version 2 adds the effective workflow reporting policy without changing the
+fingerprinted execution plan. Readers continue to accept version 1 rolling-deployment
+rows: dynamic execution implies `"full"` and local execution implies `"disabled"`.
+New writers emit version 2. The version-2 reader recognizes the summary protocol's
+reserved `"sampled"` and `"terminal_only"` values for forward rolling compatibility,
+but the current runtime can select only `"full"` or `"disabled"`.
 
 Diagnostics are bounded, deterministic for the same plan and capability set, ordered by
 strategy then code/path, and contain no input values or secret material. Each rejection

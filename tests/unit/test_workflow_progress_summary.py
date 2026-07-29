@@ -805,6 +805,30 @@ def test_summary_writer_checks_pinned_plan_and_strategy(running_execution) -> No
 
 
 @pytest.mark.django_db
+def test_summary_writer_checks_pinned_reporting_policy(running_execution) -> None:
+    fingerprint = "sha256:" + "a" * 64
+    selection = PlanEligibility(("dynamic_tasks",), (), 0).select(
+        "dynamic_tasks",
+        requested_policy="auto",
+        reporting_policy="disabled",
+    )
+    running_execution.workflow_plan_fingerprint = fingerprint
+    running_execution.workflow_plan_selection = json.dumps(selection.as_dict())
+    running_execution.save(update_fields=["workflow_plan_fingerprint", "workflow_plan_selection"])
+    identity = _identity(running_execution)
+
+    with pytest.raises(WorkflowProgressSummaryConflictError, match="reporting policy"):
+        persist_workflow_progress_summary(
+            identity,
+            _summary(
+                identity,
+                selected_strategy="dynamic_tasks",
+                plan_fingerprint=fingerprint,
+            ),
+        )
+
+
+@pytest.mark.django_db
 def test_summary_writer_projects_only_bounded_coordination_fields(running_execution) -> None:
     running_execution.progress_data = "legacy-graph" * 1_000
     running_execution.args_json = json.dumps(["private-input"])

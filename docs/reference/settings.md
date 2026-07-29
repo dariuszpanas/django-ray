@@ -352,17 +352,37 @@ Validation requires it to be strictly less than `STUCK_TASK_TIMEOUT_SECONDS`.
 "TASK_MONITOR_HEARTBEAT_SECONDS": 15
 ```
 
+### WORKFLOW_PROGRESS_REPORTING_POLICY
+
+- **Type**: `str`
+- **Default**: `"full"`
+- **Allowed**: `"full"` or `"disabled"`
+
+Default node-reporting policy for Ray-native workflow invocations. `"full"` preserves
+the progress actor, per-node events, application progress, and periodic
+`progress_data` snapshots. `"disabled"` creates no progress actor, sends no
+node-reporting RPCs, and writes no `progress_data`. It does not disable task claiming,
+result/error persistence, retry and cancellation fencing, or task-monitor heartbeats.
+
+Call `WorkflowSignature.with_progress_reporting(policy).run(...)` to override this
+setting for one invocation. The fluent configuration keeps package execution options
+separate from keyword arguments forwarded to the root application callable.
+
+```python
+"WORKFLOW_PROGRESS_REPORTING_POLICY": "disabled"
+```
+
 ### WORKFLOW_PROGRESS_FLUSH_SECONDS
 
 - **Type**: `int`
 - **Default**: `1`
 - **Allowed**: `1` to `300`
 
-Minimum interval between database writes of the active Ray-native workflow's
-progress snapshot. Leaf events are collected by a per-workflow Ray actor; this
-setting bounds database traffic independently of workflow fan-out size. Every
-write is conditional on the current task attempt, execution generation, lifecycle
-state, and workflow run ID.
+Minimum interval between database writes of an active full-reporting Ray-native
+workflow's progress snapshot. Leaf events are collected by a per-workflow Ray actor.
+This setting limits snapshot write frequency; it does not bound producer RPC count,
+actor mailbox depth, or actor memory. Every write is conditional on the current task
+attempt, execution generation, lifecycle state, and workflow run ID.
 
 ```python
 "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1
@@ -659,6 +679,7 @@ DJANGO_RAY = {
     "WORKER_LEASE_SECONDS": 60,
     "WORKER_HEARTBEAT_SECONDS": 15,
     "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
+    "WORKFLOW_PROGRESS_REPORTING_POLICY": "full",
     "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
     "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7,
 }

@@ -29,6 +29,7 @@ from django_ray.workflows import (
     _json_safe,
     _LocalExecutor,
     _RayExecutor,
+    _workflow_progress_policy,
     chain,
     group,
     map_step,
@@ -47,6 +48,14 @@ def multiply(value: int, factor: int = 1) -> int:
 
 def increment(value: int) -> int:
     return value + 1
+
+
+def report_and_increment(value: int) -> tuple[bool, int]:
+    return report_progress(1, 2), value + 1
+
+
+def echo_workflow_progress_policy(*, workflow_progress_policy: str) -> str:
+    return workflow_progress_policy
 
 
 def sum_values(values: list[int]) -> int:
@@ -963,6 +972,48 @@ def test_forced_ray_mode_requires_initialized_ray(monkeypatch) -> None:
         step(increment).run(1, use_ray=True)
 
 
+def test_invalid_workflow_progress_policy_fails_before_plan_materialization(
+    monkeypatch,
+) -> None:
+    materialized = False
+
+    def record_materialization(*args, **kwargs):
+        del args, kwargs
+        nonlocal materialized
+        materialized = True
+        raise AssertionError("policy validation must run first")
+
+    monkeypatch.setattr(
+        "django_ray.workflow_plans.materialize_workflow_plan",
+        record_materialization,
+    )
+
+    with pytest.raises(WorkflowDefinitionError, match="full, disabled|disabled, full"):
+        step(increment).with_progress_reporting("sampled")
+
+    assert materialized is False
+
+
+def test_progress_policy_named_application_kwarg_is_not_reserved() -> None:
+    assert (
+        step(echo_workflow_progress_policy).run(
+            use_ray=False,
+            workflow_progress_policy="business-value",
+        )
+        == "business-value"
+    )
+
+
+def test_workflow_progress_policy_uses_configured_default(settings) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_REPORTING_POLICY": "disabled",
+    }
+
+    assert _workflow_progress_policy(None) == "disabled"
+    assert _workflow_progress_policy("full") == "full"
+
+
 def test_ray_job_workflow_lazily_initializes_ray(monkeypatch) -> None:
     fake_ray = _FakeRay(initialized=False)
     executor = object()
@@ -1327,6 +1378,39 @@ def test_workflow_executes_on_real_ray() -> None:
         assert ray.get(outer_task.remote(5)) == 40
     finally:
         ray.shutdown()
+
+
+@pytest.mark.django_db
+@pytest.mark.real_ray
+def test_real_ray_workflow_can_disable_node_reporting() -> None:
+    import ray
+
+    from django_ray.models import RayTaskExecution, TaskState
+
+    execution = RayTaskExecution.objects.create(
+        task_id="real-ray-disabled-progress",
+        callable_path=f"{__name__}.report_and_increment",
+        state=TaskState.RUNNING,
+        execution_generation=1,
+    )
+    ray.init(ignore_reinit_error=True)
+    try:
+        with durable_task_execution(
+            execution.pk,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+        ):
+            result = (
+                step(report_and_increment).with_progress_reporting("disabled").run(5, use_ray=True)
+            )
+    finally:
+        ray.shutdown()
+
+    execution.refresh_from_db()
+    selection = json.loads(execution.workflow_plan_selection)
+    assert result == (False, 6)
+    assert selection["reporting_policy"] == "disabled"
+    assert execution.progress_data is None
 
 
 @pytest.mark.real_ray

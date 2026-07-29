@@ -51,11 +51,21 @@ The best batch size sits between those constraints.
 ## Keep Database Traffic at the Outer Boundary
 
 A workflow creates one `RayTaskExecution` for the outer Django task. Internal leaves
-exchange Ray object references and report events to an in-memory progress actor.
-django-ray writes a complete graph snapshot when a changed revision is flushed.
-`WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not bound the
-encoded snapshot, decoded object, task-row, or response size. Those costs currently
-grow with the graph and its per-node metadata.
+exchange Ray object references. With the default
+`WORKFLOW_PROGRESS_REPORTING_POLICY="full"`, they also report events to an in-memory
+progress actor and django-ray writes a complete graph snapshot when a changed revision
+is flushed. `WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not
+bound producer RPCs, actor mailbox or memory, the encoded snapshot, decoded object,
+task-row, or response size. Those costs currently grow with the graph and its per-node
+metadata.
+
+For workloads where that observability cost outweighs its value, set the policy to
+`"disabled"` globally or call
+`WorkflowSignature.with_progress_reporting("disabled").run(...)` for one invocation.
+The disabled path creates no progress actor, emits no node or application-progress
+RPCs, and writes no `progress_data`; task lifecycle, retry, cancellation, result/error
+persistence, and monitor heartbeats remain active. Measure before making this a
+deployment-wide default because node-level live progress is intentionally unavailable.
 
 This is faster than making every leaf a Django task, but it changes semantics:
 

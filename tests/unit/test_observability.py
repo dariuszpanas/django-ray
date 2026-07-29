@@ -29,7 +29,7 @@ from django_ray.observability import (
     get_workflow_progress,
     get_workflow_snapshot,
 )
-from django_ray.workflow_plans import PLAN_DOMAIN_SEPARATOR
+from django_ray.workflow_plans import PLAN_DOMAIN_SEPARATOR, PlanEligibility
 
 
 @pytest.fixture
@@ -120,6 +120,7 @@ def test_versioned_task_summary_omits_sensitive_payloads(db, settings) -> None:
     assert summary["workflow_revision"] == 7
     assert summary["workflow_run_id"] == "00000000-0000-0000-0000-000000000032"
     assert summary["workflow_plan_pinned_attempt"] == 1
+    assert summary["workflow_reporting_policy"] is None
     assert summary["error_message"] == "[REDACTED]"
     assert summary["error_message_truncated"] is False
     assert summary["started_at"] == "2026-07-19T11:59:57Z"
@@ -154,6 +155,50 @@ def test_task_summary_omits_invalid_plan_selection(db, selection: str) -> None:
     summary = get_task_summary(execution)
 
     assert summary["workflow_selected_strategy"] is None
+    assert summary["workflow_reporting_policy"] is None
+
+
+def test_task_summary_redacts_selection_fields_after_validation(db, settings) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "REDACT_PATTERNS": [r"disabled"],
+    }
+    selection = PlanEligibility(("dynamic_tasks",), (), 0).select(
+        "dynamic_tasks",
+        requested_policy="auto",
+        reporting_policy="disabled",
+    )
+    execution = RayTaskExecution.objects.create(
+        task_id="task-redacted-selection",
+        callable_path="testproject.tasks.echo",
+        workflow_plan_selection=json.dumps(selection.as_dict()),
+    )
+
+    summary = get_task_summary(execution)
+
+    assert summary["workflow_selected_strategy"] == "dynamic_tasks"
+    assert summary["workflow_reporting_policy"] == "[REDACTED]"
+
+
+def test_task_summary_contains_deeply_nested_plan_selection_failure(db, monkeypatch) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="task-recursive-selection",
+        callable_path="testproject.tasks.echo",
+        workflow_plan_selection="{}",
+    )
+    original_loads = observability_module.json.loads
+
+    def recursive_selection_loads(value):
+        if value == execution.workflow_plan_selection:
+            raise RecursionError
+        return original_loads(value)
+
+    monkeypatch.setattr(observability_module.json, "loads", recursive_selection_loads)
+
+    summary = get_task_summary(execution)
+
+    assert summary["workflow_selected_strategy"] is None
+    assert summary["workflow_reporting_policy"] is None
 
 
 def test_get_workflow_plan_rejects_incomplete_snapshot(db) -> None:

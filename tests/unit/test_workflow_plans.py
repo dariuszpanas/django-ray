@@ -33,14 +33,18 @@ from django_ray.workflow_plans import (
     MAX_RUNTIME_ENV_DIAGNOSTICS,
     MAX_RUNTIME_ENV_IDENTITY_BYTES,
     PLAN_FORMAT_VERSION,
+    PLAN_SELECTION_FORMAT_VERSION,
+    PLAN_SELECTION_LEGACY_FORMAT_VERSION,
     WorkflowPlanBuildContext,
     WorkflowPlanMismatchError,
     WorkflowPlanValidationError,
+    effective_plan_selection_reporting_policy,
     materialize_workflow_plan,
     plan_requires_drain,
     prepare_materialized_plan_for_ray,
     runtime_env_plan_identity,
     runtime_env_plan_identity_from_transport,
+    validate_plan_selection_manifest,
 )
 from django_ray.workflow_progress import claim_workflow_run
 from django_ray.workflows import chain, group, map_step, step
@@ -72,6 +76,94 @@ stateful_callable = StatefulCallable(2)
 def record_side_effect(value: int) -> int:
     SIDE_EFFECTS.append(value)
     return value
+
+
+def test_plan_selection_v2_persists_effective_reporting_policy() -> None:
+    plan = _materialize(step(increment), 1).plan
+    selection = plan.eligibility.select(
+        "dynamic_tasks",
+        requested_policy="auto",
+        reporting_policy="disabled",
+    )
+
+    manifest = selection.as_dict()
+
+    assert manifest["plan_selection_format_version"] == PLAN_SELECTION_FORMAT_VERSION
+    assert manifest["reporting_policy"] == "disabled"
+    assert validate_plan_selection_manifest(manifest) == manifest
+    assert effective_plan_selection_reporting_policy(manifest) == "disabled"
+
+
+def test_local_plan_selection_defaults_to_disabled_reporting() -> None:
+    plan = _materialize(step(increment), 1).plan
+
+    manifest = plan.eligibility.select(
+        "local",
+        requested_policy="local",
+    ).as_dict()
+
+    assert manifest["reporting_policy"] == "disabled"
+    assert validate_plan_selection_manifest(manifest) == manifest
+
+
+def test_local_plan_selection_rejects_non_disabled_reporting() -> None:
+    plan = _materialize(step(increment), 1).plan
+
+    with pytest.raises(WorkflowPlanValidationError, match="Local workflow execution"):
+        plan.eligibility.select(
+            "local",
+            requested_policy="local",
+            reporting_policy="full",
+        )
+
+    manifest = plan.eligibility.select(
+        "local",
+        requested_policy="local",
+    ).as_dict()
+    manifest["reporting_policy"] = "full"
+    with pytest.raises(WorkflowPlanValidationError, match="Local workflow plan selection"):
+        validate_plan_selection_manifest(manifest)
+
+
+@pytest.mark.parametrize("reporting_policy", ["sampled", "terminal_only"])
+def test_plan_selection_v2_reader_accepts_reserved_reporting_policies(
+    reporting_policy: str,
+) -> None:
+    plan = _materialize(step(increment), 1).plan
+    manifest = plan.eligibility.select(
+        "dynamic_tasks",
+        requested_policy="auto",
+    ).as_dict()
+    manifest["reporting_policy"] = reporting_policy
+
+    assert validate_plan_selection_manifest(manifest) == manifest
+    assert effective_plan_selection_reporting_policy(manifest) == reporting_policy
+    with pytest.raises(WorkflowPlanValidationError, match="reporting policy"):
+        plan.eligibility.select(
+            "dynamic_tasks",
+            requested_policy="auto",
+            reporting_policy=reporting_policy,
+        )
+
+
+@pytest.mark.parametrize(
+    ("selected_strategy", "expected_policy"),
+    [("dynamic_tasks", "full"), ("local", "disabled")],
+)
+def test_plan_selection_v1_reporting_policy_is_inferred_for_rolling_rows(
+    selected_strategy: str,
+    expected_policy: str,
+) -> None:
+    plan = _materialize(step(increment), 1).plan
+    legacy = plan.eligibility.select(
+        selected_strategy,
+        requested_policy=selected_strategy,
+    ).as_dict()
+    legacy["plan_selection_format_version"] = PLAN_SELECTION_LEGACY_FORMAT_VERSION
+    legacy.pop("reporting_policy")
+
+    assert validate_plan_selection_manifest(legacy) == legacy
+    assert effective_plan_selection_reporting_policy(legacy) == expected_policy
 
 
 BASE_IMAGE_DIGEST = "sha256:" + "a" * 64
@@ -1732,6 +1824,7 @@ def test_plan_is_pinned_and_observable_without_progress() -> None:
     summary = get_task_summary(execution)
     snapshot = get_workflow_plan(execution)
     assert summary["workflow_selected_strategy"] == "local"
+    assert summary["workflow_reporting_policy"] == "disabled"
     assert snapshot is not None
     assert snapshot["fingerprint"] == execution.workflow_plan_fingerprint
     assert "secret" not in execution.workflow_plan_json.lower()
@@ -1838,6 +1931,51 @@ def test_ray_run_rechecks_fence_after_preparation_before_actor_or_leaf(monkeypat
 
     assert actor_creations == 0
     assert not hasattr(executor, "workflow_run_identity")
+
+
+@pytest.mark.django_db
+def test_disabled_ray_reporting_pins_policy_without_creating_actor() -> None:
+    from django_ray.workflows import _RayExecutor
+
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-progress-disabled",
+        callable_path=f"{__name__}.increment",
+        state=TaskState.RUNNING,
+        execution_generation=2,
+    )
+    materialized = _materialize(step(increment), 1)
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = DurableTaskContext(
+        task_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+    executor.progress_actor = None
+    actor_creations = 0
+
+    class ProgressActor:
+        @staticmethod
+        def remote(*args):
+            del args
+            nonlocal actor_creations
+            actor_creations += 1
+            return object()
+
+    executor.progress_actor_cls = ProgressActor()
+
+    executor.bind_plan(
+        materialized,
+        requested_policy="auto",
+        reporting_policy="disabled",
+    )
+
+    execution.refresh_from_db()
+    selection = json.loads(execution.workflow_plan_selection)
+    assert actor_creations == 0
+    assert executor.progress_actor is None
+    assert executor.workflow_run_identity is not None
+    assert selection["reporting_policy"] == "disabled"
+    assert execution.progress_data is None
 
 
 @pytest.mark.django_db

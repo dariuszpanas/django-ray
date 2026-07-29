@@ -135,7 +135,13 @@ def report_progress(
 
 
 class _Executor(ABC):
-    def bind_plan(self, materialized_plan: Any, *, requested_policy: str) -> None:
+    def bind_plan(
+        self,
+        materialized_plan: Any,
+        *,
+        requested_policy: str,
+        reporting_policy: str = "full",
+    ) -> None:
         """Attach a pre-submit snapshot to an executor implementation."""
         self.materialized_plan = materialized_plan
 
@@ -368,10 +374,24 @@ class _LocalExecutor(_Executor):
     def __init__(self, materialized_plan: Any | None = None) -> None:
         self.materialized_plan = materialized_plan
         if materialized_plan is not None:
-            self.bind_plan(materialized_plan, requested_policy="local")
+            self.bind_plan(
+                materialized_plan,
+                requested_policy="local",
+                reporting_policy="disabled",
+            )
 
-    def bind_plan(self, materialized_plan: Any, *, requested_policy: str) -> None:
-        super().bind_plan(materialized_plan, requested_policy=requested_policy)
+    def bind_plan(
+        self,
+        materialized_plan: Any,
+        *,
+        requested_policy: str,
+        reporting_policy: str = "full",
+    ) -> None:
+        super().bind_plan(
+            materialized_plan,
+            requested_policy=requested_policy,
+            reporting_policy=reporting_policy,
+        )
         from django_ray.runtime.context import get_current_task_context
 
         task_context = get_current_task_context()
@@ -382,6 +402,7 @@ class _LocalExecutor(_Executor):
         selection = materialized_plan.plan.eligibility.select(
             "local",
             requested_policy=requested_policy,
+            reporting_policy="disabled",
         )
         if task_context.attempt_number is None or task_context.execution_generation is None:
             return
@@ -517,12 +538,26 @@ class _RayExecutor(_Executor):
         self._map_progress_sent_at: dict[str, float] = {}
         self.progress_actor_cls = progress_actor_cls
         if materialized_plan is not None:
-            self.bind_plan(materialized_plan, requested_policy="auto")
+            self.bind_plan(
+                materialized_plan,
+                requested_policy="auto",
+                reporting_policy="full",
+            )
 
-    def bind_plan(self, materialized_plan: Any, *, requested_policy: str) -> None:
+    def bind_plan(
+        self,
+        materialized_plan: Any,
+        *,
+        requested_policy: str,
+        reporting_policy: str = "full",
+    ) -> None:
         from django_ray.workflow_plans import prepare_materialized_plan_for_ray
 
-        super().bind_plan(materialized_plan, requested_policy=requested_policy)
+        super().bind_plan(
+            materialized_plan,
+            requested_policy=requested_policy,
+            reporting_policy=reporting_policy,
+        )
         if self.task_context is None:
             self.materialized_plan = prepare_materialized_plan_for_ray(materialized_plan)
             return
@@ -535,6 +570,7 @@ class _RayExecutor(_Executor):
         selection = materialized_plan.plan.eligibility.select(
             "dynamic_tasks",
             requested_policy=requested_policy,
+            reporting_policy=reporting_policy,
         )
         if not claim_workflow_run(
             identity,
@@ -557,6 +593,8 @@ class _RayExecutor(_Executor):
             )
         self.materialized_plan = prepared_plan
         self.workflow_run_identity = identity
+        if reporting_policy == "disabled":
+            return
         self.progress_actor = self.progress_actor_cls.remote(
             identity.task_execution_pk,
             identity.attempt_number,
@@ -1328,9 +1366,33 @@ class WorkflowSignature(ABC):
         ``use_ray=False`` provides a deterministic local fallback for sync
         workers and tests. ``use_ray=True`` requires an initialized Ray client.
         """
+        return self._run_with_configuration(
+            args,
+            kwargs,
+            use_ray=use_ray,
+            reporting_policy=None,
+        )
+
+    def with_progress_reporting(self, policy: str) -> _ConfiguredWorkflowRun:
+        """Return an invocation runner with an explicit progress policy."""
+        return _ConfiguredWorkflowRun(
+            signature=self,
+            reporting_policy=_workflow_progress_policy(policy),
+        )
+
+    def _run_with_configuration(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        use_ray: bool | None,
+        reporting_policy: str | None,
+    ) -> Any:
+        """Execute with package-owned options separate from application kwargs."""
         from django_ray.runtime.context import get_current_task_context
         from django_ray.workflow_plans import materialize_workflow_plan
 
+        reporting_policy = _workflow_progress_policy(reporting_policy)
         materialized_plan = materialize_workflow_plan(
             self,
             invocation_args=args,
@@ -1343,6 +1405,9 @@ class WorkflowSignature(ABC):
             requested_policy=(
                 "local" if use_ray is False else ("dynamic_tasks" if use_ray is True else "auto")
             ),
+            reporting_policy=(
+                "disabled" if isinstance(executor, _LocalExecutor) else reporting_policy
+            ),
         )
         try:
             submission = self._submit(executor, args, kwargs, "0", ())
@@ -1352,6 +1417,28 @@ class WorkflowSignature(ABC):
             raise
         executor.finish_progress()
         return result
+
+
+@dataclass(frozen=True)
+class _ConfiguredWorkflowRun:
+    """One explicit execution configuration without reserving task keywords."""
+
+    signature: WorkflowSignature
+    reporting_policy: str
+
+    def run(
+        self,
+        *args: Any,
+        use_ray: bool | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute the underlying signature with this reporting policy."""
+        return self.signature._run_with_configuration(
+            args,
+            kwargs,
+            use_ray=use_ray,
+            reporting_policy=self.reporting_policy,
+        )
 
 
 @dataclass(frozen=True)
@@ -2081,6 +2168,31 @@ def _get_executor(
     if use_ray is not False and ray_ready:
         return _RayExecutor() if materialized_plan is None else _RayExecutor(materialized_plan)
     return _LocalExecutor() if materialized_plan is None else _LocalExecutor(materialized_plan)
+
+
+def _workflow_progress_policy(value: str | None) -> str:
+    """Resolve and validate one invocation's effective reporting policy."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    from django_ray.conf.defaults import (
+        DEFAULTS,
+        WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES,
+    )
+    from django_ray.conf.settings import get_settings
+
+    if value is not None:
+        policy = value
+    else:
+        try:
+            policy = get_settings()["WORKFLOW_PROGRESS_REPORTING_POLICY"]
+        except ImproperlyConfigured:
+            policy = DEFAULTS["WORKFLOW_PROGRESS_REPORTING_POLICY"]
+    if not isinstance(policy, str) or policy not in WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES:
+        valid_policies = ", ".join(sorted(WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES))
+        raise WorkflowDefinitionError(
+            f"Workflow progress reporting policy must be one of: {valid_policies}"
+        )
+    return policy
 
 
 __all__ = [

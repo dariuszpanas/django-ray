@@ -27,7 +27,8 @@ version.
 The task summary intentionally omits task arguments, result contents, tracebacks,
 storage references, Ray addresses, and RuntimeEnv JSON. It includes durable identifiers,
 queue and priority, lifecycle state, attempt/generation, timestamps, bounded redacted
-errors, workflow run ID, and workflow revision.
+errors, workflow run ID, workflow revision, selected workflow strategy, and effective
+workflow reporting policy.
 
 ```python
 from django_ray.models import RayTaskExecution
@@ -74,11 +75,18 @@ metrics or errors, credentials, paths, URIs, Ray identifiers, or handles.
 
 The package-owned topology/detail storage, bounded integrity verifier, atomic writer,
 retention cleanup, and authorized public read facade are present. The current workflow
-actor still publishes schema v2. Schema-v3 publication stays disabled until #79 bounds
-live ingestion, #142 completes ADR-0005's composite topology/detail preparation after
+actor still publishes schema v2 in full mode. A workflow using the disabled runtime
+policy creates no actor and publishes no legacy snapshot. Its bounded version-2 plan
+selection records the effective policy independently, so current-attempt authorized
+readers return `DISABLED` without fabricating a schema-v3 summary or empty graph.
+Historical attempts need an archived schema-v3 summary to retain that distinction;
+otherwise they remain `NOT_REPORTED`.
+
+Full-mode schema-v3 publication stays disabled until #79 bounds the remaining live
+ingestion path, #142 completes ADR-0005's composite topology/detail preparation after
 #141's spill-backed topology delivery, and old writers have drained. Until then,
-schema-v3 graph and node helpers
-report detail unavailable rather than fabricating an empty workflow.
+schema-v3 graph and node helpers report detail unavailable rather than fabricating an
+empty workflow.
 
 Once activated, `AVAILABLE` and `TRUNCATED` summaries may reference the manifest and
 detail revisions committed by the atomic storage writer. `DISABLED` and
