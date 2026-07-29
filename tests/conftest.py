@@ -12,6 +12,10 @@ from django.conf import settings
 
 pytest_plugins = ("scripts.pytest_taxonomy",)
 
+# Locust's process-wide gevent patching is appropriate for the CLI but unsafe
+# when its test module is collected after Django or urllib3 has imported SSL.
+os.environ.setdefault("LOCUST_SKIP_MONKEY_PATCH", "1")
+
 # Add testproject to path so it can be imported
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:

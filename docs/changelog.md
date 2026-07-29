@@ -237,6 +237,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The tracked Locust harness now authenticates with a secret-safe environment token and provides
+  a deterministic one-user observability demo that follows lightweight default, priority, sync,
+  cluster/workflow, RuntimeEnv, and ML tasks to terminal state. Quick, moderate, historical
+  18-user, and stress profiles select their intended classes explicitly instead of activating an
+  accidental broad weighted mix, and stress tasks no longer shadow their submission helpers.
 - Ray Job task claims and retries now preserve the immutable cluster target selected
   by a Django Tasks backend alias instead of clearing it with stale submission-handle
   metadata. New tasks snapshot the global django-ray address when an alias does not

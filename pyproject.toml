@@ -75,12 +75,12 @@ dev = [
     "whitenoise>=6.6",
     "ruff>=0.14.13",
     "ty>=0.0.12",
-    "pytest>=7.0",
+    "pytest>=8.3.3",
     "pytest-django>=4.7",
     "pytest-cov>=4.0",
     "pytest-xdist==3.8.0",
     "pyyaml>=6.0",
-    "locust>=2.20",
+    "locust>=2.43",
     "zensical>=0.0.42",
 ]
 

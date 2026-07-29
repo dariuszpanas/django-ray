@@ -457,10 +457,11 @@ jobs:
             "django-ninja==1.5.1" \
             "django-unfold==0.102.0" \
             "whitenoise==6.6" \
-            "pytest==7.0" \
+            "pytest==8.3.3" \
             "pytest-django==4.7" \
             "pytest-cov==4.0" \
-            "pytest-xdist==3.8.0"
+            "pytest-xdist==3.8.0" \
+            "locust==2.43.0"
 
       - name: Resolve and install latest dependencies
         if: matrix.resolution == 'latest'
