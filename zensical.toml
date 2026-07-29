@@ -19,6 +19,7 @@ nav = [
     { "Performance" = "performance.md" },
     { "Observability" = "observability.md" },
     { "Compatibility" = "compatibility.md" },
+    { "Migrating from Celery" = "celery-migration.md" },
     { "Compiled Graph Compatibility" = "compiled-graph-compatibility.md" },
     { "Tasks" = "tasks.md" },
     { "Ray-Native Workflows" = "workflows.md" },

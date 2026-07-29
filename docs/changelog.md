@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   globally and per invocation. Disabled runs retain the durable outer-task lifecycle
   and bounded plan/strategy metadata while creating no progress actor, node-reporting
   RPCs, or `progress_data` writes.
+- A practical Celery migration and coexistence guide that separates direct Django
+  Tasks mappings from semantic rewrites and unsupported broker behavior, provides
+  copyable enqueue/result-storage recipes, and requires producer-first Celery drain
+  evidence before service removal.
 - A manual and monthly line-coverage debt report now records exact JSON and Markdown evidence,
   classifies every uncovered range, and idempotently updates one marked GitHub tracker comment while
   preserving the existing global, worker, Ray Job, and testproject coverage floors.
