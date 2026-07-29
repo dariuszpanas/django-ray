@@ -21,6 +21,39 @@ DJANGO_RAY = {
 }
 ```
 
+### Ray address ownership
+
+`DJANGO_RAY["RAY_ADDRESS"]` is the process-wide fallback. A Django Tasks backend
+alias may instead set `OPTIONS["RAY_ADDRESS"]`; django-ray snapshots the resulting
+effective Ray Job target on each execution when it is enqueued:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+    },
+    "analytics": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["analytics"],
+        "OPTIONS": {"RAY_ADDRESS": "ray://analytics-head:10001"},
+    },
+}
+```
+
+Ray Job submission uses and preserves that snapshot across retries. When the alias
+omits `RAY_ADDRESS`, the snapshot is the current global
+`DJANGO_RAY["RAY_ADDRESS"]` value. `RayTaskExecution.ray_target_address` owns that
+durable routing decision; `ray_address` records the mutable submitted-job handle used
+for status and cancellation. Once django-ray selects the target, it remains
+authoritative for the Ray Job client; ambient `RAY_API_SERVER_ADDRESS` or
+`RAY_ADDRESS` process variables cannot redirect that task to another cluster.
+
+Ray Core workers choose one cluster when the process starts, through `--local`,
+`--cluster`, or the global settings. They do not switch clusters per task. Use
+separate queues and task-manager processes when Ray Core workloads must target
+different clusters.
+
 ## All Settings
 
 ### Ray Connection

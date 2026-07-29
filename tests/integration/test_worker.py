@@ -695,6 +695,72 @@ class TestWorkerSync:
 
 
 @pytest.mark.django_db
+class TestWorkerRayJobRouting:
+    """Ray Job claims preserve the backend alias selected at enqueue time."""
+
+    def test_backend_alias_targets_survive_claim_and_submit(self, monkeypatch) -> None:
+        from django_ray.backends import RayTaskBackend
+        from django_ray.management.commands.django_ray_worker import Command
+        from django_ray.runner.ray_job import RayJobRunner
+        from testproject.tasks import add_numbers
+
+        submissions: list[tuple[str, int]] = []
+
+        class FakeClient:
+            def __init__(self, address: str) -> None:
+                self.address = address
+
+            def _upload_working_dir_if_needed(self, _runtime_env) -> None:
+                return None
+
+            def _upload_py_modules_if_needed(self, _runtime_env) -> None:
+                return None
+
+            def submit_job(self, **kwargs) -> str:
+                task_pk = int(kwargs["metadata"]["django_ray_task_id"])
+                submissions.append((self.address, task_pk))
+                return f"raysubmit_{task_pk}"
+
+        monkeypatch.setattr(
+            RayJobRunner,
+            "_get_client",
+            lambda _runner, address=None: FakeClient(str(address)),
+        )
+        task = add_numbers.using(queue_name="default")
+        backend_a = RayTaskBackend(
+            "cluster_a",
+            {"QUEUES": ["default"], "OPTIONS": {"RAY_ADDRESS": "ray://a:10001"}},
+        )
+        backend_b = RayTaskBackend(
+            "cluster_b",
+            {"QUEUES": ["default"], "OPTIONS": {"RAY_ADDRESS": "ray://b:10001"}},
+        )
+        result_a = backend_a.enqueue(task, args=(1, 2), kwargs={})
+        result_b = backend_b.enqueue(task, args=(3, 4), kwargs={})
+        execution_a = RayTaskExecution.objects.get(task_id=result_a.id)
+        execution_b = RayTaskExecution.objects.get(task_id=result_b.id)
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "ray"
+        cmd.worker_id = "routing-worker"
+        cmd.active_tasks = {}
+
+        assert cmd.claim_and_process_tasks(queues=["default"], concurrency=2) == 2
+
+        execution_a.refresh_from_db()
+        execution_b.refresh_from_db()
+        assert submissions == [
+            ("ray://a:10001", execution_a.pk),
+            ("ray://b:10001", execution_b.pk),
+        ]
+        assert execution_a.ray_target_address == "ray://a:10001"
+        assert execution_b.ray_target_address == "ray://b:10001"
+        assert execution_a.ray_address == "ray://a:10001"
+        assert execution_b.ray_address == "ray://b:10001"
+
+
+@pytest.mark.django_db
 class TestWorkerRayJobFailureHandling:
     """Test Ray Job mode failure paths use unified retry handling."""
 
@@ -720,6 +786,7 @@ class TestWorkerRayJobFailureHandling:
             args_json="[1, 2]",
             kwargs_json="{}",
             attempt_number=1,
+            ray_target_address="ray://retry-target:10001",
         )
 
         class FailingRunner:
@@ -738,6 +805,8 @@ class TestWorkerRayJobFailureHandling:
         assert "Failed to submit to Ray: submission exploded" in task.error_message
         assert task.finished_at is None
         assert task.pk not in cmd.active_tasks
+        assert task.ray_target_address == "ray://retry-target:10001"
+        assert task.ray_address is None
 
     def test_submit_task_to_ray_does_not_retry_pinned_plan_mismatch(self, monkeypatch):
         """A changed pinned plan is permanent for the existing task identity."""
