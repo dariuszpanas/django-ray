@@ -65,6 +65,10 @@ hold:
 5. The configured token enqueues `20 + 22`.
 6. The task result endpoint reaches `SUCCESSFUL`.
 7. The authenticated execution endpoint and a direct PostgreSQL read both contain result `42`.
+8. The authenticated Unfold admin uses the package registrations, hides standalone attempt
+   navigation by default, and links the archived successful attempt from its execution page.
+9. The attempt detail, live observability endpoint, and manifest-hashed Unfold stylesheet are
+   reachable through the same disposable administrator session.
 
 CI generates fresh disposable credentials and runs this same tracked Compose contract. It does not
 rely on a developer database, token, Python environment, or a prebuilt application image.
@@ -163,7 +167,9 @@ docker compose exec web python testproject/manage.py createsuperuser
 
 Then open [Ray task executions](http://127.0.0.1:8000/admin/django_ray/raytaskexecution/) and inspect
 the task ID returned by the enqueue request. Its final state should be `SUCCEEDED` and its result
-should be `42`.
+should be `42`. The change page shows its ordered read-only attempt history and links to the bounded
+attempt detail. The default inline mode intentionally omits Task Attempts from top-level navigation;
+authorized direct URLs remain valid.
 
 ## Shut down
 

@@ -191,6 +191,25 @@ Optional install extras:
 - `pip install "django-ray[gcs]"` for GCS backend dependencies.
 - `pip install "django-ray[object-storage]"` for both.
 
+### Admin presentation
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `TASK_ATTEMPT_ADMIN_MODE` | `str` | `"inline"` | Attempt-history presentation: `"inline"`, `"standalone"`, or `"both"` |
+
+The default `inline` mode shows immutable attempt history on an existing
+`RayTaskExecution` change page and hides the top-level `TaskAttempt` entry from the
+admin index. `standalone` restores the previous top-level presentation without the
+inline, while `both` enables both navigation paths. Selection happens per request;
+`TaskAttempt` remains registered and authorized list/detail bookmarks remain valid in
+every mode.
+
+The inline requires permission to view the parent execution plus global
+`view_taskattempt` or `change_taskattempt` permission. Direct attempt detail views
+also accept object-specific child permission. The setting controls presentation, not
+access. See [Settings Reference](reference/settings.md#task_attempt_admin_mode) for
+the bounded diagnostic fields and custom-`AdminSite` contract.
+
 ### Redaction and operational output
 
 `REDACT_PATTERNS` is an optional sequence of regular expressions used for

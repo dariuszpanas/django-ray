@@ -27,9 +27,15 @@ from django.template import loader
 from django.test import Client
 from django.urls import reverse
 from unfold.admin import ModelAdmin as UnfoldModelAdmin
+from unfold.admin import TabularInline as UnfoldTabularInline
 from unfold.sites import UnfoldAdminSite
 
-from django_ray.admin import RayTaskExecutionAdmin, TaskAttemptAdmin, TaskWorkerLeaseAdmin
+from django_ray.admin import (
+    RayTaskExecutionAdmin,
+    TaskAttemptAdmin,
+    TaskAttemptInline,
+    TaskWorkerLeaseAdmin,
+)
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 
 assert settings.INSTALLED_APPS.index("unfold") < settings.INSTALLED_APPS.index(
@@ -51,6 +57,7 @@ for model, expected_admin in expected_admins.items():
     registered_admin = admin.site._registry[model]
     assert isinstance(registered_admin, expected_admin)
     assert isinstance(registered_admin, UnfoldModelAdmin)
+assert issubclass(TaskAttemptInline, UnfoldTabularInline)
 
 template_origin = loader.get_template("admin/base.html").origin.name.replace("\\", "/")
 assert "/unfold/templates/admin/base.html" in template_origin
@@ -73,6 +80,12 @@ execution = RayTaskExecution.objects.create(
     task_id="unfold-admin-execution",
     callable_path="testproject.tasks.add_numbers",
     state=TaskState.QUEUED,
+)
+attempt = TaskAttempt.objects.create(
+    execution=execution,
+    attempt_number=1,
+    state=TaskState.FAILED,
+    error_message="unfold-attempt-inline-marker",
 )
 failed_execution = RayTaskExecution.objects.create(
     task_id="unfold-admin-retry",
@@ -103,11 +116,17 @@ change = authenticated.get(
 observability = authenticated.get(
     reverse("admin:django_ray_raytaskexecution_observability", args=[execution.pk])
 )
+attempt_detail_url = reverse(
+    "admin:django_ray_taskattempt_change",
+    args=[attempt.pk],
+)
+attempt_detail = authenticated.get(attempt_detail_url)
 
 assert index.status_code == 200
 assert changelist.status_code == 200
 assert change.status_code == 200
 assert observability.status_code == 200
+assert attempt_detail.status_code == 200
 
 login_html = login.content.decode("utf-8")
 index_html = index.content.decode("utf-8")
@@ -119,10 +138,14 @@ for rendered_html in (login_html, index_html, changelist_html, change_html):
     assert "unfold/js/app" in rendered_html
 
 assert "django-ray" in index_html
+assert reverse("admin:django_ray_taskattempt_changelist") not in index_html
 assert "retry_tasks" in changelist_html
 assert "cancel_tasks" in changelist_html
 assert "django-ray-live-observability" in change_html
 assert "django_ray/admin/task_live" in change_html
+assert "Attempt history" in change_html
+assert "unfold-attempt-inline-marker" in change_html
+assert attempt_detail_url in change_html
 
 retry_response = authenticated.post(
     reverse("admin:django_ray_raytaskexecution_changelist"),
@@ -168,6 +191,8 @@ print(
     json.dumps(
         {
             "admin": type(admin.site).__name__,
+            "attempt_detail": attempt_detail.status_code,
+            "attempt_inline": "passed",
             "change_view": change.status_code,
             "changelist": changelist.status_code,
             "collectstatic": "passed",
@@ -208,7 +233,12 @@ django.setup()
 
 from django.contrib import admin
 
-from django_ray.admin import RayTaskExecutionAdmin, TaskAttemptAdmin, TaskWorkerLeaseAdmin
+from django_ray.admin import (
+    RayTaskExecutionAdmin,
+    TaskAttemptAdmin,
+    TaskAttemptInline,
+    TaskWorkerLeaseAdmin,
+)
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskWorkerLease
 
 assert "unfold" not in sys.modules
@@ -221,8 +251,24 @@ for model, expected_admin in expected_admins.items():
     registered_admin = admin.site._registry[model]
     assert isinstance(registered_admin, expected_admin)
     assert isinstance(registered_admin, admin.ModelAdmin)
+assert issubclass(TaskAttemptInline, admin.TabularInline)
+assert TaskAttemptInline in admin.site._registry[RayTaskExecution].get_inlines(
+    None,
+    RayTaskExecution(
+        task_id="standard-inline-probe",
+        callable_path="testproject.tasks.add_numbers",
+    ),
+)
 
-print(json.dumps({"admin": type(admin.site).__name__, "unfold_imported": False}))
+print(
+    json.dumps(
+        {
+            "admin": type(admin.site).__name__,
+            "attempt_inline": "passed",
+            "unfold_imported": False,
+        }
+    )
+)
 """
 
 
@@ -256,6 +302,8 @@ def test_testproject_renders_unfold_admin_contract(tmp_path: Path) -> None:
 
     assert payload == {
         "admin": "UnfoldAdminSite",
+        "attempt_detail": 200,
+        "attempt_inline": "passed",
         "change_view": 200,
         "changelist": 200,
         "collectstatic": "passed",
@@ -270,4 +318,5 @@ def test_testproject_renders_unfold_admin_contract(tmp_path: Path) -> None:
 def test_package_admin_uses_standard_django_without_unfold_enabled() -> None:
     payload = _run_probe(STANDARD_ADMIN_PROBE)
 
+    assert payload["attempt_inline"] == "passed"
     assert payload["unfold_imported"] is False

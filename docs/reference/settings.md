@@ -404,6 +404,49 @@ follows task-attempt retention and remains available after detail expires.
 "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7
 ```
 
+## Admin Presentation
+
+### TASK_ATTEMPT_ADMIN_MODE
+
+- **Type**: `str`
+- **Default**: `"inline"`
+- **Values**: `"inline"`, `"standalone"`, or `"both"`
+
+Controls where immutable `TaskAttempt` history is presented in Django admin:
+
+- `inline` shows ordered contextual history on an existing `RayTaskExecution` change
+  page and hides the top-level `TaskAttempt` entry from the app index.
+- `standalone` retains the independent attempt changelist and does not add the
+  contextual inline.
+- `both` provides both presentations.
+
+The mode is read at request time. `TaskAttempt` stays registered in every mode, so
+authorized changelist/detail URLs and existing bookmarks remain valid even when
+top-level navigation is hidden. Changing the mode never grants or revokes access.
+
+The inline shows attempt number, state, start/finish times, and a redacted error
+preview capped at 512 characters. An oversized message is replaced by a fixed prompt
+to open the bounded detail view. Tracebacks, results, result references, and workflow
+summaries are not selected or rendered by the inline.
+
+A caller must be authorized to view the parent execution and must also have global
+`view_taskattempt` or `change_taskattempt` permission before Django renders the
+inline. Object-specific child permission is checked on direct attempt detail
+requests; it is not evaluated once per inline row because the generic Django inline
+has no queryset-level object-permission contract.
+
+```python
+DJANGO_RAY = {
+    "RAY_ADDRESS": "auto",
+    "TASK_ATTEMPT_ADMIN_MODE": "both",
+}
+```
+
+A fully custom `AdminSite` may replace the package presentation, but it then owns its
+permission, redaction, and query-bounding behavior. Register both
+`RayTaskExecution` and `TaskAttempt` on the same site when using the package inline,
+otherwise Django cannot resolve its stock attempt-detail link.
+
 ## Durable Inputs
 
 ### MAX_INLINE_INPUT_SIZE_BYTES

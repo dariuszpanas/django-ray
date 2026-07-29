@@ -275,6 +275,23 @@ The change form links to bounded Admin topology and node-detail views. Those vie
 the same per-object permission check on every page request and call the package read
 facade; they are not fetched by the polling script.
 
+By default, the same change form presents ordered immutable attempt history
+contextually. The inline selects only attempt identity, state, timing, and a bounded
+redacted error preview; it does not load complete tracebacks, results, result
+references, or workflow summaries. Oversized error text is replaced by a fixed link
+prompt next to the attempt-detail link rather than selecting or displaying an
+arbitrary prefix.
+
+Parent access alone does not reveal attempt history. Django renders the inline only
+when the caller can view the execution and has global `view_taskattempt` or
+`change_taskattempt` permission. The linked attempt detail repeats authorization with
+the actual child object, so an object-permission backend may grant a direct detail
+read without causing a permission query for every inline row.
+
+`DJANGO_RAY["TASK_ATTEMPT_ADMIN_MODE"]` can select the default `inline`,
+`standalone`, or `both` presentation. This is a navigation setting: attempt list and
+detail routes remain registered and permission-checked in every mode.
+
 The panel does not query Ray or retrieve logs automatically. Operators can explicitly
 request live node data through an authorized application surface when needed. This
 makes database state visible even during Ray outages.

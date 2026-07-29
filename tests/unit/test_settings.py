@@ -31,6 +31,34 @@ class TestValidateSettings:
     def test_workflow_progress_reporting_defaults_to_full(self) -> None:
         assert DEFAULTS["WORKFLOW_PROGRESS_REPORTING_POLICY"] == "full"
 
+    def test_task_attempt_admin_mode_defaults_to_inline(self) -> None:
+        assert DEFAULTS["TASK_ATTEMPT_ADMIN_MODE"] == "inline"
+
+    @pytest.mark.parametrize("admin_mode", ["inline", "standalone", "both"])
+    def test_validate_task_attempt_admin_mode(self, admin_mode: str) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "TASK_ATTEMPT_ADMIN_MODE": admin_mode,
+            }
+        )
+
+    @pytest.mark.parametrize("admin_mode", ["", "INLINE", "separate", True, None])
+    def test_validate_task_attempt_admin_mode_rejects_unsupported_values(
+        self,
+        admin_mode: object,
+    ) -> None:
+        with pytest.raises(
+            ImproperlyConfigured,
+            match="TASK_ATTEMPT_ADMIN_MODE",
+        ):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "TASK_ATTEMPT_ADMIN_MODE": admin_mode,
+                }
+            )
+
     @pytest.mark.parametrize("reporting_policy", ["full", "disabled"])
     def test_validate_workflow_progress_reporting_policy(
         self,

@@ -152,7 +152,10 @@ navigation. Open
 [Ray task executions](http://127.0.0.1:8000/admin/django_ray/raytaskexecution/) and inspect the
 completed `add_numbers` record. The task ID should match the API response, its state should be
 `SUCCEEDED`, and its result should be `42`. The changelist retains django-ray's retry and cancel
-actions, while the change page retains live durable status and bounded workflow-detail links.
+actions, while the change page retains live durable status, bounded workflow-detail links, and
+ordered read-only attempt history. The default `TASK_ATTEMPT_ADMIN_MODE="inline"` hides the
+standalone Task Attempt entry from top-level navigation without invalidating authorized list or
+detail URLs. Select `standalone` to restore the previous navigation or `both` to expose both views.
 
 Unfold is a testproject dependency, not a required dependency of the published `django-ray` package.
 Downstream projects that want the same theme can install `django-unfold`, place `"unfold"` before
@@ -160,6 +163,10 @@ Downstream projects that want the same theme can install `django-unfold`, place 
 app is not installed, django-ray's registrations continue to use Django's standard `ModelAdmin`.
 Production deployments using Unfold must run `collectstatic`; the tracked Kubernetes web deployment
 does this in the pod's `collect-static` init container before the application starts.
+
+The attempt inline also requires global permission to view or change `TaskAttempt`; parent execution
+permission alone does not expose child history. A custom `AdminSite` using the package inline must
+register both `RayTaskExecution` and `TaskAttempt` on that same site so its detail link resolves.
 
 Before upgrading an already-running copy of the bundled testproject, allow executions in `QUEUED`,
 `RUNNING`, or `CANCELLING` state to finish. Their persisted Ray runtime environments predate the

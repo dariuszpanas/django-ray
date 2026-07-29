@@ -9,6 +9,7 @@ from django.contrib import admin
 from django.contrib.auth import get_permission_codename
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import QuerySet
+from django.db.models.functions import Substr
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.urls import path, reverse
 from django.utils import timezone
@@ -16,6 +17,7 @@ from django.utils.html import format_html
 from django.utils.http import quote, unquote
 from django.utils.text import Truncator
 
+from django_ray.conf.settings import get_settings
 from django_ray.lifecycle import request_task_cancellation, retry_task
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.redaction import redact_text, safe_json_dumps
@@ -31,14 +33,18 @@ from django_ray.workflow_progress_reads import (
 
 if apps.is_installed("unfold"):
     from unfold.admin import ModelAdmin as _ConfiguredModelAdmin
+    from unfold.admin import TabularInline as _ConfiguredTabularInline
 else:
     _ConfiguredModelAdmin = admin.ModelAdmin
+    _ConfiguredTabularInline = admin.TabularInline
 
 DjangoRayModelAdmin = cast(Any, _ConfiguredModelAdmin)
+DjangoRayTabularInline = cast(Any, _ConfiguredTabularInline)
 
 # Ray Dashboard URL fallback for local Ray.
 RAY_DASHBOARD_URL = "http://localhost:8265"
 ADMIN_DIAGNOSTIC_MAX_CHARS = 4096
+ADMIN_ATTEMPT_INLINE_MAX_CHARS = 512
 
 
 def _bounded_redacted_text(value: Any, *, max_chars: int = ADMIN_DIAGNOSTIC_MAX_CHARS) -> str:
@@ -60,6 +66,97 @@ def _bounded_redacted_json(value: str | None) -> str:
         ADMIN_DIAGNOSTIC_MAX_CHARS,
         truncate="... [truncated]",
     )
+
+
+def _task_attempt_admin_mode() -> str:
+    """Return the validated request-time attempt presentation mode."""
+    return cast(str, get_settings()["TASK_ATTEMPT_ADMIN_MODE"])
+
+
+class TaskAttemptInline(DjangoRayTabularInline):
+    """Compact immutable attempt history on an execution change page."""
+
+    model = TaskAttempt
+    fk_name = "execution"
+    fields = (
+        "attempt_number",
+        "state",
+        "started_at",
+        "finished_at",
+        "error_summary",
+    )
+    readonly_fields = fields
+    ordering = ("attempt_number",)
+    extra = 0
+    can_delete = False
+    show_change_link = True
+    verbose_name_plural = "Attempt history"
+
+    def get_queryset(self, request: HttpRequest) -> QuerySet[TaskAttempt]:
+        """Keep large attempt diagnostics out of the contextual history query."""
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(
+                admin_error_preview=Substr(
+                    "error_message",
+                    1,
+                    ADMIN_ATTEMPT_INLINE_MAX_CHARS + 1,
+                )
+            )
+            .defer(
+                "error_message",
+                "error_traceback",
+                "result_data",
+                "result_reference",
+                "workflow_progress_summary_json",
+            )
+            .order_by("attempt_number")
+        )
+
+    def has_add_permission(
+        self,
+        request: HttpRequest,
+        obj: RayTaskExecution | None = None,
+    ) -> bool:
+        return False
+
+    def has_change_permission(
+        self,
+        request: HttpRequest,
+        obj: RayTaskExecution | None = None,
+    ) -> bool:
+        return False
+
+    def has_delete_permission(
+        self,
+        request: HttpRequest,
+        obj: RayTaskExecution | None = None,
+    ) -> bool:
+        return False
+
+    def has_view_permission(
+        self,
+        request: HttpRequest,
+        obj: RayTaskExecution | None = None,
+    ) -> bool:
+        """Require global child access and authorization for the parent."""
+        if not super().has_view_permission(request):
+            return False
+        parent_admin = self.admin_site._registry.get(RayTaskExecution)
+        return parent_admin is not None and parent_admin.has_view_permission(request, obj)
+
+    @admin.display(description="Error")
+    def error_summary(self, obj: TaskAttempt) -> str:
+        preview = getattr(obj, "admin_error_preview", None)
+        if not hasattr(obj, "admin_error_preview"):
+            preview = obj.error_message
+        if preview not in (None, "") and len(preview) > ADMIN_ATTEMPT_INLINE_MAX_CHARS:
+            return "Open the attempt detail to view bounded diagnostics."
+        return _bounded_redacted_text(
+            preview,
+            max_chars=ADMIN_ATTEMPT_INLINE_MAX_CHARS,
+        )
 
 
 @admin.register(RayTaskExecution)
@@ -230,6 +327,17 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 "workflow_progress_summary_json",
             )
         )
+
+    def get_inlines(
+        self,
+        request: HttpRequest,
+        obj: RayTaskExecution | None,
+    ) -> list[type[admin.options.InlineModelAdmin]]:
+        """Select contextual attempt history without import-time registration."""
+        configured_inlines = list(super().get_inlines(request, obj))
+        if obj is not None and _task_attempt_admin_mode() in {"inline", "both"}:
+            configured_inlines.append(TaskAttemptInline)
+        return configured_inlines
 
     def has_view_permission(
         self,
@@ -791,10 +899,17 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
 class TaskAttemptAdmin(DjangoRayModelAdmin):
     """Read-only historical attempt diagnostics."""
 
-    list_display = ["execution", "attempt_number", "state", "started_at", "finished_at"]
+    list_display = [
+        "execution_link",
+        "attempt_number",
+        "state",
+        "started_at",
+        "finished_at",
+    ]
+    list_display_links = ("attempt_number",)
     list_filter = ["state"]
     fields = [
-        "execution",
+        "execution_link",
         "attempt_number",
         "state",
         "started_at",
@@ -806,6 +921,50 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
         "created_at",
     ]
     readonly_fields = fields
+
+    def get_queryset(self, request: HttpRequest) -> QuerySet[TaskAttempt]:
+        """Bound routine list reads while retaining detail diagnostics."""
+        queryset = super().get_queryset(request).defer("workflow_progress_summary_json")
+        resolver_match = request.resolver_match
+        if (
+            resolver_match is not None
+            and resolver_match.url_name == "django_ray_taskattempt_changelist"
+        ):
+            queryset = queryset.only(
+                "pk",
+                "execution_id",
+                "attempt_number",
+                "state",
+                "started_at",
+                "finished_at",
+            )
+        return queryset
+
+    def has_module_permission(self, request: HttpRequest) -> bool:
+        """Hide standalone navigation when contextual history is the default."""
+        return _task_attempt_admin_mode() in {
+            "standalone",
+            "both",
+        } and super().has_module_permission(request)
+
+    def has_view_permission(
+        self,
+        request: HttpRequest,
+        obj: TaskAttempt | None = None,
+    ) -> bool:
+        """Honor global grants and object-permission backends on detail reads."""
+        if super().has_view_permission(request, obj):
+            return True
+        if obj is None:
+            return False
+        opts = self.opts
+        return request.user.has_perm(
+            f"{opts.app_label}.{get_permission_codename('view', opts)}",
+            obj,
+        ) or request.user.has_perm(
+            f"{opts.app_label}.{get_permission_codename('change', opts)}",
+            obj,
+        )
 
     def has_add_permission(self, request: HttpRequest) -> bool:
         return False
@@ -823,6 +982,16 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
         obj: TaskAttempt | None = None,
     ) -> bool:
         return False
+
+    @admin.display(description="Execution", ordering="execution_id")
+    def execution_link(self, obj: TaskAttempt) -> str:
+        opts = RayTaskExecution._meta
+        url = reverse(
+            f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_change",
+            args=[quote(str(obj.execution_id))],
+            current_app=self.admin_site.name,
+        )
+        return format_html('<a href="{}">{}</a>', url, obj.execution_id)
 
     @admin.display(description="Error")
     def error_message_display(self, obj: TaskAttempt) -> str:

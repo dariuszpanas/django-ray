@@ -196,6 +196,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Task-attempt history now defaults to an ordered, bounded, read-only inline on its
+  execution page. The standalone app-index entry is hidden by default, while existing
+  authorized list/detail bookmarks remain valid; `TASK_ATTEMPT_ADMIN_MODE` can restore
+  standalone navigation or enable both presentations. The same package registrations
+  support Unfold and standard Django admin.
 - `make test-xdist` provides an ordinary four-worker local speed path for the
   default-resource subset. Markers identify tests that own real Ray, live-cluster, or
   PostgreSQL resources; they do not create CI shards or cross-test coordination, and
