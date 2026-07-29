@@ -27,6 +27,10 @@ from django_ray.admin import (
     TaskWorkerLeaseAdmin,
 )
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.workflow_plans import (
+    PLAN_SELECTION_FORMAT,
+    PLAN_SELECTION_FORMAT_VERSION,
+)
 from django_ray.workflow_progress_reads import (
     WorkflowProgressReadError,
     WorkflowProgressReadErrorCode,
@@ -679,6 +683,46 @@ class TestRayTaskExecutionAdmin:
         assert payload["workflow"] is None
         assert payload["workflow_availability"] == "NOT_REPORTED"
         assert "secret" not in json.dumps(payload)
+
+    def test_terminal_full_workflow_without_v3_is_missing_not_empty(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-missing-workflow-v3",
+            callable_path="testproject.tasks.run_workflow_benchmark",
+            state=TaskState.SUCCEEDED,
+            workflow_plan_selection=json.dumps(
+                {
+                    "plan_selection_format": PLAN_SELECTION_FORMAT,
+                    "plan_selection_format_version": PLAN_SELECTION_FORMAT_VERSION,
+                    "requested_policy": "auto",
+                    "selected_strategy": "dynamic_tasks",
+                    "reporting_policy": "full",
+                    "eligible_strategies": ["dynamic_tasks"],
+                    "rejections": [],
+                    "total_rejections": 0,
+                    "rejections_truncated": False,
+                }
+            ),
+        )
+        user = get_user_model().objects.create_superuser(username="missing-workflow-v3-admin")
+        request = RequestFactory().get("/admin/live/")
+        request.user = user
+
+        summary_response = _task_admin().observability_view(
+            request,
+            str(execution.pk),
+        )
+        summary = json.loads(summary_response.content)
+        topology_response = _task_admin().workflow_topology_nodes_view(
+            request,
+            str(execution.pk),
+        )
+        topology = json.loads(topology_response.content)
+
+        assert summary_response.status_code == 200
+        assert summary["workflow"] is None
+        assert summary["workflow_availability"] == "MISSING"
+        assert topology_response.status_code == 409
+        assert topology["code"] == "MISSING"
 
     def test_observability_endpoint_defers_payloads_and_reads_progress_once(self) -> None:
         execution = RayTaskExecution.objects.create(

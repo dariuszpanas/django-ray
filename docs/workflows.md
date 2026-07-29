@@ -548,7 +548,9 @@ cancellation, recovery, and monitor heartbeat behavior.
 The bounded task summary exposes the effective policy. Authorized bounded workflow
 progress readers return `availability="DISABLED"` with no fabricated summary or graph
 for the current disabled run. The plan selection is the current-attempt signal, so
-historical attempts without an archived schema-v3 summary remain `NOT_REPORTED`.
+an active full-reporting run without schema v3 remains `NOT_REPORTED`, while a terminal
+full-reporting run without schema v3 is `MISSING`. Historical attempts without an
+archived schema-v3 summary remain `NOT_REPORTED`.
 Local execution has no progress actor and is recorded as disabled regardless of the
 configured Ray reporting default.
 

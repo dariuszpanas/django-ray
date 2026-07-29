@@ -112,6 +112,7 @@ monotonic schedules; idle claim backoff does not postpone them.
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |
 | `WORKFLOW_PROGRESS_REPORTING_POLICY` | `str` | `"full"` | Default Ray workflow node-reporting policy: `"full"` or `"disabled"` |
 | `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between full-mode workflow progress snapshot writes |
+| `WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS` | `int` | `15` | Total deadline for the final full-mode snapshot while a progress actor starts or drains (`1`-`60` seconds) |
 | `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS` | `int` | `7` | Terminal workflow topology and node-detail retention (`0`-`30` days) |
 
 `django-ray` validates numeric settings at startup, rejects booleans passed as integers, and enforces
@@ -131,6 +132,10 @@ setting for one invocation without reserving an application task keyword. Full m
 collects node events in memory and writes a snapshot no more often than
 `WORKFLOW_PROGRESS_FLUSH_SECONDS`; the interval limits database write frequency, not
 producer RPCs or actor memory.
+When a workflow finishes, the coordinator retries one pending actor snapshot for up to
+`WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS`. Exhausting that bounded deadline
+leaves task execution unaffected and emits a structured warning instead of silently
+abandoning a requested full-reporting snapshot.
 Terminal topology and node detail become eligible for cleanup after
 `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`; `0` makes them eligible as soon as the
 terminal state is durably archived. Active current detail is not expired by this

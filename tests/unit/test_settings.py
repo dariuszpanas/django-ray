@@ -31,6 +31,11 @@ class TestValidateSettings:
     def test_workflow_progress_reporting_defaults_to_full(self) -> None:
         assert DEFAULTS["WORKFLOW_PROGRESS_REPORTING_POLICY"] == "full"
 
+    def test_workflow_progress_terminal_flush_timeout_defaults_to_fifteen_seconds(
+        self,
+    ) -> None:
+        assert DEFAULTS["WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS"] == 15
+
     def test_task_attempt_admin_mode_defaults_to_inline(self) -> None:
         assert DEFAULTS["TASK_ATTEMPT_ADMIN_MODE"] == "inline"
 
@@ -163,6 +168,7 @@ class TestValidateSettings:
             "WORKER_HEARTBEAT_SECONDS",
             "TASK_MONITOR_HEARTBEAT_SECONDS",
             "WORKFLOW_PROGRESS_FLUSH_SECONDS",
+            "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS",
             "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS",
             "RAY_STATE_API_TIMEOUT_SECONDS",
             "MAX_RESULT_SIZE_BYTES",
@@ -185,6 +191,30 @@ class TestValidateSettings:
         with pytest.raises(ImproperlyConfigured, match="RETRY_BACKOFF_SECONDS"):
             validate_settings(
                 {"RAY_ADDRESS": "ray://localhost:10001", "RETRY_BACKOFF_SECONDS": 3601}
+            )
+
+    def test_validate_workflow_progress_terminal_flush_timeout_boundaries(self) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 1,
+            }
+        )
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 60,
+            }
+        )
+        with pytest.raises(
+            ImproperlyConfigured,
+            match="WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS",
+        ):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 61,
+                }
             )
 
     @pytest.mark.parametrize(

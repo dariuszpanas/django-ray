@@ -388,6 +388,22 @@ attempt, execution generation, lifecycle state, and workflow run ID.
 "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1
 ```
 
+### WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS
+
+- **Type**: `int`
+- **Default**: `15`
+- **Allowed**: `1` to `60`
+
+Total deadline for the final full-reporting snapshot after a Ray-native workflow
+finishes. The coordinator keeps polling one pending actor request while a newly
+scheduled progress actor starts or drains leaf events. If no snapshot becomes
+available before the deadline, task execution remains unaffected and a structured
+warning records the unavailable producer.
+
+```python
+"WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 15
+```
+
 ### WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS
 
 - **Type**: `int` (booleans are rejected)
@@ -724,6 +740,7 @@ DJANGO_RAY = {
     "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
     "WORKFLOW_PROGRESS_REPORTING_POLICY": "full",
     "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
+    "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 15,
     "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7,
 }
 ```
