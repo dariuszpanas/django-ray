@@ -266,17 +266,29 @@ for durable task state and workflow progress. Polling uses ordinary same-origin 
 requests, pauses while the tab is hidden, and stops when the task reaches a terminal
 state. Responses use `Cache-Control: no-store`.
 
-The polling queryset defers both progress payload columns. Its follow-up workflow read
-uses a database byte guard for only the 16 KiB schema-v3 summary and explicitly disables
-the legacy fallback. It never selects or parses `progress_data`, topology pages, or
-normalized detail rows. Active legacy writers therefore appear as not yet reported in
-the high-frequency panel. A terminal full-reporting run without schema v3 is explicitly
-`MISSING`; compatibility tools may still opt into the separately capped schema-v1/v2
-reader.
+The polling queryset defers both progress payload columns and the complete workflow plan
+and strategy-selection snapshots. Its follow-up workflow read uses a database byte guard
+for only the 16 KiB schema-v3 summary and explicitly disables the legacy fallback. It
+never selects or parses `progress_data`, the plan blobs, topology pages, or normalized
+detail rows. Runs without a schema-v3 summary therefore appear as not yet reported in
+the high-frequency panel, regardless of plan policy. The lazy workflow diagnostics
+request distinguishes disabled reporting, an active requested-but-not-reported run,
+and a terminal requested-but-missing snapshot. Compatibility tools may still opt into
+the separately capped schema-v1/v2 reader.
 
-The change form links to bounded Admin topology and node-detail views. Those views repeat
-the same per-object permission check on every page request and call the package read
-facade; they are not fetched by the polling script.
+The initially collapsed **Workflow execution** section performs a separate authorized
+read only when an operator opens it. The compact view verifies the persisted plan
+fingerprint and selection schema, groups strategy rejection counts by stable code, and
+explains whether bounded progress is available, partial, expired, disabled, legacy-only,
+requested but not reported, missing, or corrupt. It does not render raw plan JSON,
+rejection paths, or rejection messages in the task form.
+
+Verified plan and selection JSON remain available as explicit, byte-bounded downloads.
+The lazy summary and downloads are GET-only, repeat the per-object permission check, use
+SQL byte guards before loading the blobs, and return `Cache-Control: no-store`. Topology
+and node-detail actions appear only when the retained schema-v3 collection can return
+useful data. Those actions repeat the same authorization and call the package read
+facade; none is fetched by the polling script.
 
 By default, the same change form presents ordered immutable attempt history
 contextually. The inline selects only attempt identity, state, timing, and a bounded

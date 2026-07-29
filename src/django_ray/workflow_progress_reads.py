@@ -513,6 +513,7 @@ def _summary_context(
     *,
     selected_attempt_number: int,
     include_legacy: bool,
+    infer_current_reporting_policy: bool,
     generated_at: datetime,
     using: str,
 ) -> _SummaryContext:
@@ -573,7 +574,7 @@ def _summary_context(
             )
 
     availability = WorkflowProgressDetailAvailability.NOT_REPORTED.value
-    if selected_attempt_number == execution.attempt_number:
+    if infer_current_reporting_policy and selected_attempt_number == execution.attempt_number:
         reporting_policy = _current_workflow_reporting_policy(execution, using=using)
         if reporting_policy == "disabled":
             availability = WorkflowProgressDetailAvailability.DISABLED.value
@@ -1032,12 +1033,17 @@ def get_workflow_progress_summary(
     *,
     authorize: Callable[[RayTaskExecution], bool],
     include_legacy: bool = False,
+    infer_current_reporting_policy: bool = True,
     attempt_number: int | None = None,
     generated_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """Return the authorized bounded aggregate summary for one workflow run."""
+    """Return the authorized bounded aggregate summary for one workflow run.
+
+    Callers that only poll an existing schema-v3 publication may disable current
+    policy inference so an absent summary never loads the raw plan selection.
+    """
     fresh = _load_authorized_execution(execution, authorize=authorize, lock=False)
-    if type(include_legacy) is not bool:
+    if type(include_legacy) is not bool or type(infer_current_reporting_policy) is not bool:
         _raise(WorkflowProgressReadErrorCode.INVALID_ARGUMENT)
     observed_at = _normalized_observed_at(
         datetime.now(UTC) if generated_at is None else generated_at
@@ -1047,6 +1053,7 @@ def get_workflow_progress_summary(
         fresh,
         selected_attempt_number=selected,
         include_legacy=include_legacy,
+        infer_current_reporting_policy=infer_current_reporting_policy,
         generated_at=observed_at,
         using=_database_for(fresh),
     )
@@ -1077,6 +1084,7 @@ def _locked_context(
         fresh,
         selected_attempt_number=selected,
         include_legacy=False,
+        infer_current_reporting_policy=True,
         generated_at=generated_at,
         using=_database_for(fresh),
     )

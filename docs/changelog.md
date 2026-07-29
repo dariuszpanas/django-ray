@@ -102,6 +102,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem/S3/GCS retrieval, immutable retry reuse, and retention-safe cleanup.
 - Versioned package observability services, bounded-cardinality Prometheus metrics,
   byte-bounded live Ray logs, and authenticated live task updates in Django admin.
+- Compact, lazy workflow-execution diagnostics in Django admin replace inline plan JSON,
+  verify the plan fingerprint and selection schema before presentation, bind schema-v3
+  progress to the validated fingerprint, selected strategy, and reporting policy, explain
+  bounded-progress availability, reveal topology actions only for useful retained
+  collections, and keep complete redacted diagnostics behind authorized byte-bounded
+  downloads.
 - A Django Unfold-themed bundled testproject admin that shares the documentation icon and type
   treatment, adopts the landing page's sky/slate palette and graph artwork, and provides compact
   execution/attempt layouts. Reproducibly pinned development, sample-image, and RuntimeEnv

@@ -28,6 +28,9 @@ _TASK_LIVE_STYLESHEET_RE = re.compile(
 _TASK_LIVE_SCRIPT_RE = re.compile(
     r"""src=["'](?P<path>/static/django_ray/admin/task_live[^"']*\.js)["']"""
 )
+_WORKFLOW_DIAGNOSTICS_SCRIPT_RE = re.compile(
+    r"""src=["'](?P<path>/static/django_ray/admin/workflow_diagnostics[^"']*\.js)["']"""
+)
 _DJANGO_RAY_ICON_RE = re.compile(
     r"""(?:href|src)=["'](?P<path>/static/testproject/django-ray[^"']*\.svg)["']"""
 )
@@ -75,7 +78,7 @@ def _request_text(
     *,
     headers: dict[str, str] | None = None,
     expected_status: int = 200,
-    expected_content_type: str | None = None,
+    expected_content_type: str | tuple[str, ...] | None = None,
     deadline: float | None = None,
 ) -> str:
     if not path.startswith("/") or "://" in path:
@@ -100,10 +103,16 @@ def _request_text(
             )
         if expected_content_type is not None:
             content_type = response.headers.get("Content-Type", "").partition(";")[0].strip()
-            if content_type != expected_content_type:
+            accepted_content_types = (
+                (expected_content_type,)
+                if isinstance(expected_content_type, str)
+                else expected_content_type
+            )
+            if content_type not in accepted_content_types:
+                expected_label = " or ".join(accepted_content_types)
                 raise DockerSmokeError(
                     f"request to {path} returned content type {content_type or 'missing'}; "
-                    f"expected {expected_content_type}"
+                    f"expected {expected_label}"
                 )
         body = _response_text(response)
     if deadline is not None and time.monotonic() > deadline:
@@ -280,19 +289,32 @@ def _verify_unfold_admin_contract(
             "django-ray-live-observability" not in change_html
             or _TASK_LIVE_STYLESHEET_RE.search(change_html) is None
             or _TASK_LIVE_SCRIPT_RE.search(change_html) is None
+            or _WORKFLOW_DIAGNOSTICS_SCRIPT_RE.search(change_html) is None
             or 'aria-labelledby="django-ray-live-heading"' not in change_html
-            or change_html.count('role="status"') != 1
+            or change_html.count('role="status"') != 2
             or "django-ray-live__grid" not in change_html
-            or "django-ray-live__workflow-links" not in change_html
+            or "django-ray-workflow-diagnostics" not in change_html
+            or "Workflow execution" not in change_html
         ):
             raise DockerSmokeError("admin change view did not render live task diagnostics")
-        workflow_paths = (
-            f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/topology/nodes/",
-            f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/topology/edges/",
-            f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/nodes/",
-        )
-        if any(f'href="{path}"' not in change_html for path in workflow_paths):
-            raise DockerSmokeError("admin change view did not render workflow action links")
+        workflow_paths = {
+            "data-topology-nodes-url": (
+                f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/topology/nodes/"
+            ),
+            "data-topology-edges-url": (
+                f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/topology/edges/"
+            ),
+            "data-node-details-url": (
+                f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/nodes/"
+            ),
+        }
+        if any(
+            f'{attribute}="{path}"' not in change_html or f'href="{path}"' in change_html
+            for attribute, path in workflow_paths.items()
+        ):
+            raise DockerSmokeError(
+                "admin change view did not keep workflow actions behind lazy diagnostics"
+            )
         if "Runtime env json" in change_html or "field-runtime_env_json" in change_html:
             raise DockerSmokeError("admin change view exposed the raw RuntimeEnv snapshot")
         if (
@@ -363,9 +385,28 @@ def _verify_unfold_admin_contract(
         )
         if (
             "#django-ray-live-observability" not in live_stylesheet
+            or ".django-ray-workflow__summary" not in live_stylesheet
+            or "grid-template-columns: repeat(4, minmax(0, 1fr))" not in live_stylesheet
+            or ".django-ray-workflow__chip" not in live_stylesheet
             or ":focus-visible" not in live_stylesheet
         ):
             raise DockerSmokeError("live status stylesheet response was invalid")
+
+        workflow_script_match = _WORKFLOW_DIAGNOSTICS_SCRIPT_RE.search(change_html)
+        if workflow_script_match is None:
+            raise DockerSmokeError("admin change view did not load workflow diagnostics JavaScript")
+        workflow_script = _request_text(
+            base_url,
+            html.unescape(workflow_script_match.group("path")),
+            expected_content_type=("text/javascript", "application/javascript"),
+            deadline=deadline,
+        )
+        if (
+            "django-ray-workflow-diagnostics" not in workflow_script
+            or 'credentials: "same-origin"' not in workflow_script
+            or "innerHTML" in workflow_script
+        ):
+            raise DockerSmokeError("workflow diagnostics script response was invalid")
 
         icon_match = _DJANGO_RAY_ICON_RE.search(index_html)
         if icon_match is None:

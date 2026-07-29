@@ -9,7 +9,7 @@ from django.apps import apps
 from django.contrib import admin
 from django.contrib.auth import get_permission_codename
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import QuerySet
+from django.db.models import Case, F, Func, IntegerField, QuerySet, TextField, Value, When
 from django.db.models.functions import Substr
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.urls import path, reverse
@@ -23,6 +23,8 @@ from django_ray.conf.settings import get_settings
 from django_ray.lifecycle import request_task_cancellation, retry_task
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.redaction import redact_text, safe_json_dumps
+from django_ray.workflow_plans import MAX_PLAN_BYTES
+from django_ray.workflow_progress import MAX_PLAN_SELECTION_BYTES
 from django_ray.workflow_progress_reads import (
     WorkflowProgressReadError,
     WorkflowProgressReadErrorCode,
@@ -31,6 +33,9 @@ from django_ray.workflow_progress_reads import (
     list_workflow_node_details,
     list_workflow_topology_edges,
     list_workflow_topology_nodes,
+)
+from django_ray.workflow_progress_summary import (
+    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
 )
 
 if apps.is_installed("unfold"):
@@ -47,6 +52,170 @@ DjangoRayTabularInline = cast(Any, _ConfiguredTabularInline)
 RAY_DASHBOARD_URL = "http://localhost:8265"
 ADMIN_DIAGNOSTIC_MAX_CHARS = 4096
 ADMIN_ATTEMPT_INLINE_MAX_CHARS = 512
+ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES = 16 * 1024
+ADMIN_WORKFLOW_PLAN_DOWNLOAD_MAX_BYTES = 128 * 1024
+ADMIN_WORKFLOW_PLAN_SELECTION_DOWNLOAD_MAX_BYTES = 32 * 1024
+_WORKFLOW_PROGRESS_MESSAGES = {
+    "NOT_REPORTED": "No workflow progress snapshot has been reported.",
+    "REQUESTED_NOT_REPORTED": (
+        "Full workflow reporting was requested, but no bounded snapshot has been published yet."
+    ),
+    "REQUESTED_MISSING": (
+        "Full workflow reporting was requested, but the terminal snapshot was not captured."
+    ),
+    "LEGACY_ONLY": (
+        "Only a legacy aggregate snapshot is retained; bounded topology and node detail "
+        "are unavailable."
+    ),
+    "DISABLED": "Workflow progress reporting was disabled by policy.",
+    "OMITTED_BY_POLICY": (
+        "Detailed workflow progress was omitted by the selected reporting policy."
+    ),
+    "AVAILABLE": "Bounded workflow topology and node detail are available.",
+    "TRUNCATED": "Bounded workflow detail is available but incomplete.",
+    "EXPIRED": "Retained workflow topology and node detail have expired.",
+    "MISSING": "The workflow summary references retained detail that is missing.",
+    "CORRUPT": "Workflow progress failed validation.",
+}
+
+
+class _AdminOctetLength(Func):
+    """Return storage bytes consistently across supported databases."""
+
+    function = "OCTET_LENGTH"
+    output_field = IntegerField()
+
+    def as_sqlite(self, compiler: Any, connection: Any, **extra_context: Any) -> Any:
+        return self.as_sql(
+            compiler,
+            connection,
+            template="LENGTH(CAST(%(expressions)s AS BLOB))",
+            **extra_context,
+        )
+
+    def as_oracle(self, compiler: Any, connection: Any, **extra_context: Any) -> Any:
+        return self.as_sql(
+            compiler,
+            connection,
+            function="LENGTHB",
+            **extra_context,
+        )
+
+
+def _secure_admin_response(response: HttpResponse) -> HttpResponse:
+    """Apply the fixed cache and MIME-sniffing policy to lazy diagnostics."""
+    response["Cache-Control"] = "no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _admin_json_response(
+    payload: dict[str, Any],
+    *,
+    status: int = 200,
+    max_bytes: int,
+) -> HttpResponse:
+    """Serialize one explicitly byte-bounded admin response."""
+    try:
+        content = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, UnicodeEncodeError, ValueError) as error:
+        raise ValueError("Admin workflow diagnostics are not serializable") from error
+    if len(content) > max_bytes:
+        raise ValueError("Admin workflow diagnostics exceed their response limit")
+    return _secure_admin_response(
+        HttpResponse(content, status=status, content_type="application/json; charset=utf-8")
+    )
+
+
+def _admin_json_attachment(
+    payload: dict[str, Any],
+    *,
+    filename: str,
+    max_bytes: int,
+) -> HttpResponse:
+    """Return one compact, redacted JSON attachment within a strict wire bound."""
+    try:
+        content = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, UnicodeEncodeError, ValueError) as error:
+        raise ValueError("Admin workflow diagnostics are not serializable") from error
+    if len(content) > max_bytes:
+        raise ValueError("Admin workflow diagnostics exceed their response limit")
+    response = HttpResponse(content, content_type="application/json; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return _secure_admin_response(response)
+
+
+def _workflow_diagnostics_error_response(
+    *,
+    code: str,
+    message: str,
+    status: int,
+) -> HttpResponse:
+    """Return one fixed-shape safe failure without storage diagnostics."""
+    return _admin_json_response(
+        {"code": code, "message": message},
+        status=status,
+        max_bytes=ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES,
+    )
+
+
+def _corrupt_workflow_plan_presentation() -> dict[str, Any]:
+    """Return the compact fail-closed plan shape expected by the admin UI."""
+    return {
+        "status": "CORRUPT",
+        "definition_name": None,
+        "definition_revision": None,
+        "topology_class": None,
+        "declared_node_count": None,
+        "retry_safe": None,
+        "fingerprint": None,
+        "fingerprint_compact": None,
+        "requested_policy": None,
+        "selected_strategy": None,
+        "reporting_policy": None,
+        "eligible_strategies": [],
+        "rejection_counts": {},
+        "retained_rejections": 0,
+        "total_rejections": 0,
+        "unretained_rejections": 0,
+    }
+
+
+def _workflow_progress_presentation(
+    *,
+    state: str,
+    availability: str | None = None,
+    complete: bool = False,
+    truncation_reasons: list[str] | None = None,
+    topology_nodes: bool = False,
+    topology_edges: bool = False,
+    node_details: bool = False,
+) -> dict[str, Any]:
+    """Build one exact, bounded progress-presentation object."""
+    return {
+        "state": state,
+        "message": _WORKFLOW_PROGRESS_MESSAGES[state],
+        "availability": availability,
+        "complete": complete,
+        "truncation_reasons": sorted(set(truncation_reasons or [])),
+        "actions": {
+            "topology_nodes": topology_nodes,
+            "topology_edges": topology_edges,
+            "node_details": node_details,
+        },
+    }
 
 
 def _bounded_redacted_text(value: Any, *, max_chars: int = ADMIN_DIAGNOSTIC_MAX_CHARS) -> str:
@@ -236,7 +405,6 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         "runtime_env_hash",
         "workflow_plan_fingerprint",
         "workflow_plan_pinned_attempt",
-        "workflow_plan_selection",
         "error_message",
     )
     workflow_read_fields = (
@@ -289,8 +457,6 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         "workflow_run_id",
         "workflow_plan_fingerprint",
         "workflow_plan_pinned_attempt",
-        "workflow_plan_display",
-        "workflow_plan_selection_display",
         "created_at",
         "started_at",
         "finished_at",
@@ -321,8 +487,6 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                     "workflow_run_id",
                     "workflow_plan_fingerprint",
                     "workflow_plan_pinned_attempt",
-                    "workflow_plan_display",
-                    "workflow_plan_selection_display",
                 ),
                 "description": (
                     "Execution metadata is read-only. Use the package-owned Retry "
@@ -386,6 +550,8 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             .defer(
                 "progress_data",
                 "runtime_env_json",
+                "workflow_plan_json",
+                "workflow_plan_selection",
                 "workflow_progress_summary_json",
             )
         )
@@ -455,6 +621,21 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 name=f"{opts.app_label}_{opts.model_name}_observability",
             ),
             path(
+                "<path:object_id>/workflow/diagnostics/",
+                self.admin_site.admin_view(self.workflow_diagnostics_view),
+                name=f"{opts.app_label}_{opts.model_name}_workflow_diagnostics",
+            ),
+            path(
+                "<path:object_id>/workflow/diagnostics/plan.json",
+                self.admin_site.admin_view(self.workflow_plan_download_view),
+                name=f"{opts.app_label}_{opts.model_name}_workflow_plan_download",
+            ),
+            path(
+                "<path:object_id>/workflow/diagnostics/selection.json",
+                self.admin_site.admin_view(self.workflow_plan_selection_download_view),
+                name=f"{opts.app_label}_{opts.model_name}_workflow_plan_selection_download",
+            ),
+            path(
                 "<path:object_id>/workflow/topology/nodes/",
                 self.admin_site.admin_view(self.workflow_topology_nodes_view),
                 name=f"{opts.app_label}_{opts.model_name}_workflow_topology_nodes",
@@ -494,6 +675,22 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             "show_save_and_continue": False,
             "django_ray_observability_url": reverse(
                 f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_observability",
+                args=[quote(object_id)],
+                current_app=self.admin_site.name,
+            ),
+            "django_ray_workflow_diagnostics_url": reverse(
+                f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_workflow_diagnostics",
+                args=[quote(object_id)],
+                current_app=self.admin_site.name,
+            ),
+            "django_ray_workflow_plan_download_url": reverse(
+                f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_workflow_plan_download",
+                args=[quote(object_id)],
+                current_app=self.admin_site.name,
+            ),
+            "django_ray_workflow_selection_download_url": reverse(
+                f"{self.admin_site.name}:"
+                f"{opts.app_label}_{opts.model_name}_workflow_plan_selection_download",
                 args=[quote(object_id)],
                 current_app=self.admin_site.name,
             ),
@@ -546,6 +743,99 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             raise PermissionDenied
         return execution
 
+    def _load_bounded_workflow_plan_fields(
+        self,
+        request: HttpRequest,
+        execution: RayTaskExecution,
+    ) -> RayTaskExecution:
+        """Load and reauthorize one identity-fenced, SQL-bounded plan row."""
+        database = str(getattr(execution._state, "db", None) or "default")
+        try:
+            fresh = (
+                self.get_queryset(request)
+                .using(database)
+                .annotate(
+                    _admin_plan_bytes=_AdminOctetLength("workflow_plan_json"),
+                    _admin_selection_bytes=_AdminOctetLength("workflow_plan_selection"),
+                )
+                .annotate(
+                    _admin_bounded_plan=Case(
+                        When(
+                            _admin_plan_bytes__lte=MAX_PLAN_BYTES,
+                            then=F("workflow_plan_json"),
+                        ),
+                        default=Value(None),
+                        output_field=TextField(),
+                    ),
+                    _admin_bounded_selection=Case(
+                        When(
+                            _admin_selection_bytes__lte=MAX_PLAN_SELECTION_BYTES,
+                            then=F("workflow_plan_selection"),
+                        ),
+                        default=Value(None),
+                        output_field=TextField(),
+                    ),
+                )
+                .only(*self.workflow_read_fields, "workflow_plan_fingerprint")
+                .get(pk=execution.pk)
+            )
+        except RayTaskExecution.DoesNotExist as error:
+            raise Http404("Ray task execution was not found") from error
+
+        row = {
+            "workflow_plan_fingerprint": fresh.workflow_plan_fingerprint,
+            "_admin_plan_bytes": fresh._admin_plan_bytes,
+            "_admin_selection_bytes": fresh._admin_selection_bytes,
+            "_admin_bounded_plan": fresh._admin_bounded_plan,
+            "_admin_bounded_selection": fresh._admin_bounded_selection,
+        }
+
+        bounded_fields = (
+            (
+                row["_admin_plan_bytes"],
+                row["_admin_bounded_plan"],
+                MAX_PLAN_BYTES,
+            ),
+            (
+                row["_admin_selection_bytes"],
+                row["_admin_bounded_selection"],
+                MAX_PLAN_SELECTION_BYTES,
+            ),
+        )
+        for stored_bytes, value, maximum in bounded_fields:
+            if stored_bytes is None:
+                if value is not None:
+                    raise ValueError("Workflow diagnostic storage failed validation")
+                continue
+            if (
+                type(stored_bytes) is not int
+                or not 0 <= stored_bytes <= maximum
+                or not isinstance(value, str)
+            ):
+                raise ValueError("Workflow diagnostic storage failed validation")
+            try:
+                decoded_bytes = len(value.encode("utf-8"))
+            except UnicodeEncodeError as error:
+                raise ValueError("Workflow diagnostic storage failed validation") from error
+            if decoded_bytes != stored_bytes:
+                raise ValueError("Workflow diagnostic storage failed validation")
+
+        fresh.workflow_plan_json = row["_admin_bounded_plan"]
+        fresh.workflow_plan_selection = row["_admin_bounded_selection"]
+        identity_fields = (
+            "pk",
+            "task_id",
+            "callable_path",
+            "attempt_number",
+            "execution_generation",
+            "workflow_run_id",
+        )
+        if any(getattr(fresh, field) != getattr(execution, field) for field in identity_fields):
+            raise Http404("Ray task execution was not found")
+        if not self.has_view_permission(request, fresh):
+            raise PermissionDenied
+        return fresh
+
     def _workflow_authorizer(
         self,
         request: HttpRequest,
@@ -597,6 +887,402 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         except ValueError as error:
             raise ValueError("attempt_number must be an integer") from error
 
+    def _preflight_workflow_collection(
+        self,
+        request: HttpRequest,
+        execution: RayTaskExecution,
+        *,
+        collection: str,
+    ) -> dict[str, Any]:
+        """Read one authorized record to prove a claimed collection is useful."""
+        authorizer = self._workflow_authorizer(request)
+        if collection == "topology_nodes":
+            return list_workflow_topology_nodes(
+                execution,
+                authorize=authorizer,
+                limit=1,
+            )
+        if collection == "topology_edges":
+            return list_workflow_topology_edges(
+                execution,
+                authorize=authorizer,
+                limit=1,
+            )
+        return list_workflow_node_details(
+            execution,
+            authorize=authorizer,
+            limit=1,
+        )
+
+    def _lazy_workflow_progress_presentation(
+        self,
+        request: HttpRequest,
+        execution: RayTaskExecution,
+        plan: dict[str, Any],
+        plan_binding: dict[str, str] | None,
+    ) -> dict[str, Any]:
+        """Explain the bounded progress state and advertise only useful actions."""
+        try:
+            envelope = get_workflow_progress_summary(
+                execution,
+                authorize=self._workflow_authorizer(request),
+                include_legacy=True,
+            )
+        except WorkflowProgressReadError as error:
+            if error.code is WorkflowProgressReadErrorCode.ACCESS_DENIED:
+                raise PermissionDenied from error
+            if error.code is WorkflowProgressReadErrorCode.NOT_FOUND:
+                raise Http404("Ray task execution was not found") from error
+            state = "MISSING" if error.code is WorkflowProgressReadErrorCode.MISSING else "CORRUPT"
+            return _workflow_progress_presentation(
+                state=state,
+                availability=error.code.value,
+            )
+
+        source_schema = envelope.get("source_schema_version")
+        summary = envelope.get("summary")
+        availability = envelope.get("availability")
+        availability_text = availability if isinstance(availability, str) else None
+        complete = envelope.get("complete") is True
+
+        if (
+            type(source_schema) is int
+            and source_schema < WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION
+            and isinstance(summary, dict)
+        ):
+            return _workflow_progress_presentation(
+                state="LEGACY_ONLY",
+                availability=availability_text,
+            )
+        if source_schema is None:
+            state_by_availability = {
+                "DISABLED": "DISABLED",
+                "MISSING": "REQUESTED_MISSING",
+            }
+            if availability_text == "NOT_REPORTED":
+                state = (
+                    "REQUESTED_NOT_REPORTED"
+                    if plan.get("status") == "AVAILABLE"
+                    and plan_binding is not None
+                    and plan_binding.get("reporting_policy") == "full"
+                    else "NOT_REPORTED"
+                )
+            else:
+                state = state_by_availability.get(availability_text or "", "CORRUPT")
+            return _workflow_progress_presentation(
+                state=state,
+                availability=availability_text,
+            )
+        if source_schema != WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION or not isinstance(
+            summary, dict
+        ):
+            return _workflow_progress_presentation(
+                state="CORRUPT",
+                availability=availability_text,
+            )
+        if plan.get("status") != "AVAILABLE" or plan_binding is None:
+            return _workflow_progress_presentation(
+                state="CORRUPT",
+                availability="CORRUPT",
+            )
+        if (
+            summary.get("plan_fingerprint") != plan_binding["fingerprint"]
+            or summary.get("selected_strategy") != plan_binding["selected_strategy"]
+            or summary.get("reporting_policy") != plan_binding["reporting_policy"]
+        ):
+            return _workflow_progress_presentation(
+                state="CORRUPT",
+                availability="CORRUPT",
+            )
+
+        state_by_availability = {
+            "DISABLED": "DISABLED",
+            "OMITTED_BY_POLICY": "OMITTED_BY_POLICY",
+            "AVAILABLE": "AVAILABLE",
+            "TRUNCATED": "TRUNCATED",
+            "EXPIRED": "EXPIRED",
+            "MISSING": "MISSING",
+            "CORRUPT": "CORRUPT",
+        }
+        if availability_text == "NOT_REPORTED":
+            state = (
+                "REQUESTED_NOT_REPORTED"
+                if plan.get("status") == "AVAILABLE"
+                and plan_binding is not None
+                and plan_binding.get("reporting_policy") == "full"
+                else "NOT_REPORTED"
+            )
+        else:
+            state = state_by_availability.get(availability_text or "", "CORRUPT")
+        detail = summary.get("detail")
+        node_counts = summary.get("node_counts")
+        edge_counts = summary.get("edge_counts")
+        publication = envelope.get("publication")
+        if (
+            not isinstance(detail, dict)
+            or not isinstance(node_counts, dict)
+            or not isinstance(edge_counts, dict)
+            or not isinstance(publication, dict)
+        ):
+            return _workflow_progress_presentation(
+                state="CORRUPT",
+                availability=availability_text,
+            )
+        truncation_reasons = detail.get("truncation_reasons")
+        if not isinstance(truncation_reasons, list) or not all(
+            isinstance(reason, str) for reason in truncation_reasons
+        ):
+            return _workflow_progress_presentation(
+                state="CORRUPT",
+                availability=availability_text,
+            )
+
+        actions_available = (
+            state in {"AVAILABLE", "TRUNCATED"} and plan.get("status") == "AVAILABLE"
+        )
+        topology_revision = publication.get("topology_version")
+        detail_revision = publication.get("detail_revision")
+        retained_nodes = node_counts.get("retained_topology")
+        retained_edges = edge_counts.get("retained_topology")
+        retained_detail = node_counts.get("retained_detail")
+        claimed_actions = {
+            "topology_nodes": (
+                actions_available
+                and type(topology_revision) is int
+                and topology_revision > 0
+                and type(retained_nodes) is int
+                and retained_nodes > 0
+            ),
+            "topology_edges": (
+                actions_available
+                and type(topology_revision) is int
+                and topology_revision > 0
+                and type(retained_edges) is int
+                and retained_edges > 0
+            ),
+            "node_details": (
+                actions_available
+                and type(detail_revision) is int
+                and detail_revision > 0
+                and type(retained_detail) is int
+                and retained_detail > 0
+            ),
+        }
+        useful_actions: dict[str, bool] = {}
+        for collection, claimed in claimed_actions.items():
+            if not claimed:
+                useful_actions[collection] = False
+                continue
+            try:
+                page = self._preflight_workflow_collection(
+                    request,
+                    execution,
+                    collection=collection,
+                )
+            except WorkflowProgressReadError as error:
+                if error.code is WorkflowProgressReadErrorCode.ACCESS_DENIED:
+                    raise PermissionDenied from error
+                if error.code is WorkflowProgressReadErrorCode.NOT_FOUND:
+                    raise Http404("Ray task execution was not found") from error
+                preflight_state = (
+                    "MISSING" if error.code is WorkflowProgressReadErrorCode.MISSING else "CORRUPT"
+                )
+                return _workflow_progress_presentation(
+                    state=preflight_state,
+                    availability=error.code.value,
+                )
+            page_availability = page.get("availability")
+            if page_availability not in {"AVAILABLE", "TRUNCATED"}:
+                preflight_state = (
+                    page_availability
+                    if page_availability
+                    in {
+                        "DISABLED",
+                        "OMITTED_BY_POLICY",
+                        "EXPIRED",
+                        "MISSING",
+                        "CORRUPT",
+                    }
+                    else "CORRUPT"
+                )
+                return _workflow_progress_presentation(
+                    state=preflight_state,
+                    availability=(
+                        page_availability if isinstance(page_availability, str) else "CORRUPT"
+                    ),
+                )
+            returned_count = page.get("returned_count")
+            items = page.get("items")
+            if (
+                type(returned_count) is not int
+                or not isinstance(items, list)
+                or len(items) != returned_count
+            ):
+                return _workflow_progress_presentation(
+                    state="CORRUPT",
+                    availability="CORRUPT",
+                )
+            if returned_count < 1:
+                return _workflow_progress_presentation(
+                    state="MISSING",
+                    availability="MISSING",
+                )
+            useful_actions[collection] = True
+
+        return _workflow_progress_presentation(
+            state=state,
+            availability=availability_text,
+            complete=complete,
+            truncation_reasons=truncation_reasons,
+            topology_nodes=useful_actions["topology_nodes"],
+            topology_edges=useful_actions["topology_edges"],
+            node_details=useful_actions["node_details"],
+        )
+
+    def workflow_diagnostics_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> HttpResponse:
+        """Return lazy compact plan and progress diagnostics for the change form."""
+        if request.method != "GET":
+            return _secure_admin_response(HttpResponseNotAllowed(["GET"]))
+        execution = self._authorized_workflow_read_execution(request, object_id)
+
+        from django_ray import observability
+
+        plan_binding = None
+        try:
+            execution = self._load_bounded_workflow_plan_fields(request, execution)
+            plan = observability.get_workflow_plan_diagnostics(execution)
+            if plan["status"] == "AVAILABLE":
+                plan_binding = observability.get_workflow_plan_binding(execution)
+        except (ValueError, observability.WorkflowObservabilityError):
+            plan = _corrupt_workflow_plan_presentation()
+        progress = self._lazy_workflow_progress_presentation(
+            request,
+            execution,
+            plan,
+            plan_binding,
+        )
+        if plan["status"] != "AVAILABLE":
+            progress["actions"] = {
+                "topology_nodes": False,
+                "topology_edges": False,
+                "node_details": False,
+            }
+        payload = {
+            "schema": "django-ray.admin-workflow-diagnostics",
+            "schema_version": 1,
+            "plan": plan,
+            "progress": progress,
+        }
+        try:
+            return _admin_json_response(
+                payload,
+                max_bytes=ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES,
+            )
+        except ValueError:
+            return _workflow_diagnostics_error_response(
+                code="CORRUPT",
+                message="Workflow diagnostics failed validation.",
+                status=503,
+            )
+
+    def _verified_workflow_plan_download(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> dict[str, Any] | None:
+        """Authorize, byte-bound, validate, and redact one complete plan pair."""
+        execution = self._authorized_workflow_read_execution(request, object_id)
+        execution = self._load_bounded_workflow_plan_fields(request, execution)
+
+        from django_ray import observability
+
+        diagnostics = observability.get_workflow_plan_diagnostics(execution)
+        if diagnostics["status"] == "NOT_RECORDED":
+            return None
+        workflow_plan = observability.get_workflow_plan(execution)
+        if (
+            not isinstance(workflow_plan, dict)
+            or not isinstance(workflow_plan.get("manifest"), dict)
+            or not isinstance(workflow_plan.get("selection"), dict)
+        ):
+            raise observability.WorkflowObservabilityError("Workflow diagnostics are incomplete")
+        return workflow_plan
+
+    def _workflow_plan_attachment_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+        *,
+        component: str,
+    ) -> HttpResponse:
+        if request.method != "GET":
+            return _secure_admin_response(HttpResponseNotAllowed(["GET"]))
+        from django_ray import observability
+
+        try:
+            workflow_plan = self._verified_workflow_plan_download(request, object_id)
+            if workflow_plan is None:
+                return _workflow_diagnostics_error_response(
+                    code="NOT_RECORDED",
+                    message="Workflow diagnostics were not recorded.",
+                    status=404,
+                )
+            if component == "manifest":
+                return _admin_json_attachment(
+                    {
+                        "fingerprint": workflow_plan["fingerprint"],
+                        "manifest": workflow_plan["manifest"],
+                    },
+                    filename="plan.json",
+                    max_bytes=ADMIN_WORKFLOW_PLAN_DOWNLOAD_MAX_BYTES,
+                )
+            return _admin_json_attachment(
+                {
+                    "fingerprint": workflow_plan["fingerprint"],
+                    "selection": workflow_plan["selection"],
+                },
+                filename="selection.json",
+                max_bytes=ADMIN_WORKFLOW_PLAN_SELECTION_DOWNLOAD_MAX_BYTES,
+            )
+        except Http404:
+            raise
+        except PermissionDenied:
+            raise
+        except (TypeError, ValueError, observability.WorkflowObservabilityError):
+            return _workflow_diagnostics_error_response(
+                code="CORRUPT",
+                message="Workflow diagnostics failed validation.",
+                status=503,
+            )
+
+    def workflow_plan_download_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> HttpResponse:
+        """Download the verified, redacted effective workflow plan."""
+        return self._workflow_plan_attachment_view(
+            request,
+            object_id,
+            component="manifest",
+        )
+
+    def workflow_plan_selection_download_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> HttpResponse:
+        """Download the verified, redacted workflow strategy selection."""
+        return self._workflow_plan_attachment_view(
+            request,
+            object_id,
+            component="selection",
+        )
+
     def observability_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
         """Return a versioned durable summary without querying Ray or task logs."""
         if request.method != "GET":
@@ -613,6 +1299,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 execution,
                 authorize=self._workflow_authorizer(request),
                 include_legacy=False,
+                infer_current_reporting_policy=False,
             )
             progress = progress_envelope["summary"]
         except WorkflowProgressReadError as error:
@@ -623,7 +1310,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             progress = None
             workflow_error = _bounded_redacted_text(str(error))
             workflow_error_code = error.code.value
-        summary = observability.get_task_summary(execution, workflow_progress=progress)
+        summary = observability.get_task_summary(
+            execution,
+            include_workflow_plan_selection=False,
+            workflow_progress=progress,
+        )
         if summary.get("error_message") is not None:
             summary["error_message"] = _bounded_redacted_text(summary["error_message"])
         if workflow_error is not None:
@@ -811,14 +1502,6 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     @admin.display(description="Progress")
     def progress_data_display(self, obj: RayTaskExecution) -> str:
         return self._redacted_json(obj.progress_data)
-
-    @admin.display(description="Effective workflow plan")
-    def workflow_plan_display(self, obj: RayTaskExecution) -> str:
-        return self._redacted_json(obj.workflow_plan_json)
-
-    @admin.display(description="Workflow strategy selection")
-    def workflow_plan_selection_display(self, obj: RayTaskExecution) -> str:
-        return self._redacted_json(obj.workflow_plan_selection)
 
     @admin.display(description="Completion envelope")
     def completion_data_display(self, obj: RayTaskExecution) -> str:
