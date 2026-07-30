@@ -533,7 +533,7 @@ class TestEnqueueAPI:
         assert execution.attempt_number == 1
         assert RayTaskExecution.objects.count() == 1
 
-    @pytest.mark.parametrize("reporting_policy", ["full", "terminal_only"])
+    @pytest.mark.parametrize("reporting_policy", ["full", "terminal_only", "disabled"])
     def test_enqueue_complex_workflow_accepts_explicit_reporting_policy(
         self,
         client,

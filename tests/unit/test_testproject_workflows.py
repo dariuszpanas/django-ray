@@ -63,7 +63,11 @@ def test_complex_workflow_default_config_remains_unchanged() -> None:
     ]
 
 
-def test_complex_workflow_terminal_only_selection_is_per_invocation(monkeypatch) -> None:
+@pytest.mark.parametrize("reporting_policy", ["terminal_only", "disabled"])
+def test_complex_workflow_reporting_policy_selection_is_per_invocation(
+    monkeypatch,
+    reporting_policy: str,
+) -> None:
     captured: dict[str, object] = {}
 
     class _Configured:
@@ -84,12 +88,12 @@ def test_complex_workflow_terminal_only_selection_is_per_invocation(monkeypatch)
         1,
         0.01,
         0.02,
-        reporting_policy="terminal_only",
+        reporting_policy=reporting_policy,
         use_ray=True,
     )
 
     assert captured == {
-        "policy": "terminal_only",
+        "policy": reporting_policy,
         "args": (2, 1, 0.01, 0.02),
         "kwargs": {"use_ray": True},
     }

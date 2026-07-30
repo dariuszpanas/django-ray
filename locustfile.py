@@ -41,7 +41,7 @@ Metrics to watch:
 import os
 import random
 import time
-from typing import Any
+from typing import Any, Literal
 
 from locust import HttpUser, between, events, task
 from locust.exception import StopTest
@@ -51,6 +51,15 @@ _TERMINAL_SUCCESS_STATES = frozenset({"SUCCESSFUL", "SUCCEEDED"})
 _TERMINAL_FAILURE_STATES = frozenset({"FAILED", "CANCELLED", "LOST"})
 _ACTIVE_STATES = frozenset({"READY", "QUEUED", "RUNNING", "CANCELLING"})
 _REQUEST_TIMEOUT_SECONDS = 10.0
+_WorkflowReportingPolicy = Literal["full", "terminal_only", "disabled"]
+_WORKFLOW_POLICY_DETAIL_EXPECTATIONS: dict[
+    _WorkflowReportingPolicy,
+    tuple[str, bool],
+] = {
+    "full": ("AVAILABLE", True),
+    "terminal_only": ("OMITTED_BY_POLICY", False),
+    "disabled": ("DISABLED", False),
+}
 _EXPLICIT_ONLY_USER_CLASSES = frozenset(
     {
         "BurstTaskUser",
@@ -71,6 +80,36 @@ def _configured_api_token() -> str | None:
 def _missing_api_token_error() -> RuntimeError:
     return RuntimeError(
         "DJANGO_API_TOKEN must be set before running Locust against protected task routes"
+    )
+
+
+def _workflow_policy_summary_matches(
+    data: dict[str, Any],
+    *,
+    task_id: str,
+    expected_policy: _WorkflowReportingPolicy,
+) -> bool:
+    """Validate one terminal bounded-summary response without exposing its payload."""
+    expected_availability, expected_complete = _WORKFLOW_POLICY_DETAIL_EXPECTATIONS[expected_policy]
+    if (
+        data.get("task_id") != task_id
+        or data.get("availability") != expected_availability
+        or data.get("complete") is not expected_complete
+    ):
+        return False
+
+    summary = data.get("summary")
+    if expected_policy == "disabled":
+        return data.get("source_schema_version") is None and summary is None
+    if data.get("source_schema_version") != 3 or not isinstance(summary, dict):
+        return False
+    detail = summary.get("detail")
+    return (
+        summary.get("reporting_policy") == expected_policy
+        and summary.get("state") == "SUCCEEDED"
+        and isinstance(detail, dict)
+        and detail.get("availability") == expected_availability
+        and detail.get("complete") is expected_complete
     )
 
 
@@ -375,15 +414,23 @@ class TaskCreationMixin:
         self,
         fast_items: int | None = None,
         slow_items: int | None = None,
+        reporting_policy: _WorkflowReportingPolicy | None = None,
     ) -> dict[str, Any] | None:
         """Enqueue a nested group/chain workflow."""
         fast_items = fast_items or random.randint(4, 10)
         slow_items = slow_items or random.randint(2, 6)
-        return self._post_task(
+        endpoint = (
             f"/api/cluster/complex-workflow"
             f"?fast_items={fast_items}&slow_items={slow_items}"
-            f"&fast_seconds=0.02&slow_seconds=0.3",
-            "/api/cluster/complex-workflow",
+            f"&fast_seconds=0.02&slow_seconds=0.3"
+        )
+        request_name = "/api/cluster/complex-workflow"
+        if reporting_policy is not None:
+            endpoint += f"&reporting_policy={reporting_policy}"
+            request_name += f" ({reporting_policy})"
+        return self._post_task(
+            endpoint,
+            request_name,
         )
 
     def complex_workflow_result(self, task_id: str) -> dict[str, Any] | None:
@@ -392,6 +439,42 @@ class TaskCreationMixin:
             f"/api/cluster/complex-workflow/{task_id}",
             "/api/cluster/complex-workflow/[task_id]",
         )
+
+    def workflow_policy_summary(
+        self,
+        task_id: str,
+        *,
+        expected_policy: _WorkflowReportingPolicy,
+    ) -> dict[str, Any] | None:
+        """Read and validate one policy's terminal bounded workflow summary."""
+        request_name = f"/api/cluster/workflows/[task_id] ({expected_policy})"
+        with self.client.get(
+            f"/api/cluster/workflows/{task_id}",
+            name=request_name,
+            catch_response=True,
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        ) as response:
+            if response.status_code != 200:
+                response.failure(
+                    f"{expected_policy} workflow summary read failed: {response.status_code}"
+                )
+                return None
+            try:
+                data = response.json()
+            except ValueError:
+                response.failure(f"{expected_policy} workflow summary response was not valid JSON")
+                return None
+            if not isinstance(data, dict) or not _workflow_policy_summary_matches(
+                data,
+                task_id=task_id,
+                expected_policy=expected_policy,
+            ):
+                response.failure(
+                    f"{expected_policy} workflow summary did not match its bounded policy contract"
+                )
+                return None
+            response.success()
+            return data
 
     # ========== Runtime Environments (0.3.0) ==========
 
@@ -717,7 +800,9 @@ class ObservabilityDemoUser(AuthenticatedTaskUser):
         "show_priority_task",
         "show_sync_task",
         "show_cluster_search",
-        "show_workflow",
+        "show_workflow_full",
+        "show_workflow_terminal_only",
+        "show_workflow_disabled",
         "show_runtime_env",
         "show_ml_inference",
         "show_monitoring",
@@ -733,7 +818,7 @@ class ObservabilityDemoUser(AuthenticatedTaskUser):
         *,
         scenario_name: str,
         timeout_seconds: float = 60.0,
-    ) -> None:
+    ) -> dict[str, Any]:
         if result is None:
             self.environment.process_exit_code = 1
             raise StopTest(f"{scenario_name} could not be enqueued")
@@ -747,6 +832,14 @@ class ObservabilityDemoUser(AuthenticatedTaskUser):
             raise StopTest(
                 f"{scenario_name} had an indeterminate result; stopping before the next task"
             )
+        terminal_status = str(terminal_result.get("status", "")).upper()
+        if terminal_status not in _TERMINAL_SUCCESS_STATES:
+            self.environment.process_exit_code = 1
+            raise StopTest(
+                f"{scenario_name} reached unsuccessful terminal state "
+                f"{terminal_status}; stopping before the next task"
+            )
+        return terminal_result
 
     @task
     def run_next_scenario(self) -> None:
@@ -788,11 +881,37 @@ class ObservabilityDemoUser(AuthenticatedTaskUser):
             scenario_name="cluster search",
         )
 
-    def show_workflow(self) -> None:
-        self._submit_and_follow(
-            self.workflow_fanout_benchmark(num_items=3, seconds_per_item=0.25),
-            scenario_name="tiny workflow",
+    def _show_workflow_policy(
+        self,
+        reporting_policy: _WorkflowReportingPolicy,
+    ) -> None:
+        terminal_result = self._submit_and_follow(
+            self.complex_workflow(
+                fast_items=2,
+                slow_items=1,
+                reporting_policy=reporting_policy,
+            ),
+            scenario_name=f"workflow {reporting_policy}",
         )
+        summary = self.workflow_policy_summary(
+            terminal_result["task_id"],
+            expected_policy=reporting_policy,
+        )
+        if summary is None:
+            self.environment.process_exit_code = 1
+            raise StopTest(
+                f"workflow {reporting_policy} summary was indeterminate; "
+                "stopping before the next task"
+            )
+
+    def show_workflow_full(self) -> None:
+        self._show_workflow_policy("full")
+
+    def show_workflow_terminal_only(self) -> None:
+        self._show_workflow_policy("terminal_only")
+
+    def show_workflow_disabled(self) -> None:
+        self._show_workflow_policy("disabled")
 
     def show_runtime_env(self) -> None:
         self._submit_and_follow(
