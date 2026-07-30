@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from django.db import connection, transaction
+from django.db import DatabaseError, connection, transaction
+from django.db.models.query import QuerySet
 from django.test.utils import CaptureQueriesContext
 
 import django_ray.workflow_progress as progress_module
@@ -27,7 +29,12 @@ from django_ray.observability import (
 )
 from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
 from django_ray.runtime.context import WORKFLOW_PROGRESS_SCHEMA_VERSION, WorkflowRunIdentity
-from django_ray.workflow_plans import PlanEligibility
+from django_ray.workflow_plans import (
+    PLAN_DOMAIN_SEPARATOR,
+    PLAN_FORMAT,
+    PLAN_FORMAT_VERSION,
+    PlanEligibility,
+)
 from django_ray.workflow_progress import (
     WorkflowProgressDiagnosticCode,
     WorkflowProgressReadSource,
@@ -1243,6 +1250,296 @@ def test_matching_producer_terminal_summary_archives_authoritative_detail_expiry
     finished_at = datetime.fromisoformat(archived["terminal"]["finished_at"][:-1] + "+00:00")
     expires_at = datetime.fromisoformat(archived["retention"]["detail_expires_at"][:-1] + "+00:00")
     assert expires_at == finished_at + timedelta(days=7)
+
+
+def _configure_terminal_only_attempt(
+    execution: RayTaskExecution,
+    *,
+    run_id: str,
+) -> None:
+    selection = PlanEligibility(("dynamic_tasks",), (), 0).select(
+        "dynamic_tasks",
+        requested_policy="auto",
+        reporting_policy="terminal_only",
+    )
+    plan_json = json.dumps(
+        {
+            "plan_format": PLAN_FORMAT,
+            "plan_format_version": PLAN_FORMAT_VERSION,
+            "nodes": [{}, {}, {}],
+            "edges": [{}, {}],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    execution.state = TaskState.RUNNING
+    execution.started_at = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+    execution.workflow_run_id = run_id
+    execution.workflow_plan_fingerprint = (
+        "sha256:" + hashlib.sha256(PLAN_DOMAIN_SEPARATOR + plan_json.encode("utf-8")).hexdigest()
+    )
+    execution.workflow_plan_json = plan_json
+    execution.workflow_plan_selection = json.dumps(selection.as_dict())
+    execution.workflow_progress_summary_json = None
+    execution.save(
+        update_fields=[
+            "state",
+            "started_at",
+            "workflow_run_id",
+            "workflow_plan_fingerprint",
+            "workflow_plan_json",
+            "workflow_plan_selection",
+            "workflow_progress_summary_json",
+        ]
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("outcome", [TaskState.SUCCEEDED, TaskState.FAILED])
+def test_terminal_only_summary_is_created_by_the_durable_outer_transition(
+    running_execution: RayTaskExecution,
+    outcome: str,
+) -> None:
+    _configure_terminal_only_attempt(
+        running_execution,
+        run_id="00000000-0000-0000-0000-000000000125",
+    )
+
+    if outcome == TaskState.SUCCEEDED:
+        accepted = succeed_task(running_execution, result_data="{}", result_reference=None)
+        assert succeed_task(running_execution, result_data="{}", result_reference=None) is False
+    else:
+        accepted = record_failure(
+            running_execution,
+            error_message="prepared result failed",
+            retry=False,
+        )
+        assert (
+            record_failure(
+                running_execution,
+                error_message="duplicate failure",
+                retry=False,
+            )
+            is False
+        )
+
+    assert accepted is True
+    running_execution.refresh_from_db()
+    attempt = TaskAttempt.objects.get(
+        execution=running_execution,
+        attempt_number=running_execution.attempt_number,
+    )
+    assert running_execution.state == outcome
+    assert running_execution.workflow_progress_summary_json is not None
+    assert (
+        attempt.workflow_progress_summary_json == running_execution.workflow_progress_summary_json
+    )
+    summary = deserialize_workflow_progress_summary(
+        running_execution.workflow_progress_summary_json
+    )
+    assert summary["summary_revision"] == 1
+    assert summary["state"] == outcome
+    assert summary["terminal"]["outcome"] == outcome
+    assert summary["reporting_policy"] == "terminal_only"
+    assert summary["selected_strategy"] == "dynamic_tasks"
+    assert summary["node_counts"] == {
+        "declared": 3,
+        "discovered": 0,
+        "retained_topology": 0,
+        "retained_detail": 0,
+        "pending": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+    }
+    assert summary["edge_counts"] == {
+        "declared": 2,
+        "discovered": 0,
+        "retained_topology": 0,
+    }
+    assert summary["detail"]["availability"] == "OMITTED_BY_POLICY"
+    assert summary["topology_version"] is None
+    assert summary["detail_revision"] is None
+    assert not WorkflowProgressRunStorage.objects.filter(execution=running_execution).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("corruption", ["fingerprint", "format"])
+def test_terminal_only_summary_requires_the_pinned_plan_snapshot(
+    running_execution: RayTaskExecution,
+    corruption: str,
+) -> None:
+    _configure_terminal_only_attempt(
+        running_execution,
+        run_id="00000000-0000-0000-0000-000000000125",
+    )
+    if corruption == "fingerprint":
+        running_execution.workflow_plan_fingerprint = "sha256:" + ("f" * 64)
+        running_execution.save(update_fields=["workflow_plan_fingerprint"])
+    else:
+        plan = json.loads(running_execution.workflow_plan_json)
+        plan["plan_format_version"] = PLAN_FORMAT_VERSION + 1
+        plan_json = json.dumps(
+            plan,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        running_execution.workflow_plan_json = plan_json
+        running_execution.workflow_plan_fingerprint = (
+            "sha256:"
+            + hashlib.sha256(PLAN_DOMAIN_SEPARATOR + plan_json.encode("utf-8")).hexdigest()
+        )
+        running_execution.save(update_fields=["workflow_plan_json", "workflow_plan_fingerprint"])
+
+    assert succeed_task(running_execution, result_data="{}", result_reference=None)
+
+    running_execution.refresh_from_db()
+    attempt = TaskAttempt.objects.get(execution=running_execution)
+    assert running_execution.state == TaskState.SUCCEEDED
+    assert running_execution.workflow_progress_summary_json is None
+    assert attempt.workflow_progress_summary_json is None
+
+
+@pytest.mark.django_db
+def test_terminal_only_summary_clamps_a_future_start_timestamp(
+    running_execution: RayTaskExecution,
+) -> None:
+    _configure_terminal_only_attempt(
+        running_execution,
+        run_id="00000000-0000-0000-0000-000000000125",
+    )
+    running_execution.started_at = datetime(2100, 1, 1, tzinfo=UTC)
+    running_execution.save(update_fields=["started_at"])
+
+    assert succeed_task(running_execution, result_data="{}", result_reference=None)
+
+    running_execution.refresh_from_db()
+    assert running_execution.workflow_progress_summary_json is not None
+    summary = deserialize_workflow_progress_summary(
+        running_execution.workflow_progress_summary_json
+    )
+    assert summary["timestamps"]["started_at"] == summary["timestamps"]["finished_at"]
+
+
+@pytest.mark.django_db
+def test_terminal_only_retry_archives_independent_revision_one_summaries(
+    running_execution: RayTaskExecution,
+) -> None:
+    first_run_id = "00000000-0000-0000-0000-000000000125"
+    second_run_id = "00000000-0000-0000-0000-000000000126"
+    _configure_terminal_only_attempt(running_execution, run_id=first_run_id)
+
+    assert record_failure(
+        running_execution,
+        error_message="retry this attempt",
+        retry=True,
+    )
+    running_execution.refresh_from_db()
+    first_attempt = TaskAttempt.objects.get(
+        execution=running_execution,
+        attempt_number=2,
+    )
+    first_summary = deserialize_workflow_progress_summary(
+        first_attempt.workflow_progress_summary_json
+    )
+    assert first_summary["summary_revision"] == 1
+    assert first_summary["state"] == TaskState.FAILED
+    assert first_summary["run_identity"]["run_id"] == first_run_id
+    assert running_execution.attempt_number == 3
+    assert running_execution.workflow_progress_summary_json is None
+
+    _configure_terminal_only_attempt(running_execution, run_id=second_run_id)
+    assert succeed_task(running_execution, result_data="{}", result_reference=None)
+    running_execution.refresh_from_db()
+    second_attempt = TaskAttempt.objects.get(
+        execution=running_execution,
+        attempt_number=3,
+    )
+    second_summary = deserialize_workflow_progress_summary(
+        second_attempt.workflow_progress_summary_json
+    )
+    assert second_summary["summary_revision"] == 1
+    assert second_summary["state"] == TaskState.SUCCEEDED
+    assert second_summary["run_identity"]["run_id"] == second_run_id
+    assert TaskAttempt.objects.filter(execution=running_execution).count() == 2
+
+
+@pytest.mark.django_db
+def test_terminal_only_summary_failure_never_replaces_task_success(
+    running_execution: RayTaskExecution,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_terminal_only_attempt(
+        running_execution,
+        run_id="00000000-0000-0000-0000-000000000125",
+    )
+
+    def fail(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("secret=do-not-leak")
+
+    monkeypatch.setattr(
+        "django_ray.workflow_progress_publication.prepare_terminal_only_workflow_progress_summary",
+        fail,
+    )
+
+    assert succeed_task(running_execution, result_data="{}", result_reference=None)
+
+    running_execution.refresh_from_db()
+    attempt = TaskAttempt.objects.get(execution=running_execution)
+    assert running_execution.state == TaskState.SUCCEEDED
+    assert running_execution.workflow_progress_summary_json is None
+    assert attempt.workflow_progress_summary_json is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("outcome", [TaskState.SUCCEEDED, TaskState.FAILED])
+def test_terminal_only_database_failure_never_replaces_the_task_transition(
+    running_execution: RayTaskExecution,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    _configure_terminal_only_attempt(
+        running_execution,
+        run_id="00000000-0000-0000-0000-000000000125",
+    )
+    original_update = QuerySet.update
+
+    def reject_summary_update(self: QuerySet, **kwargs: object) -> int:
+        if self.model is TaskAttempt and set(kwargs) == {"workflow_progress_summary_json"}:
+            raise DatabaseError("summary storage is unavailable")
+        return original_update(self, **kwargs)
+
+    monkeypatch.setattr(QuerySet, "update", reject_summary_update)
+
+    if outcome == TaskState.SUCCEEDED:
+        accepted = succeed_task(
+            running_execution,
+            result_data='{"prepared":true}',
+            result_reference=None,
+        )
+    else:
+        accepted = record_failure(
+            running_execution,
+            error_message="application workflow failed",
+            retry=False,
+        )
+
+    assert accepted is True
+    running_execution.refresh_from_db()
+    attempt = TaskAttempt.objects.get(execution=running_execution)
+    assert running_execution.state == outcome
+    assert attempt.state == outcome
+    assert running_execution.workflow_progress_summary_json is None
+    assert attempt.workflow_progress_summary_json is None
+    if outcome == TaskState.SUCCEEDED:
+        assert running_execution.result_data == '{"prepared":true}'
+        assert running_execution.error_message is None
+    else:
+        assert running_execution.error_message == "application workflow failed"
 
 
 @pytest.mark.django_db

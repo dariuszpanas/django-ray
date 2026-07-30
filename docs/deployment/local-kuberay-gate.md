@@ -4,8 +4,8 @@ The local KubeRay final gate complements, but never replaces, `uv run make ci` a
 GitHub Actions matrix. It exercises the Docker Desktop or Kind deployment boundary that unit and
 disposable CI clusters cannot reproduce: locally built images, Kustomize, the setup Job, the shared
 RuntimeEnv archive, generic Ray nodes, application task managers, protected HTTP APIs, kubelet
-probes, terminal schema-v3 workflow progress, authenticated admin graph projection, and live
-Prometheus discovery.
+probes, full and terminal-only schema-v3 workflow progress, authenticated admin presentation, and
+live Prometheus discovery.
 
 Run it only against the dedicated local `django-ray` namespace. The command fails before its first
 Docker build or Kubernetes mutation unless the checkout is clean, the active context is the named
@@ -31,7 +31,7 @@ run the gate and choose the cold Ray restart.
 | Testproject dashboard, templates, JavaScript, static collection, web image, entrypoint, or web dependencies | Required | `skip`, unless the RuntimeEnv or Ray boundary also changed | Proves the exact asset and image reached the live web pod and protected actions still work. |
 | `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
 | Ray Client submission, reconnect, cancellation, retry, task context, result persistence, or cross-component task lifecycle | Required | `required` | Exercises a fresh Ray session plus fresh task managers and a durable result. |
-| Workflow execution, progress capture/publication, schema-v3 bounded readers, failure diagnostics, or the admin graph fed by workflow progress | Required | `required` | Proves a cold Ray generation can execute the same tiny nested workflow to both success and one deterministic first-attempt failure, then expose complete bounded progress and an authenticated sanitized failure path. |
+| Workflow execution, progress capture/publication, schema-v3 bounded readers, failure diagnostics, or the admin graph fed by workflow progress | Required | `required` | Proves a cold Ray generation can execute the same tiny nested workflow with default-full and explicit terminal-only reporting in both success and deterministic first-attempt failure modes. Full reporting must expose complete bounded detail; terminal-only must expose exactly one summary and no detail storage or actions. |
 | KubeRay `RayCluster`, Ray services, Ray pod volumes/environment, or Ray metrics configuration | Required | `required` | The tested Ray pods must be cold replacements of the prior pods. |
 | Kubernetes application resources, setup Job, web/worker Deployments, probes, Secrets/ConfigMaps, RBAC, services, ingress, Prometheus, or Grafana | Required | `required` when Ray resources or the RuntimeEnv mount changed; otherwise `skip` | Proves rendered resources, rollouts, probes, authentication, and scrape ownership together. |
 | Worker command, queue selection, application image, polling, or database-backed execution behavior | Required | `required` for cluster-mode submission changes; otherwise `skip` | Proves all task-manager Deployments reconnect and consume a real task. |
@@ -190,24 +190,33 @@ The gate performs these bounded layers:
 9. Requires unauthenticated enqueue/stats/metrics/executions requests to return `401`; requires the
    same protected reads to return `200` with the in-memory token; then polls only the fresh task via
    an exact `task_id` filter and `limit=1` until it reaches durable `SUCCEEDED` with `result_data=5`.
-10. Enqueues the same tiny nested workflow once for success and once with the deterministic
-    slow-branch failure fixture. Each response must retain the exact typed enqueue arguments, and
-    each execution must remain on durable attempt 1. The successful result must report all three
-    leaves. The failed execution must retain the normalized fixture error; its terminal snapshot may
-    legitimately retain pending or running downstream nodes that Ray did not execute after their
-    dependency failed. For both runs, the gate requires terminal schema-v3 summaries and complete
-    one-page topology-node, topology-edge, and node-detail readers with matching run identity,
-    publication revisions, graph membership, states, and counts.
-11. Enters the exact converged `django-web` container through a sensitive-output-suppressed command
-    path and creates a disposable authenticated admin session. It verifies the change view,
-    diagnostics, all three bounded readers, and the sanitized graph route against the same two
-    workflow runs. The successful graph must be fully succeeded. The failed graph must retain one
-    failure origin, at least one incoming edge and its ancestor path, and at least one successful node
-    outside that path as sibling context. Both graphs must match the bounded pages, remain within
-    their fixed allowlist and byte cap, and have exactly one current manifest with no pending manifest
-    or unlinked page. The disposable session and user are removed before the child smoke returns
-    scalar evidence.
-12. Reuses the checked-in Prometheus checker through the same proxy-disabled, redirect-rejecting
+10. Enqueues the same tiny nested workflow with the unchanged default-full behavior once for success
+    and once with the deterministic slow-branch failure fixture. Each response must retain the exact
+    typed enqueue arguments, and each execution must remain on durable attempt 1. The successful
+    result must report all three leaves. The failed execution must retain the normalized fixture
+    error; its terminal snapshot may legitimately retain pending or running downstream nodes that Ray
+    did not execute after their dependency failed. For both runs, the gate requires terminal
+    schema-v3 summaries and complete one-page topology-node, topology-edge, and node-detail readers
+    with matching run identity, publication revisions, graph membership, states, and counts.
+11. Repeats the success and deterministic failure through the explicit
+    `reporting_policy=terminal_only` testproject option. Each run must remain on attempt 1 and expose
+    one revision-1 schema-v3 summary with `reporting_policy="terminal_only"` and
+    `detail.availability="OMITTED_BY_POLICY"`. Declared plan counts must match each run's persisted
+    materialized plan and remain consistent across the equivalent success and failure fixtures,
+    while discovered, retained, and node-state counts remain zero. Topology and detail revisions
+    are null, and all three bounded collection readers return empty omitted-by-policy envelopes.
+12. Enters the exact converged `django-web` container through a sensitive-output-suppressed command
+    path and creates a disposable authenticated admin session. For the default-full runs it verifies
+    the change view, diagnostics, all three bounded readers, and the sanitized graph route. The
+    successful graph must be fully succeeded. The failed graph must retain one failure origin, at
+    least one incoming edge and its ancestor path, and at least one successful node outside that path
+    as sibling context. Both graphs must match the bounded pages, remain within their fixed allowlist
+    and byte cap, and have exactly one current manifest with no pending manifest or unlinked page.
+    For both terminal-only runs it instead proves null legacy progress, an identical archived attempt
+    summary, no run storage, manifest, page, link, or node-detail row, zero advertised admin actions,
+    and a bounded `UNAVAILABLE` graph response. The disposable sessions and users are removed before
+    each child smoke returns scalar evidence.
+13. Reuses the checked-in Prometheus checker through the same proxy-disabled, redirect-rejecting
     local HTTP opener. It requires exactly one `django-ray`, one `ray-head`, and one target for every
     converged Ray worker, plus the absence of the removed `django-ray-worker` pool. The exact
     RayCluster UID/topology is rechecked before and after Prometheus and again before evidence.
@@ -266,6 +275,10 @@ The runtime block records:
   count, schema-v3 availability, pending/running/succeeded/failed node counts, authenticated
   sanitized graph route, single failure origin, incoming failure edge, ancestor-path and successful
   sibling context, and clean current publication storage;
+- the explicit terminal-only success and deterministic failure, each on attempt 1 with one
+  revision-1 schema-v3 summary, omitted detail, declared counts matching its persisted materialized
+  plan, null legacy progress and detail revisions, zero retained detail rows, and no advertised
+  admin action;
 - probe path/Host, web restart count, and Prometheus pool counts;
 - the preservation statement.
 
@@ -289,9 +302,11 @@ For example, portable commit validation can say:
   `K8S_RAY_RESTART=required`: passed; the emitted source tree matched
   HEAD, all application workloads were ready, authenticated API smoke
   returned 200, the task succeeded with result 5, the schema-v3 nested
-  workflow passed in both success and deterministic first-attempt
-  failure modes, the authenticated admin graph retained the incoming
-  failure path, all Ray pods were cold-replaced, and
+  workflow passed in both default-full success and deterministic
+  first-attempt failure modes, terminal-only success and failure each
+  retained one omitted-detail summary with no legacy or normalized
+  detail storage, the authenticated admin graph retained the incoming
+  full-reporting failure path, all Ray pods were cold-replaced, and
   data-bearing resources were preserved.
 ```
 

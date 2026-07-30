@@ -67,7 +67,7 @@
           <details
             class="django-ray-workflow"
             id="django-ray-workflow-diagnostics"
-            data-diagnostics-url="{{ django_ray_workflow_diagnostics_url }}"
+            data-diagnostics-url="{{ django_ray_workflow_diagnostics_url }}?attempt_number={{ workflow_attempt }}"
             data-pinned-attempt-number="{{ workflow_attempt }}"
             data-graph-url="{{ django_ray_workflow_graph_url }}?attempt_number={{ workflow_attempt }}"
             data-plan-download-url="{{ django_ray_workflow_plan_download_url }}"

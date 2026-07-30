@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -14,6 +15,10 @@ from django_ray.models import RayTaskExecution, TaskState
 from django_ray.workflow_progress_reads import (
     WorkflowProgressReadError,
     WorkflowProgressReadErrorCode,
+)
+from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from tests.workflow_progress_summary_helpers import (
+    terminal_only_workflow_progress_summary,
 )
 
 
@@ -323,6 +328,101 @@ def test_bounded_workflow_routes_delegate_to_package_services(
         "error_traceback",
     )
     assert all(field not in query for query in task_selects for field in payload_fields)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("workflow_state", [TaskState.SUCCEEDED, TaskState.FAILED])
+def test_terminal_only_api_exposes_summary_without_detail_or_graph_links(
+    client: Client,
+    workflow_state: str,
+) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id=f"terminal-only-api-{workflow_state.lower()}",
+        callable_path="testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
+        queue_name="default",
+        state=workflow_state,
+        workflow_run_id=(
+            "00000000-0000-0000-0000-000000000227"
+            if workflow_state == TaskState.SUCCEEDED
+            else "00000000-0000-0000-0000-000000000228"
+        ),
+    )
+    summary = terminal_only_workflow_progress_summary(
+        execution,
+        state=workflow_state,
+        declared_node_count=12,
+        declared_edge_count=11,
+    )
+    summary["selected_strategy"] = "dynamic_tasks"
+    summary["plan_fingerprint"] = "sha256:" + ("a" * 64)
+    execution.workflow_progress_summary_json = serialize_workflow_progress_summary(summary)
+    execution.save(update_fields=["workflow_progress_summary_json"])
+
+    summary_response = client.get(f"/api/cluster/workflows/{execution.task_id}")
+    summary_payload = summary_response.json()
+
+    assert summary_response.status_code == 200
+    assert summary_payload["availability"] == "OMITTED_BY_POLICY"
+    assert summary_payload["complete"] is False
+    assert summary_payload["publication"] == {
+        "summary_revision": 1,
+        "topology_version": None,
+        "detail_revision": None,
+    }
+    assert summary_payload["summary"]["reporting_policy"] == "terminal_only"
+    assert summary_payload["summary"]["state"] == workflow_state
+    assert summary_payload["summary"]["terminal"]["outcome"] == workflow_state
+    assert summary_payload["summary"]["node_counts"] == {
+        "declared": 12,
+        "discovered": 0,
+        "retained_topology": 0,
+        "retained_detail": 0,
+        "pending": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+    }
+    assert summary_payload["summary"]["edge_counts"] == {
+        "declared": 11,
+        "discovered": 0,
+        "retained_topology": 0,
+    }
+    assert summary_payload["summary"]["detail"] == {
+        "availability": "OMITTED_BY_POLICY",
+        "complete": False,
+        "truncation_reasons": [],
+    }
+    assert summary_payload["summary"]["storage"] == {
+        "kind": "database",
+        "manifest_id": None,
+    }
+    serialized_payload = json.dumps(summary_payload)
+    assert "/topology/" not in serialized_payload
+    assert "/nodes" not in serialized_payload
+    assert "/graph" not in serialized_payload
+
+    detail_responses = [
+        client.get(f"/api/cluster/workflows/{execution.task_id}/topology/nodes"),
+        client.get(f"/api/cluster/workflows/{execution.task_id}/topology/edges"),
+        client.get(f"/api/cluster/workflows/{execution.task_id}/nodes"),
+        client.get(
+            f"/api/cluster/workflows/{execution.task_id}/node-detail",
+            {"node_id": "not-collected"},
+        ),
+    ]
+    for response in detail_responses:
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["availability"] == "OMITTED_BY_POLICY"
+        if "items" in payload:
+            assert payload["items"] == []
+            assert payload["returned_count"] == 0
+        else:
+            assert payload["found"] is False
+            assert payload["item"] is None
+
+    legacy_graph = client.get(f"/api/cluster/workflows/{execution.task_id}/graph")
+    assert legacy_graph.status_code == 404
 
 
 @pytest.mark.django_db

@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 # Runtime-selectable policies. The durable summary protocol also reserves
-# sampled and terminal-only values for later producer implementations.
-WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES = frozenset({"full", "disabled"})
+# sampled reporting for a later producer implementation.
+WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES = frozenset({"full", "terminal_only", "disabled"})
 TASK_ATTEMPT_ADMIN_MODES = frozenset({"inline", "standalone", "both"})
 
 DEFAULTS: dict[str, Any] = {

@@ -211,6 +211,7 @@ def _request_admin_json(
     *,
     headers: dict[str, str],
     deadline: float,
+    expected_status: int = 200,
 ) -> dict[str, Any]:
     """Read one authenticated, byte-bounded admin JSON response."""
 
@@ -218,6 +219,7 @@ def _request_admin_json(
         base_url,
         path,
         headers={"Accept": "application/json", **headers},
+        expected_status=expected_status,
         expected_content_type="application/json",
         deadline=deadline,
     )
@@ -801,6 +803,38 @@ def _workflow_admin_graph_evidence(
     }
 
 
+def _workflow_admin_degraded_graph_evidence(
+    payload: dict[str, Any],
+    *,
+    expected_status: str,
+) -> str:
+    """Validate an empty degraded graph with the same bounded root contract."""
+    if _workflow_graph_contains_forbidden_field(payload):
+        raise DockerSmokeError("admin workflow graph exposed a forbidden private field")
+    nodes = payload.get("nodes")
+    edges = payload.get("edges")
+    counts = payload.get("counts")
+    message = payload.get("message")
+    if (
+        set(payload) != _WORKFLOW_GRAPH_ROOT_FIELDS
+        or payload.get("schema") != "django-ray.admin-workflow-graph"
+        or payload.get("schema_version") != 1
+        or payload.get("status") != expected_status
+        or payload.get("complete") is not False
+        or not isinstance(message, str)
+        or not message
+        or len(message.encode("utf-8")) > 256
+        or counts != {"nodes": 0, "edges": 0}
+        or payload.get("limits") != _WORKFLOW_GRAPH_LIMITS
+        or nodes != []
+        or edges != []
+        or len(json.dumps(payload, ensure_ascii=True).encode("utf-8"))
+        > _WORKFLOW_GRAPH_LIMITS["response_bytes"]
+    ):
+        raise DockerSmokeError("admin workflow graph did not match its degraded root contract")
+    return expected_status
+
+
 def _verify_existing_workflow_storage_contract(
     *,
     execution: Any,
@@ -893,6 +927,7 @@ def _verify_existing_workflow_admin_contract(
         "node_details": f"{root}/workflow/nodes/",
     }
     attempt_query = f"attempt_number={int(execution.attempt_number)}"
+    diagnostics_read_path = f"{diagnostics_path}?{attempt_query}"
     graph_read_path = f"{graph_path}?{attempt_query}"
     collection_read_paths = {
         collection: f"{path}?{attempt_query}" for collection, path in collection_paths.items()
@@ -906,7 +941,7 @@ def _verify_existing_workflow_admin_contract(
             deadline=deadline,
         )
         expected_attributes = {
-            "data-diagnostics-url": diagnostics_path,
+            "data-diagnostics-url": diagnostics_read_path,
             "data-graph-url": graph_read_path,
             "data-topology-nodes-url": collection_read_paths["topology_nodes"],
             "data-topology-edges-url": collection_read_paths["topology_edges"],
@@ -923,7 +958,7 @@ def _verify_existing_workflow_admin_contract(
 
         diagnostics = _request_admin_json(
             base_url,
-            diagnostics_path,
+            diagnostics_read_path,
             headers=headers,
             deadline=deadline,
         )
@@ -1005,12 +1040,293 @@ def _verify_existing_workflow_admin_contract(
     }
 
 
+def _verify_existing_terminal_only_storage_contract(
+    *,
+    execution: Any,
+) -> dict[str, bool | int | str]:
+    """Prove one terminal summary exists without legacy or normalized detail."""
+
+    from django_ray.models import (
+        TaskAttempt,
+        WorkflowProgressNodeDetail,
+        WorkflowProgressRunStorage,
+        WorkflowProgressTopologyManifest,
+        WorkflowProgressTopologyManifestPage,
+        WorkflowProgressTopologyPage,
+    )
+    from django_ray.workflow_plans import (
+        WorkflowPlanValidationError,
+        effective_plan_selection_reporting_policy,
+        validate_plan_selection_manifest,
+    )
+    from django_ray.workflow_progress_summary import (
+        WorkflowProgressSummaryError,
+        deserialize_workflow_progress_summary,
+    )
+
+    if (
+        execution.state not in {"SUCCEEDED", "FAILED"}
+        or execution.attempt_number != 1
+        or execution.workflow_run_id is None
+        or execution.progress_data is not None
+        or not isinstance(execution.workflow_plan_json, str)
+        or not execution.workflow_plan_json
+        or not isinstance(execution.workflow_progress_summary_json, str)
+        or not execution.workflow_progress_summary_json
+    ):
+        raise DockerSmokeError(
+            "terminal-only workflow lacked one first-attempt summary or wrote legacy progress"
+        )
+    attempts = TaskAttempt.objects.filter(execution=execution)
+    if attempts.count() != 1:
+        raise DockerSmokeError("terminal-only workflow did not archive exactly one task attempt")
+    attempt = attempts.get()
+    if (
+        attempt.attempt_number != execution.attempt_number
+        or attempt.state != execution.state
+        or attempt.workflow_progress_summary_json != execution.workflow_progress_summary_json
+    ):
+        raise DockerSmokeError(
+            "terminal-only workflow attempt did not archive the exact terminal summary"
+        )
+    try:
+        plan = json.loads(execution.workflow_plan_json)
+        summary = deserialize_workflow_progress_summary(execution.workflow_progress_summary_json)
+        selection = validate_plan_selection_manifest(
+            json.loads(execution.workflow_plan_selection or "null")
+        )
+    except (
+        TypeError,
+        json.JSONDecodeError,
+        WorkflowPlanValidationError,
+        WorkflowProgressSummaryError,
+    ) as error:
+        raise DockerSmokeError(
+            "terminal-only workflow retained invalid summary or plan selection"
+        ) from error
+    if not isinstance(plan, dict):
+        raise DockerSmokeError("terminal-only workflow retained an invalid materialized plan")
+    snapshot = plan.get("snapshot")
+    if isinstance(snapshot, dict):
+        plan_declared_nodes = snapshot.get("observed_node_count")
+        plan_declared_edges = snapshot.get("observed_edge_count")
+    else:
+        plan_declared_nodes = None
+        plan_declared_edges = None
+    if (
+        type(plan_declared_nodes) is not int
+        or plan_declared_nodes < 0
+        or type(plan_declared_edges) is not int
+        or plan_declared_edges < 0
+    ):
+        plan_nodes = plan.get("nodes")
+        plan_edges = plan.get("edges")
+        if not isinstance(plan_nodes, list) or not isinstance(plan_edges, list):
+            raise DockerSmokeError(
+                "terminal-only workflow retained an invalid materialized plan topology"
+            )
+        plan_declared_nodes = len(plan_nodes)
+        plan_declared_edges = len(plan_edges)
+
+    identity = summary["run_identity"]
+    fingerprint = summary["plan_fingerprint"]
+    node_counts = summary["node_counts"]
+    edge_counts = summary["edge_counts"]
+    timestamps = summary["timestamps"]
+    finished_at = timestamps["finished_at"]
+    declared_nodes = node_counts["declared"]
+    declared_edges = edge_counts["declared"]
+    if (
+        effective_plan_selection_reporting_policy(selection) != "terminal_only"
+        or selection.get("selected_strategy") != "dynamic_tasks"
+        or summary["reporting_policy"] != "terminal_only"
+        or summary["selected_strategy"] != "dynamic_tasks"
+        or summary["summary_revision"] != 1
+        or summary["topology_version"] is not None
+        or summary["detail_revision"] is not None
+        or summary["state"] != execution.state
+        or fingerprint != execution.workflow_plan_fingerprint
+        or not isinstance(fingerprint, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+        or execution.workflow_plan_pinned_attempt != 1
+        or identity["task_execution_pk"] != execution.pk
+        or identity["attempt_number"] != 1
+        or identity["execution_generation"] != execution.execution_generation
+        or identity["run_id"] != str(execution.workflow_run_id)
+        or summary["detail"]
+        != {
+            "availability": "OMITTED_BY_POLICY",
+            "complete": False,
+            "truncation_reasons": [],
+        }
+        or summary["storage"] != {"kind": "database", "manifest_id": None}
+        or summary["retention"]["detail_expires_at"] is not None
+        or summary["terminal"] != {"outcome": execution.state, "finished_at": finished_at}
+        or not isinstance(finished_at, str)
+        or not finished_at
+        or type(declared_nodes) is not int
+        or declared_nodes < 1
+        or declared_nodes != plan_declared_nodes
+        or type(declared_edges) is not int
+        or declared_edges < 1
+        or declared_edges != plan_declared_edges
+        or any(
+            node_counts[field_name] != 0
+            for field_name in (
+                "discovered",
+                "retained_topology",
+                "retained_detail",
+                "pending",
+                "running",
+                "succeeded",
+                "failed",
+            )
+        )
+        or edge_counts["discovered"] != 0
+        or edge_counts["retained_topology"] != 0
+        or summary["progress_percent"] != (100.0 if execution.state == "SUCCEEDED" else 0.0)
+    ):
+        raise DockerSmokeError(
+            "terminal-only workflow summary claimed detail or mismatched its durable plan"
+        )
+
+    run_storage_rows = WorkflowProgressRunStorage.objects.filter(execution=execution).count()
+    topology_manifests = WorkflowProgressTopologyManifest.objects.filter(
+        run_storage__execution=execution
+    ).count()
+    topology_pages = WorkflowProgressTopologyPage.objects.filter(
+        run_storage__execution=execution
+    ).count()
+    manifest_links = WorkflowProgressTopologyManifestPage.objects.filter(
+        manifest__run_storage__execution=execution
+    ).count()
+    node_details = WorkflowProgressNodeDetail.objects.filter(
+        run_storage__execution=execution
+    ).count()
+    if any(
+        value != 0
+        for value in (
+            run_storage_rows,
+            topology_manifests,
+            topology_pages,
+            manifest_links,
+            node_details,
+        )
+    ):
+        raise DockerSmokeError("terminal-only workflow retained normalized detail storage")
+    return {
+        "summary_revision": 1,
+        "reporting_policy": "terminal_only",
+        "detail_availability": "OMITTED_BY_POLICY",
+        "declared_nodes": declared_nodes,
+        "declared_edges": declared_edges,
+        "legacy_progress_null": True,
+        "attempt_summary_matches": True,
+        "storage_rows": run_storage_rows,
+        "topology_manifests": topology_manifests,
+        "topology_pages": topology_pages,
+        "manifest_links": manifest_links,
+        "node_details": node_details,
+    }
+
+
+def _verify_existing_terminal_only_admin_contract(
+    *,
+    base_url: str,
+    deadline: float,
+    execution: Any,
+) -> dict[str, bool | int | str]:
+    """Prove admin presents the summary without advertising detail actions."""
+
+    root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
+    diagnostics_path = f"{root}/workflow/diagnostics/"
+    graph_path = f"{root}/workflow/graph/"
+    attempt_query = f"attempt_number={int(execution.attempt_number)}"
+    diagnostics_read_path = f"{diagnostics_path}?{attempt_query}"
+    graph_read_path = f"{graph_path}?{attempt_query}"
+    detail_paths = (
+        graph_read_path,
+        f"{root}/workflow/topology/nodes/?{attempt_query}",
+        f"{root}/workflow/topology/edges/?{attempt_query}",
+        f"{root}/workflow/nodes/?{attempt_query}",
+        f"{root}/workflow/node/?{attempt_query}",
+    )
+
+    with _disposable_admin_headers() as headers:
+        change_html = _request_text(
+            base_url,
+            f"{root}/change/",
+            headers=headers,
+            deadline=deadline,
+        )
+        if (
+            "django-ray-workflow-diagnostics" not in change_html
+            or f'data-diagnostics-url="{diagnostics_read_path}"' not in change_html
+            or any(f'href="{path}"' in change_html for path in detail_paths)
+        ):
+            raise DockerSmokeError(
+                "terminal-only workflow admin advertised a visible detail action"
+            )
+        diagnostics = _request_admin_json(
+            base_url,
+            diagnostics_read_path,
+            headers=headers,
+            deadline=deadline,
+        )
+        graph = _request_admin_json(
+            base_url,
+            graph_read_path,
+            headers=headers,
+            deadline=deadline,
+        )
+
+    plan = diagnostics.get("plan")
+    progress = diagnostics.get("progress")
+    no_actions = {
+        "topology_nodes": False,
+        "topology_edges": False,
+        "node_details": False,
+    }
+    if (
+        diagnostics.get("schema") != "django-ray.admin-workflow-diagnostics"
+        or diagnostics.get("schema_version") != 1
+        or not isinstance(plan, dict)
+        or plan.get("status") != "AVAILABLE"
+        or plan.get("reporting_policy") != "terminal_only"
+        or not isinstance(progress, dict)
+        or progress.get("state") != "TERMINAL_ONLY"
+        or progress.get("workflow_state") != execution.state
+        or progress.get("availability") != "OMITTED_BY_POLICY"
+        or progress.get("complete") is not False
+        or progress.get("actions") != no_actions
+    ):
+        raise DockerSmokeError(
+            "terminal-only workflow admin did not retain its summary-only boundary"
+        )
+    graph_status = _workflow_admin_degraded_graph_evidence(
+        graph,
+        expected_status="UNAVAILABLE",
+    )
+
+    return {
+        "admin_workflow": "terminal-summary-verified",
+        "task_id": str(execution.task_id),
+        "task_state": str(execution.state),
+        "attempt_number": int(execution.attempt_number),
+        "admin_actions": 0,
+        "graph_advertised": False,
+        "graph_status": graph_status,
+        **_verify_existing_terminal_only_storage_contract(execution=execution),
+    }
+
+
 def _run_existing_workflow_admin_smoke(
     *,
     base_url: str,
     task_id: str,
     timeout_seconds: float,
-) -> dict[str, str | int]:
+    expected_reporting_policy: str = "full",
+) -> dict[str, bool | int | str]:
     """Verify one already-terminal workflow through loopback admin and PostgreSQL."""
 
     import django
@@ -1031,11 +1347,20 @@ def _run_existing_workflow_admin_smoke(
         raise DockerSmokeError(
             "existing workflow task ID did not resolve to exactly one execution"
         ) from error
-    return _verify_existing_workflow_admin_contract(
-        base_url=base_url,
-        deadline=time.monotonic() + timeout_seconds,
-        execution=execution,
-    )
+    deadline = time.monotonic() + timeout_seconds
+    if expected_reporting_policy == "full":
+        return _verify_existing_workflow_admin_contract(
+            base_url=base_url,
+            deadline=deadline,
+            execution=execution,
+        )
+    if expected_reporting_policy == "terminal_only":
+        return _verify_existing_terminal_only_admin_contract(
+            base_url=base_url,
+            deadline=deadline,
+            execution=execution,
+        )
+    raise DockerSmokeError("unsupported expected workflow reporting policy")
 
 
 def _run_smoke(*, base_url: str, token: str, timeout_seconds: float) -> dict[str, Any]:
@@ -1169,6 +1494,12 @@ def _parser() -> argparse.ArgumentParser:
             "run-scoped storage without enqueueing another task"
         ),
     )
+    parser.add_argument(
+        "--expected-workflow-reporting-policy",
+        choices=("full", "terminal_only"),
+        default="full",
+        help="Expected policy for --existing-workflow-task-id (default: full)",
+    )
     return parser
 
 
@@ -1181,6 +1512,7 @@ def main() -> int:
             base_url=args.base_url,
             task_id=args.existing_workflow_task_id,
             timeout_seconds=args.timeout,
+            expected_reporting_policy=args.expected_workflow_reporting_policy,
         )
     else:
         token = os.environ.get("DJANGO_API_TOKEN")

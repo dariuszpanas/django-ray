@@ -109,6 +109,7 @@ def complex_workflow_benchmark(
     slow_seconds: float = 0.5,
     failure_branch: str | None = None,
     failure_item: int | None = None,
+    reporting_policy: str | None = None,
 ) -> dict[str, Any]:
     """Run nested fast and slow workflow branches behind one durable task."""
     if not 1 <= fast_items <= 100 or not 1 <= slow_items <= 100:
@@ -121,24 +122,24 @@ def complex_workflow_benchmark(
         failure_branch=failure_branch,
         failure_item=failure_item,
     )
+    if reporting_policy not in {None, "full", "terminal_only"}:
+        raise ValueError("reporting_policy must be 'full' or 'terminal_only'")
 
     try:
-        if failure_branch is None:
-            return run_complex_branch_workflow(
-                fast_items,
-                slow_items,
-                fast_seconds,
-                slow_seconds,
-                use_ray=True,
+        workflow_options: dict[str, Any] = {"use_ray": True}
+        if failure_branch is not None:
+            workflow_options.update(
+                failure_branch=failure_branch,
+                failure_item=failure_item,
             )
+        if reporting_policy is not None:
+            workflow_options["reporting_policy"] = reporting_policy
         return run_complex_branch_workflow(
             fast_items,
             slow_items,
             fast_seconds,
             slow_seconds,
-            failure_branch=failure_branch,
-            failure_item=failure_item,
-            use_ray=True,
+            **workflow_options,
         )
     except Exception as error:
         if failure_branch is None or not _is_complex_workflow_fixture_failure(error):

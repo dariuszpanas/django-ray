@@ -35,6 +35,17 @@
     const revision = workflow.revision ?? 0;
     const state = workflow.state ?? workflow.workflow_state ?? "UNKNOWN";
     const detailAvailability = workflow.detail?.availability ?? availability;
+    if (workflow.reporting_policy === "terminal_only") {
+      const declaredNodes = workflow.declared_nodes;
+      const declared =
+        Number.isInteger(declaredNodes) && declaredNodes >= 0
+          ? ` The pinned plan declares ${declaredNodes} nodes.`
+          : "";
+      return (
+        `Terminal summary: ${state}. Detail ${detailAvailability ?? "OMITTED_BY_POLICY"}.` +
+        `${declared} No node execution detail was collected.`
+      );
+    }
     const detail = detailAvailability ? `, detail ${detailAvailability}` : "";
     return `${state}: ${completed}/${total} nodes (${percent}%), revision ${revision}${detail}`;
   };

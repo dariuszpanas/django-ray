@@ -1,4 +1,4 @@
-"""Default-off schema-v3 publication for bounded workflow progress snapshots."""
+"""Schema-v3 publication for bounded workflow progress policies."""
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ from django_ray.workflow_progress_storage import (
 )
 from django_ray.workflow_progress_summary import (
     WORKFLOW_PROGRESS_DETAIL_RETENTION_MAX_DAYS,
+    WORKFLOW_PROGRESS_SUMMARY_LIMITS_PROFILE,
     WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
     WorkflowProgressSummaryError,
     serialize_workflow_progress_summary,
@@ -706,6 +707,93 @@ def prepare_terminal_workflow_progress_publication(
     )
 
 
+def prepare_terminal_only_workflow_progress_summary(
+    identity: WorkflowRunIdentity,
+    *,
+    plan_fingerprint: str,
+    selected_strategy: str,
+    declared_node_count: int,
+    declared_edge_count: int,
+    outcome: str,
+    started_at: int | float,
+    finished_at: int | float,
+    detail_days: int,
+) -> dict[str, Any]:
+    """Prepare one terminal summary without claiming any node discovery."""
+    if outcome not in _TERMINAL_WORKFLOW_STATES:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    if (
+        type(detail_days) is not int
+        or not 0 <= detail_days <= WORKFLOW_PROGRESS_DETAIL_RETENTION_MAX_DAYS
+    ):
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SELECTION)
+    declared_nodes = _counter(declared_node_count)
+    declared_edges = _counter(declared_edge_count)
+    started_timestamp = _utc_timestamp(started_at)
+    finished_timestamp = _utc_timestamp(finished_at)
+    if datetime.fromisoformat(finished_timestamp[:-1] + "+00:00") < datetime.fromisoformat(
+        started_timestamp[:-1] + "+00:00"
+    ):
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+
+    summary = {
+        "schema_version": WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
+        "storage_protocol_version": WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION,
+        "run_identity": identity.as_dict(),
+        "reporting_policy": "terminal_only",
+        "selected_strategy": selected_strategy,
+        "plan_fingerprint": plan_fingerprint,
+        "limits_profile": WORKFLOW_PROGRESS_SUMMARY_LIMITS_PROFILE,
+        "summary_revision": 1,
+        "topology_version": None,
+        "detail_revision": None,
+        "state": outcome,
+        "node_counts": {
+            "declared": declared_nodes,
+            "discovered": 0,
+            "retained_topology": 0,
+            "retained_detail": 0,
+            "pending": 0,
+            "running": 0,
+            "succeeded": 0,
+            "failed": 0,
+        },
+        "edge_counts": {
+            "declared": declared_edges,
+            "discovered": 0,
+            "retained_topology": 0,
+        },
+        "progress_percent": 100.0 if outcome == "SUCCEEDED" else 0.0,
+        "timestamps": {
+            "started_at": started_timestamp,
+            "updated_at": finished_timestamp,
+            "finished_at": finished_timestamp,
+        },
+        "detail": {
+            "availability": "OMITTED_BY_POLICY",
+            "complete": False,
+            "truncation_reasons": [],
+        },
+        "storage": {"kind": "database", "manifest_id": None},
+        "retention": {
+            "detail_days": detail_days,
+            "detail_expires_at": None,
+        },
+        "terminal": {
+            "outcome": outcome,
+            "finished_at": finished_timestamp,
+        },
+    }
+    try:
+        serialize_workflow_progress_summary(
+            summary,
+            expected_identity=identity,
+        )
+    except WorkflowProgressSummaryError as error:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT) from error
+    return summary
+
+
 def publish_terminal_workflow_progress(
     identity: WorkflowRunIdentity,
     snapshot: Any,
@@ -793,6 +881,7 @@ __all__ = [
     "WorkflowProgressPilotError",
     "WorkflowProgressPilotPublicationResult",
     "WorkflowProgressPilotReason",
+    "prepare_terminal_only_workflow_progress_summary",
     "prepare_terminal_workflow_progress_publication",
     "publish_terminal_workflow_progress",
 ]

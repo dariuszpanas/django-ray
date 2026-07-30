@@ -542,6 +542,32 @@ class TestEnqueueAPI:
         assert execution.attempt_number == 1
         assert RayTaskExecution.objects.count() == 1
 
+    @pytest.mark.parametrize("reporting_policy", ["full", "terminal_only"])
+    def test_enqueue_complex_workflow_accepts_explicit_reporting_policy(
+        self,
+        client,
+        reporting_policy,
+    ):
+        response = client.post(
+            "/api/cluster/complex-workflow"
+            "?fast_items=2&slow_items=1&fast_seconds=0.01&slow_seconds=0.02"
+            f"&reporting_policy={reporting_policy}"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        expected_kwargs = {
+            "fast_items": 2,
+            "slow_items": 1,
+            "fast_seconds": 0.01,
+            "slow_seconds": 0.02,
+            "reporting_policy": reporting_policy,
+        }
+        assert data["kwargs"] == expected_kwargs
+        execution = RayTaskExecution.objects.get(task_id=data["task_id"])
+        assert json.loads(execution.kwargs_json) == expected_kwargs
+        assert RayTaskExecution.objects.count() == 1
+
     @pytest.mark.parametrize(
         "query",
         [
@@ -551,6 +577,7 @@ class TestEnqueueAPI:
             "failure_branch=fast&failure_item=-1",
             "fast_items=2&failure_branch=fast&failure_item=2",
             "slow_items=2&failure_branch=slow&failure_item=2",
+            "reporting_policy=sampled",
         ],
     )
     def test_enqueue_complex_workflow_rejects_invalid_failure_controls(

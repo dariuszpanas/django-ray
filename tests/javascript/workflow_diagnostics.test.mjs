@@ -13,6 +13,15 @@ const diagnosticsScript = fs.readFileSync(
   ),
   "utf8",
 );
+const taskLiveScript = fs.readFileSync(
+  fileURLToPath(
+    new URL(
+      "../../src/django_ray/static/django_ray/admin/task_live.js",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 const graphStyles = fs.readFileSync(
   fileURLToPath(
     new URL(
@@ -100,11 +109,17 @@ class FakeElement {
 }
 
 function matches(element, selector) {
-  if (selector.startsWith("[data-") && selector.endsWith("]")) {
-    const key = selector
-      .slice(6, -1)
+  const dataSelector = selector.match(
+    /^\[data-([a-z-]+)(?:="([^"]*)")?\]$/,
+  );
+  if (dataSelector !== null) {
+    const key = dataSelector[1]
       .replaceAll(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
-    return Object.hasOwn(element.dataset, key);
+    return (
+      Object.hasOwn(element.dataset, key) &&
+      (dataSelector[2] === undefined ||
+        String(element.dataset[key]) === dataSelector[2])
+    );
   }
   return element.tagName === selector.toUpperCase();
 }
@@ -361,6 +376,39 @@ function loadDiagnostics({
   };
 }
 
+function loadTaskLive(payload) {
+  const panel = new FakeElement("section");
+  panel.dataset.observabilityUrl = "/admin/execution/1/observability/";
+  const fields = Object.fromEntries(
+    ["state", "attempt", "workflow", "status"].map((name) => {
+      const field = new FakeElement("span");
+      field.dataset.field = name;
+      panel.append(field);
+      return [name, field];
+    }),
+  );
+  const fetchCalls = [];
+  const document = {
+    hidden: false,
+    addEventListener() {},
+    getElementById(id) {
+      return id === "django-ray-live-observability" ? panel : null;
+    },
+  };
+  const window = {
+    async fetch(url, options) {
+      fetchCalls.push({ options, url });
+      return response(200, payload);
+    },
+    setTimeout() {
+      throw new Error("terminal task live status must not schedule another poll");
+    },
+  };
+  const context = vm.createContext({ document, window });
+  vm.runInContext(taskLiveScript, context, { filename: "task_live.js" });
+  return { fetchCalls, fields, panel };
+}
+
 async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
@@ -538,7 +586,7 @@ test("unavailable plans and progress do not expose misleading actions", async ()
 
   assert.match(app.content.textContent, /failed verification/);
   assert.match(app.content.textContent, /no usable snapshot was retained/);
-  assert.match(app.content.textContent, /Execution graph/);
+  assert.doesNotMatch(app.content.textContent, /Execution graph/);
   assert.deepEqual(linkLabels(app), []);
   assert.equal(
     app.content.textContent.includes("billing.pipeline"),
@@ -548,6 +596,175 @@ test("unavailable plans and progress do not expose misleading actions", async ()
     findAll(app.content, (element) => element.tagName === "BUTTON").length,
     0,
   );
+});
+
+test("terminal-only summaries never advertise or request workflow detail", async () => {
+  const app = loadDiagnostics({
+    fetchResponses: [
+      response(
+        200,
+        validPayload({
+          plan: {
+            reporting_policy: "terminal_only",
+          },
+          progress: {
+            state: "TERMINAL_ONLY",
+            workflow_state: "SUCCEEDED",
+            availability: "OMITTED_BY_POLICY",
+            complete: false,
+            message:
+              "A terminal workflow summary is available; topology and node detail were omitted by the terminal-only reporting policy.",
+            actions: {
+              topology_nodes: true,
+              topology_edges: true,
+              node_details: true,
+            },
+          },
+        }),
+      ),
+    ],
+  });
+
+  await app.toggle(true);
+
+  assert.match(app.content.textContent, /terminal workflow summary is available/i);
+  assert.match(app.content.textContent, /Terminal outcomeSUCCEEDED/);
+  assert.match(app.content.textContent, /Detail availabilityOMITTED BY POLICY/);
+  assert.match(
+    app.content.textContent,
+    /No bounded topology actions are available/,
+  );
+  assert.equal(
+    elementsByClass(app, "django-ray-workflow-graph").length,
+    0,
+  );
+  assert.deepEqual(linkLabels(app), [
+    "Download plan JSON",
+    "Download selection JSON",
+  ]);
+  assert.equal(app.fetchCalls.length, 1);
+});
+
+test("terminal-only graph suppression survives corrupt plan diagnostics", async () => {
+  const app = loadDiagnostics({
+    fetchResponses: [
+      response(
+        200,
+        validPayload({
+          plan: {
+            status: "CORRUPT",
+            reporting_policy: undefined,
+          },
+          progress: {
+            state: "CORRUPT",
+            availability: "CORRUPT",
+            complete: false,
+            reporting_policy: "terminal_only",
+            message: "Workflow diagnostics failed verification.",
+            actions: {
+              topology_nodes: false,
+              topology_edges: false,
+              node_details: false,
+            },
+          },
+        }),
+      ),
+    ],
+  });
+
+  await app.toggle(true);
+
+  assert.match(app.content.textContent, /failed verification/i);
+  assert.equal(
+    elementsByClass(app, "django-ray-workflow-graph").length,
+    0,
+  );
+  assert.match(
+    app.content.textContent,
+    /No bounded topology actions are available/,
+  );
+  assert.equal(app.fetchCalls.length, 1);
+});
+
+test("terminal-only pending and missing states never expose the graph", async (context) => {
+  for (const [state, availability] of [
+    ["TERMINAL_ONLY_PENDING", "NOT_REPORTED"],
+    ["TERMINAL_ONLY_MISSING", "MISSING"],
+  ]) {
+    await context.test(state, async () => {
+      const app = loadDiagnostics({
+        fetchResponses: [
+          response(
+            200,
+            validPayload({
+              plan: {
+                reporting_policy: "terminal_only",
+              },
+              progress: {
+                state,
+                availability,
+                complete: false,
+                message: "",
+                actions: {
+                  topology_nodes: false,
+                  topology_edges: false,
+                  node_details: false,
+                },
+              },
+            }),
+          ),
+        ],
+      });
+
+      await app.toggle(true);
+
+      assert.match(app.content.textContent, /Terminal-only reporting/);
+      assert.equal(
+        elementsByClass(app, "django-ray-workflow-graph").length,
+        0,
+      );
+      assert.deepEqual(linkLabels(app), [
+        "Download plan JSON",
+        "Download selection JSON",
+      ]);
+      assert.equal(app.fetchCalls.length, 1);
+    });
+  }
+});
+
+test("live task status labels terminal-only summary without fabricated node execution", async () => {
+  const live = loadTaskLive({
+    state: "SUCCEEDED",
+    attempt_number: 1,
+    execution_generation: 0,
+    workflow_run_id: "00000000-0000-0000-0000-000000000001",
+    workflow_availability: "OMITTED_BY_POLICY",
+    workflow: {
+      revision: 1,
+      state: "SUCCEEDED",
+      total_nodes: 0,
+      completed_nodes: 0,
+      progress_percent: 100,
+      reporting_policy: "terminal_only",
+      declared_nodes: 12,
+      detail: {
+        availability: "OMITTED_BY_POLICY",
+        complete: false,
+        truncation_reasons: [],
+      },
+    },
+  });
+
+  await settle();
+
+  assert.equal(
+    live.fields.workflow.textContent,
+    "Terminal summary: SUCCEEDED. Detail OMITTED_BY_POLICY. " +
+      "The pinned plan declares 12 nodes. No node execution detail was collected.",
+  );
+  assert.equal(live.fields.workflow.textContent.includes("0/0 nodes"), false);
+  assert.match(live.fields.status.textContent, /Terminal summary: SUCCEEDED/);
+  assert.equal(live.fetchCalls.length, 1);
 });
 
 test("a redacted fingerprint placeholder is never offered to the clipboard", async () => {

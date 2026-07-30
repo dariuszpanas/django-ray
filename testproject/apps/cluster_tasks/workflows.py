@@ -11,7 +11,7 @@ import importlib.metadata
 import os
 import platform
 import time
-from typing import Any
+from typing import Any, Literal
 
 from django_ray.workflows import chain, group, map_step, report_progress, step
 
@@ -228,28 +228,25 @@ def run_complex_branch_workflow(
     *,
     failure_branch: str | None = None,
     failure_item: int | None = None,
+    reporting_policy: Literal["full", "terminal_only"] | None = None,
     use_ray: bool | None = None,
 ) -> dict[str, Any]:
     """Run nested fast and slow branches and record total wall time."""
     started_at = time.perf_counter()
-    if failure_branch is None:
-        result = complex_branch_workflow.run(
-            fast_items,
-            slow_items,
-            fast_seconds,
-            slow_seconds,
-            use_ray=use_ray,
-        )
-    else:
-        result = complex_branch_workflow.run(
-            fast_items,
-            slow_items,
-            fast_seconds,
-            slow_seconds,
-            failure_branch,
-            failure_item,
-            use_ray=use_ray,
-        )
+    workflow = (
+        complex_branch_workflow
+        if reporting_policy is None
+        else complex_branch_workflow.with_progress_reporting(reporting_policy)
+    )
+    workflow_args: tuple[Any, ...] = (
+        fast_items,
+        slow_items,
+        fast_seconds,
+        slow_seconds,
+    )
+    if failure_branch is not None:
+        workflow_args = (*workflow_args, failure_branch, failure_item)
+    result = workflow.run(*workflow_args, use_ray=use_ray)
     result["workflow_elapsed_seconds"] = round(time.perf_counter() - started_at, 4)
     return result
 

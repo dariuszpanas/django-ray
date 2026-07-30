@@ -71,6 +71,41 @@ def test_complex_workflow_task_passes_unchanged_defaults(monkeypatch) -> None:
     }
 
 
+def test_complex_workflow_task_forwards_terminal_only_with_failure(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def run(*args: Any, **kwargs: Any) -> dict[str, str]:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"status": "ok"}
+
+    monkeypatch.setattr(tasks, "run_complex_branch_workflow", run)
+
+    assert tasks.complex_workflow_benchmark.func(
+        fast_items=2,
+        slow_items=1,
+        fast_seconds=0.01,
+        slow_seconds=0.02,
+        failure_branch="slow",
+        failure_item=0,
+        reporting_policy="terminal_only",
+    ) == {"status": "ok"}
+    assert captured == {
+        "args": (2, 1, 0.01, 0.02),
+        "kwargs": {
+            "failure_branch": "slow",
+            "failure_item": 0,
+            "reporting_policy": "terminal_only",
+            "use_ray": True,
+        },
+    }
+
+
+def test_complex_workflow_task_rejects_unknown_reporting_policy() -> None:
+    with pytest.raises(ValueError, match="reporting_policy"):
+        tasks.complex_workflow_benchmark.func(reporting_policy="sampled")
+
+
 def test_complex_workflow_task_normalizes_exact_ray_wrapped_fixture(monkeypatch) -> None:
     wrapped = RayTaskError(
         "run_cpu_work_item",

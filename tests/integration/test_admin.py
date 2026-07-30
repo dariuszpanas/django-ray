@@ -65,7 +65,10 @@ from tests.workflow_progress_storage_helpers import (
     workflow_node,
     workflow_summary,
 )
-from tests.workflow_progress_summary_helpers import workflow_progress_summary
+from tests.workflow_progress_summary_helpers import (
+    terminal_only_workflow_progress_summary,
+    workflow_progress_summary,
+)
 
 _ADMIN_MIDDLEWARE = [
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -803,6 +806,8 @@ class TestRayTaskExecutionAdmin:
         [
             ("disabled", TaskState.RUNNING, "DISABLED"),
             ("full", TaskState.SUCCEEDED, "MISSING"),
+            ("terminal_only", TaskState.RUNNING, "NOT_REPORTED"),
+            ("terminal_only", TaskState.SUCCEEDED, "MISSING"),
         ],
     )
     def test_progress_read_can_skip_selection_inference_for_routine_polling(
@@ -1353,7 +1358,9 @@ class TestRayTaskExecutionAdmin:
             _execution: RayTaskExecution,
             *,
             collection: str,
+            attempt_number: int | None,
         ) -> dict[str, Any]:
+            assert attempt_number is None
             assert collection in {
                 "topology_nodes",
                 "topology_edges",
@@ -1383,6 +1390,20 @@ class TestRayTaskExecutionAdmin:
                 TaskState.SUCCEEDED,
                 "full",
                 "REQUESTED_MISSING",
+                None,
+            ),
+            (
+                "terminal-only-pending",
+                TaskState.RUNNING,
+                "terminal_only",
+                "TERMINAL_ONLY_PENDING",
+                None,
+            ),
+            (
+                "terminal-only-missing",
+                TaskState.SUCCEEDED,
+                "terminal_only",
+                "TERMINAL_ONLY_MISSING",
                 None,
             ),
             ("legacy", TaskState.RUNNING, "full", "LEGACY_ONLY", "legacy"),
@@ -1496,6 +1517,8 @@ class TestRayTaskExecutionAdmin:
         for state in (
             "REQUESTED_NOT_REPORTED",
             "REQUESTED_MISSING",
+            "TERMINAL_ONLY_PENDING",
+            "TERMINAL_ONLY_MISSING",
             "LEGACY_ONLY",
             "DISABLED",
             "OMITTED_BY_POLICY",
@@ -1518,6 +1541,135 @@ class TestRayTaskExecutionAdmin:
         }
         assert observed["TRUNCATED"]["complete"] is False
         assert observed["TRUNCATED"]["truncation_reasons"] == ["detail_count_limit"]
+
+    @pytest.mark.parametrize(
+        ("workflow_state", "task_state"),
+        [
+            ("SUCCEEDED", TaskState.SUCCEEDED),
+            ("FAILED", TaskState.FAILED),
+        ],
+    )
+    def test_terminal_only_summary_is_explicit_and_never_advertises_detail(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+        workflow_state: str,
+        task_state: str,
+    ) -> None:
+        manifest = json.loads(admin_dynamic_workflow_plan.canonical_json)
+        execution = RayTaskExecution.objects.create(
+            task_id=f"admin-terminal-only-{workflow_state.lower()}",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=task_state,
+            workflow_run_id=(
+                "00000000-0000-0000-0000-000000950011"
+                if workflow_state == "SUCCEEDED"
+                else "00000000-0000-0000-0000-000000950012"
+            ),
+            workflow_plan_fingerprint=admin_dynamic_workflow_plan.fingerprint,
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(
+                admin_dynamic_workflow_plan,
+                reporting_policy="terminal_only",
+            ),
+        )
+        summary = terminal_only_workflow_progress_summary(
+            execution,
+            state=workflow_state,
+            declared_node_count=len(manifest["nodes"]),
+            declared_edge_count=len(manifest["edges"]),
+        )
+        summary["selected_strategy"] = "dynamic_tasks"
+        summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(summary)
+        execution.save(update_fields=["workflow_progress_summary_json"])
+        user = get_user_model().objects.create_superuser(
+            username=f"terminal-only-{workflow_state.lower()}-admin",
+        )
+        request = RequestFactory().get(
+            "/admin/workflow/diagnostics/",
+            {"attempt_number": execution.attempt_number},
+        )
+        request.user = user
+        admin_obj = _task_admin()
+
+        def unexpected_detail_read(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("terminal-only presentation must not read workflow detail")
+
+        monkeypatch.setattr(
+            admin_obj,
+            "_preflight_workflow_collection",
+            unexpected_detail_read,
+        )
+        for read_name in (
+            "list_workflow_topology_nodes",
+            "list_workflow_topology_edges",
+            "list_workflow_node_details",
+        ):
+            monkeypatch.setattr(f"django_ray.admin.{read_name}", unexpected_detail_read)
+
+        diagnostics_response = admin_obj.workflow_diagnostics_view(
+            request,
+            str(execution.pk),
+        )
+        graph_response = admin_obj.workflow_graph_view(request, str(execution.pk))
+        observability_response = admin_obj.observability_view(request, str(execution.pk))
+        diagnostics = json.loads(diagnostics_response.content)
+        graph = json.loads(graph_response.content)
+        observability = json.loads(observability_response.content)
+        public_identity = {
+            key: value
+            for key, value in summary["run_identity"].items()
+            if key != "task_execution_pk"
+        }
+
+        assert diagnostics_response.status_code == 200
+        assert diagnostics["progress"] == {
+            "state": "TERMINAL_ONLY",
+            "message": (
+                "A terminal workflow summary is available; topology and node detail "
+                "were omitted by the terminal-only reporting policy."
+            ),
+            "availability": "OMITTED_BY_POLICY",
+            "complete": False,
+            "workflow_state": workflow_state,
+            "reporting_policy": "terminal_only",
+            "truncation_reasons": [],
+            "actions": {
+                "topology_nodes": False,
+                "topology_edges": False,
+                "node_details": False,
+            },
+        }
+        assert graph_response.status_code == 200
+        assert graph["status"] == "UNAVAILABLE"
+        assert graph["complete"] is False
+        assert graph["nodes"] == []
+        assert graph["edges"] == []
+        assert observability_response.status_code == 200
+        assert observability["workflow"] == {
+            "revision": 1,
+            "run_identity": public_identity,
+            "state": workflow_state,
+            "total_nodes": 0,
+            "completed_nodes": 0,
+            "failed_nodes": 0,
+            "running_nodes": 0,
+            "pending_nodes": 0,
+            "progress_percent": 100.0 if workflow_state == "SUCCEEDED" else 0.0,
+            "reporting_policy": "terminal_only",
+            "selected_strategy": "dynamic_tasks",
+            "declared_nodes": len(manifest["nodes"]),
+            "declared_edges": len(manifest["edges"]),
+            "timestamps": summary["timestamps"],
+            "terminal": summary["terminal"],
+            "detail": {
+                "availability": "OMITTED_BY_POLICY",
+                "complete": False,
+                "truncation_reasons": [],
+            },
+        }
+        assert "task_execution_pk" not in observability["workflow"]["run_identity"]
 
     @pytest.mark.parametrize(
         ("mismatched_field", "mismatched_value"),
@@ -1621,7 +1773,9 @@ class TestRayTaskExecutionAdmin:
             _execution: RayTaskExecution,
             *,
             collection: str,
+            attempt_number: int | None,
         ) -> dict[str, Any]:
+            assert attempt_number is None
             assert collection in {"topology_nodes", "node_details"}
             return {
                 "availability": "AVAILABLE",
@@ -1724,6 +1878,156 @@ class TestRayTaskExecutionAdmin:
             "node_details": False,
         }
 
+    def test_corrupt_plan_preserves_terminal_only_graph_suppression_signal(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-terminal-only-corrupt-plan",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.SUCCEEDED,
+            workflow_run_id="00000000-0000-0000-0000-000000960004",
+            workflow_plan_fingerprint="sha256:" + ("0" * 64),
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(
+                admin_dynamic_workflow_plan,
+                reporting_policy="terminal_only",
+            ),
+        )
+        manifest = json.loads(admin_dynamic_workflow_plan.canonical_json)
+        summary = terminal_only_workflow_progress_summary(
+            execution,
+            declared_node_count=len(manifest["nodes"]),
+            declared_edge_count=len(manifest["edges"]),
+        )
+        summary["plan_fingerprint"] = admin_dynamic_workflow_plan.fingerprint
+        summary["selected_strategy"] = "dynamic_tasks"
+        execution.workflow_progress_summary_json = serialize_workflow_progress_summary(summary)
+        execution.save(update_fields=["workflow_progress_summary_json"])
+        user = get_user_model().objects.create_superuser(
+            username="terminal-only-corrupt-plan-admin",
+        )
+        request = RequestFactory().get(
+            "/admin/workflow/diagnostics/",
+            {"attempt_number": execution.attempt_number},
+        )
+        request.user = user
+        admin_obj = _task_admin()
+
+        monkeypatch.setattr(
+            admin_obj,
+            "_preflight_workflow_collection",
+            lambda *_args, **_kwargs: pytest.fail(
+                "corrupt plans must not preflight terminal-only detail"
+            ),
+        )
+
+        response = admin_obj.workflow_diagnostics_view(request, str(execution.pk))
+        payload = json.loads(response.content)
+
+        assert response.status_code == 200
+        assert payload["plan"]["status"] == "CORRUPT"
+        assert payload["progress"]["state"] == "CORRUPT"
+        assert payload["progress"]["availability"] == "CORRUPT"
+        assert payload["progress"]["reporting_policy"] == "terminal_only"
+        assert payload["progress"]["actions"] == {
+            "topology_nodes": False,
+            "topology_edges": False,
+            "node_details": False,
+        }
+
+    def test_corrupt_plan_preserves_terminal_only_policy_without_a_summary(
+        self,
+        monkeypatch,
+        admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-terminal-only-corrupt-plan-missing-summary",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.SUCCEEDED,
+            workflow_run_id="00000000-0000-0000-0000-000000960005",
+            workflow_plan_fingerprint="sha256:" + ("0" * 64),
+            workflow_plan_json=admin_dynamic_workflow_plan.canonical_json,
+            workflow_plan_selection=_plan_selection_json(
+                admin_dynamic_workflow_plan,
+                reporting_policy="terminal_only",
+            ),
+        )
+        user = get_user_model().objects.create_superuser(
+            username="terminal-only-corrupt-plan-missing-summary-admin",
+        )
+        request = RequestFactory().get(
+            "/admin/workflow/diagnostics/",
+            {"attempt_number": execution.attempt_number},
+        )
+        request.user = user
+        admin_obj = _task_admin()
+        monkeypatch.setattr(
+            admin_obj,
+            "_preflight_workflow_collection",
+            lambda *_args, **_kwargs: pytest.fail(
+                "a terminal-only run without a summary must not preflight detail"
+            ),
+        )
+
+        response = admin_obj.workflow_diagnostics_view(request, str(execution.pk))
+        payload = json.loads(response.content)
+
+        assert response.status_code == 200
+        assert payload["plan"]["status"] == "CORRUPT"
+        assert payload["plan"]["reporting_policy"] == "terminal_only"
+        assert payload["progress"]["state"] == "TERMINAL_ONLY_MISSING"
+        assert payload["progress"]["availability"] == "MISSING"
+        assert payload["progress"]["reporting_policy"] == "terminal_only"
+        assert payload["progress"]["actions"] == {
+            "topology_nodes": False,
+            "topology_edges": False,
+            "node_details": False,
+        }
+
+    def test_workflow_diagnostics_read_is_pinned_to_the_requested_attempt(
+        self,
+        monkeypatch,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-workflow-pinned-diagnostics",
+            callable_path="tests.integration.test_admin._admin_diagnostic_increment",
+            state=TaskState.RUNNING,
+            attempt_number=2,
+        )
+        user = get_user_model().objects.create_superuser(
+            username="workflow-pinned-diagnostics-admin",
+        )
+        request = RequestFactory().get(
+            "/admin/workflow/diagnostics/",
+            {"attempt_number": 1},
+        )
+        request.user = user
+        observed: list[int | None] = []
+
+        def summary_read(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+            observed.append(kwargs.get("attempt_number"))
+            return {
+                "source_schema_version": None,
+                "summary": None,
+                "availability": "NOT_REPORTED",
+                "complete": False,
+            }
+
+        monkeypatch.setattr(
+            "django_ray.admin.get_workflow_progress_summary",
+            summary_read,
+        )
+
+        response = _task_admin().workflow_diagnostics_view(
+            request,
+            str(execution.pk),
+        )
+
+        assert response.status_code == 200
+        assert observed == [1]
+
     def test_workflow_diagnostics_does_not_advertise_summary_only_topology(
         self,
         admin_dynamic_workflow_plan: EffectiveWorkflowPlan,
@@ -1804,7 +2108,9 @@ class TestRayTaskExecutionAdmin:
             _execution: RayTaskExecution,
             *,
             collection: str,
+            attempt_number: int | None,
         ) -> dict[str, Any]:
+            assert attempt_number is None
             assert collection == "topology_nodes"
             raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.CORRUPT)
 
@@ -1905,7 +2211,9 @@ class TestRayTaskExecutionAdmin:
             _execution: RayTaskExecution,
             *,
             collection: str,
+            attempt_number: int | None,
         ) -> dict[str, Any]:
+            assert attempt_number is None
             assert collection == "topology_nodes"
             return preflight_page
 
@@ -2376,7 +2684,7 @@ class TestRayTaskExecutionAdmin:
         assert "data-workflow-diagnostics-status" in content
         assert "data-workflow-diagnostics-content" in content
         assert 'aria-atomic="true"' in content
-        assert f'data-diagnostics-url="{diagnostics_url}"' in content
+        assert f'data-diagnostics-url="{diagnostics_url}{attempt_query}"' in content
         assert f'data-pinned-attempt-number="{execution.attempt_number}"' in content
         assert f'data-graph-url="{graph_url}{attempt_query}"' in content
         assert f'data-plan-download-url="{plan_download_url}"' in content

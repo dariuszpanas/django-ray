@@ -562,8 +562,11 @@ Version 2 adds the effective workflow reporting policy without changing the
 fingerprinted execution plan. Readers continue to accept version 1 rolling-deployment
 rows: dynamic execution implies `"full"` and local execution implies `"disabled"`.
 New writers emit version 2. The version-2 reader recognizes the summary protocol's
-reserved `"sampled"` and `"terminal_only"` values for forward rolling compatibility,
-but the current runtime can select only `"full"` or `"disabled"`.
+reserved `"sampled"` value for forward rolling compatibility. The current runtime can
+select `"full"`, `"terminal_only"`, or `"disabled"`. Terminal-only retains the same
+pinned plan and strategy identity while bypassing the progress actor and legacy
+snapshot writer; the accepted durable success or failure transition may attach one
+summary-only schema-v3 record. Sampled reporting remains reserved.
 
 Diagnostics are bounded, deterministic for the same plan and capability set, ordered by
 strategy then code/path, and contain no input values or secret material. Each rejection

@@ -545,6 +545,11 @@ attempt. If live polling advances the task to a newer attempt, reload the page b
 opening its graph. The bounded topology and detail JSON routes remain available as
 explicit diagnostic fallbacks.
 
+That graph is a full-reporting detail surface. A terminal-only run instead shows its
+terminal outcome and `OMITTED_BY_POLICY` status explicitly in the live and workflow
+diagnostic panels. The Admin does not render or request an execution graph and does not
+offer topology or node-detail links for that summary.
+
 ## Local Execution
 
 Signatures run locally when Ray is not initialized. This makes workflow logic easy to
@@ -559,33 +564,56 @@ Set `use_ray=True` to fail instead of falling back when Ray is unavailable.
 
 ## Workflow Progress Policy
 
-Ray workflow node reporting defaults to the configured
-`WORKFLOW_PROGRESS_REPORTING_POLICY="full"`. A latency-sensitive or very large
-workflow can opt out for one invocation:
+Ray workflow progress defaults to the configured
+`WORKFLOW_PROGRESS_REPORTING_POLICY="full"`. Use terminal-only reporting when a
+workflow needs one durable completion summary without live per-node telemetry:
+
+```python
+result = calculation.with_progress_reporting("terminal_only").run(4, use_ray=True)
+```
+
+Terminal-only reporting creates no workflow progress actor, sends no node or
+application-progress RPCs, and writes no `RayTaskExecution.progress_data`. Calls to
+`report_progress()` return `False`, and the workflow submits the same Ray work. The
+accepted outer-task success or failure transition makes exactly one best-effort
+schema-v3 summary publication after result preparation has succeeded or the durable
+application error is known. It records the pinned strategy and plan fingerprint,
+declared plan counts, terminal outcome, and bounded timestamps. Discovered, retained,
+and node-state counts remain zero because no node execution evidence was collected.
+Detail is `OMITTED_BY_POLICY`; there is no topology or node-detail revision, manifest,
+page, or row.
+
+Terminal-only publication is observational. Summary construction, validation, or
+database attachment failure cannot replace the workflow result or application error.
+A stale lifecycle fence accepts neither the terminal task transition nor its summary.
+The authorized summary API and Admin show the terminal record explicitly, while
+topology pages return empty omitted-by-policy responses and the legacy graph plus Admin
+execution graph stay unavailable.
+
+Use disabled reporting when no workflow-progress summary is needed:
 
 ```python
 result = calculation.with_progress_reporting("disabled").run(4, use_ray=True)
 ```
 
-Disabled reporting creates no workflow progress actor, sends no node or application
-progress RPCs, and writes no `RayTaskExecution.progress_data`. Calls to
-`report_progress()` return `False`, and the workflow submits the same Ray work. Inside
-a durable task, it still claims and fences its exact run, pins the effective plan and
-selected strategy, and preserves the outer task's state, result/error, retry,
-cancellation, recovery, and monitor heartbeat behavior.
+Disabled mode has the same zero-actor, zero-progress-RPC, and zero-legacy-write
+behavior, but does not attempt the terminal schema-v3 summary. Both actor-free modes
+preserve the durable outer task's state, result/error, retry, cancellation, recovery,
+and monitor heartbeat behavior.
 
 The bounded task summary exposes the effective policy. Authorized bounded workflow
 progress readers return `availability="DISABLED"` with no fabricated summary or graph
-for the current disabled run. The plan selection is the current-attempt signal, so
-an active full-reporting run without schema v3 remains `NOT_REPORTED`, while a terminal
-full-reporting run without schema v3 is `MISSING`. Historical attempts without an
-archived schema-v3 summary remain `NOT_REPORTED`.
-Local execution has no progress actor and is recorded as disabled regardless of the
-configured Ray reporting default.
+for the current disabled run. The plan selection is the current-attempt signal, so an
+active full or terminal-only run without schema v3 remains `NOT_REPORTED`, while a
+terminal full or terminal-only run without its expected schema-v3 publication is
+`MISSING`. Historical attempts without an archived schema-v3 summary remain
+`NOT_REPORTED`. Local execution has no progress actor and is recorded as disabled
+regardless of the configured Ray reporting default.
 
-Only `"full"` and `"disabled"` are executable policies today. Sampled and terminal-only
-collection policies remain later #79 work; the schema-v3 pilot still collects in full
-mode and changes only terminal publication. Changing
+`"full"`, `"terminal_only"`, and `"disabled"` are executable policies. Sampled
+reporting remains later #79 work. The schema-v3 pilot still applies only to full mode:
+it collects live actor evidence and changes terminal publication, while terminal-only
+mode publishes its bounded summary without enabling the pilot. Changing
 `WORKFLOW_PROGRESS_FLUSH_SECONDS` only throttles full-mode database snapshots and does
 not remove producer or actor overhead.
 
@@ -599,7 +627,8 @@ V1 limits. Enabling the pilot narrows actor collection and publication to the fi
 detail, and 4 MiB combined, with the byte ceilings applied to encoded and decoded
 evidence. Descriptive metadata is redacted before it crosses Ray.
 
-These bounds close the individual producer-to-actor and retained-collector gap. They
+These bounds close the individual producer-to-actor and retained-collector gap for
+full reporting. They
 do not bound the aggregate number or bytes of events already queued in Ray's actor
 mailbox, coalesce repeated producer updates, provide producer backpressure, or provide
 the bounded actor-to-preparation drain needed at the hard V1 ceilings. Those remain
@@ -622,8 +651,11 @@ The outer Django task is the durability and retry boundary:
   events marked truncated; a producer-side failure before actor submission cannot
   appear in those counters. The aggregate Ray mailbox, snapshot-to-preparer drain, and
   transient snapshot materialization are not yet governed by the later
-  admission/backpressure contract. Disabled mode bypasses the coordinator, codec,
-  actor, and snapshot path while leaving the durable outer-task boundary intact.
+  admission/backpressure contract. Terminal-only and disabled modes bypass that live
+  coordinator, event codec, actor, and snapshot path while leaving the durable
+  outer-task boundary intact. Terminal-only still makes its one bounded best-effort
+  summary publication after the application reaches success or failure; disabled does
+  not.
 - A separate nullable `workflow_progress_summary_json` field and schema-v3 codec are
   deployed reader-first. The field is fixed-shape and capped at 16 KiB of canonical
   UTF-8 JSON. Package-owned topology/detail tables and the internal storage writer can
@@ -631,16 +663,20 @@ The outer Django task is the durability and retry boundary:
   and that summary pointer in one transaction. The standalone schema-v3 writer rejects
   topology/detail pointers; it is the only path for an intentional summary-only
   `DISABLED` or `OMITTED_BY_POLICY` record, which creates no empty detail storage.
-  Authorized public readers are implemented. The default-off pilot makes one
+  Terminal-only execution now uses the omitted-by-policy path for one terminal summary
+  without a live actor. Authorized public readers are implemented. The default-off
+  pilot makes one
   best-effort terminal publication from an internally consistent full-reporting actor
   snapshot, revalidates the pinned plan and exact run fence, then stages and atomically
   promotes topology, detail, and summary. Rejected or truncated ingress, invalid
   cross-field evidence, admission overflow, preparation truncation, a stale fence, or
   storage failure leaves schema v3 unpublished and emits a stable bounded diagnostic;
   it never changes the application result. The periodic schema-v2 writer remains
-  active for rolling compatibility. General or default activation still requires the
-  remaining mailbox/backpressure, composite-preparation, aggregate-spill, migration,
-  and old-writer-drain work.
+  active for rolling compatibility. Terminal-only does not solve or weaken the
+  remaining full-reporting boundaries: sampled/coalesced reporting, aggregate
+  producer/mailbox admission, bounded actor-to-preparer draining, live cost
+  attribution, large-fan-out slow-consumer evidence, default schema-v3 activation, and
+  old-writer drain remain #79 and its dependent deliveries.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -743,6 +779,7 @@ GET  /api/cluster/workflow-benchmark/{task_id}
 
 POST /api/cluster/complex-workflow
 POST /api/cluster/complex-workflow?failure_branch=slow&failure_item=0
+POST /api/cluster/complex-workflow?reporting_policy=terminal_only
 GET  /api/cluster/complex-workflow/{task_id}
 
 GET  /api/cluster/workflows/{task_id}
@@ -780,6 +817,21 @@ Admin graph against the same bounded publication. Open either terminal
 the originating map node and its incoming ancestor path while retaining successful
 sibling context.
 
+Omitting `reporting_policy` preserves the existing full-reporting fixture. Set
+`reporting_policy=terminal_only` to exercise the actor-free summary path with a small
+success:
+
+```text
+POST /api/cluster/complex-workflow?fast_items=2&slow_items=1&fast_seconds=0.01&slow_seconds=0.02&reporting_policy=terminal_only
+```
+
+Add `failure_branch=slow&failure_item=0` for the deterministic terminal-only failure.
+Poll the returned task ID through `GET /api/cluster/workflows/{task_id}`. The response
+should report the terminal outcome, pinned strategy, declared plan counts, zero
+discovered nodes, and `detail.availability="OMITTED_BY_POLICY"`. Topology and
+node-detail routes return empty omitted-by-policy responses, and the Admin shows no
+execution graph for either fixture.
+
 ## API Reference
 
 | API | Behavior |
@@ -792,4 +844,4 @@ sibling context.
 | `bounded_map.with_result_buffer(max_serialized_bytes=..., actor_options=...)` | Opt into a resource-accounted Ray actor that forwards one ordered payload reference without coordinator decoding |
 | `report_progress(current, total, message=None, metrics=None)` | Report progress from a running leaf |
 | `signature.run(*args, use_ray=None, **kwargs)` | Execute with Ray when initialized, otherwise locally |
-| `signature.with_progress_reporting(policy).run(...)` | Execute one invocation with explicit `"full"` or `"disabled"` node reporting without reserving an application keyword |
+| `signature.with_progress_reporting(policy).run(...)` | Execute one invocation with explicit `"full"`, `"terminal_only"`, or `"disabled"` progress reporting without reserving an application keyword |

@@ -73,3 +73,39 @@ def workflow_progress_summary(
         },
         "terminal": {"outcome": state if terminal else None, "finished_at": finished_at},
     }
+
+
+def terminal_only_workflow_progress_summary(
+    execution: Any,
+    *,
+    state: str = "SUCCEEDED",
+    declared_node_count: int = 1,
+    declared_edge_count: int = 0,
+) -> dict[str, Any]:
+    """Build the summary-only terminal contract without fabricated node evidence."""
+    if state not in {"SUCCEEDED", "FAILED"}:
+        raise ValueError("terminal-only test summaries require success or failure")
+    summary = workflow_progress_summary(execution, state=state)
+    summary["reporting_policy"] = "terminal_only"
+    summary["node_counts"] = {
+        "declared": declared_node_count,
+        "discovered": 0,
+        "retained_topology": 0,
+        "retained_detail": 0,
+        "pending": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+    }
+    summary["edge_counts"] = {
+        "declared": declared_edge_count,
+        "discovered": 0,
+        "retained_topology": 0,
+    }
+    summary["progress_percent"] = 100.0 if state == "SUCCEEDED" else 0.0
+    summary["detail"] = {
+        "availability": "OMITTED_BY_POLICY",
+        "complete": False,
+        "truncation_reasons": [],
+    }
+    return summary

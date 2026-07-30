@@ -226,6 +226,12 @@
         "Workflow detail was requested, but no usable snapshot was retained.",
       OMITTED_BY_POLICY:
         "Workflow progress detail was intentionally omitted by reporting policy.",
+      TERMINAL_ONLY:
+        "A terminal workflow summary is available; topology and node detail were omitted by policy.",
+      TERMINAL_ONLY_PENDING:
+        "Terminal-only reporting waits for workflow completion; no live node detail is collected.",
+      TERMINAL_ONLY_MISSING:
+        "Terminal-only reporting was selected, but its terminal summary was not captured.",
       EXPIRED: "The retained workflow detail has expired.",
       MISSING: "Workflow detail was requested but no usable snapshot was retained.",
       CORRUPT:
@@ -941,7 +947,7 @@
     return graph;
   };
 
-  const renderProgress = (progress) => {
+  const renderProgress = (progress, reportingPolicy, planStatus) => {
     const wrapper = section(
       "Progress and topology",
       progress.state ?? progress.availability,
@@ -955,9 +961,21 @@
     );
 
     const facts = element("dl", "django-ray-workflow__facts");
-    addFact(facts, "Workflow state", asIdentifier(progress.state));
+    addFact(facts, "Progress status", asIdentifier(progress.state));
+    if (
+      typeof progress.workflow_state === "string" &&
+      progress.workflow_state.length > 0
+    ) {
+      addFact(
+        facts,
+        progress.state === "TERMINAL_ONLY"
+          ? "Terminal outcome"
+          : "Workflow state",
+        asIdentifier(progress.workflow_state),
+      );
+    }
     addFact(facts, "Detail availability", asIdentifier(progress.availability));
-    addFact(facts, "Complete snapshot", asBoolean(progress.complete));
+    addFact(facts, "Complete detail", asBoolean(progress.complete));
     wrapper.append(facts);
 
     if (
@@ -974,14 +992,26 @@
       addChips(wrapper, progress.truncation_reasons);
     }
 
-    if (endpoints.graph) {
+    const terminalOnlyState =
+      typeof progress.state === "string" &&
+      progress.state.startsWith("TERMINAL_ONLY");
+    const terminalOnlyPolicy =
+      reportingPolicy === "terminal_only" ||
+      progress.reporting_policy === "terminal_only";
+    if (
+      endpoints.graph &&
+      planStatus === "AVAILABLE" &&
+      !terminalOnlyPolicy &&
+      !terminalOnlyState
+    ) {
       wrapper.append(graphDisclosure());
       return wrapper;
     }
 
-    const availableActions = isRecord(progress.actions)
-      ? progress.actions
-      : {};
+    const availableActions =
+      !terminalOnlyPolicy && isRecord(progress.actions)
+        ? progress.actions
+        : {};
     const actions = element("nav", "django-ray-workflow__actions");
     actions.setAttribute("aria-label", "Available workflow topology views");
     if (availableActions.topology_nodes === true) {
@@ -1030,7 +1060,11 @@
     }
     contentNode.replaceChildren(
       renderPlan(payload.plan),
-      renderProgress(payload.progress),
+      renderProgress(
+        payload.progress,
+        payload.plan.reporting_policy,
+        payload.plan.status,
+      ),
     );
     contentNode.hidden = false;
     setStatus("Workflow diagnostics loaded.");

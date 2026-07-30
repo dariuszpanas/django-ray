@@ -255,6 +255,7 @@ def test_existing_workflow_main_needs_no_api_token_and_prints_scalar_json(
         base_url="http://127.0.0.1:8000",
         timeout=45.0,
         existing_workflow_task_id=WORKFLOW_TASK_ID,
+        expected_workflow_reporting_policy="full",
     )
     expected = {
         "admin_workflow": "verified",
@@ -300,6 +301,7 @@ def test_existing_workflow_main_needs_no_api_token_and_prints_scalar_json(
             "base_url": "http://127.0.0.1:8000",
             "task_id": WORKFLOW_TASK_ID,
             "timeout_seconds": 45.0,
+            "expected_reporting_policy": "full",
         }
     ]
     assert json.loads(capsys.readouterr().out) == expected
@@ -318,10 +320,11 @@ def _admin_workflow_responses(
         "node_details": f"{root}/workflow/nodes/",
     }
     attempt_query = f"?attempt_number={execution.attempt_number}"
+    diagnostics_read_path = f"{diagnostics_path}{attempt_query}"
     change_html = "".join(
         (
             '<section id="django-ray-workflow-diagnostics" ',
-            f'data-diagnostics-url="{diagnostics_path}" ',
+            f'data-diagnostics-url="{diagnostics_read_path}" ',
             f'data-graph-url="{graph_path}{attempt_query}" ',
             f'data-topology-nodes-url="{collection_paths["topology_nodes"]}{attempt_query}" ',
             f'data-topology-edges-url="{collection_paths["topology_edges"]}{attempt_query}" ',
@@ -346,7 +349,7 @@ def _admin_workflow_responses(
 
     page_query = f"{attempt_query}&limit={docker_smoke._WORKFLOW_PAGE_LIMIT}"
     responses = {
-        diagnostics_path: {
+        diagnostics_read_path: {
             "schema": "django-ray.admin-workflow-diagnostics",
             "schema_version": 1,
             "plan": {"status": "AVAILABLE"},
@@ -483,7 +486,7 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
     root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
     assert requested_paths == [
         f"{root}/change/",
-        f"{root}/workflow/diagnostics/",
+        f"{root}/workflow/diagnostics/?attempt_number=1",
         f"{root}/workflow/topology/nodes/?attempt_number=1&limit=16",
         f"{root}/workflow/topology/edges/?attempt_number=1&limit=16",
         f"{root}/workflow/nodes/?attempt_number=1&limit=16",
@@ -529,6 +532,148 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
     assert all(type(value) in {int, str} for value in evidence.values())
 
 
+def test_terminal_only_admin_advertises_no_detail_and_skips_collection_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = SimpleNamespace(
+        pk=43,
+        task_id=WORKFLOW_TASK_ID,
+        attempt_number=1,
+        state="SUCCEEDED",
+    )
+    root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
+    diagnostics_path = f"{root}/workflow/diagnostics/"
+    diagnostics_read_path = f"{diagnostics_path}?attempt_number=1"
+    graph_path = f"{root}/workflow/graph/?attempt_number=1"
+    change_html = (
+        f'<section id="django-ray-workflow-diagnostics" '
+        f'data-diagnostics-url="{diagnostics_read_path}" '
+        f'data-graph-url="{graph_path}"></section>'
+    )
+    responses = {
+        diagnostics_read_path: {
+            "schema": "django-ray.admin-workflow-diagnostics",
+            "schema_version": 1,
+            "plan": {
+                "status": "AVAILABLE",
+                "reporting_policy": "terminal_only",
+            },
+            "progress": {
+                "state": "TERMINAL_ONLY",
+                "workflow_state": "SUCCEEDED",
+                "availability": "OMITTED_BY_POLICY",
+                "complete": False,
+                "actions": {
+                    "topology_nodes": False,
+                    "topology_edges": False,
+                    "node_details": False,
+                },
+            },
+        },
+        graph_path: {
+            "schema": "django-ray.admin-workflow-graph",
+            "schema_version": 1,
+            "status": "UNAVAILABLE",
+            "message": "Workflow execution detail was omitted by policy.",
+            "complete": False,
+            "counts": {"nodes": 0, "edges": 0},
+            "limits": dict(docker_smoke._WORKFLOW_GRAPH_LIMITS),
+            "nodes": [],
+            "edges": [],
+        },
+    }
+    requested_paths: list[str] = []
+
+    @contextmanager
+    def admin_headers():
+        yield {"Cookie": "sessionid=private-admin-session"}
+
+    def request_text(
+        _base_url: str,
+        path: str,
+        **_kwargs: object,
+    ) -> str:
+        requested_paths.append(path)
+        return change_html
+
+    def request_json(
+        _base_url: str,
+        path: str,
+        **_kwargs: object,
+    ) -> dict[str, Any]:
+        requested_paths.append(path)
+        return responses[path]
+
+    storage_evidence: dict[str, bool | int | str] = {
+        "summary_revision": 1,
+        "reporting_policy": "terminal_only",
+        "detail_availability": "OMITTED_BY_POLICY",
+        "declared_nodes": 3,
+        "declared_edges": 2,
+        "legacy_progress_null": True,
+        "attempt_summary_matches": True,
+        "storage_rows": 0,
+        "topology_manifests": 0,
+        "topology_pages": 0,
+        "manifest_links": 0,
+        "node_details": 0,
+    }
+    monkeypatch.setattr(docker_smoke, "_disposable_admin_headers", admin_headers)
+    monkeypatch.setattr(docker_smoke, "_request_text", request_text)
+    monkeypatch.setattr(docker_smoke, "_request_admin_json", request_json)
+    monkeypatch.setattr(
+        docker_smoke,
+        "_verify_existing_terminal_only_storage_contract",
+        lambda **_kwargs: storage_evidence,
+    )
+
+    evidence = docker_smoke._verify_existing_terminal_only_admin_contract(
+        base_url="http://127.0.0.1:8000",
+        deadline=100.0,
+        execution=execution,
+    )
+
+    assert requested_paths == [
+        f"{root}/change/",
+        diagnostics_read_path,
+        graph_path,
+    ]
+    assert evidence == {
+        "admin_workflow": "terminal-summary-verified",
+        "task_id": WORKFLOW_TASK_ID,
+        "task_state": "SUCCEEDED",
+        "attempt_number": 1,
+        "admin_actions": 0,
+        "graph_advertised": False,
+        "graph_status": "UNAVAILABLE",
+        **storage_evidence,
+    }
+
+
+def test_terminal_only_degraded_graph_rejects_extra_private_fields() -> None:
+    payload = {
+        "schema": "django-ray.admin-workflow-graph",
+        "schema_version": 1,
+        "status": "UNAVAILABLE",
+        "message": "Workflow execution detail was omitted by policy.",
+        "complete": False,
+        "counts": {"nodes": 0, "edges": 0},
+        "limits": dict(docker_smoke._WORKFLOW_GRAPH_LIMITS),
+        "nodes": [],
+        "edges": [],
+        "runtime_env": {"env_vars": {"SECRET": "must-not-appear"}},
+    }
+
+    with pytest.raises(
+        docker_smoke.DockerSmokeError,
+        match="forbidden private field",
+    ):
+        docker_smoke._workflow_admin_degraded_graph_evidence(
+            payload,
+            expected_status="UNAVAILABLE",
+        )
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -552,10 +697,11 @@ def test_existing_workflow_admin_rejects_unavailable_or_inconsistent_routes(
     root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
     query = f"?attempt_number=1&limit={docker_smoke._WORKFLOW_PAGE_LIMIT}"
     diagnostics_path = f"{root}/workflow/diagnostics/"
+    diagnostics_read_path = f"{diagnostics_path}?attempt_number={execution.attempt_number}"
     node_path = f"{root}/workflow/topology/nodes/{query}"
     if failure == "unavailable_diagnostics":
-        responses[diagnostics_path]["progress"]["state"] = "MISSING"
-        responses[diagnostics_path]["progress"]["availability"] = "MISSING"
+        responses[diagnostics_read_path]["progress"]["state"] = "MISSING"
+        responses[diagnostics_read_path]["progress"]["availability"] = "MISSING"
     else:
         responses[node_path]["items"] = []
         responses[node_path]["returned_count"] = 0
@@ -852,6 +998,123 @@ def test_existing_workflow_storage_requires_one_clean_current_publication() -> N
         "pending_manifests": 0,
         "unlinked_pages": 0,
     }
+
+
+@pytest.mark.django_db
+def test_terminal_only_storage_requires_one_summary_and_no_detail_rows() -> None:
+    from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+    from django_ray.workflow_plans import (
+        PLAN_SELECTION_FORMAT,
+        PLAN_SELECTION_FORMAT_VERSION,
+    )
+    from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+    from tests.workflow_progress_summary_helpers import workflow_progress_summary
+
+    fingerprint = f"sha256:{'a' * 64}"
+    selection = {
+        "plan_selection_format": PLAN_SELECTION_FORMAT,
+        "plan_selection_format_version": PLAN_SELECTION_FORMAT_VERSION,
+        "requested_policy": "auto",
+        "selected_strategy": "dynamic_tasks",
+        "reporting_policy": "terminal_only",
+        "eligible_strategies": ["dynamic_tasks", "local"],
+        "rejections": [],
+        "total_rejections": 0,
+        "rejections_truncated": False,
+    }
+    execution = RayTaskExecution.objects.create(
+        task_id=WORKFLOW_TASK_ID,
+        callable_path="testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
+        state=TaskState.SUCCEEDED,
+        attempt_number=1,
+        execution_generation=1,
+        workflow_run_id="35200000-0000-4000-8000-000000000003",
+        workflow_plan_fingerprint=fingerprint,
+        workflow_plan_json=json.dumps(
+            {
+                "snapshot": {
+                    "observed_node_count": 3,
+                    "observed_edge_count": 2,
+                },
+                "nodes": [],
+                "edges": [],
+            }
+        ),
+        workflow_plan_pinned_attempt=1,
+        workflow_plan_selection=json.dumps(selection),
+    )
+    summary = workflow_progress_summary(execution, state="SUCCEEDED")
+    summary.update(
+        reporting_policy="terminal_only",
+        selected_strategy="dynamic_tasks",
+        plan_fingerprint=fingerprint,
+    )
+    summary["node_counts"] = {
+        "declared": 3,
+        "discovered": 0,
+        "retained_topology": 0,
+        "retained_detail": 0,
+        "pending": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+    }
+    summary["edge_counts"] = {
+        "declared": 2,
+        "discovered": 0,
+        "retained_topology": 0,
+    }
+    summary["detail"] = {
+        "availability": "OMITTED_BY_POLICY",
+        "complete": False,
+        "truncation_reasons": [],
+    }
+    serialized = serialize_workflow_progress_summary(summary)
+    execution.workflow_progress_summary_json = serialized
+    execution.save(update_fields=["workflow_progress_summary_json"])
+    attempt = TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=1,
+        state=TaskState.SUCCEEDED,
+        workflow_progress_summary_json=serialized,
+    )
+
+    assert docker_smoke._verify_existing_terminal_only_storage_contract(execution=execution) == {
+        "summary_revision": 1,
+        "reporting_policy": "terminal_only",
+        "detail_availability": "OMITTED_BY_POLICY",
+        "declared_nodes": 3,
+        "declared_edges": 2,
+        "legacy_progress_null": True,
+        "attempt_summary_matches": True,
+        "storage_rows": 0,
+        "topology_manifests": 0,
+        "topology_pages": 0,
+        "manifest_links": 0,
+        "node_details": 0,
+    }
+
+    attempt.attempt_number = 2
+    attempt.save(update_fields=["attempt_number"])
+    with pytest.raises(
+        docker_smoke.DockerSmokeError,
+        match="attempt did not archive",
+    ):
+        docker_smoke._verify_existing_terminal_only_storage_contract(execution=execution)
+    attempt.attempt_number = 1
+    attempt.save(update_fields=["attempt_number"])
+
+    TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=2,
+        state=TaskState.SUCCEEDED,
+        workflow_progress_summary_json=serialized,
+    )
+    with pytest.raises(
+        docker_smoke.DockerSmokeError,
+        match="exactly one task attempt",
+    ):
+        docker_smoke._verify_existing_terminal_only_storage_contract(execution=execution)
 
 
 @pytest.mark.django_db
