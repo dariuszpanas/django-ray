@@ -29,6 +29,22 @@ def test_normalize_version_rejects_unversioned_refs() -> None:
         normalize_version("main")
 
 
+def test_semantic_version_order_places_final_after_prereleases() -> None:
+    versions = [
+        "0.4.0-rc.2",
+        "0.4.0-beta.2",
+        "0.4.0",
+        "0.4.0-rc.10",
+    ]
+
+    assert sorted(versions, key=release._semantic_version_key, reverse=True) == [
+        "0.4.0",
+        "0.4.0-rc.10",
+        "0.4.0-rc.2",
+        "0.4.0-beta.2",
+    ]
+
+
 def test_release_versions_match_repository_sources() -> None:
     assert release._read_pyproject_version(ROOT) == "0.4.0"
     assert release._read_module_version(ROOT) == "0.4.0"
@@ -76,6 +92,291 @@ def test_release_changelog_requires_an_empty_unreleased_section(tmp_path: Path) 
 
     with pytest.raises(ValueError, match="Unreleased changelog section must be empty"):
         release._validate_changelog_release(tmp_path, "0.4.0")
+
+
+def _write_development_changelog(
+    root: Path,
+    *,
+    current_version: str,
+    changelog: str,
+) -> None:
+    (root / "pyproject.toml").write_text(
+        f'[project]\nversion = "{current_version}"\n',
+        encoding="utf-8",
+    )
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "changelog.md").write_text(changelog, encoding="utf-8")
+
+
+def test_development_changelog_accepts_all_current_work_as_unreleased(tmp_path: Path) -> None:
+    _write_development_changelog(
+        tmp_path,
+        current_version="0.4.0",
+        changelog=(
+            "## [Unreleased]\n\n### Added\n\n- pending\n\n"
+            "## [0.3.1] - 2026-07-18\n\n- released\n\n"
+            "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...HEAD\n"
+            "[0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1\n"
+        ),
+    )
+
+    assert (
+        release._validate_changelog_development(
+            tmp_path,
+            as_of=date(2026, 7, 29),
+            released_versions={"0.3.1"},
+        )
+        is False
+    )
+
+
+def test_development_changelog_rejects_mixed_current_release_and_unreleased(
+    tmp_path: Path,
+) -> None:
+    _write_development_changelog(
+        tmp_path,
+        current_version="0.4.0",
+        changelog=(
+            "## [Unreleased]\n\n### Added\n\n- still pending\n\n"
+            "## [0.4.0] - 2026-07-29\n\n- supposedly released\n\n"
+            "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
+            "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="cannot be dated while Unreleased still contains"):
+        release._validate_changelog_development(tmp_path, as_of=date(2026, 7, 29))
+
+
+def test_development_changelog_rejects_future_release_date(tmp_path: Path) -> None:
+    _write_development_changelog(
+        tmp_path,
+        current_version="0.4.0",
+        changelog=(
+            "## [Unreleased]\n\n"
+            "## [0.4.0] - 2026-08-03\n\n- ready later\n\n"
+            "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
+            "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n"
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"future-dated 2026-08-03"):
+        release._validate_changelog_development(tmp_path, as_of=date(2026, 7, 29))
+
+
+def test_development_changelog_rejects_dated_heading_without_git_tag(
+    tmp_path: Path,
+) -> None:
+    _write_development_changelog(
+        tmp_path,
+        current_version="0.4.0",
+        changelog=(
+            "## [Unreleased]\n\n### Added\n\n- pending\n\n"
+            "## [0.3.2] - 2026-07-28\n\n- not actually released\n\n"
+            "## [0.3.1] - 2026-07-18\n\n- released\n\n"
+            "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.2...HEAD\n"
+            "[0.3.2]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.3.2\n"
+            "[0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1\n"
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"missing v0\.3\.2"):
+        release._validate_changelog_development(
+            tmp_path,
+            as_of=date(2026, 7, 29),
+            released_versions={"0.3.1"},
+        )
+
+
+def test_development_changelog_rejects_release_tag_missing_from_changelog(
+    tmp_path: Path,
+) -> None:
+    _write_development_changelog(
+        tmp_path,
+        current_version="0.4.1",
+        changelog=(
+            "## [Unreleased]\n\n### Added\n\n- pending\n\n"
+            "## [0.3.1] - 2026-07-18\n\n- released\n\n"
+            "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...HEAD\n"
+            "[0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1\n"
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"missing \[0\.4\.0\]"):
+        release._validate_changelog_development(
+            tmp_path,
+            as_of=date(2026, 7, 29),
+            released_versions={"0.3.1", "0.4.0"},
+        )
+
+
+def test_development_changelog_rejects_release_headings_out_of_version_order(
+    tmp_path: Path,
+) -> None:
+    _write_development_changelog(
+        tmp_path,
+        current_version="0.5.0",
+        changelog=(
+            "## [Unreleased]\n\n### Added\n\n- pending\n\n"
+            "## [0.3.1] - 2026-07-18\n\n- older\n\n"
+            "## [0.4.0] - 2026-07-28\n\n- newer but misplaced\n\n"
+            "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...HEAD\n"
+            "[0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1\n"
+            "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="newest version first"):
+        release._validate_changelog_development(
+            tmp_path,
+            as_of=date(2026, 7, 29),
+            released_versions={"0.3.1", "0.4.0"},
+        )
+
+
+def test_development_changelog_rejects_release_link_that_skips_previous_version(
+    tmp_path: Path,
+) -> None:
+    _write_development_changelog(
+        tmp_path,
+        current_version="0.5.0",
+        changelog=(
+            "## [Unreleased]\n\n### Added\n\n- pending\n\n"
+            "## [0.4.0] - 2026-07-29\n\n- released\n\n"
+            "## [0.3.1] - 2026-07-18\n\n- previous\n\n"
+            "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
+            "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.1.0...v0.4.0\n"
+            "[0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1\n"
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"must compare v0\.3\.1 with v0\.4\.0"):
+        release._validate_changelog_development(
+            tmp_path,
+            as_of=date(2026, 7, 29),
+            released_versions={"0.3.1", "0.4.0"},
+        )
+
+
+def test_development_changelog_allows_one_explicit_release_candidate_before_tag(
+    tmp_path: Path,
+) -> None:
+    _write_development_changelog(
+        tmp_path,
+        current_version="0.4.0",
+        changelog=(
+            "## [Unreleased]\n\n"
+            "## [0.4.0] - 2026-07-29\n\n- ready\n\n"
+            "## [0.3.1] - 2026-07-18\n\n- released\n\n"
+            "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
+            "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n"
+            "[0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1\n"
+        ),
+    )
+
+    assert release._validate_changelog_development(
+        tmp_path,
+        as_of=date(2026, 7, 29),
+        released_versions={"0.3.1"},
+        pending_release_version="0.4.0",
+    )
+
+
+def test_git_release_versions_require_the_requested_root_to_be_checkout_top(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout_root = tmp_path / "checkout"
+    source_root = checkout_root / "source-archive"
+    source_root.mkdir(parents=True)
+
+    def fake_run(*_args: Any, **_kwargs: Any) -> Any:
+        return release.subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=f"{checkout_root}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+
+    assert release._read_git_release_versions(source_root) is None
+    with pytest.raises(ValueError, match="nested inside a different Git checkout"):
+        release._read_git_release_versions(source_root, require_complete=True)
+
+
+def test_git_release_versions_allow_source_archive_without_git_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command: list[str], **_kwargs: Any) -> Any:
+        return release.subprocess.CompletedProcess(
+            args=command,
+            returncode=128,
+            stdout="",
+            stderr="not a git repository",
+        )
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+
+    assert release._read_git_release_versions(tmp_path) is None
+    with pytest.raises(ValueError, match="not a Git checkout"):
+        release._read_git_release_versions(tmp_path, require_complete=True)
+
+
+def test_git_release_versions_reject_shallow_metadata_when_required(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        "--show-toplevel": f"{tmp_path}\n",
+        "--is-shallow-repository": "true\n",
+    }
+
+    def fake_run(command: list[str], **_kwargs: Any) -> Any:
+        return release.subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=responses[command[-1]],
+            stderr="",
+        )
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+
+    assert release._read_git_release_versions(tmp_path) is None
+    with pytest.raises(ValueError, match="checkout is shallow"):
+        release._read_git_release_versions(tmp_path, require_complete=True)
+
+
+def test_git_release_versions_read_semantic_tags_from_complete_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        "--show-toplevel": f"{tmp_path}\n",
+        "--is-shallow-repository": "false\n",
+        "v*": "v0.3.1\nv0.4.0-rc.1\nversion-next\n",
+    }
+
+    def fake_run(command: list[str], **_kwargs: Any) -> Any:
+        return release.subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=responses[command[-1]],
+            stderr="",
+        )
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+
+    assert release._read_git_release_versions(tmp_path, require_complete=True) == {
+        "0.3.1",
+        "0.4.0-rc.1",
+    }
+
+
+def test_repository_development_changelog_is_consistent() -> None:
+    release._validate_changelog_development(ROOT)
 
 
 def test_release_candidate_validation_accepts_consistent_fixture(

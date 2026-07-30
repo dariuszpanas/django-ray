@@ -12,6 +12,7 @@ build:
     - python -m pip install --upgrade pip
     - python -m pip install uv
     - uv sync --frozen --only-dev --no-install-project
+    - uv run --no-sync python scripts/validate_release.py --development --allow-release-candidate
     - uv run --no-sync zensical build --strict
     - mkdir -p "$READTHEDOCS_OUTPUT/html"
     - cp -r site/. "$READTHEDOCS_OUTPUT/html/"

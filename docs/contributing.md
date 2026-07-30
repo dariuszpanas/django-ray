@@ -678,11 +678,17 @@ make docs-serve
 ```
 
 Versioned docs deployment is intentionally not wired up yet. CI validates the docs site with
-`make docs-build-strict`, which runs `uv run zensical build --strict`.
+`make docs-build-strict`, which first checks the Unreleased/release-heading contract and then
+runs a strict Zensical build. The dedicated docs jobs fetch the complete Git history and require
+every dated changelog heading to match a release tag. A release-preparation commit may have one
+untagged current-version heading only when its Unreleased section is empty and the complete
+release-candidate validator passes.
 
 Read the Docs hosting is configured by `.readthedocs.yaml`. Because Zensical is a custom static
-site generator from Read the Docs' perspective, that config builds with Zensical and copies the
-generated `site/` directory into `$READTHEDOCS_OUTPUT/html`.
+site generator from Read the Docs' perspective, that config checks the structural changelog
+contract, builds with Zensical, and copies the generated `site/` directory into
+`$READTHEDOCS_OUTPUT/html`. Tag inventory is enforced by the required GitHub docs job because
+hosted source checkouts may not contain complete Git metadata.
 
 ## Releasing
 

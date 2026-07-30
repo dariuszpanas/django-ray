@@ -7,21 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Development scope
 
-- Documentation now follows the operating system color preference by default and offers explicit
-  light, dark, and automatic controls. The existing light presentation keeps a high-contrast blue
-  link treatment, while the new dark presentation shares the testproject's neutral black and grey
-  foundation and reserves django-ray blue for interactive accents.
-
-## [0.4.0] - 2026-08-03
-
-### Release scope
-
-- Supported execution remains synchronous, dynamic Ray Core, and Ray Job. This release adds
-  durable priority scheduling, bounded worker polling, opt-in durable oversized inputs,
-  coroutine tasks, workflow plan and bounded map/reduce improvements, and authenticated
-  observability without changing those default execution paths.
+- Supported execution remains synchronous, dynamic Ray Core, and Ray Job. The current
+  unreleased development line adds durable priority scheduling, bounded worker polling,
+  opt-in durable oversized inputs, coroutine tasks, workflow plan and bounded map/reduce
+  improvements, and authenticated observability without changing those default execution
+  paths.
 - Compiled Graph compatibility policy, lifecycle, probe containment, and the guarded KubeRay
   pilot ship as experimental, default-off groundwork. No capability row or native product
   execution is enabled. Public native candidate jobs and the scheduled hosted canary were
@@ -200,7 +192,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounded dry-run-first management command removes only due inactive detail and old
   unpublished orphans while preserving task and attempt summaries. Authorized public
   readers are implemented, and the default-off terminal pilot is the only runtime
-  topology/detail producer in this release. Durable rows and pages are bounded
+  topology/detail producer in the current unreleased development line. Durable rows
+  and pages are bounded
   independently from preparer memory.
 - A bounded workflow-progress preparation decision and non-production SQLite spill
   prototype. The exact one-shot path externalizes duplicate and reference state into a
@@ -235,6 +228,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Documentation now follows the operating system color preference by default and offers explicit
+  light, dark, and automatic controls. The existing light presentation keeps a high-contrast blue
+  link treatment, while the new dark presentation shares the testproject's neutral black and grey
+  foundation and reserves django-ray blue for interactive accents.
 - Task-attempt history now defaults to an ordered, bounded, read-only inline on its
   execution page. The standalone app-index entry is hidden by default, while existing
   authorized list/detail bookmarks remain valid; `TASK_ATTEMPT_ADMIN_MODE` can restore
@@ -267,13 +264,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanup schedules now remain independent from idle claim polling.
 - Workflow metadata inspection no longer imports or initializes Ray before execution
   actually needs it.
-- Legacy `ray_core:<pk>` task handles remain readable in 0.4.0. Reconstructed PK-only
-  handles now fail closed for low-level polling and cancellation when a pending
-  submission occupies that row; identity-aware task controls remain supported. This
-  release is only the earliest review point for a future removal.
+- Legacy `ray_core:<pk>` task handles remain readable throughout the current unreleased
+  development line. Reconstructed PK-only handles now fail closed for low-level polling
+  and cancellation when a pending submission occupies that row; identity-aware task
+  controls remain supported. A future removal still requires explicit release notes and
+  migration guidance.
 
 ### Fixed
 
+- Changelog integrity checks now keep all post-release work under `Unreleased`, match
+  dated headings and comparison chains to the complete Git tag inventory, and preserve
+  one fully validated release-candidate path before its tag is cut.
 - The tracked Locust harness now authenticates with a secret-safe environment token and provides
   a deterministic one-user observability demo that follows lightweight default, priority, sync,
   cluster/workflow, RuntimeEnv, and ML tasks to terminal state. Quick, moderate, historical
@@ -335,11 +336,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Apply migrations `0007` through `0014` before starting upgraded workers:
   `python manage.py migrate django_ray`.
-- Drain and stop every pre-0.4.0 Ray Job task manager before starting upgraded
-  task managers. Let in-flight jobs finish and reconcile, or explicitly verify
-  remote quiescence before retrying them; do not run a mixed old/new worker fleet.
-  The deterministic pre-reserved submission ID, `UNKNOWN` no-auto-retry policy,
-  and completion-envelope fences form one lifecycle recovery protocol.
+- Drain and stop every Ray Job task manager running `0.3.1`-or-older code before
+  starting code from this development line. Let in-flight jobs finish and reconcile,
+  or explicitly verify remote quiescence before retrying them; do not run a mixed
+  old/new worker fleet. The deterministic pre-reserved submission ID, `UNKNOWN`
+  no-auto-retry policy, and completion-envelope fences form one lifecycle recovery
+  protocol.
 - `0007_raytaskexecution_priority` adds task priority and gives existing rows the
   neutral default `0`.
 - `0008_raytaskexecution_priority_constraint` enforces the `-100` through `100`
@@ -355,10 +357,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rolling old writers remain valid.
 - `0012_workflow_progress_summary` adds nullable current/per-attempt schema-v3 summary
   fields reader-first. It does not modify legacy `progress_data`.
-- `0013_workflow_progress_detail_storage` adds dormant run, manifest, page, link, and
-  normalized-detail tables without backfilling or reinterpreting legacy snapshots.
-  Reverse it only after disabling schema-v3 publication and exporting retained detail
-  needed for audit; reversal deletes those package-owned tables.
+- `0013_workflow_progress_detail_storage` adds reader-first run, manifest, page, link,
+  and normalized-detail tables without backfilling or reinterpreting legacy snapshots.
+  They remain default-dormant except for accepted opt-in terminal-pilot publications.
+  Reverse the migration only after disabling schema-v3 publication and exporting
+  retained detail needed for audit; reversal deletes those package-owned tables.
 - `0014_raytaskexecution_ray_target_address` adds a nullable immutable Ray Job routing
   target. New enqueues snapshot their effective alias-or-global address. New task
   managers lazily preserve a legacy non-`"auto"` Ray Job `ray_address` under the claim
@@ -366,10 +369,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the global fallback because old writers used it even without an alias target. Drain
   pre-`0014` task managers before relying on alias routing and drain targeted tasks
   before reversing the migration.
-- Keep the schema-v3 pilot disabled by default through the 0.4.0 rollout. The current
-  schema-v2 coordinator remains the live compatibility writer; opt-in terminal
-  publication is limited to the documented pilot profile until the remaining
-  ingestion, preparation, capacity, migration, and old-writer-drain work is complete.
+- Keep the schema-v3 pilot disabled by default until the documented activation gates
+  are complete. The current schema-v2 coordinator remains the live compatibility
+  writer; opt-in terminal publication is limited to the documented pilot profile until
+  the remaining ingestion, preparation, capacity, migration, and old-writer-drain work
+  is complete.
 
 ## [0.3.1] - 2026-07-18
 
@@ -556,8 +560,7 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...HEAD
 [0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dariuszpanas/django-ray/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dariuszpanas/django-ray/compare/v0.1.1...v0.2.0

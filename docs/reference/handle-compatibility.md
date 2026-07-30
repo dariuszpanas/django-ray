@@ -51,8 +51,10 @@ Notes:
 Policy introduced on **February 23, 2026**:
 
 1. `v0.1.x` and `v0.2.x`: read compatibility for both formats is maintained.
-2. `v0.3.0` target: keep read compatibility; avoid introducing new legacy writes except fallback cases.
-3. `v0.4.0` earliest: legacy format removal can be considered only after explicit release notes and migration guidance.
+2. `v0.3.x`: keep read compatibility; avoid introducing new legacy writes except
+   fallback cases.
+3. A future release may consider removal only after explicit release notes,
+   migration guidance, and observed migration impact.
 
 No hard removal date is set yet.
 

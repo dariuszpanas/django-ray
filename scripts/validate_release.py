@@ -7,6 +7,7 @@ import ast
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 import tomllib
 from datetime import date, datetime
@@ -15,6 +16,11 @@ from types import ModuleType
 from typing import Any
 
 _VERSION_RE = re.compile(r"^v?(?P<version>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$")
+_CHANGELOG_RELEASE_HEADING_RE = re.compile(
+    r"^## \[(?P<version>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\] - "
+    r"(?P<date>\d{4}-\d{2}-\d{2})\s*$",
+    re.MULTILINE,
+)
 _REVIEW_FILE_RE = re.compile(
     r"^compiled-graph-capability-review-(?P<date>\d{4}-\d{2}-\d{2})\.json$"
 )
@@ -45,6 +51,20 @@ _CAPABILITY_FIELDS = frozenset(
     }
 )
 _EVIDENCE_FILES = frozenset({"environment.json", "packages.txt", "probe.json"})
+
+
+def _semantic_version_key(version: str) -> tuple[Any, ...]:
+    """Return a SemVer ordering key without depending on packaging tooling."""
+    public_version = version.split("+", 1)[0]
+    core, separator, prerelease = public_version.partition("-")
+    major, minor, patch = (int(part) for part in core.split("."))
+    prerelease_key: tuple[tuple[int, int | str], ...] = ()
+    if separator:
+        prerelease_key = tuple(
+            (0, int(identifier)) if identifier.isdigit() else (1, identifier)
+            for identifier in prerelease.split(".")
+        )
+    return major, minor, patch, int(not separator), prerelease_key
 
 
 def _read_pyproject_version(root: Path) -> str:
@@ -118,6 +138,186 @@ def _validate_changelog_release(root: Path, version: str) -> None:
         raise ValueError(
             f"the [{version}] changelog link must compare the previous tag with v{version}"
         )
+
+
+def _read_git_release_versions(
+    root: Path,
+    *,
+    require_complete: bool = False,
+) -> set[str] | None:
+    """Return local semantic release tags when complete Git metadata is available."""
+
+    def unavailable(reason: str) -> None:
+        if require_complete:
+            raise ValueError(
+                "complete Git tag metadata is required for changelog validation; "
+                f"{reason}. Fetch the full history and tags first"
+            )
+
+    try:
+        checkout = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        unavailable(f"Git could not be executed ({exc})")
+        return None
+    if checkout.returncode != 0:
+        unavailable("the source tree is not a Git checkout")
+        return None
+    if Path(checkout.stdout.strip()).resolve() != root.resolve():
+        unavailable("the source root is nested inside a different Git checkout")
+        return None
+
+    shallow = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if shallow.returncode != 0:
+        unavailable("the Git checkout depth could not be determined")
+        return None
+    if shallow.stdout.strip() == "true":
+        unavailable("the Git checkout is shallow")
+        return None
+
+    tags = subprocess.run(
+        ["git", "-C", str(root), "tag", "--list", "v*"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if tags.returncode != 0:
+        unavailable("release tags could not be listed")
+        return None
+    versions = {
+        match.group("version")
+        for tag in tags.stdout.splitlines()
+        if (match := _VERSION_RE.fullmatch(tag.strip())) is not None
+    }
+    if not versions:
+        unavailable("no semantic vX.Y.Z release tags are available")
+        return None
+    return versions
+
+
+def _validate_changelog_development(
+    root: Path,
+    *,
+    as_of: date | None = None,
+    released_versions: set[str] | None = None,
+    pending_release_version: str | None = None,
+) -> bool:
+    """Reject internally inconsistent or future-dated development changelogs."""
+    changelog = (root / "docs" / "changelog.md").read_text(encoding="utf-8")
+    unreleased_headings = list(re.finditer(r"^## \[Unreleased\]\s*$", changelog, re.MULTILINE))
+    if len(unreleased_headings) != 1:
+        raise ValueError("docs/changelog.md must contain one Unreleased heading")
+    unreleased_heading = unreleased_headings[0]
+
+    release_headings = list(_CHANGELOG_RELEASE_HEADING_RE.finditer(changelog))
+    if not release_headings:
+        raise ValueError("docs/changelog.md must contain at least one dated release heading")
+    latest_release = release_headings[0]
+    if latest_release.start() <= unreleased_heading.end():
+        raise ValueError("the latest dated release must follow the Unreleased heading")
+
+    evaluation_date = as_of or date.today()
+    for heading in release_headings:
+        released_on = date.fromisoformat(heading.group("date"))
+        if released_on > evaluation_date:
+            raise ValueError(
+                f"changelog release [{heading.group('version')}] is future-dated "
+                f"{released_on.isoformat()}"
+            )
+
+    heading_versions = [heading.group("version") for heading in release_headings]
+    dated_versions = set(heading_versions)
+    if len(dated_versions) != len(heading_versions):
+        duplicates = sorted(
+            version for version in dated_versions if heading_versions.count(version) > 1
+        )
+        raise ValueError(
+            "docs/changelog.md contains duplicate dated release headings: "
+            + ", ".join(f"[{version}]" for version in duplicates)
+        )
+    expected_order = sorted(heading_versions, key=_semantic_version_key, reverse=True)
+    if heading_versions != expected_order:
+        raise ValueError("dated changelog release headings must be ordered newest version first")
+    current_version = _read_pyproject_version(root)
+    unreleased_body = changelog[unreleased_heading.end() : latest_release.start()].strip()
+    if unreleased_body and current_version in dated_versions:
+        raise ValueError(
+            f"current development version [{current_version}] cannot be dated while "
+            "Unreleased still contains changes"
+        )
+    pending_release_accepted = False
+    if released_versions is not None:
+        undocumented_tags = released_versions - dated_versions
+        if undocumented_tags:
+            raise ValueError(
+                "Git release tags must have matching dated changelog headings; missing "
+                + ", ".join(f"[{version}]" for version in sorted(undocumented_tags))
+            )
+        missing_tags = dated_versions - released_versions
+        pending_release_is_valid = (
+            pending_release_version is not None
+            and missing_tags == {pending_release_version}
+            and pending_release_version == current_version
+            and pending_release_version == latest_release.group("version")
+            and not unreleased_body
+        )
+        if pending_release_is_valid:
+            _validate_changelog_release(root, pending_release_version)
+            pending_release_accepted = True
+            missing_tags.clear()
+        if missing_tags:
+            raise ValueError(
+                "dated changelog releases must have matching Git tags; missing "
+                + ", ".join(f"v{version}" for version in sorted(missing_tags))
+            )
+
+    link_matches = re.findall(r"^\[([^\]]+)\]:\s+(\S+)\s*$", changelog, re.MULTILINE)
+    for version, previous_version in zip(heading_versions, heading_versions[1:], strict=False):
+        release_links = [url for label, url in link_matches if label == version]
+        expected_release_suffix = f"/compare/v{previous_version}...v{version}"
+        if len(release_links) != 1 or not release_links[0].endswith(expected_release_suffix):
+            raise ValueError(
+                f"the [{version}] changelog link must compare v{previous_version} with v{version}"
+            )
+    unreleased_links = [url for label, url in link_matches if label == "Unreleased"]
+    latest_released_version = latest_release.group("version")
+    expected_suffix = f"/compare/v{latest_released_version}...HEAD"
+    if len(unreleased_links) != 1 or not unreleased_links[0].endswith(expected_suffix):
+        raise ValueError(
+            "the Unreleased changelog link must compare the latest dated release "
+            f"v{latest_released_version} with HEAD"
+        )
+    return pending_release_accepted
+
+
+def validate_development_changelog(
+    root: Path,
+    *,
+    require_git_tags: bool = False,
+    allow_release_candidate: bool = False,
+) -> None:
+    """Validate the in-development changelog and any available release tags."""
+    released_versions = _read_git_release_versions(
+        root,
+        require_complete=require_git_tags,
+    )
+    pending_release_version = _read_pyproject_version(root) if allow_release_candidate else None
+    pending_release_accepted = _validate_changelog_development(
+        root,
+        released_versions=released_versions,
+        pending_release_version=pending_release_version,
+    )
+    if pending_release_accepted and pending_release_version is not None:
+        validate_release_version(root, pending_release_version)
 
 
 def normalize_version(value: str) -> str:
@@ -478,6 +678,7 @@ def validate_release_version(root: Path, requested: str) -> str:
     if len(set(versions.values())) != 1:
         details = ", ".join(f"{name}={version}" for name, version in versions.items())
         raise ValueError(f"release versions do not agree: {details}")
+    _validate_changelog_development(root)
     _validate_changelog_release(root, requested_version)
     validate_compiled_graph_capability_review(root)
     return requested_version
@@ -485,11 +686,42 @@ def validate_release_version(root: Path, requested: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("version", help="tag or manual release version, such as v0.3.0")
+    parser.add_argument("version", nargs="?", help="tag or manual release version, such as v0.3.0")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument(
+        "--development",
+        action="store_true",
+        help="validate the current Unreleased changelog instead of a release candidate",
+    )
+    parser.add_argument(
+        "--require-git-tags",
+        action="store_true",
+        help="fail unless complete Git metadata is available for dated-heading tag checks",
+    )
+    parser.add_argument(
+        "--allow-release-candidate",
+        action="store_true",
+        help="allow one fully validated, current release candidate to precede its tag",
+    )
     args = parser.parse_args()
     try:
-        print(validate_release_version(args.root, args.version))
+        if args.development:
+            if args.version is not None:
+                parser.error("version cannot be used with --development")
+            validate_development_changelog(
+                args.root,
+                require_git_tags=args.require_git_tags,
+                allow_release_candidate=args.allow_release_candidate,
+            )
+            print("development changelog valid")
+        else:
+            if args.version is None:
+                parser.error("version is required unless --development is used")
+            if args.require_git_tags:
+                parser.error("--require-git-tags can only be used with --development")
+            if args.allow_release_candidate:
+                parser.error("--allow-release-candidate can only be used with --development")
+            print(validate_release_version(args.root, args.version))
     except (OSError, KeyError, TypeError, ValueError) as exc:
         print(f"Release validation failed: {exc}", file=sys.stderr)
         return 1

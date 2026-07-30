@@ -54,6 +54,37 @@ def _events(path: Path) -> set[str]:
     return set()
 
 
+@pytest.mark.parametrize(
+    ("workflow_name", "job_id"),
+    [
+        ("ci.yml", "docs"),
+        ("docs.yml", "build"),
+        ("release.yml", "build"),
+    ],
+)
+def test_changelog_tag_validation_jobs_fetch_complete_tag_inventory(
+    workflow_name: str,
+    job_id: str,
+) -> None:
+    job = _jobs(WORKFLOWS / workflow_name)[job_id]
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    checkout = next(
+        step
+        for step in steps
+        if isinstance(step, dict) and str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+
+    assert checkout["with"]["fetch-depth"] == "0"
+    commands = "\n".join(
+        str(step["run"]) for step in steps if isinstance(step, dict) and "run" in step
+    )
+    assert "scripts/validate_release.py" in commands
+    assert "--development" in commands
+    assert "--require-git-tags" in commands
+    assert "--allow-release-candidate" in commands
+
+
 def _needs(job: dict[str, Any]) -> set[str]:
     needs = job.get("needs", [])
     if isinstance(needs, str):
