@@ -328,6 +328,20 @@ def normalize_version(value: str) -> str:
     return match.group("version")
 
 
+def _validate_version_sources(root: Path, requested: str) -> str:
+    requested_version = normalize_version(requested)
+    versions = {
+        "release ref": requested_version,
+        "pyproject.toml": _read_pyproject_version(root),
+        "django_ray.__version__": _read_module_version(root),
+        "uv.lock": _read_lock_version(root),
+    }
+    if len(set(versions.values())) != 1:
+        details = ", ".join(f"{name}={version}" for name, version in versions.items())
+        raise ValueError(f"release versions do not agree: {details}")
+    return requested_version
+
+
 def _load_runtime_policy(root: Path) -> tuple[int, int, list[dict[str, Any]]]:
     source = root / "src" / "django_ray" / "runtime" / "compiled_graph.py"
     module_name = "_django_ray_release_compiled_graph"
@@ -665,21 +679,26 @@ def validate_compiled_graph_capability_review(root: Path, *, as_of: date | None 
 
 def validate_release_version(root: Path, requested: str) -> str:
     """Validate a tag/manual input against every release version source."""
-    requested_version = normalize_version(requested)
-    pyproject_version = _read_pyproject_version(root)
-    module_version = _read_module_version(root)
-    lock_version = _read_lock_version(root)
-    versions = {
-        "release ref": requested_version,
-        "pyproject.toml": pyproject_version,
-        "django_ray.__version__": module_version,
-        "uv.lock": lock_version,
-    }
-    if len(set(versions.values())) != 1:
-        details = ", ".join(f"{name}={version}" for name, version in versions.items())
-        raise ValueError(f"release versions do not agree: {details}")
+    requested_version = _validate_version_sources(root, requested)
     _validate_changelog_development(root)
     _validate_changelog_release(root, requested_version)
+    validate_compiled_graph_capability_review(root)
+    return requested_version
+
+
+def validate_testpypi_candidate(root: Path, requested: str) -> str:
+    """Validate an Unreleased, pre-tag candidate for a TestPyPI rehearsal."""
+    requested_version = _validate_version_sources(root, requested)
+    released_versions = _read_git_release_versions(root, require_complete=True)
+    if released_versions is None:  # pragma: no cover - require_complete raises instead
+        raise ValueError("complete Git tag metadata is required")
+    if requested_version in released_versions:
+        raise ValueError(f"TestPyPI candidate v{requested_version} is already tagged")
+    _validate_changelog_development(
+        root,
+        released_versions=released_versions,
+        pending_release_version=requested_version,
+    )
     validate_compiled_graph_capability_review(root)
     return requested_version
 
@@ -703,11 +722,18 @@ def main() -> int:
         action="store_true",
         help="allow one fully validated, current release candidate to precede its tag",
     )
+    parser.add_argument(
+        "--testpypi-candidate",
+        action="store_true",
+        help="validate an Unreleased manual TestPyPI candidate with complete Git tags",
+    )
     args = parser.parse_args()
     try:
         if args.development:
             if args.version is not None:
                 parser.error("version cannot be used with --development")
+            if args.testpypi_candidate:
+                parser.error("--testpypi-candidate cannot be used with --development")
             validate_development_changelog(
                 args.root,
                 require_git_tags=args.require_git_tags,
@@ -721,7 +747,10 @@ def main() -> int:
                 parser.error("--require-git-tags can only be used with --development")
             if args.allow_release_candidate:
                 parser.error("--allow-release-candidate can only be used with --development")
-            print(validate_release_version(args.root, args.version))
+            if args.testpypi_candidate:
+                print(validate_testpypi_candidate(args.root, args.version))
+            else:
+                print(validate_release_version(args.root, args.version))
     except (OSError, KeyError, TypeError, ValueError) as exc:
         print(f"Release validation failed: {exc}", file=sys.stderr)
         return 1

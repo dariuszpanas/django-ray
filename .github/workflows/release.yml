@@ -7,7 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (e.g., 0.1.0)"
+        description: "Version to rehearse on TestPyPI (e.g., 0.4.0)"
+        required: true
+        type: string
+      candidate_sha:
+        description: "Authorized full origin/main commit SHA"
         required: true
         type: string
 
@@ -16,11 +20,61 @@ jobs:
     name: Build Package
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.validate-version.outputs.version }}
+      version: ${{ steps.validate_testpypi_version.outputs.version || steps.validate_production_version.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate manual candidate input
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::candidate_sha must be a lowercase full 40-character commit SHA"
+            exit 1
+          fi
+          if [[ "$CANDIDATE_SHA" != "$EVENT_SHA" ]]; then
+            echo "::error::candidate_sha must match the workflow dispatch ref"
+            exit 1
+          fi
+
+      - name: Check out manual candidate
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ inputs.candidate_sha }}
+
+      - name: Check out production tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Refresh release refs
+        run: >-
+          git fetch --force --prune --tags origin
+          "+refs/heads/main:refs/remotes/origin/main"
+
+      - name: Verify manual candidate source
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: >-
+          python3 scripts/verify_release_source.py
+          --manual-candidate "$CANDIDATE_SHA"
+          --event-sha "$EVENT_SHA"
+
+      - name: Verify production tag source
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          python3 scripts/verify_release_source.py
+          --production-tag "$RELEASE_TAG"
+          --event-sha "$EVENT_SHA"
 
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -41,10 +95,23 @@ jobs:
           --require-git-tags
           --allow-release-candidate
 
-      - name: Validate release version
-        id: validate-version
+      - name: Validate TestPyPI candidate version
+        if: github.event_name == 'workflow_dispatch'
+        id: validate_testpypi_version
         env:
-          RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          RELEASE_REF: ${{ inputs.version }}
+        run: |
+          version="$(
+            uv run --no-sync python scripts/validate_release.py \
+              --testpypi-candidate "$RELEASE_REF"
+          )"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Validate production release version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        id: validate_production_version
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
         run: |
           version="$(uv run --no-sync python scripts/validate_release.py "$RELEASE_REF")"
           echo "version=$version" >> "$GITHUB_OUTPUT"

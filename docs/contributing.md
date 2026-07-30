@@ -697,14 +697,16 @@ operations.
 
 ### Prepare a release candidate
 
-1. Fetch `origin` and prepare the candidate from current `origin/main`.
-2. Update the same version in `pyproject.toml`, `src/django_ray/__init__.py`, `uv.lock`,
-   the release assertion, and `docs/changelog.md`.
-3. Run the release checks locally against the built wheel:
+1. Fetch `origin` with complete tags and prepare the candidate from current
+   `origin/main`.
+2. Keep active release work under `Unreleased`. Update the same development version
+   in `pyproject.toml`, `src/django_ray/__init__.py`, `uv.lock`, and the release
+   assertion.
+3. Run the candidate checks locally against the built wheel:
 
 ```bash
 uv run make ci
-uv run python scripts/validate_release.py vX.Y.Z
+uv run python scripts/validate_release.py --testpypi-candidate vX.Y.Z
 uv build
 uv run --isolated --no-project --python 3.12 \
   --with ./dist/django_ray-X.Y.Z-py3-none-any.whl \
@@ -712,22 +714,50 @@ uv run --isolated --no-project --python 3.12 \
 ```
 
 4. Merge the preparation PR only after its required checks pass. Fetch `origin` again,
-   wait for the complete `origin/main` CI run, and record the exact full candidate SHA.
+   wait for the complete `origin/main` CI run, and record the exact lowercase full
+   candidate SHA.
 5. Stop until a maintainer explicitly authorizes that exact SHA. Preparation does not
    authorize a TestPyPI dispatch, tag push, PyPI upload, or GitHub Release.
 
-The validator requires the requested version, package sources, editable lock entry, and
-dated changelog section to agree. The installed-wheel smoke checks metadata, import
-provenance, management-command discovery, the exact migration leaf, and a fresh database
-migration. The release workflow repeats that wheel smoke on every supported Python
-version.
+The TestPyPI candidate validator requires the requested version, package sources,
+editable lock entry, complete historical tag inventory, development changelog, and
+Compiled Graph capability review to agree. It accepts the normal non-empty
+`Unreleased` form and a strict-ready untagged form. It rejects an already-tagged
+version. The production validator remains stricter: it requires one dated target
+heading and an empty `Unreleased` section.
+
+The installed-wheel smoke checks metadata, import provenance, management-command
+discovery, the exact migration leaf, and a fresh database migration. The release
+workflow repeats that wheel smoke on every supported Python version.
+
+After explicit authorization, an optional TestPyPI rehearsal can be dispatched from
+the exact current `main` commit:
+
+```bash
+gh workflow run release.yml \
+  --ref main \
+  -f version=X.Y.Z \
+  -f candidate_sha=<authorized-full-sha>
+```
+
+The workflow rejects a non-canonical SHA before checkout. It then freshly fetches
+`origin/main` and refuses to build unless the input SHA, dispatch SHA, checked-out
+HEAD, and fetched `origin/main` are identical. Any tracked change creates a different
+candidate and requires fresh validation and authorization.
 
 ### Publish an authorized candidate
 
-After authorization, re-fetch `origin` and prove that the authorized SHA is still the
-exact green `origin/main` candidate. A manual workflow dispatch is TestPyPI-only and is
-an optional publication check. A `v*` tag push publishes to production PyPI and then
-creates the GitHub Release.
+For production, move the complete `Unreleased` contents into one dated target-version
+heading, update its comparison links, and run the full candidate gate again, including:
+
+```bash
+uv run python scripts/validate_release.py vX.Y.Z
+```
+
+After that strict preparation is merged, re-fetch `origin`, wait for its complete CI,
+and obtain explicit authorization for the new exact SHA. A manual workflow dispatch
+remains TestPyPI-only. A `v*` tag push publishes to production PyPI and then creates
+the GitHub Release.
 
 Create an annotated tag on the exact authorized commit:
 
@@ -735,6 +765,10 @@ Create an annotated tag on the exact authorized commit:
 git tag -a vX.Y.Z -m "Release vX.Y.Z" <authorized-full-sha>
 git push origin vX.Y.Z
 ```
+
+The production workflow verifies that the pushed ref is an annotated tag and that its
+peeled commit, event SHA, checked-out HEAD, and freshly fetched `origin/main` are all
+the exact authorized commit before it builds.
 
 ### Release failure recovery
 
