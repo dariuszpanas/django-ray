@@ -349,6 +349,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Full-reporting Ray workflows now retain and retry one delayed terminal progress
+  snapshot within the configurable total flush deadline, allowing progress-actor
+  startup or queued leaf events to complete after execution finishes. If a current
+  terminal run still has no admitted schema-v3 summary, bounded Admin and API readers
+  report `MISSING` instead of presenting an empty topology; the workflow outcome is
+  unchanged and full-detail schema-v3 publication remains a default-off pilot.
 - The bundled testproject no longer exposes direct execution-row deletion. Removing a
   running row could orphan Ray work from its durable lifecycle owner, while deleting a
   terminal row would not constitute complete external-result or workflow-detail
