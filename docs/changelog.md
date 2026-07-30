@@ -31,6 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An opt-in testproject/local-KubeRay workflow reporting benchmark now runs the
+  same tiny nested workflow sequentially under full, terminal-only, and disabled
+  policies with counterbalanced order. Versioned secret-free JSON separates
+  durable server timing, useful leaf work, processed actor ingress, logical
+  progress storage, and shared lifecycle bytes while marking producer attempts,
+  actor resource use, mailbox lag, network traffic, and PostgreSQL
+  statement/latency/WAL attribution unavailable. It retains bounded executions
+  for Admin inspection by default and can delete only its exact owned rows after
+  successful validation.
 - Opt-in authenticated encryption for durable RuntimeEnv snapshots, using strict
   AES-256-GCM envelopes with either a dedicated rotating key ring or an explicit
   Django-secret fallback. Readers remain plaintext/encrypted compatible; encrypted
