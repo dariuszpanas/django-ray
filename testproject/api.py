@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from django.conf import settings
@@ -1243,8 +1243,9 @@ def cluster_complex_workflow(
     slow_seconds: float = 0.5,
     failure_branch: Literal["fast", "slow"] | None = None,
     failure_item: int | None = None,
+    reporting_policy: Literal["full", "terminal_only"] | None = None,
 ):
-    """Run nested fast and slow branches to demonstrate groups and chains."""
+    """Run nested branches with optional terminal-summary-only reporting."""
     try:
         cluster_tasks.validate_complex_workflow_failure_controls(
             fast_items=fast_items,
@@ -1254,22 +1255,20 @@ def cluster_complex_workflow(
         )
     except ValueError as error:
         raise HttpError(422, str(error)) from error
-    if failure_branch is None:
-        result = cluster_tasks.complex_workflow_benchmark.enqueue(
-            fast_items=fast_items,
-            slow_items=slow_items,
-            fast_seconds=fast_seconds,
-            slow_seconds=slow_seconds,
-        )
-    else:
-        result = cluster_tasks.complex_workflow_benchmark.enqueue(
-            fast_items=fast_items,
-            slow_items=slow_items,
-            fast_seconds=fast_seconds,
-            slow_seconds=slow_seconds,
+    workflow_options: dict[str, Any] = {
+        "fast_items": fast_items,
+        "slow_items": slow_items,
+        "fast_seconds": fast_seconds,
+        "slow_seconds": slow_seconds,
+    }
+    if failure_branch is not None:
+        workflow_options.update(
             failure_branch=failure_branch,
             failure_item=failure_item,
         )
+    if reporting_policy is not None:
+        workflow_options["reporting_policy"] = reporting_policy
+    result = cluster_tasks.complex_workflow_benchmark.enqueue(**workflow_options)
     return {
         "task_id": result.id,
         "status": result.status.value,

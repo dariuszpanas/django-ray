@@ -80,15 +80,35 @@ not evidence for hard-V1-scale or arbitrary concurrent workloads.
 The bundled testproject enables the pilot so its nested workflow and the guarded local
 KubeRay gate exercise real topology publication. Benchmark package-default behavior
 with the setting explicitly disabled unless the pilot itself is the subject of the
-measurement.
+measurement. The gate also runs terminal-only success and failure separately to prove
+null legacy progress, one summary-only publication, and no retained detail. Focused
+unit tests prove the actor is not constructed and progress transport metadata is not
+sent; those checks do not turn on pilot detail for the terminal-only invocation.
 
-For workloads where that observability cost outweighs its value, set the policy to
-`"disabled"` globally or call
+For workloads that need a durable terminal outcome but not live per-node telemetry,
+select `"terminal_only"` globally or call
+`WorkflowSignature.with_progress_reporting("terminal_only").run(...)`. This path
+creates no progress actor, emits no node or application-progress RPCs, and writes no
+legacy `progress_data`. It makes one best-effort fenced schema-v3 summary write on
+durable success or failure, with the pinned strategy and plan fingerprint, declared
+plan counts, terminal outcome, and bounded timestamps. Discovered and node-state
+counts remain zero; detail is `OMITTED_BY_POLICY`, and no topology or node-detail rows
+exist. Measure it as one terminal database write rather than as zero observability
+work.
+
+For workloads where even that summary is unnecessary, set the policy to `"disabled"`
+globally or call
 `WorkflowSignature.with_progress_reporting("disabled").run(...)` for one invocation.
 The disabled path creates no progress actor, emits no node or application-progress
 RPCs, and writes no `progress_data`; task lifecycle, retry, cancellation, result/error
 persistence, and monitor heartbeats remain active. Measure before making this a
 deployment-wide default because node-level live progress is intentionally unavailable.
+
+Terminal-only avoids the current full-mode producer and mailbox cost; it does not make
+those costs bounded for workflows that still choose full reporting. Sampled/coalesced
+reporting, aggregate producer/mailbox admission, bounded actor-to-preparer draining,
+live cost attribution, and large-fan-out slow-consumer evidence remain separate #79
+work.
 
 This is faster than making every leaf a Django task, but it changes semantics:
 

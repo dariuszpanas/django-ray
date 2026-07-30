@@ -33,7 +33,11 @@ from django_ray.conf.settings import get_settings
 from django_ray.lifecycle import request_task_cancellation, retry_task
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.redaction import redact_text, safe_json_dumps
-from django_ray.workflow_plans import MAX_PLAN_BYTES
+from django_ray.workflow_plans import (
+    MAX_PLAN_BYTES,
+    effective_plan_selection_reporting_policy,
+    validate_plan_selection_manifest,
+)
 from django_ray.workflow_progress import MAX_PLAN_SELECTION_BYTES
 from django_ray.workflow_progress_reads import (
     WorkflowProgressReadError,
@@ -46,6 +50,7 @@ from django_ray.workflow_progress_reads import (
 )
 from django_ray.workflow_progress_summary import (
     WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
+    WORKFLOW_PROGRESS_TERMINAL_STATES,
 )
 
 if apps.is_installed("unfold"):
@@ -80,6 +85,17 @@ _WORKFLOW_PROGRESS_MESSAGES = {
     "DISABLED": "Workflow progress reporting was disabled by policy.",
     "OMITTED_BY_POLICY": (
         "Detailed workflow progress was omitted by the selected reporting policy."
+    ),
+    "TERMINAL_ONLY": (
+        "A terminal workflow summary is available; topology and node detail were "
+        "omitted by the terminal-only reporting policy."
+    ),
+    "TERMINAL_ONLY_PENDING": (
+        "Terminal-only reporting waits for durable success or failure; no live "
+        "workflow topology or node detail is collected."
+    ),
+    "TERMINAL_ONLY_MISSING": (
+        "Terminal-only reporting was selected, but its terminal summary was not captured."
     ),
     "AVAILABLE": "Bounded workflow topology and node detail are available.",
     "TRUNCATED": "Bounded workflow detail is available but incomplete.",
@@ -203,18 +219,32 @@ def _corrupt_workflow_plan_presentation() -> dict[str, Any]:
     }
 
 
+def _workflow_reporting_policy_hint(serialized_selection: Any) -> str | None:
+    """Recover only the bounded policy enum when the plan itself is unusable."""
+    if not isinstance(serialized_selection, str):
+        return None
+    try:
+        selection = validate_plan_selection_manifest(json.loads(serialized_selection))
+        policy = effective_plan_selection_reporting_policy(selection)
+    except (TypeError, ValueError, RecursionError, json.JSONDecodeError):
+        return None
+    return policy if isinstance(policy, str) else None
+
+
 def _workflow_progress_presentation(
     *,
     state: str,
     availability: str | None = None,
     complete: bool = False,
+    workflow_state: str | None = None,
+    reporting_policy: str | None = None,
     truncation_reasons: list[str] | None = None,
     topology_nodes: bool = False,
     topology_edges: bool = False,
     node_details: bool = False,
 ) -> dict[str, Any]:
     """Build one exact, bounded progress-presentation object."""
-    return {
+    presentation = {
         "state": state,
         "message": _WORKFLOW_PROGRESS_MESSAGES[state],
         "availability": availability,
@@ -226,6 +256,11 @@ def _workflow_progress_presentation(
             "node_details": node_details,
         },
     }
+    if workflow_state is not None:
+        presentation["workflow_state"] = workflow_state
+    if reporting_policy is not None:
+        presentation["reporting_policy"] = reporting_policy
+    return presentation
 
 
 def _bounded_redacted_text(value: Any, *, max_chars: int = ADMIN_DIAGNOSTIC_MAX_CHARS) -> str:
@@ -918,6 +953,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         execution: RayTaskExecution,
         *,
         collection: str,
+        attempt_number: int | None = None,
     ) -> dict[str, Any]:
         """Read one authorized record to prove a claimed collection is useful."""
         authorizer = self._workflow_authorizer(request)
@@ -926,17 +962,20 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 execution,
                 authorize=authorizer,
                 limit=1,
+                attempt_number=attempt_number,
             )
         if collection == "topology_edges":
             return list_workflow_topology_edges(
                 execution,
                 authorize=authorizer,
                 limit=1,
+                attempt_number=attempt_number,
             )
         return list_workflow_node_details(
             execution,
             authorize=authorizer,
             limit=1,
+            attempt_number=attempt_number,
         )
 
     def _lazy_workflow_progress_presentation(
@@ -945,6 +984,9 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         execution: RayTaskExecution,
         plan: dict[str, Any],
         plan_binding: dict[str, str] | None,
+        *,
+        attempt_number: int | None = None,
+        reporting_policy_hint: str | None = None,
     ) -> dict[str, Any]:
         """Explain the bounded progress state and advertise only useful actions."""
         try:
@@ -952,6 +994,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 execution,
                 authorize=self._workflow_authorizer(request),
                 include_legacy=True,
+                attempt_number=attempt_number,
             )
         except WorkflowProgressReadError as error:
             if error.code is WorkflowProgressReadErrorCode.ACCESS_DENIED:
@@ -962,6 +1005,9 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             return _workflow_progress_presentation(
                 state=state,
                 availability=error.code.value,
+                reporting_policy=(
+                    "terminal_only" if reporting_policy_hint == "terminal_only" else None
+                ),
             )
 
         source_schema = envelope.get("source_schema_version")
@@ -980,6 +1026,26 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 availability=availability_text,
             )
         if source_schema is None:
+            effective_reporting_policy = (
+                plan_binding.get("reporting_policy")
+                if plan_binding is not None
+                else reporting_policy_hint
+            )
+            if effective_reporting_policy == "terminal_only":
+                terminal_only_state = {
+                    "NOT_REPORTED": "TERMINAL_ONLY_PENDING",
+                    "MISSING": "TERMINAL_ONLY_MISSING",
+                }.get(availability_text or "")
+                if terminal_only_state is None:
+                    return _workflow_progress_presentation(
+                        state="CORRUPT",
+                        availability="CORRUPT",
+                    )
+                return _workflow_progress_presentation(
+                    state=terminal_only_state,
+                    availability=availability_text,
+                    reporting_policy="terminal_only",
+                )
             state_by_availability = {
                 "DISABLED": "DISABLED",
                 "MISSING": "REQUESTED_MISSING",
@@ -1005,10 +1071,14 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 state="CORRUPT",
                 availability=availability_text,
             )
+        summary_reporting_policy = (
+            "terminal_only" if summary.get("reporting_policy") == "terminal_only" else None
+        )
         if plan.get("status") != "AVAILABLE" or plan_binding is None:
             return _workflow_progress_presentation(
                 state="CORRUPT",
                 availability="CORRUPT",
+                reporting_policy=summary_reporting_policy,
             )
         if (
             summary.get("plan_fingerprint") != plan_binding["fingerprint"]
@@ -1018,6 +1088,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             return _workflow_progress_presentation(
                 state="CORRUPT",
                 availability="CORRUPT",
+                reporting_policy=summary_reporting_policy,
             )
 
         state_by_availability = {
@@ -1029,7 +1100,19 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             "MISSING": "MISSING",
             "CORRUPT": "CORRUPT",
         }
-        if availability_text == "NOT_REPORTED":
+        reporting_policy = summary.get("reporting_policy")
+        workflow_state = summary.get("state")
+        if reporting_policy == "terminal_only":
+            if (
+                availability_text != "OMITTED_BY_POLICY"
+                or workflow_state not in WORKFLOW_PROGRESS_TERMINAL_STATES
+            ):
+                return _workflow_progress_presentation(
+                    state="CORRUPT",
+                    availability="CORRUPT",
+                )
+            state = "TERMINAL_ONLY"
+        elif availability_text == "NOT_REPORTED":
             state = (
                 "REQUESTED_NOT_REPORTED"
                 if plan.get("status") == "AVAILABLE"
@@ -1103,6 +1186,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                     request,
                     execution,
                     collection=collection,
+                    attempt_number=attempt_number,
                 )
             except WorkflowProgressReadError as error:
                 if error.code is WorkflowProgressReadErrorCode.ACCESS_DENIED:
@@ -1158,6 +1242,8 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             state=state,
             availability=availability_text,
             complete=complete,
+            workflow_state=workflow_state if isinstance(workflow_state, str) else None,
+            reporting_policy=summary_reporting_policy,
             truncation_reasons=truncation_reasons,
             topology_nodes=useful_actions["topology_nodes"],
             topology_edges=useful_actions["topology_edges"],
@@ -1173,22 +1259,38 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         if request.method != "GET":
             return _secure_admin_response(HttpResponseNotAllowed(["GET"]))
         execution = self._authorized_workflow_read_execution(request, object_id)
+        try:
+            attempt_number = self._attempt_number(request)
+        except ValueError:
+            return _workflow_diagnostics_error_response(
+                code="INVALID_ARGUMENT",
+                message="attempt_number must be an integer.",
+                status=400,
+            )
 
         from django_ray import observability
 
         plan_binding = None
+        reporting_policy_hint = None
         try:
             execution = self._load_bounded_workflow_plan_fields(request, execution)
+            reporting_policy_hint = _workflow_reporting_policy_hint(
+                execution.workflow_plan_selection
+            )
             plan = observability.get_workflow_plan_diagnostics(execution)
             if plan["status"] == "AVAILABLE":
                 plan_binding = observability.get_workflow_plan_binding(execution)
         except (ValueError, observability.WorkflowObservabilityError):
             plan = _corrupt_workflow_plan_presentation()
+        if plan["status"] != "AVAILABLE" and reporting_policy_hint is not None:
+            plan["reporting_policy"] = reporting_policy_hint
         progress = self._lazy_workflow_progress_presentation(
             request,
             execution,
             plan,
             plan_binding,
+            attempt_number=attempt_number,
+            reporting_policy_hint=reporting_policy_hint,
         )
         if plan["status"] != "AVAILABLE":
             progress["actions"] = {
@@ -1379,7 +1481,19 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                     node_counts.get("pending", 0) if schema_v3 else progress.get("pending_nodes", 0)
                 ),
                 "progress_percent": progress.get("progress_percent", 0.0),
-                **({"detail": progress.get("detail")} if schema_v3 else {}),
+                **(
+                    {
+                        "reporting_policy": progress.get("reporting_policy"),
+                        "selected_strategy": progress.get("selected_strategy"),
+                        "declared_nodes": node_counts.get("declared"),
+                        "declared_edges": progress.get("edge_counts", {}).get("declared"),
+                        "timestamps": progress.get("timestamps"),
+                        "terminal": progress.get("terminal"),
+                        "detail": progress.get("detail"),
+                    }
+                    if schema_v3
+                    else {}
+                ),
             }
             if progress is not None
             else None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -174,6 +176,144 @@ def _attempt_workflow_progress_summary(execution: RayTaskExecution) -> str | Non
         return derived
     except (OverflowError, WorkflowProgressSummaryError):
         return None
+
+
+def _prepare_terminal_only_workflow_progress_summary(
+    execution: RayTaskExecution,
+) -> str | None:
+    """Prepare one summary at the accepted durable success or failure transition."""
+    if (
+        execution.state not in {TaskState.SUCCEEDED, TaskState.FAILED}
+        or execution.workflow_progress_summary_json is not None
+        or execution.workflow_run_id is None
+        or not isinstance(execution.workflow_plan_fingerprint, str)
+        or not isinstance(execution.workflow_plan_json, str)
+        or not isinstance(execution.workflow_plan_selection, str)
+    ):
+        return None
+
+    try:
+        from django_ray.conf.settings import get_settings
+        from django_ray.workflow_plans import (
+            PLAN_DOMAIN_SEPARATOR,
+            PLAN_FORMAT,
+            PLAN_FORMAT_VERSION,
+            effective_plan_selection_reporting_policy,
+            validate_plan_selection_manifest,
+        )
+        from django_ray.workflow_progress_publication import (
+            prepare_terminal_only_workflow_progress_summary,
+        )
+
+        selection = validate_plan_selection_manifest(json.loads(execution.workflow_plan_selection))
+        if effective_plan_selection_reporting_policy(selection) != "terminal_only":
+            return None
+        selected_strategy = selection["selected_strategy"]
+        if not isinstance(selected_strategy, str):
+            return None
+
+        expected_fingerprint = (
+            "sha256:"
+            + hashlib.sha256(
+                PLAN_DOMAIN_SEPARATOR + execution.workflow_plan_json.encode("utf-8")
+            ).hexdigest()
+        )
+        if execution.workflow_plan_fingerprint != expected_fingerprint:
+            return None
+
+        plan = json.loads(execution.workflow_plan_json)
+        if (
+            not isinstance(plan, dict)
+            or plan.get("plan_format") != PLAN_FORMAT
+            or plan.get("plan_format_version") != PLAN_FORMAT_VERSION
+        ):
+            return None
+        nodes = plan.get("nodes")
+        edges = plan.get("edges")
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            return None
+        snapshot = plan.get("snapshot")
+        if isinstance(snapshot, dict):
+            declared_nodes = snapshot.get("observed_node_count")
+            declared_edges = snapshot.get("observed_edge_count")
+        else:
+            declared_nodes = None
+            declared_edges = None
+        if (
+            type(declared_nodes) is not int
+            or declared_nodes < 0
+            or type(declared_edges) is not int
+            or declared_edges < 0
+        ):
+            declared_nodes = len(nodes)
+            declared_edges = len(edges)
+
+        finished_at = execution.finished_at or datetime.now(UTC)
+        started_at = execution.started_at or finished_at
+        if started_at > finished_at:
+            started_at = finished_at
+        identity = WorkflowRunIdentity(
+            task_execution_pk=execution.pk,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+            run_id=str(execution.workflow_run_id),
+        )
+        summary = prepare_terminal_only_workflow_progress_summary(
+            identity,
+            plan_fingerprint=execution.workflow_plan_fingerprint,
+            selected_strategy=selected_strategy,
+            declared_node_count=declared_nodes,
+            declared_edge_count=declared_edges,
+            outcome=execution.state,
+            started_at=started_at.timestamp(),
+            finished_at=finished_at.timestamp(),
+            detail_days=int(get_settings().get("WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS", 7)),
+        )
+        return serialize_workflow_progress_summary(
+            summary,
+            expected_identity=identity,
+        )
+    except BaseException:
+        return None
+
+
+def _persist_terminal_only_workflow_progress_summary(
+    execution: RayTaskExecution,
+    *,
+    serialized_summary: str,
+    attempt_number: int,
+    execution_generation: int,
+    run_id: str,
+    outcome: str,
+    retain_as_current: bool,
+) -> bool:
+    """Attach one logical summary without weakening the core lifecycle write."""
+    try:
+        with transaction.atomic():
+            archived = TaskAttempt.objects.filter(
+                execution_id=execution.pk,
+                attempt_number=attempt_number,
+                state=outcome,
+                workflow_progress_summary_json__isnull=True,
+            ).update(workflow_progress_summary_json=serialized_summary)
+            if archived != 1:
+                raise RuntimeError("terminal-only attempt summary fence was rejected")
+            if retain_as_current:
+                current = RayTaskExecution.objects.filter(
+                    pk=execution.pk,
+                    state=outcome,
+                    attempt_number=attempt_number,
+                    execution_generation=execution_generation,
+                    workflow_run_id=run_id,
+                    workflow_progress_summary_json__isnull=True,
+                ).update(workflow_progress_summary_json=serialized_summary)
+                if current != 1:
+                    raise RuntimeError("terminal-only current summary fence was rejected")
+    except BaseException:
+        return False
+    if retain_as_current:
+        execution.workflow_progress_summary_json = serialized_summary
+    return True
 
 
 def _record_attempt(execution: RayTaskExecution) -> None:
@@ -429,6 +569,10 @@ def record_failure(
         current.cancellation_error = cancellation_error
         current.finished_at = datetime.now(UTC)
         current.state = TaskState.FAILED
+        terminal_only_summary = _prepare_terminal_only_workflow_progress_summary(current)
+        terminal_attempt_number = int(current.attempt_number)
+        terminal_execution_generation = int(current.execution_generation)
+        terminal_run_id = str(current.workflow_run_id)
         _record_attempt(current)
         if retry:
             current.state = TaskState.QUEUED
@@ -463,6 +607,16 @@ def record_failure(
                 "completion_data",
             ]
         )
+        if terminal_only_summary is not None:
+            _persist_terminal_only_workflow_progress_summary(
+                current,
+                serialized_summary=terminal_only_summary,
+                attempt_number=terminal_attempt_number,
+                execution_generation=terminal_execution_generation,
+                run_id=terminal_run_id,
+                outcome=TaskState.FAILED,
+                retain_as_current=not retry,
+            )
         execution.__dict__.update(current.__dict__)
         return True
 
@@ -535,6 +689,10 @@ def succeed_task(
         current.result_reference = result_reference
         current.error_message = None
         current.error_traceback = None
+        terminal_only_summary = _prepare_terminal_only_workflow_progress_summary(current)
+        terminal_attempt_number = int(current.attempt_number)
+        terminal_execution_generation = int(current.execution_generation)
+        terminal_run_id = str(current.workflow_run_id)
         _record_attempt(current)
         current.save(
             update_fields=[
@@ -544,8 +702,19 @@ def succeed_task(
                 "result_reference",
                 "error_message",
                 "error_traceback",
+                "workflow_progress_summary_json",
             ]
         )
+        if terminal_only_summary is not None:
+            _persist_terminal_only_workflow_progress_summary(
+                current,
+                serialized_summary=terminal_only_summary,
+                attempt_number=terminal_attempt_number,
+                execution_generation=terminal_execution_generation,
+                run_id=terminal_run_id,
+                outcome=TaskState.SUCCEEDED,
+                retain_as_current=True,
+            )
         execution.__dict__.update(current.__dict__)
         return True
 

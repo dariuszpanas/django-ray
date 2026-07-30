@@ -110,7 +110,7 @@ monotonic schedules; idle claim backoff does not postpone them.
 | `WORKER_LEASE_SECONDS` | `int` | `60` | Worker lease duration (`1`-`86400` seconds) for distributed coordination |
 | `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval (`1`-`86400` seconds), which must be below the lease duration |
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |
-| `WORKFLOW_PROGRESS_REPORTING_POLICY` | `str` | `"full"` | Default Ray workflow node-reporting policy: `"full"` or `"disabled"` |
+| `WORKFLOW_PROGRESS_REPORTING_POLICY` | `str` | `"full"` | Default Ray workflow progress policy: `"full"`, `"terminal_only"`, or `"disabled"` |
 | `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` | `bool` | `False` | Experimental terminal schema-v3 publication for admitted full-reporting workflows |
 | `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between full-mode workflow progress snapshot writes |
 | `WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS` | `int` | `15` | Total deadline for the final full-mode snapshot while a progress actor starts or drains (`1`-`60` seconds) |
@@ -124,15 +124,30 @@ persisted Ray Job handles from inactive workers, another worker will first try t
 reconcile or adopt the existing job before timeout-based stuck recovery marks it lost.
 Task monitor heartbeats are batched into one update for all in-flight tasks and
 throttled by `TASK_MONITOR_HEARTBEAT_SECONDS`.
-Ray-native workflow node reporting defaults to `"full"`. Set
-`WORKFLOW_PROGRESS_REPORTING_POLICY` to `"disabled"` when a workload needs the
-durable outer task lifecycle without a workflow progress actor, node-reporting RPCs,
-or `progress_data` writes. Calling
-`WorkflowSignature.with_progress_reporting("disabled").run(...)` overrides the
-setting for one invocation without reserving an application task keyword. Full mode
-collects node events in memory and writes a snapshot no more often than
+Ray-native workflow progress defaults to `"full"`. Full mode collects node events in
+memory and writes a schema-v2 compatibility snapshot no more often than
 `WORKFLOW_PROGRESS_FLUSH_SECONDS`; the interval limits database write frequency, not
 producer RPCs or actor memory.
+
+Use `"terminal_only"` when the outer task needs one bounded terminal observability
+record without live node reporting. This mode creates no progress actor, sends no node
+or application-progress RPCs, and never writes legacy `progress_data`. On durable
+success or failure it makes exactly one best-effort, run-fenced schema-v3 summary
+publication. The summary records the pinned strategy and plan fingerprint, declared
+plan counts, terminal outcome, and bounded timestamps. It deliberately reports zero
+discovered or executed nodes, sets detail availability to `OMITTED_BY_POLICY`, and
+creates no topology manifest, page, or node-detail row. Summary serialization,
+validation, or database attachment failure is observational and cannot replace the
+workflow result or application error. A stale lifecycle fence accepts neither the
+terminal task transition nor its summary.
+
+Use `"disabled"` when even that terminal summary is not wanted. Disabled mode also
+avoids the actor, progress RPCs, and `progress_data`, but makes no schema-v3 summary
+publication. Calling
+`WorkflowSignature.with_progress_reporting("terminal_only").run(...)` or
+`WorkflowSignature.with_progress_reporting("disabled").run(...)` overrides the global
+setting for one invocation without reserving an application task keyword. Local
+execution remains actor-free and is recorded as disabled.
 
 `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` is an experimental, default-off bridge from one
 terminal full-reporting actor snapshot into the bounded schema-v3 summary, topology,
@@ -141,6 +156,10 @@ both actor collection and publication: at most 512 nodes, 2,048 edges, 2 MiB of
 topology, 1 MiB of detail, and 4 MiB combined, with the byte ceilings enforced for
 both encoded and decoded evidence. This is deliberately below the hard protocol-v1
 limits and is not a high-scale readiness claim.
+
+The pilot flag applies only to full reporting. Terminal-only publication is already
+summary-only, never starts the live actor, and does not opt into pilot topology or
+node-detail collection.
 
 Publication fails closed if actor ingress rejected or truncated an event, the
 snapshot or pinned plan is inconsistent, a pilot admission or preparation limit is
@@ -157,8 +176,10 @@ can be exercised. Its
 exception and defaults to enabled; the
 [guarded local KubeRay stack](deployment/local-kuberay-gate.md) uses the same
 testproject setting and verifies the resulting summary, topology nodes, edges, and node
-detail. Production projects must opt in explicitly after checking the pilot limits
-against their workloads.
+detail. The same gate separately exercises terminal-only success and failure with a
+null legacy snapshot and no detail storage; that summary-only path does not depend on
+the pilot setting. Production projects must opt into the full-detail pilot explicitly
+after checking its limits against their workloads.
 
 When a workflow finishes, the coordinator retries one pending actor snapshot for up to
 `WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS`. Exhausting that bounded deadline
@@ -168,6 +189,8 @@ Terminal topology and node detail become eligible for cleanup after
 `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`; `0` makes them eligible as soon as the
 terminal state is durably archived. Active current detail is not expired by this
 setting, and bounded per-attempt summaries remain subject to task-attempt retention.
+Terminal-only summaries retain the configured policy value for audit consistency but
+have no detail expiry because no detail rows are created.
 
 RuntimeEnv profiles are resolved and stored when a task is enqueued. See
 [Runtime Environments](runtime-environments.md) for inheritance, backend aliases,

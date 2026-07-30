@@ -1120,7 +1120,7 @@ def test_invalid_workflow_progress_policy_fails_before_plan_materialization(
         record_materialization,
     )
 
-    with pytest.raises(WorkflowDefinitionError, match="full, disabled|disabled, full"):
+    with pytest.raises(WorkflowDefinitionError, match="must be one of"):
         step(increment).with_progress_reporting("sampled")
 
     assert materialized is False
@@ -1144,6 +1144,32 @@ def test_workflow_progress_policy_uses_configured_default(settings) -> None:
 
     assert _workflow_progress_policy(None) == "disabled"
     assert _workflow_progress_policy("full") == "full"
+    assert _workflow_progress_policy("terminal_only") == "terminal_only"
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_REPORTING_POLICY": "terminal_only",
+    }
+    assert _workflow_progress_policy(None) == "terminal_only"
+
+
+def test_terminal_only_per_workflow_override_reaches_the_ray_executor(
+    monkeypatch,
+) -> None:
+    executor = _GraphExecutor()
+    bindings: list[tuple[str, str]] = []
+
+    def bind_plan(materialized_plan, *, requested_policy, reporting_policy):
+        del materialized_plan
+        bindings.append((requested_policy, reporting_policy))
+
+    monkeypatch.setattr(executor, "bind_plan", bind_plan)
+    monkeypatch.setattr("django_ray.workflows._get_executor", lambda use_ray: executor)
+
+    result = step(increment).with_progress_reporting("terminal_only").run(1, use_ray=True)
+
+    assert result == 2
+    assert bindings == [("dynamic_tasks", "terminal_only")]
 
 
 def test_ray_job_workflow_lazily_initializes_ray(monkeypatch) -> None:
@@ -1903,6 +1929,22 @@ def test_enabled_terminal_schema_v3_publication_is_attempted_exactly_once(
     assert executor._terminal_progress_publication_attempted is True
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_terminal_only_finish_waits_for_the_outer_task_lifecycle(
+    failed,
+) -> None:
+    executor = object.__new__(_RayExecutor)
+    executor.reporting_policy = "terminal_only"
+    executor.progress_actor = None
+    executor._terminal_progress_publication_attempted = False
+
+    executor.finish_progress(failed=failed)
+    executor.finish_progress(failed=failed)
+
+    assert executor.progress_actor is None
+    assert executor._terminal_progress_publication_attempted is False
+
+
 @pytest.mark.parametrize(
     ("failure_mode", "expected_reason"),
     [
@@ -2027,6 +2069,62 @@ def test_schema_v3_pilot_passes_strict_limits_to_the_progress_actor(
     assert decoded.payload == {"plan": materialized.plan.summary()}
 
 
+@pytest.mark.django_db
+def test_terminal_only_bind_claims_plan_without_creating_progress_actor(
+    settings,
+) -> None:
+    from django_ray.models import RayTaskExecution, TaskState
+    from django_ray.runtime.context import DurableTaskContext
+    from django_ray.workflow_plans import materialize_workflow_plan
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+    }
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-terminal-only-bind",
+        callable_path=f"{__name__}.increment",
+        state=TaskState.RUNNING,
+        execution_generation=2,
+        progress_data='{"legacy":true}',
+    )
+    materialized = materialize_workflow_plan(
+        step(increment),
+        invocation_args=(1,),
+        invocation_kwargs={},
+    )
+
+    class ProgressActor:
+        @staticmethod
+        def remote(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("terminal-only reporting must not create an actor")
+
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = DurableTaskContext(
+        task_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+    executor.progress_actor = None
+    executor.progress_actor_cls = ProgressActor()
+
+    executor.bind_plan(
+        materialized,
+        requested_policy="auto",
+        reporting_policy="terminal_only",
+    )
+
+    execution.refresh_from_db()
+    assert executor.reporting_policy == "terminal_only"
+    assert executor.progress_actor is None
+    assert executor.workflow_run_identity is not None
+    assert execution.progress_data is None
+    assert execution.workflow_progress_summary_json is None
+    assert execution.workflow_plan_json == materialized.plan.canonical_json
+    assert json.loads(execution.workflow_plan_selection)["reporting_policy"] == "terminal_only"
+
+
 def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> None:
     remote_calls: list[dict[str, Any]] = []
 
@@ -2068,6 +2166,38 @@ def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> No
         "ray_options": {},
         "runtime_env": {"mode": "inherit"},
     }
+
+
+def test_terminal_only_submit_omits_all_progress_transport_metadata() -> None:
+    remote_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    class _Ref:
+        pass
+
+    class _RemoteStep:
+        def options(self, **kwargs):
+            del kwargs
+            return self
+
+        def remote(self, *args, **kwargs):
+            remote_calls.append((args, kwargs))
+            return _Ref()
+
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = None
+    executor.task_execution_pk = 1
+    executor.workflow_run_identity = _workflow_identity()
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
+    executor.reporting_policy = "terminal_only"
+    executor.progress_actor = None
+    executor.remote_step = _RemoteStep()
+
+    executor.submit_step(step(increment), (), {}, "0.0", ())
+
+    assert len(remote_calls) == 1
+    args, kwargs = remote_calls[0]
+    assert args[6] is None
+    assert kwargs == {}
 
 
 def test_ray_executor_submit_passes_strict_pilot_limits_to_remote_step() -> None:

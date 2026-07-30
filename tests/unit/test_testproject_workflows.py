@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from testproject.apps.cluster_tasks import workflows
 from testproject.apps.cluster_tasks.workflows import (
     COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE,
     ComplexWorkflowFixtureError,
@@ -58,6 +61,39 @@ def test_complex_workflow_default_config_remains_unchanged() -> None:
         {"item_id": 1, "seconds_per_item": 0.01, "branch": "fast"},
         {"item_id": 2, "seconds_per_item": 0.01, "branch": "fast"},
     ]
+
+
+def test_complex_workflow_terminal_only_selection_is_per_invocation(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Configured:
+        def run(self, *args: Any, **kwargs: Any) -> dict[str, list[object]]:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return {"branches": []}
+
+    class _Workflow:
+        def with_progress_reporting(self, policy: str) -> _Configured:
+            captured["policy"] = policy
+            return _Configured()
+
+    monkeypatch.setattr(workflows, "complex_branch_workflow", _Workflow())
+
+    result = workflows.run_complex_branch_workflow(
+        2,
+        1,
+        0.01,
+        0.02,
+        reporting_policy="terminal_only",
+        use_ray=True,
+    )
+
+    assert captured == {
+        "policy": "terminal_only",
+        "args": (2, 1, 0.01, 0.02),
+        "kwargs": {"use_ray": True},
+    }
+    assert result["workflow_elapsed_seconds"] >= 0
 
 
 def test_complex_workflow_failure_selects_one_stable_leaf_and_keeps_sibling_valid() -> None:

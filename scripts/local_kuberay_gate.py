@@ -107,6 +107,25 @@ COMPLEX_WORKFLOW_FAILURE_ENQUEUE_KWARGS = {
     "failure_branch": "slow",
     "failure_item": 0,
 }
+COMPLEX_WORKFLOW_TERMINAL_ONLY_ENQUEUE_PATH = (
+    "/api/cluster/complex-workflow?fast_items=2&slow_items=1"
+    "&fast_seconds=0.01&slow_seconds=0.02"
+    "&reporting_policy=terminal_only"
+)
+COMPLEX_WORKFLOW_TERMINAL_ONLY_ENQUEUE_KWARGS = {
+    **COMPLEX_WORKFLOW_ENQUEUE_KWARGS,
+    "reporting_policy": "terminal_only",
+}
+COMPLEX_WORKFLOW_TERMINAL_ONLY_FAILURE_ENQUEUE_PATH = (
+    "/api/cluster/complex-workflow?fast_items=2&slow_items=1"
+    "&fast_seconds=0.01&slow_seconds=0.05"
+    "&failure_branch=slow&failure_item=0"
+    "&reporting_policy=terminal_only"
+)
+COMPLEX_WORKFLOW_TERMINAL_ONLY_FAILURE_ENQUEUE_KWARGS = {
+    **COMPLEX_WORKFLOW_FAILURE_ENQUEUE_KWARGS,
+    "reporting_policy": "terminal_only",
+}
 COMPLEX_WORKFLOW_FAILURE_MESSAGE = "Intentional complex workflow fixture failure"
 WORKFLOW_ADMIN_LOOPBACK_URL = "http://127.0.0.1:8000"
 WORKFLOW_PROGRESS_SCHEMA_VERSION = 3
@@ -661,6 +680,26 @@ class GateEvidence:
     workflow_failure_current_manifests: int = 0
     workflow_failure_pending_manifests: int = 0
     workflow_failure_unlinked_pages: int = 0
+    workflow_terminal_only_task_id: str = ""
+    workflow_terminal_only_task_state: str = ""
+    workflow_terminal_only_attempt_number: int = 0
+    workflow_terminal_only_schema_version: int = 0
+    workflow_terminal_only_summary_revision: int = 0
+    workflow_terminal_only_declared_nodes: int = 0
+    workflow_terminal_only_declared_edges: int = 0
+    workflow_terminal_only_admin_actions: int = 0
+    workflow_terminal_only_graph_advertised: bool = True
+    workflow_terminal_only_storage_rows: int = -1
+    workflow_terminal_only_failure_task_id: str = ""
+    workflow_terminal_only_failure_task_state: str = ""
+    workflow_terminal_only_failure_attempt_number: int = 0
+    workflow_terminal_only_failure_schema_version: int = 0
+    workflow_terminal_only_failure_summary_revision: int = 0
+    workflow_terminal_only_failure_declared_nodes: int = 0
+    workflow_terminal_only_failure_declared_edges: int = 0
+    workflow_terminal_only_failure_admin_actions: int = 0
+    workflow_terminal_only_failure_graph_advertised: bool = True
+    workflow_terminal_only_failure_storage_rows: int = -1
     prometheus_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -681,6 +720,19 @@ class WorkflowGateObservation:
     running_nodes: int
     succeeded_nodes: int
     failed_nodes: int
+
+
+@dataclass(frozen=True)
+class TerminalOnlyWorkflowGateObservation:
+    """One terminal summary-only workflow verified without retained detail."""
+
+    task_id: str
+    state: str
+    attempt_number: int
+    schema_version: int
+    summary_revision: int
+    declared_nodes: int
+    declared_edges: int
 
 
 def validate_namespace(namespace: str) -> None:
@@ -3738,6 +3790,9 @@ class LocalKubeRayGate:
         schema: str,
         expected_run_identity: Mapping[str, Any] | None = None,
         expected_publication: Mapping[str, Any] | None = None,
+        expected_availability: str = "AVAILABLE",
+        expected_complete: bool = True,
+        expect_detail_revisions: bool = True,
     ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
         """Validate common bounded-reader identity without retaining response payloads."""
 
@@ -3745,8 +3800,11 @@ class LocalKubeRayGate:
             raise ValueError(f"{endpoint} returned an unsupported read envelope")
         if payload.get("task_id") != task_id:
             raise ValueError(f"{endpoint} returned the wrong workflow task")
-        if payload.get("availability") != "AVAILABLE" or payload.get("complete") is not True:
-            raise ValueError(f"{endpoint} did not return complete AVAILABLE workflow progress")
+        if (
+            payload.get("availability") != expected_availability
+            or payload.get("complete") is not expected_complete
+        ):
+            raise ValueError(f"{endpoint} returned the wrong workflow detail availability")
 
         run_identity = _mapping(
             payload.get("run_identity"),
@@ -3784,15 +3842,23 @@ class LocalKubeRayGate:
             "summary_revision",
             "topology_version",
             "detail_revision",
-        } or any(
-            type(publication.get(field_name)) is not int or cast(int, publication[field_name]) < 1
-            for field_name in (
-                "summary_revision",
-                "topology_version",
-                "detail_revision",
-            )
-        ):
+        }:
             raise ValueError(f"{endpoint} returned invalid publication revisions")
+        summary_revision = publication.get("summary_revision")
+        topology_version = publication.get("topology_version")
+        detail_revision = publication.get("detail_revision")
+        if type(summary_revision) is not int or cast(int, summary_revision) < 1:
+            raise ValueError(f"{endpoint} returned invalid publication revisions")
+        if expect_detail_revisions:
+            if (
+                type(topology_version) is not int
+                or cast(int, topology_version) < 1
+                or type(detail_revision) is not int
+                or cast(int, detail_revision) < 1
+            ):
+                raise ValueError(f"{endpoint} returned invalid publication revisions")
+        elif topology_version is not None or detail_revision is not None:
+            raise ValueError(f"{endpoint} unexpectedly advertised retained workflow detail")
         if expected_publication is not None and publication != expected_publication:
             raise ValueError(f"{endpoint} returned a different workflow publication")
         return run_identity, publication
@@ -3838,6 +3904,43 @@ class LocalKubeRayGate:
             _mapping(item, field_name=f"{collection} item {index}")
             for index, item in enumerate(items)
         ]
+
+    def _workflow_empty_terminal_only_page(
+        self,
+        *,
+        task_id: str,
+        collection: str,
+        headers: Mapping[str, str],
+        run_identity: Mapping[str, Any],
+        publication: Mapping[str, Any],
+    ) -> None:
+        """Prove summary-only readers expose no retained topology or node detail."""
+
+        suffix = WORKFLOW_PROGRESS_COLLECTION_PATHS[collection]
+        query = urlencode({"limit": WORKFLOW_PROGRESS_PAGE_LIMIT})
+        endpoint = f"/api/cluster/workflows/{task_id}/{suffix}?{query}"
+        status, body = self._http(endpoint, method="GET", headers=headers)
+        if status != 200:
+            raise ValueError(f"{collection} terminal-only read returned a non-success status")
+        page = self._json_body(body, endpoint=f"terminal-only {collection}")
+        self._workflow_envelope_contract(
+            page,
+            task_id=task_id,
+            endpoint=f"terminal-only {collection}",
+            schema="django-ray.workflow-progress-page",
+            expected_run_identity=run_identity,
+            expected_publication=publication,
+            expected_availability="OMITTED_BY_POLICY",
+            expected_complete=False,
+            expect_detail_revisions=False,
+        )
+        if (
+            page.get("collection") != collection
+            or page.get("returned_count") != 0
+            or page.get("items") != []
+            or page.get("next_cursor") is not None
+        ):
+            raise ValueError(f"{collection} terminal-only read exposed retained workflow detail")
 
     @staticmethod
     def _workflow_node_ids(
@@ -4162,8 +4265,282 @@ class LocalKubeRayGate:
             failed_nodes=failed_nodes,
         )
 
+    def _verify_terminal_only_complex_workflow_run(
+        self,
+        *,
+        enqueue_path: str,
+        expected_enqueue_kwargs: Mapping[str, object],
+        expected_state: str,
+        expected_error: str | None = None,
+    ) -> TerminalOnlyWorkflowGateObservation:
+        """Verify one terminal-only run exposes exactly one summary and no detail."""
+
+        token = self._secret_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        status, body = self._http(enqueue_path, method="POST", headers=headers)
+        if status != 200:
+            raise ValueError("terminal-only workflow enqueue returned a non-success status")
+        enqueue = self._json_body(body, endpoint="terminal-only workflow enqueue")
+        enqueue_kwargs = _mapping(
+            enqueue.get("kwargs"),
+            field_name="terminal-only workflow enqueue kwargs",
+        )
+        if (
+            enqueue.get("args") != []
+            or set(enqueue_kwargs) != set(expected_enqueue_kwargs)
+            or any(
+                type(enqueue_kwargs.get(field_name)) is not type(expected_value)
+                or enqueue_kwargs.get(field_name) != expected_value
+                for field_name, expected_value in expected_enqueue_kwargs.items()
+            )
+            or enqueue_kwargs.get("reporting_policy") != "terminal_only"
+        ):
+            raise ValueError(
+                "terminal-only workflow enqueue did not retain the exact requested inputs"
+            )
+        fast_items = enqueue_kwargs.get("fast_items")
+        slow_items = enqueue_kwargs.get("slow_items")
+        if type(fast_items) is not int or type(slow_items) is not int:
+            raise ValueError("terminal-only workflow enqueue returned invalid branch item counts")
+        expected_leaf_tasks = cast(int, fast_items) + cast(int, slow_items)
+        if not 2 <= expected_leaf_tasks <= 200:
+            raise ValueError("terminal-only workflow enqueue returned invalid total leaf work")
+
+        task_id = enqueue.get("task_id")
+        try:
+            parsed_task_id = UUID(cast(str, task_id))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(
+                "terminal-only workflow enqueue task_id is not a canonical UUID"
+            ) from error
+        if (
+            parsed_task_id.version != 4
+            or str(parsed_task_id) != task_id
+            or not isinstance(task_id, str)
+        ):
+            raise ValueError("terminal-only workflow enqueue task_id is not a canonical UUIDv4")
+        task_id = str(parsed_task_id)
+
+        deadline = time.monotonic() + self.config.task_timeout
+        last_state = "missing"
+        terminal_states = WORKFLOW_PROGRESS_FAILURE_STATES | {"SUCCEEDED"}
+        while True:
+            status, body = self._http(
+                f"/api/cluster/complex-workflow/{task_id}",
+                method="GET",
+                headers=headers,
+            )
+            if status != 200:
+                raise ValueError("terminal-only workflow polling returned a non-success status")
+            execution = self._json_body(body, endpoint="terminal-only workflow polling")
+            state = execution.get("state")
+            if not isinstance(state, str) or state not in WORKFLOW_PROGRESS_TASK_STATES:
+                raise ValueError("terminal-only workflow polling returned an invalid task state")
+            last_state = state
+            if state in terminal_states:
+                if state != expected_state:
+                    raise ValueError("terminal-only workflow reached an unexpected terminal state")
+                if state == "SUCCEEDED":
+                    result = _mapping(
+                        execution.get("result"),
+                        field_name="terminal-only workflow result",
+                    )
+                    if (
+                        result.get("shape") != "chain(group(chain(map), chain(map)), step)"
+                        or result.get("durability_boundary") != "single RayTaskExecution"
+                        or result.get("total_leaf_tasks") != expected_leaf_tasks
+                        or execution.get("error") is not None
+                    ):
+                        raise ValueError(
+                            "terminal-only workflow result did not match the tiny nested workload"
+                        )
+                elif (
+                    execution.get("result") is not None or execution.get("error") != expected_error
+                ):
+                    raise ValueError(
+                        "failed terminal-only workflow did not retain its normalized fixture error"
+                    )
+                break
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    f"terminal-only workflow did not reach {expected_state} within "
+                    f"{self.config.task_timeout}s (last state: {last_state})"
+                )
+            time.sleep(2)
+
+        execution_query = urlencode({"task_id": task_id, "limit": 1})
+        status, body = self._http(
+            f"/api/executions?{execution_query}",
+            method="GET",
+            headers=headers,
+        )
+        if status != 200:
+            raise ValueError("terminal-only execution read returned a non-success status")
+        execution_list = self._json_body(body, endpoint="terminal-only workflow execution")
+        task_records = _sequence(
+            execution_list.get("tasks"),
+            field_name="terminal-only workflow execution tasks",
+        )
+        if len(task_records) != 1:
+            raise ValueError("terminal-only execution read did not return exactly one row")
+        task_record = _mapping(
+            task_records[0],
+            field_name="terminal-only workflow execution row",
+        )
+        if (
+            task_record.get("task_id") != task_id
+            or task_record.get("state") != expected_state
+            or task_record.get("callable_path")
+            != "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"
+            or task_record.get("attempt_number") != 1
+        ):
+            raise ValueError("terminal-only workflow did not remain on its first durable attempt")
+
+        summary_endpoint = f"/api/cluster/workflows/{task_id}"
+        status, body = self._http(summary_endpoint, method="GET", headers=headers)
+        if status != 200:
+            raise ValueError("terminal-only summary read returned a non-success status")
+        summary_envelope = self._json_body(body, endpoint="terminal-only workflow summary")
+        run_identity, publication = self._workflow_envelope_contract(
+            summary_envelope,
+            task_id=task_id,
+            endpoint="terminal-only workflow summary",
+            schema="django-ray.workflow-progress-summary",
+            expected_availability="OMITTED_BY_POLICY",
+            expected_complete=False,
+            expect_detail_revisions=False,
+        )
+        summary = _mapping(
+            summary_envelope.get("summary"),
+            field_name="terminal-only workflow summary payload",
+        )
+        summary_revision = publication["summary_revision"]
+        if (
+            summary_envelope.get("source_schema_version") != WORKFLOW_PROGRESS_SCHEMA_VERSION
+            or summary.get("schema_version") != WORKFLOW_PROGRESS_SCHEMA_VERSION
+            or summary.get("storage_protocol_version") != 1
+            or summary.get("run_identity") != run_identity
+            or run_identity.get("attempt_number") != 1
+            or summary.get("state") != expected_state
+            or summary.get("reporting_policy") != "terminal_only"
+            or summary.get("selected_strategy") != "dynamic_tasks"
+            or summary_revision != 1
+            or summary.get("summary_revision") != summary_revision
+            or summary.get("topology_version") is not None
+            or summary.get("detail_revision") is not None
+            or summary.get("limits_profile") != "v1"
+        ):
+            raise ValueError(
+                "terminal-only summary did not report one terminal schema-v3 publication"
+            )
+        if task_record.get("execution_generation") != run_identity.get(
+            "execution_generation"
+        ) or str(task_record.get("workflow_run_id")) != run_identity.get("run_id"):
+            raise ValueError("terminal-only summary identity did not match the execution row")
+        fingerprint = summary.get("plan_fingerprint")
+        if (
+            not isinstance(fingerprint, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+        ):
+            raise ValueError("terminal-only summary did not retain a canonical plan fingerprint")
+
+        detail = _mapping(summary.get("detail"), field_name="terminal-only summary detail")
+        storage = _mapping(summary.get("storage"), field_name="terminal-only summary storage")
+        retention = _mapping(
+            summary.get("retention"),
+            field_name="terminal-only summary retention",
+        )
+        terminal = _mapping(summary.get("terminal"), field_name="terminal-only summary terminal")
+        timestamps = _mapping(
+            summary.get("timestamps"),
+            field_name="terminal-only summary timestamps",
+        )
+        finished_at = timestamps.get("finished_at")
+        if (
+            detail
+            != {
+                "availability": "OMITTED_BY_POLICY",
+                "complete": False,
+                "truncation_reasons": [],
+            }
+            or storage != {"kind": "database", "manifest_id": None}
+            or type(retention.get("detail_days")) is not int
+            or not 0 <= cast(int, retention["detail_days"]) <= 30
+            or retention.get("detail_expires_at") is not None
+            or not isinstance(timestamps.get("started_at"), str)
+            or not isinstance(timestamps.get("updated_at"), str)
+            or not isinstance(finished_at, str)
+            or not finished_at
+            or terminal != {"outcome": expected_state, "finished_at": finished_at}
+            or summary.get("progress_percent") != (100.0 if expected_state == "SUCCEEDED" else 0.0)
+        ):
+            raise ValueError("terminal-only summary retained invalid terminal metadata")
+
+        node_counts = _mapping(
+            summary.get("node_counts"),
+            field_name="terminal-only summary node_counts",
+        )
+        edge_counts = _mapping(
+            summary.get("edge_counts"),
+            field_name="terminal-only summary edge_counts",
+        )
+        declared_nodes = node_counts.get("declared")
+        declared_edges = edge_counts.get("declared")
+        if (
+            set(node_counts)
+            != {
+                "declared",
+                "discovered",
+                "retained_topology",
+                "retained_detail",
+                "pending",
+                "running",
+                "succeeded",
+                "failed",
+            }
+            or type(declared_nodes) is not int
+            or cast(int, declared_nodes) < 1
+            or any(
+                node_counts.get(field_name) != 0
+                for field_name in (
+                    "discovered",
+                    "retained_topology",
+                    "retained_detail",
+                    "pending",
+                    "running",
+                    "succeeded",
+                    "failed",
+                )
+            )
+            or set(edge_counts) != {"declared", "discovered", "retained_topology"}
+            or type(declared_edges) is not int
+            or cast(int, declared_edges) < 1
+            or edge_counts.get("discovered") != 0
+            or edge_counts.get("retained_topology") != 0
+        ):
+            raise ValueError("terminal-only summary claimed discovered or retained workflow detail")
+
+        for collection in WORKFLOW_PROGRESS_COLLECTION_PATHS:
+            self._workflow_empty_terminal_only_page(
+                task_id=task_id,
+                collection=collection,
+                headers=headers,
+                run_identity=run_identity,
+                publication=publication,
+            )
+
+        return TerminalOnlyWorkflowGateObservation(
+            task_id=task_id,
+            state=expected_state,
+            attempt_number=1,
+            schema_version=WORKFLOW_PROGRESS_SCHEMA_VERSION,
+            summary_revision=cast(int, summary_revision),
+            declared_nodes=cast(int, declared_nodes),
+            declared_edges=cast(int, declared_edges),
+        )
+
     def _verify_complex_workflow_progress(self) -> None:
-        """Prove successful and deterministic failed nested workflows end to end."""
+        """Prove default-full and terminal-only nested workflows end to end."""
 
         succeeded = self._verify_complex_workflow_run(
             enqueue_path=COMPLEX_WORKFLOW_ENQUEUE_PATH,
@@ -4176,6 +4553,27 @@ class LocalKubeRayGate:
             expected_state="FAILED",
             expected_error=COMPLEX_WORKFLOW_FAILURE_MESSAGE,
         )
+        terminal_only_succeeded = self._verify_terminal_only_complex_workflow_run(
+            enqueue_path=COMPLEX_WORKFLOW_TERMINAL_ONLY_ENQUEUE_PATH,
+            expected_enqueue_kwargs=COMPLEX_WORKFLOW_TERMINAL_ONLY_ENQUEUE_KWARGS,
+            expected_state="SUCCEEDED",
+        )
+        terminal_only_failed = self._verify_terminal_only_complex_workflow_run(
+            enqueue_path=COMPLEX_WORKFLOW_TERMINAL_ONLY_FAILURE_ENQUEUE_PATH,
+            expected_enqueue_kwargs=(COMPLEX_WORKFLOW_TERMINAL_ONLY_FAILURE_ENQUEUE_KWARGS),
+            expected_state="FAILED",
+            expected_error=COMPLEX_WORKFLOW_FAILURE_MESSAGE,
+        )
+        if (
+            terminal_only_succeeded.declared_nodes,
+            terminal_only_succeeded.declared_edges,
+        ) != (
+            terminal_only_failed.declared_nodes,
+            terminal_only_failed.declared_edges,
+        ):
+            raise ValueError(
+                "equivalent terminal-only runs reported different declared plan counts"
+            )
 
         self.evidence.workflow_task_id = succeeded.task_id
         self.evidence.workflow_task_state = succeeded.state
@@ -4199,6 +4597,32 @@ class LocalKubeRayGate:
         self.evidence.workflow_failure_running_nodes = failed.running_nodes
         self.evidence.workflow_failure_succeeded_nodes = failed.succeeded_nodes
         self.evidence.workflow_failure_failed_nodes = failed.failed_nodes
+        self.evidence.workflow_terminal_only_task_id = terminal_only_succeeded.task_id
+        self.evidence.workflow_terminal_only_task_state = terminal_only_succeeded.state
+        self.evidence.workflow_terminal_only_attempt_number = terminal_only_succeeded.attempt_number
+        self.evidence.workflow_terminal_only_schema_version = terminal_only_succeeded.schema_version
+        self.evidence.workflow_terminal_only_summary_revision = (
+            terminal_only_succeeded.summary_revision
+        )
+        self.evidence.workflow_terminal_only_declared_nodes = terminal_only_succeeded.declared_nodes
+        self.evidence.workflow_terminal_only_declared_edges = terminal_only_succeeded.declared_edges
+        self.evidence.workflow_terminal_only_failure_task_id = terminal_only_failed.task_id
+        self.evidence.workflow_terminal_only_failure_task_state = terminal_only_failed.state
+        self.evidence.workflow_terminal_only_failure_attempt_number = (
+            terminal_only_failed.attempt_number
+        )
+        self.evidence.workflow_terminal_only_failure_schema_version = (
+            terminal_only_failed.schema_version
+        )
+        self.evidence.workflow_terminal_only_failure_summary_revision = (
+            terminal_only_failed.summary_revision
+        )
+        self.evidence.workflow_terminal_only_failure_declared_nodes = (
+            terminal_only_failed.declared_nodes
+        )
+        self.evidence.workflow_terminal_only_failure_declared_edges = (
+            terminal_only_failed.declared_edges
+        )
 
     def _verify_workflow_admin(self) -> None:
         """Exercise both terminal workflows through authenticated admin readers."""
@@ -4356,6 +4780,154 @@ class LocalKubeRayGate:
         self.evidence.workflow_failure_current_manifests = cast(int, failed["current_manifests"])
         self.evidence.workflow_failure_pending_manifests = cast(int, failed["pending_manifests"])
         self.evidence.workflow_failure_unlinked_pages = cast(int, failed["unlinked_pages"])
+
+        terminal_expected_fields = {
+            "admin_workflow",
+            "task_id",
+            "task_state",
+            "attempt_number",
+            "admin_actions",
+            "graph_advertised",
+            "graph_status",
+            "summary_revision",
+            "reporting_policy",
+            "detail_availability",
+            "declared_nodes",
+            "declared_edges",
+            "legacy_progress_null",
+            "attempt_summary_matches",
+            "storage_rows",
+            "topology_manifests",
+            "topology_pages",
+            "manifest_links",
+            "node_details",
+        }
+        terminal_runs = (
+            (
+                "successful",
+                self.evidence.workflow_terminal_only_task_id,
+                self.evidence.workflow_terminal_only_task_state,
+                self.evidence.workflow_terminal_only_attempt_number,
+                self.evidence.workflow_terminal_only_summary_revision,
+                self.evidence.workflow_terminal_only_declared_nodes,
+                self.evidence.workflow_terminal_only_declared_edges,
+            ),
+            (
+                "failed",
+                self.evidence.workflow_terminal_only_failure_task_id,
+                self.evidence.workflow_terminal_only_failure_task_state,
+                self.evidence.workflow_terminal_only_failure_attempt_number,
+                self.evidence.workflow_terminal_only_failure_summary_revision,
+                self.evidence.workflow_terminal_only_failure_declared_nodes,
+                self.evidence.workflow_terminal_only_failure_declared_edges,
+            ),
+        )
+        terminal_verified: dict[str, Mapping[str, Any]] = {}
+        for (
+            label,
+            task_id,
+            task_state,
+            attempt_number,
+            summary_revision,
+            declared_nodes,
+            declared_edges,
+        ) in terminal_runs:
+            if (
+                not task_id
+                or task_state not in {"SUCCEEDED", "FAILED"}
+                or attempt_number != 1
+                or summary_revision != 1
+                or declared_nodes < 1
+                or declared_edges < 1
+            ):
+                raise ValueError(
+                    "terminal-only workflow API evidence was not ready for admin verification"
+                )
+            result = self._kubectl(
+                "exec",
+                "deployment/django-web",
+                "-c",
+                "django-web",
+                "--",
+                "python",
+                "-m",
+                "testproject.docker_smoke",
+                "--base-url",
+                WORKFLOW_ADMIN_LOOPBACK_URL,
+                "--timeout",
+                str(self.config.task_timeout),
+                "--existing-workflow-task-id",
+                task_id,
+                "--expected-workflow-reporting-policy",
+                "terminal_only",
+                timeout=(self.config.task_timeout + self.config.kubectl_request_timeout + 5),
+                sensitive_output=True,
+            )
+            payload = self._json_command(
+                result,
+                field_name=f"{label} terminal-only workflow admin smoke response",
+            )
+            if set(payload) != terminal_expected_fields:
+                raise ValueError(
+                    "terminal-only workflow admin smoke returned unexpected evidence fields"
+                )
+            if (
+                payload.get("admin_workflow") != "terminal-summary-verified"
+                or payload.get("task_id") != task_id
+                or payload.get("task_state") != task_state
+                or payload.get("attempt_number") != attempt_number
+                or payload.get("summary_revision") != summary_revision
+                or payload.get("reporting_policy") != "terminal_only"
+                or payload.get("detail_availability") != "OMITTED_BY_POLICY"
+                or payload.get("declared_nodes") != declared_nodes
+                or payload.get("declared_edges") != declared_edges
+                or payload.get("legacy_progress_null") is not True
+                or payload.get("attempt_summary_matches") is not True
+                or payload.get("admin_actions") != 0
+                or payload.get("graph_advertised") is not False
+                or payload.get("graph_status") != "UNAVAILABLE"
+                or any(
+                    payload.get(field_name) != 0
+                    for field_name in (
+                        "storage_rows",
+                        "topology_manifests",
+                        "topology_pages",
+                        "manifest_links",
+                        "node_details",
+                    )
+                )
+            ):
+                raise ValueError(
+                    "terminal-only admin or storage evidence did not match its API summary"
+                )
+            terminal_verified[label] = payload
+
+        terminal_success = terminal_verified["successful"]
+        terminal_failure = terminal_verified["failed"]
+        self.evidence.workflow_terminal_only_admin_actions = cast(
+            int,
+            terminal_success["admin_actions"],
+        )
+        self.evidence.workflow_terminal_only_graph_advertised = cast(
+            bool,
+            terminal_success["graph_advertised"],
+        )
+        self.evidence.workflow_terminal_only_storage_rows = cast(
+            int,
+            terminal_success["storage_rows"],
+        )
+        self.evidence.workflow_terminal_only_failure_admin_actions = cast(
+            int,
+            terminal_failure["admin_actions"],
+        )
+        self.evidence.workflow_terminal_only_failure_graph_advertised = cast(
+            bool,
+            terminal_failure["graph_advertised"],
+        )
+        self.evidence.workflow_terminal_only_failure_storage_rows = cast(
+            int,
+            terminal_failure["storage_rows"],
+        )
 
     def _verify_ray_identity(self) -> None:
         """Re-pin the exact RayCluster UID, topology, and complete owned pod inventory."""
@@ -4562,6 +5134,104 @@ class LocalKubeRayGate:
             (
                 "workflow_failure_unlinked_pages",
                 self.evidence.workflow_failure_unlinked_pages,
+            ),
+            (
+                "workflow_terminal_only_task_id",
+                self.evidence.workflow_terminal_only_task_id,
+            ),
+            (
+                "workflow_terminal_only_task_state",
+                self.evidence.workflow_terminal_only_task_state,
+            ),
+            (
+                "workflow_terminal_only_attempt_number",
+                self.evidence.workflow_terminal_only_attempt_number,
+            ),
+            (
+                "workflow_terminal_only_schema_version",
+                self.evidence.workflow_terminal_only_schema_version,
+            ),
+            (
+                "workflow_terminal_only_summary_revision",
+                self.evidence.workflow_terminal_only_summary_revision,
+            ),
+            ("workflow_terminal_only_reporting_policy", "terminal_only"),
+            (
+                "workflow_terminal_only_detail_availability",
+                "OMITTED_BY_POLICY",
+            ),
+            ("workflow_terminal_only_topology_version", None),
+            ("workflow_terminal_only_detail_revision", None),
+            (
+                "workflow_terminal_only_declared_nodes",
+                self.evidence.workflow_terminal_only_declared_nodes,
+            ),
+            (
+                "workflow_terminal_only_declared_edges",
+                self.evidence.workflow_terminal_only_declared_edges,
+            ),
+            ("workflow_terminal_only_legacy_progress", None),
+            (
+                "workflow_terminal_only_admin_actions",
+                self.evidence.workflow_terminal_only_admin_actions,
+            ),
+            (
+                "workflow_terminal_only_graph_advertised",
+                self.evidence.workflow_terminal_only_graph_advertised,
+            ),
+            ("workflow_terminal_only_graph_status", "UNAVAILABLE"),
+            (
+                "workflow_terminal_only_storage_rows",
+                self.evidence.workflow_terminal_only_storage_rows,
+            ),
+            (
+                "workflow_terminal_only_failure_task_id",
+                self.evidence.workflow_terminal_only_failure_task_id,
+            ),
+            (
+                "workflow_terminal_only_failure_task_state",
+                self.evidence.workflow_terminal_only_failure_task_state,
+            ),
+            (
+                "workflow_terminal_only_failure_attempt_number",
+                self.evidence.workflow_terminal_only_failure_attempt_number,
+            ),
+            (
+                "workflow_terminal_only_failure_schema_version",
+                self.evidence.workflow_terminal_only_failure_schema_version,
+            ),
+            (
+                "workflow_terminal_only_failure_summary_revision",
+                self.evidence.workflow_terminal_only_failure_summary_revision,
+            ),
+            ("workflow_terminal_only_failure_reporting_policy", "terminal_only"),
+            (
+                "workflow_terminal_only_failure_detail_availability",
+                "OMITTED_BY_POLICY",
+            ),
+            ("workflow_terminal_only_failure_topology_version", None),
+            ("workflow_terminal_only_failure_detail_revision", None),
+            (
+                "workflow_terminal_only_failure_declared_nodes",
+                self.evidence.workflow_terminal_only_failure_declared_nodes,
+            ),
+            (
+                "workflow_terminal_only_failure_declared_edges",
+                self.evidence.workflow_terminal_only_failure_declared_edges,
+            ),
+            ("workflow_terminal_only_failure_legacy_progress", None),
+            (
+                "workflow_terminal_only_failure_admin_actions",
+                self.evidence.workflow_terminal_only_failure_admin_actions,
+            ),
+            (
+                "workflow_terminal_only_failure_graph_advertised",
+                self.evidence.workflow_terminal_only_failure_graph_advertised,
+            ),
+            ("workflow_terminal_only_failure_graph_status", "UNAVAILABLE"),
+            (
+                "workflow_terminal_only_failure_storage_rows",
+                self.evidence.workflow_terminal_only_failure_storage_rows,
             ),
             ("probe_path", EXPECTED_PROBE_PATH),
             ("probe_host", EXPECTED_PROBE_HOST),

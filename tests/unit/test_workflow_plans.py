@@ -27,6 +27,7 @@ from django_ray.runtime.context import (
     DurableTaskContext,
     WorkflowRunIdentity,
     durable_task_execution,
+    get_current_task_context,
 )
 from django_ray.runtime.runtime_env import normalize_runtime_env
 from django_ray.workflow_plans import (
@@ -53,6 +54,7 @@ from django_ray.workflow_progress_protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
 )
+from django_ray.workflow_progress_summary import deserialize_workflow_progress_summary
 from django_ray.workflows import chain, group, map_step, step
 
 
@@ -131,24 +133,33 @@ def test_local_plan_selection_rejects_non_disabled_reporting() -> None:
         validate_plan_selection_manifest(manifest)
 
 
-@pytest.mark.parametrize("reporting_policy", ["sampled", "terminal_only"])
-def test_plan_selection_v2_reader_accepts_reserved_reporting_policies(
-    reporting_policy: str,
-) -> None:
+def test_plan_selection_v2_accepts_terminal_only_reporting() -> None:
+    plan = _materialize(step(increment), 1).plan
+    manifest = plan.eligibility.select(
+        "dynamic_tasks",
+        requested_policy="auto",
+        reporting_policy="terminal_only",
+    ).as_dict()
+
+    assert validate_plan_selection_manifest(manifest) == manifest
+    assert effective_plan_selection_reporting_policy(manifest) == "terminal_only"
+
+
+def test_plan_selection_v2_reader_accepts_reserved_sampled_reporting() -> None:
     plan = _materialize(step(increment), 1).plan
     manifest = plan.eligibility.select(
         "dynamic_tasks",
         requested_policy="auto",
     ).as_dict()
-    manifest["reporting_policy"] = reporting_policy
+    manifest["reporting_policy"] = "sampled"
 
     assert validate_plan_selection_manifest(manifest) == manifest
-    assert effective_plan_selection_reporting_policy(manifest) == reporting_policy
+    assert effective_plan_selection_reporting_policy(manifest) == "sampled"
     with pytest.raises(WorkflowPlanValidationError, match="reporting policy"):
         plan.eligibility.select(
             "dynamic_tasks",
             requested_policy="auto",
-            reporting_policy=reporting_policy,
+            reporting_policy="sampled",
         )
 
 
@@ -1968,6 +1979,142 @@ def test_ray_run_rechecks_fence_after_preparation_before_actor_or_leaf(monkeypat
 
     assert actor_creations == 0
     assert not hasattr(executor, "workflow_run_identity")
+
+
+@pytest.mark.django_db
+def test_terminal_only_preparation_failure_keeps_a_plan_for_durable_failure_summary(
+    monkeypatch,
+) -> None:
+    from django_ray.workflows import _RayExecutor
+
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-terminal-only-preparation-failure",
+        callable_path=f"{__name__}.increment",
+        state=TaskState.RUNNING,
+        execution_generation=7,
+    )
+    materialized = _materialize(step(increment), 1)
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = DurableTaskContext(
+        task_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+    executor.progress_actor_cls = None
+
+    def fail_preparation(_materialized_plan):
+        raise RuntimeError("RuntimeEnv packaging failed")
+
+    monkeypatch.setattr(
+        "django_ray.workflow_plans.prepare_materialized_plan_for_ray",
+        fail_preparation,
+    )
+
+    with pytest.raises(RuntimeError, match="RuntimeEnv packaging failed"):
+        executor.bind_plan(
+            materialized,
+            requested_policy="auto",
+            reporting_policy="terminal_only",
+        )
+
+    assert not hasattr(executor, "workflow_run_identity")
+    execution.refresh_from_db()
+    assert execution.workflow_run_id is not None
+    assert execution.workflow_plan_json == materialized.plan.canonical_json
+    assert execution.workflow_progress_summary_json is None
+
+    assert record_failure(
+        execution,
+        error_message="RuntimeEnv preparation failed",
+        retry=False,
+    )
+
+    execution.refresh_from_db()
+    assert execution.workflow_progress_summary_json is not None
+    summary = deserialize_workflow_progress_summary(execution.workflow_progress_summary_json)
+    assert execution.state == TaskState.FAILED
+    assert summary["state"] == TaskState.FAILED
+    assert summary["reporting_policy"] == "terminal_only"
+    assert summary["node_counts"]["declared"] == len(materialized.plan.manifest["nodes"])
+    assert summary["edge_counts"]["declared"] == len(materialized.plan.manifest["edges"])
+    assert execution.progress_data is None
+
+
+@pytest.mark.django_db
+def test_terminal_only_result_serialization_failure_publishes_only_failed_summary(
+    monkeypatch,
+) -> None:
+    from django_ray.runtime import entrypoint
+
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-terminal-only-result-serialization-failure",
+        callable_path="tests.return_unserializable_workflow_result",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=8,
+    )
+    materialized = _materialize(step(increment), 1)
+
+    def return_unserializable_result() -> set[object]:
+        context = get_current_task_context()
+        assert context is not None
+        identity = WorkflowRunIdentity.create(context)
+        assert identity is not None
+        selection = materialized.plan.eligibility.select(
+            "dynamic_tasks",
+            requested_policy="auto",
+            reporting_policy="terminal_only",
+        )
+        assert claim_workflow_run(
+            identity,
+            plan=materialized.plan,
+            selection=selection,
+        )
+        return {object()}
+
+    monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+    monkeypatch.setattr(
+        "django_ray.runtime.import_utils.import_callable",
+        lambda _path: return_unserializable_result,
+    )
+
+    result_json = entrypoint.execute_task(
+        execution.callable_path,
+        "[]",
+        "{}",
+        task_execution_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+    result = json.loads(result_json)
+
+    execution.refresh_from_db()
+    assert result["success"] is False
+    assert result["exception_type"] == "builtins.TypeError"
+    assert execution.state == TaskState.RUNNING
+    assert execution.workflow_progress_summary_json is None
+    assert execution.completion_data == result_json
+
+    assert record_failure(
+        execution,
+        error_message=result["error"],
+        error_traceback=result["traceback"],
+        retry=False,
+        expected_attempt_number=1,
+        expected_execution_generation=8,
+        expected_completion_data=result_json,
+        require_completion_data_match=True,
+    )
+
+    execution.refresh_from_db()
+    assert execution.workflow_progress_summary_json is not None
+    summary = deserialize_workflow_progress_summary(execution.workflow_progress_summary_json)
+    assert execution.state == TaskState.FAILED
+    assert summary["state"] == TaskState.FAILED
+    assert summary["summary_revision"] == 1
+    assert summary["terminal"]["outcome"] == TaskState.FAILED
+    assert summary["node_counts"]["declared"] == len(materialized.plan.manifest["nodes"])
+    assert execution.progress_data is None
 
 
 @pytest.mark.django_db

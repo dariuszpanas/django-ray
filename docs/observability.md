@@ -75,14 +75,25 @@ metrics or errors, credentials, paths, URIs, Ray identifiers, or handles.
 
 The package-owned topology/detail storage, bounded integrity verifier, atomic writer,
 retention cleanup, and authorized public read facade are present. The current workflow
-actor still publishes schema v2 in full mode. A workflow using the disabled runtime
-policy creates no actor and publishes no legacy snapshot. Its bounded version-2 plan
-selection records the effective policy independently, so current-attempt authorized
-readers return `DISABLED` without fabricating a schema-v3 summary or empty graph.
+actor still publishes schema v2 in full mode. Terminal-only and disabled workflows
+create no actor and publish no legacy snapshot. Their bounded version-2 plan selection
+records the effective policy independently.
+
+On accepted durable success or failure, terminal-only mode attempts one revision-1
+schema-v3 summary containing pinned plan identity, declared counts, terminal outcome,
+and bounded timestamps. It reports zero discovered or executed nodes,
+`OMITTED_BY_POLICY` detail, and no topology/detail pointers or rows. Summary
+serialization or database attachment failure rolls back only the observability
+attachment; the task result or application error remains authoritative. Disabled mode
+does not attempt that summary, so current-attempt authorized readers return `DISABLED`
+without fabricating an empty graph.
+
 An active full-reporting run without schema v3 remains `NOT_REPORTED`; if that run
-reaches a terminal task state without publishing schema v3, readers return `MISSING`
-instead of presenting an empty graph. Historical attempts need an archived schema-v3
-summary to retain these distinctions; otherwise they remain `NOT_REPORTED`.
+reaches a terminal task state without publishing schema v3, readers return `MISSING`.
+Terminal-only uses explicit pending, missing, and available-summary presentations and
+never advertises topology, node detail, or an execution graph. Historical attempts
+need an archived schema-v3 summary to retain these distinctions; otherwise they remain
+`NOT_REPORTED`.
 
 General/default full-mode schema-v3 publication stays disabled until #79 bounds the
 remaining live ingestion path, #142 completes ADR-0005's composite topology/detail
@@ -274,9 +285,11 @@ for only the 16 KiB schema-v3 summary and explicitly disables the legacy fallbac
 never selects or parses `progress_data`, the plan blobs, topology pages, or normalized
 detail rows. Runs without a schema-v3 summary therefore appear as not yet reported in
 the high-frequency panel, regardless of plan policy. The lazy workflow diagnostics
-request distinguishes disabled reporting, an active requested-but-not-reported run,
-and a terminal requested-but-missing snapshot. Compatibility tools may still opt into
-the separately capped schema-v1/v2 reader.
+request distinguishes disabled reporting, active and missing terminal-only reporting,
+an active requested-but-not-reported full run, and a terminal requested-but-missing
+snapshot. A terminal-only summary shows its outcome and omitted-by-policy detail without
+offering graph or collection actions. Compatibility tools may still opt into the
+separately capped schema-v1/v2 reader.
 
 The initially collapsed **Workflow execution** section performs a separate authorized
 read only when an operator opens it. The compact view verifies the persisted plan
@@ -289,10 +302,12 @@ Verified plan and selection JSON remain available as explicit, byte-bounded down
 The lazy summary and downloads are GET-only, repeat the per-object permission check, use
 SQL byte guards before loading the blobs, and return `Cache-Control: no-store`. Topology
 and node-detail actions in the compact diagnostics row appear only when the retained
-schema-v3 collection can return useful data. The nested graph control also exposes the
-three fixed bounded JSON routes as explicit fallbacks whenever graph rendering degrades,
-including before a terminal publication exists. Every route repeats the same
-authorization and calls the package read facade; none is fetched by the polling script.
+schema-v3 collection can return useful data. For a verified full-reporting plan, the
+nested graph control also exposes the three fixed bounded JSON routes as explicit
+fallbacks whenever graph rendering degrades, including before a terminal publication
+exists. An unverified plan or terminal-only policy exposes neither the graph control nor
+those detail links. Every route repeats the same authorization and calls the package
+read facade; none is fetched by the polling script.
 
 Within that collapsed section, **Execution graph** is a second, independently lazy
 control. It makes exactly one same-origin GET after it is opened and caches a successful
@@ -317,8 +332,9 @@ records. Semantic node links follow topological and tab order and are pinned to 
 attempt as the rendered graph. The graph summary visibly names that page-rendered
 attempt; reload the page before inspecting a newer attempt shown by live polling.
 Decorative connectors are hidden from assistive technology, and state, map, and
-failure-origin/path distinctions use text and symbols in addition to color. The bounded
-JSON routes remain visible fallbacks whenever a graph cannot be shown safely.
+failure-origin/path distinctions use text and symbols in addition to color. For
+full-reporting publications with verified useful retained collections, the bounded JSON
+routes remain visible fallbacks whenever a graph cannot be shown safely.
 
 By default, the same change form presents ordered immutable attempt history
 contextually. The inline selects only attempt identity, state, timing, and a bounded

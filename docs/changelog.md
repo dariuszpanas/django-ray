@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admitted terminal snapshot; the bundled testproject and guarded local KubeRay gate enable and
   prove that path. Static-actor and Compiled Graph workflow strategies and a resident
   prepared-graph cache remain inactive.
+- Full workflow progress remains the default. Terminal-only reporting is an actor-free,
+  summary-only option; it does not enable the default-off full-detail schema-v3 pilot or
+  close the remaining #79 full-mode scale boundaries.
 
 ### Added
 
@@ -56,10 +59,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RuntimeEnv, execution, metric, event, and plan data never enter the graph response.
   The guarded KubeRay gate proves successful and deterministic first-attempt failed
   workflows through the schema-v3 readers and authenticated admin projection.
-- Ray-native workflows can keep the default full node-progress reporting or disable it
-  globally and per invocation. Disabled runs retain the durable outer-task lifecycle
-  and bounded plan/strategy metadata while creating no progress actor, node-reporting
-  RPCs, or `progress_data` writes.
+- Ray-native workflows can keep the default full node-progress reporting, select
+  terminal-only reporting, or disable progress globally and per invocation.
+  Terminal-only runs create no progress actor, node/application-progress RPC, legacy
+  `progress_data` write, topology, or node-detail row. Durable success or failure makes
+  one best-effort fenced schema-v3 summary publication containing pinned plan identity,
+  declared counts, terminal outcome, and bounded timestamps while explicitly reporting
+  zero discovered nodes and `OMITTED_BY_POLICY` detail. API and Admin readers present
+  that terminal summary without topology, node-detail, or graph links. Disabled runs
+  retain the outer-task lifecycle and bounded plan/strategy metadata without making the
+  terminal summary attempt. The testproject and guarded local KubeRay gate exercise
+  terminal-only success and deterministic failure without changing the existing
+  full-reporting fixture default.
 - A practical Celery migration and coexistence guide that separates direct Django
   Tasks mappings from semantic rewrites and unsupported broker behavior, provides
   copyable enqueue/result-storage recipes, and requires producer-first Celery drain
@@ -381,9 +392,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before reversing the migration.
 - Keep the schema-v3 pilot disabled by default until the documented activation gates
   are complete. The current schema-v2 coordinator remains the live compatibility
-  writer; opt-in terminal publication is limited to the documented pilot profile until
-  the remaining ingestion, preparation, capacity, migration, and old-writer-drain work
-  is complete.
+  writer for full reporting; opt-in full-detail terminal publication is limited to the
+  documented pilot profile until the remaining ingestion, preparation, capacity,
+  migration, and old-writer-drain work is complete. Terminal-only summary publication
+  does not enable that detail producer and requires no migration.
 
 ## [0.3.1] - 2026-07-18
 

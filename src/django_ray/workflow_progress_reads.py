@@ -578,7 +578,10 @@ def _summary_context(
         reporting_policy = _current_workflow_reporting_policy(execution, using=using)
         if reporting_policy == "disabled":
             availability = WorkflowProgressDetailAvailability.DISABLED.value
-        elif reporting_policy == "full" and execution.state in WORKFLOW_PROGRESS_TERMINAL_STATES:
+        elif (
+            reporting_policy in {"full", "terminal_only"}
+            and execution.state in WORKFLOW_PROGRESS_TERMINAL_STATES
+        ):
             availability = WorkflowProgressDetailAvailability.MISSING.value
 
     return _SummaryContext(

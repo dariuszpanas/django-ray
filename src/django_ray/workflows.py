@@ -539,6 +539,7 @@ class _RayExecutor(_Executor):
         self._progress_suppression_depth = 0
         self._map_progress_sent_at: dict[str, float] = {}
         self._terminal_progress_publication_attempted = False
+        self.reporting_policy = "full"
         self.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
         self.progress_actor_cls = progress_actor_cls
         if materialized_plan is not None:
@@ -562,6 +563,7 @@ class _RayExecutor(_Executor):
             requested_policy=requested_policy,
             reporting_policy=reporting_policy,
         )
+        self.reporting_policy = reporting_policy
         if self.task_context is None:
             self.materialized_plan = prepare_materialized_plan_for_ray(materialized_plan)
             return
@@ -595,9 +597,9 @@ class _RayExecutor(_Executor):
             raise WorkflowPlanMismatchError(
                 "The durable workflow run became stale during RuntimeEnv preparation"
             )
-        self.materialized_plan = prepared_plan
         self.workflow_run_identity = identity
-        if reporting_policy == "disabled":
+        self.materialized_plan = prepared_plan
+        if reporting_policy in {"disabled", "terminal_only"}:
             return
         from django_ray.conf.settings import get_settings
         from django_ray.workflow_progress_limits import (
@@ -781,16 +783,19 @@ class _RayExecutor(_Executor):
             from django_ray.runtime.runtime_env import prepare_runtime_env_for_ray_core
 
             options["runtime_env"] = prepare_runtime_env_for_ray_core(resolved_runtime_env)
-        remote_progress_kwargs: dict[str, Any] = {
-            "workflow_run_identity": (
+        remote_progress_kwargs: dict[str, Any] = {}
+        if getattr(self, "reporting_policy", "full") != "terminal_only":
+            remote_progress_kwargs["workflow_run_identity"] = (
                 self.workflow_run_identity.as_dict()
                 if self.workflow_run_identity is not None
                 else None
             )
-        }
         from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_LIMITS_V1
 
-        if self.workflow_progress_limits != WORKFLOW_PROGRESS_LIMITS_V1:
+        if (
+            getattr(self, "reporting_policy", "full") != "terminal_only"
+            and self.workflow_progress_limits != WORKFLOW_PROGRESS_LIMITS_V1
+        ):
             remote_progress_kwargs["workflow_progress_limits"] = self.workflow_progress_limits
         object_ref = self.remote_step.options(**options).remote(
             signature.callable_path,
@@ -1534,6 +1539,8 @@ class _RayExecutor(_Executor):
         return snapshot
 
     def finish_progress(self, *, failed: bool = False) -> None:
+        if getattr(self, "reporting_policy", "full") == "terminal_only":
+            return
         if self.progress_actor is None:
             return
 

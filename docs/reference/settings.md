@@ -356,20 +356,24 @@ Validation requires it to be strictly less than `STUCK_TASK_TIMEOUT_SECONDS`.
 
 - **Type**: `str`
 - **Default**: `"full"`
-- **Allowed**: `"full"` or `"disabled"`
+- **Allowed**: `"full"`, `"terminal_only"`, or `"disabled"`
 
 Default node-reporting policy for Ray-native workflow invocations. `"full"` preserves
 the progress actor, per-node events, application progress, and periodic
-`progress_data` snapshots. `"disabled"` creates no progress actor, sends no
-node-reporting RPCs, and writes no `progress_data`. It does not disable task claiming,
-result/error persistence, retry and cancellation fencing, or task-monitor heartbeats.
+`progress_data` snapshots. `"terminal_only"` creates no progress actor, sends no node
+or application-progress RPCs, and writes no `progress_data`; it makes one best-effort
+fenced schema-v3 summary publication when the durable workflow succeeds or fails.
+That summary has `OMITTED_BY_POLICY` detail and creates no topology or node-detail
+rows. `"disabled"` uses the same actor-free path without the terminal summary attempt.
+Neither actor-free policy disables task claiming, result/error persistence, retry and
+cancellation fencing, or task-monitor heartbeats.
 
 Call `WorkflowSignature.with_progress_reporting(policy).run(...)` to override this
 setting for one invocation. The fluent configuration keeps package execution options
 separate from keyword arguments forwarded to the root application callable.
 
 ```python
-"WORKFLOW_PROGRESS_REPORTING_POLICY": "disabled"
+"WORKFLOW_PROGRESS_REPORTING_POLICY": "terminal_only"
 ```
 
 ### WORKFLOW_PROGRESS_SCHEMA_V3_PILOT

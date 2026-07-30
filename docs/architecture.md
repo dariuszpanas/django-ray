@@ -142,12 +142,20 @@ ownership, or storage failure refuses publication without changing the applicati
 result or removing schema-v2 compatibility evidence. The package default remains
 disabled.
 
-An invocation can instead select disabled reporting: the versioned bounded plan
+An invocation can instead select terminal-only reporting. Its versioned bounded plan
 selection retains the effective policy and execution strategy, while no progress
-actor, node RPC, legacy snapshot, or schema-v3 writer is created. Authorized paginated
-services are implemented. General or default schema-v3 activation still requires the
-remaining live-ingestion, composite-preparation, aggregate-spill, migration, and
-old-writer-drain work. See
+actor, node or application-progress RPC, or legacy snapshot is created. Durable success
+or failure makes one best-effort schema-v3 summary publication through the exact run
+fence. The summary records pinned plan identity, declared counts, terminal outcome, and
+bounded timestamps, but records zero discovered or executed nodes and
+`OMITTED_BY_POLICY` detail. It creates no topology or detail row. Publication failure
+is observational and never replaces the application result or error.
+
+Disabled reporting uses the same actor-free execution path but creates no schema-v3
+summary. Full remains the default, and authorized paginated services are implemented.
+Terminal-only is not a substitute for the remaining full-mode live-ingestion,
+composite-preparation, aggregate-spill, capacity, migration, and old-writer-drain
+work. See
 [ADR-0004](design/adr-0004-bounded-workflow-progress.md) and
 [ADR-0005](design/adr-0005-bounded-workflow-preparation.md).
 
@@ -176,7 +184,7 @@ Primary execution record for one task attempt chain.
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
 | `progress_data` | Current schema-v1/v2 compatibility snapshot of retained actor state; actor-side rejection/truncation diagnostics remain in the envelope |
-| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence or an accepted default-off terminal-pilot publication |
+| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence, one accepted terminal-only summary, or an accepted default-off terminal-pilot publication |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
 | `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
@@ -316,7 +324,9 @@ prepared value still materializes the complete `observed_node_ids` compatibility
 needed by initial detail, so this is not yet an end-to-end O(retained) preparation
 claim. #142 completes composite detail preparation under
 [issue #132](https://github.com/dariuszpanas/django-ray/issues/132). #79 separately
-owns live wire, mailbox, producer backpressure, and aggregate workspace admission.
+owns sampled/coalesced reporting, live wire and cost attribution, aggregate
+producer/mailbox admission, producer backpressure, bounded actor-to-preparer draining,
+and large-fan-out slow-consumer evidence.
 The current pilot avoids claiming those broader boundaries by using a fixed profile of
 512 nodes, 2,048 edges, 2 MiB of topology, 1 MiB of detail, and 4 MiB combined.
 Default or higher-scale schema-v3 activation must compose all of the remaining
@@ -455,10 +465,12 @@ Migrations `0012` and `0013` implement the additive reader-first progress-storag
 boundary: nullable schema-v3 summaries followed by package-owned topology and detail
 tables. Existing rows and older writers continue using `progress_data`; `0013` does
 not backfill or reinterpret legacy snapshots. Schema v2 remains the live compatibility
-writer. The schema-v3 producer is disabled by default and may be enabled only as the
-strict terminal pilot after authorized bounded readers and storage are deployed;
-enabling it applies the smaller actor and publication profile and does not make
-hard-V1-scale production supported. Reversing
+writer for full mode. Terminal-only can add one summary-only schema-v3 record without
+enabling topology/detail production, changing the database schema, or reinterpreting
+legacy rows. The full-detail schema-v3 producer remains disabled by default and may be
+enabled only as the strict terminal pilot after authorized bounded readers and storage
+are deployed; enabling it applies the smaller actor and publication profile and does
+not make hard-V1-scale production supported. Reversing
 `0013` discards normalized detail tables, while reversing `0012` drops the summary
 columns. Export any retained schema-v3 data needed for audit before either rollback;
 legacy progress remains unchanged.
@@ -495,8 +507,10 @@ produced a terminal state.
 - Per-workflow in-memory progress coordination emits revision-based schema-v2
   compatibility snapshots of retained actor state. Bounded schema-v3 summary/detail
   storage and authorized readers are present, with a default-off, stricter terminal
-  publication pilot. Default and higher-scale activation still wait for the remaining
-  ingestion, preparation, capacity, migration, and old-writer-drain work.
+  publication pilot. Terminal-only reporting bypasses the actor and legacy writer,
+  then attempts one fenced summary-only terminal publication. Default and higher-scale
+  full-detail activation still wait for the remaining ingestion, preparation,
+  capacity, migration, and old-writer-drain work.
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.
@@ -511,6 +525,8 @@ produced a terminal state.
 - Authenticated, polling-based live task state and workflow progress in the task admin.
 - Versioned package services for task, queue, attempt, workflow, bounded paginated
   workflow detail, indexed nodes, and bounded live-Ray data.
+- Explicit terminal-only API and Admin summaries that never advertise topology,
+  node-detail, or execution-graph surfaces.
 - Package-owned Prometheus rendering with explicit queue-label allowlists and fixed labels.
 - Worker logs for claim/submit/reconcile/retry events.
 - Structured workflow-leaf logs correlated by durable task, workflow node, and Ray IDs.

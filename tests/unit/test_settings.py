@@ -92,7 +92,10 @@ class TestValidateSettings:
                 }
             )
 
-    @pytest.mark.parametrize("reporting_policy", ["full", "disabled"])
+    @pytest.mark.parametrize(
+        "reporting_policy",
+        ["full", "terminal_only", "disabled"],
+    )
     def test_validate_workflow_progress_reporting_policy(
         self,
         reporting_policy: str,
@@ -104,7 +107,7 @@ class TestValidateSettings:
             }
         )
 
-    @pytest.mark.parametrize("reporting_policy", ["sampled", "terminal_only", "", True, None])
+    @pytest.mark.parametrize("reporting_policy", ["sampled", "", True, None])
     def test_validate_workflow_progress_reporting_policy_rejects_unsupported_values(
         self,
         reporting_policy: object,

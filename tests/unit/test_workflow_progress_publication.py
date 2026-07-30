@@ -334,6 +334,69 @@ def test_terminal_adapter_preserves_a_mid_graph_failure() -> None:
 
 
 @pytest.mark.parametrize(
+    ("outcome", "expected_percent"),
+    [("SUCCEEDED", 100.0), ("FAILED", 0.0)],
+)
+def test_terminal_only_adapter_reports_declared_counts_without_discovery(
+    outcome: str,
+    expected_percent: float,
+) -> None:
+    identity = _identity()
+
+    summary = publication.prepare_terminal_only_workflow_progress_summary(
+        identity,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        declared_node_count=12,
+        declared_edge_count=11,
+        outcome=outcome,
+        started_at=1_785_365_100.0,
+        finished_at=1_785_365_104.0,
+        detail_days=7,
+    )
+
+    assert summary["reporting_policy"] == "terminal_only"
+    assert summary["state"] == outcome
+    assert summary["node_counts"] == {
+        "declared": 12,
+        "discovered": 0,
+        "retained_topology": 0,
+        "retained_detail": 0,
+        "pending": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+    }
+    assert summary["edge_counts"] == {
+        "declared": 11,
+        "discovered": 0,
+        "retained_topology": 0,
+    }
+    assert summary["progress_percent"] == expected_percent
+    assert summary["topology_version"] is None
+    assert summary["detail_revision"] is None
+    assert summary["detail"] == {
+        "availability": "OMITTED_BY_POLICY",
+        "complete": False,
+        "truncation_reasons": [],
+    }
+    assert summary["storage"] == {"kind": "database", "manifest_id": None}
+    assert summary["retention"] == {
+        "detail_days": 7,
+        "detail_expires_at": None,
+    }
+    assert summary["terminal"]["outcome"] == outcome
+    assert summary["terminal"]["finished_at"] == summary["timestamps"]["finished_at"]
+    assert (
+        deserialize_workflow_progress_summary(
+            json.dumps(summary),
+            expected_identity=identity,
+        )["state"]
+        == outcome
+    )
+
+
+@pytest.mark.parametrize(
     ("mutate", "reason"),
     [
         (
