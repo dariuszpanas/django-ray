@@ -1050,19 +1050,24 @@ class TestExecutionsAPI:
         response = client.get("/api/executions/99999")
         assert response.status_code == 404
 
-    def test_delete_execution(self, client):
-        """Test deleting an execution."""
+    def test_delete_execution_is_not_a_supported_lifecycle_operation(self, client):
+        """A REST client cannot erase the durable row behind active Ray work."""
         task = RayTaskExecution.objects.create(
             task_id="test-delete",
             callable_path="test.task",
-            state=TaskState.QUEUED,
+            state=TaskState.RUNNING,
         )
 
         response = client.delete(f"/api/executions/{task.pk}")
-        assert response.status_code == 200
+        assert response.status_code == 405
+        assert RayTaskExecution.objects.filter(pk=task.pk, state=TaskState.RUNNING).exists()
 
-        # Verify deleted
-        assert not RayTaskExecution.objects.filter(pk=task.pk).exists()
+    def test_openapi_does_not_advertise_execution_deletion(self, client):
+        """The reusable sample contract exposes only the lifecycle-safe detail read."""
+        schema_response = client.get("/api/openapi.json")
+        assert schema_response.status_code == 200
+        execution_path = schema_response.json()["paths"]["/api/executions/{execution_id}"]
+        assert set(execution_path) == {"get"}
 
     def test_cancel_queued_execution(self, client):
         """Test cancelling a queued execution."""

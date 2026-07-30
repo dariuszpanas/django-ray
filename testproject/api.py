@@ -799,14 +799,6 @@ def get_execution(request, execution_id: int):
     return task
 
 
-@api.delete("/executions/{execution_id}", response=MessageSchema, tags=["Admin"])
-def delete_execution(request, execution_id: int):
-    """Delete an execution record."""
-    task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
-    task.delete()
-    return {"message": f"Execution {execution_id} deleted"}
-
-
 @api.post("/executions/{execution_id}/cancel", response=TaskExecutionSchema, tags=["Admin"])
 def cancel_execution(request, execution_id: int):
     """Cancel a queued or running task execution."""
