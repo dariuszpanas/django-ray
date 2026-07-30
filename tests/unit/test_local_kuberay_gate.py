@@ -946,6 +946,7 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
     assert gate.evidence.task_state == "SUCCEEDED"
     assert gate.evidence.task_result == 5
     assert gate.evidence.api_execution_delete_rejected is True
+    assert gate.evidence.api_legacy_workflow_graph_absent is True
 
 
 @pytest.mark.parametrize(
@@ -3165,6 +3166,7 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.web_restart_count = cast(Any, token)
     evidence.task_result = token
     evidence.api_execution_delete_rejected = cast(Any, token)
+    evidence.api_legacy_workflow_graph_absent = cast(Any, token)
     evidence.runtime_env_encryption_overlay = cast(Any, token)
     evidence.runtime_env_encryption_canary = cast(Any, token)
     evidence.runtime_env_encryption_envelope = cast(Any, token)
@@ -3593,6 +3595,7 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
     assert gate.evidence.task_state == "SUCCEEDED"
     assert gate.evidence.task_result == 5
     assert gate.evidence.api_execution_delete_rejected is True
+    assert gate.evidence.api_legacy_workflow_graph_absent is True
     assert calls[:4] == [
         ("/api/enqueue/add/2/3", "POST", False),
         ("/api/executions/stats", "GET", False),
@@ -3632,6 +3635,34 @@ def test_api_smoke_rejects_an_openapi_execution_delete() -> None:
     gate._http = request  # type: ignore[method-assign]
 
     with pytest.raises(ValueError, match="advertises unsafe DELETE"):
+        gate._verify_api()
+
+
+def test_api_smoke_rejects_the_legacy_workflow_graph_in_openapi() -> None:
+    gate = LocalKubeRayGate(_config())
+
+    def request(
+        path: str,
+        *,
+        method: str,
+        headers: dict[str, str] | None = None,
+        response_limit: int = MAX_OUTPUT_CHARACTERS,
+    ) -> tuple[int, bytes]:
+        if path == "/api/openapi.json":
+            assert response_limit > MAX_OUTPUT_CHARACTERS
+            return 200, json.dumps(
+                {
+                    "paths": {
+                        "/api/executions/{execution_id}": {"get": {}},
+                        "/api/cluster/workflows/{task_id}/graph": {"get": {}},
+                    }
+                }
+            ).encode()
+        return 401, b"{}"
+
+    gate._http = request  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="removed legacy workflow graph"):
         gate._verify_api()
 
 
@@ -4912,6 +4943,7 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.task_state = "SUCCEEDED"
     gate.evidence.task_result = 5
     gate.evidence.api_execution_delete_rejected = True
+    gate.evidence.api_legacy_workflow_graph_absent = True
     gate.evidence.runtime_env_encryption_overlay = True
     gate.evidence.runtime_env_encryption_canary = True
     gate.evidence.runtime_env_encryption_envelope = True
@@ -4987,6 +5019,7 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.task_state = "SUCCEEDED"
     gate.evidence.task_result = 5
     gate.evidence.api_execution_delete_rejected = True
+    gate.evidence.api_legacy_workflow_graph_absent = True
     gate.evidence.runtime_env_encryption_overlay = True
     gate.evidence.runtime_env_encryption_canary = True
     gate.evidence.runtime_env_encryption_envelope = True
@@ -5058,6 +5091,7 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("docker_host") == gate.evidence.docker_host
     assert reconstructed("app_image_id") == IMAGE_ID
     assert reconstructed("api_execution_delete_rejected") == "True"
+    assert reconstructed("api_legacy_workflow_graph_absent") == "True"
     assert reconstructed("runtime_env_encryption_canary") == "True"
     assert reconstructed("runtime_env_encryption_envelope") == "True"
     assert reconstructed("runtime_env_encryption_retry_preserved") == "True"

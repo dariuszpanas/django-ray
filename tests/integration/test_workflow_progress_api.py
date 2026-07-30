@@ -423,9 +423,6 @@ def test_terminal_only_api_exposes_summary_without_detail_or_graph_links(
             assert payload["found"] is False
             assert payload["item"] is None
 
-    legacy_graph = client.get(f"/api/cluster/workflows/{execution.task_id}/graph")
-    assert legacy_graph.status_code == 404
-
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
@@ -463,21 +460,60 @@ def test_workflow_read_errors_keep_distinct_bounded_codes(
 
 
 @pytest.mark.django_db
-def test_legacy_graph_route_is_deprecated_but_remains_compatible(
+def test_removed_legacy_graph_contract_is_absent_from_http_and_openapi(
     client: Client,
     workflow_execution: RayTaskExecution,
 ) -> None:
-    execution = workflow_execution
-    execution.progress_data = (
+    response = client.get(f"/api/cluster/workflows/{workflow_execution.task_id}/graph")
+    schema_response = client.get("/api/openapi.json")
+
+    assert response.status_code == 404
+    assert schema_response.status_code == 200
+    schema = schema_response.json()
+    assert "/api/cluster/workflows/{task_id}/graph" not in schema["paths"]
+    assert "WorkflowGraphSchema" not in schema["components"]["schemas"]
+
+
+@pytest.mark.django_db
+def test_legacy_row_remains_unchanged_and_aggregate_readable(
+    client: Client,
+    workflow_execution: RayTaskExecution,
+) -> None:
+    legacy_payload = (
         '{"schema_version":1,"revision":1,"state":"RUNNING",'
-        '"total_nodes":0,"completed_nodes":0,"failed_nodes":0,'
-        '"running_nodes":0,"pending_nodes":0,"progress_percent":0.0,'
-        '"updated_at":0.0,"graph":{"nodes":[],"edges":[]},'
+        '"total_nodes":2,"completed_nodes":1,"failed_nodes":0,'
+        '"running_nodes":1,"pending_nodes":0,"progress_percent":50.0,'
+        '"updated_at":123.5,"graph":{"nodes":[{"secret":"not-returned"}],'
+        '"edges":[{"source":"0.0","target":"0.1"}]},'
         '"recent_events":[]}'
     )
-    execution.save(update_fields=["progress_data"])
+    workflow_execution.progress_data = legacy_payload
+    workflow_execution.save(update_fields=["progress_data"])
 
-    response = client.get(f"/api/cluster/workflows/{execution.task_id}/graph")
+    response = client.get(f"/api/cluster/workflows/{workflow_execution.task_id}")
 
     assert response.status_code == 200
-    assert response.json()["graph"] == {"nodes": [], "edges": []}
+    payload = response.json()
+    assert payload["source_schema_version"] == 1
+    assert payload["availability"] == "NOT_REPORTED"
+    assert payload["complete"] is False
+    assert payload["summary"]["node_counts"] == {
+        "declared": 2,
+        "discovered": 2,
+        "retained_topology": 0,
+        "retained_detail": 0,
+        "pending": 0,
+        "running": 1,
+        "succeeded": 1,
+        "failed": 0,
+    }
+    assert payload["summary"]["edge_counts"] == {
+        "declared": 1,
+        "discovered": 1,
+        "retained_topology": 0,
+    }
+    assert "graph" not in payload["summary"]
+    assert "secret" not in json.dumps(payload)
+
+    workflow_execution.refresh_from_db()
+    assert workflow_execution.progress_data == legacy_payload

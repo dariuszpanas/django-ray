@@ -587,8 +587,8 @@ Terminal-only publication is observational. Summary construction, validation, or
 database attachment failure cannot replace the workflow result or application error.
 A stale lifecycle fence accepts neither the terminal task transition nor its summary.
 The authorized summary API and Admin show the terminal record explicitly, while
-topology pages return empty omitted-by-policy responses and the legacy graph plus Admin
-execution graph stay unavailable.
+topology pages return empty omitted-by-policy responses and the Admin execution graph
+stays unavailable.
 
 Use disabled reporting when no workflow-progress summary is needed:
 

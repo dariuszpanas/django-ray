@@ -46,7 +46,6 @@ from django_ray.workflow_progress_reads import (
     list_workflow_topology_edges,
     list_workflow_topology_nodes,
 )
-from django_ray.workflow_progress_summary import WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION
 
 # Import tasks that use Django 6's @task decorator
 from testproject import tasks
@@ -76,10 +75,6 @@ _WORKFLOW_OBSERVABILITY_CALLABLES = frozenset(
 def _authorize_example_workflow(execution: RayTaskExecution) -> bool:
     """Apply the sample's explicit object policy after bearer authentication."""
     return execution.callable_path in _WORKFLOW_OBSERVABILITY_CALLABLES
-
-
-def _workflow_observability_execution(task_id: str) -> RayTaskExecution:
-    return get_object_or_404(_workflow_observability_executions(), task_id=task_id)
 
 
 def _bounded_workflow_observability_execution(task_id: str) -> RayTaskExecution:
@@ -280,31 +275,6 @@ class WorkflowResultSchema(Schema):
     @classmethod
     def redact_workflow_error(cls, value):
         return redact_text(value) if value is not None else None
-
-
-class WorkflowGraphSchema(Schema):
-    """UI-ready durable workflow graph and aggregate state."""
-
-    task_id: str
-    task_state: str
-    schema_version: int
-    run_identity: dict | None
-    revision: int
-    workflow_state: str
-    total_nodes: int
-    completed_nodes: int
-    failed_nodes: int
-    running_nodes: int
-    pending_nodes: int
-    progress_percent: float
-    updated_at: float
-    graph: dict
-    recent_events: list[dict]
-
-    @field_validator("graph", "recent_events", mode="before")
-    @classmethod
-    def redact_graph_payload(cls, value):
-        return redact_value(value)
 
 
 class WorkflowNodeSchema(Schema):
@@ -1438,47 +1408,6 @@ def get_cluster_workflow_node_details(
         )
     except WorkflowProgressReadError as error:
         return _workflow_read_error_response(error)
-
-
-@api.get(
-    "/cluster/workflows/{task_id}/graph",
-    response=WorkflowGraphSchema,
-    tags=["Workflows"],
-    deprecated=True,
-)
-def get_cluster_workflow_graph(request, task_id: str):
-    """Return the legacy complete graph; new clients use bounded page routes."""
-    execution = _workflow_observability_execution(task_id)
-    if not _authorize_example_workflow(execution):
-        raise Http404("Workflow was not found")
-    try:
-        progress = get_workflow_progress(execution)
-    except WorkflowObservabilityError as exc:
-        raise Http404(str(exc)) from exc
-    if progress is None:
-        raise Http404("Workflow graph is not available yet")
-    if progress.get("schema_version") == WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION:
-        raise Http404("Workflow graph detail is not available through the bounded summary")
-    return {
-        "task_id": execution.task_id,
-        "task_state": execution.state,
-        "schema_version": progress.get("schema_version", 1),
-        "run_identity": progress.get("run_identity"),
-        "revision": progress.get("revision", 0),
-        "workflow_state": progress.get("state", "RUNNING"),
-        "total_nodes": progress.get("total_nodes", 0),
-        "completed_nodes": progress.get("completed_nodes", 0),
-        "failed_nodes": progress.get("failed_nodes", 0),
-        "running_nodes": progress.get("running_nodes", 0),
-        "pending_nodes": progress.get("pending_nodes", 0),
-        "progress_percent": progress.get("progress_percent", 0.0),
-        "updated_at": progress.get("updated_at", 0.0),
-        "graph": progress.get(
-            "graph",
-            {"nodes": progress.get("nodes", []), "edges": []},
-        ),
-        "recent_events": progress.get("recent_events", []),
-    }
 
 
 @api.get(

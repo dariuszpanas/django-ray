@@ -316,6 +316,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controls remain supported. A future removal still requires explicit release notes and
   migration guidance.
 
+### Removed
+
+- The pre-1.0 testproject
+  `GET /api/cluster/workflows/{task_id}/graph` complete-graph endpoint has been removed
+  without a compatibility alias. Clients should use the bounded workflow summary,
+  topology-node, topology-edge, node-detail-page, and indexed-node routes. Existing
+  schema-v1/v2 database rows remain unchanged and aggregate-readable, and the private
+  bounded Admin graph remains available.
+
 ### Fixed
 
 - The bundled testproject no longer exposes direct execution-row deletion. Removing a
