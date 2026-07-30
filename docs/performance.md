@@ -110,6 +110,13 @@ reporting, aggregate producer/mailbox admission, bounded actor-to-preparer drain
 live cost attribution, and large-fan-out slow-consumer evidence remain separate #79
 work.
 
+The bundled `ObservabilityDemoUser` makes the three shipped policies directly
+comparable without becoming a load benchmark. `make loadtest-demo` runs one tiny
+nested workflow at a time under full, terminal-only, and disabled reporting, waits for
+durable completion, and validates the bounded summary contract before continuing.
+Stable per-policy Locust labels separate enqueue, terminal polling, and summary-read
+latency. The one-user, one-user-per-second defaults remain intentionally conservative.
+
 This is faster than making every leaf a Django task, but it changes semantics:
 
 - a leaf does not have an independent durable retry record;

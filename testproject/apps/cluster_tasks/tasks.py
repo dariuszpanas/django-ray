@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from typing import Any
+from typing import Any, Literal
 
 from django.tasks import task
 
@@ -109,9 +109,9 @@ def complex_workflow_benchmark(
     slow_seconds: float = 0.5,
     failure_branch: str | None = None,
     failure_item: int | None = None,
-    reporting_policy: str | None = None,
+    reporting_policy: Literal["full", "terminal_only", "disabled"] | None = None,
 ) -> dict[str, Any]:
-    """Run nested fast and slow workflow branches behind one durable task."""
+    """Run nested branches with an optional explicit workflow reporting policy."""
     if not 1 <= fast_items <= 100 or not 1 <= slow_items <= 100:
         raise ValueError("branch item counts must be between 1 and 100")
     if not 0.01 <= fast_seconds <= 10 or not 0.01 <= slow_seconds <= 10:
@@ -122,8 +122,8 @@ def complex_workflow_benchmark(
         failure_branch=failure_branch,
         failure_item=failure_item,
     )
-    if reporting_policy not in {None, "full", "terminal_only"}:
-        raise ValueError("reporting_policy must be 'full' or 'terminal_only'")
+    if reporting_policy not in {None, "full", "terminal_only", "disabled"}:
+        raise ValueError("reporting_policy must be 'full', 'terminal_only', or 'disabled'")
 
     try:
         workflow_options: dict[str, Any] = {"use_ray": True}

@@ -228,10 +228,10 @@ def run_complex_branch_workflow(
     *,
     failure_branch: str | None = None,
     failure_item: int | None = None,
-    reporting_policy: Literal["full", "terminal_only"] | None = None,
+    reporting_policy: Literal["full", "terminal_only", "disabled"] | None = None,
     use_ray: bool | None = None,
 ) -> dict[str, Any]:
-    """Run nested fast and slow branches and record total wall time."""
+    """Run nested branches with an optional per-invocation reporting policy."""
     started_at = time.perf_counter()
     workflow = (
         complex_branch_workflow

@@ -124,7 +124,9 @@ def test_observability_demo_rotates_required_scenarios_deterministically() -> No
         "show_priority_task",
         "show_sync_task",
         "show_cluster_search",
-        "show_workflow",
+        "show_workflow_full",
+        "show_workflow_terminal_only",
+        "show_workflow_disabled",
         "show_runtime_env",
         "show_ml_inference",
         "show_monitoring",
@@ -214,15 +216,6 @@ def test_observability_demo_rotates_required_scenarios_deterministically() -> No
             ("cluster search", 60.0),
         ),
         (
-            "show_workflow",
-            (
-                "/api/cluster/workflow-benchmark?num_items=3&seconds_per_item=0.25",
-                "/api/cluster/workflow-benchmark",
-                None,
-            ),
-            ("tiny workflow", 60.0),
-        ),
-        (
             "show_runtime_env",
             (
                 "/api/cluster/runtime-env/probe?profile=thin",
@@ -293,6 +286,107 @@ def test_observability_demo_routes_and_resource_caps_are_stable(
     ]
 
 
+@pytest.mark.parametrize("reporting_policy", ["full", "terminal_only", "disabled"])
+def test_observability_demo_compares_workflow_policies_with_stable_labels(
+    reporting_policy: locustfile._WorkflowReportingPolicy,
+) -> None:
+    user = object.__new__(locustfile.ObservabilityDemoUser)
+    user.environment = SimpleNamespace(process_exit_code=None)
+    requests: list[tuple[str, str | None, dict[str, Any] | None]] = []
+    follows: list[tuple[dict[str, str] | None, str, float]] = []
+    summaries: list[tuple[str, str]] = []
+
+    def record_post(
+        endpoint: str,
+        name: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        requests.append((endpoint, name, payload))
+        return {"task_id": f"{reporting_policy}-task"}
+
+    def record_follow(
+        result: dict[str, str] | None,
+        *,
+        scenario_name: str,
+        timeout_seconds: float = 60.0,
+    ) -> dict[str, str]:
+        follows.append((result, scenario_name, timeout_seconds))
+        return {"task_id": f"{reporting_policy}-task", "status": "SUCCESSFUL"}
+
+    def record_summary(
+        task_id: str,
+        *,
+        expected_policy: locustfile._WorkflowReportingPolicy,
+    ) -> dict[str, str]:
+        summaries.append((task_id, expected_policy))
+        return {"availability": "validated"}
+
+    user._post_task = record_post  # type: ignore[method-assign]
+    user._submit_and_follow = record_follow  # type: ignore[method-assign]
+    user.workflow_policy_summary = record_summary  # type: ignore[method-assign]
+
+    getattr(user, f"show_workflow_{reporting_policy}")()
+
+    assert requests == [
+        (
+            "/api/cluster/complex-workflow"
+            "?fast_items=2&slow_items=1&fast_seconds=0.02&slow_seconds=0.3"
+            f"&reporting_policy={reporting_policy}",
+            f"/api/cluster/complex-workflow ({reporting_policy})",
+            None,
+        )
+    ]
+    assert follows == [
+        (
+            {"task_id": f"{reporting_policy}-task"},
+            f"workflow {reporting_policy}",
+            60.0,
+        )
+    ]
+    assert summaries == [(f"{reporting_policy}-task", reporting_policy)]
+    assert user.environment.process_exit_code is None
+
+
+def test_observability_demo_stops_after_invalid_workflow_policy_summary() -> None:
+    user = object.__new__(locustfile.ObservabilityDemoUser)
+    user.environment = SimpleNamespace(process_exit_code=None)
+    user.complex_workflow = lambda **_kwargs: {"task_id": "workflow-task"}  # type: ignore[method-assign]
+    user._submit_and_follow = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: {
+            "task_id": "workflow-task",
+            "status": "SUCCESSFUL",
+        }
+    )
+    user.workflow_policy_summary = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    with pytest.raises(StopTest, match="summary was indeterminate"):
+        user.show_workflow_disabled()
+
+    assert user.environment.process_exit_code == 1
+
+
+def test_observability_demo_stops_disabled_policy_after_task_failure() -> None:
+    user = object.__new__(locustfile.ObservabilityDemoUser)
+    user.environment = SimpleNamespace(process_exit_code=None)
+    summary_reads: list[str] = []
+    user.complex_workflow = lambda **_kwargs: {"task_id": "workflow-task"}  # type: ignore[method-assign]
+    user._poll_task_to_terminal = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: {
+            "task_id": "workflow-task",
+            "status": "FAILED",
+        }
+    )
+    user.workflow_policy_summary = (  # type: ignore[method-assign]
+        lambda task_id, **_kwargs: summary_reads.append(task_id)
+    )
+
+    with pytest.raises(StopTest, match="unsuccessful terminal state FAILED"):
+        user.show_workflow_disabled()
+
+    assert user.environment.process_exit_code == 1
+    assert summary_reads == []
+
+
 def test_observability_demo_monitoring_checks_stats_then_metrics() -> None:
     user = object.__new__(locustfile.ObservabilityDemoUser)
     checks: list[str] = []
@@ -315,13 +409,14 @@ def test_observability_demo_follows_every_successful_enqueue() -> None:
         )
     )
 
-    user._submit_and_follow(
+    result = user._submit_and_follow(
         {"task_id": "demo-task-id"},
         scenario_name="demo family",
         timeout_seconds=12.0,
     )
 
     assert polls == [("demo-task-id", "demo family", 12.0)]
+    assert result == {"task_id": "demo-task-id", "status": "SUCCEEDED"}
 
 
 @pytest.mark.parametrize("enqueue_result", [None, {"task_id": "demo-task-id"}])
@@ -408,10 +503,18 @@ def test_capacity_targets_select_one_intended_user_class(
 
 
 class _Response:
-    def __init__(self, payload: dict[str, Any], *, text: str = "") -> None:
-        self.status_code = 200
+    def __init__(
+        self,
+        payload: Any,
+        *,
+        text: str = "",
+        status_code: int = 200,
+        json_error: bool = False,
+    ) -> None:
+        self.status_code = status_code
         self._payload = payload
         self.text = text
+        self.json_error = json_error
         self.failures: list[str] = []
         self.successes = 0
 
@@ -421,7 +524,9 @@ class _Response:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def json(self) -> dict[str, Any]:
+    def json(self) -> Any:
+        if self.json_error:
+            raise ValueError("invalid JSON")
         return self._payload
 
     def success(self) -> None:
@@ -435,11 +540,13 @@ class _PollingClient:
     def __init__(self, responses: list[_Response]) -> None:
         self.responses = responses
         self.calls = 0
+        self.request_args: list[tuple[object, ...]] = []
         self.request_kwargs: list[dict[str, object]] = []
 
     def get(self, *args: object, **kwargs: object) -> _Response:
         response = self.responses[self.calls]
         self.calls += 1
+        self.request_args.append(args)
         self.request_kwargs.append(kwargs)
         return response
 
@@ -448,6 +555,138 @@ def _polling_user(*responses: _Response) -> locustfile.AuthenticatedTaskUser:
     user = object.__new__(locustfile.AuthenticatedTaskUser)
     user.client = _PollingClient(list(responses))  # type: ignore[assignment]
     return user
+
+
+@pytest.mark.parametrize(
+    ("reporting_policy", "availability", "complete", "summary"),
+    [
+        (
+            "full",
+            "AVAILABLE",
+            True,
+            {
+                "reporting_policy": "full",
+                "state": "SUCCEEDED",
+                "detail": {"availability": "AVAILABLE", "complete": True},
+            },
+        ),
+        (
+            "terminal_only",
+            "OMITTED_BY_POLICY",
+            False,
+            {
+                "reporting_policy": "terminal_only",
+                "state": "SUCCEEDED",
+                "detail": {
+                    "availability": "OMITTED_BY_POLICY",
+                    "complete": False,
+                },
+            },
+        ),
+        ("disabled", "DISABLED", False, None),
+    ],
+)
+def test_workflow_policy_summary_accepts_each_bounded_terminal_contract(
+    reporting_policy: locustfile._WorkflowReportingPolicy,
+    availability: str,
+    complete: bool,
+    summary: dict[str, Any] | None,
+) -> None:
+    payload = {
+        "task_id": "workflow-task",
+        "availability": availability,
+        "complete": complete,
+        "source_schema_version": None if reporting_policy == "disabled" else 3,
+        "summary": summary,
+    }
+    response = _Response(payload)
+    user = _polling_user(response)
+
+    result = user.workflow_policy_summary(
+        "workflow-task",
+        expected_policy=reporting_policy,
+    )
+
+    assert result == payload
+    assert response.successes == 1
+    assert response.failures == []
+    assert user.client.request_args == [
+        ("/api/cluster/workflows/workflow-task",),
+    ]
+    assert user.client.request_kwargs == [
+        {
+            "name": f"/api/cluster/workflows/[task_id] ({reporting_policy})",
+            "catch_response": True,
+            "timeout": locustfile._REQUEST_TIMEOUT_SECONDS,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "task_id": "different-task",
+            "availability": "DISABLED",
+            "complete": False,
+            "source_schema_version": None,
+            "summary": None,
+        },
+        {
+            "task_id": "workflow-task",
+            "availability": "AVAILABLE",
+            "complete": True,
+            "source_schema_version": None,
+            "summary": None,
+        },
+        {
+            "task_id": "workflow-task",
+            "availability": "DISABLED",
+            "complete": False,
+            "source_schema_version": 3,
+            "summary": {"reporting_policy": "disabled"},
+        },
+    ],
+)
+def test_workflow_policy_summary_rejects_mismatched_bounded_contracts(
+    payload: dict[str, Any],
+) -> None:
+    response = _Response(payload)
+    user = _polling_user(response)
+
+    result = user.workflow_policy_summary(
+        "workflow-task",
+        expected_policy="disabled",
+    )
+
+    assert result is None
+    assert response.successes == 0
+    assert response.failures == [
+        "disabled workflow summary did not match its bounded policy contract"
+    ]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _Response({}, status_code=503),
+        _Response({}, json_error=True),
+        _Response([]),
+    ],
+)
+def test_workflow_policy_summary_rejects_unusable_responses(
+    response: _Response,
+) -> None:
+    user = _polling_user(response)
+
+    result = user.workflow_policy_summary(
+        "workflow-task",
+        expected_policy="full",
+    )
+
+    assert result is None
+    assert response.successes == 0
+    assert response.failures
 
 
 def test_metrics_request_uses_shared_client_timeout() -> None:

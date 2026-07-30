@@ -1262,9 +1262,9 @@ def cluster_complex_workflow(
     slow_seconds: float = 0.5,
     failure_branch: Literal["fast", "slow"] | None = None,
     failure_item: int | None = None,
-    reporting_policy: Literal["full", "terminal_only"] | None = None,
+    reporting_policy: Literal["full", "terminal_only", "disabled"] | None = None,
 ):
-    """Run nested branches with optional terminal-summary-only reporting."""
+    """Run nested branches with an optional explicit workflow reporting policy."""
     try:
         cluster_tasks.validate_complex_workflow_failure_controls(
             fast_items=fast_items,

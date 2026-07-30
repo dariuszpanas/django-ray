@@ -148,7 +148,8 @@ the next task family. One cycle covers:
 - basic and deliberately slow default-queue tasks;
 - a high-priority task;
 - a synchronous task;
-- a small distributed search and three-leaf workflow;
+- a small distributed search and three tiny nested workflows that compare full,
+  terminal-only, and disabled reporting;
 - a lightweight `thin` RuntimeEnv probe;
 - a small ML inference task;
 - authenticated execution statistics and Prometheus metrics.
@@ -157,6 +158,11 @@ It intentionally excludes failure injection, CPU benchmarks, NumPy RuntimeEnv in
 bursts, and stress workloads. Sync tasks are visible in the task worker logs and Django admin but
 do not appear in Ray. The default, priority, cluster/workflow, RuntimeEnv, and ML tasks pass through
 Ray and can be inspected on the [local Ray dashboard](http://localhost:30265).
+The three workflow scenarios use separate stable Locust labels for enqueue, terminal
+polling, and bounded-summary reads. Full reporting must expose complete pilot detail,
+terminal-only must expose its one summary with detail omitted by policy, and disabled
+must report `DISABLED` without fabricating a summary. The demo stops instead of moving
+to another task when any of those contracts is missing or malformed.
 
 Load the current Kubernetes secret into the Locust process without printing it, run the five-minute
 one-user demo, and remove the shell variable afterwards.

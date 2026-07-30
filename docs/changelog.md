@@ -254,6 +254,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The authenticated one-user Locust observability demo now compares tiny nested
+  workflows under full, terminal-only, and disabled reporting. Stable per-policy
+  request labels separate enqueue, terminal polling, and bounded-summary reads, and
+  the demo stops when a durable policy contract is missing or malformed.
 - Documentation now follows the operating system color preference by default and offers explicit
   light, dark, and automatic controls. The existing light presentation keeps a high-contrast blue
   link treatment, while the new dark presentation shares the testproject's neutral black and grey
