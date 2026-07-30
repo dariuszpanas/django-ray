@@ -305,6 +305,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The repository-root and published `llms.txt` agent guides now share one exact
+  content contract, restoring current workflow bounds, schema-v3 pilot status,
+  numeric priority behavior, Celery migration, durable-input, and RuntimeEnv
+  encryption guidance while preventing the tracked copies from drifting again.
 - Changelog integrity checks now keep all post-release work under `Unreleased`, match
   dated headings and comparison chains to the complete Git tag inventory, and preserve
   one fully validated release-candidate path before its tag is cut.

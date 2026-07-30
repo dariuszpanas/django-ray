@@ -73,6 +73,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - `src/django_ray/workflows.py`: workflow signature construction and execution.
 - `src/django_ray/runtime/runtime_env.py`: profile validation, inheritance, hashing,
   and local-path preparation.
+- `src/django_ray/runtime/runtime_env_encryption.py`: key validation, HKDF
+  derivation, and strict AES-256-GCM storage envelopes.
 - `src/django_ray/runtime/compiled_graph_lifecycle.py`: deterministic Ray-free
   compiled session and invocation state reducer.
 - `src/django_ray/runner/ray_core.py`: low-overhead Ray Core submission.
@@ -112,9 +114,11 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - RuntimeEnv is dependency isolation inside one trust boundary, not tenant isolation.
 - Durable RuntimeEnv snapshots default to canonical plaintext writes. Readers always
   accept supported plaintext and AES-256-GCM envelope rows, so encrypted rollout is
-  reader-first and a binary downgrade is unsafe after the first encrypted row.
+  reader-first and a binary downgrade is unsafe while any encrypted row remains.
 - Prefer a separately managed RuntimeEnv encryption key ring. The `django-secret`
-  HKDF fallback is explicit only, and every dedicated key or
-  `SECRET_KEY_FALLBACKS` entry must remain available while a durable row can name it.
-  The public plaintext hash still reveals equality, and encryption does not protect
-  Ray transport, process memory, arguments, results, progress, or logs.
+  HKDF fallback is explicit only. Retain every dedicated key while a durable row can
+  name its key ID. The stable `django-secret` envelope ID does not encode fallback
+  position, so retain every current or fallback Django secret candidate that a row may
+  depend on for the full RuntimeEnv row lifetime. The public plaintext hash still
+  reveals equality, and encryption does not protect Ray transport, process memory,
+  arguments, results, progress, or logs.
