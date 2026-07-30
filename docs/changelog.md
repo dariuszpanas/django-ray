@@ -349,6 +349,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Live-cluster fault scenarios now keep one visible serial CI job and one disposable Ray
+  cluster while executing in fresh pytest processes with individual hard deadlines,
+  diagnostic thread dumps, and explicit node-ID timing markers. A bounded host-side
+  preflight now proves the Ray Client proxy and per-client backend without propagating
+  the runner's implicit `uv run` environment into generic cluster containers, while
+  bounded, credential-redacted internal Ray Client error logs remain available before
+  cleanup. The package-free submission smoke now installs the testproject's declared
+  remote dependencies explicitly rather than receiving testproject-only packages such
+  as Unfold from the CI driver. A Ray Client disconnect can no longer contaminate the
+  following cancellation scenario or hide its blocked phase behind the aggregate job
+  timeout.
 - Full-reporting Ray workflows now retain and retry one delayed terminal progress
   snapshot within the configurable total flush deadline, allowing progress-actor
   startup or queued leaf events to complete after execution finishes. If a current

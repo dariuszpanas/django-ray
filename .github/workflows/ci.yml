@@ -293,6 +293,8 @@ jobs:
       DJANGO_RAY_LIVE_RAY_ADDRESS: ray://127.0.0.1:10001
       DJANGO_RAY_LIVE_MIN_NODES: "2"
       DJANGO_RAY_LIVE_WORKING_DIR_URI: file:///tmp/django-ray-source.zip
+      PYTHONUNBUFFERED: "1"
+      RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -349,8 +351,146 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Run live cluster fault tests
-        run: uv run pytest tests/integration/test_live_failure_injection.py -m live_cluster -v
+      - name: Verify Ray Client readiness
+        timeout-minutes: 3
+        run: |
+          readiness_started_at="$(date +%s)"
+          readiness_ready=0
+          for attempt in 1 2; do
+            echo "::group::Ray Client readiness attempt $attempt/2"
+            echo "RAY_CLIENT_READINESS_START attempt=$attempt/2"
+            attempt_started_at="$(date +%s)"
+            set +e
+            timeout --signal=TERM --kill-after=5s 70s \
+              env RAY_CLIENT_INITIAL_CONNECTION_TIMEOUT_S=3 \
+              RAY_CLIENT_MAX_CONNECTION_TIMEOUT_S=3 \
+              .venv/bin/python - "$attempt" <<'PY'
+          import faulthandler
+          import logging
+          import os
+          import sys
+
+          import ray
+
+          attempt = sys.argv[1]
+          required_nodes = int(os.environ["DJANGO_RAY_LIVE_MIN_NODES"])
+          faulthandler.dump_traceback_later(45)
+          try:
+              ray.init(
+                  address=os.environ["DJANGO_RAY_LIVE_RAY_ADDRESS"],
+                  logging_level=logging.ERROR,
+              )
+              live_nodes = sum(bool(node.get("Alive")) for node in ray.nodes())
+              if live_nodes < required_nodes:
+                  raise RuntimeError(
+                      f"Ray Client saw {live_nodes} live node(s); "
+                      f"requires {required_nodes}"
+                  )
+
+              @ray.remote
+              def readiness_probe():
+                  return "ready"
+
+              if ray.get(readiness_probe.remote(), timeout=10) != "ready":
+                  raise RuntimeError("Ray Client task probe returned the wrong value")
+              print(
+                  "RAY_CLIENT_READINESS_CONNECTED "
+                  f"attempt={attempt}/2 live_nodes={live_nodes}",
+                  flush=True,
+              )
+          finally:
+              ray.shutdown()
+              faulthandler.cancel_dump_traceback_later()
+          PY
+            status="$?"
+            set -e
+            attempt_elapsed="$(( $(date +%s) - attempt_started_at ))"
+            if [[ "$status" -eq 0 ]]; then
+              echo "RAY_CLIENT_READINESS_PASS attempt=$attempt/2 elapsed_seconds=$attempt_elapsed"
+              readiness_ready=1
+            else
+              echo "::warning title=Ray Client readiness retry::attempt $attempt/2 failed after ${attempt_elapsed}s (exit $status)."
+            fi
+            echo "::endgroup::"
+            if [[ "$readiness_ready" -eq 1 ]]; then
+              break
+            fi
+            if [[ "$attempt" -lt 2 ]]; then
+              sleep 2
+            fi
+          done
+          readiness_elapsed="$(( $(date +%s) - readiness_started_at ))"
+          if [[ "$readiness_ready" -ne 1 ]]; then
+            echo "::error title=Ray Client readiness exhausted::2 fresh-process attempts failed after ${readiness_elapsed}s."
+            exit 1
+          fi
+
+      - name: Run isolated live cluster fault scenarios
+        run: |
+          live_cluster_scenarios=(
+            "tests/integration/test_live_failure_injection.py::TestLiveFailureInjection::test_ray_core_runner_submits_project_code_to_generic_cluster"
+            "tests/integration/test_live_failure_injection.py::TestLiveFailureInjection::test_disconnect_retries_pending_ray_core_task"
+            "tests/integration/test_live_failure_injection.py::TestLiveFailureInjection::test_cancellation_finalizes_live_pending_task"
+          )
+          for scenario in "${live_cluster_scenarios[@]}"; do
+            echo "::group::Live cluster scenario: $scenario"
+            echo "LIVE_CLUSTER_SCENARIO_START node_id=$scenario"
+            started_at="$(date +%s)"
+            set +e
+            timeout --signal=TERM --kill-after=15s 165s \
+              .venv/bin/python -m pytest "$scenario" -m live_cluster -vv -s \
+              --setup-show -o faulthandler_timeout=90
+            status="$?"
+            set -e
+            elapsed_seconds="$(( $(date +%s) - started_at ))"
+            if [[ "$status" -eq 0 ]]; then
+              echo "LIVE_CLUSTER_SCENARIO_PASS node_id=$scenario elapsed_seconds=$elapsed_seconds"
+            elif [[ "$status" -eq 124 ]]; then
+              echo "::error title=Live cluster scenario timed out::$scenario exceeded the 165-second TERM deadline (180-second hard ceiling; elapsed ${elapsed_seconds}s; exit $status)."
+            elif [[ "$status" -eq 137 && "$elapsed_seconds" -ge 180 ]]; then
+              echo "::error title=Live cluster scenario timed out::$scenario reached the 180-second forced-kill ceiling (elapsed ${elapsed_seconds}s; exit $status)."
+            elif [[ "$status" -eq 137 ]]; then
+              echo "::error title=Live cluster scenario was killed early::$scenario received SIGKILL before the timeout ceiling (elapsed ${elapsed_seconds}s; exit $status)."
+            else
+              echo "::error title=Live cluster scenario failed::$scenario failed after $elapsed_seconds seconds (exit $status)."
+            fi
+            echo "::endgroup::"
+            if [[ "$status" -ne 0 ]]; then
+              exit "$status"
+            fi
+          done
+
+      - name: Show bounded Ray Client diagnostics
+        if: always()
+        run: |
+          (
+            docker exec ray-head bash -lc '
+              shopt -s nullglob
+              files=(/tmp/ray/session_latest/logs/ray_client_server*.err*)
+              emitted=0
+              for path in "${files[@]}"; do
+                [[ -s "$path" ]] || continue
+                emitted=1
+                printf "===== %s (%s bytes) =====\n" \
+                  "$(basename "$path")" "$(wc -c < "$path")"
+                tail -n 400 "$path"
+              done
+              if [[ "$emitted" -eq 0 ]]; then
+                echo "No non-empty ray_client_server*.err diagnostics found."
+              fi
+            ' 2>&1 || true
+          ) | python3 scripts/bounded_redact.py \
+            --max-chars 65536 \
+            --secret-env DJANGO_API_TOKEN \
+            --secret-env DJANGO_SECRET_KEY \
+            --secret-env DATABASE_URL \
+            --secret-env DATABASE_PASSWORD \
+            --secret-env POSTGRES_PASSWORD \
+            --secret-env GITHUB_TOKEN \
+            --secret-env RAY_JOB_HEADERS \
+            --secret-env AWS_ACCESS_KEY_ID \
+            --secret-env AWS_SECRET_ACCESS_KEY \
+            --secret-env AWS_SESSION_TOKEN
 
       - name: Show Ray container logs
         if: always()

@@ -185,7 +185,12 @@ The remainder preserves the normal suite's collected outcomes; it is not Postgre
 Compiled Graph execution evidence. The dedicated PostgreSQL job owns its backend proof. Native
 Compiled Graph proof belongs to the guarded local KubeRay pilot in issue #102, not a public hosted
 workflow. `live-cluster` remains outside the normal supported-Python selection and keeps its
-dedicated serial opt-in lane.
+dedicated serial opt-in lane. Its three scenarios share one disposable Ray cluster but execute in
+fresh sequential pytest processes with individual hard deadlines and diagnostic thread dumps; they
+do not communicate through pytest order, xdist, or workflow matrix shards. Before those processes
+start, one bounded host-side Ray Client preflight uses separate disposable drivers to prove the
+published proxy, per-client backend, two-node view, and trivial remote execution. No preflight
+driver state is shared with a scenario.
 
 Coverage is erased once before the first phase. Every phase, including hermetic, uses
 `--cov-append` against that proven-empty data path and does not enforce an intermediate floor. Only
