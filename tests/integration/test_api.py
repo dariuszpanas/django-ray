@@ -509,7 +509,59 @@ class TestEnqueueAPI:
         assert execution.callable_path == (
             "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"
         )
+        expected_kwargs = {
+            "fast_items": 3,
+            "slow_items": 2,
+            "fast_seconds": 0.01,
+            "slow_seconds": 0.05,
+        }
+        assert data["kwargs"] == expected_kwargs
+        assert json.loads(execution.kwargs_json) == expected_kwargs
         assert RayTaskExecution.objects.count() == 1
+
+    def test_enqueue_complex_workflow_accepts_deterministic_failure(self, client):
+        response = client.post(
+            "/api/cluster/complex-workflow"
+            "?fast_items=3&slow_items=2&fast_seconds=0.01&slow_seconds=0.05"
+            "&failure_branch=slow&failure_item=1"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        expected_kwargs = {
+            "fast_items": 3,
+            "slow_items": 2,
+            "fast_seconds": 0.01,
+            "slow_seconds": 0.05,
+            "failure_branch": "slow",
+            "failure_item": 1,
+        }
+        assert data["kwargs"] == expected_kwargs
+        execution = RayTaskExecution.objects.get(task_id=data["task_id"])
+        assert json.loads(execution.kwargs_json) == expected_kwargs
+        assert execution.attempt_number == 1
+        assert RayTaskExecution.objects.count() == 1
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "failure_branch=fast",
+            "failure_item=0",
+            "failure_branch=other&failure_item=0",
+            "failure_branch=fast&failure_item=-1",
+            "fast_items=2&failure_branch=fast&failure_item=2",
+            "slow_items=2&failure_branch=slow&failure_item=2",
+        ],
+    )
+    def test_enqueue_complex_workflow_rejects_invalid_failure_controls(
+        self,
+        client,
+        query,
+    ):
+        response = client.post(f"/api/cluster/complex-workflow?{query}")
+
+        assert response.status_code == 422
+        assert RayTaskExecution.objects.count() == 0
 
     def test_enqueue_runtime_env_benchmark_creates_one_durable_task(self, client):
         response = client.post(

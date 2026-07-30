@@ -47,8 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compatibility path. The bundled testproject enables the pilot through
   `DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT`, and the guarded local KubeRay gate
   proves non-empty mutually consistent summary, topology, edges, and node detail from
-  the real producer. Accessible graph rendering remains the bounded-reader follow-up
-  in [issue #219](https://github.com/dariuszpanas/django-ray/issues/219).
+  the real producer.
+- Terminal schema-v3 workflow publications now have an accessible, lazy Django admin
+  execution graph. Its private GET-only adapter projects only bounded redacted display
+  fields, refuses partial or incoherent data, caps reads at 100 nodes, 256 edges,
+  100 details, and 128 KiB, pins node links to the displayed attempt, and highlights
+  failure origins with their incoming ancestor paths. Raw result, callable, argument,
+  RuntimeEnv, execution, metric, event, and plan data never enter the graph response.
+  The guarded KubeRay gate proves successful and deterministic first-attempt failed
+  workflows through the schema-v3 readers and authenticated admin projection.
 - Ray-native workflows can keep the default full node-progress reporting or disable it
   globally and per invocation. Disabled runs retain the durable outer-task lifecycle
   and bounded plan/strategy metadata while creating no progress actor, node-reporting

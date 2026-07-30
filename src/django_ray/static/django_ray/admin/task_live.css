@@ -451,6 +451,321 @@
   opacity: 0.65;
 }
 
+#django-ray-live-observability .django-ray-workflow-graph {
+  background: var(--django-ray-live-surface-bg);
+  border: 1px solid var(--django-ray-live-border-strong);
+  border-radius: var(--border-radius, 8px);
+  margin-top: 1rem;
+  overflow: hidden;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__summary {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  list-style: none;
+  padding: 0.875rem;
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__summary::-webkit-details-marker {
+  display: none;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__summary:hover {
+  background: var(--django-ray-live-emphasis-bg);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__summary:focus-visible {
+  outline: 3px solid var(--django-ray-live-accent);
+  outline-offset: -3px;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__summary-title {
+  color: var(--django-ray-live-heading);
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__summary-copy {
+  color: var(--django-ray-live-muted);
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 400;
+  margin-top: 0.2rem;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__summary-arrow {
+  color: var(--django-ray-live-accent-strong);
+  font-size: 1rem;
+  line-height: 1;
+  transition: transform 150ms ease;
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph[open]
+  .django-ray-workflow-graph__summary-arrow {
+  transform: rotate(90deg);
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__body {
+  background: var(--django-ray-live-raised-bg);
+  border-top: 1px solid var(--django-ray-live-border-strong);
+  padding: 0.875rem;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__status {
+  background: var(--django-ray-live-emphasis-bg);
+  border-left: 4px solid var(--django-ray-live-accent);
+  border-radius: 0 var(--border-radius, 8px) var(--border-radius, 8px) 0;
+  color: var(--django-ray-live-text);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  margin: 0;
+  padding: 0.75rem;
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__status[data-state="error"] {
+  background: var(--django-ray-live-status-error-bg);
+  border-left-color: var(--django-ray-live-status-error-border);
+  color: var(--django-ray-live-status-error-fg);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__status[data-state="warning"] {
+  background: var(--django-ray-live-warning-bg);
+  border-left-color: var(--django-ray-live-warning-border);
+  color: var(--django-ray-live-warning-fg);
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__content[hidden] {
+  display: none;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  margin: 0.875rem 0 0;
+  padding: 0;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__legend-item {
+  align-items: center;
+  background: var(--django-ray-live-surface-bg);
+  border: 1px solid var(--django-ray-live-border-strong);
+  border-radius: 999px;
+  color: var(--django-ray-live-text);
+  display: inline-flex;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  gap: 0.35rem;
+  padding: 0.25rem 0.5rem;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__nodes {
+  display: grid;
+  gap: 0;
+  list-style: none;
+  margin: 1rem 0 0;
+  max-width: 52rem;
+  padding: 0;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__node-row {
+  min-width: 0;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__incoming {
+  align-items: center;
+  color: var(--django-ray-live-muted);
+  display: grid;
+  font-size: 0.6875rem;
+  gap: 0.5rem;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  line-height: 1.4;
+  min-height: 2.5rem;
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__incoming[data-root="true"] {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: auto;
+  padding-bottom: 0.4rem;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__incoming p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__connector {
+  color: var(--django-ray-live-accent-strong);
+  height: 2.5rem;
+  overflow: visible;
+  width: 2rem;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__connector path {
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__incoming[data-failure-path="true"]
+  .django-ray-workflow-graph__connector {
+  color: var(--django-ray-live-danger-border);
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__node {
+  background: var(--django-ray-live-raised-bg);
+  border: 1px solid var(--django-ray-live-border-strong);
+  border-left: 5px solid var(--django-ray-live-neutral-border);
+  border-radius: var(--border-radius, 8px);
+  color: var(--django-ray-live-text);
+  display: grid;
+  gap: 0.625rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 0.875rem;
+  text-decoration: none;
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__node[data-failure-path="true"] {
+  box-shadow: inset 0 0 0 1px var(--django-ray-live-danger-border);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__node[data-state="PENDING"] {
+  border-left-color: var(--django-ray-live-warning-border);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__node[data-state="RUNNING"] {
+  border-left-color: var(--django-ray-live-info-border);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__node[data-state="SUCCEEDED"] {
+  border-left-color: var(--django-ray-live-success-border);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__node[data-state="FAILED"] {
+  border-left-color: var(--django-ray-live-danger-border);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__node[data-kind="map"] {
+  border-right: 5px double var(--django-ray-live-accent-strong);
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__node:hover {
+  background: var(--django-ray-live-emphasis-bg);
+  border-color: var(--django-ray-live-accent);
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__node:focus-visible {
+  outline: 3px solid var(--django-ray-live-accent);
+  outline-offset: 2px;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__node-title {
+  color: var(--django-ray-live-heading);
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__node-id {
+  color: var(--django-ray-live-muted);
+  display: block;
+  font-family: var(--font-family-monospace, ui-monospace, monospace);
+  font-size: 0.6875rem;
+  margin-top: 0.2rem;
+  overflow-wrap: anywhere;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__state {
+  align-items: center;
+  background: var(--django-ray-live-neutral-bg);
+  border: 1px solid var(--django-ray-live-neutral-border);
+  border-radius: 999px;
+  color: var(--django-ray-live-neutral-fg);
+  display: inline-flex;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  white-space: nowrap;
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__state[data-state="RUNNING"] {
+  background: var(--django-ray-live-info-bg);
+  border-color: var(--django-ray-live-info-border);
+  color: var(--django-ray-live-info-fg);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__state[data-state="SUCCEEDED"] {
+  background: var(--django-ray-live-success-bg);
+  border-color: var(--django-ray-live-success-border);
+  color: var(--django-ray-live-success-fg);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__state[data-state="FAILED"] {
+  background: var(--django-ray-live-danger-bg);
+  border-color: var(--django-ray-live-danger-border);
+  color: var(--django-ray-live-danger-fg);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__state[data-state="PENDING"] {
+  background: var(--django-ray-live-warning-bg);
+  border-color: var(--django-ray-live-warning-border);
+  color: var(--django-ray-live-warning-fg);
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__node-meta {
+  color: var(--django-ray-live-muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.6875rem;
+  gap: 0.5rem;
+  grid-column: 1 / -1;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__node-message {
+  background: var(--django-ray-live-surface-bg);
+  border-radius: var(--border-radius, 8px);
+  color: var(--django-ray-live-text);
+  font-size: 0.75rem;
+  grid-column: 1 / -1;
+  line-height: 1.45;
+  margin: 0;
+  overflow-wrap: anywhere;
+  padding: 0.625rem;
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__node-message[data-failure="true"] {
+  background: var(--django-ray-live-status-error-bg);
+  color: var(--django-ray-live-status-error-fg);
+}
+
 :is(html.dark, html[data-theme="dark"]) #django-ray-live-observability {
   --django-ray-live-accent-strong: #38bdf8;
   --django-ray-live-action-bg: #212226;
@@ -549,7 +864,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #django-ray-live-observability .django-ray-workflow__summary-arrow {
+  #django-ray-live-observability
+    :is(
+      .django-ray-workflow__summary-arrow,
+      .django-ray-workflow-graph__summary-arrow
+    ) {
     transition: none;
   }
 }
@@ -601,5 +920,13 @@
   #django-ray-live-observability
     :is(.django-ray-workflow__actions a, .django-ray-workflow__copy) {
     width: 100%;
+  }
+
+  #django-ray-live-observability .django-ray-workflow-graph__node {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #django-ray-live-observability .django-ray-workflow-graph__state {
+    justify-self: start;
   }
 }

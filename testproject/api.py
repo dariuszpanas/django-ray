@@ -19,6 +19,7 @@ from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
 from django.tasks.exceptions import InvalidTaskBackend
 from ninja import NinjaAPI, Schema
+from ninja.errors import HttpError
 from ninja.security import HttpBearer
 from pydantic import Field, field_validator
 
@@ -1240,14 +1241,35 @@ def cluster_complex_workflow(
     slow_items: int = 4,
     fast_seconds: float = 0.02,
     slow_seconds: float = 0.5,
+    failure_branch: Literal["fast", "slow"] | None = None,
+    failure_item: int | None = None,
 ):
     """Run nested fast and slow branches to demonstrate groups and chains."""
-    result = cluster_tasks.complex_workflow_benchmark.enqueue(
-        fast_items=fast_items,
-        slow_items=slow_items,
-        fast_seconds=fast_seconds,
-        slow_seconds=slow_seconds,
-    )
+    try:
+        cluster_tasks.validate_complex_workflow_failure_controls(
+            fast_items=fast_items,
+            slow_items=slow_items,
+            failure_branch=failure_branch,
+            failure_item=failure_item,
+        )
+    except ValueError as error:
+        raise HttpError(422, str(error)) from error
+    if failure_branch is None:
+        result = cluster_tasks.complex_workflow_benchmark.enqueue(
+            fast_items=fast_items,
+            slow_items=slow_items,
+            fast_seconds=fast_seconds,
+            slow_seconds=slow_seconds,
+        )
+    else:
+        result = cluster_tasks.complex_workflow_benchmark.enqueue(
+            fast_items=fast_items,
+            slow_items=slow_items,
+            fast_seconds=fast_seconds,
+            slow_seconds=slow_seconds,
+            failure_branch=failure_branch,
+            failure_item=failure_item,
+        )
     return {
         "task_id": result.id,
         "status": result.status.value,

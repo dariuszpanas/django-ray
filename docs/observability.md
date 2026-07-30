@@ -288,9 +288,37 @@ rejection paths, or rejection messages in the task form.
 Verified plan and selection JSON remain available as explicit, byte-bounded downloads.
 The lazy summary and downloads are GET-only, repeat the per-object permission check, use
 SQL byte guards before loading the blobs, and return `Cache-Control: no-store`. Topology
-and node-detail actions appear only when the retained schema-v3 collection can return
-useful data. Those actions repeat the same authorization and call the package read
-facade; none is fetched by the polling script.
+and node-detail actions in the compact diagnostics row appear only when the retained
+schema-v3 collection can return useful data. The nested graph control also exposes the
+three fixed bounded JSON routes as explicit fallbacks whenever graph rendering degrades,
+including before a terminal publication exists. Every route repeats the same
+authorization and calls the package read facade; none is fetched by the polling script.
+
+Within that collapsed section, **Execution graph** is a second, independently lazy
+control. It makes exactly one same-origin GET after it is opened and caches a successful
+response for the current page. A pre-terminal `NOT_REPORTED` response and a transport or
+malformed-response failure remain retryable after the control is closed and reopened.
+Authentication loss, missing objects, and stable terminal degradation do not cause a
+request loop.
+
+The private graph adapter accepts only one complete, terminal, internally coherent
+schema-v3 publication. It performs fixed first-page reads with ceilings of 100 topology
+nodes, 256 edges, 100 node details, and 128 KiB of encoded response data. Any cursor,
+cycle, unknown edge endpoint, identity or publication mismatch, incomplete count,
+truncation, or limit breach produces an explicit empty degraded response rather than a
+partial graph.
+
+The response is a redacted display projection, not another raw workflow API. Its
+allowlist contains node identity, bounded label, task/map kind, fixed state, bounded
+progress message, sanitized map fan-out counters, bounded failure text, edges, and
+failure-path flags. It never includes callable paths, arguments, results, RuntimeEnv
+data, execution identifiers, raw progress metrics or events, plan data, or storage
+records. Semantic node links follow topological and tab order and are pinned to the same
+attempt as the rendered graph. The graph summary visibly names that page-rendered
+attempt; reload the page before inspecting a newer attempt shown by live polling.
+Decorative connectors are hidden from assistive technology, and state, map, and
+failure-origin/path distinctions use text and symbols in addition to color. The bounded
+JSON routes remain visible fallbacks whenever a graph cannot be shown safely.
 
 By default, the same change form presents ordered immutable attempt history
 contextually. The inline selects only attempt identity, state, timing, and a bounded

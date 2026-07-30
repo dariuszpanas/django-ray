@@ -13,13 +13,61 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
 _MAX_RESPONSE_BYTES = 1_048_576
 _REQUEST_TIMEOUT_SECONDS = 5.0
 _WORKFLOW_PAGE_LIMIT = 16
+_WORKFLOW_GRAPH_LIMITS = {
+    "nodes": 100,
+    "edges": 256,
+    "details": 100,
+    "response_bytes": 131_072,
+}
+_WORKFLOW_GRAPH_ROOT_FIELDS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "status",
+        "message",
+        "complete",
+        "counts",
+        "limits",
+        "nodes",
+        "edges",
+    }
+)
+_WORKFLOW_GRAPH_NODE_FIELDS = frozenset(
+    {"id", "label", "kind", "state", "message", "error", "failure_path"}
+)
+_WORKFLOW_GRAPH_FANOUT_FIELDS = frozenset(
+    {
+        "submitted_items",
+        "completed_items",
+        "in_flight_items",
+        "input_exhausted",
+    }
+)
+_WORKFLOW_GRAPH_FORBIDDEN_FIELDS = frozenset(
+    {
+        "task_id",
+        "run_identity",
+        "publication",
+        "callable_path",
+        "runtime_env",
+        "ray_options",
+        "execution",
+        "recent_events",
+        "traceback",
+        "result",
+        "metrics",
+        "started_at",
+        "finished_at",
+        "raw",
+    }
+)
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _UNFOLD_STYLESHEET_RE = re.compile(
     r"""href=["'](?P<path>/static/unfold/css/styles[^"']*\.css)["']"""
@@ -372,15 +420,27 @@ def _verify_unfold_admin_contract(
             or "Workflow execution" not in change_html
         ):
             raise DockerSmokeError("admin change view did not render live task diagnostics")
+        workflow_attempt_query = f"?attempt_number={int(execution.attempt_number)}"
         workflow_paths = {
+            "data-graph-url": (
+                f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/graph/"
+                f"{workflow_attempt_query}"
+            ),
             "data-topology-nodes-url": (
                 f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/topology/nodes/"
+                f"{workflow_attempt_query}"
             ),
             "data-topology-edges-url": (
                 f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/topology/edges/"
+                f"{workflow_attempt_query}"
             ),
             "data-node-details-url": (
                 f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/nodes/"
+                f"{workflow_attempt_query}"
+            ),
+            "data-node-detail-url": (
+                f"/admin/django_ray/raytaskexecution/{execution.pk}/workflow/node/"
+                f"{workflow_attempt_query}"
             ),
         }
         if any(
@@ -549,12 +609,207 @@ def _workflow_admin_page_count(
     return returned_count
 
 
+def _workflow_graph_contains_forbidden_field(value: Any) -> bool:
+    """Detect private workflow fields anywhere in the admin graph projection."""
+    if isinstance(value, dict):
+        if set(value) & _WORKFLOW_GRAPH_FORBIDDEN_FIELDS:
+            return True
+        return any(_workflow_graph_contains_forbidden_field(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_workflow_graph_contains_forbidden_field(item) for item in value)
+    return False
+
+
+def _workflow_admin_graph_evidence(
+    payload: dict[str, Any],
+    *,
+    execution_state: str,
+    topology_nodes: list[dict[str, Any]],
+    topology_edges: list[dict[str, Any]],
+    node_details: list[dict[str, Any]],
+) -> dict[str, str | int]:
+    """Validate one sanitized graph against the same bounded admin pages."""
+    if _workflow_graph_contains_forbidden_field(payload):
+        raise DockerSmokeError("admin workflow graph exposed a forbidden private field")
+    nodes = payload.get("nodes")
+    edges = payload.get("edges")
+    counts = payload.get("counts")
+    message = payload.get("message")
+    if (
+        set(payload) != _WORKFLOW_GRAPH_ROOT_FIELDS
+        or payload.get("schema") != "django-ray.admin-workflow-graph"
+        or payload.get("schema_version") != 1
+        or payload.get("status") != "AVAILABLE"
+        or payload.get("complete") is not True
+        or not isinstance(message, str)
+        or not message
+        or len(message.encode("utf-8")) > 256
+        or not isinstance(counts, dict)
+        or set(counts) != {"nodes", "edges"}
+        or payload.get("limits") != _WORKFLOW_GRAPH_LIMITS
+        or not isinstance(nodes, list)
+        or not isinstance(edges, list)
+        or counts.get("nodes") != len(nodes)
+        or counts.get("edges") != len(edges)
+        or len(nodes) != len(topology_nodes)
+        or len(edges) != len(topology_edges)
+        or len(json.dumps(payload, ensure_ascii=True).encode("utf-8"))
+        > _WORKFLOW_GRAPH_LIMITS["response_bytes"]
+    ):
+        raise DockerSmokeError("admin workflow graph did not match its bounded root contract")
+
+    topology_ids = {
+        item.get("node_id") for item in topology_nodes if isinstance(item.get("node_id"), str)
+    }
+    detail_states = {
+        item.get("node_id"): item.get("state")
+        for item in node_details
+        if isinstance(item.get("node_id"), str) and isinstance(item.get("state"), str)
+    }
+    if len(topology_ids) != len(topology_nodes) or len(detail_states) != len(node_details):
+        raise DockerSmokeError("admin workflow pages contained invalid or duplicate node IDs")
+
+    graph_by_id: dict[str, dict[str, Any]] = {}
+    ordered_ids: list[str] = []
+    for item in nodes:
+        if not isinstance(item, dict):
+            raise DockerSmokeError("admin workflow graph node was not an object")
+        node_id = item.get("id")
+        kind = item.get("kind")
+        expected_fields = set(_WORKFLOW_GRAPH_NODE_FIELDS)
+        if kind == "map":
+            expected_fields.add("fanout")
+        if (
+            set(item) != expected_fields
+            or not isinstance(node_id, str)
+            or not node_id
+            or node_id in graph_by_id
+            or not isinstance(item.get("label"), str)
+            or not item["label"]
+            or kind not in {"task", "map"}
+            or item.get("state") not in {"PENDING", "RUNNING", "SUCCEEDED", "FAILED"}
+            or not (item.get("message") is None or isinstance(item.get("message"), str))
+            or not (item.get("error") is None or isinstance(item.get("error"), str))
+            or type(item.get("failure_path")) is not bool
+        ):
+            raise DockerSmokeError("admin workflow graph node failed its allowlist")
+        if kind == "map":
+            fanout = item.get("fanout")
+            if (
+                not isinstance(fanout, dict)
+                or set(fanout) != _WORKFLOW_GRAPH_FANOUT_FIELDS
+                or any(
+                    type(fanout.get(field)) is not int or fanout[field] < 0
+                    for field in (
+                        "submitted_items",
+                        "completed_items",
+                        "in_flight_items",
+                    )
+                )
+                or type(fanout.get("input_exhausted")) is not bool
+                or fanout["completed_items"] > fanout["submitted_items"]
+                or fanout["in_flight_items"]
+                != fanout["submitted_items"] - fanout["completed_items"]
+            ):
+                raise DockerSmokeError("admin workflow graph map fanout failed validation")
+        if (item["state"] == "FAILED") != (item["error"] is not None):
+            raise DockerSmokeError("admin workflow graph failure error was inconsistent")
+        graph_by_id[node_id] = item
+        ordered_ids.append(node_id)
+
+    if set(graph_by_id) != topology_ids or any(
+        graph_by_id[node_id]["state"] != state for node_id, state in detail_states.items()
+    ):
+        raise DockerSmokeError("admin workflow graph nodes differed from bounded pages")
+
+    expected_edges = {(item.get("source"), item.get("target")) for item in topology_edges}
+    graph_edges: set[tuple[str, str]] = set()
+    positions = {node_id: index for index, node_id in enumerate(ordered_ids)}
+    for item in edges:
+        if not isinstance(item, dict) or set(item) != {"source", "target"}:
+            raise DockerSmokeError("admin workflow graph edge failed its allowlist")
+        source = item.get("source")
+        target = item.get("target")
+        if (
+            not isinstance(source, str)
+            or not isinstance(target, str)
+            or source not in graph_by_id
+            or target not in graph_by_id
+            or source == target
+            or (source, target) in graph_edges
+            or positions[source] >= positions[target]
+        ):
+            raise DockerSmokeError("admin workflow graph edge was invalid or not topological")
+        graph_edges.add((source, target))
+    if graph_edges != expected_edges:
+        raise DockerSmokeError("admin workflow graph edges differed from bounded pages")
+
+    failed = {node_id for node_id, item in graph_by_id.items() if item["state"] == "FAILED"}
+    pending_nodes = {node_id for node_id, item in graph_by_id.items() if item["state"] == "PENDING"}
+    running_nodes = {node_id for node_id, item in graph_by_id.items() if item["state"] == "RUNNING"}
+    succeeded = {node_id for node_id, item in graph_by_id.items() if item["state"] == "SUCCEEDED"}
+    predecessors = {node_id: set() for node_id in graph_by_id}
+    for source, target in graph_edges:
+        predecessors[target].add(source)
+    origins = {
+        node_id
+        for node_id in failed
+        if not any(parent in failed for parent in predecessors[node_id])
+    }
+    expected_failure_path: set[str] = set()
+    pending = list(origins)
+    while pending:
+        node_id = pending.pop()
+        if node_id in expected_failure_path:
+            continue
+        expected_failure_path.add(node_id)
+        pending.extend(predecessors[node_id])
+    observed_failure_path = {
+        node_id for node_id, item in graph_by_id.items() if item["failure_path"]
+    }
+    incoming_failure_edges = sum(target in origins for _source, target in graph_edges)
+    if observed_failure_path != expected_failure_path:
+        raise DockerSmokeError("admin workflow graph failure path was inconsistent")
+    if execution_state == "SUCCEEDED":
+        if failed or observed_failure_path or len(succeeded) != len(graph_by_id):
+            raise DockerSmokeError("successful admin workflow graph was not fully succeeded")
+    elif execution_state == "FAILED":
+        if (
+            len(origins) != 1
+            or not (succeeded - observed_failure_path)
+            or not observed_failure_path
+            or incoming_failure_edges < 1
+        ):
+            raise DockerSmokeError(
+                "failed admin workflow graph lacked one incoming failed path "
+                "and successful sibling context"
+            )
+    else:
+        raise DockerSmokeError("admin workflow graph execution was not terminal")
+
+    return {
+        "graph_status": "AVAILABLE",
+        "graph_nodes": len(graph_by_id),
+        "graph_edges": len(graph_edges),
+        "graph_pending_nodes": len(pending_nodes),
+        "graph_running_nodes": len(running_nodes),
+        "graph_succeeded_nodes": len(succeeded),
+        "graph_failed_nodes": len(failed),
+        "graph_failure_path_nodes": len(observed_failure_path),
+        "graph_failure_origins": len(origins),
+        "graph_incoming_failure_edges": incoming_failure_edges,
+    }
+
+
 def _verify_existing_workflow_storage_contract(
     *,
     execution: Any,
     topology_nodes: int,
     topology_edges: int,
     node_details: int,
+    pending_nodes: int = 0,
+    running_nodes: int = 0,
+    failed_nodes: int = 0,
 ) -> dict[str, int]:
     """Directly prove that the published run has no transitional storage residue."""
 
@@ -589,14 +844,18 @@ def _verify_existing_workflow_storage_contract(
                 )
 
             current = manifests.get(slot=WorkflowProgressTopologySlot.CURRENT)
+            state_counts = (pending_nodes, running_nodes, failed_nodes)
             if (
-                current.node_count != topology_nodes
+                any(type(value) is not int or value < 0 for value in state_counts)
+                or sum(state_counts) > node_details
+                or current.node_count != topology_nodes
                 or current.edge_count != topology_edges
                 or run_storage.detail_node_count != node_details
-                or run_storage.detail_pending_count != 0
-                or run_storage.detail_running_count != 0
-                or run_storage.detail_succeeded_count != node_details
-                or run_storage.detail_failed_count != 0
+                or run_storage.detail_pending_count != pending_nodes
+                or run_storage.detail_running_count != running_nodes
+                or run_storage.detail_succeeded_count
+                != node_details - pending_nodes - running_nodes - failed_nodes
+                or run_storage.detail_failed_count != failed_nodes
             ):
                 raise DockerSmokeError(
                     "existing workflow storage counts did not match terminal admin reader evidence"
@@ -626,10 +885,17 @@ def _verify_existing_workflow_admin_contract(
     task_id = str(execution.task_id)
     root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
     diagnostics_path = f"{root}/workflow/diagnostics/"
+    graph_path = f"{root}/workflow/graph/"
+    node_detail_path = f"{root}/workflow/node/"
     collection_paths = {
         "topology_nodes": f"{root}/workflow/topology/nodes/",
         "topology_edges": f"{root}/workflow/topology/edges/",
         "node_details": f"{root}/workflow/nodes/",
+    }
+    attempt_query = f"attempt_number={int(execution.attempt_number)}"
+    graph_read_path = f"{graph_path}?{attempt_query}"
+    collection_read_paths = {
+        collection: f"{path}?{attempt_query}" for collection, path in collection_paths.items()
     }
 
     with _disposable_admin_headers() as headers:
@@ -641,9 +907,11 @@ def _verify_existing_workflow_admin_contract(
         )
         expected_attributes = {
             "data-diagnostics-url": diagnostics_path,
-            "data-topology-nodes-url": collection_paths["topology_nodes"],
-            "data-topology-edges-url": collection_paths["topology_edges"],
-            "data-node-details-url": collection_paths["node_details"],
+            "data-graph-url": graph_read_path,
+            "data-topology-nodes-url": collection_read_paths["topology_nodes"],
+            "data-topology-edges-url": collection_read_paths["topology_edges"],
+            "data-node-details-url": collection_read_paths["node_details"],
+            "data-node-detail-url": f"{node_detail_path}?{attempt_query}",
         }
         if "django-ray-workflow-diagnostics" not in change_html or any(
             f'{attribute}="{path}"' not in change_html
@@ -684,12 +952,18 @@ def _verify_existing_workflow_admin_contract(
         pages = {
             collection: _request_admin_json(
                 base_url,
-                f"{path}?limit={_WORKFLOW_PAGE_LIMIT}",
+                f"{path}&limit={_WORKFLOW_PAGE_LIMIT}",
                 headers=headers,
                 deadline=deadline,
             )
-            for collection, path in collection_paths.items()
+            for collection, path in collection_read_paths.items()
         }
+        graph = _request_admin_json(
+            base_url,
+            graph_read_path,
+            headers=headers,
+            deadline=deadline,
+        )
 
     counts = {
         collection: _workflow_admin_page_count(
@@ -699,21 +973,34 @@ def _verify_existing_workflow_admin_contract(
         )
         for collection in collection_paths
     }
+    graph_evidence = _workflow_admin_graph_evidence(
+        graph,
+        execution_state=str(execution.state),
+        topology_nodes=pages["topology_nodes"]["items"],
+        topology_edges=pages["topology_edges"]["items"],
+        node_details=pages["node_details"]["items"],
+    )
 
     storage = _verify_existing_workflow_storage_contract(
         execution=execution,
         topology_nodes=counts["topology_nodes"],
         topology_edges=counts["topology_edges"],
         node_details=counts["node_details"],
+        pending_nodes=cast(int, graph_evidence["graph_pending_nodes"]),
+        running_nodes=cast(int, graph_evidence["graph_running_nodes"]),
+        failed_nodes=cast(int, graph_evidence["graph_failed_nodes"]),
     )
     return {
         "admin_workflow": "verified",
         "task_id": task_id,
-        "admin_routes": 5,
+        "task_state": str(execution.state),
+        "attempt_number": int(execution.attempt_number),
+        "admin_routes": 6,
         "admin_actions": len(expected_actions),
         "topology_nodes": counts["topology_nodes"],
         "topology_edges": counts["topology_edges"],
         "node_details": counts["node_details"],
+        **graph_evidence,
         **storage,
     }
 
