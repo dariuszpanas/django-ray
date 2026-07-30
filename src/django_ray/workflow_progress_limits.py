@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, fields
+from typing import Any
 
 WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION = 1
 WORKFLOW_PROGRESS_LIMITS_PROFILE = "v1"
@@ -37,6 +39,52 @@ WORKFLOW_PROGRESS_EVENT_PAYLOAD_MAX_BYTES = 16 * 1024
 WORKFLOW_PROGRESS_EVENT_WIRE_MAX_BYTES = 32 * 1024
 WORKFLOW_PROGRESS_EVENT_DECODED_MAX_BYTES = 32 * 1024
 WORKFLOW_PROGRESS_EDGE_BATCH_MAX_ITEMS = 32
+
+
+def canonical_workflow_progress_retained_size(value: Any) -> int:
+    """Return the canonical encoded size used by the live progress collector."""
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+
+_WORKFLOW_PROGRESS_RETAINED_STATE_FRAME_BYTES = canonical_workflow_progress_retained_size(
+    {
+        "edges": [],
+        "nodes": [],
+        "plan": None,
+        "recent_events": [],
+    }
+) - len(b"null")
+
+
+def workflow_progress_retained_state_size(
+    *,
+    plan_bytes: int,
+    node_bytes: int,
+    node_count: int,
+    edge_bytes: int,
+    edge_count: int,
+    event_bytes: int,
+    event_count: int,
+) -> int:
+    """Return the exact canonical size of one retained actor state frame."""
+    return (
+        _WORKFLOW_PROGRESS_RETAINED_STATE_FRAME_BYTES
+        + plan_bytes
+        + node_bytes
+        + max(0, node_count - 1)
+        + edge_bytes
+        + max(0, edge_count - 1)
+        + event_bytes
+        + max(0, event_count - 1)
+    )
 
 
 @dataclass(frozen=True)
@@ -119,6 +167,21 @@ class _WorkflowProgressLimitsV1Values:
 _WORKFLOW_PROGRESS_LIMITS_V1_VALUES = _WorkflowProgressLimitsV1Values()
 WORKFLOW_PROGRESS_LIMITS_V1 = WorkflowProgressLimits()
 
+# The default-off publication pilot deliberately narrows aggregate retention
+# while preserving the protocol-v1 per-event and pagination ceilings.
+WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS_PROFILE = "schema-v3-pilot-v1"
+WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS = WorkflowProgressLimits(
+    topology_node_max_items=512,
+    topology_edge_max_items=2_048,
+    topology_max_encoded_bytes=2 * 1024 * 1024,
+    topology_max_decoded_bytes=2 * 1024 * 1024,
+    detail_max_items=512,
+    detail_max_encoded_bytes=1024 * 1024,
+    detail_max_decoded_bytes=1024 * 1024,
+    combined_max_encoded_bytes=4 * 1024 * 1024,
+    combined_max_decoded_bytes=4 * 1024 * 1024,
+)
+
 
 __all__ = [
     "WORKFLOW_PROGRESS_COMBINED_MAX_DECODED_BYTES",
@@ -143,6 +206,8 @@ __all__ = [
     "WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES",
     "WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS",
     "WORKFLOW_PROGRESS_RECORD_MAX_ENCODED_BYTES",
+    "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS",
+    "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS_PROFILE",
     "WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION",
     "WORKFLOW_PROGRESS_TOPOLOGY_EDGE_MAX_ITEMS",
     "WORKFLOW_PROGRESS_TOPOLOGY_MANIFEST_MAX_ENCODED_BYTES",
@@ -154,4 +219,6 @@ __all__ = [
     "WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ITEMS",
     "WORKFLOW_PROGRESS_VALUE_MAX_DEPTH",
     "WorkflowProgressLimits",
+    "canonical_workflow_progress_retained_size",
+    "workflow_progress_retained_state_size",
 ]
