@@ -49,7 +49,12 @@ assert callable(settings.UNFOLD["SITE_FAVICONS"][0]["href"])
 assert callable(settings.UNFOLD["STYLES"][0])
 assert callable(settings.UNFOLD["LOGIN"]["image"])
 assert settings.UNFOLD["BORDER_RADIUS"] == "8px"
+assert settings.UNFOLD["COLORS"]["base"]["100"] == "#f1f5f9"
+assert settings.UNFOLD["COLORS"]["base"]["400"] == "#94a3b8"
+assert settings.UNFOLD["COLORS"]["base"]["700"] == "#334155"
+assert settings.UNFOLD["COLORS"]["base"]["800"] == "#1e293b"
 assert settings.UNFOLD["COLORS"]["base"]["900"] == "#0f172a"
+assert settings.UNFOLD["COLORS"]["base"]["950"] == "#020617"
 assert settings.UNFOLD["COLORS"]["primary"]["400"] == "#38bdf8"
 assert settings.UNFOLD["COLORS"]["primary"]["600"] == "#075985"
 assert isinstance(admin.site, UnfoldAdminSite)
@@ -309,8 +314,50 @@ assert custom_stylesheet_response["Content-Type"].startswith("text/css")
 assert "immutable" in custom_stylesheet_response["Cache-Control"]
 custom_stylesheet_body = b"".join(custom_stylesheet_response.streaming_content)
 custom_stylesheet_response.close()
+custom_stylesheet_text = custom_stylesheet_body.decode("utf-8")
 assert b"--django-ray-admin-accent" in custom_stylesheet_body
+assert b"--django-ray-admin-dark-canvas: #0b0c0f" in custom_stylesheet_body
+assert b"--django-ray-admin-dark-surface: #16171a" in custom_stylesheet_body
+assert b"--django-ray-admin-dark-surface-raised: #212226" in custom_stylesheet_body
+assert b"--django-ray-admin-dark-border: #303238" in custom_stylesheet_body
+assert b"--django-ray-admin-dark-text: #f4f4f5" in custom_stylesheet_body
+assert b"--django-ray-admin-dark-muted: #a1a1aa" in custom_stylesheet_body
+assert b"--color-base-100: #f4f4f5" in custom_stylesheet_body
+assert b"--color-base-400: #a1a1aa" in custom_stylesheet_body
+assert b"--color-base-700: var(--django-ray-admin-dark-border)" in custom_stylesheet_body
+assert b"--color-base-800: var(--django-ray-admin-dark-surface-raised)" in (
+    custom_stylesheet_body
+)
+assert b"--color-base-900: var(--django-ray-admin-dark-surface)" in (
+    custom_stylesheet_body
+)
+assert b"--color-base-950: var(--django-ray-admin-dark-canvas)" in (
+    custom_stylesheet_body
+)
+assert b"--color-primary-600: var(--django-ray-admin-accent-strong)" in (
+    custom_stylesheet_body
+)
+assert b"html.dark #changelist-actions > div" in custom_stylesheet_body
+assert b'html.dark #changelist-actions button[name="index"]' in custom_stylesheet_body
 assert b"django-ray" in custom_stylesheet_body
+for selector in (
+    "html.dark body.login #page",
+    "html.dark body:not(.login) #main",
+):
+    rule = re.search(
+        rf"{re.escape(selector)}\s*\{{(?P<body>[^}}]*)\}}",
+        custom_stylesheet_text,
+    )
+    assert rule is not None
+    assert "background: var(--django-ray-admin-dark-canvas)" in rule.group("body")
+    assert "gradient" not in rule.group("body")
+light_login_rule = re.search(
+    rf"{re.escape('html:not(.dark) body.login #page')}\s*\{{(?P<body>[^}}]*)\}}",
+    custom_stylesheet_text,
+)
+assert light_login_rule is not None
+assert "radial-gradient" in light_login_rule.group("body")
+assert "linear-gradient" in light_login_rule.group("body")
 
 live_stylesheet_match = re.search(
     r'''href=["'](?P<path>/static/django_ray/admin/task_live[^"']*\.css)["']''',

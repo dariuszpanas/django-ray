@@ -1,9 +1,53 @@
 #django-ray-live-observability {
-  background: var(--body-bg, #fff);
-  border: 1px solid var(--color-base-200, var(--hairline-color, #d9e0ea));
+  --django-ray-live-accent: #38bdf8;
+  --django-ray-live-accent-strong: #0284c7;
+  --django-ray-live-action-bg: #e0f2fe;
+  --django-ray-live-action-border: #7dd3fc;
+  --django-ray-live-action-fg: #075985;
+  --django-ray-live-action-hover-bg: #bae6fd;
+  --django-ray-live-action-hover-fg: #0c4a6e;
+  --django-ray-live-bg: var(--body-bg, #fff);
+  --django-ray-live-border: var(
+    --color-base-200,
+    var(--hairline-color, #d9e0ea)
+  );
+  --django-ray-live-border-strong: var(--hairline-color, #e2e8f0);
+  --django-ray-live-danger-bg: #fee2e2;
+  --django-ray-live-danger-border: #fca5a5;
+  --django-ray-live-danger-fg: #991b1b;
+  --django-ray-live-emphasis-bg: var(--selected-bg, #f0f9ff);
+  --django-ray-live-fingerprint-bg: #e2e8f0;
+  --django-ray-live-fingerprint-fg: #334155;
+  --django-ray-live-header-bg: #0f172a;
+  --django-ray-live-header-fg: #f8fafc;
+  --django-ray-live-heading: var(--body-fg, #0f172a);
+  --django-ray-live-info-bg: #e0f2fe;
+  --django-ray-live-info-border: #7dd3fc;
+  --django-ray-live-info-fg: #075985;
+  --django-ray-live-muted: var(--body-quiet-color, #64748b);
+  --django-ray-live-neutral-bg: #e2e8f0;
+  --django-ray-live-neutral-border: #cbd5e1;
+  --django-ray-live-neutral-fg: #334155;
+  --django-ray-live-raised-bg: var(--body-bg, #fff);
+  --django-ray-live-shadow: 0 12px 32px rgb(15 23 42 / 8%);
+  --django-ray-live-state-neutral-fg: inherit;
+  --django-ray-live-status-error-bg: #fef2f2;
+  --django-ray-live-status-error-border: #ef4444;
+  --django-ray-live-status-error-fg: #991b1b;
+  --django-ray-live-success-bg: #dcfce7;
+  --django-ray-live-success-border: #86efac;
+  --django-ray-live-success-fg: #166534;
+  --django-ray-live-surface-bg: var(--darkened-bg, #f8fafc);
+  --django-ray-live-text: var(--body-fg, #334155);
+  --django-ray-live-warning-bg: #fef3c7;
+  --django-ray-live-warning-border: #fcd34d;
+  --django-ray-live-warning-fg: #92400e;
+  --django-ray-live-workflow-body-bg: transparent;
+  background: var(--django-ray-live-bg);
+  border: 1px solid var(--django-ray-live-border);
   border-radius: var(--border-radius, 8px);
-  box-shadow: 0 12px 32px rgb(15 23 42 / 8%);
-  color: var(--body-fg, #334155);
+  box-shadow: var(--django-ray-live-shadow);
+  color: var(--django-ray-live-text);
   margin-block: 1.5rem;
   min-width: 0;
   overflow: hidden;
@@ -11,8 +55,8 @@
 
 #django-ray-live-observability > h2 {
   align-items: center;
-  background: #0f172a;
-  color: #f8fafc;
+  background: var(--django-ray-live-header-bg);
+  color: var(--django-ray-live-header-fg);
   display: flex;
   font-size: 0.875rem;
   font-weight: 700;
@@ -23,7 +67,7 @@
 }
 
 #django-ray-live-observability .django-ray-live__indicator {
-  background: #38bdf8;
+  background: var(--django-ray-live-accent);
   border: 3px solid rgb(125 211 252 / 28%);
   border-radius: 999px;
   box-sizing: content-box;
@@ -32,9 +76,9 @@
 }
 
 #django-ray-live-observability .django-ray-live__summary {
-  background: var(--selected-bg, #f0f9ff);
-  border-left: 4px solid #38bdf8;
-  color: var(--body-fg, #334155);
+  background: var(--django-ray-live-emphasis-bg);
+  border-left: 4px solid var(--django-ray-live-accent);
+  color: var(--django-ray-live-text);
   margin: 0;
   padding: 0.875rem 1rem;
 }
@@ -48,8 +92,8 @@
 }
 
 #django-ray-live-observability .django-ray-live__metric {
-  background: var(--darkened-bg, #f8fafc);
-  border: 1px solid var(--hairline-color, #e2e8f0);
+  background: var(--django-ray-live-surface-bg);
+  border: 1px solid var(--django-ray-live-border-strong);
   border-radius: var(--border-radius, 8px);
   min-width: 0;
   padding: 0.875rem;
@@ -60,7 +104,7 @@
 }
 
 #django-ray-live-observability dt {
-  color: var(--body-quiet-color, #64748b);
+  color: var(--django-ray-live-muted);
   font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -69,7 +113,7 @@
 }
 
 #django-ray-live-observability dd {
-  color: var(--body-fg, #0f172a);
+  color: var(--django-ray-live-heading);
   font-size: 0.875rem;
   line-height: 1.4;
   margin: 0.25rem 0 0;
@@ -77,9 +121,10 @@
 }
 
 #django-ray-live-observability .django-ray-live__state {
-  background: #e2e8f0;
-  border: 1px solid #cbd5e1;
+  background: var(--django-ray-live-neutral-bg);
+  border: 1px solid var(--django-ray-live-neutral-border);
   border-radius: 999px;
+  color: var(--django-ray-live-state-neutral-fg);
   display: inline-flex;
   font-size: 0.75rem;
   font-weight: 700;
@@ -88,30 +133,30 @@
 }
 
 #django-ray-live-observability .django-ray-live__state[data-state="SUCCEEDED"] {
-  background: #dcfce7;
-  border-color: #86efac;
-  color: #166534;
+  background: var(--django-ray-live-success-bg);
+  border-color: var(--django-ray-live-success-border);
+  color: var(--django-ray-live-success-fg);
 }
 
 #django-ray-live-observability
   .django-ray-live__state:is([data-state="FAILED"], [data-state="LOST"]) {
-  background: #fee2e2;
-  border-color: #fca5a5;
-  color: #991b1b;
+  background: var(--django-ray-live-danger-bg);
+  border-color: var(--django-ray-live-danger-border);
+  color: var(--django-ray-live-danger-fg);
 }
 
 #django-ray-live-observability
   .django-ray-live__state:is([data-state="RUNNING"], [data-state="CANCELLING"]) {
-  background: #e0f2fe;
-  border-color: #7dd3fc;
-  color: #075985;
+  background: var(--django-ray-live-info-bg);
+  border-color: var(--django-ray-live-info-border);
+  color: var(--django-ray-live-info-fg);
 }
 
 #django-ray-live-observability
   .django-ray-live__state:is([data-state="QUEUED"], [data-state="CANCELLED"]) {
-  background: #fef3c7;
-  border-color: #fcd34d;
-  color: #92400e;
+  background: var(--django-ray-live-warning-bg);
+  border-color: var(--django-ray-live-warning-border);
+  color: var(--django-ray-live-warning-fg);
 }
 
 #django-ray-live-observability .django-ray-live__attempt {
@@ -120,8 +165,8 @@
 }
 
 #django-ray-live-observability .django-ray-workflow {
-  background: var(--darkened-bg, #f8fafc);
-  border-top: 1px solid var(--hairline-color, #e2e8f0);
+  background: var(--django-ray-live-surface-bg);
+  border-top: 1px solid var(--django-ray-live-border-strong);
 }
 
 #django-ray-live-observability .django-ray-workflow__summary {
@@ -140,28 +185,28 @@
 }
 
 #django-ray-live-observability .django-ray-workflow__summary:hover {
-  background: var(--selected-bg, #f0f9ff);
+  background: var(--django-ray-live-emphasis-bg);
 }
 
 #django-ray-live-observability .django-ray-workflow__summary:focus-visible {
-  outline: 3px solid #38bdf8;
+  outline: 3px solid var(--django-ray-live-accent);
   outline-offset: -3px;
 }
 
 #django-ray-live-observability .django-ray-workflow__summary-title {
-  color: var(--body-fg, #0f172a);
+  color: var(--django-ray-live-heading);
   font-size: 0.875rem;
   font-weight: 700;
 }
 
 #django-ray-live-observability .django-ray-workflow__summary-copy {
-  color: var(--body-quiet-color, #64748b);
+  color: var(--django-ray-live-muted);
   font-size: 0.75rem;
   text-align: right;
 }
 
 #django-ray-live-observability .django-ray-workflow__summary-arrow {
-  color: #0284c7;
+  color: var(--django-ray-live-accent-strong);
   font-size: 1rem;
   grid-column: 3;
   grid-row: 1;
@@ -176,15 +221,16 @@
 }
 
 #django-ray-live-observability .django-ray-workflow__body {
-  border-top: 1px solid var(--hairline-color, #e2e8f0);
+  background: var(--django-ray-live-workflow-body-bg);
+  border-top: 1px solid var(--django-ray-live-border-strong);
   padding: 1rem;
 }
 
 #django-ray-live-observability .django-ray-workflow__status {
-  background: var(--selected-bg, #f0f9ff);
-  border-left: 4px solid #38bdf8;
+  background: var(--django-ray-live-emphasis-bg);
+  border-left: 4px solid var(--django-ray-live-accent);
   border-radius: 0 var(--border-radius, 8px) var(--border-radius, 8px) 0;
-  color: var(--body-fg, #334155);
+  color: var(--django-ray-live-text);
   font-size: 0.8125rem;
   margin: 0;
   padding: 0.75rem;
@@ -192,9 +238,9 @@
 
 #django-ray-live-observability
   .django-ray-workflow__status[data-state="error"] {
-  background: #fef2f2;
-  border-left-color: #ef4444;
-  color: #991b1b;
+  background: var(--django-ray-live-status-error-bg);
+  border-left-color: var(--django-ray-live-status-error-border);
+  color: var(--django-ray-live-status-error-fg);
 }
 
 #django-ray-live-observability .django-ray-workflow__content {
@@ -208,8 +254,8 @@
 }
 
 #django-ray-live-observability .django-ray-workflow__section {
-  background: var(--body-bg, #fff);
-  border: 1px solid var(--hairline-color, #e2e8f0);
+  background: var(--django-ray-live-raised-bg);
+  border: 1px solid var(--django-ray-live-border-strong);
   border-radius: var(--border-radius, 8px);
   min-width: 0;
   padding: 1rem;
@@ -225,17 +271,17 @@
 }
 
 #django-ray-live-observability .django-ray-workflow__section h3 {
-  color: var(--body-fg, #0f172a);
+  color: var(--django-ray-live-heading);
   font-size: 0.875rem;
   font-weight: 700;
   margin: 0;
 }
 
 #django-ray-live-observability .django-ray-workflow__badge {
-  background: #e2e8f0;
-  border: 1px solid #cbd5e1;
+  background: var(--django-ray-live-neutral-bg);
+  border: 1px solid var(--django-ray-live-neutral-border);
   border-radius: 999px;
-  color: #334155;
+  color: var(--django-ray-live-neutral-fg);
   display: inline-flex;
   font-size: 0.6875rem;
   font-weight: 700;
@@ -246,9 +292,9 @@
 
 #django-ray-live-observability
   .django-ray-workflow__badge[data-status="AVAILABLE"] {
-  background: #dcfce7;
-  border-color: #86efac;
-  color: #166534;
+  background: var(--django-ray-live-success-bg);
+  border-color: var(--django-ray-live-success-border);
+  color: var(--django-ray-live-success-fg);
 }
 
 #django-ray-live-observability
@@ -258,9 +304,9 @@
     [data-status="REQUESTED_MISSING"],
     [data-status="EXPIRED"]
   ) {
-  background: #fee2e2;
-  border-color: #fca5a5;
-  color: #991b1b;
+  background: var(--django-ray-live-danger-bg);
+  border-color: var(--django-ray-live-danger-border);
+  color: var(--django-ray-live-danger-fg);
 }
 
 #django-ray-live-observability
@@ -270,9 +316,9 @@
     [data-status="NOT_REPORTED"],
     [data-status="REQUESTED_NOT_REPORTED"]
   ) {
-  background: #fef3c7;
-  border-color: #fcd34d;
-  color: #92400e;
+  background: var(--django-ray-live-warning-bg);
+  border-color: var(--django-ray-live-warning-border);
+  color: var(--django-ray-live-warning-fg);
 }
 
 #django-ray-live-observability .django-ray-workflow__facts {
@@ -283,7 +329,7 @@
 }
 
 #django-ray-live-observability .django-ray-workflow__fact {
-  background: var(--darkened-bg, #f8fafc);
+  background: var(--django-ray-live-surface-bg);
   border-radius: var(--border-radius, 8px);
   min-width: 0;
   padding: 0.75rem;
@@ -310,16 +356,16 @@
 }
 
 #django-ray-live-observability .django-ray-workflow__fingerprint code {
-  background: #e2e8f0;
+  background: var(--django-ray-live-fingerprint-bg);
   border-radius: 0.3rem;
-  color: #334155;
+  color: var(--django-ray-live-fingerprint-fg);
   font-size: 0.75rem;
   overflow-wrap: anywhere;
   padding: 0.25rem 0.4rem;
 }
 
 #django-ray-live-observability .django-ray-workflow__notice {
-  color: var(--body-quiet-color, #64748b);
+  color: var(--django-ray-live-muted);
   font-size: 0.8125rem;
   line-height: 1.5;
   margin: 0;
@@ -335,10 +381,10 @@
 }
 
 #django-ray-live-observability .django-ray-workflow__chip {
-  background: var(--darkened-bg, #f8fafc);
-  border: 1px solid var(--hairline-color, #e2e8f0);
+  background: var(--django-ray-live-surface-bg);
+  border: 1px solid var(--django-ray-live-border-strong);
   border-radius: 999px;
-  color: var(--body-fg, #334155);
+  color: var(--django-ray-live-text);
   font-size: 0.6875rem;
   font-weight: 700;
   padding: 0.25rem 0.5rem;
@@ -354,10 +400,10 @@
 #django-ray-live-observability
   :is(.django-ray-workflow__actions a, .django-ray-workflow__copy) {
   align-items: center;
-  background: #e0f2fe;
-  border: 1px solid #7dd3fc;
+  background: var(--django-ray-live-action-bg);
+  border: 1px solid var(--django-ray-live-action-border);
   border-radius: var(--border-radius, 8px);
-  color: #075985;
+  color: var(--django-ray-live-action-fg);
   display: inline-flex;
   font-family: inherit;
   font-size: 0.75rem;
@@ -383,14 +429,14 @@
 
 #django-ray-live-observability
   :is(.django-ray-workflow__actions a, .django-ray-workflow__copy):hover {
-  background: #bae6fd;
-  border-color: #38bdf8;
-  color: #0c4a6e;
+  background: var(--django-ray-live-action-hover-bg);
+  border-color: var(--django-ray-live-accent);
+  color: var(--django-ray-live-action-hover-fg);
 }
 
 #django-ray-live-observability
   :is(.django-ray-workflow__actions a, .django-ray-workflow__copy):focus-visible {
-  outline: 3px solid #38bdf8;
+  outline: 3px solid var(--django-ray-live-accent);
   outline-offset: 2px;
 }
 
@@ -406,351 +452,100 @@
 }
 
 :is(html.dark, html[data-theme="dark"]) #django-ray-live-observability {
-  background: #0f172a;
-  border-color: #334155;
-  box-shadow: 0 12px 32px rgb(2 6 23 / 35%);
-  color: #cbd5e1;
-}
-
-:is(html.dark, html[data-theme="dark"]) #django-ray-live-observability > h2 {
-  background: #020617;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-live__summary {
-  background: #0c4a6e;
-  border-left-color: #38bdf8;
-  color: #e0f2fe;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  :is(
-    .django-ray-live__metric,
-    .django-ray-workflow,
-    .django-ray-workflow__fact
-  ) {
-  background: #111827;
-  border-color: #334155;
-}
-
-:is(html.dark, html[data-theme="dark"]) #django-ray-live-observability dt,
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  :is(.django-ray-workflow__summary-copy, .django-ray-workflow__notice) {
-  color: #94a3b8;
-}
-
-:is(html.dark, html[data-theme="dark"]) #django-ray-live-observability dd,
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  :is(.django-ray-workflow__summary-title, .django-ray-workflow__section h3) {
-  color: #f1f5f9;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  :is(.django-ray-workflow__body, .django-ray-workflow__section) {
-  background: #0f172a;
-  border-color: #334155;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-workflow__status {
-  background: #0c4a6e;
-  color: #e0f2fe;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-workflow__status[data-state="error"] {
-  background: #7f1d1d;
-  color: #fee2e2;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-workflow__fingerprint
-  code {
-  background: #334155;
-  color: #f8fafc;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-workflow__chip {
-  background: #1e293b;
-  border-color: #475569;
-  color: #e2e8f0;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-workflow__badge {
-  background: #334155;
-  border-color: #475569;
-  color: #f8fafc;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-workflow__badge[data-status="AVAILABLE"] {
-  background: #14532d;
-  border-color: #22c55e;
-  color: #dcfce7;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-workflow__badge:is(
-    [data-status="CORRUPT"],
-    [data-status="MISSING"],
-    [data-status="REQUESTED_MISSING"],
-    [data-status="EXPIRED"]
-  ) {
-  background: #7f1d1d;
-  border-color: #ef4444;
-  color: #fee2e2;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-workflow__badge:is(
-    [data-status="TRUNCATED"],
-    [data-status="LEGACY_ONLY"],
-    [data-status="NOT_REPORTED"],
-    [data-status="REQUESTED_NOT_REPORTED"]
-  ) {
-  background: #78350f;
-  border-color: #f59e0b;
-  color: #fef3c7;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-live__state {
-  background: #334155;
-  border-color: #475569;
-  color: #f8fafc;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-live__state[data-state="SUCCEEDED"] {
-  background: #14532d;
-  border-color: #22c55e;
-  color: #dcfce7;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-live__state:is([data-state="FAILED"], [data-state="LOST"]) {
-  background: #7f1d1d;
-  border-color: #ef4444;
-  color: #fee2e2;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-live__state:is([data-state="RUNNING"], [data-state="CANCELLING"]) {
-  background: #0c4a6e;
-  border-color: #38bdf8;
-  color: #e0f2fe;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  .django-ray-live__state:is([data-state="QUEUED"], [data-state="CANCELLED"]) {
-  background: #78350f;
-  border-color: #f59e0b;
-  color: #fef3c7;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  :is(.django-ray-workflow__actions a, .django-ray-workflow__copy) {
-  background: #0c4a6e;
-  border-color: #38bdf8;
-  color: #e0f2fe;
-}
-
-:is(html.dark, html[data-theme="dark"])
-  #django-ray-live-observability
-  :is(.django-ray-workflow__actions a, .django-ray-workflow__copy):hover {
-  background: #075985;
-  color: #f0f9ff;
+  --django-ray-live-accent-strong: #38bdf8;
+  --django-ray-live-action-bg: #212226;
+  --django-ray-live-action-border: #3f4148;
+  --django-ray-live-action-fg: #7dd3fc;
+  --django-ray-live-action-hover-bg: #292a30;
+  --django-ray-live-action-hover-fg: #38bdf8;
+  --django-ray-live-bg: #16171a;
+  --django-ray-live-border: #303238;
+  --django-ray-live-border-strong: #303238;
+  --django-ray-live-danger-bg: rgb(239 68 68 / 12%);
+  --django-ray-live-danger-border: rgb(248 113 113 / 45%);
+  --django-ray-live-danger-fg: #fecaca;
+  --django-ray-live-emphasis-bg: #212226;
+  --django-ray-live-fingerprint-bg: #27282d;
+  --django-ray-live-fingerprint-fg: #f4f4f5;
+  --django-ray-live-header-bg: #0b0c0f;
+  --django-ray-live-header-fg: #f4f4f5;
+  --django-ray-live-heading: #f4f4f5;
+  --django-ray-live-info-bg: rgb(56 189 248 / 12%);
+  --django-ray-live-info-border: rgb(56 189 248 / 45%);
+  --django-ray-live-info-fg: #bae6fd;
+  --django-ray-live-muted: #a1a1aa;
+  --django-ray-live-neutral-bg: #27282d;
+  --django-ray-live-neutral-border: #3f4148;
+  --django-ray-live-neutral-fg: #e4e4e7;
+  --django-ray-live-raised-bg: #16171a;
+  --django-ray-live-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  --django-ray-live-state-neutral-fg: #e4e4e7;
+  --django-ray-live-status-error-bg: var(--django-ray-live-danger-bg);
+  --django-ray-live-status-error-border: var(--django-ray-live-danger-border);
+  --django-ray-live-status-error-fg: var(--django-ray-live-danger-fg);
+  --django-ray-live-success-bg: rgb(34 197 94 / 12%);
+  --django-ray-live-success-border: rgb(74 222 128 / 45%);
+  --django-ray-live-success-fg: #bbf7d0;
+  --django-ray-live-surface-bg: #212226;
+  --django-ray-live-text: #d4d4d8;
+  --django-ray-live-warning-bg: rgb(245 158 11 / 12%);
+  --django-ray-live-warning-border: rgb(251 191 36 / 45%);
+  --django-ray-live-warning-fg: #fde68a;
+  --django-ray-live-workflow-body-bg: #16171a;
+  background: var(--django-ray-live-bg);
+  border-color: var(--django-ray-live-border);
+  box-shadow: var(--django-ray-live-shadow);
+  color: var(--django-ray-live-text);
 }
 
 @media (prefers-color-scheme: dark) {
   html[data-theme="auto"] #django-ray-live-observability {
-    border-color: #334155;
-    box-shadow: 0 12px 32px rgb(2 6 23 / 35%);
+    --django-ray-live-accent-strong: #38bdf8;
+    --django-ray-live-action-bg: #212226;
+    --django-ray-live-action-border: #3f4148;
+    --django-ray-live-action-fg: #7dd3fc;
+    --django-ray-live-action-hover-bg: #292a30;
+    --django-ray-live-action-hover-fg: #38bdf8;
+    --django-ray-live-bg: #16171a;
+    --django-ray-live-border: #303238;
+    --django-ray-live-border-strong: #303238;
+    --django-ray-live-danger-bg: rgb(239 68 68 / 12%);
+    --django-ray-live-danger-border: rgb(248 113 113 / 45%);
+    --django-ray-live-danger-fg: #fecaca;
+    --django-ray-live-emphasis-bg: #212226;
+    --django-ray-live-fingerprint-bg: #27282d;
+    --django-ray-live-fingerprint-fg: #f4f4f5;
+    --django-ray-live-header-bg: #0b0c0f;
+    --django-ray-live-header-fg: #f4f4f5;
+    --django-ray-live-heading: #f4f4f5;
+    --django-ray-live-info-bg: rgb(56 189 248 / 12%);
+    --django-ray-live-info-border: rgb(56 189 248 / 45%);
+    --django-ray-live-info-fg: #bae6fd;
+    --django-ray-live-muted: #a1a1aa;
+    --django-ray-live-neutral-bg: #27282d;
+    --django-ray-live-neutral-border: #3f4148;
+    --django-ray-live-neutral-fg: #e4e4e7;
+    --django-ray-live-raised-bg: #16171a;
+    --django-ray-live-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+    --django-ray-live-state-neutral-fg: #e4e4e7;
+    --django-ray-live-status-error-bg: var(--django-ray-live-danger-bg);
+    --django-ray-live-status-error-border: var(--django-ray-live-danger-border);
+    --django-ray-live-status-error-fg: var(--django-ray-live-danger-fg);
+    --django-ray-live-success-bg: rgb(34 197 94 / 12%);
+    --django-ray-live-success-border: rgb(74 222 128 / 45%);
+    --django-ray-live-success-fg: #bbf7d0;
+    --django-ray-live-surface-bg: #212226;
+    --django-ray-live-text: #d4d4d8;
+    --django-ray-live-warning-bg: rgb(245 158 11 / 12%);
+    --django-ray-live-warning-border: rgb(251 191 36 / 45%);
+    --django-ray-live-warning-fg: #fde68a;
+    --django-ray-live-workflow-body-bg: #16171a;
+    background: var(--django-ray-live-bg);
+    border-color: var(--django-ray-live-border);
+    box-shadow: var(--django-ray-live-shadow);
+    color: var(--django-ray-live-text);
   }
 
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-live__state {
-    background: #334155;
-    border-color: #475569;
-    color: #f8fafc;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-live__state[data-state="SUCCEEDED"] {
-    background: #14532d;
-    border-color: #22c55e;
-    color: #dcfce7;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-live__state:is([data-state="FAILED"], [data-state="LOST"]) {
-    background: #7f1d1d;
-    border-color: #ef4444;
-    color: #fee2e2;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-live__state:is(
-      [data-state="RUNNING"],
-      [data-state="CANCELLING"]
-    ) {
-    background: #0c4a6e;
-    border-color: #38bdf8;
-    color: #e0f2fe;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-live__state:is(
-      [data-state="QUEUED"],
-      [data-state="CANCELLED"]
-    ) {
-    background: #78350f;
-    border-color: #f59e0b;
-    color: #fef3c7;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    :is(
-      .django-ray-workflow,
-      .django-ray-workflow__fact,
-      .django-ray-workflow__section
-    ) {
-    background: #111827;
-    border-color: #334155;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-workflow__body {
-    background: #0f172a;
-    border-color: #334155;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    :is(.django-ray-workflow__summary-title, .django-ray-workflow__section h3) {
-    color: #f1f5f9;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    :is(.django-ray-workflow__summary-copy, .django-ray-workflow__notice) {
-    color: #94a3b8;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-workflow__status {
-    background: #0c4a6e;
-    color: #e0f2fe;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-workflow__status[data-state="error"] {
-    background: #7f1d1d;
-    color: #fee2e2;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-workflow__fingerprint
-    code {
-    background: #334155;
-    color: #f8fafc;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-workflow__chip {
-    background: #1e293b;
-    border-color: #475569;
-    color: #e2e8f0;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-workflow__badge {
-    background: #334155;
-    border-color: #475569;
-    color: #f8fafc;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-workflow__badge[data-status="AVAILABLE"] {
-    background: #14532d;
-    border-color: #22c55e;
-    color: #dcfce7;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-workflow__badge:is(
-      [data-status="CORRUPT"],
-      [data-status="MISSING"],
-      [data-status="REQUESTED_MISSING"],
-      [data-status="EXPIRED"]
-    ) {
-    background: #7f1d1d;
-    border-color: #ef4444;
-    color: #fee2e2;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    .django-ray-workflow__badge:is(
-      [data-status="TRUNCATED"],
-      [data-status="LEGACY_ONLY"],
-      [data-status="NOT_REPORTED"],
-      [data-status="REQUESTED_NOT_REPORTED"]
-    ) {
-    background: #78350f;
-    border-color: #f59e0b;
-    color: #fef3c7;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    :is(.django-ray-workflow__actions a, .django-ray-workflow__copy) {
-    background: #0c4a6e;
-    border-color: #38bdf8;
-    color: #e0f2fe;
-  }
-
-  html[data-theme="auto"]
-    #django-ray-live-observability
-    :is(.django-ray-workflow__actions a, .django-ray-workflow__copy):hover {
-    background: #075985;
-    color: #f0f9ff;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

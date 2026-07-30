@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Documentation now follows the operating system color preference by default and offers explicit
+  light, dark, and automatic controls. The existing light presentation keeps a high-contrast blue
+  link treatment, while the new dark presentation shares the testproject's neutral black and grey
+  foundation and reserves django-ray blue for interactive accents.
+
 ## [0.4.0] - 2026-08-03
 
 ### Release scope

@@ -4,6 +4,133 @@
 }
 
 /*
+ * Keep the existing light canvas while giving links a WCAG AA brand blue.
+ * The explicit custom palette also keeps light and dark activation in one
+ * predictable Zensical contract.
+ */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #0369a1;
+  --md-primary-fg-color--light: #0284c7;
+  --md-primary-fg-color--dark: #075985;
+  --md-accent-fg-color: #0369a1;
+  --md-accent-fg-color--transparent: rgb(3 105 161 / 12%);
+  --md-typeset-a-color: #0369a1;
+}
+
+/*
+ * The dark palette shares the same restrained neutral foundation as the
+ * bundled testproject: blue is reserved for links, focus, and active state.
+ */
+[data-md-color-scheme="slate"] {
+  --django-ray-docs-backdrop: #0b0c0f;
+  --django-ray-docs-canvas: #16171a;
+  --django-ray-docs-surface: #212226;
+  --django-ray-docs-border: #303238;
+  --django-ray-docs-heading: #f4f4f5;
+  --django-ray-docs-muted: #a1a1aa;
+  --django-ray-docs-accent: #38bdf8;
+
+  --color-backdrop: 11 12 15;
+  --color-background: 22 23 26;
+  --color-background-subtle: 33 34 38;
+  --md-primary-fg-color: var(--django-ray-docs-accent);
+  --md-primary-fg-color--light: #7dd3fc;
+  --md-primary-fg-color--dark: #0ea5e9;
+  --md-primary-bg-color: var(--django-ray-docs-backdrop);
+  --md-primary-bg-color--light: var(--django-ray-docs-canvas);
+  --md-accent-fg-color: var(--django-ray-docs-accent);
+  --md-accent-fg-color--transparent: rgb(56 189 248 / 14%);
+  --md-accent-bg-color: var(--django-ray-docs-backdrop);
+  --md-accent-bg-color--light: var(--django-ray-docs-canvas);
+  --md-default-fg-color: #d4d4d8;
+  --md-default-fg-color--light: var(--django-ray-docs-muted);
+  --md-default-fg-color--lighter: #71717a;
+  --md-default-fg-color--lightest: var(--django-ray-docs-border);
+  --md-default-bg-color: var(--django-ray-docs-canvas);
+  --md-default-bg-color--light: rgb(22 23 26 / 92%);
+  --md-default-bg-color--lighter: rgb(33 34 38 / 72%);
+  --md-default-bg-color--lightest: rgb(33 34 38 / 38%);
+  --md-code-fg-color: #e4e4e7;
+  --md-code-bg-color: var(--django-ray-docs-surface);
+  --md-code-bg-color--light: rgb(33 34 38 / 90%);
+  --md-code-bg-color--lighter: rgb(33 34 38 / 62%);
+  --md-typeset-color: var(--md-default-fg-color);
+  --md-typeset-a-color: var(--django-ray-docs-accent);
+  --md-typeset-table-color: var(--django-ray-docs-border);
+  --md-typeset-table-color--light: rgb(33 34 38 / 72%);
+  --md-admonition-fg-color: var(--md-default-fg-color);
+  --md-admonition-bg-color: var(--django-ray-docs-surface);
+  --md-footer-bg-color: var(--django-ray-docs-backdrop);
+  --md-footer-bg-color--dark: var(--django-ray-docs-backdrop);
+}
+
+[data-md-color-scheme="slate"] .md-header {
+  background-color: rgb(11 12 15 / 92%);
+  border-bottom: 1px solid var(--django-ray-docs-border);
+  box-shadow: none;
+}
+
+[data-md-color-scheme="slate"] .md-header__title,
+[data-md-color-scheme="slate"] .md-typeset h1,
+[data-md-color-scheme="slate"] .md-typeset h2,
+[data-md-color-scheme="slate"] .md-typeset h3,
+[data-md-color-scheme="slate"] .md-typeset h4,
+[data-md-color-scheme="slate"] .md-typeset h5,
+[data-md-color-scheme="slate"] .md-typeset h6 {
+  color: var(--django-ray-docs-heading);
+}
+
+[data-md-color-scheme="slate"] .md-nav__title,
+[data-md-color-scheme="slate"] .md-nav__link {
+  color: var(--django-ray-docs-muted);
+}
+
+[data-md-color-scheme="slate"] .md-nav__link:focus,
+[data-md-color-scheme="slate"] .md-nav__link:hover,
+[data-md-color-scheme="slate"] .md-nav__link--active {
+  color: var(--django-ray-docs-accent);
+}
+
+@media screen and (min-width: 45em) {
+  [data-md-color-scheme="slate"] .md-search__button {
+    background-color: var(--django-ray-docs-surface);
+    border: 1px solid var(--django-ray-docs-border);
+    color: var(--django-ray-docs-muted);
+  }
+}
+
+@media screen and (max-width: 76.234375em) {
+  [data-md-color-scheme="slate"] .md-sidebar--primary {
+    background-color: var(--django-ray-docs-canvas);
+    border: 1px solid var(--django-ray-docs-border);
+  }
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) {
+  background-color: var(--django-ray-docs-canvas);
+  border-color: var(--django-ray-docs-border);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) tbody tr:hover {
+  background-color: var(--django-ray-docs-surface);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .admonition,
+[data-md-color-scheme="slate"] .md-typeset details {
+  background-color: var(--django-ray-docs-surface);
+  border: 1px solid var(--django-ray-docs-border);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .mermaid {
+  background-color: var(--django-ray-docs-surface);
+  border-color: var(--django-ray-docs-border);
+}
+
+[data-md-color-scheme="slate"] :focus-visible {
+  outline-color: var(--django-ray-docs-accent);
+}
+
+/*
  * Command-line flags and backend addresses lose meaning when their punctuation
  * wraps independently. Let descriptive cells wrap and let wide tables scroll.
  */
