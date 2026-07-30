@@ -76,6 +76,15 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
             f"{valid_policies}, got {reporting_policy!r}"
         )
 
+    schema_v3_pilot = config.get(
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT",
+        DEFAULTS["WORKFLOW_PROGRESS_SCHEMA_V3_PILOT"],
+    )
+    if type(schema_v3_pilot) is not bool:
+        raise ImproperlyConfigured(
+            "django-ray: WORKFLOW_PROGRESS_SCHEMA_V3_PILOT must be a boolean"
+        )
+
     task_attempt_admin_mode = config.get(
         "TASK_ATTEMPT_ADMIN_MODE",
         DEFAULTS["TASK_ATTEMPT_ADMIN_MODE"],

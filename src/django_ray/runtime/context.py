@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from django_ray.workflow_progress_limits import (
+    WORKFLOW_PROGRESS_LIMITS_V1,
+    WorkflowProgressLimits,
+)
+
 WORKFLOW_PROGRESS_SCHEMA_VERSION = 2
 WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION = 1
 WORKFLOW_INVOCATION_IDENTITY_SCHEMA_VERSION = 1
@@ -112,6 +117,7 @@ class WorkflowStepContext:
     progress_actor: Any | None
     node_id: str
     run_identity: dict[str, Any] | None = None
+    progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1
 
 
 _current_task: ContextVar[DurableTaskContext | None] = ContextVar(
@@ -183,6 +189,7 @@ def workflow_step_execution(
     progress_actor: Any | None,
     node_id: str,
     run_identity: dict[str, Any] | None = None,
+    progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
 ) -> Iterator[None]:
     """Expose the progress actor to code running inside one workflow step."""
     if progress_actor is None and run_identity is None:
@@ -194,6 +201,7 @@ def workflow_step_execution(
             progress_actor=progress_actor,
             node_id=node_id,
             run_identity=run_identity,
+            progress_limits=progress_limits,
         )
     )
     try:
@@ -235,5 +243,6 @@ def report_workflow_progress(
             "message": message,
             "metrics": {} if metrics is None else metrics,
         },
+        limits=context.progress_limits,
     )
     return True

@@ -111,6 +111,7 @@ monotonic schedules; idle claim backoff does not postpone them.
 | `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval (`1`-`86400` seconds), which must be below the lease duration |
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |
 | `WORKFLOW_PROGRESS_REPORTING_POLICY` | `str` | `"full"` | Default Ray workflow node-reporting policy: `"full"` or `"disabled"` |
+| `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` | `bool` | `False` | Experimental terminal schema-v3 publication for admitted full-reporting workflows |
 | `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between full-mode workflow progress snapshot writes |
 | `WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS` | `int` | `15` | Total deadline for the final full-mode snapshot while a progress actor starts or drains (`1`-`60` seconds) |
 | `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS` | `int` | `7` | Terminal workflow topology and node-detail retention (`0`-`30` days) |
@@ -132,6 +133,33 @@ setting for one invocation without reserving an application task keyword. Full m
 collects node events in memory and writes a snapshot no more often than
 `WORKFLOW_PROGRESS_FLUSH_SECONDS`; the interval limits database write frequency, not
 producer RPCs or actor memory.
+
+`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` is an experimental, default-off bridge from one
+terminal full-reporting actor snapshot into the bounded schema-v3 summary, topology,
+and node-detail storage. Enabling it applies the fixed `schema-v3-pilot-v1` profile to
+both actor collection and publication: at most 512 nodes, 2,048 edges, 2 MiB of
+topology, 1 MiB of detail, and 4 MiB combined, with the byte ceilings enforced for
+both encoded and decoded evidence. This is deliberately below the hard protocol-v1
+limits and is not a high-scale readiness claim.
+
+Publication fails closed if actor ingress rejected or truncated an event, the
+snapshot or pinned plan is inconsistent, a pilot admission or preparation limit is
+exceeded, the exact run fence is stale, or storage cannot publish atomically. No
+partial schema-v3 graph is exposed, and the workflow's application result is
+unchanged. A staged topology candidate is discarded after a rejected or failed
+publication, with cleanup failure reported explicitly. The bounded schema-v2
+`progress_data` snapshots remain the live and rolling compatibility path regardless
+of whether terminal schema-v3 publication succeeds.
+
+The bundled testproject deliberately enables the pilot so its real workflow topology
+can be exercised. Its
+`DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` environment variable controls that
+exception and defaults to enabled; the
+[guarded local KubeRay stack](deployment/local-kuberay-gate.md) uses the same
+testproject setting and verifies the resulting summary, topology nodes, edges, and node
+detail. Production projects must opt in explicitly after checking the pilot limits
+against their workloads.
+
 When a workflow finishes, the coordinator retries one pending actor snapshot for up to
 `WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS`. Exhausting that bounded deadline
 leaves task execution unaffected and emits a structured warning instead of silently

@@ -31,6 +31,34 @@ class TestValidateSettings:
     def test_workflow_progress_reporting_defaults_to_full(self) -> None:
         assert DEFAULTS["WORKFLOW_PROGRESS_REPORTING_POLICY"] == "full"
 
+    def test_workflow_progress_schema_v3_pilot_defaults_to_disabled(self) -> None:
+        assert DEFAULTS["WORKFLOW_PROGRESS_SCHEMA_V3_PILOT"] is False
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_validate_workflow_progress_schema_v3_pilot(self, enabled: bool) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": enabled,
+            }
+        )
+
+    @pytest.mark.parametrize("enabled", [0, 1, "", "true", None])
+    def test_validate_workflow_progress_schema_v3_pilot_rejects_non_booleans(
+        self,
+        enabled: object,
+    ) -> None:
+        with pytest.raises(
+            ImproperlyConfigured,
+            match="WORKFLOW_PROGRESS_SCHEMA_V3_PILOT",
+        ):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": enabled,
+                }
+            )
+
     def test_workflow_progress_terminal_flush_timeout_defaults_to_fifteen_seconds(
         self,
     ) -> None:

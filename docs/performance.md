@@ -57,17 +57,29 @@ progress actor and django-ray writes a complete graph snapshot when a changed re
 is flushed. Each data event is canonical, identity-fenced, and bounded before its Ray
 call: payloads are at most 16 KiB, complete wire and decoded envelopes are at most
 32 KiB, and dependency edges are sent in batches of at most 32. The actor revalidates
-the envelope and caps retained nodes, edges, recent events, and bytes using the durable
-V1 profile.
+the envelope and caps retained nodes, edges, recent events, and bytes. Package-default
+execution uses the durable V1 profile and remains a schema-v2 writer.
 
 `WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not bound the
 aggregate Ray actor mailbox, queued bytes, update frequency, or transient snapshot and
 drain allocations. Coalescing, producer backpressure, mailbox admission, and the
 bounded actor-to-preparer drain remain separate scale work. They prevent treating the
-hard V1 ceilings as a safe default production profile, but do not require withholding a
-stricter opt-in schema-v3 pilot. Issue #212 owns that guarded adapter and local KubeRay
-proof. The current durable writer remains the schema-v2 complete snapshot path until
-that pilot lands.
+hard V1 ceilings as a safe default production profile.
+
+`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT=True` selects the intentionally smaller
+`schema-v3-pilot-v1` profile for both actor retention and one terminal schema-v3
+publication attempt: at most 512 nodes, 2,048 edges, 2 MiB of topology, 1 MiB of
+detail, and 4 MiB combined, with encoded and decoded byte ceilings. It does not add a
+schema-v3 database write to every live flush. A rejected or truncated event, invalid
+snapshot, admission/preparation failure, stale fence, or storage failure refuses the
+terminal publication while preserving the application result and schema-v2
+compatibility snapshots. This strict fail-closed path is a bounded integration pilot,
+not evidence for hard-V1-scale or arbitrary concurrent workloads.
+
+The bundled testproject enables the pilot so its nested workflow and the guarded local
+KubeRay gate exercise real topology publication. Benchmark package-default behavior
+with the setting explicitly disabled unless the pilot itself is the subject of the
+measurement.
 
 For workloads where that observability cost outweighs its value, set the policy to
 `"disabled"` globally or call
