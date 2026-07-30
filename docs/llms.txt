@@ -110,3 +110,11 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - Ray Client task-level RuntimeEnv code must use a remote/shared URI, not a Django-pod
   local directory.
 - RuntimeEnv is dependency isolation inside one trust boundary, not tenant isolation.
+- Durable RuntimeEnv snapshots default to canonical plaintext writes. Readers always
+  accept supported plaintext and AES-256-GCM envelope rows, so encrypted rollout is
+  reader-first and a binary downgrade is unsafe after the first encrypted row.
+- Prefer a separately managed RuntimeEnv encryption key ring. The `django-secret`
+  HKDF fallback is explicit only, and every dedicated key or
+  `SECRET_KEY_FALLBACKS` entry must remain available while a durable row can name it.
+  The public plaintext hash still reveals equality, and encryption does not protect
+  Ray transport, process memory, arguments, results, progress, or logs.

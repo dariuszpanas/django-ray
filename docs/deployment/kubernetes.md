@@ -365,6 +365,30 @@ data:
   DATABASE_PASSWORD: <base64-encoded>
 ```
 
+For production RuntimeEnv snapshot encryption, prefer a dedicated key stored through
+your external secret manager and map it into `RUNTIME_ENV_ENCRYPTION_KEYS` only in
+Django processes that enqueue, retry, inspect, or execute durable tasks. Do not add
+that key to `django-ray-secret`: the example Ray pods currently import that shared
+Secret for Django-aware task execution, while generic Ray nodes do not need the
+database-encryption key.
+
+The local `kuberay-kind` overlay deliberately exercises the lower-configuration
+`django-secret` fallback instead. It patches
+`DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE=encrypted`,
+`DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY=django-secret`, and
+`DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK=true` directly onto
+`django-web` and the default, synchronous, and ML task-manager containers. Those
+selectors are not placed in the shared ConfigMap or Ray pod specifications. The base
+and other overlays therefore keep plaintext writes unless they opt in explicitly.
+This local fallback validates encryption behavior, not key isolation: the sample's
+Django-aware Ray pods still import `django-ray-secret`, including the Django signing
+secret from which the fallback key is derived. A production deployment gets the
+read-only database separation described by the threat model only when a dedicated
+RuntimeEnv key is delivered exclusively to the Django application processes that
+need it.
+See [Runtime Environments](../runtime-environments.md#encrypt-durable-snapshots) for
+the reader-first rollout, key-retention requirements, and downgrade boundary.
+
 Before routing traffic to the service, run Django's deployment checks with the same ConfigMap
 and Secret values used by the web pod:
 

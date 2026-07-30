@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in authenticated encryption for durable RuntimeEnv snapshots, using strict
+  AES-256-GCM envelopes with either a dedicated rotating key ring or an explicit
+  Django-secret fallback. Readers remain plaintext/encrypted compatible; encrypted
+  envelopes fail closed on corruption, unknown keys, or identity mismatch before Ray
+  submission. Dual-read compatibility does not authenticate row provenance against a
+  database writer. Rollout, retention, downgrade, and threat-boundary guidance
+  accompanies a local KubeRay configuration that exercises encrypted writes on Django
+  processes only.
 - Workflow progress now crosses Ray through one canonical, identity-fenced bytes
   envelope. Producers redact and cap every event before submission, dependency
   edges are chunked, and the collector revalidates the complete run identity while
@@ -262,11 +270,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Execution rows are otherwise read-only: queue, priority, lifecycle, generation, and worker
   ownership remain visible, while controlled writes use the fenced Retry and Cancel actions.
 - Persisted RuntimeEnv snapshots now cross one storage seam and fail closed when an
-  identified row is missing, malformed, noncanonical, or hash-mismatched. Sync, Ray Core,
-  and Ray Job workers classify the failure as permanent before submission. Manual and
-  automatic retry paths verify under the lifecycle row lock before attempt archival or
-  metadata reset, while exact no-profile/no-hash legacy rows keep their default-resolution
-  compatibility. This integrity boundary does not encrypt the plaintext snapshot.
+  identified row is missing, malformed, unsupported, unknown-key, authentication-failed,
+  noncanonical, or hash-mismatched. Sync, Ray Core, and Ray Job workers classify the
+  failure as permanent before submission. Manual and automatic retry paths verify under
+  the lifecycle row lock before attempt archival or metadata reset, while exact
+  no-profile/no-hash legacy rows keep their default-resolution compatibility. Plaintext
+  writes remain the compatibility default; encrypted envelopes use the same boundary.
 - `make test-xdist` provides an ordinary four-worker local speed path for the
   default-resource subset. Markers identify tests that own real Ray, live-cluster, or
   PostgreSQL resources; they do not create CI shards or cross-test coordination, and

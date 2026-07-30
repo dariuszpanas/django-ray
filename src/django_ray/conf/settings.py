@@ -100,8 +100,12 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
         )
 
     from django_ray.runtime.runtime_env import validate_runtime_env_profiles
+    from django_ray.runtime.runtime_env_encryption import (
+        validate_runtime_env_encryption_settings,
+    )
 
     validate_runtime_env_profiles(config)
+    validate_runtime_env_encryption_settings(config)
 
     code_revision = config.get("WORKFLOW_PLAN_CODE_REVISION")
     if code_revision is not None and (

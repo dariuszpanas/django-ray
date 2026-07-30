@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import sys
@@ -17,6 +18,7 @@ from django_ray.models import RayTaskExecution, TaskState
 from django_ray.result_storage import ResultStorageError
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
+    runtime_env_for_execution,
     runtime_env_for_storage,
 )
 
@@ -120,9 +122,12 @@ class TestRayTaskBackend:
 
         observed = []
 
-        def record_storage(runtime_env):
+        observed_task_ids = []
+
+        def record_storage(runtime_env, *, task_id):
             observed.append(runtime_env)
-            return runtime_env_for_storage(runtime_env)
+            observed_task_ids.append(task_id)
+            return runtime_env_for_storage(runtime_env, task_id=task_id)
 
         monkeypatch.setattr("django_ray.backends.runtime_env_for_storage", record_storage)
 
@@ -134,13 +139,15 @@ class TestRayTaskBackend:
 
         execution = RayTaskExecution.objects.get(task_id=result.id)
         assert len(observed) == 1
+        assert observed_task_ids == [result.id]
         assert execution.runtime_env_json == observed[0].serialized
         assert execution.runtime_env_hash == observed[0].digest
 
     def test_runtime_env_storage_failure_creates_no_execution(self, monkeypatch) -> None:
         from testproject.tasks import add_numbers
 
-        def reject_storage(_runtime_env):
+        def reject_storage(_runtime_env, *, task_id):
+            assert task_id
             raise RuntimeEnvSnapshotError(
                 "django-ray: Resolved RuntimeEnv storage snapshot is invalid"
             )
@@ -161,6 +168,74 @@ class TestRayTaskBackend:
             )
 
         assert not RayTaskExecution.objects.exists()
+
+    def test_encryption_configuration_failure_precedes_input_storage(
+        self,
+        monkeypatch,
+        settings,
+    ) -> None:
+        from testproject.tasks import add_numbers
+
+        settings.DJANGO_RAY = {
+            "RAY_ADDRESS": "auto",
+            "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+        }
+        monkeypatch.setattr(
+            "django_ray.backends.prepare_task_input",
+            lambda *_args, **_kwargs: pytest.fail(
+                "task input was prepared before RuntimeEnv encryption configuration"
+            ),
+        )
+
+        with pytest.raises(
+            ImproperlyConfigured,
+            match="RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY",
+        ):
+            _make_backend().enqueue(
+                add_numbers.using(queue_name="default"),
+                args=(2, 3),
+                kwargs={},
+            )
+
+        assert not RayTaskExecution.objects.exists()
+
+    def test_enqueue_encrypts_runtime_env_before_persisting(
+        self,
+        settings,
+    ) -> None:
+        from testproject.tasks import add_numbers
+
+        marker = "arbitrary-enqueue-runtime-env-secret-61b8"
+        key = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+        settings.DJANGO_RAY = {
+            "RAY_ADDRESS": "auto",
+            "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"backend-key": key},
+            "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "backend-key",
+        }
+        backend = RayTaskBackend(
+            "encrypted",
+            {
+                "QUEUES": ["default"],
+                "OPTIONS": {
+                    "RAY_ADDRESS": "auto",
+                    "RAY_RUNTIME_ENV": {"env_vars": {"API_TOKEN": marker}},
+                },
+            },
+        )
+
+        result = backend.enqueue(
+            add_numbers.using(queue_name="default"),
+            args=(2, 3),
+            kwargs={},
+        )
+
+        execution = RayTaskExecution.objects.get(task_id=result.id)
+        assert marker not in execution.runtime_env_json
+        assert json.loads(execution.runtime_env_json)["format"] == (
+            "django-ray.runtime-env.encrypted"
+        )
+        assert runtime_env_for_execution(execution).spec == {"env_vars": {"API_TOKEN": marker}}
 
     def test_enqueue_logs_only_runtime_env_identity(self, caplog) -> None:
         from testproject.tasks import add_numbers

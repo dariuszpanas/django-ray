@@ -176,6 +176,17 @@ def test_optional_benchmark_jobs_are_exactly_workflow_dispatch_only() -> None:
     assert '"pytest-xdist==3.8.0"' in minimum_install["run"]
 
 
+def test_minimum_dependency_lane_pins_runtime_encryption_dependency() -> None:
+    """The minimum lane must exercise the declared cryptography compatibility floor."""
+    minimum_install = next(
+        step
+        for step in _jobs()["dependency-compatibility"]["steps"]
+        if step.get("name") == "Install minimum supported dependencies"
+    )
+
+    assert '"cryptography==42.0.8"' in minimum_install["run"]
+
+
 def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     test_job = _jobs()["test"]
     strategy = test_job["strategy"]

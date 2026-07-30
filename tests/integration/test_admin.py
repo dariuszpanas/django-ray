@@ -2852,7 +2852,7 @@ class TestRayTaskExecutionAdmin:
         assert valid.attempt_number == 3
         assert messages == [
             "Queued 1 task(s) for retry. Skipped 1 task(s) because their persisted "
-            "RuntimeEnv snapshots failed integrity validation."
+            "RuntimeEnv snapshots failed validation."
         ]
         assert "arbitrary-customer-marker-7cf3" not in messages[0]
 

@@ -158,3 +158,16 @@ def test_unfold_is_testproject_only_and_reproducibly_pinned() -> None:
         for extra, requirements in project["optional-dependencies"].items()
         if extra != "sample"
     )
+
+
+def test_cryptography_is_an_unconditional_runtime_dependency() -> None:
+    """RuntimeEnv encryption must not rely on a transitive or optional dependency."""
+    project_root = Path(__file__).parents[2]
+    config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = config["project"]
+
+    assert project["dependencies"].count("cryptography>=42.0.8") == 1
+    assert all(
+        all("cryptography" not in requirement for requirement in requirements)
+        for requirements in project["optional-dependencies"].values()
+    )

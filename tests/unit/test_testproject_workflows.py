@@ -146,14 +146,21 @@ def test_runtime_env_cache_benchmark_has_local_fallback(settings) -> None:
 
 
 def test_runtime_env_probe_reads_distribution_metadata(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DJANGO_RAY_RUNTIME_ENV_STORAGE_PROBE",
+        "django-ray-runtime-env-encryption-canary-v1-7c4e2a91",
+    )
     monkeypatch.setattr("importlib.metadata.version", lambda package: f"{package}-version")
 
     result = inspect_runtime_environment("sample-package")
 
     assert result["package_version"] == "sample-package-version"
+    assert result["storage_encryption_verified"] is True
 
 
 def test_runtime_env_probe_handles_missing_distribution(monkeypatch) -> None:
+    monkeypatch.delenv("DJANGO_RAY_RUNTIME_ENV_STORAGE_PROBE", raising=False)
+
     def _missing(package: str) -> str:
         from importlib.metadata import PackageNotFoundError
 
@@ -164,3 +171,4 @@ def test_runtime_env_probe_handles_missing_distribution(monkeypatch) -> None:
     result = inspect_runtime_environment("missing-package")
 
     assert result["package_version"] == "not installed"
+    assert result["storage_encryption_verified"] is False

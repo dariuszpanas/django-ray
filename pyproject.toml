@@ -37,6 +37,7 @@ classifiers = [
     "Topic :: System :: Distributed Computing",
 ]
 dependencies = [
+    "cryptography>=42.0.8",
     "django>=6.0",
     "ray[default]>=2.53.0",
 ]

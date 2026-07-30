@@ -161,7 +161,7 @@ class RayTaskBackend(BaseTaskBackend):
             self.runtime_env_profile,
             inline_spec=self.inline_runtime_env,
         )
-        stored_runtime_env = runtime_env_for_storage(runtime_env)
+        stored_runtime_env = runtime_env_for_storage(runtime_env, task_id=task_id)
         prepared_input = prepare_task_input(list(args), kwargs)
 
         # Create the task execution record

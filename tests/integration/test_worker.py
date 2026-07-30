@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -17,6 +19,7 @@ from django_ray.models import (
 )
 from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.ray_core import RayCoreHandle
+from django_ray.runtime.runtime_env import normalize_runtime_env, runtime_env_for_storage
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
@@ -69,6 +72,142 @@ class TestWorkerSync:
         assert task.error_message is None
         assert task.finished_at is not None
         assert task.claimed_by_worker == "test-worker"
+
+    def test_sync_worker_executes_an_encrypted_runtime_env_snapshot(
+        self,
+        settings,
+    ):
+        key = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+        encryption_config = {
+            "RAY_ADDRESS": "auto",
+            "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"worker-key": key},
+            "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "worker-key",
+        }
+        settings.DJANGO_RAY = encryption_config
+        task_id = "test-worker-encrypted-sync-001"
+        runtime_env = normalize_runtime_env(
+            {"env_vars": {"MODE": "encrypted-sync"}},
+            profile="thin",
+        )
+        stored = runtime_env_for_storage(
+            runtime_env,
+            task_id=task_id,
+            config=encryption_config,
+        )
+        task = RayTaskExecution.objects.create(
+            task_id=task_id,
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+            runtime_env_profile=stored.profile,
+            runtime_env_json=stored.serialized,
+            runtime_env_hash=stored.digest,
+        )
+
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "encrypted-sync-worker"
+        cmd.active_tasks = {}
+
+        assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data == "8"
+        assert "encrypted-sync" not in task.runtime_env_json
+
+    @pytest.mark.parametrize(
+        ("failure_mode", "expected_error"),
+        [
+            ("tampered-ciphertext", "authentication failed"),
+            ("unknown-key", "decryption key is unavailable"),
+        ],
+    )
+    @pytest.mark.parametrize("execution_mode", ["sync", "local", "ray"])
+    def test_encrypted_snapshot_failure_is_permanent_before_mode_dispatch(
+        self,
+        monkeypatch,
+        settings,
+        execution_mode,
+        failure_mode,
+        expected_error,
+    ):
+        key = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+        task_id = f"test-worker-encrypted-{failure_mode}-{execution_mode}"
+        encryption_config = {
+            "RAY_ADDRESS": "auto",
+            "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"worker-key": key},
+            "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "worker-key",
+        }
+        runtime_env = normalize_runtime_env(
+            {"env_vars": {"VALUE": "arbitrary-encrypted-worker-marker-2c9f"}},
+            profile="thin",
+        )
+        stored = runtime_env_for_storage(
+            runtime_env,
+            task_id=task_id,
+            config=encryption_config,
+        )
+        envelope = json.loads(stored.serialized)
+        if failure_mode == "unknown-key":
+            envelope["key_id"] = "missing-worker-key"
+        else:
+            ciphertext = envelope["ciphertext"]
+            envelope["ciphertext"] = ("A" if ciphertext[0] != "A" else "B") + ciphertext[1:]
+        task = RayTaskExecution.objects.create(
+            task_id=task_id,
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+            runtime_env_profile=stored.profile,
+            runtime_env_json=json.dumps(
+                envelope,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            runtime_env_hash=stored.digest,
+        )
+        settings.DJANGO_RAY = {
+            "RAY_ADDRESS": "auto",
+            "RUNTIME_ENV_STORAGE_MODE": "plaintext",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"worker-key": key},
+        }
+
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = execution_mode
+        cmd.worker_id = "encrypted-snapshot-failure-worker"
+        cmd.active_tasks = {}
+
+        def unexpected_dispatch(_task):
+            pytest.fail(f"{execution_mode} dispatch ran before RuntimeEnv decryption")
+
+        monkeypatch.setattr(cmd, "execute_task_sync", unexpected_dispatch)
+        monkeypatch.setattr(cmd, "submit_task_to_ray_core", unexpected_dispatch)
+        monkeypatch.setattr(cmd, "submit_task_to_ray", unexpected_dispatch)
+
+        assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.ray_job_id is None
+        assert task.ray_address is None
+        assert task.error_traceback is None
+        assert expected_error in task.error_message
+        assert stored.serialized not in task.error_message
+        assert TaskAttempt.objects.filter(execution=task, attempt_number=1).count() == 1
 
     @pytest.mark.parametrize("execution_mode", ["sync", "local", "ray"])
     def test_runtime_env_integrity_failure_is_permanent_before_mode_dispatch(

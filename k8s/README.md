@@ -97,6 +97,16 @@ the deployment boundary, follow the source-bound trigger matrix and guarded comm
 mutations in `django-ray`, preserves PostgreSQL/PVCs, and verifies the running image IDs, protected
 task smoke, probes, generic-Ray RuntimeEnv boundary, and Prometheus pools together.
 
+This local overlay also opts Django application processes into encrypted durable
+RuntimeEnv snapshots through the explicit `django-secret` fallback. The three
+selection variables are patched directly onto `django-web` and the default,
+synchronous, and ML task-manager containers; they are not added to the shared
+ConfigMap or `RayCluster` pod specification. The base and other overlays remain in
+the plaintext compatibility mode. This verifies the envelope and execution path, not
+production key isolation: the example Ray pods still import the shared Django signing
+secret used by the fallback. Use a dedicated key delivered only to Django application
+processes when separation from read-only database access is required.
+
 ```bash
 # Build app images, load them into kind, install operator, deploy KubeRay overlay.
 # Ray head/workers use the upstream image; RuntimeEnv supplies project code.
@@ -285,7 +295,9 @@ kubectl delete namespace django-ray
 
 For production deployment:
 
-1. **Secrets**: Use external secret management (Vault, AWS Secrets Manager, etc.)
+1. **Secrets**: Use external secret management (Vault, AWS Secrets Manager, etc.).
+   Prefer a dedicated RuntimeEnv snapshot key with an independent retention schedule;
+   do not place it in the shared `django-ray-secret` that the example Ray pods import.
 2. **Database**: Use managed PostgreSQL (RDS, Cloud SQL, Azure Database)
 3. **Ray Cluster**: Consider using [KubeRay operator](https://ray-project.github.io/kuberay/)
 4. **TLS**: Enable TLS for Ray cluster communication (see below)
@@ -421,6 +433,9 @@ For more details, see the [Ray TLS documentation](https://docs.ray.io/en/latest/
 | `DJANGO_API_TOKEN` | placeholder in base Secret | Bearer token for non-health API routes; at least 32 characters in production |
 | `DJANGO_DEBUG` | False | Debug mode; production rejects True |
 | `DJANGO_ALLOWED_HOSTS` | `django-ray.example.com` | Explicit comma-separated hosts; production rejects `*`. Keep web probe `Host` headers aligned in production overlays. |
+| `DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE` | `plaintext` | Format for new durable RuntimeEnv snapshots; the local KubeRay overlay selects `encrypted` only on Django application containers |
+| `DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY` | unset | Key ID for new encrypted snapshots; the local KubeRay overlay selects the reserved `django-secret` fallback |
+| `DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK` | `False` | Explicitly permit HKDF derivation from Django signing keys; the local KubeRay overlay sets `true` |
 
 ### Database Configuration
 

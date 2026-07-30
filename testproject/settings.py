@@ -280,6 +280,10 @@ TASKS = {
     },
 }
 
+_runtime_env_encryption_active_key = os.environ.get("DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY")
+if _runtime_env_encryption_active_key is not None:
+    _runtime_env_encryption_active_key = _runtime_env_encryption_active_key.strip() or None
+
 # django-ray configuration used by the library backend and worker command.
 DJANGO_RAY = {
     # Use "auto" for local Ray, or "ray://host:port" for cluster
@@ -293,6 +297,7 @@ DJANGO_RAY = {
             ),
             "excludes": [".git", ".venv", "__pycache__", "staticfiles"],
             "pip": [
+                "cryptography>=42.0.8",
                 "django>=6.0",
                 "django-unfold==0.102.0",
                 "psycopg[binary]>=3.1",
@@ -301,6 +306,9 @@ DJANGO_RAY = {
             ],
             "env_vars": {
                 "DJANGO_RAY_RUNTIME_ENV": "project",
+                "DJANGO_RAY_RUNTIME_ENV_STORAGE_PROBE": (
+                    "django-ray-runtime-env-encryption-canary-v1-7c4e2a91"
+                ),
                 "PYTHONPATH": "src",
             },
         },
@@ -326,6 +334,15 @@ DJANGO_RAY = {
         },
     },
     "DEFAULT_RUNTIME_ENV_PROFILE": "project",
+    "RUNTIME_ENV_STORAGE_MODE": os.environ.get(
+        "DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE",
+        "plaintext",
+    ).strip(),
+    "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": _runtime_env_encryption_active_key,
+    "RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK": _env_bool(
+        "DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK",
+        default=False,
+    ),
     "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": _env_bool(
         "DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT",
         default=True,

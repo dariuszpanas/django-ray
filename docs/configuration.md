@@ -66,6 +66,10 @@ different clusters.
 | `RAY_STATE_API_TIMEOUT_SECONDS` | `int` | `5` | Timeout for optional Ray state and log queries |
 | `RUNTIME_ENV_PROFILES` | `dict` | `{}` | Named, validated Ray RuntimeEnv definitions |
 | `DEFAULT_RUNTIME_ENV_PROFILE` | `str \| None` | `None` | Profile used when a backend does not select one |
+| `RUNTIME_ENV_STORAGE_MODE` | `str` | `"plaintext"` | Format for new snapshots: `"plaintext"` or `"encrypted"`; readers always support both |
+| `RUNTIME_ENV_ENCRYPTION_KEYS` | `dict[str, str]` | `{}` | Dedicated key IDs mapped to canonical unpadded base64url AES-256 keys |
+| `RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY` | `str \| None` | `None` | Dedicated key ID or reserved `"django-secret"` ID used for new encrypted snapshots |
+| `RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK` | `bool` | `False` | Explicitly allow HKDF-derived keys from `SECRET_KEY` and `SECRET_KEY_FALLBACKS` |
 | `WORKFLOW_PLAN_CODE_REVISION` | `str \| None` | `None` | Immutable non-secret application build, artifact, or image revision; required for reusable-plan eligibility |
 | `WORKFLOW_PLAN_TRUST_IDENTITY` | `dict` | `{}` | Bounded non-secret trust, credential-provider, and optional full-environment revision used to decide safe actor reuse |
 | `RUNNER` | `str` | `"ray_job"` | Default runner when no mode flag is passed: `"ray_job"` or `"ray_core"` |
@@ -194,7 +198,8 @@ have no detail expiry because no detail rows are created.
 
 RuntimeEnv profiles are resolved and stored when a task is enqueued. See
 [Runtime Environments](runtime-environments.md) for inheritance, backend aliases,
-workflow leaf overrides, and cache behavior.
+workflow leaf overrides, cache behavior, encrypted snapshot configuration, and the
+required rolling-deployment order.
 
 ### Inputs
 
@@ -297,6 +302,9 @@ admin, Ray dashboard, and result storage with the appropriate access controls.
 The admin never renders the raw durable RuntimeEnv snapshot because arbitrary
 `env_vars`, package references, and URIs cannot be made safe through
 name-pattern redaction alone. It shows only the profile and content hash.
+`RUNTIME_ENV_STORAGE_MODE="encrypted"` can protect that one database column from
+read-only database and backup exposure, but it does not encrypt task inputs,
+results, progress, Ray transport, process memory, or application-created logs.
 
 `RayTaskExecution` detail fields are read-only, including queue, priority,
 lifecycle state, attempt/generation identity, and worker ownership. Queue and

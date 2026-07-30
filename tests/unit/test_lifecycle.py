@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -19,6 +20,7 @@ from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
     normalize_runtime_env,
+    runtime_env_for_storage,
 )
 
 
@@ -194,6 +196,97 @@ def test_retry_task_integrity_preflight_preserves_the_complete_execution(monkeyp
 
 
 @pytest.mark.django_db
+def test_retry_task_missing_encryption_key_preserves_the_complete_execution(
+    settings,
+) -> None:
+    key = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+    write_config = {
+        "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+        "RUNTIME_ENV_ENCRYPTION_KEYS": {"retained-key": key},
+        "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "retained-key",
+    }
+    snapshot = normalize_runtime_env(
+        {"env_vars": {"VALUE": "arbitrary-encrypted-retry-marker-8b2a"}},
+        profile="thin",
+    )
+    task_id = "lifecycle-retry-encrypted-key-001"
+    stored = runtime_env_for_storage(
+        snapshot,
+        task_id=task_id,
+        config=write_config,
+    )
+    task = RayTaskExecution.objects.create(
+        task_id=task_id,
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        attempt_number=2,
+        execution_generation=4,
+        error_message="original failure",
+        error_traceback="OriginalError: retained",
+        runtime_env_profile=stored.profile,
+        runtime_env_json=stored.serialized,
+        runtime_env_hash=stored.digest,
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    settings.DJANGO_RAY = {
+        "RAY_ADDRESS": "auto",
+        "RUNTIME_ENV_STORAGE_MODE": "plaintext",
+    }
+
+    with pytest.raises(RuntimeEnvSnapshotError, match="decryption key is unavailable") as exc_info:
+        retry_task(task.pk)
+
+    after = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    assert after == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+    assert stored.serialized not in str(exc_info.value)
+    assert "arbitrary-encrypted-retry-marker-8b2a" not in str(exc_info.value)
+
+
+@pytest.mark.django_db
+def test_retry_task_rejects_missing_hash_on_encrypted_no_profile_snapshot(
+    settings,
+) -> None:
+    key = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+    config = {
+        "RAY_ADDRESS": "auto",
+        "RAY_RUNTIME_ENV": {"env_vars": {"MODE": "current-default"}},
+        "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+        "RUNTIME_ENV_ENCRYPTION_KEYS": {"retained-key": key},
+        "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "retained-key",
+    }
+    marker = "arbitrary-encrypted-retry-missing-hash-3c91"
+    task_id = "lifecycle-retry-encrypted-missing-hash-001"
+    stored = runtime_env_for_storage(
+        normalize_runtime_env({"env_vars": {"VALUE": marker}}),
+        task_id=task_id,
+        config=config,
+    )
+    task = RayTaskExecution.objects.create(
+        task_id=task_id,
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        attempt_number=2,
+        execution_generation=4,
+        error_message="original failure",
+        runtime_env_profile=stored.profile,
+        runtime_env_json=stored.serialized,
+        runtime_env_hash="",
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    settings.DJANGO_RAY = config
+
+    with pytest.raises(RuntimeEnvSnapshotError, match="incomplete identity") as exc_info:
+        retry_task(task.pk)
+
+    after = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    assert after == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+    assert stored.serialized not in str(exc_info.value)
+    assert marker not in str(exc_info.value)
+
+
+@pytest.mark.django_db
 def test_automatic_retry_integrity_preflight_rolls_back_before_attempt_history() -> None:
     snapshot = normalize_runtime_env(
         {"env_vars": {"VALUE": "arbitrary-customer-marker-7cf3"}},
@@ -224,6 +317,102 @@ def test_automatic_retry_integrity_preflight_rolls_back_before_attempt_history()
 
 
 @pytest.mark.django_db
+def test_automatic_retry_missing_encryption_key_rolls_back_before_attempt_history(
+    settings,
+) -> None:
+    key = base64.urlsafe_b64encode(bytes(reversed(range(32)))).rstrip(b"=").decode("ascii")
+    task_id = "lifecycle-auto-retry-encrypted-key-001"
+    snapshot = normalize_runtime_env(
+        {"env_vars": {"VALUE": "arbitrary-encrypted-auto-retry-marker-5d7c"}},
+    )
+    stored = runtime_env_for_storage(
+        snapshot,
+        task_id=task_id,
+        config={
+            "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"retained-key": key},
+            "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "retained-key",
+        },
+    )
+    task = RayTaskExecution.objects.create(
+        task_id=task_id,
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=3,
+        error_message="previous diagnostic",
+        claimed_by_worker="retained-worker",
+        runtime_env_profile=stored.profile,
+        runtime_env_json=stored.serialized,
+        runtime_env_hash=stored.digest,
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    settings.DJANGO_RAY = {
+        "RAY_ADDRESS": "auto",
+        "RUNTIME_ENV_STORAGE_MODE": "plaintext",
+    }
+
+    with pytest.raises(RuntimeEnvSnapshotError, match="decryption key is unavailable"):
+        record_failure(
+            task,
+            error_message="current callable failure",
+            retry=True,
+        )
+
+    after = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    assert after == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+@pytest.mark.django_db
+def test_automatic_retry_rejects_missing_hash_on_encrypted_no_profile_snapshot(
+    settings,
+) -> None:
+    key = base64.urlsafe_b64encode(bytes(reversed(range(32)))).rstrip(b"=").decode("ascii")
+    config = {
+        "RAY_ADDRESS": "auto",
+        "RAY_RUNTIME_ENV": {"env_vars": {"MODE": "current-default"}},
+        "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+        "RUNTIME_ENV_ENCRYPTION_KEYS": {"retained-key": key},
+        "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "retained-key",
+    }
+    marker = "arbitrary-encrypted-auto-retry-missing-hash-4da2"
+    task_id = "lifecycle-auto-retry-encrypted-missing-hash-001"
+    stored = runtime_env_for_storage(
+        normalize_runtime_env({"env_vars": {"VALUE": marker}}),
+        task_id=task_id,
+        config=config,
+    )
+    task = RayTaskExecution.objects.create(
+        task_id=task_id,
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=3,
+        error_message="previous diagnostic",
+        claimed_by_worker="retained-worker",
+        runtime_env_profile=stored.profile,
+        runtime_env_json=stored.serialized,
+        runtime_env_hash="",
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    settings.DJANGO_RAY = config
+
+    with pytest.raises(RuntimeEnvSnapshotError, match="incomplete identity") as exc_info:
+        record_failure(
+            task,
+            error_message="current callable failure",
+            retry=True,
+        )
+
+    after = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    assert after == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+    assert stored.serialized not in str(exc_info.value)
+    assert marker not in str(exc_info.value)
+
+
+@pytest.mark.django_db
 def test_terminal_failure_can_record_a_corrupt_snapshot_without_retrying() -> None:
     task = RayTaskExecution.objects.create(
         task_id="lifecycle-terminal-runtime-env-integrity-001",
@@ -237,7 +426,7 @@ def test_terminal_failure_can_record_a_corrupt_snapshot_without_retrying() -> No
 
     assert record_failure(
         task,
-        error_message="Persisted RuntimeEnv snapshot failed integrity validation",
+        error_message="Persisted RuntimeEnv snapshot failed validation",
         retry=False,
     )
 
