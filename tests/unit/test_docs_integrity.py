@@ -16,6 +16,10 @@ EVIDENCE_DIRECTORIES = {"benchmarks", "investigations"}
 SETTINGS_OUTSIDE_DJANGO_RAY = {"RAY_DASHBOARD_URL"}
 
 
+def test_repository_llms_guide_matches_published_copy() -> None:
+    assert (ROOT / "llms.txt").read_bytes() == (DOCS / "llms.txt").read_bytes()
+
+
 def _nav_markdown_paths(value: Any) -> set[Path]:
     if isinstance(value, str):
         return {Path(value)} if value.endswith(".md") else set()

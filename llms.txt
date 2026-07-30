@@ -16,14 +16,20 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   complete backend configuration, task definition, worker startup, and result lookup.
 - [Performance](https://django-ray.readthedocs.io/en/latest/performance/): choose
   durable task boundaries, Ray Core versus Ray Job, batching, and RuntimeEnv strategy.
+- [Observability](https://django-ray.readthedocs.io/en/latest/observability/): use
+  versioned task services, bounded metrics, live admin updates, and optional Ray data.
 - [Compatibility](https://django-ray.readthedocs.io/en/latest/compatibility/):
   supported Python, Django, Ray, CI, and platform policy.
+- [Migrating from Celery](https://django-ray.readthedocs.io/en/latest/celery-migration/):
+  move producers through Django Tasks, classify semantic gaps, coexist safely, and
+  drain Celery before removing it.
 - [Tasks](https://django-ray.readthedocs.io/en/latest/tasks/): Django task arguments,
   results, errors, batching, and distributed utilities.
 - [Ray-native workflows](https://django-ray.readthedocs.io/en/latest/workflows/):
   `step`, `chain`, `group`, `map_step`, progress, and graph semantics.
 - [Workflow plan contract](https://django-ray.readthedocs.io/en/latest/workflow-plans/):
-  plan identity, workload classification, and execution-strategy eligibility.
+  definitions versus immutable plans, workload classification, fingerprints, run
+  identity, and execution-strategy eligibility.
 - [Compiled session ownership](https://django-ray.readthedocs.io/en/latest/design/adr-0002-compiled-session-ownership/):
   initial local/direct CPU-pilot process boundary, deferred Ray Client-submitted
   topology, within-run reuse, routing, admission, and drain.
@@ -33,8 +39,17 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Bounded workflow progress](https://django-ray.readthedocs.io/en/latest/design/adr-0004-bounded-workflow-progress/):
   Always-bounded summaries, immutable topology pages, normalized latest-state detail,
   fenced publication, pagination, retention, and legacy snapshot rollout.
+- [Bounded workflow progress preparation](https://django-ray.readthedocs.io/en/latest/design/adr-0005-bounded-workflow-preparation/):
+  Selected contract, prototype, and #141 spill-backed production topology adapter for
+  exact one-shot preparation; #142 owns the remaining composite topology/detail
+  lifetime.
+- [Compiled Graph compatibility](https://django-ray.readthedocs.io/en/latest/compiled-graph-compatibility/):
+  fail-closed candidate and verified tuples, native probe outcomes, topology,
+  transport, dependencies, and canary maintenance.
 - [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
   named profiles, code delivery, cache behavior, and security boundaries.
+- [Ray Serve integration boundary](https://django-ray.readthedocs.io/en/latest/design/ray-serve-boundary/):
+  deferred ownership, lifecycle, security, and packaging decision.
 
 ## Operations and reference
 
@@ -42,6 +57,7 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Queues](https://django-ray.readthedocs.io/en/latest/queues/)
 - [Configuration](https://django-ray.readthedocs.io/en/latest/configuration/)
 - [Settings reference](https://django-ray.readthedocs.io/en/latest/reference/settings/)
+- [Durable input storage](https://django-ray.readthedocs.io/en/latest/reference/input-storage/)
 - [API and UI integration](https://django-ray.readthedocs.io/en/latest/reference/api/)
 - [Kubernetes](https://django-ray.readthedocs.io/en/latest/deployment/kubernetes/)
 - [Operator runbook](https://django-ray.readthedocs.io/en/latest/runbook/)
@@ -50,35 +66,59 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 ## Source map
 
 - `src/django_ray/backends.py`: Django Tasks backend and result reconstruction.
+- `src/django_ray/input_storage.py`: versioned input envelopes, storage references,
+  integrity validation, and retention registration.
 - `src/django_ray/management/commands/django_ray_worker.py`: claims, leases, retries,
   mode selection, and reconciliation.
 - `src/django_ray/workflows.py`: workflow signature construction and execution.
 - `src/django_ray/runtime/runtime_env.py`: profile validation, inheritance, hashing,
   and local-path preparation.
+- `src/django_ray/runtime/runtime_env_encryption.py`: key validation, HKDF
+  derivation, and strict AES-256-GCM storage envelopes.
 - `src/django_ray/runtime/compiled_graph_lifecycle.py`: deterministic Ray-free
   compiled session and invocation state reducer.
 - `src/django_ray/runner/ray_core.py`: low-overhead Ray Core submission.
 - `src/django_ray/runner/ray_job.py`: Ray Job submission and reconciliation.
-- `src/django_ray/observability.py`: graph, Ray state, and bounded log helpers.
+- `src/django_ray/observability.py`: versioned durable and optional live-Ray services.
+- `src/django_ray/metrics.py`: bounded-cardinality Prometheus rendering.
 - `testproject/apps/cluster_tasks/`: executable workflow and RuntimeEnv examples.
 
 ## Semantic constraints
 
 - One workflow is one durable `RayTaskExecution`; internal leaves are not independent
   Django tasks.
+- `WorkflowSignature` is a definition builder, not a persisted plan. Compiled Graph is
+  an execution strategy for eligible static actor regions, not a Django task type.
 - Compiled lifecycle protocol version 1 is fingerprinted in the effective plan. It
   closes fallback before preparation and same-invocation replay when submission starts;
   no native Compiled Graph strategy is enabled by the reducer.
-- Current workflow actors still emit complete, size-unbounded schema-v2 graph snapshots.
-  ADR-0004's additive schema-v3 summary columns, strict 16 KiB codec, fenced writer
-  primitive, rolling reader, and terminal attempt archival are implemented, but writer
-  activation waits for topology/detail storage (#126) and authorized public readers
-  (#127).
+- Full workflow reporting now sends canonical, identity-fenced, redacted, byte-bounded
+  event envelopes to an actor with bounded nodes, edges, recent events, and retained
+  bytes. The actor still emits schema-v2 compatibility snapshots of that retained
+  bounded state; actor ingress diagnostics report actor-side rejection counts and
+  accepted events marked truncated rather than implying that an over-limit graph is
+  complete. ADR-0004's additive schema-v3 summary, bounded topology/detail storage,
+  atomic publication, retention cleanup, authorized readers, and #141 spill-backed
+  topology preparation are implemented. A default-off stricter pilot may publish one
+  admitted terminal schema-v3 snapshot. Default and higher-scale activation still wait
+  for #79's aggregate mailbox/backpressure work, #142's composite topology/detail
+  lifetime, capacity and migration gates, and an old-writer drain.
 - The result returned by `enqueue()` is a snapshot. Fetch current state with
   `task_backends[alias].get_result(task_id)`.
-- Per-task numeric priority is not supported. Conventional queue names influence claim
-  order when one worker consumes multiple queues.
+- Per-task numeric priority is persisted from `-100` through `100`; larger values are
+  claimed first and equal priorities remain FIFO. Queue names provide workload
+  isolation and do not imply scheduling precedence.
 - Ray-native callables should be importable module-level functions.
 - Ray Client task-level RuntimeEnv code must use a remote/shared URI, not a Django-pod
   local directory.
 - RuntimeEnv is dependency isolation inside one trust boundary, not tenant isolation.
+- Durable RuntimeEnv snapshots default to canonical plaintext writes. Readers always
+  accept supported plaintext and AES-256-GCM envelope rows, so encrypted rollout is
+  reader-first and a binary downgrade is unsafe while any encrypted row remains.
+- Prefer a separately managed RuntimeEnv encryption key ring. The `django-secret`
+  HKDF fallback is explicit only. Retain every dedicated key while a durable row can
+  name its key ID. The stable `django-secret` envelope ID does not encode fallback
+  position, so retain every current or fallback Django secret candidate that a row may
+  depend on for the full RuntimeEnv row lifetime. The public plaintext hash still
+  reveals equality, and encryption does not protect Ray transport, process memory,
+  arguments, results, progress, or logs.
