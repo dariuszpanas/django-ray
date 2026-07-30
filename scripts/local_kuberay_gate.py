@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -85,6 +86,80 @@ EXPECTED_PROBE_PATH = "/api/health"
 EXPECTED_PROBE_HOST = "django-ray.localhost"
 RUNTIME_ENV_ARCHIVE = "/runtime-env/django-ray-source.zip"
 RUNTIME_ENV_REQUIRED_MEMBER = "src/django_ray/runtime/remote.py"
+RUNTIME_ENV_ENCRYPTION_PROBE_PATH = "/api/cluster/runtime-env/probe?profile=thin"
+RUNTIME_ENV_ENCRYPTION_RESULT_PATH = "/api/cluster/runtime-env/{task_id}"
+RUNTIME_ENV_STORAGE_PROBE_MARKER = "django-ray-runtime-env-encryption-canary-v1-7c4e2a91"
+RUNTIME_ENV_FAILURE_UNKNOWN_KEY_ID = "django-ray-gate-unknown"
+RUNTIME_ENV_ENVELOPE_FORMAT = "django-ray.runtime-env.encrypted"
+RUNTIME_ENV_ENVELOPE_VERSION = 1
+RUNTIME_ENV_ENVELOPE_ALGORITHM = "AES-256-GCM"
+RUNTIME_ENV_ENVELOPE_FIELDS = frozenset(
+    {
+        "format",
+        "version",
+        "algorithm",
+        "key_id",
+        "nonce",
+        "ciphertext",
+    }
+)
+RUNTIME_ENV_ENCRYPTION_ENV = {
+    "DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE": "encrypted",
+    "DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "django-secret",
+    "DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK": "true",
+}
+RUNTIME_ENV_FAILURE_FIXTURE_CALLABLE = "testproject.apps.cluster_tasks.tasks.runtime_env_probe"
+RUNTIME_ENV_FAILURE_FIXTURE_SCRIPT = """
+import json
+import uuid
+
+from django.db import transaction
+
+from django_ray.models import RayTaskExecution, TaskState
+from django_ray.runtime.runtime_env import (
+    resolve_runtime_env_profile,
+    runtime_env_for_storage,
+)
+
+
+def canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+with transaction.atomic():
+    resolved = resolve_runtime_env_profile("thin")
+    fixtures = {}
+    for mutation in ("ciphertext", "key_id"):
+        task_id = str(uuid.uuid4())
+        stored = runtime_env_for_storage(resolved, task_id=task_id)
+        envelope = json.loads(stored.serialized)
+        if mutation == "ciphertext":
+            ciphertext = envelope["ciphertext"]
+            envelope["ciphertext"] = ("A" if ciphertext[0] != "A" else "B") + ciphertext[1:]
+        else:
+            envelope["key_id"] = "django-ray-gate-unknown"
+        serialized = canonical_json(envelope)
+        execution = RayTaskExecution.objects.create(
+            task_id=task_id,
+            callable_path="testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+            queue_name="default",
+            priority=100,
+            state=TaskState.QUEUED,
+            runtime_env_profile=stored.profile,
+            runtime_env_json=serialized,
+            runtime_env_hash=stored.digest,
+            timeout_seconds=30,
+        )
+        fixtures[mutation] = {
+            "id": execution.pk,
+            "task_id": task_id,
+            "envelope": serialized,
+            "nonce": envelope["nonce"],
+            "ciphertext": envelope["ciphertext"],
+        }
+
+print(canonical_json(fixtures))
+""".strip()
 COMPLEX_WORKFLOW_ENQUEUE_PATH = (
     "/api/cluster/complex-workflow?fast_items=2&slow_items=1&fast_seconds=0.01&slow_seconds=0.02"
 )
@@ -543,6 +618,7 @@ class Runner:
         effective_timeout = self.timeout_seconds if timeout is None else timeout
         if effective_timeout <= 0:
             raise ValueError("command timeout must be positive")
+        sensitive_timeout_error: CommandError | None = None
         try:
             result = subprocess.run(
                 list(args),
@@ -579,7 +655,15 @@ class Runner:
                 detail = f"{detail}\n[sensitive command output suppressed]"
             elif output:
                 detail = f"{detail}\n{output}"
-            raise CommandError(self.redactor.clean(detail)) from error
+            command_error = CommandError(self.redactor.clean(detail))
+            if sensitive_output:
+                sensitive_timeout_error = command_error
+            else:
+                raise command_error from error
+        if sensitive_timeout_error is not None:
+            # Raise after leaving the except block so the TimeoutExpired payload
+            # is absent from both __cause__ and __context__.
+            raise sensitive_timeout_error
         command_result = CommandResult(result.stdout, result.stderr, result.returncode)
         if check and result.returncode != 0:
             command = " ".join(args)
@@ -645,6 +729,15 @@ class GateEvidence:
     task_id: str = ""
     task_state: str = ""
     task_result: object = None
+    runtime_env_encryption_overlay: bool = False
+    runtime_env_encryption_canary: bool = False
+    runtime_env_encryption_envelope: bool = False
+    runtime_env_encryption_marker_absent: bool = False
+    runtime_env_encryption_tamper_rejected: bool = False
+    runtime_env_encryption_unknown_key_rejected: bool = False
+    runtime_env_encryption_retry_preserved: bool = False
+    runtime_env_encryption_logs_clear: bool = False
+    django_ray_secret_preserved: bool = False
     workflow_task_id: str = ""
     workflow_task_state: str = ""
     workflow_attempt_number: int = 0
@@ -923,6 +1016,276 @@ def _sequence(value: object, *, field_name: str) -> list[Any]:
     if not isinstance(value, list):
         raise ValueError(f"{field_name} must be a list")
     return value
+
+
+def _parse_json_without_cause(
+    value: str | bytes,
+    *,
+    error_message: str,
+) -> Any:
+    """Parse JSON while keeping raw input out of the raised exception graph."""
+    parsed: Any = None
+    parsed_ok = False
+    try:
+        parsed = json.loads(value)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        pass
+    else:
+        parsed_ok = True
+    if not parsed_ok:
+        # This raise must remain outside the except block. JSONDecodeError.doc
+        # and UnicodeDecodeError.object may contain the complete private input.
+        raise ValueError(error_message)
+    return parsed
+
+
+def secret_data_sha256(data: Mapping[str, Any]) -> str:
+    """Hash the complete base64 Secret data mapping without retaining its values."""
+    canonical: dict[str, str] = {}
+    for key, value in data.items():
+        if not isinstance(key, str) or not key or not isinstance(value, str):
+            raise ValueError("Secret/django-ray-secret data must map names to base64 strings")
+        canonical[key] = value
+    if not canonical:
+        raise ValueError("Secret/django-ray-secret data must not be empty")
+    serialized = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def inspect_runtime_env_encryption_secret_data(data: Mapping[str, Any]) -> None:
+    """Reject selectors inherited from the preserved application Secret."""
+    if any(name in data for name in RUNTIME_ENV_ENCRYPTION_ENV):
+        raise ValueError(
+            "Secret/django-ray-secret must not contain RuntimeEnv encryption selectors"
+        )
+
+
+def _runtime_env_encryption_pod_specs(
+    resource: Mapping[str, Any],
+) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+    """Return every rendered application or Ray pod spec with a stable label."""
+    identity = _resource_identity(resource)
+    kind = identity[1]
+    if kind in {"Deployment", "Job"}:
+        pod_spec = _pod_spec(resource)
+        if pod_spec is None:  # pragma: no cover - guarded by the kind branch
+            return ()
+        return ((f"{kind}/{identity[2]}", pod_spec),)
+    if kind != "RayCluster":
+        return ()
+
+    spec = _mapping(resource.get("spec"), field_name="RayCluster spec")
+    head = _mapping(spec.get("headGroupSpec"), field_name="RayCluster headGroupSpec")
+    head_template = _mapping(head.get("template"), field_name="RayCluster head template")
+    head_pod_spec = _mapping(
+        head_template.get("spec"),
+        field_name="RayCluster head pod spec",
+    )
+    result: list[tuple[str, Mapping[str, Any]]] = [
+        (f"RayCluster/{identity[2]} head", head_pod_spec)
+    ]
+    for index, value in enumerate(
+        _sequence(spec.get("workerGroupSpecs"), field_name="RayCluster workerGroupSpecs")
+    ):
+        group = _mapping(value, field_name=f"RayCluster workerGroupSpecs[{index}]")
+        name = group.get("groupName")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"RayCluster workerGroupSpecs[{index}] has no groupName")
+        template = _mapping(
+            group.get("template"),
+            field_name=f"RayCluster workerGroupSpecs[{index}] template",
+        )
+        pod_spec = _mapping(
+            template.get("spec"),
+            field_name=f"RayCluster workerGroupSpecs[{index}] pod spec",
+        )
+        result.append((f"RayCluster/{identity[2]} worker {name}", pod_spec))
+    return tuple(result)
+
+
+def inspect_runtime_env_encryption_overlay(resources: Sequence[Mapping[str, Any]]) -> None:
+    """Require encrypted Django-secret selectors only on application containers."""
+    rendered_sources = {
+        (identity[1], identity[2])
+        for resource in resources
+        if (identity := _resource_identity(resource))[1] in {"ConfigMap", "Secret"}
+    }
+    carriers: dict[tuple[str, str, str], dict[str, str]] = {}
+    for resource in resources:
+        identity = _resource_identity(resource)
+        if identity[1] in {"ConfigMap", "Secret"}:
+            for source_field in ("data", "stringData"):
+                data = resource.get(source_field, {})
+                if data is None:
+                    continue
+                mapping = _mapping(
+                    data,
+                    field_name=f"{identity[1]}/{identity[2]} {source_field}",
+                )
+                if any(name in mapping for name in RUNTIME_ENV_ENCRYPTION_ENV):
+                    raise ValueError(
+                        "RuntimeEnv encryption selectors must not use a shared ConfigMap or Secret"
+                    )
+
+        for workload, pod_spec in _runtime_env_encryption_pod_specs(resource):
+            for collection in ("initContainers", "containers"):
+                entries = _sequence(
+                    pod_spec.get(collection, []),
+                    field_name=f"{workload} {collection}",
+                )
+                for index, value in enumerate(entries):
+                    container = _mapping(
+                        value,
+                        field_name=f"{workload} {collection}[{index}]",
+                    )
+                    container_name = container.get("name")
+                    if not isinstance(container_name, str) or not container_name:
+                        raise ValueError(f"{workload} {collection}[{index}] has no container name")
+                    selected: dict[str, str] = {}
+                    env_entries = _sequence(
+                        container.get("env", []),
+                        field_name=f"{workload} {container_name} env",
+                    )
+                    env_from_entries = _sequence(
+                        container.get("envFrom", []),
+                        field_name=f"{workload} {container_name} envFrom",
+                    )
+                    for env_from_index, env_from_value in enumerate(env_from_entries):
+                        env_from = _mapping(
+                            env_from_value,
+                            field_name=(f"{workload} {container_name} envFrom[{env_from_index}]"),
+                        )
+                        references = tuple(
+                            (field, kind)
+                            for field, kind in (
+                                ("configMapRef", "ConfigMap"),
+                                ("secretRef", "Secret"),
+                            )
+                            if field in env_from
+                        )
+                        if len(references) != 1:
+                            raise ValueError(
+                                f"{workload} {container_name} envFrom must name exactly one source"
+                            )
+                        field, kind = references[0]
+                        reference = _mapping(
+                            env_from.get(field),
+                            field_name=f"{workload} {container_name} {field}",
+                        )
+                        source_name = reference.get("name")
+                        if (
+                            not isinstance(source_name, str)
+                            or not source_name
+                            or (kind, source_name) not in rendered_sources
+                        ):
+                            raise ValueError(
+                                f"{workload} {container_name} envFrom source is not rendered"
+                            )
+                    for env_index, env_value in enumerate(env_entries):
+                        entry = _mapping(
+                            env_value,
+                            field_name=f"{workload} {container_name} env[{env_index}]",
+                        )
+                        name = entry.get("name")
+                        if name not in RUNTIME_ENV_ENCRYPTION_ENV:
+                            continue
+                        if name in selected:
+                            raise ValueError(
+                                f"{workload} {container_name} duplicates RuntimeEnv selector {name}"
+                            )
+                        literal = entry.get("value")
+                        if not isinstance(literal, str) or set(entry) != {"name", "value"}:
+                            raise ValueError(
+                                f"{workload} {container_name} must set RuntimeEnv selector "
+                                f"{name} as a literal value"
+                            )
+                        selected[cast(str, name)] = literal
+                    if selected:
+                        carriers[(workload, collection, container_name)] = selected
+
+    expected_workloads = {f"Deployment/{name}" for name in APP_DEPLOYMENTS}
+    if (
+        len(carriers) != len(expected_workloads)
+        or {workload for workload, _collection, _container in carriers} != expected_workloads
+        or any(collection != "containers" for _workload, collection, _container in carriers)
+        or any(values != dict(RUNTIME_ENV_ENCRYPTION_ENV) for values in carriers.values())
+    ):
+        raise ValueError(
+            "RuntimeEnv encrypted Django-secret mode must appear exactly on django-web "
+            "and the default, synchronous, and ML task-manager containers"
+        )
+
+
+def _decode_canonical_base64url(
+    value: object,
+    *,
+    exact_bytes: int | None = None,
+    minimum_bytes: int | None = None,
+) -> bytes | None:
+    """Decode one strict unpadded base64url value for envelope inspection."""
+    if not isinstance(value, str) or not value or "=" in value:
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        return None
+    try:
+        decoded = base64.b64decode(
+            f"{value}{'=' * (-len(value) % 4)}".encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+    except (ValueError, binascii.Error):
+        return None
+    if exact_bytes is not None and len(decoded) != exact_bytes:
+        return None
+    if minimum_bytes is not None and len(decoded) < minimum_bytes:
+        return None
+    canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii")
+    return decoded if canonical == value else None
+
+
+def validate_runtime_env_encryption_envelope(
+    serialized: str,
+    *,
+    marker: str = RUNTIME_ENV_STORAGE_PROBE_MARKER,
+) -> tuple[str, str]:
+    """Validate the strict persisted canary envelope without decrypting it."""
+    if not isinstance(serialized, str) or not serialized or marker in serialized:
+        raise ValueError("persisted RuntimeEnv envelope exposed the plaintext probe marker")
+    value = _parse_json_without_cause(
+        serialized,
+        error_message="persisted RuntimeEnv envelope is not valid JSON",
+    )
+    envelope = _mapping(value, field_name="persisted RuntimeEnv envelope")
+    if set(envelope) != RUNTIME_ENV_ENVELOPE_FIELDS:
+        raise ValueError("persisted RuntimeEnv envelope fields are not exact")
+    if (
+        envelope.get("format") != RUNTIME_ENV_ENVELOPE_FORMAT
+        or type(envelope.get("version")) is not int
+        or envelope.get("version") != RUNTIME_ENV_ENVELOPE_VERSION
+        or envelope.get("algorithm") != RUNTIME_ENV_ENVELOPE_ALGORITHM
+        or envelope.get("key_id") != "django-secret"
+    ):
+        raise ValueError("persisted RuntimeEnv envelope metadata is not the guarded contract")
+    canonical = json.dumps(
+        envelope,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    if serialized != canonical:
+        raise ValueError("persisted RuntimeEnv envelope is not canonical")
+    nonce = envelope.get("nonce")
+    ciphertext = envelope.get("ciphertext")
+    if _decode_canonical_base64url(nonce, exact_bytes=12) is None:
+        raise ValueError("persisted RuntimeEnv envelope nonce is malformed")
+    if _decode_canonical_base64url(ciphertext, minimum_bytes=16) is None:
+        raise ValueError("persisted RuntimeEnv envelope ciphertext is malformed")
+    return cast(str, nonce), cast(str, ciphertext)
 
 
 def _register_secret_value(redactor: Redactor, value: object) -> None:
@@ -1791,6 +2154,17 @@ class LocalKubeRayGate:
         self._docker_host: str | None = None
         self.mutated = False
         self._api_token: str | None = None
+        self._secret_data_sha256: str | None = None
+        self._runtime_env_protected_values = [
+            RUNTIME_ENV_STORAGE_PROBE_MARKER,
+            RUNTIME_ENV_FAILURE_UNKNOWN_KEY_ID,
+        ]
+        self._runtime_env_fixture_values_registered = False
+        self.redactor.register(RUNTIME_ENV_STORAGE_PROBE_MARKER)
+        self.redactor.register(RUNTIME_ENV_FAILURE_UNKNOWN_KEY_ID)
+        if self.runner.redactor is not self.redactor:
+            self.runner.redactor.register(RUNTIME_ENV_STORAGE_PROBE_MARKER)
+            self.runner.redactor.register(RUNTIME_ENV_FAILURE_UNKNOWN_KEY_ID)
         self._ray_cluster_uid: str | None = None
         self._ray_pod_identities: frozenset[PodRuntimeIdentity] | None = None
         self.diagnostics_attempted = False
@@ -1844,12 +2218,11 @@ class LocalKubeRayGate:
         digest = hashlib.sha256(payload).hexdigest()
         if digest != self._kubeconfig_digest:
             raise ValueError("private kubeconfig snapshot changed during the gate")
-        try:
-            server = inspect_kubeconfig_snapshot(
-                json.loads(payload), expected_context=self.config.context
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError("private kubeconfig snapshot is no longer valid JSON") from error
+        parsed = _parse_json_without_cause(
+            payload,
+            error_message="private kubeconfig snapshot is no longer valid JSON",
+        )
+        server = inspect_kubeconfig_snapshot(parsed, expected_context=self.config.context)
         if server != self._kubernetes_server:
             raise ValueError("private kubeconfig snapshot API server identity changed")
 
@@ -1934,7 +2307,11 @@ class LocalKubeRayGate:
         )
 
     def _json_command(self, result: CommandResult, *, field_name: str) -> Mapping[str, Any]:
-        return _mapping(json.loads(result.stdout), field_name=field_name)
+        payload = _parse_json_without_cause(
+            result.stdout,
+            error_message=f"{field_name} is not valid JSON",
+        )
+        return _mapping(payload, field_name=field_name)
 
     def _create_kubeconfig_snapshot(self, *, current_context: str) -> None:
         """Capture one private flattened kubeconfig without exposing credential output."""
@@ -1957,10 +2334,10 @@ class LocalKubeRayGate:
             sensitive_output=True,
             env=sanitized_environment(KUBECTL_ENVIRONMENT_KEYS),
         )
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            raise ValueError("flattened kubeconfig snapshot is not valid JSON") from error
+        payload = _parse_json_without_cause(
+            result.stdout,
+            error_message="flattened kubeconfig snapshot is not valid JSON",
+        )
         register_kubeconfig_secrets(payload, redactor=self.redactor)
         if self.runner.redactor is not self.redactor:
             register_kubeconfig_secrets(payload, redactor=self.runner.redactor)
@@ -2056,6 +2433,10 @@ class LocalKubeRayGate:
                     self._layer("runtime-env", self._verify_generic_ray_nodes)
                     self._layer("probes", self._verify_probes)
                     self._layer("api-smoke", self._verify_api)
+                    self._layer(
+                        "runtime-env-encryption",
+                        self._verify_runtime_env_encryption,
+                    )
                     self._layer("workflow-progress", self._verify_complex_workflow_progress)
                     self._layer("workflow-admin", self._verify_workflow_admin)
                     self._layer("prometheus", self._verify_prometheus)
@@ -2265,6 +2646,8 @@ class LocalKubeRayGate:
         rendered = self._kubectl_cluster("kustomize", str(overlay)).stdout
         resources = load_rendered_resources(rendered)
         inspect_rendered_resources(resources, namespace=self.config.namespace, tag=tag)
+        inspect_runtime_env_encryption_overlay(resources)
+        self.evidence.runtime_env_encryption_overlay = True
         expected_app_image = f"{APP_IMAGE_REPOSITORY}:{tag}"
         setup = next(
             resource
@@ -3648,9 +4031,8 @@ class LocalKubeRayGate:
         if status != 200:
             raise ValueError(f"probe HTTP request returned {status}, expected 200")
 
-    def _secret_token(self) -> str:
-        if self._api_token is not None:
-            return self._api_token
+    def _secret_data(self) -> Mapping[str, Any]:
+        """Read the preserved Secret through a suppressed-output command."""
         secret = self._json_command(
             self._kubectl(
                 "get",
@@ -3662,14 +4044,28 @@ class LocalKubeRayGate:
             ),
             field_name="Secret/django-ray-secret",
         )
-        data = _mapping(secret.get("data"), field_name="Secret/django-ray-secret data")
+        return _mapping(secret.get("data"), field_name="Secret/django-ray-secret data")
+
+    def _secret_token(self) -> str:
+        if self._api_token is not None:
+            return self._api_token
+        data = self._secret_data()
+        inspect_runtime_env_encryption_secret_data(data)
+        digest = secret_data_sha256(data)
+        if self._secret_data_sha256 is None:
+            self._secret_data_sha256 = digest
         encoded = data.get("DJANGO_API_TOKEN")
         if not isinstance(encoded, str) or not encoded:
             raise ValueError("Secret/django-ray-secret has no DJANGO_API_TOKEN")
+        token: str | None = None
         try:
             token = base64.b64decode(encoded, validate=True).decode("utf-8")
-        except (ValueError, UnicodeDecodeError) as error:
-            raise ValueError("DJANGO_API_TOKEN is not valid base64-encoded UTF-8") from error
+        except (ValueError, UnicodeDecodeError):
+            pass
+        if token is None:
+            # Raise outside the except block so invalid decoded bytes are not
+            # retained by UnicodeDecodeError.object in the exception graph.
+            raise ValueError("DJANGO_API_TOKEN is not valid base64-encoded UTF-8")
         if not 32 <= len(token) <= 512 or BEARER_TOKEN68_PATTERN.fullmatch(token) is None:
             raise ValueError(
                 "DJANGO_API_TOKEN must be 32-512 characters using the Bearer token68 alphabet "
@@ -3681,6 +4077,15 @@ class LocalKubeRayGate:
         self.runner.redactor.register(encoded)
         self._api_token = token
         return token
+
+    def _verify_preserved_secret(self) -> None:
+        """Compare all Secret data to the preflight identity without emitting its digest."""
+        if self._secret_data_sha256 is None:
+            raise ValueError("Secret/django-ray-secret identity was not captured during preflight")
+        current = secret_data_sha256(self._secret_data())
+        if current != self._secret_data_sha256:
+            raise ValueError("Secret/django-ray-secret data changed during the guarded gate")
+        self.evidence.django_ray_secret_preserved = True
 
     def _http(
         self,
@@ -3700,10 +4105,11 @@ class LocalKubeRayGate:
             raise ValueError(f"local HTTP request failed: {error.reason}") from error
 
     def _json_body(self, body: bytes, *, endpoint: str) -> Mapping[str, Any]:
-        try:
-            return _mapping(json.loads(body), field_name=f"{endpoint} response")
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError(f"{endpoint} did not return valid JSON") from error
+        payload = _parse_json_without_cause(
+            body,
+            error_message=f"{endpoint} did not return valid JSON",
+        )
+        return _mapping(payload, field_name=f"{endpoint} response")
 
     def _verify_api(self) -> None:
         unauthenticated = (
@@ -3780,6 +4186,526 @@ class LocalKubeRayGate:
                     f"(last state: {last_state})"
                 )
             time.sleep(2)
+
+    def _register_runtime_env_protected_value(self, value: str) -> None:
+        """Register one gate-only storage value before any later diagnostics."""
+        if not value:
+            return
+        if value not in self._runtime_env_protected_values:
+            self._runtime_env_protected_values.append(value)
+        self.redactor.register(value)
+        if self.runner.redactor is not self.redactor:
+            self.runner.redactor.register(value)
+
+    def _assert_runtime_env_values_absent(self, value: object, *, surface: str) -> None:
+        """Reject a protected storage value without including it in the failure."""
+        serialized = (
+            value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+        )
+        if any(protected in serialized for protected in self._runtime_env_protected_values):
+            raise ValueError(f"{surface} exposed a protected RuntimeEnv storage value")
+
+    @staticmethod
+    def _canonical_uuid4(value: object, *, field_name: str) -> str:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field_name} is missing")
+        try:
+            parsed = UUID(value)
+        except ValueError as error:
+            raise ValueError(f"{field_name} is not a canonical UUID") from error
+        if parsed.version != 4 or str(parsed) != value:
+            raise ValueError(f"{field_name} is not a canonical UUIDv4")
+        return str(parsed)
+
+    def _sensitive_django_shell(
+        self,
+        script: str,
+        *,
+        field_name: str,
+    ) -> Mapping[str, Any]:
+        """Run one bounded in-pod inspector whose successful stdout stays private."""
+        result = self._kubectl(
+            "exec",
+            "deployment/django-web",
+            "-c",
+            "django-web",
+            "--",
+            "python",
+            "testproject/manage.py",
+            "shell",
+            "--no-imports",
+            "-c",
+            script,
+            sensitive_output=True,
+            timeout=self.config.command_timeout,
+        )
+        if len(result.stdout) > MAX_OUTPUT_CHARACTERS:
+            raise ValueError(f"{field_name} exceeded the private JSON size limit")
+        value = _parse_json_without_cause(
+            result.stdout,
+            error_message=f"{field_name} did not return valid private JSON",
+        )
+        return _mapping(value, field_name=field_name)
+
+    def _poll_runtime_env_canary(
+        self,
+        task_id: str,
+        *,
+        headers: Mapping[str, str],
+        surfaces: list[bytes],
+    ) -> Mapping[str, Any]:
+        """Poll the public sanitized RuntimeEnv result until it is terminal."""
+        deadline = time.monotonic() + self.config.task_timeout
+        last_state = "missing"
+        path = RUNTIME_ENV_ENCRYPTION_RESULT_PATH.format(task_id=task_id)
+        while True:
+            status, body = self._http(path, method="GET", headers=headers)
+            surfaces.append(body)
+            if status != 200:
+                raise ValueError(
+                    f"RuntimeEnv encryption canary polling returned {status}, expected 200"
+                )
+            execution = self._json_body(body, endpoint="RuntimeEnv encryption canary polling")
+            if execution.get("task_id") != task_id:
+                raise ValueError("RuntimeEnv encryption canary polling returned the wrong task")
+            last_state = str(execution.get("state"))
+            if last_state == "SUCCEEDED":
+                if execution.get("runtime_env_profile") != "thin":
+                    raise ValueError("RuntimeEnv encryption canary did not retain the thin profile")
+                digest = execution.get("runtime_env_hash")
+                if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                    raise ValueError(
+                        "RuntimeEnv encryption canary returned an invalid content hash"
+                    )
+                result = _mapping(
+                    execution.get("result"),
+                    field_name="RuntimeEnv encryption canary result",
+                )
+                if result.get("storage_encryption_verified") is not True:
+                    raise ValueError(
+                        "RuntimeEnv encryption canary did not observe the fixed Ray marker"
+                    )
+                if execution.get("error") is not None:
+                    raise ValueError("RuntimeEnv encryption canary succeeded with an error")
+                return execution
+            if last_state in {"FAILED", "CANCELLED", "LOST"}:
+                raise ValueError(
+                    f"RuntimeEnv encryption canary reached terminal state {last_state}"
+                )
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "RuntimeEnv encryption canary did not reach SUCCEEDED within "
+                    f"{self.config.task_timeout}s (last state: {last_state})"
+                )
+            time.sleep(2)
+
+    def _inspect_runtime_env_canary_envelope(
+        self,
+        *,
+        task_id: str,
+        profile: str,
+        digest: str,
+    ) -> None:
+        """Inspect and protect the raw canary envelope without emitting it."""
+        script = "\n".join(
+            (
+                "import json",
+                "from django_ray.models import RayTaskExecution",
+                (
+                    "row = RayTaskExecution.objects.only("
+                    "'runtime_env_json', 'runtime_env_profile', 'runtime_env_hash'"
+                    f").get(task_id={task_id!r})"
+                ),
+                (
+                    "print(json.dumps({"
+                    "'envelope': row.runtime_env_json, "
+                    "'profile': row.runtime_env_profile, "
+                    "'runtime_env_hash': row.runtime_env_hash"
+                    "}, sort_keys=True, separators=(',', ':')))"
+                ),
+            )
+        )
+        payload = self._sensitive_django_shell(
+            script,
+            field_name="RuntimeEnv encryption envelope inspection",
+        )
+        envelope = payload.get("envelope")
+        if not isinstance(envelope, str) or not envelope:
+            raise ValueError("RuntimeEnv encryption envelope inspection returned no envelope")
+        self._register_runtime_env_protected_value(envelope)
+
+        parsed: object | None
+        try:
+            parsed = json.loads(envelope)
+        except (TypeError, ValueError, RecursionError):
+            parsed = None
+        if isinstance(parsed, Mapping):
+            for field in ("nonce", "ciphertext"):
+                protected = parsed.get(field)
+                if isinstance(protected, str) and protected:
+                    self._register_runtime_env_protected_value(protected)
+
+        nonce, ciphertext = validate_runtime_env_encryption_envelope(envelope)
+        self._register_runtime_env_protected_value(nonce)
+        self._register_runtime_env_protected_value(ciphertext)
+        if payload.get("profile") != profile or payload.get("runtime_env_hash") != digest:
+            raise ValueError(
+                "RuntimeEnv encryption envelope identity did not match the sanitized API"
+            )
+        self.evidence.runtime_env_encryption_envelope = True
+        self.evidence.runtime_env_encryption_marker_absent = True
+
+    def _create_runtime_env_failure_fixtures(self) -> dict[str, tuple[int, str]]:
+        """Atomically create two encrypted rows corrupted before workers can claim them."""
+        payload = self._sensitive_django_shell(
+            RUNTIME_ENV_FAILURE_FIXTURE_SCRIPT,
+            field_name="RuntimeEnv encryption failure fixtures",
+        )
+        if set(payload) != {"ciphertext", "key_id"}:
+            raise ValueError("RuntimeEnv encryption failure fixture set is incomplete")
+        for label in ("ciphertext", "key_id"):
+            raw_fixture = payload.get(label)
+            if not isinstance(raw_fixture, Mapping):
+                continue
+            for protected_field in ("envelope", "nonce", "ciphertext"):
+                protected = raw_fixture.get(protected_field)
+                if isinstance(protected, str) and protected:
+                    self._register_runtime_env_protected_value(protected)
+        fixtures: dict[str, tuple[int, str]] = {}
+        for label in ("ciphertext", "key_id"):
+            fixture = _mapping(
+                payload.get(label),
+                field_name=f"RuntimeEnv encryption {label} fixture",
+            )
+            if set(fixture) != {"id", "task_id", "envelope", "nonce", "ciphertext"}:
+                raise ValueError(f"RuntimeEnv encryption {label} fixture fields are invalid")
+            envelope = fixture.get("envelope")
+            nonce = fixture.get("nonce")
+            ciphertext = fixture.get("ciphertext")
+            if (
+                not isinstance(envelope, str)
+                or not isinstance(nonce, str)
+                or not isinstance(ciphertext, str)
+                or RUNTIME_ENV_STORAGE_PROBE_MARKER in envelope
+            ):
+                raise ValueError(f"RuntimeEnv encryption {label} fixture values are invalid")
+            try:
+                parsed = json.loads(envelope)
+            except (TypeError, ValueError, RecursionError):
+                parsed = None
+            if (
+                not isinstance(parsed, Mapping)
+                or set(parsed) != RUNTIME_ENV_ENVELOPE_FIELDS
+                or json.dumps(
+                    parsed,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                != envelope
+                or parsed.get("nonce") != nonce
+                or parsed.get("ciphertext") != ciphertext
+                or parsed.get("format") != RUNTIME_ENV_ENVELOPE_FORMAT
+                or parsed.get("version") != RUNTIME_ENV_ENVELOPE_VERSION
+                or parsed.get("algorithm") != RUNTIME_ENV_ENVELOPE_ALGORITHM
+                or parsed.get("key_id")
+                != (
+                    "django-secret" if label == "ciphertext" else RUNTIME_ENV_FAILURE_UNKNOWN_KEY_ID
+                )
+                or _decode_canonical_base64url(nonce, exact_bytes=12) is None
+                or _decode_canonical_base64url(ciphertext, minimum_bytes=16) is None
+            ):
+                raise ValueError(f"RuntimeEnv encryption {label} fixture envelope is invalid")
+            execution_id = fixture.get("id")
+            if (
+                isinstance(execution_id, bool)
+                or not isinstance(execution_id, int)
+                or execution_id < 1
+            ):
+                raise ValueError(f"RuntimeEnv encryption {label} fixture ID is invalid")
+            task_id = self._canonical_uuid4(
+                fixture.get("task_id"),
+                field_name=f"RuntimeEnv encryption {label} fixture task_id",
+            )
+            fixtures[label] = (execution_id, task_id)
+        self._runtime_env_fixture_values_registered = True
+        return fixtures
+
+    def _poll_runtime_env_failure(
+        self,
+        *,
+        execution_id: int,
+        task_id: str,
+        headers: Mapping[str, str],
+        surfaces: list[bytes],
+    ) -> None:
+        """Wait for a corrupt snapshot to fail permanently through the task manager."""
+        deadline = time.monotonic() + self.config.task_timeout
+        last_state = "missing"
+        query = urlencode({"task_id": task_id, "limit": 1})
+        while True:
+            status, body = self._http(
+                f"/api/executions?{query}",
+                method="GET",
+                headers=headers,
+            )
+            surfaces.append(body)
+            if status != 200:
+                raise ValueError(f"RuntimeEnv corruption polling returned {status}, expected 200")
+            listing = self._json_body(body, endpoint="RuntimeEnv corruption polling")
+            tasks = _sequence(listing.get("tasks"), field_name="RuntimeEnv corruption tasks")
+            execution = next(
+                (
+                    _mapping(value, field_name="RuntimeEnv corruption execution")
+                    for value in tasks
+                    if isinstance(value, Mapping) and value.get("task_id") == task_id
+                ),
+                None,
+            )
+            if execution is not None:
+                if execution.get("id") != execution_id:
+                    raise ValueError("RuntimeEnv corruption polling returned the wrong row")
+                last_state = str(execution.get("state"))
+                if last_state == "FAILED":
+                    if (
+                        execution.get("attempt_number") != 1
+                        or execution.get("execution_generation") != 1
+                        or execution.get("result_data") is not None
+                        or execution.get("runtime_env_profile") != "thin"
+                    ):
+                        raise ValueError(
+                            "RuntimeEnv corruption API lifecycle evidence is inconsistent"
+                        )
+                    return
+                if last_state in {"SUCCEEDED", "CANCELLED", "LOST"}:
+                    raise ValueError(
+                        f"RuntimeEnv corruption reached unexpected terminal state {last_state}"
+                    )
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "RuntimeEnv corruption did not reach FAILED within "
+                    f"{self.config.task_timeout}s (last state: {last_state})"
+                )
+            time.sleep(2)
+
+    def _runtime_env_failure_invariants(
+        self,
+        fixtures: Mapping[str, tuple[int, str]],
+    ) -> Mapping[str, Any]:
+        """Read only scalar pre-Ray and attempt-history invariants for fresh fixtures."""
+        identifiers = {label: execution_id for label, (execution_id, _) in fixtures.items()}
+        script = "\n".join(
+            (
+                "import hashlib",
+                "import json",
+                "from django.core.serializers.json import DjangoJSONEncoder",
+                "from django_ray.models import RayTaskExecution",
+                f"identifiers = {identifiers!r}",
+                "def concrete_fields(instance):",
+                "    return {",
+                "        field.attname: field.value_from_object(instance)",
+                "        for field in instance._meta.concrete_fields",
+                "    }",
+                "observations = {}",
+                "for label, execution_id in identifiers.items():",
+                "    row = RayTaskExecution.objects.get(pk=execution_id)",
+                "    error = (row.error_message or '').lower()",
+                "    attempt_rows = list(row.attempts.order_by('attempt_number', 'pk'))",
+                "    attempts = list(row.attempts.order_by('attempt_number').values(",
+                "        'attempt_number', 'state'",
+                "    ))",
+                "    archive = {",
+                "        'row': concrete_fields(row),",
+                "        'attempts': [concrete_fields(attempt) for attempt in attempt_rows],",
+                "    }",
+                "    archive_json = json.dumps(",
+                "        archive,",
+                "        sort_keys=True,",
+                "        separators=(',', ':'),",
+                "        cls=DjangoJSONEncoder,",
+                "    )",
+                "    observations[label] = {",
+                "        'archive_fingerprint': hashlib.sha256(archive_json.encode()).hexdigest(),",
+                "        'state': row.state,",
+                "        'attempt_number': row.attempt_number,",
+                "        'execution_generation': row.execution_generation,",
+                "        'claimed': bool(row.claimed_by_worker),",
+                "        'lifecycle_timestamps': bool(row.started_at and row.finished_at),",
+                "        'no_ray_submission': bool(",
+                "            row.ray_job_id is None",
+                "            and row.ray_address is None",
+                "            and row.completion_data is None",
+                "        ),",
+                "        'no_result': bool(",
+                "            row.result_data is None",
+                "            and row.result_reference is None",
+                "            and row.progress_data is None",
+                "        ),",
+                "        'attempts': attempts,",
+                "        'authentication_failed': 'authentication failed' in error,",
+                "        'key_unavailable': 'decryption key is unavailable' in error,",
+                "    }",
+                "print(json.dumps(observations, sort_keys=True, separators=(',', ':')))",
+            )
+        )
+        return self._sensitive_django_shell(
+            script,
+            field_name="RuntimeEnv encryption failure invariants",
+        )
+
+    @staticmethod
+    def _validate_runtime_env_failure_invariants(
+        observations: Mapping[str, Any],
+    ) -> None:
+        if set(observations) != {"ciphertext", "key_id"}:
+            raise ValueError("RuntimeEnv corruption invariant set is incomplete")
+        expected_attempts = [{"attempt_number": 1, "state": "FAILED"}]
+        for label in ("ciphertext", "key_id"):
+            observation = _mapping(
+                observations.get(label),
+                field_name=f"RuntimeEnv {label} failure invariants",
+            )
+            archive_fingerprint = observation.get("archive_fingerprint")
+            if (
+                not isinstance(archive_fingerprint, str)
+                or re.fullmatch(r"[0-9a-f]{64}", archive_fingerprint) is None
+                or observation.get("state") != "FAILED"
+                or observation.get("attempt_number") != 1
+                or observation.get("execution_generation") != 1
+                or observation.get("claimed") is not True
+                or observation.get("lifecycle_timestamps") is not True
+                or observation.get("no_ray_submission") is not True
+                or observation.get("no_result") is not True
+                or observation.get("attempts") != expected_attempts
+            ):
+                raise ValueError(f"RuntimeEnv {label} failure crossed a lifecycle boundary")
+        ciphertext = _mapping(
+            observations.get("ciphertext"),
+            field_name="RuntimeEnv ciphertext failure invariants",
+        )
+        unknown = _mapping(
+            observations.get("key_id"),
+            field_name="RuntimeEnv unknown-key failure invariants",
+        )
+        if (
+            ciphertext.get("authentication_failed") is not True
+            or ciphertext.get("key_unavailable") is not False
+            or unknown.get("key_unavailable") is not True
+            or unknown.get("authentication_failed") is not False
+        ):
+            raise ValueError("RuntimeEnv corruption failures were not classified safely")
+
+    def _verify_runtime_env_logs_clear(self) -> None:
+        """Search current API/admin and task-manager logs for protected values."""
+        commands = (
+            (
+                "API/admin",
+                (
+                    "logs",
+                    "deployment/django-web",
+                    "--all-containers=true",
+                    "--since=15m",
+                    "--tail=-1",
+                    "--limit-bytes=1048576",
+                ),
+            ),
+            (
+                "task-manager",
+                (
+                    "logs",
+                    "-l",
+                    "app=django-ray,component=worker",
+                    "--all-containers=true",
+                    "--since=15m",
+                    "--tail=-1",
+                    "--limit-bytes=1048576",
+                    "--max-log-requests=20",
+                    "--prefix=true",
+                ),
+            ),
+        )
+        for label, command in commands:
+            result = self._kubectl(
+                *command,
+                timeout=min(self.config.command_timeout, 60),
+            )
+            combined = "\n".join(part for part in (result.stdout, result.stderr) if part)
+            self._assert_runtime_env_values_absent(
+                combined,
+                surface=f"{label} logs",
+            )
+        self.evidence.runtime_env_encryption_logs_clear = True
+
+    def _verify_runtime_env_encryption(self) -> None:
+        """Prove encrypted storage, Ray delivery, and fail-closed corruption paths."""
+        inspect_runtime_env_encryption_overlay(self.resources)
+        self.evidence.runtime_env_encryption_overlay = True
+        token = self._secret_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        surfaces: list[bytes] = []
+
+        status, body = self._http(
+            RUNTIME_ENV_ENCRYPTION_PROBE_PATH,
+            method="POST",
+            headers=headers,
+        )
+        surfaces.append(body)
+        if status != 200:
+            raise ValueError(
+                f"RuntimeEnv encryption canary enqueue returned {status}, expected 200"
+            )
+        enqueue = self._json_body(body, endpoint="RuntimeEnv encryption canary enqueue")
+        task_id = self._canonical_uuid4(
+            enqueue.get("task_id"),
+            field_name="RuntimeEnv encryption canary task_id",
+        )
+        canary = self._poll_runtime_env_canary(
+            task_id,
+            headers=headers,
+            surfaces=surfaces,
+        )
+        digest = cast(str, canary["runtime_env_hash"])
+        self.evidence.runtime_env_encryption_canary = True
+        self._inspect_runtime_env_canary_envelope(
+            task_id=task_id,
+            profile="thin",
+            digest=digest,
+        )
+
+        fixtures = self._create_runtime_env_failure_fixtures()
+        for execution_id, fixture_task_id in fixtures.values():
+            self._poll_runtime_env_failure(
+                execution_id=execution_id,
+                task_id=fixture_task_id,
+                headers=headers,
+                surfaces=surfaces,
+            )
+        before_retry = self._runtime_env_failure_invariants(fixtures)
+        self._validate_runtime_env_failure_invariants(before_retry)
+        self.evidence.runtime_env_encryption_tamper_rejected = True
+        self.evidence.runtime_env_encryption_unknown_key_rejected = True
+
+        retry_id = fixtures["ciphertext"][0]
+        retry_status, retry_body = self._http(
+            f"/api/executions/{retry_id}/retry",
+            method="POST",
+            headers=headers,
+        )
+        surfaces.append(retry_body)
+        if retry_status != 409:
+            raise ValueError(f"RuntimeEnv corruption retry returned {retry_status}, expected 409")
+        after_retry = self._runtime_env_failure_invariants(fixtures)
+        self._validate_runtime_env_failure_invariants(after_retry)
+        if after_retry != before_retry:
+            raise ValueError("RuntimeEnv corruption retry changed row or attempt history")
+        self.evidence.runtime_env_encryption_retry_preserved = True
+
+        for surface in surfaces:
+            self._assert_runtime_env_values_absent(
+                surface,
+                surface="authenticated RuntimeEnv API",
+            )
+        self._verify_runtime_env_logs_clear()
 
     def _workflow_envelope_contract(
         self,
@@ -4956,6 +5882,7 @@ class LocalKubeRayGate:
         self._verify_kubeconfig_snapshot()
         self._verify_ray_identity()
         self._verify_deployed_images()
+        self._verify_preserved_secret()
 
     def _verify_prometheus(self) -> None:
         self._verify_ray_identity()
@@ -5034,6 +5961,42 @@ class LocalKubeRayGate:
             ("task_id", self.evidence.task_id),
             ("task_state", self.evidence.task_state),
             ("task_result", self.evidence.task_result),
+            (
+                "runtime_env_encryption_overlay",
+                self.evidence.runtime_env_encryption_overlay,
+            ),
+            (
+                "runtime_env_encryption_canary",
+                self.evidence.runtime_env_encryption_canary,
+            ),
+            (
+                "runtime_env_encryption_envelope",
+                self.evidence.runtime_env_encryption_envelope,
+            ),
+            (
+                "runtime_env_encryption_marker_absent",
+                self.evidence.runtime_env_encryption_marker_absent,
+            ),
+            (
+                "runtime_env_encryption_tamper_rejected",
+                self.evidence.runtime_env_encryption_tamper_rejected,
+            ),
+            (
+                "runtime_env_encryption_unknown_key_rejected",
+                self.evidence.runtime_env_encryption_unknown_key_rejected,
+            ),
+            (
+                "runtime_env_encryption_retry_preserved",
+                self.evidence.runtime_env_encryption_retry_preserved,
+            ),
+            (
+                "runtime_env_encryption_logs_clear",
+                self.evidence.runtime_env_encryption_logs_clear,
+            ),
+            (
+                "django_ray_secret_preserved",
+                self.evidence.django_ray_secret_preserved,
+            ),
             ("workflow_task_id", self.evidence.workflow_task_id),
             ("workflow_task_state", self.evidence.workflow_task_state),
             ("workflow_attempt_number", self.evidence.workflow_attempt_number),
@@ -5269,12 +6232,25 @@ class LocalKubeRayGate:
         if not self.mutated:
             return
         self._emit(f"--- bounded diagnostics for {layer} ---")
+        runtime_env_logs_safe = (
+            layer != "runtime-env-encryption" or self._runtime_env_fixture_values_registered
+        )
         commands: list[tuple[str, ...]] = [
             ("get", "pods,deployments,jobs,pvc", "-o", "wide"),
         ]
         if layer == "setup":
             commands.append(("logs", f"job/{SETUP_JOB}", "--tail=60"))
-        if layer in {"workloads", "ray", "runtime-env", "rollouts"}:
+        if (
+            layer
+            in {
+                "workloads",
+                "ray",
+                "runtime-env",
+                "runtime-env-encryption",
+                "rollouts",
+            }
+            and runtime_env_logs_safe
+        ):
             commands.append(
                 (
                     "logs",
@@ -5285,15 +6261,20 @@ class LocalKubeRayGate:
                     "--prefix=true",
                 )
             )
-        if layer in {
-            "rollouts",
-            "app-convergence",
-            "image-identity",
-            "probes",
-            "api-smoke",
-            "workflow-progress",
-            "workflow-admin",
-        }:
+        if (
+            layer
+            in {
+                "rollouts",
+                "app-convergence",
+                "image-identity",
+                "probes",
+                "api-smoke",
+                "runtime-env-encryption",
+                "workflow-progress",
+                "workflow-admin",
+            }
+            and runtime_env_logs_safe
+        ):
             commands.extend(
                 [
                     ("logs", "deployment/django-web", "--all-containers=true", "--tail=40"),

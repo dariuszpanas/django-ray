@@ -88,7 +88,13 @@ class TestWorkerDispatchAndReconnectHelpers:
     """Non-DB tests for dispatch/reconnect helper branches."""
 
     def test_process_task_dispatches_to_ray_core_and_ray_job(self, monkeypatch) -> None:
-        task = SimpleNamespace(pk=1, callable_path="testproject.tasks.add_numbers")
+        task = SimpleNamespace(
+            pk=1,
+            callable_path="testproject.tasks.add_numbers",
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+        )
         cmd = _make_command()
         events: list[str] = []
 
@@ -118,6 +124,9 @@ class TestWorkerDispatchAndReconnectHelpers:
             kwargs_json="{}",
             attempt_number=1,
             execution_generation=0,
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
         )
         cmd = _make_command()
         captured: list[dict[str, Any]] = []

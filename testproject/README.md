@@ -240,6 +240,17 @@ The default
 standalone Task Attempt entry from top-level navigation without invalidating authorized list or
 detail URLs. Select `standalone` to restore the previous navigation or `both` to expose both views.
 
+The ordinary testproject settings keep new durable RuntimeEnv snapshots in plaintext
+for upgrade compatibility. The local `kuberay-kind` overlay opts only its Django web
+and task-manager containers into encrypted writes using the explicit Django-secret
+fallback; it does not put the encryption-mode selectors in the shared ConfigMap or
+generic Ray pod specification. Its project profile also carries a fixed non-secret
+probe marker so the guarded deployment gate can verify, without returning the value,
+that Ray received the decrypted environment while the raw database column retained
+only an authenticated envelope. Production deployments should prefer a dedicated key
+ring and follow the reader-first rollout in
+[Runtime Environments](../docs/runtime-environments.md#roll-out-encrypted-writes).
+
 Unfold is a testproject dependency, not a required dependency of the published `django-ray` package.
 Downstream projects that want the same theme can install `django-unfold`, place `"unfold"` before
 `"django.contrib.admin"` in `INSTALLED_APPS`, and configure the optional `UNFOLD` settings. When the

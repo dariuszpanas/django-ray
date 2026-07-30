@@ -1200,7 +1200,7 @@ class Command(BaseCommand):
         except RuntimeEnvSnapshotError as storage_error:
             retry_decision = RetryDecision(
                 should_retry=False,
-                reason="Persisted RuntimeEnv snapshot failed integrity validation",
+                reason="Persisted RuntimeEnv snapshot failed validation",
             )
             error_message = f"{error_message}\nAutomatic retry blocked: {storage_error}"
             handled = record_failure(

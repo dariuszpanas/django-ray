@@ -787,7 +787,7 @@ def reset_executions(
     if blocked:
         message += (
             f"; blocked {blocked} execution(s) because their persisted RuntimeEnv "
-            "snapshots failed integrity validation"
+            "snapshots failed validation"
         )
     return {"message": message}
 
@@ -834,7 +834,7 @@ def retry_execution(request, execution_id: int):
     except RuntimeEnvSnapshotError:
         raise HttpError(
             409,
-            "Persisted RuntimeEnv snapshot failed integrity validation",
+            "Persisted RuntimeEnv snapshot failed validation",
         ) from None
     if retried is not None:
         return retried

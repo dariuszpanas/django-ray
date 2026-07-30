@@ -602,6 +602,7 @@ name = "django-ray"
 version = "0.4.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "django" },
     { name = "ray", extra = ["default"] },
 ]
@@ -647,6 +648,7 @@ dev = [
 requires-dist = [
     { name = "boto3", marker = "extra == 'object-storage'", specifier = ">=1.34" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
+    { name = "cryptography", specifier = ">=42.0.8" },
     { name = "django", specifier = ">=6.0" },
     { name = "django-ninja", marker = "extra == 'sample'", specifier = ">=1.5.1" },
     { name = "django-unfold", marker = "extra == 'sample'", specifier = "==0.102.0" },

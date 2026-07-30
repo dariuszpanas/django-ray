@@ -180,21 +180,160 @@ The backend resolves the profile during enqueue and stores its canonical JSON an
 SHA-256 identity on `RayTaskExecution`. Retries use that immutable snapshot even
 if Django settings change after enqueue.
 
-New writes pass through one storage boundary. Before Sync, Ray Core, or Ray Job
-execution, django-ray requires every identified snapshot to contain canonical mapping
-JSON and its matching SHA-256 hash. Manual and automatic retries repeat that verification
-while holding the task lifecycle lock, before archiving an attempt or resetting task
-metadata. Missing, malformed, noncanonical, or hash-mismatched snapshots fail permanently
-without reaching Ray; bulk retry operations skip the affected row and continue.
+New writes pass through one storage boundary. The compatibility default stores canonical
+plaintext JSON. Deployments may instead opt into an authenticated AES-256-GCM envelope;
+readers always accept both supported plaintext and encrypted rows, independently of the
+current write mode. Before Sync, Ray Core, or Ray Job execution, django-ray decrypts when
+needed, canonicalizes the mapping, and verifies its matching plaintext SHA-256 hash.
+Manual and automatic retries repeat that verification while holding the task lifecycle
+lock, before archiving an attempt or resetting task metadata. Missing, malformed,
+unsupported, unknown-key, authentication-failed, noncanonical, or hash-mismatched
+snapshots fail permanently without reaching Ray; bulk retry operations skip the affected
+row and continue.
 
-Rows created before the snapshot fields existed have neither a profile nor a hash. That
-exact legacy marker continues to resolve the current configured default because migration
-could not reconstruct the environment used by the original task. Canonical `{}` plus its
-hash is instead a valid identified empty RuntimeEnv.
+Rows created before the snapshot fields existed retain migration's exact canonical `{}`
+payload and have neither a profile nor a hash. Only that complete legacy marker resolves
+the current configured default because migration could not reconstruct the environment
+used by the original task. Any other payload without identity metadata fails closed.
+Canonical `{}` plus its hash is instead a valid identified empty RuntimeEnv.
 
 `RAY_RUNTIME_ENV` remains supported as the unnamed default. A backend may also
 provide an inline `RAY_RUNTIME_ENV`, but it cannot combine that option with
 `RUNTIME_ENV_PROFILE`.
+
+## Encrypt Durable Snapshots
+
+RuntimeEnv encryption is an opt-in protection for the `runtime_env_json` database
+column. New installations and upgrades keep `RUNTIME_ENV_STORAGE_MODE="plaintext"`
+until an operator completes the key-distribution rollout. Encrypted mode uses a fresh
+random 12-byte nonce for every write and stores a strict canonical envelope:
+
+```json
+{
+  "algorithm": "AES-256-GCM",
+  "ciphertext": "<canonical base64url>",
+  "format": "django-ray.runtime-env.encrypted",
+  "key_id": "runtime-env-2026-01",
+  "nonce": "<canonical base64url>",
+  "version": 1
+}
+```
+
+The envelope contains no plaintext RuntimeEnv. AES-GCM authenticates canonical
+associated data containing the format, version, algorithm, key ID, task ID,
+RuntimeEnv profile, and public plaintext hash. Moving an envelope to another task or
+changing any bound identity therefore fails closed. The unencrypted
+`runtime_env_hash` remains the SHA-256 of canonical plaintext so workflow identity and
+cache correlation do not change.
+
+The `django-ray.runtime-env.*` format namespace and the exact six-field envelope
+shape are reserved as the storage discriminator. Individual field names such as
+`version` or `nonce` remain available to Ray custom RuntimeEnv plugins; a mapping is
+not treated as encrypted merely because one generic name appears.
+
+Prefer a dedicated key ring whose secret material is managed separately from the
+database and Django signing keys:
+
+```python
+import os
+
+
+DJANGO_RAY = {
+    "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+    "RUNTIME_ENV_ENCRYPTION_KEYS": {
+        "runtime-env-2026-01": os.environ["DJANGO_RAY_RUNTIME_ENV_KEY_2026_01"],
+        # Retain older keys while any durable row may still name them.
+        "runtime-env-2025-10": os.environ["DJANGO_RAY_RUNTIME_ENV_KEY_2025_10"],
+    },
+    "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "runtime-env-2026-01",
+}
+```
+
+Each dedicated key is an unpadded, canonical base64url encoding of exactly 32 random
+bytes. A key ID is case-sensitive, contains at most 64 letters, numbers, dots,
+underscores, or hyphens, and starts with a letter or number. `django-secret` is
+reserved for the fallback described below. Invalid keys, IDs, modes, or active-key
+selection fail at Django startup and enqueue without creating a task row or external
+input object.
+
+When a separate key is not practical, a deployment may explicitly derive an AES key
+from Django's signing secret:
+
+```python
+DJANGO_RAY = {
+    "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+    "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "django-secret",
+    "RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK": True,
+}
+```
+
+This fallback is never automatic. django-ray derives a 32-byte key with HKDF-SHA256
+and a versioned django-ray domain context; it does not use the raw `SECRET_KEY` as an
+AES key. New writes use the current `SECRET_KEY`. Reads try that key and then
+`SECRET_KEY_FALLBACKS` under the same stable `django-secret` key ID, without recording
+which fallback succeeded. Dedicated keys remain preferable because Django signing-key
+rotation and RuntimeEnv retention usually have different schedules.
+
+### Roll out encrypted writes
+
+Use this order for a rolling deployment:
+
+1. Back up the complete RuntimeEnv key ring separately from the database. Deploy the
+   dual-read release to every web process, task producer, retry API, admin process, and
+   task manager while writes remain `plaintext`.
+2. Distribute every retained key to all of those processes and restart them, still in
+   plaintext mode. Validate configuration everywhere before any encrypted row exists.
+3. Confirm no pre-encryption reader remains, then select the active key and switch new
+   writes to `encrypted`.
+4. Enqueue and execute a canary, inspect the raw database field without copying it into
+   logs, and prove a tampered or unknown-key row fails before Ray submission.
+
+Switching the same dual-read release back to `plaintext` changes only future writes.
+Existing encrypted rows still require their keys. Downgrading to a binary that does
+not understand encrypted envelopes is unsafe while any encrypted row remains: it
+cannot be made safe merely by retaining the key. This delivery has no historical
+rewrite or rewrap command.
+
+For a dedicated-key rotation, distribute the new key to every reader first, then make
+it active. Generate a new key ID for every new key: the binding from a dedicated key
+ID to its bytes is immutable, and replacing material under an existing ID makes
+historical envelopes that name it unrecoverable. Keep every retired key until an
+independent inventory proves no queued, running, retryable, or retained row still
+names it. The stable `django-secret` ID is the documented exception because readers
+try the current derived key and retained fallback candidates. Add the old `SECRET_KEY`
+to `SECRET_KEY_FALLBACKS` before rotating it and retain it for the full RuntimeEnv row
+lifetime. Removing a required dedicated key or Django fallback makes the affected
+snapshots unrecoverable.
+
+### Understand the threat boundary
+
+Encryption protects RuntimeEnv plaintext from a party that can read only the database,
+a replica, dump, or backup, provided that party cannot also read the key store. It
+also detects changes to an existing encrypted envelope or its bound identity. It does
+not:
+
+- protect against combined database-and-key access, Django or task-manager process
+  compromise, or a database writer that deletes/corrupts rows to cause denial of
+  service;
+- provide write-integrity against a database writer: because readers deliberately
+  accept both formats during this compatibility release, that actor can replace the
+  complete envelope with canonical plaintext and recompute the public hash. Encrypted
+  writes therefore protect confidentiality at rest, but do not authenticate row
+  provenance, protect execution integrity from that actor, or enforce that every stored
+  row remains encrypted;
+- hide the profile or unkeyed `runtime_env_hash`, which reveals equality and permits
+  guessing low-entropy environment definitions;
+- encrypt task arguments, results, progress, workflow input, external input storage,
+  or a RuntimeEnv value copied into one of those fields; or
+- keep plaintext out of Django process memory, the Ray submission channel, Ray worker
+  process memory and caches, or application-created logs.
+
+Back up keys through a different access path from database backups and test restoring
+both. Encryption is defense in depth, not permission to place long-lived credentials
+in RuntimeEnv. Prefer workload identity, mounted secrets, and provider-specific
+credential mechanisms.
 
 ## Select a Profile for a Workflow Step
 
@@ -344,17 +483,17 @@ This separation works well for a shared cluster within one trust boundary:
 4. That node can reuse its cached copy for later tasks with the same environment.
 
 Mount credentials, certificates, and shared data through the cluster deployment.
-Do not put secrets in profile URIs or `env_vars`: the resolved RuntimeEnv is stored
-in plaintext on the task row for exact retry execution and may be available through
-database access, backups, and the Ray runtime. The Django admin intentionally omits
-the raw snapshot and shows only its profile and content hash; that presentation
-boundary does not encrypt the stored value.
+Avoid secrets in profile URIs or `env_vars`: plaintext is necessarily available to
+the Django task manager and Ray runtime even when the durable database snapshot is
+encrypted. The Django admin intentionally omits the raw snapshot and shows only its
+profile and content hash. Plaintext storage remains the compatibility default, so
+database access, dumps, and backups must be treated as able to reveal RuntimeEnv
+values until encrypted writes are explicitly enabled and verified.
 
-The hash detects accidental corruption and incomplete lifecycle state; it is unkeyed and
-does not protect against a database writer that can replace both the snapshot and hash.
-Application-layer encryption and key rotation are a separate opt-in delivery. Until then,
-database access, dumps, and backups must be treated as able to reveal the plaintext
-RuntimeEnv.
+The hash detects accidental corruption and incomplete lifecycle state but remains
+unkeyed and visible in encrypted mode. AES-GCM binds the hash and task identity for
+authenticated storage; it does not turn a shared Ray cluster into a security
+boundary.
 
 RuntimeEnv is packaging and dependency isolation, not a security boundary. Use
 separate Ray clusters for mutually untrusted teams or workloads.

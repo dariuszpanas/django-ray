@@ -461,6 +461,7 @@ jobs:
           uv venv --python ${{ matrix.python-version }}
           uv pip install --python .venv/bin/python \
             -e . \
+            "cryptography==42.0.8" \
             "django==6.0" \
             "ray[default]==2.53.0" \
             "django-ninja==1.5.1" \

@@ -93,11 +93,15 @@ and execution generation observed during object authorization. Manual retry arch
 terminal attempt, increments both values, and clears only attempt-local data.
 After the state and identity fences pass, the same row lock verifies the persisted
 RuntimeEnv snapshot before any archival or reset. An identified missing, malformed,
-noncanonical, or hash-mismatched snapshot raises the redaction-safe
+unsupported, unknown-key, authentication-failed, noncanonical, or hash-mismatched
+snapshot raises the redaction-safe
 `RuntimeEnvSnapshotError`; application endpoints should map it to a fixed conflict
 response, while bulk operations should skip that row and continue. Automatic retry
 records the current failure terminally but does not create a replacement attempt when
-the same preflight fails.
+the same preflight fails. Encryption mode changes do not rewrite a task's snapshot:
+every retry of an encrypted row still needs the key named by its envelope, even when
+new writes have returned to plaintext mode. Keep retired dedicated keys or Django
+`SECRET_KEY_FALLBACKS` for at least as long as those rows remain retryable.
 `django_ray.lifecycle.request_task_cancellation()` provides the matching
 authorization-neutral cancellation service: it immediately archives queued work as
 `CANCELLED`, or moves running work to `CANCELLING` for worker-owned, best-effort backend

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import traceback
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +33,16 @@ def _config() -> dict:
             "numpy": {"pip": ["numpy==2.3.5"], "env_vars": {"MODE": "numpy"}},
         },
         "DEFAULT_RUNTIME_ENV_PROFILE": "thin",
+    }
+
+
+def _encryption_config(*, mode: str = "encrypted") -> dict:
+    key = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+    return {
+        "RUNTIME_ENV_STORAGE_MODE": mode,
+        "RUNTIME_ENV_ENCRYPTION_KEYS": {"test-key-1": key},
+        "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "test-key-1",
+        "RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK": False,
     }
 
 
@@ -67,10 +79,11 @@ def test_storage_seam_preserves_canonical_snapshot_identity() -> None:
         profile="thin",
     )
 
-    stored = runtime_env_for_storage(resolved)
+    stored = runtime_env_for_storage(resolved, task_id="task-6")
     loaded = runtime_env_for_execution(
         SimpleNamespace(
             pk=6,
+            task_id="task-6",
             runtime_env_profile=stored.profile,
             runtime_env_json=stored.serialized,
             runtime_env_hash=stored.digest,
@@ -79,6 +92,228 @@ def test_storage_seam_preserves_canonical_snapshot_identity() -> None:
 
     assert stored.serialized == '{"env_vars":{"A":"1","B":"2"}}'
     assert loaded == resolved
+
+
+def test_runtime_env_value_reprs_omit_plaintext_and_raw_storage() -> None:
+    marker = "arbitrary-runtime-env-repr-secret-5d23"
+    resolved = normalize_runtime_env(
+        {"env_vars": {"API_TOKEN": marker}},
+        profile="thin",
+    )
+    plaintext = runtime_env_for_storage(
+        resolved,
+        task_id="repr-plaintext-task",
+        config={"RUNTIME_ENV_STORAGE_MODE": "plaintext"},
+    )
+    encrypted = runtime_env_for_storage(
+        resolved,
+        task_id="repr-encrypted-task",
+        config=_encryption_config(),
+    )
+
+    for value in (resolved, plaintext, encrypted):
+        diagnostic = repr(value)
+        assert marker not in diagnostic
+        assert resolved.serialized not in diagnostic
+        assert encrypted.serialized not in diagnostic
+
+
+def test_encrypted_storage_is_randomized_and_dual_read_preserves_plaintext_identity() -> None:
+    marker = "arbitrary-runtime-env-secret-7c4e2a91"
+    resolved = normalize_runtime_env(
+        {"env_vars": {"API_TOKEN": marker}},
+        profile="thin",
+    )
+    encrypted_config = _encryption_config()
+
+    first = runtime_env_for_storage(
+        resolved,
+        task_id="encrypted-task-1",
+        config=encrypted_config,
+    )
+    second = runtime_env_for_storage(
+        resolved,
+        task_id="encrypted-task-1",
+        config=encrypted_config,
+    )
+
+    assert first.digest == second.digest == resolved.digest
+    assert first.serialized != second.serialized
+    assert marker not in first.serialized
+    envelope = json.loads(first.serialized)
+    assert set(envelope) == {
+        "algorithm",
+        "ciphertext",
+        "format",
+        "key_id",
+        "nonce",
+        "version",
+    }
+    assert envelope["format"] == "django-ray.runtime-env.encrypted"
+
+    rollback_config = _encryption_config(mode="plaintext")
+    loaded = runtime_env_for_execution(
+        SimpleNamespace(
+            pk=13,
+            task_id="encrypted-task-1",
+            runtime_env_profile=first.profile,
+            runtime_env_json=first.serialized,
+            runtime_env_hash=first.digest,
+        ),
+        config=rollback_config,
+    )
+
+    assert loaded == resolved
+
+
+def test_encrypted_no_profile_snapshot_cannot_enter_legacy_fallback_when_hash_is_missing(
+    settings,
+) -> None:
+    settings.DJANGO_RAY = _config()
+    marker = "arbitrary-runtime-env-secret-missing-hash-9ac1"
+    resolved = normalize_runtime_env({"env_vars": {"API_TOKEN": marker}})
+    config = _encryption_config()
+    stored = runtime_env_for_storage(
+        resolved,
+        task_id="encrypted-missing-hash-task",
+        config=config,
+    )
+
+    with pytest.raises(RuntimeEnvSnapshotError, match="incomplete identity") as exc_info:
+        runtime_env_for_execution(
+            SimpleNamespace(
+                pk=14,
+                task_id="encrypted-missing-hash-task",
+                runtime_env_profile=None,
+                runtime_env_json=stored.serialized,
+                runtime_env_hash="",
+            ),
+            config=config,
+        )
+
+    _assert_snapshot_error_is_sanitized(exc_info.value, marker)
+    assert stored.serialized not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"task_id": "transplanted-task"}, "authentication failed"),
+        ({"runtime_env_profile": "other-profile"}, "authentication failed"),
+        ({"runtime_env_hash": "0" * 64}, "authentication failed"),
+    ],
+)
+def test_encrypted_snapshot_aad_tampering_fails_closed_without_disclosure(
+    mutation,
+    message,
+) -> None:
+    marker = "arbitrary-runtime-env-secret-aad-6f81"
+    resolved = normalize_runtime_env(
+        {"env_vars": {"API_TOKEN": marker}},
+        profile="thin",
+    )
+    config = _encryption_config()
+    stored = runtime_env_for_storage(
+        resolved,
+        task_id="aad-bound-task",
+        config=config,
+    )
+    execution_fields = {
+        "pk": 14,
+        "task_id": "aad-bound-task",
+        "runtime_env_profile": stored.profile,
+        "runtime_env_json": stored.serialized,
+        "runtime_env_hash": stored.digest,
+        **mutation,
+    }
+
+    with pytest.raises(RuntimeEnvSnapshotError, match=message) as exc_info:
+        runtime_env_for_execution(
+            SimpleNamespace(**execution_fields),
+            config=config,
+        )
+
+    _assert_snapshot_error_is_sanitized(exc_info.value, marker)
+    assert stored.serialized not in str(exc_info.value)
+
+
+def test_encrypted_snapshot_ciphertext_and_key_id_tampering_fail_closed() -> None:
+    marker = "arbitrary-runtime-env-secret-envelope-9e14"
+    resolved = normalize_runtime_env(
+        {"env_vars": {"API_TOKEN": marker}},
+        profile="thin",
+    )
+    config = _encryption_config()
+    stored = runtime_env_for_storage(
+        resolved,
+        task_id="envelope-bound-task",
+        config=config,
+    )
+    envelope = json.loads(stored.serialized)
+
+    ciphertext_tampered = {**envelope}
+    first = ciphertext_tampered["ciphertext"][0]
+    ciphertext_tampered["ciphertext"] = ("A" if first != "A" else "B") + ciphertext_tampered[
+        "ciphertext"
+    ][1:]
+    unknown_key = {**envelope, "key_id": "missing-key"}
+
+    for candidate, message in (
+        (ciphertext_tampered, "authentication failed"),
+        (unknown_key, "decryption key is unavailable"),
+    ):
+        serialized = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+        with pytest.raises(RuntimeEnvSnapshotError, match=message) as exc_info:
+            runtime_env_for_execution(
+                SimpleNamespace(
+                    pk=15,
+                    task_id="envelope-bound-task",
+                    runtime_env_profile=stored.profile,
+                    runtime_env_json=serialized,
+                    runtime_env_hash=stored.digest,
+                ),
+                config=config,
+            )
+
+        _assert_snapshot_error_is_sanitized(exc_info.value, marker)
+        assert serialized not in str(exc_info.value)
+
+
+def test_plaintext_snapshot_remains_readable_while_encrypted_writes_are_enabled() -> None:
+    resolved = normalize_runtime_env(
+        {"env_vars": {"MODE": "plaintext-row"}},
+        profile="thin",
+    )
+
+    loaded = runtime_env_for_execution(
+        SimpleNamespace(
+            pk=16,
+            task_id="plaintext-task",
+            runtime_env_profile=resolved.profile,
+            runtime_env_json=resolved.serialized,
+            runtime_env_hash=resolved.digest,
+        ),
+        config=_encryption_config(),
+    )
+
+    assert loaded == resolved
+
+
+@pytest.mark.parametrize(
+    "custom_plugin_field",
+    ["format", "version", "algorithm", "key_id", "nonce", "ciphertext"],
+)
+def test_runtime_env_allows_individual_generic_custom_plugin_fields(
+    custom_plugin_field,
+) -> None:
+    resolved = normalize_runtime_env({custom_plugin_field: "application-value"})
+
+    assert resolved.spec == {custom_plugin_field: "application-value"}
+
+
+def test_runtime_env_rejects_the_namespaced_storage_discriminator() -> None:
+    with pytest.raises(ImproperlyConfigured, match="reserved"):
+        normalize_runtime_env({"format": "django-ray.runtime-env.encrypted"})
 
 
 def test_storage_seam_rejects_an_internally_inconsistent_resolution() -> None:
@@ -90,7 +325,7 @@ def test_storage_seam_rejects_an_internally_inconsistent_resolution() -> None:
     )
 
     with pytest.raises(RuntimeEnvSnapshotError, match="snapshot is inconsistent") as exc_info:
-        runtime_env_for_storage(inconsistent)
+        runtime_env_for_storage(inconsistent, task_id="task-inconsistent")
 
     _assert_snapshot_error_is_sanitized(exc_info.value, marker)
 
@@ -100,7 +335,10 @@ def test_storage_seam_rejects_non_ascii_digest_without_leaking_it() -> None:
     marker = "é" * 64
 
     with pytest.raises(RuntimeEnvSnapshotError, match="snapshot is inconsistent") as exc_info:
-        runtime_env_for_storage(replace(resolved, digest=marker))
+        runtime_env_for_storage(
+            replace(resolved, digest=marker),
+            task_id="task-invalid-digest",
+        )
 
     _assert_snapshot_error_is_sanitized(exc_info.value, marker)
 
@@ -111,7 +349,7 @@ def test_storage_seam_sanitizes_normalization_failures() -> None:
     invalid = replace(resolved, spec={"pip": {marker}})
 
     with pytest.raises(RuntimeEnvSnapshotError, match="snapshot is invalid") as exc_info:
-        runtime_env_for_storage(invalid)
+        runtime_env_for_storage(invalid, task_id="task-invalid")
 
     _assert_snapshot_error_is_sanitized(exc_info.value, marker)
 
@@ -444,7 +682,7 @@ def test_execution_snapshot_rejects_malformed_profile_metadata() -> None:
         runtime_env_for_execution(execution)
 
 
-def test_legacy_execution_ignores_unidentified_payload(settings) -> None:
+def test_unidentified_nonmigration_payload_fails_closed(settings) -> None:
     settings.DJANGO_RAY = _config()
     missing = SimpleNamespace(
         pk=12,
@@ -453,10 +691,10 @@ def test_legacy_execution_ignores_unidentified_payload(settings) -> None:
         runtime_env_hash="",
     )
 
-    resolved = runtime_env_for_execution(missing)
+    with pytest.raises(RuntimeEnvSnapshotError, match="incomplete identity") as exc_info:
+        runtime_env_for_execution(missing)
 
-    assert resolved.profile == "thin"
-    assert resolved.spec == {"env_vars": {"MODE": "thin"}}
+    _assert_snapshot_error_is_sanitized(exc_info.value, "legacy-unidentified-marker")
 
 
 def test_prepare_runtime_env_uploads_local_working_dir(monkeypatch, tmp_path) -> None:

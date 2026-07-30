@@ -23,7 +23,11 @@ from django_ray.runner.ray_job import (
     _find_auto_ray_address,
     _resolve_submission_address,
 )
-from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError, normalize_runtime_env
+from django_ray.runtime.runtime_env import (
+    RuntimeEnvSnapshotError,
+    normalize_runtime_env,
+    runtime_env_for_storage,
+)
 from django_ray.workflow_plans import WorkflowPlanMismatchError
 
 
@@ -653,6 +657,63 @@ class TestRayJobRunnerSubmit:
         assert addresses == ["ray://unit-test:10001"]
         submission = fake_client.submissions[0]
         assert submission["runtime_env"] == {"env_vars": {"MY_ENV": "1"}}
+
+    def test_submit_decrypts_stored_runtime_env_before_job_submission(
+        self,
+        monkeypatch,
+        settings,
+    ) -> None:
+        key = base64.urlsafe_b64encode(bytes(reversed(range(32)))).rstrip(b"=").decode("ascii")
+        encryption_config = {
+            "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"runner-key": key},
+            "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "runner-key",
+        }
+        settings.DJANGO_RAY = {
+            "RAY_ADDRESS": "ray://encrypted-job:10001",
+            **encryption_config,
+        }
+        runtime_env = normalize_runtime_env(
+            {"env_vars": {"EXECUTION_MODE": "encrypted-ray-job"}},
+            profile="encrypted-job",
+        )
+        task_id = "encrypted-ray-job-task"
+        stored = runtime_env_for_storage(
+            runtime_env,
+            task_id=task_id,
+            config=encryption_config,
+        )
+        fake_client = FakeJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+
+        runner.submit(
+            task_execution=SimpleNamespace(
+                pk=56,
+                task_id=task_id,
+                runtime_env_profile=stored.profile,
+                runtime_env_json=stored.serialized,
+                runtime_env_hash=stored.digest,
+                attempt_number=1,
+                execution_generation=4,
+            ),
+            callable_path="testproject.tasks.echo_task",
+            args=(),
+            kwargs={},
+        )
+
+        assert stored.serialized != runtime_env.serialized
+        submission = fake_client.submissions[0]
+        assert submission["runtime_env"] == runtime_env.spec
+        entrypoint = str(submission["entrypoint"])
+        payload = json.loads(base64.urlsafe_b64decode(entrypoint.rsplit(" ", 1)[-1]).decode())
+        assert payload["runtime_env_profile"] == runtime_env.profile
+        assert payload["runtime_env_hash"] == runtime_env.digest
+        assert payload["runtime_env_plan_identity"]["profile"] == runtime_env.profile
+        metadata = submission["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["runtime_env_profile"] == runtime_env.profile
+        assert metadata["runtime_env_hash"] == runtime_env.digest
 
     def test_get_client_pins_configured_address_against_ray_environment(
         self,

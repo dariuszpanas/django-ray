@@ -367,6 +367,14 @@ for authorization or encryption. Custom patterns cannot guarantee removal of arb
 customer data, and application `print()` calls can still write sensitive values to Ray
 logs.
 
+The admin and operational API never return `runtime_env_json`, whether it contains
+plaintext or an encrypted envelope. Encrypted snapshot storage protects that database
+column from read-only database and backup exposure when keys are held separately; it
+does not make ciphertext, nonces, keys, or raw envelopes appropriate operational
+diagnostics. The profile and plaintext SHA-256 identity remain visible and can reveal
+that two tasks used the same environment. Plaintext also necessarily exists in the
+Django task manager and Ray execution path.
+
 Protect the database, admin, metrics route, Ray dashboard, State API, and storage
 backends independently. Never expose live log access by default.
 

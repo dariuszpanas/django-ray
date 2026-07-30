@@ -4,8 +4,8 @@ The local KubeRay final gate complements, but never replaces, `uv run make ci` a
 GitHub Actions matrix. It exercises the Docker Desktop or Kind deployment boundary that unit and
 disposable CI clusters cannot reproduce: locally built images, Kustomize, the setup Job, the shared
 RuntimeEnv archive, generic Ray nodes, application task managers, protected HTTP APIs, kubelet
-probes, full and terminal-only schema-v3 workflow progress, authenticated admin presentation, and
-live Prometheus discovery.
+probes, encrypted durable RuntimeEnv storage, full and terminal-only schema-v3 workflow progress,
+authenticated admin presentation, and live Prometheus discovery.
 
 Run it only against the dedicated local `django-ray` namespace. The command fails before its first
 Docker build or Kubernetes mutation unless the checkout is clean, the active context is the named
@@ -30,6 +30,7 @@ run the gate and choose the cold Ray restart.
 | Isolated Compiled Graph pilot files under `k8s/pilots/compiled-graph/`, `scripts/kuberay_compiled_graph_pilot.py`, its focused tests, or its retained investigation evidence for #102 | Not applicable | N/A | The pinned pilot has its own isolated namespace, manifests, resource profile, teardown checks, and evidence contract. It must not mutate or validate the supported local application stack. |
 | Testproject dashboard, templates, JavaScript, static collection, web image, entrypoint, or web dependencies | Required | `skip`, unless the RuntimeEnv or Ray boundary also changed | Proves the exact asset and image reached the live web pod and protected actions still work. |
 | `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
+| RuntimeEnv snapshot storage, encryption settings or dependencies, storage/retry validation, the fixed deployment canary, or KubeRay encryption selectors | Required | `required` | Proves a cold generic Ray generation receives the decrypted marker while the database retains only the authenticated envelope, and proves corrupt or unknown-key rows fail before Ray. |
 | Ray Client submission, reconnect, cancellation, retry, task context, result persistence, or cross-component task lifecycle | Required | `required` | Exercises a fresh Ray session plus fresh task managers and a durable result. |
 | Workflow execution, progress capture/publication, schema-v3 bounded readers, failure diagnostics, or the admin graph fed by workflow progress | Required | `required` | Proves a cold Ray generation can execute the same tiny nested workflow with default-full and explicit terminal-only reporting in both success and deterministic first-attempt failure modes. Full reporting must expose complete bounded detail; terminal-only must expose exactly one summary and no detail storage or actions. |
 | KubeRay `RayCluster`, Ray services, Ray pod volumes/environment, or Ray metrics configuration | Required | `required` | The tested Ray pods must be cold replacements of the prior pods. |
@@ -147,8 +148,11 @@ The gate performs these bounded layers:
    stable source-tree OCI labels, and named Kind clusters receive those exact tags through
    `kind load docker-image`.
 3. Renders a temporary copy of `k8s/overlays/kuberay-kind`, rejects floating application tags or any
-   resource outside `django-ray`, and preserves the existing live API Secret. It applies only setup
-   prerequisites first, then rolls Prometheus and waits for PostgreSQL.
+   resource outside `django-ray`, and preserves the existing live API Secret. It requires encrypted
+   Django-secret mode directly on `django-web` and the default, synchronous, and ML task-manager
+   containers, with no selector in an init container, shared ConfigMap, setup Job, or Ray pod
+   template. It applies only setup prerequisites first, then rolls Prometheus and waits for
+   PostgreSQL.
 4. Recreates `Job/django-setup` with timeout-bounded deletion and completion waits. Setup must prove
    migrations, static collection, RuntimeEnv bundle creation, the exact Job UID ownership of its
    pod, and the rendered `django-setup` container name, tag, and image ID without a substitute
@@ -190,7 +194,18 @@ The gate performs these bounded layers:
 9. Requires unauthenticated enqueue/stats/metrics/executions requests to return `401`; requires the
    same protected reads to return `200` with the in-memory token; then polls only the fresh task via
    an exact `task_id` filter and `limit=1` until it reaches durable `SUCCEEDED` with `result_data=5`.
-10. Enqueues the same tiny nested workflow with the unchanged default-full behavior once for success
+10. Enqueues the lightweight `thin` RuntimeEnv probe and requires its sanitized result to report
+    `storage_encryption_verified=true`. A sensitive-output-suppressed in-pod inspector then reads the
+    raw database field, requires the exact canonical AES-256-GCM envelope with the guarded
+    Django-secret key selection, and proves the fixed plaintext marker is absent. The marker, raw
+    envelope, nonce, and ciphertext are registered with both command and gate redactors before any
+    later diagnostics. One atomic in-pod transaction creates exactly two additional encrypted queued
+    probe rows through the production storage seam, changing canonical ciphertext on one and the key
+    ID on the other before commit. Both must fail permanently on attempt 1 before any Ray submission;
+    an authenticated retry of one must return `409` without changing the row or archived attempt.
+    Sanitized API bodies plus bounded current API/admin and task-manager logs must contain none of the
+    protected values. The layer retains only booleans and creates three bounded disposable rows.
+11. Enqueues the same tiny nested workflow with the unchanged default-full behavior once for success
     and once with the deterministic slow-branch failure fixture. Each response must retain the exact
     typed enqueue arguments, and each execution must remain on durable attempt 1. The successful
     result must report all three leaves. The failed execution must retain the normalized fixture
@@ -198,14 +213,14 @@ The gate performs these bounded layers:
     did not execute after their dependency failed. For both runs, the gate requires terminal
     schema-v3 summaries and complete one-page topology-node, topology-edge, and node-detail readers
     with matching run identity, publication revisions, graph membership, states, and counts.
-11. Repeats the success and deterministic failure through the explicit
+12. Repeats the success and deterministic failure through the explicit
     `reporting_policy=terminal_only` testproject option. Each run must remain on attempt 1 and expose
     one revision-1 schema-v3 summary with `reporting_policy="terminal_only"` and
     `detail.availability="OMITTED_BY_POLICY"`. Declared plan counts must match each run's persisted
     materialized plan and remain consistent across the equivalent success and failure fixtures,
     while discovered, retained, and node-state counts remain zero. Topology and detail revisions
     are null, and all three bounded collection readers return empty omitted-by-policy envelopes.
-12. Enters the exact converged `django-web` container through a sensitive-output-suppressed command
+13. Enters the exact converged `django-web` container through a sensitive-output-suppressed command
     path and creates a disposable authenticated admin session. For the default-full runs it verifies
     the change view, diagnostics, all three bounded readers, and the sanitized graph route. The
     successful graph must be fully succeeded. The failed graph must retain one failure origin, at
@@ -216,7 +231,7 @@ The gate performs these bounded layers:
     summary, no run storage, manifest, page, link, or node-detail row, zero advertised admin actions,
     and a bounded `UNAVAILABLE` graph response. The disposable sessions and users are removed before
     each child smoke returns scalar evidence.
-13. Reuses the checked-in Prometheus checker through the same proxy-disabled, redirect-rejecting
+14. Reuses the checked-in Prometheus checker through the same proxy-disabled, redirect-rejecting
     local HTTP opener. It requires exactly one `django-ray`, one `ray-head`, and one target for every
     converged Ray worker, plus the absence of the removed `django-ray-worker` pool. The exact
     RayCluster UID/topology is rechecked before and after Prometheus and again before evidence.
@@ -268,6 +283,10 @@ The runtime block records:
   retained Ray pod UID/container/image identity-set SHA-256;
 - ready replica counts for all application Deployments;
 - unauthenticated/authenticated status summary plus the fresh task ID, `SUCCEEDED`, and result `5`;
+- scalar booleans for the encrypted RuntimeEnv overlay, decrypted-marker canary, exact durable
+  envelope and marker absence, corrupt-ciphertext and unknown-key rejection before Ray, retry
+  preservation, protected-value log scan, and full `django-ray-secret` preservation. Encryption
+  evidence never includes task IDs, hashes, key IDs, nonces, ciphertext, or envelopes;
 - the successful workflow's first-attempt state, schema-v3 availability, topology/detail counts,
   exact three-leaf enqueue/result agreement, authenticated admin-reader count, and clean current
   publication storage;
@@ -280,7 +299,9 @@ The runtime block records:
   plan, null legacy progress and detail revisions, zero retained detail rows, and no advertised
   admin action;
 - probe path/Host, web restart count, and Prometheus pool counts;
-- the preservation statement.
+- the preservation statement. The full base64 `django-ray-secret.data` mapping is digested privately
+  during preflight and compared again immediately before evidence; neither digest nor Secret value is
+  emitted.
 
 After a full pass, retain a concise semantic summary in the material commit and PR. It must include:
 
@@ -305,7 +326,11 @@ For example, portable commit validation can say:
   workflow passed in both default-full success and deterministic
   first-attempt failure modes, terminal-only success and failure each
   retained one omitted-detail summary with no legacy or normalized
-  detail storage, the authenticated admin graph retained the incoming
+  detail storage, encrypted RuntimeEnv storage delivered
+  its marker through cold Ray while retaining only a canonical envelope,
+  corrupt and unknown-key rows failed before Ray without a retry mutation,
+  the full application Secret remained unchanged, and the
+  authenticated admin graph retained the incoming
   full-reporting failure path, all Ray pods were cold-replaced, and
   data-bearing resources were preserved.
 ```
@@ -322,8 +347,9 @@ final-gate evidence.
 ## Failure diagnostics and recovery
 
 Failures are labeled by layer: `preflight`, `images`, `apply`, `setup`, `workloads`, `ray`, `rollouts`,
-`app-convergence`, `image-identity`, `runtime-env`, `probes`, `api-smoke`, `workflow-progress`,
-`workflow-admin`, `prometheus`, or `final-identity`. After a Kubernetes mutation,
+`app-convergence`, `image-identity`, `runtime-env`, `probes`, `api-smoke`,
+`runtime-env-encryption`, `workflow-progress`, `workflow-admin`, `prometheus`, or
+`final-identity`. After a Kubernetes mutation,
 the command prints only bounded status plus the relevant tail of setup, Ray, application, or
 Prometheus logs. Every line uses the same redacting emitter; sensitive kubeconfig and Secret command
 failures suppress their captured output before the credential values could be registered, while

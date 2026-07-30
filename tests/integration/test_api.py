@@ -1158,9 +1158,7 @@ class TestExecutionsAPI:
         response = client.post(f"/api/executions/{task.pk}/retry")
 
         assert response.status_code == 409
-        assert response.json() == {
-            "detail": "Persisted RuntimeEnv snapshot failed integrity validation"
-        }
+        assert response.json() == {"detail": "Persisted RuntimeEnv snapshot failed validation"}
         assert "arbitrary-customer-marker-7cf3" not in response.content.decode()
         task.refresh_from_db()
         assert task.state == TaskState.FAILED
@@ -1260,7 +1258,7 @@ class TestExecutionsAPI:
         assert response.json() == {
             "message": (
                 "Reset 1 execution(s) to QUEUED state; blocked 1 execution(s) "
-                "because their persisted RuntimeEnv snapshots failed integrity validation"
+                "because their persisted RuntimeEnv snapshots failed validation"
             )
         }
         assert "arbitrary-customer-marker-7cf3" not in response.content.decode()

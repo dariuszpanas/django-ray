@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 from datetime import UTC, datetime
@@ -19,6 +20,7 @@ from django_ray.runner.ray_core import (
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
     normalize_runtime_env,
+    runtime_env_for_storage,
 )
 
 
@@ -47,6 +49,7 @@ class _FakeRay:
         self.initialized = initialized
         self.init_calls: list[dict[str, Any]] = []
         self.remote_calls: list[dict[str, Any]] = []
+        self.remote_invocations: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.runtime_job_id = "02000000"
         self.runtime_context_error: Exception | None = None
         self.cancel_error: Exception | None = None
@@ -78,6 +81,7 @@ class _FakeRay:
             class _RemoteCallable:
                 @staticmethod
                 def remote(*args: Any, **kw: Any) -> _FakeObjectRef:
+                    fake.remote_invocations.append((args, kw))
                     if fake.remote_error is not None:
                         raise fake.remote_error
                     value = fn(*args, **kw)
@@ -141,11 +145,17 @@ def _task_execution(
     execution_generation: int = 0,
     **attributes: Any,
 ) -> SimpleNamespace:
+    task_attributes = {
+        "runtime_env_profile": None,
+        "runtime_env_json": "{}",
+        "runtime_env_hash": "",
+        **attributes,
+    }
     return SimpleNamespace(
         pk=pk,
         attempt_number=attempt_number,
         execution_generation=execution_generation,
-        **attributes,
+        **task_attributes,
     )
 
 
@@ -194,6 +204,53 @@ class TestRayCoreRunnerRuntime:
         assert pending.execution_generation == 0
         assert pending.ray_job_id == "02000000"
         assert pending.ray_task_id == fake.default_hex[:48]
+
+    def test_submit_decrypts_stored_runtime_env_before_remote_submission(
+        self,
+        monkeypatch,
+        settings,
+    ) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda *_args, **_kwargs: json.dumps({"success": True, "result": None}),
+        )
+        key = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+        encryption_config = {
+            "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"runner-key": key},
+            "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "runner-key",
+        }
+        settings.DJANGO_RAY = {"RAY_ADDRESS": "auto", **encryption_config}
+        runtime_env = normalize_runtime_env(
+            {"env_vars": {"EXECUTION_MODE": "encrypted-ray-core"}},
+            profile="encrypted-core",
+        )
+        task_id = "encrypted-ray-core-task"
+        stored = runtime_env_for_storage(
+            runtime_env,
+            task_id=task_id,
+            config=encryption_config,
+        )
+
+        RayCoreRunner().submit(
+            task_execution=_task_execution(
+                12,
+                task_id=task_id,
+                runtime_env_profile=stored.profile,
+                runtime_env_json=stored.serialized,
+                runtime_env_hash=stored.digest,
+            ),
+            callable_path="testproject.tasks.echo_task",
+            args=(),
+            kwargs={},
+        )
+
+        assert stored.serialized != runtime_env.serialized
+        assert fake.remote_calls[-1]["runtime_env"] == runtime_env.spec
+        submitted_args, submitted_kwargs = fake.remote_invocations[-1]
+        assert submitted_args[4:6] == (runtime_env.profile, runtime_env.digest)
+        assert submitted_kwargs["runtime_env_plan_identity"]["profile"] == runtime_env.profile
 
     def test_submit_rejects_duplicate_pk_before_remote_submission(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)

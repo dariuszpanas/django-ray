@@ -42,6 +42,29 @@ patches:
       kind: Deployment
       name: django-web
 
+  # Exercise encrypted RuntimeEnv snapshots through the explicit Django-secret
+  # fallback. Keep these settings on Django application processes only: generic
+  # Ray pods neither encrypt nor decrypt durable task rows.
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE
+          value: encrypted
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY
+          value: django-secret
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
+          value: "true"
+    target:
+      kind: Deployment
+      name: django-web
+
   # Remove legacy static Ray resources from base.
   - patch: |-
       $patch: delete
@@ -93,6 +116,60 @@ patches:
     target:
       kind: Deployment
       name: django-ray-worker
+
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE
+          value: encrypted
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY
+          value: django-secret
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
+          value: "true"
+    target:
+      kind: Deployment
+      name: django-ray-worker
+
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE
+            value: encrypted
+          - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY
+            value: django-secret
+          - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
+            value: "true"
+    target:
+      kind: Deployment
+      name: django-ray-worker-sync
+
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE
+          value: encrypted
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY
+          value: django-secret
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
+          value: "true"
+    target:
+      kind: Deployment
+      name: django-ray-worker-ml
 
   # Also consume the high-priority and low-priority queues from the default
   # worker pool so tasks submitted to them aren't stuck with no consumer.

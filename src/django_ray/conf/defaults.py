@@ -17,6 +17,13 @@ DEFAULTS: dict[str, Any] = {
     "RAY_STATE_API_TIMEOUT_SECONDS": 5,
     "RUNTIME_ENV_PROFILES": {},
     "DEFAULT_RUNTIME_ENV_PROFILE": None,
+    # RuntimeEnv snapshots remain plaintext by default for rolling-upgrade
+    # compatibility. Encrypted writes are an explicit deployment choice, while
+    # both modes retain dual-read support for existing snapshots.
+    "RUNTIME_ENV_STORAGE_MODE": "plaintext",
+    "RUNTIME_ENV_ENCRYPTION_KEYS": {},
+    "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": None,
+    "RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK": False,
     # Optional, non-secret deployment identities used by workflow plan snapshots.
     # The code revision should be an immutable build, artifact, or image revision.
     "WORKFLOW_PLAN_CODE_REVISION": None,

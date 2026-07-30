@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -29,7 +30,11 @@ from scripts.local_kuberay_gate import (
     MAX_OUTPUT_CHARACTERS,
     RAY_CLUSTER_LABEL,
     RAY_CLUSTER_NAME,
+    RUNTIME_ENV_ENCRYPTION_ENV,
+    RUNTIME_ENV_ENCRYPTION_PROBE_PATH,
+    RUNTIME_ENV_FAILURE_FIXTURE_SCRIPT,
     RUNTIME_ENV_REQUIRED_MEMBER,
+    RUNTIME_ENV_STORAGE_PROBE_MARKER,
     SETUP_JOB,
     TASK_MANAGER_DEPLOYMENTS,
     CommandError,
@@ -50,6 +55,8 @@ from scripts.local_kuberay_gate import (
     inspect_kubeconfig_snapshot,
     inspect_probe_contract,
     inspect_rendered_resources,
+    inspect_runtime_env_encryption_overlay,
+    inspect_runtime_env_encryption_secret_data,
     inspect_setup_log,
     load_rendered_resources,
     normalize_ray_topology,
@@ -59,12 +66,14 @@ from scripts.local_kuberay_gate import (
     parse_task_result,
     pod_image_contract,
     register_kubeconfig_secrets,
+    secret_data_sha256,
     source_bound_tag,
     split_apply_resources,
     validate_local_context,
     validate_local_docker_endpoint,
     validate_local_http_url,
     validate_namespace,
+    validate_runtime_env_encryption_envelope,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -83,6 +92,9 @@ TERMINAL_ONLY_WORKFLOW_RUN_ID = "75200000-0000-4000-8000-000000000007"
 TERMINAL_ONLY_FAILED_WORKFLOW_TASK_ID = "85200000-0000-4000-8000-000000000008"
 TERMINAL_ONLY_FAILED_WORKFLOW_RUN_ID = "95200000-0000-4000-8000-000000000009"
 TOKEN68 = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/=="
+RUNTIME_ENV_CANARY_TASK_ID = "a5200000-0000-4000-8000-000000000010"
+RUNTIME_ENV_TAMPER_TASK_ID = "b5200000-0000-4000-8000-000000000011"
+RUNTIME_ENV_UNKNOWN_KEY_TASK_ID = "c5200000-0000-4000-8000-000000000012"
 
 
 def _token_representations(token: str) -> tuple[str, ...]:
@@ -234,6 +246,20 @@ def _resources() -> list[dict[str, object]]:
                     "metadata": {"name": name, "namespace": EXPECTED_NAMESPACE},
                 }
             )
+    return resources
+
+
+def _runtime_env_encryption_resources() -> list[dict[str, Any]]:
+    resources = cast(list[dict[str, Any]], _resources())
+    for resource in resources:
+        if (
+            resource.get("kind") == "Deployment"
+            and resource.get("metadata", {}).get("name") in APP_DEPLOYMENTS
+        ):
+            container = resource["spec"]["template"]["spec"]["containers"][0]
+            container["env"] = [
+                {"name": name, "value": value} for name, value in RUNTIME_ENV_ENCRYPTION_ENV.items()
+            ]
     return resources
 
 
@@ -933,6 +959,7 @@ def test_runner_timeout_is_bounded_and_redacts_partial_output(
 
     assert token not in str(captured.value)
     assert str(captured.value).count("[REDACTED]") == 2
+    assert isinstance(captured.value.__cause__, subprocess.TimeoutExpired)
 
 
 def test_runner_sensitive_failures_never_expose_unregistered_output(
@@ -958,6 +985,8 @@ def test_runner_sensitive_failures_never_expose_unregistered_output(
         )
 
     assert encoded_secret not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
 
 
 def test_runner_sensitive_nonzero_failures_never_expose_unregistered_output(
@@ -985,6 +1014,65 @@ def test_runner_sensitive_nonzero_failures_never_expose_unregistered_output(
 
     assert secret not in str(captured.value)
     assert encoded_secret not in str(captured.value)
+
+
+def test_private_json_parsers_drop_raw_payload_from_exception_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_value = "private-json-value-that-must-not-enter-the-exception-graph"
+    malformed = f'{{"private":"{private_value}"'
+    gate = LocalKubeRayGate(_config())
+
+    with pytest.raises(ValueError, match="did not return valid JSON") as api_error:
+        gate._json_body(malformed.encode(), endpoint="private API")
+
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **kwargs: CommandResult(malformed, "", 0),
+    )
+    with pytest.raises(ValueError, match="valid private JSON") as shell_error:
+        gate._sensitive_django_shell("print('private')", field_name="private shell")
+    with pytest.raises(
+        ValueError, match="Secret/django-ray-secret is not valid JSON"
+    ) as secret_error:
+        gate._secret_data()
+
+    for error in (api_error.value, shell_error.value, secret_error.value):
+        assert private_value not in str(error)
+        assert error.__cause__ is None
+        assert error.__context__ is None
+
+
+def test_private_kubeconfig_json_failures_drop_raw_payload_from_exception_graph(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    private_value = "private-kubeconfig-value-that-must-not-enter-the-exception-graph"
+    malformed = f'{{"private":"{private_value}"'
+
+    creation_gate = LocalKubeRayGate(_config())
+    creation_gate.temp_root = tmp_path
+    monkeypatch.setattr(
+        creation_gate.runner,
+        "run",
+        lambda *args, **kwargs: CommandResult(malformed, "", 0),
+    )
+    with pytest.raises(ValueError, match="flattened kubeconfig") as creation_error:
+        creation_gate._create_kubeconfig_snapshot(current_context=_config().context)
+
+    snapshot = tmp_path / "malformed-kubeconfig.json"
+    snapshot.write_text(malformed, encoding="utf-8")
+    verification_gate = LocalKubeRayGate(_config())
+    verification_gate.kubeconfig_path = snapshot
+    verification_gate._kubeconfig_digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="no longer valid JSON") as verification_error:
+        verification_gate._verify_kubeconfig_snapshot()
+
+    for error in (creation_error.value, verification_error.value):
+        assert private_value not in str(error)
+        assert error.__cause__ is None
+        assert error.__context__ is None
 
 
 def test_runner_redacts_before_bounding_failure_output(
@@ -1112,6 +1200,59 @@ def test_source_bound_tag_contains_tree_time_and_uniqueness() -> None:
     assert re.fullmatch(r"local-gate-tree-[0-9a-f]{12}-\d{14}-[0-9a-f]{8}", tag)
 
 
+def _runtime_env_envelope() -> tuple[str, str, str]:
+    nonce = base64.urlsafe_b64encode(b"n" * 12).rstrip(b"=").decode()
+    ciphertext = base64.urlsafe_b64encode(b"c" * 48).rstrip(b"=").decode()
+    serialized = json.dumps(
+        {
+            "algorithm": "AES-256-GCM",
+            "ciphertext": ciphertext,
+            "format": "django-ray.runtime-env.encrypted",
+            "key_id": "django-secret",
+            "nonce": nonce,
+            "version": 1,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return serialized, nonce, ciphertext
+
+
+def test_runtime_env_encryption_envelope_contract_is_exact_and_canonical() -> None:
+    serialized, nonce, ciphertext = _runtime_env_envelope()
+
+    assert validate_runtime_env_encryption_envelope(serialized) == (nonce, ciphertext)
+
+    noncanonical = json.dumps(json.loads(serialized))
+    with pytest.raises(ValueError, match="not canonical"):
+        validate_runtime_env_encryption_envelope(noncanonical)
+
+    exposed = serialized.replace(ciphertext, RUNTIME_ENV_STORAGE_PROBE_MARKER)
+    with pytest.raises(ValueError, match="plaintext probe marker"):
+        validate_runtime_env_encryption_envelope(exposed)
+
+
+def test_runtime_env_encryption_envelope_parse_failure_has_no_private_cause() -> None:
+    private_value = "raw-envelope-value-that-must-not-enter-the-exception-graph"
+
+    with pytest.raises(ValueError, match="not valid JSON") as captured:
+        validate_runtime_env_encryption_envelope(f'{{"ciphertext":"{private_value}"')
+
+    assert private_value not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+
+
+def test_secret_data_digest_covers_every_value_without_order_dependence() -> None:
+    original = {"DJANGO_API_TOKEN": "dG9rZW4=", "DJANGO_SECRET_KEY": "c2VjcmV0"}
+    reordered = dict(reversed(tuple(original.items())))
+
+    assert secret_data_sha256(original) == secret_data_sha256(reordered)
+    assert secret_data_sha256(original) != secret_data_sha256(
+        {**original, "DJANGO_SECRET_KEY": "Y2hhbmdlZA=="}
+    )
+
+
 def test_overlay_copy_replaces_tags_without_editing_repository(tmp_path: Path) -> None:
     source = ROOT / "k8s"
     original = (source / "overlays/kuberay-kind/kustomization.yaml").read_text(encoding="utf-8")
@@ -1151,6 +1292,7 @@ def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(tmp_path: Pat
 
     resources = load_rendered_resources(result.stdout)
     inspect_rendered_resources(resources, namespace=EXPECTED_NAMESPACE, tag=TAG)
+    inspect_runtime_env_encryption_overlay(resources)
 
     assert all(
         resource["kind"] == "Namespace"
@@ -1158,6 +1300,77 @@ def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(tmp_path: Pat
         for resource in resources
     )
     assert not any(resource["kind"].startswith("ClusterRole") for resource in resources)
+
+
+def test_runtime_env_encryption_overlay_is_scoped_to_application_containers() -> None:
+    resources = _runtime_env_encryption_resources()
+
+    inspect_runtime_env_encryption_overlay(resources)
+
+    target = next(
+        resource
+        for resource in resources
+        if resource.get("kind") == "Deployment"
+        and resource.get("metadata", {}).get("name") == "django-ray-worker-sync"
+    )
+    target["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"] = "plaintext"
+    with pytest.raises(ValueError, match="exactly on django-web"):
+        inspect_runtime_env_encryption_overlay(resources)
+
+
+@pytest.mark.parametrize("location", ["configmap", "secret", "ray", "unknown-envfrom"])
+def test_runtime_env_encryption_overlay_rejects_shared_or_ray_selectors(location: str) -> None:
+    resources = _runtime_env_encryption_resources()
+    if location == "configmap":
+        configmap = next(resource for resource in resources if resource.get("kind") == "ConfigMap")
+        configmap["data"] = {
+            "DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE": "encrypted",
+        }
+    elif location == "secret":
+        secret = next(resource for resource in resources if resource.get("kind") == "Secret")
+        secret["data"] = {
+            "DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE": "ZW5jcnlwdGVk",
+        }
+    elif location == "unknown-envfrom":
+        target = next(
+            resource
+            for resource in resources
+            if resource.get("kind") == "Deployment"
+            and resource.get("metadata", {}).get("name") == "django-ray-worker-sync"
+        )
+        target["spec"]["template"]["spec"]["containers"][0].setdefault("envFrom", []).append(
+            {"secretRef": {"name": "external-runtime-env"}}
+        )
+    else:
+        ray_cluster = next(
+            resource for resource in resources if resource.get("kind") == "RayCluster"
+        )
+        ray_cluster["spec"]["headGroupSpec"]["template"]["spec"]["containers"][0]["env"] = [
+            {
+                "name": "DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE",
+                "value": "encrypted",
+            }
+        ]
+
+    with pytest.raises(ValueError):
+        inspect_runtime_env_encryption_overlay(resources)
+
+
+def test_preserved_secret_rejects_runtime_env_selector_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {
+        "DJANGO_API_TOKEN": base64.b64encode(TOKEN68.encode()).decode(),
+        "DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE": "ZW5jcnlwdGVk",
+    }
+
+    with pytest.raises(ValueError, match="must not contain"):
+        inspect_runtime_env_encryption_secret_data(data)
+
+    gate = LocalKubeRayGate(_config())
+    monkeypatch.setattr(gate, "_secret_data", lambda: data)
+    with pytest.raises(ValueError, match="must not contain"):
+        gate._secret_token()
 
 
 def test_real_kuberay_overlay_pins_exact_static_ray_topology(tmp_path: Path) -> None:
@@ -2921,6 +3134,15 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.ray_worker_count = cast(Any, token)
     evidence.web_restart_count = cast(Any, token)
     evidence.task_result = token
+    evidence.runtime_env_encryption_overlay = cast(Any, token)
+    evidence.runtime_env_encryption_canary = cast(Any, token)
+    evidence.runtime_env_encryption_envelope = cast(Any, token)
+    evidence.runtime_env_encryption_marker_absent = cast(Any, token)
+    evidence.runtime_env_encryption_tamper_rejected = cast(Any, token)
+    evidence.runtime_env_encryption_unknown_key_rejected = cast(Any, token)
+    evidence.runtime_env_encryption_retry_preserved = cast(Any, token)
+    evidence.runtime_env_encryption_logs_clear = cast(Any, token)
+    evidence.django_ray_secret_preserved = cast(Any, token)
     evidence.workflow_schema_version = cast(Any, token)
     evidence.workflow_attempt_number = cast(Any, token)
     evidence.workflow_topology_nodes = cast(Any, token)
@@ -2997,6 +3219,69 @@ def test_secret_token_is_decoded_in_memory_and_registered_for_redaction(
         gate.redactor.clean(variant) == "[REDACTED]"
         for variant in _percent_hex_case_variants(quote(token, safe=""))
     )
+
+
+def test_secret_token_decode_failure_has_no_private_exception_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_bytes = b"\xffprivate-token-bytes-that-must-not-enter-the-exception-graph"
+    encoded = base64.b64encode(private_bytes).decode()
+    gate = LocalKubeRayGate(_config())
+    monkeypatch.setattr(
+        gate,
+        "_secret_data",
+        lambda: {"DJANGO_API_TOKEN": encoded},
+    )
+
+    with pytest.raises(ValueError, match="base64-encoded UTF-8") as captured:
+        gate._secret_token()
+
+    assert encoded not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+
+
+def test_secret_preservation_compares_the_complete_data_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded = base64.b64encode(TOKEN68.encode()).decode()
+    baseline = {
+        "DJANGO_API_TOKEN": encoded,
+        "DJANGO_SECRET_KEY": base64.b64encode(b"django-secret").decode(),
+        "DATABASE_PASSWORD": base64.b64encode(b"database-secret").decode(),
+    }
+    gate = LocalKubeRayGate(_config())
+    responses = iter((baseline, dict(reversed(tuple(baseline.items())))))
+    monkeypatch.setattr(gate, "_secret_data", lambda: next(responses))
+
+    assert gate._secret_token() == TOKEN68
+    gate._verify_preserved_secret()
+
+    assert gate.evidence.django_ray_secret_preserved is True
+    assert gate._secret_data_sha256 == secret_data_sha256(baseline)
+
+
+def test_secret_preservation_rejects_any_data_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded = base64.b64encode(TOKEN68.encode()).decode()
+    baseline = {
+        "DJANGO_API_TOKEN": encoded,
+        "DJANGO_SECRET_KEY": base64.b64encode(b"django-secret").decode(),
+    }
+    changed = {
+        **baseline,
+        "DJANGO_SECRET_KEY": base64.b64encode(b"changed-secret").decode(),
+    }
+    gate = LocalKubeRayGate(_config())
+    responses = iter((baseline, changed))
+    monkeypatch.setattr(gate, "_secret_data", lambda: next(responses))
+
+    gate._secret_token()
+    with pytest.raises(ValueError, match="data changed"):
+        gate._verify_preserved_secret()
+
+    assert gate.evidence.django_ray_secret_preserved is False
 
 
 @pytest.mark.parametrize(
@@ -3274,6 +3559,326 @@ def test_api_smoke_rejects_task_id_evidence_injection(monkeypatch: pytest.Monkey
 
     with pytest.raises(ValueError, match="canonical UUID"):
         gate._verify_api()
+
+
+def _runtime_env_failure_observations() -> dict[str, dict[str, object]]:
+    common: dict[str, object] = {
+        "state": "FAILED",
+        "attempt_number": 1,
+        "execution_generation": 1,
+        "claimed": True,
+        "lifecycle_timestamps": True,
+        "no_ray_submission": True,
+        "no_result": True,
+        "attempts": [{"attempt_number": 1, "state": "FAILED"}],
+    }
+    return {
+        "ciphertext": {
+            **common,
+            "archive_fingerprint": "a" * 64,
+            "authentication_failed": True,
+            "key_unavailable": False,
+        },
+        "key_id": {
+            **common,
+            "archive_fingerprint": "b" * 64,
+            "authentication_failed": False,
+            "key_unavailable": True,
+        },
+    }
+
+
+def test_private_runtime_env_envelope_inspection_registers_every_raw_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serialized, nonce, ciphertext = _runtime_env_envelope()
+    digest = "d" * 64
+    gate = LocalKubeRayGate(_config())
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def kubectl(*args: str, **kwargs: object) -> CommandResult:
+        calls.append((args, kwargs))
+        return CommandResult(
+            json.dumps(
+                {
+                    "envelope": serialized,
+                    "profile": "thin",
+                    "runtime_env_hash": digest,
+                }
+            ),
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+
+    gate._inspect_runtime_env_canary_envelope(
+        task_id=RUNTIME_ENV_CANARY_TASK_ID,
+        profile="thin",
+        digest=digest,
+    )
+
+    assert calls[0][1]["sensitive_output"] is True
+    assert "testproject/manage.py" in calls[0][0]
+    no_imports = calls[0][0].index("--no-imports")
+    assert calls[0][0][no_imports + 1] == "-c"
+    assert gate.evidence.runtime_env_encryption_envelope is True
+    assert gate.evidence.runtime_env_encryption_marker_absent is True
+    assert gate.redactor.clean(f"{serialized}|{nonce}|{ciphertext}") == (
+        "[REDACTED]|[REDACTED]|[REDACTED]"
+    )
+    assert gate.runner.redactor.clean(serialized) == "[REDACTED]"
+
+
+def test_failure_fixture_creation_is_one_sensitive_atomic_storage_seam_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    serialized, nonce, ciphertext = _runtime_env_envelope()
+    tampered_payload = json.loads(serialized)
+    tampered_payload["ciphertext"] = ("A" if ciphertext[0] != "A" else "B") + ciphertext[1:]
+    tampered = json.dumps(tampered_payload, sort_keys=True, separators=(",", ":"))
+    unknown_payload = json.loads(serialized)
+    unknown_payload["key_id"] = "django-ray-gate-unknown"
+    unknown = json.dumps(unknown_payload, sort_keys=True, separators=(",", ":"))
+
+    def kubectl(*args: str, **kwargs: object) -> CommandResult:
+        calls.append((args, kwargs))
+        return CommandResult(
+            json.dumps(
+                {
+                    "ciphertext": {
+                        "id": 11,
+                        "task_id": RUNTIME_ENV_TAMPER_TASK_ID,
+                        "envelope": tampered,
+                        "nonce": nonce,
+                        "ciphertext": tampered_payload["ciphertext"],
+                    },
+                    "key_id": {
+                        "id": 12,
+                        "task_id": RUNTIME_ENV_UNKNOWN_KEY_TASK_ID,
+                        "envelope": unknown,
+                        "nonce": nonce,
+                        "ciphertext": ciphertext,
+                    },
+                }
+            ),
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+
+    assert gate._create_runtime_env_failure_fixtures() == {
+        "ciphertext": (11, RUNTIME_ENV_TAMPER_TASK_ID),
+        "key_id": (12, RUNTIME_ENV_UNKNOWN_KEY_TASK_ID),
+    }
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert kwargs["sensitive_output"] is True
+    no_imports = args.index("--no-imports")
+    assert args[no_imports + 1] == "-c"
+    script = args[-1]
+    assert script == RUNTIME_ENV_FAILURE_FIXTURE_SCRIPT
+    assert script.count("with transaction.atomic():") == 1
+    assert "runtime_env_for_storage(resolved, task_id=task_id)" in script
+    assert script.index('envelope["ciphertext"] =') < script.index(
+        "RayTaskExecution.objects.create"
+    )
+    assert script.index('envelope["key_id"] =') < script.index("RayTaskExecution.objects.create")
+    assert gate._runtime_env_fixture_values_registered is True
+    for value in (
+        tampered,
+        tampered_payload["ciphertext"],
+        unknown,
+        nonce,
+        ciphertext,
+    ):
+        assert gate.redactor.clean(value) == "[REDACTED]"
+
+
+def test_malformed_private_fixture_payload_suppresses_runtime_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_value = "unregistered-mutated-envelope-that-must-remain-private"
+    malformed = f'{{"ciphertext":{{"envelope":"{private_value}"'
+    output: list[str] = []
+    gate = LocalKubeRayGate(_config(), output=output.append)
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **kwargs: CommandResult(malformed, "", 0),
+    )
+
+    with pytest.raises(ValueError, match="valid private JSON") as captured:
+        gate._create_runtime_env_failure_fixtures()
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert private_value not in str(captured.value)
+    assert gate._runtime_env_fixture_values_registered is False
+
+    commands: list[tuple[str, ...]] = []
+
+    def diagnostics_kubectl(*args: str, **kwargs: object) -> CommandResult:
+        commands.append(args)
+        return CommandResult("ordinary resource status", "", 0)
+
+    monkeypatch.setattr(gate, "_kubectl", diagnostics_kubectl)
+    gate.mutated = True
+    gate.diagnostics("runtime-env-encryption")
+
+    assert commands == [("get", "pods,deployments,jobs,pvc", "-o", "wide")]
+    assert private_value not in "\n".join(output)
+
+
+def test_runtime_env_failure_invariants_require_pre_ray_permanent_failures() -> None:
+    observations = _runtime_env_failure_observations()
+
+    LocalKubeRayGate._validate_runtime_env_failure_invariants(observations)
+
+    observations["ciphertext"]["no_ray_submission"] = False
+    with pytest.raises(ValueError, match="lifecycle boundary"):
+        LocalKubeRayGate._validate_runtime_env_failure_invariants(observations)
+
+
+def test_runtime_env_encryption_layer_proves_canary_corruption_and_retry_fences(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate.resources = _runtime_env_encryption_resources()
+    token = "local-token-that-must-never-be-printed-123456"
+    digest = "d" * 64
+    fixtures = {
+        "ciphertext": (11, RUNTIME_ENV_TAMPER_TASK_ID),
+        "key_id": (12, RUNTIME_ENV_UNKNOWN_KEY_TASK_ID),
+    }
+    calls: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(gate, "_secret_token", lambda: token)
+
+    def request(
+        path: str,
+        *,
+        method: str,
+        headers: Mapping[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        authenticated = headers == {"Authorization": f"Bearer {token}"}
+        calls.append((path, method, authenticated))
+        if path == RUNTIME_ENV_ENCRYPTION_PROBE_PATH:
+            return 200, json.dumps({"task_id": RUNTIME_ENV_CANARY_TASK_ID}).encode()
+        if path == f"/api/cluster/runtime-env/{RUNTIME_ENV_CANARY_TASK_ID}":
+            return 200, json.dumps(
+                {
+                    "task_id": RUNTIME_ENV_CANARY_TASK_ID,
+                    "state": "SUCCEEDED",
+                    "runtime_env_profile": "thin",
+                    "runtime_env_hash": digest,
+                    "result": {"storage_encryption_verified": True},
+                    "error": None,
+                }
+            ).encode()
+        for execution_id, task_id in fixtures.values():
+            if path == f"/api/executions?task_id={task_id}&limit=1":
+                return 200, json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                "id": execution_id,
+                                "task_id": task_id,
+                                "state": "FAILED",
+                                "attempt_number": 1,
+                                "execution_generation": 1,
+                                "result_data": None,
+                                "runtime_env_profile": "thin",
+                            }
+                        ]
+                    }
+                ).encode()
+        if path == "/api/executions/11/retry":
+            return 409, b'{"detail":"snapshot integrity failure"}'
+        raise AssertionError(path)
+
+    monkeypatch.setattr(gate, "_http", request)
+
+    def inspect_envelope(**kwargs: object) -> None:
+        assert kwargs == {
+            "task_id": RUNTIME_ENV_CANARY_TASK_ID,
+            "profile": "thin",
+            "digest": digest,
+        }
+        gate.evidence.runtime_env_encryption_envelope = True
+        gate.evidence.runtime_env_encryption_marker_absent = True
+
+    monkeypatch.setattr(gate, "_inspect_runtime_env_canary_envelope", inspect_envelope)
+    monkeypatch.setattr(gate, "_create_runtime_env_failure_fixtures", lambda: fixtures)
+    observations = _runtime_env_failure_observations()
+    monkeypatch.setattr(gate, "_runtime_env_failure_invariants", lambda _fixtures: observations)
+    monkeypatch.setattr(
+        gate,
+        "_verify_runtime_env_logs_clear",
+        lambda: setattr(gate.evidence, "runtime_env_encryption_logs_clear", True),
+    )
+
+    gate._verify_runtime_env_encryption()
+
+    assert all(authenticated for _, _, authenticated in calls)
+    assert calls[0][:2] == (RUNTIME_ENV_ENCRYPTION_PROBE_PATH, "POST")
+    assert calls[-1][:2] == ("/api/executions/11/retry", "POST")
+    assert gate.evidence.runtime_env_encryption_overlay is True
+    assert gate.evidence.runtime_env_encryption_canary is True
+    assert gate.evidence.runtime_env_encryption_envelope is True
+    assert gate.evidence.runtime_env_encryption_marker_absent is True
+    assert gate.evidence.runtime_env_encryption_tamper_rejected is True
+    assert gate.evidence.runtime_env_encryption_unknown_key_rejected is True
+    assert gate.evidence.runtime_env_encryption_retry_preserved is True
+    assert gate.evidence.runtime_env_encryption_logs_clear is True
+
+
+def test_runtime_env_log_scan_rejects_protected_values_without_echoing_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    serialized, nonce, ciphertext = _runtime_env_envelope()
+    for value in (serialized, nonce, ciphertext):
+        gate._register_runtime_env_protected_value(value)
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **kwargs: CommandResult(
+            f"ordinary log\n{RUNTIME_ENV_STORAGE_PROBE_MARKER}\n",
+            "",
+            0,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="protected RuntimeEnv storage value") as captured:
+        gate._verify_runtime_env_logs_clear()
+
+    assert RUNTIME_ENV_STORAGE_PROBE_MARKER not in str(captured.value)
+    assert serialized not in str(captured.value)
+    assert gate.evidence.runtime_env_encryption_logs_clear is False
+
+
+def test_runtime_env_log_scan_reads_the_complete_bounded_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    calls: list[tuple[str, ...]] = []
+
+    def kubectl(*args: str, **kwargs: object) -> CommandResult:
+        calls.append(args)
+        return CommandResult("ordinary logs", "", 0)
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+
+    gate._verify_runtime_env_logs_clear()
+
+    assert len(calls) == 2
+    assert all("--tail=-1" in call for call in calls)
+    assert all("--since=15m" in call for call in calls)
+    assert all("--limit-bytes=1048576" in call for call in calls)
 
 
 def _complex_workflow_gate_responses() -> dict[str, dict[str, Any]]:
@@ -4203,6 +4808,15 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.task_id = TASK_ID
     gate.evidence.task_state = "SUCCEEDED"
     gate.evidence.task_result = 5
+    gate.evidence.runtime_env_encryption_overlay = True
+    gate.evidence.runtime_env_encryption_canary = True
+    gate.evidence.runtime_env_encryption_envelope = True
+    gate.evidence.runtime_env_encryption_marker_absent = True
+    gate.evidence.runtime_env_encryption_tamper_rejected = True
+    gate.evidence.runtime_env_encryption_unknown_key_rejected = True
+    gate.evidence.runtime_env_encryption_retry_preserved = True
+    gate.evidence.runtime_env_encryption_logs_clear = True
+    gate.evidence.django_ray_secret_preserved = True
     gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
     gate.evidence.workflow_task_state = "SUCCEEDED"
     gate.evidence.workflow_schema_version = 3
@@ -4268,6 +4882,15 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.task_id = TASK_ID
     gate.evidence.task_state = "SUCCEEDED"
     gate.evidence.task_result = 5
+    gate.evidence.runtime_env_encryption_overlay = True
+    gate.evidence.runtime_env_encryption_canary = True
+    gate.evidence.runtime_env_encryption_envelope = True
+    gate.evidence.runtime_env_encryption_marker_absent = True
+    gate.evidence.runtime_env_encryption_tamper_rejected = True
+    gate.evidence.runtime_env_encryption_unknown_key_rejected = True
+    gate.evidence.runtime_env_encryption_retry_preserved = True
+    gate.evidence.runtime_env_encryption_logs_clear = True
+    gate.evidence.django_ray_secret_preserved = True
     gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
     gate.evidence.workflow_task_state = "SUCCEEDED"
     gate.evidence.workflow_schema_version = 3
@@ -4329,6 +4952,10 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("kubernetes_server") == gate.evidence.kubernetes_server
     assert reconstructed("docker_host") == gate.evidence.docker_host
     assert reconstructed("app_image_id") == IMAGE_ID
+    assert reconstructed("runtime_env_encryption_canary") == "True"
+    assert reconstructed("runtime_env_encryption_envelope") == "True"
+    assert reconstructed("runtime_env_encryption_retry_preserved") == "True"
+    assert reconstructed("django_ray_secret_preserved") == "True"
     assert reconstructed("workflow_task_id") == WORKFLOW_TASK_ID
     assert reconstructed("workflow_availability") == "AVAILABLE"
     assert reconstructed("workflow_terminal_only_task_id") == TERMINAL_ONLY_WORKFLOW_TASK_ID
@@ -4336,6 +4963,13 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
         reconstructed("workflow_terminal_only_failure_task_id")
         == TERMINAL_ONLY_FAILED_WORKFLOW_TASK_ID
     )
+    encryption_evidence = "\n".join(
+        line
+        for line in output
+        if line.startswith(("runtime_env_encryption_", "django_ray_secret_preserved="))
+    )
+    for forbidden in ("task_id", "sha256", "key_id", "nonce", "ciphertext", "envelope={"):
+        assert forbidden not in encryption_evidence
     assert all(len(line) <= EVIDENCE_LINE_LIMIT for line in output)
 
 
@@ -4374,6 +5008,9 @@ def test_gate_guide_separates_runtime_evidence_from_durable_summary() -> None:
     assert "task succeeded with result 5" in guide
     assert "`workflow-progress`" in guide
     assert "`workflow-admin`" in guide
+    assert "`runtime-env-encryption`" in guide
+    assert "storage_encryption_verified=true" in guide
+    assert "corrupt and unknown-key rows failed before Ray" in guide
     assert "deterministic first-attempt failure" in guide
     assert "authenticated admin graph retained the incoming" in guide
     assert "all Ray pods were cold-replaced" in guide
@@ -4416,6 +5053,14 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
     assert "K8S_PROMETHEUS_URL=http://prometheus.localhost:30080" not in guide
     assert "Each emitted line is at most 72 characters" in guide
     assert "key_part_001" in guide
+    assert "RuntimeEnv snapshot storage, encryption settings or dependencies" in guide
+    assert "with no selector in an init container, shared ConfigMap, setup Job, or Ray pod" in guide
+    assert "task IDs, hashes, key IDs, nonces, ciphertext, or envelopes" in guide
+    assert "full base64 `django-ray-secret.data` mapping" in guide
+    encryption_row = next(
+        line for line in guide.splitlines() if line.startswith("| RuntimeEnv snapshot storage")
+    )
+    assert "| Required | `required` |" in encryption_row
 
 
 def test_make_gate_requires_explicit_context_namespace_and_ray_decision() -> None:
@@ -4503,6 +5148,7 @@ def _stub_successful_gate_layers(
         "_verify_generic_ray_nodes",
         "_verify_probes",
         "_verify_api",
+        "_verify_runtime_env_encryption",
         "_verify_complex_workflow_progress",
         "_verify_workflow_admin",
         "_verify_prometheus",
@@ -4510,13 +5156,18 @@ def _stub_successful_gate_layers(
         monkeypatch.setattr(gate, method_name, lambda: None)
 
 
-def test_workflow_progress_layer_runs_after_api_and_before_prometheus(
+def test_runtime_env_encryption_runs_after_api_and_before_workflows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
     gate = LocalKubeRayGate(_config(), output=lambda _value: None)
     _stub_successful_gate_layers(gate, monkeypatch)
     monkeypatch.setattr(gate, "_verify_api", lambda: events.append("api-smoke"))
+    monkeypatch.setattr(
+        gate,
+        "_verify_runtime_env_encryption",
+        lambda: events.append("runtime-env-encryption"),
+    )
     monkeypatch.setattr(
         gate,
         "_verify_complex_workflow_progress",
@@ -4538,6 +5189,7 @@ def test_workflow_progress_layer_runs_after_api_and_before_prometheus(
 
     assert events == [
         "api-smoke",
+        "runtime-env-encryption",
         "workflow-progress",
         "workflow-admin",
         "prometheus",
@@ -4753,6 +5405,7 @@ def test_final_evidence_identity_failure_is_labeled_once_without_traceback(
         "_verify_generic_ray_nodes",
         "_verify_probes",
         "_verify_api",
+        "_verify_runtime_env_encryption",
         "_verify_complex_workflow_progress",
         "_verify_workflow_admin",
         "_verify_prometheus",

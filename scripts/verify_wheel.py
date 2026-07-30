@@ -10,6 +10,7 @@ EXPECTED_FILES = {
     "django_ray/__init__.py",
     "django_ray/admin.py",
     "django_ray/models.py",
+    "django_ray/runtime/runtime_env_encryption.py",
     "django_ray/static/django_ray/admin/task_live.css",
     "django_ray/static/django_ray/admin/task_live.js",
     "django_ray/static/django_ray/admin/workflow_diagnostics.js",
@@ -60,6 +61,30 @@ def verify_installed_wheel(expected_version: str) -> None:
     ]
     if runtime_unfold_requirements:
         raise RuntimeError("django-unfold must not be a required wheel dependency")
+
+    cryptography_requirements = [
+        requirement
+        for requirement in (distribution.requires or ())
+        if requirement.partition(";")[0]
+        .strip()
+        .lower()
+        .replace("_", "-")
+        .startswith("cryptography")
+    ]
+    normalized_cryptography_requirements = [
+        "".join(requirement.split()).lower().replace("_", "-")
+        for requirement in cryptography_requirements
+    ]
+    if normalized_cryptography_requirements != ["cryptography>=42.0.8"]:
+        raise RuntimeError(
+            "cryptography>=42.0.8 must be exactly one unconditional runtime dependency"
+        )
+
+    import cryptography
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if not cryptography.__version__ or len(AESGCM.generate_key(bit_length=256)) != 32:
+        raise RuntimeError("cryptography runtime dependency could not be imported")
 
     import django
     from django.conf import settings

@@ -1926,7 +1926,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         if blocked:
             message += (
                 f" Skipped {blocked} task(s) because their persisted RuntimeEnv "
-                "snapshots failed integrity validation."
+                "snapshots failed validation."
             )
         self.message_user(
             request,

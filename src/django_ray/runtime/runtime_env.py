@@ -18,6 +18,14 @@ from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ImproperlyConfigured
 
+from django_ray.runtime.runtime_env_encryption import (
+    RuntimeEnvEncryptionError,
+    is_runtime_env_encryption_envelope_candidate,
+    protect_runtime_env_snapshot,
+    unprotect_runtime_env_snapshot,
+    validate_runtime_env_encryption_settings,
+)
+
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
 
@@ -30,7 +38,7 @@ class RuntimeEnvSnapshotError(ImproperlyConfigured):
     """Raised when a persisted RuntimeEnv snapshot cannot be trusted."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ResolvedRuntimeEnv:
     """A JSON-safe RuntimeEnv with a stable content identity."""
 
@@ -40,7 +48,7 @@ class ResolvedRuntimeEnv:
     digest: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class RuntimeEnvStorageFields:
     """Versionable model-field values for one resolved RuntimeEnv."""
 
@@ -103,6 +111,11 @@ def normalize_runtime_env(
         ) from error
 
     normalized = json.loads(serialized)
+    if is_runtime_env_encryption_envelope_candidate(normalized):
+        raise ImproperlyConfigured(
+            f"django-ray: {source} uses a top-level field reserved for "
+            "RuntimeEnv storage encryption"
+        )
     digest = hashlib.sha256(encoded).hexdigest()
     return ResolvedRuntimeEnv(
         profile=profile,
@@ -240,7 +253,12 @@ def _merge_runtime_envs(parent: dict[str, Any], child: dict[str, Any]) -> dict[s
     return merged
 
 
-def runtime_env_for_storage(runtime_env: ResolvedRuntimeEnv) -> RuntimeEnvStorageFields:
+def runtime_env_for_storage(
+    runtime_env: ResolvedRuntimeEnv,
+    *,
+    task_id: str,
+    config: dict[str, Any] | None = None,
+) -> RuntimeEnvStorageFields:
     """Verify one resolved RuntimeEnv before persisting its durable snapshot."""
     if not isinstance(runtime_env, ResolvedRuntimeEnv):
         raise RuntimeEnvSnapshotError(
@@ -276,19 +294,46 @@ def runtime_env_for_storage(runtime_env: ResolvedRuntimeEnv) -> RuntimeEnvStorag
         raise RuntimeEnvSnapshotError(
             "django-ray: Resolved RuntimeEnv storage snapshot is inconsistent"
         )
+
+    if config is None:
+        from django_ray.conf.settings import get_settings
+
+        config = get_settings()
+    encryption = validate_runtime_env_encryption_settings(config)
+    protected: str | None
+    try:
+        protected = protect_runtime_env_snapshot(
+            canonical.serialized,
+            task_id=task_id,
+            profile=profile,
+            digest=canonical.digest,
+            encryption=encryption,
+        )
+    except RuntimeEnvEncryptionError:
+        protected = None
+    if protected is None:
+        raise RuntimeEnvSnapshotError(
+            "django-ray: Resolved RuntimeEnv storage snapshot encryption failed"
+        )
     return RuntimeEnvStorageFields(
         profile=profile,
-        serialized=canonical.serialized,
+        serialized=protected,
         digest=canonical.digest,
     )
 
 
-def runtime_env_for_execution(task_execution: RayTaskExecution) -> ResolvedRuntimeEnv:
+def runtime_env_for_execution(
+    task_execution: RayTaskExecution,
+    *,
+    config: dict[str, Any] | None = None,
+) -> ResolvedRuntimeEnv:
     """Load and verify the immutable RuntimeEnv snapshot on an execution."""
     task_pk = getattr(task_execution, "pk", None)
     task_label = f" for task {task_pk}" if isinstance(task_pk, int) else ""
-    stored_profile = getattr(task_execution, "runtime_env_profile", None)
-    if stored_profile == "":
+    raw_stored_profile = getattr(task_execution, "runtime_env_profile", None)
+    stored_profile_was_empty = raw_stored_profile == ""
+    stored_profile = raw_stored_profile
+    if stored_profile_was_empty:
         stored_profile = None
     stored_digest = getattr(task_execution, "runtime_env_hash", "")
     if stored_digest is None:
@@ -298,11 +343,21 @@ def runtime_env_for_execution(task_execution: RayTaskExecution) -> ResolvedRunti
             f"django-ray: Persisted RuntimeEnv snapshot{task_label} has malformed identity metadata"
         )
     profile = stored_profile
+    serialized = getattr(task_execution, "runtime_env_json", None)
+    if not isinstance(serialized, str) or not serialized.strip():
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} is missing"
+        )
     if not stored_digest and profile is None:
         # Migration 0002 backfills pre-0.3 rows with "{}" but cannot reconstruct
         # the RuntimeEnv that would previously have been resolved at submission.
-        # No digest/profile is the durable legacy marker; new empty snapshots
-        # still carry the SHA-256 digest of their canonical "{}" payload.
+        # Its exact "{}" payload plus no digest/profile is the durable legacy
+        # marker; new empty snapshots still carry the SHA-256 digest of their
+        # canonical "{}" payload.
+        if serialized != "{}":
+            raise RuntimeEnvSnapshotError(
+                f"django-ray: Persisted RuntimeEnv snapshot{task_label} has an incomplete identity"
+            )
         legacy_runtime_env: ResolvedRuntimeEnv | None
         try:
             legacy_runtime_env = resolve_runtime_env_profile()
@@ -323,12 +378,6 @@ def runtime_env_for_execution(task_execution: RayTaskExecution) -> ResolvedRunti
             f"django-ray: Persisted RuntimeEnv snapshot{task_label} has an incomplete identity"
         )
 
-    serialized = getattr(task_execution, "runtime_env_json", None)
-    if not isinstance(serialized, str) or not serialized.strip():
-        raise RuntimeEnvSnapshotError(
-            f"django-ray: Persisted RuntimeEnv snapshot{task_label} is missing"
-        )
-
     decoded = True
     try:
         spec = json.loads(serialized)
@@ -344,6 +393,45 @@ def runtime_env_for_execution(task_execution: RayTaskExecution) -> ResolvedRunti
             f"django-ray: Persisted RuntimeEnv snapshot{task_label} is not a mapping"
         )
 
+    encrypted = is_runtime_env_encryption_envelope_candidate(spec)
+    plaintext_serialized = serialized
+    if encrypted:
+        task_id = getattr(task_execution, "task_id", None)
+        if stored_profile_was_empty or not isinstance(task_id, str) or not 1 <= len(task_id) <= 255:
+            raise RuntimeEnvSnapshotError(
+                f"django-ray: Persisted RuntimeEnv snapshot{task_label} "
+                "has malformed encryption identity"
+            )
+        if config is None:
+            from django_ray.conf.settings import get_settings
+
+            config = get_settings()
+        encryption_error: str | None = None
+        try:
+            encryption = validate_runtime_env_encryption_settings(config)
+            plaintext_serialized = unprotect_runtime_env_snapshot(
+                serialized,
+                task_id=task_id,
+                profile=profile,
+                digest=stored_digest,
+                encryption=encryption,
+            )
+        except RuntimeEnvEncryptionError as error:
+            encryption_error = str(error)
+        if encryption_error is not None:
+            raise RuntimeEnvSnapshotError(
+                f"django-ray: Persisted RuntimeEnv snapshot{task_label}: {encryption_error}"
+            )
+        try:
+            spec = json.loads(plaintext_serialized)
+        except (TypeError, ValueError, RecursionError):
+            spec = None
+        if not isinstance(spec, dict):
+            raise RuntimeEnvSnapshotError(
+                f"django-ray: Persisted RuntimeEnv snapshot{task_label} "
+                "decrypted payload is invalid"
+            )
+
     resolved: ResolvedRuntimeEnv | None
     try:
         resolved = normalize_runtime_env(
@@ -357,9 +445,10 @@ def runtime_env_for_execution(task_execution: RayTaskExecution) -> ResolvedRunti
         raise RuntimeEnvSnapshotError(
             f"django-ray: Persisted RuntimeEnv snapshot{task_label} is invalid"
         )
-    if serialized != resolved.serialized:
+    if plaintext_serialized != resolved.serialized:
         raise RuntimeEnvSnapshotError(
-            f"django-ray: Persisted RuntimeEnv snapshot{task_label} is not canonical"
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} "
+            + ("decrypted payload is invalid" if encrypted else "is not canonical")
         )
     if not hmac.compare_digest(stored_digest, resolved.digest):
         raise RuntimeEnvSnapshotError(

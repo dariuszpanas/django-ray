@@ -253,6 +253,7 @@ def run_complex_branch_workflow(
 
 def inspect_runtime_environment(package: str | None = None) -> dict[str, Any]:
     """Return observable details from the Ray worker's active environment."""
+    storage_probe_marker = "django-ray-runtime-env-encryption-canary-v1-7c4e2a91"
     package_version = None
     if package:
         try:
@@ -262,6 +263,9 @@ def inspect_runtime_environment(package: str | None = None) -> dict[str, Any]:
 
     return {
         "profile_marker": os.environ.get("DJANGO_RAY_RUNTIME_ENV", "unset"),
+        "storage_encryption_verified": (
+            os.environ.get("DJANGO_RAY_RUNTIME_ENV_STORAGE_PROBE") == storage_probe_marker
+        ),
         "python_version": platform.python_version(),
         "package": package,
         "package_version": package_version,

@@ -129,6 +129,93 @@ DJANGO_RAY = {
 Profile selected when the task backend does not specify
 `OPTIONS["RUNTIME_ENV_PROFILE"]`. The named profile must exist.
 
+### RUNTIME_ENV_STORAGE_MODE
+
+- **Type**: `str`
+- **Default**: `"plaintext"`
+- **Values**: `"plaintext"` or `"encrypted"`
+
+Selects the format for newly enqueued RuntimeEnv snapshots. Readers always accept
+both supported formats, so changing this setting does not rewrite existing rows.
+`encrypted` requires `RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY` to resolve through the
+dedicated key ring or the explicit Django-secret fallback.
+
+Keep `plaintext` during the first dual-read and key-distribution stages of a rolling
+upgrade. See [Runtime Environments](../runtime-environments.md#roll-out-encrypted-writes)
+before enabling encrypted writes.
+
+### RUNTIME_ENV_ENCRYPTION_KEYS
+
+- **Type**: `dict[str, str]`
+- **Default**: `{}`
+
+Dedicated AES-256-GCM key ring used to encrypt and decrypt RuntimeEnv snapshots.
+Mapping keys are case-sensitive key IDs. Each value must be the unpadded canonical
+base64url representation of exactly 32 random bytes.
+
+Key IDs must start with a letter or number and contain at most 64 letters, numbers,
+dots, underscores, or hyphens. The ID `django-secret` is reserved. Store values in a
+secret manager or environment variable, not source control:
+
+```python
+import os
+
+
+DJANGO_RAY = {
+    "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNTIME_ENV_ENCRYPTION_KEYS": {
+        "runtime-env-2026-01": os.environ["DJANGO_RAY_RUNTIME_ENV_KEY_2026_01"],
+        "runtime-env-2025-10": os.environ["DJANGO_RAY_RUNTIME_ENV_KEY_2025_10"],
+    },
+    "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "runtime-env-2026-01",
+    "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+}
+```
+
+Keep retired keys available to every reader while any durable row may still name
+them. Key loss is not recoverable from the database envelope.
+
+### RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY
+
+- **Type**: `str | None`
+- **Default**: `None`
+
+Key ID used for new encrypted writes. When configured, it must resolve to a key in
+`RUNTIME_ENV_ENCRYPTION_KEYS` or to the reserved `django-secret` fallback. This is
+validated even in plaintext mode so a staged rollout cannot silently retain an
+unusable active key.
+
+Changing the active key does not rewrap historical rows. Add the new key to every
+reader first, then change this setting, and retain the old key until no row needs it.
+Always give new dedicated key material a new key ID; never replace the bytes under an
+existing dedicated ID.
+
+### RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
+
+- **Type**: `bool`
+- **Default**: `False`
+
+Explicitly enables the reserved `django-secret` key ID. New writes derive a 32-byte
+AES key from Django's current `SECRET_KEY` with HKDF-SHA256 and a versioned
+django-ray domain context. Reads try the current key followed by
+`SECRET_KEY_FALLBACKS`; fallback indexes are never stored in the envelope.
+
+This mode is never selected automatically. To use it:
+
+```python
+DJANGO_RAY = {
+    "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+    "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "django-secret",
+    "RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK": True,
+}
+```
+
+Prefer dedicated keys for production because Django signing-key and durable-task
+retention schedules are often different. If this fallback is used, retain an old
+`SECRET_KEY` in `SECRET_KEY_FALLBACKS` for as long as an encrypted RuntimeEnv row may
+need it.
+
 ### WORKFLOW_PLAN_CODE_REVISION
 
 - **Type**: `str | None`
@@ -795,6 +882,26 @@ DJANGO_RAY = {
 }
 ```
 
+### Encrypted RuntimeEnv Snapshots
+
+```python
+import os
+
+
+DJANGO_RAY = {
+    "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+    "RUNTIME_ENV_ENCRYPTION_KEYS": {
+        "runtime-env-2026-01": os.environ["DJANGO_RAY_RUNTIME_ENV_KEY_2026_01"],
+    },
+    "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "runtime-env-2026-01",
+}
+```
+
+Deploy the same complete key ring to web processes, task producers, retry/admin
+services, and every task manager. Do not inject these database keys into generic Ray
+head or worker pods.
+
 ### High Throughput
 
 ```python
@@ -844,6 +951,9 @@ map these environment variables into settings or worker CLI flags:
 |----------|---------|------------|
 | `RAY_ADDRESS` | sample settings, Docker entrypoint | `DJANGO_RAY["RAY_ADDRESS"]` / cluster address |
 | `RAY_DASHBOARD_URL` | sample settings | Django `RAY_DASHBOARD_URL` |
+| `DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE` | sample settings | `DJANGO_RAY["RUNTIME_ENV_STORAGE_MODE"]` |
+| `DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY` | sample settings | `DJANGO_RAY["RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY"]` |
+| `DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK` | sample settings | `DJANGO_RAY["RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK"]` |
 | `DJANGO_RAY_QUEUE` | Docker entrypoint | CLI `--queue` |
 | `DJANGO_RAY_QUEUES` | Docker entrypoint | CLI `--queue` with comma-separated queues |
 | `DJANGO_RAY_CONCURRENCY` | Docker entrypoint | CLI `--concurrency` |

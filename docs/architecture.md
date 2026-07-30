@@ -187,8 +187,8 @@ Primary execution record for one task attempt chain.
 | `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence, one accepted terminal-only summary, or an accepted default-off terminal-pilot publication |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
-| `runtime_env_json` | Canonical immutable plaintext RuntimeEnv snapshot used by execution and retries; identified rows are verified through the centralized storage boundary before submission or retry mutation |
-| `runtime_env_hash` | Unkeyed SHA-256 content identity used for integrity checks and cache correlation; it is not encryption or protection from a database writer |
+| `runtime_env_json` | Canonical immutable plaintext mapping or strict versioned AES-256-GCM envelope used by execution and retries; the write format is opt-in while readers always support both |
+| `runtime_env_hash` | Unkeyed SHA-256 identity of canonical plaintext used for integrity checks and cache correlation; it remains visible in encrypted mode and leaks equality |
 | `error_message`, `error_traceback` | Failure metadata |
 | `ray_target_address` | Immutable Ray Job routing target selected by the enqueueing backend |
 | `ray_job_id`, `ray_address` | Runner-specific execution handle metadata |
@@ -488,6 +488,16 @@ on backend-specific Ray Job routing, and drain tasks that contain only the new t
 before reversing `0014`; the reverse migration drops that routing column. Ray Core
 workers still select one cluster at process startup and do not dynamically route by
 backend alias.
+
+RuntimeEnv encryption has no schema migration. Its rollout is nevertheless
+reader-first: deploy the dual plaintext/encrypted reader everywhere while writes remain
+plaintext, then distribute the complete key ring to every enqueue, retry, admin, and
+task-manager process before enabling encrypted writes. An application-level rollback
+to plaintext writes remains readable only while the dual-reader code and all historical
+keys stay deployed. A binary downgrade to a release that does not understand encrypted
+envelopes is unsafe after the first encrypted row. Key rotation adds a reader key before
+making it active and retains every old key until no durable row needs it; this release
+does not rewrite or rewrap historical rows.
 
 The completion envelope and `execution_generation` fields are part of the Ray Job
 protocol. Drain Ray Job workers before deploying a version that introduces or changes
