@@ -74,6 +74,8 @@ TAG = "local-gate-tree-eeeeeeeeeeee-20260721123456-deadbeef"
 APP_TAG = f"django-ray:{TAG}"
 IMAGE_ID = f"sha256:{'b' * 64}"
 TASK_ID = "15200000-0000-4000-8000-000000000001"
+WORKFLOW_TASK_ID = "25200000-0000-4000-8000-000000000002"
+WORKFLOW_RUN_ID = "35200000-0000-4000-8000-000000000003"
 TOKEN68 = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/=="
 
 
@@ -2896,6 +2898,9 @@ def test_every_evidence_field_passes_through_the_token_redactor(
         "ray_pod_identity_sha256",
         "task_id",
         "task_state",
+        "workflow_task_id",
+        "workflow_task_state",
+        "workflow_availability",
     ):
         setattr(evidence, field_name, token)
     evidence.setup_bundle_bytes = cast(Any, token)
@@ -2903,6 +2908,16 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.ray_worker_count = cast(Any, token)
     evidence.web_restart_count = cast(Any, token)
     evidence.task_result = token
+    evidence.workflow_schema_version = cast(Any, token)
+    evidence.workflow_topology_nodes = cast(Any, token)
+    evidence.workflow_topology_edges = cast(Any, token)
+    evidence.workflow_node_details = cast(Any, token)
+    evidence.workflow_leaf_tasks = cast(Any, token)
+    evidence.workflow_admin_routes = cast(Any, token)
+    evidence.workflow_admin_actions = cast(Any, token)
+    evidence.workflow_current_manifests = cast(Any, token)
+    evidence.workflow_pending_manifests = cast(Any, token)
+    evidence.workflow_unlinked_pages = cast(Any, token)
     evidence.deployments = cast(dict[str, int], dict.fromkeys(APP_DEPLOYMENTS, token))
     evidence.prometheus_counts = cast(
         dict[str, int], dict.fromkeys(("django-ray", "ray-head", "ray-workers"), token)
@@ -2912,7 +2927,7 @@ def test_every_evidence_field_passes_through_the_token_redactor(
 
     serialized = "\n".join(output)
     assert token not in serialized
-    assert serialized.count("[REDACTED]") >= 20
+    assert serialized.count("[REDACTED]") >= 33
 
 
 def test_secret_token_is_decoded_in_memory_and_registered_for_redaction(
@@ -3213,6 +3228,325 @@ def test_api_smoke_rejects_task_id_evidence_injection(monkeypatch: pytest.Monkey
         gate._verify_api()
 
 
+def _complex_workflow_gate_responses() -> dict[str, dict[str, Any]]:
+    run_identity = {
+        "schema_version": 1,
+        "run_id": WORKFLOW_RUN_ID,
+        "attempt_number": 1,
+        "execution_generation": 1,
+    }
+    publication = {
+        "summary_revision": 9,
+        "topology_version": 8,
+        "detail_revision": 1,
+    }
+    node_ids = ["0.0", "0.1.g0.0", "0.2"]
+    edges = [
+        {"source": "0.0", "target": "0.1.g0.0"},
+        {"source": "0.1.g0.0", "target": "0.2"},
+    ]
+
+    def envelope() -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "task_id": WORKFLOW_TASK_ID,
+            "run_identity": dict(run_identity),
+            "publication": dict(publication),
+            "availability": "AVAILABLE",
+            "complete": True,
+        }
+
+    def page(collection: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            **envelope(),
+            "schema": "django-ray.workflow-progress-page",
+            "collection": collection,
+            "returned_count": len(items),
+            "items": items,
+            "next_cursor": None,
+        }
+
+    summary = {
+        "schema_version": 3,
+        "run_identity": dict(run_identity),
+        "reporting_policy": "full",
+        "selected_strategy": "dynamic_tasks",
+        "plan_fingerprint": f"sha256:{'a' * 64}",
+        **publication,
+        "state": "SUCCEEDED",
+        "node_counts": {
+            "declared": None,
+            "discovered": len(node_ids),
+            "retained_topology": len(node_ids),
+            "retained_detail": len(node_ids),
+            "pending": 0,
+            "running": 0,
+            "succeeded": len(node_ids),
+            "failed": 0,
+        },
+        "edge_counts": {
+            "declared": None,
+            "discovered": len(edges),
+            "retained_topology": len(edges),
+        },
+        "detail": {
+            "availability": "AVAILABLE",
+            "complete": True,
+            "truncation_reasons": [],
+        },
+    }
+    page_query = f"?limit={gate_module.WORKFLOW_PROGRESS_PAGE_LIMIT}"
+    return {
+        gate_module.COMPLEX_WORKFLOW_ENQUEUE_PATH: {
+            "task_id": WORKFLOW_TASK_ID,
+            "status": "READY",
+        },
+        f"/api/cluster/complex-workflow/{WORKFLOW_TASK_ID}": {
+            "task_id": WORKFLOW_TASK_ID,
+            "state": "SUCCEEDED",
+            "result": {
+                "shape": "chain(group(chain(map), chain(map)), step)",
+                "durability_boundary": "single RayTaskExecution",
+                "total_leaf_tasks": 3,
+            },
+        },
+        f"/api/cluster/workflows/{WORKFLOW_TASK_ID}": {
+            **envelope(),
+            "schema": "django-ray.workflow-progress-summary",
+            "source_schema_version": 3,
+            "summary": summary,
+        },
+        f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/topology/nodes{page_query}": page(
+            "topology_nodes",
+            [{"node_id": node_id, "kind": "step"} for node_id in node_ids],
+        ),
+        f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/topology/edges{page_query}": page(
+            "topology_edges",
+            edges,
+        ),
+        f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/nodes{page_query}": page(
+            "node_details",
+            [{"node_id": node_id, "state": "SUCCEEDED"} for node_id in node_ids],
+        ),
+    }
+
+
+def test_complex_workflow_gate_requires_terminal_consistent_schema_v3_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    token = "local-token-that-must-never-be-printed-123456"
+    responses = _complex_workflow_gate_responses()
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(gate, "_secret_token", lambda: token)
+
+    def request(
+        path: str,
+        *,
+        method: str,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        assert headers == {"Authorization": f"Bearer {token}"}
+        calls.append((path, method))
+        return 200, json.dumps(responses[path]).encode()
+
+    monkeypatch.setattr(gate, "_http", request)
+
+    gate._verify_complex_workflow_progress()
+
+    assert calls == [
+        (gate_module.COMPLEX_WORKFLOW_ENQUEUE_PATH, "POST"),
+        (f"/api/cluster/complex-workflow/{WORKFLOW_TASK_ID}", "GET"),
+        (f"/api/cluster/workflows/{WORKFLOW_TASK_ID}", "GET"),
+        (
+            f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/topology/nodes?limit=16",
+            "GET",
+        ),
+        (
+            f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/topology/edges?limit=16",
+            "GET",
+        ),
+        (f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/nodes?limit=16", "GET"),
+    ]
+    assert gate.evidence.workflow_task_id == WORKFLOW_TASK_ID
+    assert gate.evidence.workflow_task_state == "SUCCEEDED"
+    assert gate.evidence.workflow_schema_version == 3
+    assert gate.evidence.workflow_availability == "AVAILABLE"
+    assert gate.evidence.workflow_topology_nodes == 3
+    assert gate.evidence.workflow_topology_edges == 2
+    assert gate.evidence.workflow_node_details == 3
+    assert gate.evidence.workflow_leaf_tasks == 3
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "terminal_failure",
+        "legacy_summary",
+        "not_available",
+        "empty_nodes",
+        "unknown_edge_node",
+        "missing_detail",
+        "publication_mismatch",
+        "count_mismatch",
+    ],
+)
+def test_complex_workflow_gate_rejects_incomplete_or_inconsistent_api_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    token = "local-token-that-must-never-be-printed-123456"
+    responses = _complex_workflow_gate_responses()
+    summary_path = f"/api/cluster/workflows/{WORKFLOW_TASK_ID}"
+    page_query = f"?limit={gate_module.WORKFLOW_PROGRESS_PAGE_LIMIT}"
+    node_path = f"{summary_path}/topology/nodes{page_query}"
+    edge_path = f"{summary_path}/topology/edges{page_query}"
+    detail_path = f"{summary_path}/nodes{page_query}"
+    poll_path = f"/api/cluster/complex-workflow/{WORKFLOW_TASK_ID}"
+
+    if failure == "terminal_failure":
+        responses[poll_path]["state"] = "FAILED"
+        responses[poll_path]["result"] = None
+    elif failure == "legacy_summary":
+        responses[summary_path]["source_schema_version"] = 2
+    elif failure == "not_available":
+        responses[summary_path]["availability"] = "NOT_REPORTED"
+        responses[summary_path]["complete"] = False
+    elif failure == "empty_nodes":
+        responses[node_path]["items"] = []
+        responses[node_path]["returned_count"] = 0
+    elif failure == "unknown_edge_node":
+        responses[edge_path]["items"][0]["target"] = "missing-node"
+    elif failure == "missing_detail":
+        responses[detail_path]["items"].pop()
+        responses[detail_path]["returned_count"] -= 1
+    elif failure == "publication_mismatch":
+        responses[edge_path]["publication"]["summary_revision"] += 1
+    else:
+        responses[summary_path]["summary"]["node_counts"]["discovered"] -= 1
+
+    monkeypatch.setattr(gate, "_secret_token", lambda: token)
+
+    def request(
+        path: str,
+        *,
+        method: str,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        assert method in {"GET", "POST"}
+        assert headers == {"Authorization": f"Bearer {token}"}
+        return 200, json.dumps(responses[path]).encode()
+
+    monkeypatch.setattr(gate, "_http", request)
+
+    with pytest.raises(ValueError):
+        gate._verify_complex_workflow_progress()
+
+    assert gate.evidence.workflow_task_id == ""
+    assert gate.evidence.workflow_topology_nodes == 0
+
+
+def _workflow_admin_smoke_evidence() -> dict[str, str | int]:
+    return {
+        "admin_workflow": "verified",
+        "task_id": WORKFLOW_TASK_ID,
+        "admin_routes": 5,
+        "admin_actions": 3,
+        "topology_nodes": 3,
+        "topology_edges": 2,
+        "node_details": 3,
+        "current_manifests": 1,
+        "pending_manifests": 0,
+        "unlinked_pages": 0,
+    }
+
+
+def test_workflow_admin_gate_executes_same_task_inside_django_web(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
+    gate.evidence.workflow_topology_nodes = 3
+    gate.evidence.workflow_topology_edges = 2
+    gate.evidence.workflow_node_details = 3
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def kubectl(*args: str, **kwargs: object) -> CommandResult:
+        calls.append((args, kwargs))
+        return CommandResult(json.dumps(_workflow_admin_smoke_evidence()), "", 0)
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+
+    gate._verify_workflow_admin()
+
+    assert calls == [
+        (
+            (
+                "exec",
+                "deployment/django-web",
+                "-c",
+                "django-web",
+                "--",
+                "python",
+                "-m",
+                "testproject.docker_smoke",
+                "--base-url",
+                "http://127.0.0.1:8000",
+                "--timeout",
+                "180",
+                "--existing-workflow-task-id",
+                WORKFLOW_TASK_ID,
+            ),
+            {
+                "timeout": 215,
+                "sensitive_output": True,
+            },
+        )
+    ]
+    assert gate.evidence.workflow_admin_routes == 5
+    assert gate.evidence.workflow_admin_actions == 3
+    assert gate.evidence.workflow_current_manifests == 1
+    assert gate.evidence.workflow_pending_manifests == 0
+    assert gate.evidence.workflow_unlinked_pages == 0
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("task_id", TASK_ID),
+        ("admin_routes", {"unexpected": 5}),
+        ("topology_nodes", 2),
+        ("current_manifests", 0),
+        ("pending_manifests", 1),
+        ("unlinked_pages", 1),
+    ],
+)
+def test_workflow_admin_gate_rejects_non_scalar_or_inconsistent_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    value: object,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
+    gate.evidence.workflow_topology_nodes = 3
+    gate.evidence.workflow_topology_edges = 2
+    gate.evidence.workflow_node_details = 3
+    payload = _workflow_admin_smoke_evidence()
+    payload[field_name] = cast(Any, value)
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **kwargs: CommandResult(json.dumps(payload), "", 0),
+    )
+
+    with pytest.raises(ValueError):
+        gate._verify_workflow_admin()
+
+    assert gate.evidence.workflow_admin_routes == 0
+    assert gate.evidence.workflow_current_manifests == 0
+
+
 def test_prometheus_uses_safe_opener_and_exact_ray_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3319,6 +3653,19 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.task_id = TASK_ID
     gate.evidence.task_state = "SUCCEEDED"
     gate.evidence.task_result = 5
+    gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
+    gate.evidence.workflow_task_state = "SUCCEEDED"
+    gate.evidence.workflow_schema_version = 3
+    gate.evidence.workflow_availability = "AVAILABLE"
+    gate.evidence.workflow_topology_nodes = 8
+    gate.evidence.workflow_topology_edges = 8
+    gate.evidence.workflow_node_details = 8
+    gate.evidence.workflow_leaf_tasks = 3
+    gate.evidence.workflow_admin_routes = 5
+    gate.evidence.workflow_admin_actions = 3
+    gate.evidence.workflow_current_manifests = 1
+    gate.evidence.workflow_pending_manifests = 0
+    gate.evidence.workflow_unlinked_pages = 0
     gate.evidence.prometheus_counts = dict.fromkeys(("django-ray", "ray-head", "ray-workers"), 1)
 
     gate._emit_evidence()
@@ -3351,6 +3698,19 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.task_id = TASK_ID
     gate.evidence.task_state = "SUCCEEDED"
     gate.evidence.task_result = 5
+    gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
+    gate.evidence.workflow_task_state = "SUCCEEDED"
+    gate.evidence.workflow_schema_version = 3
+    gate.evidence.workflow_availability = "AVAILABLE"
+    gate.evidence.workflow_topology_nodes = 8
+    gate.evidence.workflow_topology_edges = 8
+    gate.evidence.workflow_node_details = 8
+    gate.evidence.workflow_leaf_tasks = 3
+    gate.evidence.workflow_admin_routes = 5
+    gate.evidence.workflow_admin_actions = 3
+    gate.evidence.workflow_current_manifests = 1
+    gate.evidence.workflow_pending_manifests = 0
+    gate.evidence.workflow_unlinked_pages = 0
     gate.evidence.prometheus_counts = {
         "django-ray": 1,
         "ray-head": 1,
@@ -3379,6 +3739,8 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("kubernetes_server") == gate.evidence.kubernetes_server
     assert reconstructed("docker_host") == gate.evidence.docker_host
     assert reconstructed("app_image_id") == IMAGE_ID
+    assert reconstructed("workflow_task_id") == WORKFLOW_TASK_ID
+    assert reconstructed("workflow_availability") == "AVAILABLE"
     assert all(len(line) <= EVIDENCE_LINE_LIMIT for line in output)
 
 
@@ -3541,9 +3903,45 @@ def _stub_successful_gate_layers(
         "_verify_generic_ray_nodes",
         "_verify_probes",
         "_verify_api",
+        "_verify_complex_workflow_progress",
+        "_verify_workflow_admin",
         "_verify_prometheus",
     ):
         monkeypatch.setattr(gate, method_name, lambda: None)
+
+
+def test_workflow_progress_layer_runs_after_api_and_before_prometheus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    gate = LocalKubeRayGate(_config(), output=lambda _value: None)
+    _stub_successful_gate_layers(gate, monkeypatch)
+    monkeypatch.setattr(gate, "_verify_api", lambda: events.append("api-smoke"))
+    monkeypatch.setattr(
+        gate,
+        "_verify_complex_workflow_progress",
+        lambda: events.append("workflow-progress"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_verify_workflow_admin",
+        lambda: events.append("workflow-admin"),
+    )
+    monkeypatch.setattr(gate, "_verify_prometheus", lambda: events.append("prometheus"))
+    monkeypatch.setattr(
+        gate,
+        "_evidence_lines",
+        lambda: ("=== Local KubeRay final gate evidence ===",),
+    )
+
+    gate.run()
+
+    assert events == [
+        "api-smoke",
+        "workflow-progress",
+        "workflow-admin",
+        "prometheus",
+    ]
 
 
 def test_temporary_workspace_creation_failure_is_bounded_redacted_and_has_no_evidence(
@@ -3755,6 +4153,8 @@ def test_final_evidence_identity_failure_is_labeled_once_without_traceback(
         "_verify_generic_ray_nodes",
         "_verify_probes",
         "_verify_api",
+        "_verify_complex_workflow_progress",
+        "_verify_workflow_admin",
         "_verify_prometheus",
     ):
         monkeypatch.setattr(gate, method_name, lambda: None)

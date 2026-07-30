@@ -11,11 +11,16 @@ import secrets
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
+from urllib.parse import urlsplit
+from uuid import UUID
 
 _MAX_RESPONSE_BYTES = 1_048_576
 _REQUEST_TIMEOUT_SECONDS = 5.0
+_WORKFLOW_PAGE_LIMIT = 16
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _UNFOLD_STYLESHEET_RE = re.compile(
     r"""href=["'](?P<path>/static/unfold/css/styles[^"']*\.css)["']"""
 )
@@ -152,6 +157,31 @@ def _request_json(
         return _response_json(response)
 
 
+def _request_admin_json(
+    base_url: str,
+    path: str,
+    *,
+    headers: dict[str, str],
+    deadline: float,
+) -> dict[str, Any]:
+    """Read one authenticated, byte-bounded admin JSON response."""
+
+    body = _request_text(
+        base_url,
+        path,
+        headers={"Accept": "application/json", **headers},
+        expected_content_type="application/json",
+        deadline=deadline,
+    )
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise DockerSmokeError(f"admin request to {path} did not return valid JSON") from error
+    if not isinstance(payload, dict):
+        raise DockerSmokeError(f"admin request to {path} did not return a JSON object")
+    return payload
+
+
 def _wait_until(
     description: str,
     deadline: float,
@@ -178,13 +208,41 @@ def _verify_database_contract() -> None:
         raise DockerSmokeError("the one-shot migration service left unapplied migrations")
 
 
-def _verify_unfold_admin_contract(
-    *,
-    base_url: str,
-    deadline: float,
-    execution: Any,
-    attempt: Any,
-) -> dict[str, str]:
+def _validate_existing_workflow_mode(*, base_url: str, task_id: str) -> str:
+    """Require a canonical task identity and an actual loopback web endpoint."""
+
+    parsed_url = urlsplit(base_url)
+    try:
+        parsed_task_id = UUID(task_id)
+        port = parsed_url.port
+    except (TypeError, ValueError) as error:
+        raise DockerSmokeError(
+            "existing workflow verification requires a canonical UUIDv4 task ID "
+            "and loopback base URL"
+        ) from error
+    if (
+        parsed_task_id.version != 4
+        or str(parsed_task_id) != task_id
+        or parsed_url.scheme != "http"
+        or parsed_url.hostname not in _LOOPBACK_HOSTS
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or port is None
+        or parsed_url.path not in {"", "/"}
+        or parsed_url.query
+        or parsed_url.fragment
+    ):
+        raise DockerSmokeError(
+            "existing workflow verification requires a canonical UUIDv4 task ID "
+            "and loopback base URL"
+        )
+    return str(parsed_task_id)
+
+
+@contextmanager
+def _disposable_admin_headers() -> Iterator[dict[str, str]]:
+    """Yield a disposable authenticated session without returning its cookie."""
+
     from django.conf import settings
     from django.contrib.auth import (
         BACKEND_SESSION_KEY,
@@ -212,9 +270,26 @@ def _verify_unfold_admin_contract(
         session.save()
         if session.session_key is None:
             raise DockerSmokeError("could not create a disposable admin session")
+        yield {
+            "Cookie": f"{settings.SESSION_COOKIE_NAME}={session.session_key}",
+        }
+    finally:
+        try:
+            if session is not None and session.session_key is not None:
+                session.delete(session.session_key)
+        finally:
+            user.delete()
 
-        cookie = f"{settings.SESSION_COOKIE_NAME}={session.session_key}"
-        headers = {"Cookie": cookie}
+
+def _verify_unfold_admin_contract(
+    *,
+    base_url: str,
+    deadline: float,
+    execution: Any,
+    attempt: Any,
+) -> dict[str, str]:
+    with _disposable_admin_headers() as headers:
+        cookie = headers["Cookie"]
         index_html = _request_text(
             base_url,
             "/admin/",
@@ -431,12 +506,6 @@ def _verify_unfold_admin_contract(
             or observability.get("state") != execution.state
         ):
             raise DockerSmokeError("admin observability returned the wrong execution")
-    finally:
-        try:
-            if session is not None and session.session_key is not None:
-                session.delete(session.session_key)
-        finally:
-            user.delete()
 
     return {
         "admin": "unfold-authenticated",
@@ -447,6 +516,239 @@ def _verify_unfold_admin_contract(
         "admin_observability": "verified",
         "admin_static": "served",
     }
+
+
+def _workflow_admin_page_count(
+    payload: dict[str, Any],
+    *,
+    task_id: str,
+    collection: str,
+) -> int:
+    """Validate one complete bounded admin reader page without retaining it."""
+
+    items = payload.get("items")
+    returned_count = payload.get("returned_count")
+    if (
+        payload.get("schema") != "django-ray.workflow-progress-page"
+        or payload.get("schema_version") != 1
+        or payload.get("task_id") != task_id
+        or payload.get("collection") != collection
+        or payload.get("availability") != "AVAILABLE"
+        or payload.get("complete") is not True
+        or not isinstance(items, list)
+        or not items
+        or type(returned_count) is not int
+        or returned_count != len(items)
+        or returned_count > _WORKFLOW_PAGE_LIMIT
+        or payload.get("next_cursor") is not None
+        or not all(isinstance(item, dict) for item in items)
+    ):
+        raise DockerSmokeError(
+            f"admin {collection} route did not return one complete nonempty AVAILABLE page"
+        )
+    return returned_count
+
+
+def _verify_existing_workflow_storage_contract(
+    *,
+    execution: Any,
+    topology_nodes: int,
+    topology_edges: int,
+    node_details: int,
+) -> dict[str, int]:
+    """Directly prove that the published run has no transitional storage residue."""
+
+    from django.db import transaction
+
+    from django_ray.models import (
+        WorkflowProgressRunStorage,
+        WorkflowProgressTopologyManifest,
+        WorkflowProgressTopologyPage,
+        WorkflowProgressTopologySlot,
+    )
+
+    try:
+        with transaction.atomic():
+            run_storage = WorkflowProgressRunStorage.objects.select_for_update().get(
+                execution=execution,
+                attempt_number=execution.attempt_number,
+                execution_generation=execution.execution_generation,
+                run_id=execution.workflow_run_id,
+            )
+            manifests = WorkflowProgressTopologyManifest.objects.filter(run_storage=run_storage)
+            current_manifests = manifests.filter(slot=WorkflowProgressTopologySlot.CURRENT).count()
+            pending_manifests = manifests.filter(slot=WorkflowProgressTopologySlot.PENDING).count()
+            unlinked_pages = WorkflowProgressTopologyPage.objects.filter(
+                run_storage=run_storage,
+                manifest_links__isnull=True,
+            ).count()
+            if current_manifests != 1 or pending_manifests != 0 or unlinked_pages != 0:
+                raise DockerSmokeError(
+                    "existing workflow retained pending, duplicate-current, "
+                    "or unlinked topology storage"
+                )
+
+            current = manifests.get(slot=WorkflowProgressTopologySlot.CURRENT)
+            if (
+                current.node_count != topology_nodes
+                or current.edge_count != topology_edges
+                or run_storage.detail_node_count != node_details
+                or run_storage.detail_pending_count != 0
+                or run_storage.detail_running_count != 0
+                or run_storage.detail_succeeded_count != node_details
+                or run_storage.detail_failed_count != 0
+            ):
+                raise DockerSmokeError(
+                    "existing workflow storage counts did not match terminal admin reader evidence"
+                )
+    except (
+        WorkflowProgressRunStorage.DoesNotExist,
+        WorkflowProgressRunStorage.MultipleObjectsReturned,
+    ) as error:
+        raise DockerSmokeError(
+            "existing workflow did not retain exactly one run-scoped progress record"
+        ) from error
+    return {
+        "current_manifests": current_manifests,
+        "pending_manifests": pending_manifests,
+        "unlinked_pages": unlinked_pages,
+    }
+
+
+def _verify_existing_workflow_admin_contract(
+    *,
+    base_url: str,
+    deadline: float,
+    execution: Any,
+) -> dict[str, str | int]:
+    """Exercise every advertised admin workflow reader for one existing run."""
+
+    task_id = str(execution.task_id)
+    root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
+    diagnostics_path = f"{root}/workflow/diagnostics/"
+    collection_paths = {
+        "topology_nodes": f"{root}/workflow/topology/nodes/",
+        "topology_edges": f"{root}/workflow/topology/edges/",
+        "node_details": f"{root}/workflow/nodes/",
+    }
+
+    with _disposable_admin_headers() as headers:
+        change_html = _request_text(
+            base_url,
+            f"{root}/change/",
+            headers=headers,
+            deadline=deadline,
+        )
+        expected_attributes = {
+            "data-diagnostics-url": diagnostics_path,
+            "data-topology-nodes-url": collection_paths["topology_nodes"],
+            "data-topology-edges-url": collection_paths["topology_edges"],
+            "data-node-details-url": collection_paths["node_details"],
+        }
+        if "django-ray-workflow-diagnostics" not in change_html or any(
+            f'{attribute}="{path}"' not in change_html
+            for attribute, path in expected_attributes.items()
+        ):
+            raise DockerSmokeError(
+                "existing workflow admin change page did not advertise its bounded readers"
+            )
+
+        diagnostics = _request_admin_json(
+            base_url,
+            diagnostics_path,
+            headers=headers,
+            deadline=deadline,
+        )
+        plan = diagnostics.get("plan")
+        progress = diagnostics.get("progress")
+        expected_actions = {
+            "topology_nodes": True,
+            "topology_edges": True,
+            "node_details": True,
+        }
+        if (
+            diagnostics.get("schema") != "django-ray.admin-workflow-diagnostics"
+            or diagnostics.get("schema_version") != 1
+            or not isinstance(plan, dict)
+            or plan.get("status") != "AVAILABLE"
+            or not isinstance(progress, dict)
+            or progress.get("state") != "AVAILABLE"
+            or progress.get("availability") != "AVAILABLE"
+            or progress.get("complete") is not True
+            or progress.get("actions") != expected_actions
+        ):
+            raise DockerSmokeError(
+                "existing workflow admin diagnostics did not advertise AVAILABLE readers"
+            )
+
+        pages = {
+            collection: _request_admin_json(
+                base_url,
+                f"{path}?limit={_WORKFLOW_PAGE_LIMIT}",
+                headers=headers,
+                deadline=deadline,
+            )
+            for collection, path in collection_paths.items()
+        }
+
+    counts = {
+        collection: _workflow_admin_page_count(
+            pages[collection],
+            task_id=task_id,
+            collection=collection,
+        )
+        for collection in collection_paths
+    }
+
+    storage = _verify_existing_workflow_storage_contract(
+        execution=execution,
+        topology_nodes=counts["topology_nodes"],
+        topology_edges=counts["topology_edges"],
+        node_details=counts["node_details"],
+    )
+    return {
+        "admin_workflow": "verified",
+        "task_id": task_id,
+        "admin_routes": 5,
+        "admin_actions": len(expected_actions),
+        "topology_nodes": counts["topology_nodes"],
+        "topology_edges": counts["topology_edges"],
+        "node_details": counts["node_details"],
+        **storage,
+    }
+
+
+def _run_existing_workflow_admin_smoke(
+    *,
+    base_url: str,
+    task_id: str,
+    timeout_seconds: float,
+) -> dict[str, str | int]:
+    """Verify one already-terminal workflow through loopback admin and PostgreSQL."""
+
+    import django
+
+    task_id = _validate_existing_workflow_mode(base_url=base_url, task_id=task_id)
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "testproject.settings")
+    django.setup()
+    _verify_database_contract()
+
+    from django_ray.models import RayTaskExecution
+
+    try:
+        execution = RayTaskExecution.objects.get(task_id=task_id)
+    except (
+        RayTaskExecution.DoesNotExist,
+        RayTaskExecution.MultipleObjectsReturned,
+    ) as error:
+        raise DockerSmokeError(
+            "existing workflow task ID did not resolve to exactly one execution"
+        ) from error
+    return _verify_existing_workflow_admin_contract(
+        base_url=base_url,
+        deadline=time.monotonic() + timeout_seconds,
+        execution=execution,
+    )
 
 
 def _run_smoke(*, base_url: str, token: str, timeout_seconds: float) -> dict[str, Any]:
@@ -573,6 +875,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://web:8000")
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--existing-workflow-task-id",
+        help=(
+            "Verify one existing workflow through loopback admin readers and "
+            "run-scoped storage without enqueueing another task"
+        ),
+    )
     return parser
 
 
@@ -580,14 +889,23 @@ def main() -> int:
     args = _parser().parse_args()
     if args.timeout <= 0:
         raise DockerSmokeError("--timeout must be positive")
-    token = os.environ.get("DJANGO_API_TOKEN")
-    if not token:
-        raise DockerSmokeError("DJANGO_API_TOKEN must be set")
-    result = _run_smoke(
-        base_url=args.base_url,
-        token=token,
-        timeout_seconds=args.timeout,
-    )
+    if args.existing_workflow_task_id is not None:
+        result = _run_existing_workflow_admin_smoke(
+            base_url=args.base_url,
+            task_id=args.existing_workflow_task_id,
+            timeout_seconds=args.timeout,
+        )
+    else:
+        token = os.environ.get("DJANGO_API_TOKEN")
+        if not token:
+            raise DockerSmokeError("DJANGO_API_TOKEN must be set")
+        result = _run_smoke(
+            base_url=args.base_url,
+            token=token,
+            timeout_seconds=args.timeout,
+        )
+    if any(type(value) not in {bool, float, int, str} for value in result.values()):
+        raise DockerSmokeError("smoke evidence must contain scalar JSON values only")
     print(json.dumps(result, sort_keys=True))
     return 0
 
