@@ -117,6 +117,16 @@ durable completion, and validates the bounded summary contract before continuing
 Stable per-policy Locust labels separate enqueue, terminal polling, and summary-read
 latency. The one-user, one-user-per-second defaults remain intentionally conservative.
 
+`WorkflowShowcaseUser` serves a different purpose: it keeps one realistic
+order-fulfillment graph moving through the Admin and Ray dashboard at a readable
+pace. It is excluded from default Locust discovery and must be named explicitly. The
+class fixes the population at one user, submits one successful three-item,
+full-reporting workflow with `work_seconds=0.05`, waits for its durable result, and
+requires its complete 25-node/36-edge publication before repeating. It never submits
+the deterministic reservation failure or exposes a reporting-policy control. Treat
+this as a visualization and integration exercise, not a throughput or reporting-cost
+benchmark; use the counterbalanced command below for policy measurements.
+
 ## Attribute Live Workflow Reporting Policies
 
 The Locust demo proves that the three policy contracts remain usable, but HTTP timings

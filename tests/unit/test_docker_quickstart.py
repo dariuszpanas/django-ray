@@ -307,6 +307,31 @@ def test_existing_workflow_main_needs_no_api_token_and_prints_scalar_json(
     assert json.loads(capsys.readouterr().out) == expected
 
 
+def test_workflow_admin_page_limit_covers_the_showcase_topology() -> None:
+    items = [{"node_id": f"0.{index}"} for index in range(21)]
+    payload = {
+        "schema": "django-ray.workflow-progress-page",
+        "schema_version": 1,
+        "task_id": WORKFLOW_TASK_ID,
+        "collection": "topology_nodes",
+        "availability": "AVAILABLE",
+        "complete": True,
+        "returned_count": len(items),
+        "items": items,
+        "next_cursor": None,
+    }
+
+    assert docker_smoke._WORKFLOW_PAGE_LIMIT == 64
+    assert (
+        docker_smoke._workflow_admin_page_count(
+            payload,
+            task_id=WORKFLOW_TASK_ID,
+            collection="topology_nodes",
+        )
+        == 21
+    )
+
+
 def _admin_workflow_responses(
     execution: SimpleNamespace,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
@@ -487,9 +512,9 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
     assert requested_paths == [
         f"{root}/change/",
         f"{root}/workflow/diagnostics/?attempt_number=1",
-        f"{root}/workflow/topology/nodes/?attempt_number=1&limit=16",
-        f"{root}/workflow/topology/edges/?attempt_number=1&limit=16",
-        f"{root}/workflow/nodes/?attempt_number=1&limit=16",
+        f"{root}/workflow/topology/nodes/?attempt_number=1&limit=64",
+        f"{root}/workflow/topology/edges/?attempt_number=1&limit=64",
+        f"{root}/workflow/nodes/?attempt_number=1&limit=64",
         f"{root}/workflow/graph/?attempt_number=1",
     ]
     assert storage_calls == [
@@ -850,23 +875,23 @@ def test_failed_admin_graph_accepts_unfinished_downstream_nodes() -> None:
     assert evidence["graph_failed_nodes"] == 2
 
 
-def test_failed_admin_graph_does_not_treat_a_succeeded_ancestor_as_sibling() -> None:
+def test_failed_admin_graph_accepts_ancestor_context_without_a_succeeded_sibling() -> None:
     graph, topology_nodes, topology_edges, node_details = _failed_admin_graph_fixture()
     graph["nodes"][3]["state"] = "PENDING"
     graph["nodes"][3]["error"] = None
     node_details[3]["state"] = "PENDING"
 
-    with pytest.raises(
-        docker_smoke.DockerSmokeError,
-        match="successful sibling context",
-    ):
-        docker_smoke._workflow_admin_graph_evidence(
-            graph,
-            execution_state="FAILED",
-            topology_nodes=topology_nodes,
-            topology_edges=topology_edges,
-            node_details=node_details,
-        )
+    evidence = docker_smoke._workflow_admin_graph_evidence(
+        graph,
+        execution_state="FAILED",
+        topology_nodes=topology_nodes,
+        topology_edges=topology_edges,
+        node_details=node_details,
+    )
+
+    assert evidence["graph_succeeded_nodes"] == 1
+    assert evidence["graph_pending_nodes"] == 1
+    assert evidence["graph_failure_path_nodes"] == 2
 
 
 @pytest.mark.parametrize(
@@ -874,7 +899,7 @@ def test_failed_admin_graph_does_not_treat_a_succeeded_ancestor_as_sibling() -> 
     [
         "private_field",
         "wrong_failure_path",
-        "no_successful_sibling",
+        "no_successful_ancestor",
         "no_incoming_origin",
     ],
 )
@@ -886,12 +911,13 @@ def test_failed_admin_graph_rejects_private_or_inconsistent_failure_evidence(
         graph["nodes"][0]["runtime_env"] = {"env_vars": {"SECRET": "forbidden"}}
     elif corruption == "wrong_failure_path":
         graph["nodes"][0]["failure_path"] = False
-    elif corruption == "no_successful_sibling":
-        for node in graph["nodes"]:
-            node["state"] = "FAILED"
-            node["error"] = "failure"
-        for detail in node_details:
-            detail["state"] = "FAILED"
+    elif corruption == "no_successful_ancestor":
+        graph["nodes"][0]["state"] = "PENDING"
+        graph["nodes"][0]["error"] = None
+        graph["nodes"][3]["state"] = "PENDING"
+        graph["nodes"][3]["error"] = None
+        node_details[0]["state"] = "PENDING"
+        node_details[3]["state"] = "PENDING"
     else:
         graph["edges"] = [
             edge

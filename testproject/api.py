@@ -68,6 +68,7 @@ _WORKFLOW_OBSERVABILITY_CALLABLES = frozenset(
     {
         "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
         "testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark",
+        "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task",
     }
 )
 
@@ -1276,6 +1277,78 @@ def get_cluster_complex_workflow(request, task_id: str):
     try:
         progress = get_workflow_progress(execution)
     except WorkflowObservabilityError:
+        progress = None
+    return {
+        "task_id": execution.task_id,
+        "state": execution.state,
+        "created_at": execution.created_at,
+        "started_at": execution.started_at,
+        "finished_at": execution.finished_at,
+        "progress": progress,
+        "result": _result_value_for_execution(execution),
+        "error": execution.error_message,
+    }
+
+
+@api.post("/cluster/workflow-showcase", response=TaskResultSchema, tags=["Workflows"])
+def cluster_workflow_showcase(
+    request,
+    item_count: int = 3,
+    work_seconds: float = 0.05,
+    failure_stage: Literal["reserve_inventory"] | None = None,
+    failure_item: int | None = None,
+):
+    """Enqueue the full-reporting repeated split/join workflow showcase."""
+    try:
+        cluster_tasks.validate_order_fulfillment_showcase_inputs(
+            item_count=item_count,
+            work_seconds=work_seconds,
+            failure_stage=failure_stage,
+            failure_item=failure_item,
+        )
+    except ValueError as error:
+        raise HttpError(422, str(error)) from error
+    workflow_options: dict[str, Any] = {
+        "item_count": item_count,
+        "work_seconds": work_seconds,
+    }
+    if failure_stage is not None:
+        workflow_options.update(
+            failure_stage=failure_stage,
+            failure_item=failure_item,
+        )
+    result = cluster_tasks.order_fulfillment_showcase_task.enqueue(**workflow_options)
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.get(
+    "/cluster/workflow-showcase/{task_id}",
+    response=WorkflowResultSchema,
+    tags=["Workflows"],
+)
+def get_cluster_workflow_showcase(request, task_id: str):
+    """Return a bounded progress summary and the compact result or failure."""
+    execution = get_object_or_404(
+        _workflow_observability_executions(),
+        task_id=task_id,
+        callable_path=("testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task"),
+    )
+    try:
+        progress = get_workflow_progress_summary(
+            execution,
+            authorize=_authorize_example_workflow,
+            include_legacy=False,
+            infer_current_reporting_policy=False,
+        )
+    except WorkflowProgressReadError:
         progress = None
     return {
         "task_id": execution.task_id,

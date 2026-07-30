@@ -32,6 +32,37 @@ const graphStyles = fs.readFileSync(
   "utf8",
 );
 
+function cssHexToken(name) {
+  const match = graphStyles.match(
+    new RegExp(`${name}: (#[0-9a-fA-F]{6});`),
+  );
+  assert.ok(match, `${name} must define a six-digit light-theme color`);
+  return match[1];
+}
+
+function contrastAgainstWhite(hexColor) {
+  return contrastRatio(hexColor, "#ffffff");
+}
+
+function contrastRatio(firstHexColor, secondHexColor) {
+  const luminance = (hexColor) => {
+    const channels = [1, 3, 5].map((offset) =>
+      Number.parseInt(hexColor.slice(offset, offset + 2), 16) / 255,
+    );
+    const [red, green, blue] = channels.map((channel) =>
+      channel <= 0.04045
+        ? channel / 12.92
+        : ((channel + 0.055) / 1.055) ** 2.4,
+    );
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  };
+  const firstLuminance = luminance(firstHexColor);
+  const secondLuminance = luminance(secondHexColor);
+  const lighter = Math.max(firstLuminance, secondLuminance);
+  const darker = Math.min(firstLuminance, secondLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 class FakeElement {
   constructor(tagName = "div") {
     this.attributes = new Map();
@@ -80,6 +111,38 @@ class FakeElement {
     await Promise.all(listeners.map((listener) => listener({ target: this })));
   }
 
+  getBoundingClientRect() {
+    const classes = this.className.split(" ").filter(Boolean);
+    if (classes.includes("django-ray-workflow-graph__diagram")) {
+      const cards = findAll(this, (element) =>
+        element.className
+          .split(" ")
+          .filter(Boolean)
+          .includes("django-ray-workflow-graph__node"),
+      );
+      const maximumLayer = Math.max(
+        0,
+        ...cards.map((card) => Number(card.dataset.layer)),
+      );
+      const maximumPosition = Math.max(
+        0,
+        ...cards.map((card) => Number(card.dataset.position)),
+      );
+      return fakeRectangle(
+        0,
+        0,
+        Math.max(640, (maximumPosition + 1) * 240 + 48),
+        (maximumLayer + 1) * 180 + 40,
+      );
+    }
+    if (classes.includes("django-ray-workflow-graph__node")) {
+      const layer = Number(this.dataset.layer);
+      const position = Number(this.dataset.position);
+      return fakeRectangle(24 + position * 240, 40 + layer * 180, 208, 112);
+    }
+    return fakeRectangle(0, 0, 0, 0);
+  }
+
   querySelector(selector) {
     return findAll(this, (element) => matches(element, selector))[0] ?? null;
   }
@@ -106,6 +169,19 @@ class FakeElement {
       this.className = String(value);
     }
   }
+}
+
+function fakeRectangle(left, top, width, height) {
+  return {
+    bottom: top + height,
+    height,
+    left,
+    right: left + width,
+    top,
+    width,
+    x: left,
+    y: top,
+  };
 }
 
 function matches(element, selector) {
@@ -318,6 +394,15 @@ function loadDiagnostics({
     },
   };
   const window = {
+    ResizeObserver: class {
+      constructor(callback) {
+        this.callback = callback;
+      }
+
+      observe() {
+        this.callback([]);
+      }
+    },
     async fetch(url, options) {
       fetchCalls.push({ options, url });
       assert.notEqual(queuedResponses.length, 0, `unexpected fetch for ${url}`);
@@ -336,6 +421,10 @@ function loadDiagnostics({
           copied.push(value);
         },
       },
+    },
+    requestAnimationFrame(callback) {
+      callback();
+      return 1;
     },
   };
   const context = vm.createContext({
@@ -444,6 +533,28 @@ function graphContent(app) {
 
 function graphFallbacks(app) {
   return elementsByClass(app, "django-ray-workflow-graph__fallbacks");
+}
+
+function graphNodeId(link) {
+  return findAll(
+    link,
+    (element) =>
+      element.className === "django-ray-workflow-graph__node-id",
+  )[0].textContent;
+}
+
+function graphLayerNodeIds(app) {
+  return elementsByClass(app, "django-ray-workflow-graph__stage").map(
+    (stage) =>
+      findAll(
+        stage,
+        (element) =>
+          element.className
+            .split(" ")
+            .filter(Boolean)
+            .includes("django-ray-workflow-graph__node"),
+      ).map(graphNodeId),
+  );
 }
 
 test("the closed disclosure lazily renders safe, capability-gated actions", async () => {
@@ -1087,7 +1198,7 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
     elementsByClass(app, "django-ray-workflow-graph__nodes")[0].attributes.get(
       "aria-label",
     ),
-    "Workflow nodes in topological order",
+    "Workflow stages in topological order",
   );
   assert.equal(
     graphStatus(app).textContent,
@@ -1137,11 +1248,29 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
   assert.ok(
     connectors.every(
       (connector) =>
-        connector.tagName === "SVG" &&
-        connector.attributes.get("aria-hidden") === "true" &&
-        connector.attributes.get("focusable") === "false",
+        connector.tagName === "PATH" &&
+        connector.attributes.get("d").length > 0,
     ),
   );
+  assert.deepEqual(
+    connectors.map((connector) => [
+      connector.dataset.source,
+      connector.dataset.target,
+    ]),
+    [
+      ["prepare", "fanout"],
+      ["fanout", "finish"],
+    ],
+  );
+  const connectorCanvas = elementsByClass(
+    app,
+    "django-ray-workflow-graph__connectors",
+  );
+  assert.equal(connectorCanvas.length, 1);
+  assert.equal(connectorCanvas[0].tagName, "SVG");
+  assert.equal(connectorCanvas[0].attributes.get("aria-hidden"), "true");
+  assert.equal(connectorCanvas[0].attributes.get("focusable"), "false");
+  assert.equal(connectorCanvas[0].attributes.get("viewBox"), "0 0 640 580");
 
   await app.toggleGraph(false);
   await app.toggleGraph(true);
@@ -1205,6 +1334,10 @@ test("parallel roots and a multi-parent join keep an explicit incoming path", as
     incoming.map((item) => item.dataset.root ?? ""),
     ["true", "true", ""],
   );
+  assert.deepEqual(graphLayerNodeIds(app), [
+    ["root-a", "root-b"],
+    ["join"],
+  ]);
   assert.equal(
     incoming[2].textContent,
     "Incoming from Load accounts (root-a), Load invoices (root-b)",
@@ -1216,6 +1349,157 @@ test("parallel roots and a multi-parent join keep an explicit incoming path", as
       "/admin/execution/1/workflow/node/?node_id=root-b",
       "/admin/execution/1/workflow/node/?node_id=join",
     ],
+  );
+});
+
+test("repeated split and join nodes render in deterministic longest-path stages", async () => {
+  const taskNode = (id, label, overrides = {}) => ({
+    id,
+    label,
+    kind: "task",
+    state: "SUCCEEDED",
+    message: null,
+    error: null,
+    failure_path: false,
+    ...overrides,
+  });
+  const nodes = [
+    taskNode("order", "Build order batch"),
+    taskNode("profile", "Load customer profile"),
+    taskNode("history", "Load customer history"),
+    taskNode("validate", "Validate order items"),
+    taskNode("inventory", "Read inventory snapshot"),
+    taskNode("preflight", "Join fulfillment inputs"),
+    taskNode("reserve", "Reserve inventory", {
+      kind: "map",
+      fanout: {
+        submitted_items: 3,
+        completed_items: 3,
+        in_flight_items: 0,
+        input_exhausted: true,
+      },
+    }),
+    taskNode("price", "Calculate prices"),
+    taskNode("risk", "Score risk"),
+    taskNode("recommend", "Build recommendations"),
+    taskNode("pricing", "Join decision inputs"),
+    taskNode("decision", "Commit fulfillment decision"),
+    taskNode("primary-write", "Write order"),
+    taskNode("audit-write", "Write audit event"),
+    taskNode("notification", "Send notification"),
+    taskNode("final", "Finalize result"),
+  ];
+  const edges = [
+    { source: "order", target: "profile" },
+    { source: "profile", target: "history" },
+    { source: "order", target: "validate" },
+    { source: "order", target: "inventory" },
+    { source: "validate", target: "preflight" },
+    { source: "history", target: "preflight" },
+    { source: "inventory", target: "preflight" },
+    { source: "preflight", target: "reserve" },
+    { source: "preflight", target: "price" },
+    { source: "preflight", target: "risk" },
+    { source: "preflight", target: "recommend" },
+    { source: "price", target: "pricing" },
+    { source: "risk", target: "pricing" },
+    { source: "recommend", target: "pricing" },
+    { source: "reserve", target: "decision" },
+    { source: "pricing", target: "decision" },
+    { source: "decision", target: "primary-write" },
+    { source: "decision", target: "audit-write" },
+    { source: "decision", target: "notification" },
+    { source: "primary-write", target: "final" },
+    { source: "audit-write", target: "final" },
+    { source: "notification", target: "final" },
+  ];
+  const app = loadDiagnostics({
+    fetchResponses: [
+      response(200, validPayload()),
+      response(200, validGraphPayload({ nodes, edges })),
+    ],
+  });
+
+  await app.toggle(true);
+  await app.toggleGraph(true);
+
+  assert.deepEqual(graphLayerNodeIds(app), [
+    ["order"],
+    ["profile", "validate", "inventory"],
+    ["history"],
+    ["preflight"],
+    ["reserve", "price", "risk", "recommend"],
+    ["pricing"],
+    ["decision"],
+    ["primary-write", "audit-write", "notification"],
+    ["final"],
+  ]);
+  const stages = elementsByClass(app, "django-ray-workflow-graph__stage");
+  assert.deepEqual(
+    stages.map((stage) => stage.dataset.layer),
+    ["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+  );
+  assert.deepEqual(
+    elementsByClass(app, "django-ray-workflow-graph__stage-copy").map(
+      (copy) => copy.textContent,
+    ),
+    [
+      "1 node",
+      "3 parallel nodes",
+      "1 node",
+      "1 node",
+      "4 parallel nodes",
+      "1 node",
+      "1 node",
+      "3 parallel nodes",
+      "1 node",
+    ],
+  );
+
+  const renderedNodes = graphNodeLinks(app);
+  const renderedIndexes = new Map(
+    renderedNodes.map((node, index) => [graphNodeId(node), index]),
+  );
+  for (const edge of edges) {
+    assert.ok(
+      renderedIndexes.get(edge.source) < renderedIndexes.get(edge.target),
+      `${edge.source} must precede ${edge.target}`,
+    );
+  }
+  const predecessorIds = new Set(
+    elementsByClass(app, "django-ray-workflow-graph__incoming").map(
+      (incoming) => incoming.attributes.get("id"),
+    ),
+  );
+  assert.ok(
+    renderedNodes.every((node) =>
+      predecessorIds.has(node.attributes.get("aria-describedby")),
+    ),
+  );
+  assert.match(
+    app.content.textContent,
+    /Incoming from Load customer history \(history\), Validate order items \(validate\), Read inventory snapshot \(inventory\)/,
+  );
+
+  const connectors = elementsByClass(
+    app,
+    "django-ray-workflow-graph__connector",
+  );
+  assert.equal(connectors.length, edges.length);
+  const longConnector = connectors.find(
+    (connector) =>
+      connector.dataset.source === "validate" &&
+      connector.dataset.target === "preflight",
+  );
+  assert.equal(
+    longConnector.attributes.get("d"),
+    "M368 332C368 456 128 456 128 580",
+  );
+  assert.equal(
+    elementsByClass(app, "django-ray-workflow-graph__connectors")[0].attributes.get(
+      "viewBox",
+    ),
+    "0 0 1008 1660",
   );
 });
 
@@ -1286,6 +1570,92 @@ test("failed paths and malicious graph text stay visible as plain text", async (
     "/admin/execution/1/workflow/node/?node_id=failed%2Fnode%3F%3Cscript%3Esteal%28%29%3C%2Fscript%3E",
   );
   assert.equal(diagnosticsScript.includes("innerHTML"), false);
+});
+
+test("failure emphasis follows the authoritative incoming path only", async () => {
+  const nodes = [
+    {
+      id: "entry",
+      label: "Build order",
+      kind: "task",
+      state: "SUCCEEDED",
+      message: null,
+      error: null,
+      failure_path: true,
+    },
+    {
+      id: "reservation",
+      label: "Reserve inventory item 1",
+      kind: "task",
+      state: "FAILED",
+      message: null,
+      error: "Deliberate reservation failure.",
+      failure_path: true,
+    },
+    {
+      id: "decision",
+      label: "Join fulfillment decision",
+      kind: "task",
+      state: "FAILED",
+      message: null,
+      error: "Dependency failed.",
+      failure_path: false,
+    },
+    {
+      id: "final",
+      label: "Finalize order",
+      kind: "task",
+      state: "FAILED",
+      message: null,
+      error: "Dependency failed.",
+      failure_path: false,
+    },
+  ];
+  const app = loadDiagnostics({
+    fetchResponses: [
+      response(200, validPayload()),
+      response(
+        200,
+        validGraphPayload({
+          nodes,
+          edges: [
+            { source: "entry", target: "reservation" },
+            { source: "reservation", target: "decision" },
+            { source: "decision", target: "final" },
+          ],
+        }),
+      ),
+    ],
+  });
+
+  await app.toggle(true);
+  await app.toggleGraph(true);
+
+  assert.deepEqual(
+    graphNodeLinks(app).map((node) => node.dataset.failurePath ?? ""),
+    ["true", "true", "", ""],
+  );
+  const connectors = elementsByClass(
+    app,
+    "django-ray-workflow-graph__connector",
+  );
+  assert.deepEqual(
+    connectors.map((connector) => connector.dataset.failurePath ?? ""),
+    ["true", "", ""],
+  );
+  assert.deepEqual(
+    connectors.map((connector) => connector.attributes.get("marker-end")),
+    [
+      "url(#django-ray-workflow-graph-failure-arrow)",
+      "url(#django-ray-workflow-graph-arrow)",
+      "url(#django-ray-workflow-graph-arrow)",
+    ],
+  );
+  assert.equal(
+    graphNodeLinks(app).filter((node) => node.dataset.state === "FAILED")
+      .length,
+    3,
+  );
 });
 
 test("terminal degraded graph statuses show fallbacks without partial rendering", async (context) => {
@@ -1669,10 +2039,84 @@ test("graph styles cover neutral light, dark, state, shape, and narrow layouts",
     graphStyles,
     /\.django-ray-workflow-graph__node \{\s+grid-template-columns: minmax\(0, 1fr\)/,
   );
+  assert.match(
+    graphStyles,
+    /\.django-ray-workflow-graph__stage-nodes \{\s+grid-template-columns: minmax\(0, 1fr\)/,
+  );
+  assert.match(
+    graphStyles,
+    /\.django-ray-workflow-graph__connectors \{\s+display: none;/,
+  );
+  assert.match(
+    graphStyles,
+    /minmax\(min\(15rem, 100%\), 1fr\)/,
+  );
+  assert.match(
+    graphStyles,
+    /\.django-ray-workflow-graph__diagram \{[\s\S]*?overflow: hidden;[\s\S]*?position: relative;/,
+  );
+  assert.match(
+    graphStyles,
+    /\.django-ray-workflow-graph__connector\[data-failure-path="true"\]/,
+  );
+  assert.match(
+    graphStyles,
+    /connector\[data-failure-path="true"\] \{\s+stroke: var\(--django-ray-live-danger-connector\);/,
+  );
+  assert.match(
+    graphStyles,
+    /connector-arrow\[data-failure-path="true"\] \{\s+fill: var\(--django-ray-live-danger-connector\);/,
+  );
+  assert.ok(
+    contrastAgainstWhite(cssHexToken("--django-ray-live-danger-fg")) >= 3,
+  );
+  assert.ok(
+    contrastAgainstWhite(cssHexToken("--django-ray-live-action-fg")) >= 4.5,
+  );
+  const defaultFailureConnector = cssHexToken(
+    "--django-ray-live-danger-connector",
+  );
+  assert.ok(contrastRatio(defaultFailureConnector, "#ffffff") >= 3);
+  assert.ok(contrastRatio(defaultFailureConnector, "#16171a") >= 3);
+  const defaultFocusIndicator = cssHexToken(
+    "--django-ray-live-accent-strong",
+  );
+  assert.ok(contrastRatio(defaultFocusIndicator, "#ffffff") >= 3);
+  assert.ok(contrastRatio(defaultFocusIndicator, "#16171a") >= 3);
   assert.match(graphStyles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(graphStyles, /django-ray-workflow-graph__summary-arrow/);
   assert.match(
     graphStyles,
-    /outline: 3px solid var\(--django-ray-live-accent\)/,
+    /outline: 3px solid var\(--django-ray-live-accent-strong\)/,
+  );
+  assert.match(
+    graphStyles,
+    /\.django-ray-workflow-graph__node:focus-visible \{[\s\S]*?outline-offset: -3px;/,
+  );
+});
+
+test("graph styles remain usable without the testproject Unfold theme", () => {
+  assert.doesNotMatch(graphStyles, /\.unfold(?:\b|[-_])/i);
+  assert.match(
+    graphStyles,
+    /--django-ray-live-bg: var\(--body-bg, #fff\);/,
+  );
+  assert.match(
+    graphStyles,
+    /--django-ray-live-heading: var\(--body-fg, #0f172a\);/,
+  );
+  assert.match(
+    graphStyles,
+    /--django-ray-live-border-strong: var\(--hairline-color, #e2e8f0\);/,
+  );
+  assert.match(
+    graphStyles,
+    /incoming\[data-root="true"\] \{[\s\S]*?background: var\(--django-ray-live-action-bg\);[\s\S]*?border: 1px solid var\(--django-ray-live-action-border\);[\s\S]*?color: var\(--django-ray-live-action-fg\);/,
+  );
+  assert.ok(
+    contrastRatio(
+      cssHexToken("--django-ray-live-action-fg"),
+      cssHexToken("--django-ray-live-action-bg"),
+    ) >= 4.5,
   );
 });

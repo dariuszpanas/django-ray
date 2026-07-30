@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import importlib
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
+from django_ray.workflow_plans import materialize_workflow_plan
+from django_ray.workflows import Step, _Executor
 from testproject.apps.cluster_tasks import workflows
 from testproject.apps.cluster_tasks.workflows import (
     COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE,
@@ -13,11 +17,45 @@ from testproject.apps.cluster_tasks.workflows import (
     build_branch_work_items,
     build_complex_config,
     inspect_runtime_environment,
+    order_fulfillment_showcase_workflow,
     run_complex_branch_workflow,
     run_cpu_fanout_workflow,
     run_cpu_work_item,
+    run_order_fulfillment_showcase_workflow,
     run_runtime_env_cache_benchmark,
 )
+
+
+@dataclass
+class _ShowcaseGraphExecutor(_Executor):
+    """Execute locally while retaining the runtime graph visible to Admin."""
+
+    nodes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
+
+    def submit_step(
+        self,
+        signature: Step,
+        input_args: tuple[Any, ...],
+        input_kwargs: dict[str, Any],
+        node_id: str,
+        dependencies: tuple[str, ...],
+    ) -> Any:
+        self.nodes[node_id] = dependencies
+        self.labels[node_id] = signature.callable_path.rsplit(".", 1)[-1]
+        module_path, callable_name = signature.callable_path.rsplit(".", 1)
+        callable_obj = getattr(importlib.import_module(module_path), callable_name)
+        return callable_obj(
+            *input_args,
+            *signature.bound_args,
+            **{**input_kwargs, **signature.bound_kwargs},
+        )
+
+    def collect(self, values: list[Any]) -> list[Any]:
+        return values
+
+    def resolve(self, value: Any) -> Any:
+        return value
 
 
 def test_cpu_fanout_workflow_runs_locally() -> None:
@@ -132,6 +170,226 @@ def test_complex_workflow_failure_control_reaches_selected_leaf_locally() -> Non
             failure_item=1,
             use_ray=False,
         )
+
+
+@pytest.mark.parametrize(
+    ("item_count", "reserved_units", "total_cents"),
+    [
+        (1, 1, 1_000),
+        (3, 4, 4_400),
+    ],
+)
+def test_order_fulfillment_showcase_returns_one_compact_deterministic_result(
+    item_count: int,
+    reserved_units: int,
+    total_cents: int,
+) -> None:
+    result = run_order_fulfillment_showcase_workflow(
+        item_count,
+        0,
+        use_ray=False,
+    )
+
+    assert result == {
+        "engine": "django-ray-workflow",
+        "workflow": "order-fulfillment-showcase",
+        "durability_boundary": "single RayTaskExecution",
+        "order_id": "showcase-order-0001",
+        "status": "FULFILLED",
+        "item_count": item_count,
+        "reserved_units": reserved_units,
+        "currency": "USD",
+        "total_cents": total_cents,
+        "risk": "LOW",
+        "recommendation": "PRIORITY_FULFILLMENT",
+        "decision": "APPROVED",
+        "sinks": {
+            "primary": "WRITTEN",
+            "audit": "WRITTEN",
+            "notification": "SENT",
+        },
+    }
+    assert set(result) == {
+        "engine",
+        "workflow",
+        "durability_boundary",
+        "order_id",
+        "status",
+        "item_count",
+        "reserved_units",
+        "currency",
+        "total_cents",
+        "risk",
+        "recommendation",
+        "decision",
+        "sinks",
+    }
+
+
+def test_order_fulfillment_showcase_failure_reaches_selected_leaf_locally() -> None:
+    with pytest.raises(
+        workflows.WorkflowShowcaseFixtureError,
+        match=workflows.workflow_showcase_fixture_error_message(1),
+    ):
+        run_order_fulfillment_showcase_workflow(
+            3,
+            0,
+            failure_stage="reserve_inventory",
+            failure_item=1,
+            use_ray=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("item_count", "expected_nodes", "expected_edges", "layer_widths"),
+    [
+        (1, 21, 28, [1, 4, 2, 1, 4, 1, 1, 1, 1, 1, 3, 1]),
+        (3, 25, 36, [1, 4, 4, 1, 4, 1, 1, 1, 3, 1, 3, 1]),
+    ],
+)
+def test_order_fulfillment_showcase_has_stable_repeated_split_join_topology(
+    item_count: int,
+    expected_nodes: int,
+    expected_edges: int,
+    layer_widths: list[int],
+) -> None:
+    executor = _ShowcaseGraphExecutor()
+
+    submission = order_fulfillment_showcase_workflow._submit(
+        executor,
+        (item_count, 0, None, None),
+        {},
+        "0",
+        (),
+    )
+
+    layers: dict[str, int] = {}
+    for node_id, dependencies in executor.nodes.items():
+        layers[node_id] = (
+            max(layers[dependency] for dependency in dependencies) + 1 if dependencies else 0
+        )
+    assert submission.terminal_node_ids == ("0.8",)
+    assert len(executor.nodes) == expected_nodes
+    assert sum(len(dependencies) for dependencies in executor.nodes.values()) == (expected_edges)
+    assert max(layers.values()) + 1 == 12
+    assert [
+        sum(layer == layer_index for layer in layers.values()) for layer_index in range(12)
+    ] == layer_widths
+
+    validation_nodes = tuple(f"0.1.g0.1.m{index}" for index in range(item_count))
+    reservation_nodes = tuple(f"0.5.m{index}" for index in range(item_count))
+    assert executor.nodes["0.2"] == (
+        *validation_nodes,
+        "0.1.g1.1",
+        "0.1.g2",
+    )
+    assert executor.nodes["0.4"] == ("0.3.g0", "0.3.g1.1")
+    assert all(executor.nodes[node_id] == ("0.4",) for node_id in reservation_nodes)
+    assert executor.nodes["0.6"] == reservation_nodes
+    assert executor.nodes["0.8"] == ("0.7.g0", "0.7.g1", "0.7.g2")
+    assert executor.labels["0.4"] == "attach_commercial_context_to_reservations"
+    assert executor.labels["0.5.m0"] == "reserve_inventory"
+    assert executor.labels["0.6"] == "join_fulfillment_decision"
+    assert executor.labels["0.8"] == "finalize_order_fulfillment"
+
+    def ancestors(node_id: str) -> set[str]:
+        found: set[str] = set()
+        pending = list(executor.nodes[node_id])
+        while pending:
+            dependency = pending.pop()
+            if dependency in found:
+                continue
+            found.add(dependency)
+            pending.extend(executor.nodes[dependency])
+        return found
+
+    commercial_nodes = {
+        "0.3.g1.0.g0",
+        "0.3.g1.0.g1.0.g0",
+        "0.3.g1.0.g1.0.g1",
+        "0.3.g1.0.g1.1",
+        "0.3.g1.1",
+    }
+    assert commercial_nodes <= ancestors("0.5.m0")
+    assert {node_id for node_id in executor.nodes if "0.5.m0" in ancestors(node_id)} == {
+        "0.6",
+        "0.7.g0",
+        "0.7.g1",
+        "0.7.g2",
+        "0.8",
+    }
+
+
+def test_order_fulfillment_showcase_materializes_stable_business_callables() -> None:
+    manifest = materialize_workflow_plan(
+        order_fulfillment_showcase_workflow,
+        invocation_args=(3, 0.05, None, None),
+        invocation_kwargs={},
+    ).plan.as_dict()
+
+    assert manifest["topology"]["class"] == "dynamic"
+    assert len(manifest["nodes"]) == 31
+    assert len(manifest["edges"]) == 38
+    assert [
+        callable_entry["import_path"].rsplit(".", 1)[-1] for callable_entry in manifest["callables"]
+    ] == [
+        "build_order_batch",
+        "select_validation_items",
+        "validate_order_item",
+        "load_customer_profile",
+        "load_customer_history",
+        "join_customer_context",
+        "load_inventory_snapshot",
+        "join_order_inputs",
+        "select_reservation_items",
+        "calculate_order_price",
+        "score_order_risk",
+        "build_order_recommendation",
+        "join_risk_recommendation",
+        "join_commercial_context",
+        "attach_commercial_context_to_reservations",
+        "reserve_inventory",
+        "join_fulfillment_decision",
+        "write_primary_order",
+        "write_audit_record",
+        "send_order_notification",
+        "finalize_order_fulfillment",
+    ]
+    reserve_template = next(node for node in manifest["nodes"] if node["id"] == "0.5.m*")
+    assert reserve_template["ray_options"] == {
+        "max_retries": 0,
+        "num_cpus": 0.1,
+    }
+
+
+def test_order_fulfillment_showcase_always_selects_full_reporting(
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _ConfiguredWorkflow:
+        def run(self, *args: Any, **kwargs: Any) -> dict[str, str]:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return {"status": "ok"}
+
+    class _Workflow:
+        def with_progress_reporting(self, policy: str) -> _ConfiguredWorkflow:
+            captured["policy"] = policy
+            return _ConfiguredWorkflow()
+
+    monkeypatch.setattr(
+        workflows,
+        "order_fulfillment_showcase_workflow",
+        _Workflow(),
+    )
+
+    assert run_order_fulfillment_showcase_workflow(3, 0.05, use_ray=True) == {"status": "ok"}
+    assert captured == {
+        "policy": "full",
+        "args": (3, 0.05, None, None),
+        "kwargs": {"use_ray": True},
+    }
 
 
 def test_runtime_env_cache_benchmark_has_local_fallback(settings) -> None:

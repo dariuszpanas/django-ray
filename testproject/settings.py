@@ -355,5 +355,6 @@ DJANGO_RAY = {
     "RETRY_EXCEPTION_DENYLIST": [
         "testproject.tasks.NoRetryError",
         "testproject.apps.cluster_tasks.workflows.ComplexWorkflowFixtureError",
+        "testproject.apps.cluster_tasks.workflows.WorkflowShowcaseFixtureError",
     ],
 }
