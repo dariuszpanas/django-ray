@@ -218,7 +218,12 @@ class TaskCreationMixin:
 
     def _get_metrics(self):
         """Get Prometheus metrics."""
-        with self.client.get("/api/metrics", name="/api/metrics", catch_response=True) as response:
+        with self.client.get(
+            "/api/metrics",
+            name="/api/metrics",
+            catch_response=True,
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        ) as response:
             if response.status_code == 200:
                 response.success()
                 return response.text

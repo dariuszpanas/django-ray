@@ -180,17 +180,18 @@ one-user demo, and remove the shell variable afterwards.
 ### PowerShell
 
 ```powershell
-$encodedToken = kubectl --context docker-desktop -n django-ray `
-  get secret django-ray-secret `
-  -o jsonpath='{.data.DJANGO_API_TOKEN}'
-$env:DJANGO_API_TOKEN = [Text.Encoding]::UTF8.GetString(
-    [Convert]::FromBase64String($encodedToken)
-)
 try {
+    $djangoRayEncodedToken = kubectl --context docker-desktop -n django-ray `
+      get secret django-ray-secret `
+      -o jsonpath='{.data.DJANGO_API_TOKEN}'
+    $env:DJANGO_API_TOKEN = [Text.Encoding]::UTF8.GetString(
+        [Convert]::FromBase64String($djangoRayEncodedToken)
+    )
     make loadtest-demo
 }
 finally {
     Remove-Item Env:DJANGO_API_TOKEN -ErrorAction SilentlyContinue
+    Remove-Variable djangoRayEncodedToken -ErrorAction SilentlyContinue
 }
 ```
 
