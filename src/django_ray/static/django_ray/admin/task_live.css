@@ -14,6 +14,7 @@
   --django-ray-live-border-strong: var(--hairline-color, #e2e8f0);
   --django-ray-live-danger-bg: #fee2e2;
   --django-ray-live-danger-border: #fca5a5;
+  --django-ray-live-danger-connector: #dc2626;
   --django-ray-live-danger-fg: #991b1b;
   --django-ray-live-emphasis-bg: var(--selected-bg, #f0f9ff);
   --django-ray-live-fingerprint-bg: #e2e8f0;
@@ -189,7 +190,7 @@
 }
 
 #django-ray-live-observability .django-ray-workflow__summary:focus-visible {
-  outline: 3px solid var(--django-ray-live-accent);
+  outline: 3px solid var(--django-ray-live-accent-strong);
   outline-offset: -3px;
 }
 
@@ -436,7 +437,7 @@
 
 #django-ray-live-observability
   :is(.django-ray-workflow__actions a, .django-ray-workflow__copy):focus-visible {
-  outline: 3px solid var(--django-ray-live-accent);
+  outline: 3px solid var(--django-ray-live-accent-strong);
   outline-offset: 2px;
 }
 
@@ -480,7 +481,7 @@
 
 #django-ray-live-observability
   .django-ray-workflow-graph__summary:focus-visible {
-  outline: 3px solid var(--django-ray-live-accent);
+  outline: 3px solid var(--django-ray-live-accent-strong);
   outline-offset: -3px;
 }
 
@@ -547,6 +548,12 @@
   display: none;
 }
 
+#django-ray-live-observability .django-ray-workflow-graph__content,
+#django-ray-live-observability .django-ray-workflow-graph__diagram {
+  max-width: 100%;
+  min-width: 0;
+}
+
 #django-ray-live-observability .django-ray-workflow-graph__legend {
   display: flex;
   flex-wrap: wrap;
@@ -569,61 +576,132 @@
   padding: 0.25rem 0.5rem;
 }
 
+#django-ray-live-observability .django-ray-workflow-graph__diagram {
+  isolation: isolate;
+  margin-top: 1rem;
+  overflow: hidden;
+  position: relative;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__connectors {
+  height: 100%;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: absolute;
+  width: 100%;
+  z-index: 0;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__connector {
+  fill: none;
+  stroke: var(--django-ray-live-accent-strong);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-opacity: 0.72;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__connector[data-failure-path="true"] {
+  stroke: var(--django-ray-live-danger-connector);
+  stroke-opacity: 1;
+  stroke-width: 3;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__connector-arrow {
+  fill: var(--django-ray-live-accent-strong);
+}
+
+#django-ray-live-observability
+  .django-ray-workflow-graph__connector-arrow[data-failure-path="true"] {
+  fill: var(--django-ray-live-danger-connector);
+}
+
 #django-ray-live-observability .django-ray-workflow-graph__nodes {
   display: grid;
-  gap: 0;
+  gap: 2.75rem;
   list-style: none;
-  margin: 1rem 0 0;
-  max-width: 52rem;
+  margin: 0;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0;
+  position: relative;
+  z-index: 1;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__stage {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__stage-header {
+  align-items: baseline;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__stage-title {
+  color: var(--django-ray-live-heading);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__stage-copy {
+  color: var(--django-ray-live-muted);
+  font-size: 0.6875rem;
+  text-align: right;
+}
+
+#django-ray-live-observability .django-ray-workflow-graph__stage-nodes {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(15rem, 100%), 1fr)
+  );
+  list-style: none;
+  margin: 0;
+  max-width: 100%;
+  min-width: 0;
   padding: 0;
 }
 
 #django-ray-live-observability .django-ray-workflow-graph__node-row {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
 }
 
 #django-ray-live-observability .django-ray-workflow-graph__incoming {
-  align-items: center;
   color: var(--django-ray-live-muted);
-  display: grid;
   font-size: 0.6875rem;
-  gap: 0.5rem;
-  grid-template-columns: 2rem minmax(0, 1fr);
   line-height: 1.4;
-  min-height: 2.5rem;
+  min-height: 2.4rem;
+  padding: 0 0.25rem 0.4rem;
 }
 
 #django-ray-live-observability
   .django-ray-workflow-graph__incoming[data-root="true"] {
-  grid-template-columns: minmax(0, 1fr);
+  background: var(--django-ray-live-action-bg);
+  border: 1px solid var(--django-ray-live-action-border);
+  border-radius: var(--border-radius, 8px);
+  color: var(--django-ray-live-action-fg);
+  justify-self: start;
   min-height: auto;
-  padding-bottom: 0.4rem;
+  padding: 0.25rem 0.5rem;
 }
 
 #django-ray-live-observability .django-ray-workflow-graph__incoming p {
   margin: 0;
   overflow-wrap: anywhere;
-}
-
-#django-ray-live-observability .django-ray-workflow-graph__connector {
-  color: var(--django-ray-live-accent-strong);
-  height: 2.5rem;
-  overflow: visible;
-  width: 2rem;
-}
-
-#django-ray-live-observability .django-ray-workflow-graph__connector path {
-  fill: none;
-  stroke: currentcolor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 2;
-}
-
-#django-ray-live-observability
-  .django-ray-workflow-graph__incoming[data-failure-path="true"]
-  .django-ray-workflow-graph__connector {
-  color: var(--django-ray-live-danger-border);
 }
 
 #django-ray-live-observability .django-ray-workflow-graph__node {
@@ -635,6 +713,8 @@
   display: grid;
   gap: 0.625rem;
   grid-template-columns: minmax(0, 1fr) auto;
+  height: 100%;
+  max-width: 100%;
   min-width: 0;
   padding: 0.875rem;
   text-decoration: none;
@@ -676,8 +756,8 @@
 }
 
 #django-ray-live-observability .django-ray-workflow-graph__node:focus-visible {
-  outline: 3px solid var(--django-ray-live-accent);
-  outline-offset: 2px;
+  outline: 3px solid var(--django-ray-live-accent-strong);
+  outline-offset: -3px;
 }
 
 #django-ray-live-observability .django-ray-workflow-graph__node-title {
@@ -778,6 +858,7 @@
   --django-ray-live-border-strong: #303238;
   --django-ray-live-danger-bg: rgb(239 68 68 / 12%);
   --django-ray-live-danger-border: rgb(248 113 113 / 45%);
+  --django-ray-live-danger-connector: #f87171;
   --django-ray-live-danger-fg: #fecaca;
   --django-ray-live-emphasis-bg: #212226;
   --django-ray-live-fingerprint-bg: #27282d;
@@ -826,6 +907,7 @@
     --django-ray-live-border-strong: #303238;
     --django-ray-live-danger-bg: rgb(239 68 68 / 12%);
     --django-ray-live-danger-border: rgb(248 113 113 / 45%);
+    --django-ray-live-danger-connector: #f87171;
     --django-ray-live-danger-fg: #fecaca;
     --django-ray-live-emphasis-bg: #212226;
     --django-ray-live-fingerprint-bg: #27282d;
@@ -920,6 +1002,22 @@
   #django-ray-live-observability
     :is(.django-ray-workflow__actions a, .django-ray-workflow__copy) {
     width: 100%;
+  }
+
+  #django-ray-live-observability .django-ray-workflow-graph__connectors {
+    display: none;
+  }
+
+  #django-ray-live-observability .django-ray-workflow-graph__nodes {
+    gap: 1rem;
+  }
+
+  #django-ray-live-observability .django-ray-workflow-graph__stage-nodes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #django-ray-live-observability .django-ray-workflow-graph__incoming {
+    min-height: auto;
   }
 
   #django-ray-live-observability .django-ray-workflow-graph__node {

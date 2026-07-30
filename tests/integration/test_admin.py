@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from django.conf import settings as django_settings
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser, Permission
@@ -2621,6 +2622,7 @@ class TestRayTaskExecutionAdmin:
     def test_change_form_loads_live_status_panel_and_package_script(
         self,
     ) -> None:
+        assert "unfold" not in django_settings.INSTALLED_APPS
         execution = RayTaskExecution.objects.create(
             task_id="admin-live-form-001",
             callable_path="testproject.tasks.add_numbers",
@@ -2667,6 +2669,7 @@ class TestRayTaskExecutionAdmin:
         )
         attempt_query = f"?attempt_number={execution.attempt_number}"
         assert response.status_code == 200
+        assert 'class="module aligned django-ray-live"' in content
         assert 'id="django-ray-live-observability"' in content
         assert f'data-observability-url="{endpoint}"' in content
         assert 'href="/static/django_ray/admin/task_live.css"' in content

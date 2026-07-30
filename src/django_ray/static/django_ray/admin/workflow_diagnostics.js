@@ -32,6 +32,7 @@
     : "Page-rendered attempt";
   const newerAttemptGuidance =
     "Reload the task page to inspect a newer live attempt.";
+  const graphResizeObservers = new WeakMap();
   let requested = false;
 
   const isRecord = (value) =>
@@ -474,7 +475,12 @@
       ) {
         throw new Error("Partial workflow graph payload");
       }
-      return { incoming: new Map(), nodesById: new Map(), payload };
+      return {
+        incoming: new Map(),
+        layers: [],
+        nodesById: new Map(),
+        payload,
+      };
     }
     if (!payload.complete) {
       throw new Error("Incomplete workflow graph payload");
@@ -525,7 +531,23 @@
         (left, right) => nodeIndexes.get(left) - nodeIndexes.get(right),
       );
     }
-    return { incoming, nodesById, payload };
+    const layerById = new Map();
+    const layers = [];
+    for (const node of payload.nodes) {
+      const layer = incoming
+        .get(node.id)
+        .reduce(
+          (maximum, sourceId) =>
+            Math.max(maximum, layerById.get(sourceId) + 1),
+          0,
+        );
+      layerById.set(node.id, layer);
+      if (!layers[layer]) {
+        layers[layer] = [];
+      }
+      layers[layer].push(node);
+    }
+    return { incoming, layers, nodesById, payload };
   };
 
   const nodeDetailUrl = (nodeId) => {
@@ -580,17 +602,131 @@
     return actions;
   };
 
-  const graphConnector = () => {
+  const graphConnectorOverlay = (payload, nodesById) => {
     const namespace = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(namespace, "svg");
-    svg.setAttribute("class", "django-ray-workflow-graph__connector");
+    svg.setAttribute("class", "django-ray-workflow-graph__connectors");
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
-    svg.setAttribute("viewBox", "0 0 32 40");
-    const path = document.createElementNS(namespace, "path");
-    path.setAttribute("d", "M16 1v30m-7-7 7 7 7-7");
-    svg.append(path);
-    return svg;
+    svg.setAttribute("preserveAspectRatio", "none");
+
+    const definitions = document.createElementNS(namespace, "defs");
+    for (const [id, failurePath] of [
+      ["django-ray-workflow-graph-arrow", false],
+      ["django-ray-workflow-graph-failure-arrow", true],
+    ]) {
+      const marker = document.createElementNS(namespace, "marker");
+      marker.setAttribute("id", id);
+      marker.setAttribute("markerHeight", "7");
+      marker.setAttribute("markerWidth", "7");
+      marker.setAttribute("orient", "auto");
+      marker.setAttribute("refX", "6");
+      marker.setAttribute("refY", "3.5");
+      marker.setAttribute("viewBox", "0 0 7 7");
+      const arrow = document.createElementNS(namespace, "path");
+      arrow.setAttribute("class", "django-ray-workflow-graph__connector-arrow");
+      arrow.setAttribute("d", "M0 0L7 3.5L0 7Z");
+      if (failurePath) {
+        arrow.dataset.failurePath = "true";
+      }
+      marker.append(arrow);
+      definitions.append(marker);
+    }
+    svg.append(definitions);
+
+    const paths = [];
+    for (const edge of payload.edges) {
+      const path = document.createElementNS(namespace, "path");
+      path.setAttribute("class", "django-ray-workflow-graph__connector");
+      path.dataset.source = edge.source;
+      path.dataset.target = edge.target;
+      const failurePath =
+        nodesById.get(edge.source).failure_path &&
+        nodesById.get(edge.target).failure_path;
+      if (failurePath) {
+        path.dataset.failurePath = "true";
+      }
+      path.setAttribute(
+        "marker-end",
+        failurePath
+          ? "url(#django-ray-workflow-graph-failure-arrow)"
+          : "url(#django-ray-workflow-graph-arrow)",
+      );
+      svg.append(path);
+      paths.push({ edge, path });
+    }
+    return { paths, svg };
+  };
+
+  const roundedConnectorCoordinate = (value) =>
+    Math.round(value * 10) / 10;
+
+  const drawGraphConnectors = (diagram, svg, paths, cardsById) => {
+    const diagramBounds = diagram.getBoundingClientRect();
+    if (
+      !Number.isFinite(diagramBounds.width) ||
+      !Number.isFinite(diagramBounds.height) ||
+      diagramBounds.width <= 0 ||
+      diagramBounds.height <= 0
+    ) {
+      return;
+    }
+    svg.setAttribute(
+      "viewBox",
+      `0 0 ${roundedConnectorCoordinate(
+        diagramBounds.width,
+      )} ${roundedConnectorCoordinate(diagramBounds.height)}`,
+    );
+    for (const { edge, path } of paths) {
+      const sourceBounds = cardsById.get(edge.source).getBoundingClientRect();
+      const targetBounds = cardsById.get(edge.target).getBoundingClientRect();
+      const sourceX = roundedConnectorCoordinate(
+        sourceBounds.left - diagramBounds.left + sourceBounds.width / 2,
+      );
+      const sourceY = roundedConnectorCoordinate(
+        sourceBounds.bottom - diagramBounds.top,
+      );
+      const targetX = roundedConnectorCoordinate(
+        targetBounds.left - diagramBounds.left + targetBounds.width / 2,
+      );
+      const targetY = roundedConnectorCoordinate(
+        targetBounds.top - diagramBounds.top,
+      );
+      const middleY = roundedConnectorCoordinate(
+        sourceY + (targetY - sourceY) / 2,
+      );
+      path.setAttribute(
+        "d",
+        `M${sourceX} ${sourceY}C${sourceX} ${middleY} ${targetX} ${middleY} ${targetX} ${targetY}`,
+      );
+    }
+  };
+
+  const observeGraphConnectors = (diagram, svg, paths, cardsById) => {
+    let framePending = false;
+    const scheduleDraw = () => {
+      if (framePending) {
+        return;
+      }
+      framePending = true;
+      const draw = () => {
+        framePending = false;
+        drawGraphConnectors(diagram, svg, paths, cardsById);
+      };
+      if (typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(draw);
+      } else {
+        draw();
+      }
+    };
+    scheduleDraw();
+    if (typeof window.ResizeObserver === "function") {
+      const resizeObserver = new window.ResizeObserver(scheduleDraw);
+      resizeObserver.observe(diagram);
+      graphResizeObservers.set(diagram, resizeObserver);
+    } else if (typeof window.addEventListener === "function") {
+      window.addEventListener("resize", scheduleDraw);
+    }
   };
 
   const graphLegend = () => {
@@ -609,11 +745,14 @@
     return legend;
   };
 
-  const graphNodeCard = (node) => {
+  const graphNodeCard = (node, layer, position, descriptionId) => {
     const link = element("a", "django-ray-workflow-graph__node");
     link.href = nodeDetailUrl(node.id);
     link.dataset.kind = node.kind;
+    link.dataset.layer = String(layer);
+    link.dataset.position = String(position);
     link.dataset.state = node.state;
+    link.setAttribute("aria-describedby", descriptionId);
     if (node.failure_path) {
       link.dataset.failurePath = "true";
     }
@@ -694,43 +833,92 @@
   };
 
   const renderGraph = (validated, content) => {
-    const { incoming, nodesById, payload } = validated;
+    const { incoming, layers, nodesById, payload } = validated;
+    const diagram = element("div", "django-ray-workflow-graph__diagram");
     const list = element("ol", "django-ray-workflow-graph__nodes");
-    list.setAttribute("aria-label", "Workflow nodes in topological order");
-    for (const node of payload.nodes) {
-      const row = element("li", "django-ray-workflow-graph__node-row");
-      const incomingNode = element(
+    list.setAttribute("aria-label", "Workflow stages in topological order");
+    const cardsById = new Map();
+    let nodePosition = 0;
+    layers.forEach((layerNodes, layerIndex) => {
+      const stage = element("li", "django-ray-workflow-graph__stage");
+      stage.dataset.layer = String(layerIndex);
+      const stageHeader = element(
         "div",
-        "django-ray-workflow-graph__incoming",
+        "django-ray-workflow-graph__stage-header",
       );
-      const sources = incoming.get(node.id);
-      if (node.failure_path) {
-        incomingNode.dataset.failurePath = "true";
-      }
-      if (sources.length === 0) {
-        incomingNode.dataset.root = "true";
-        incomingNode.append(element("p", "", "Workflow entry"));
-      } else {
-        incomingNode.append(graphConnector());
-        const sourceLabels = sources.map((sourceId) => {
-          const source = nodesById.get(sourceId);
-          return source.label
-            ? `${source.label} (${source.id})`
-            : source.id;
-        });
-        incomingNode.append(
-          element(
-            "p",
-            "",
-            `Incoming from ${sourceLabels.join(", ")}`,
-          ),
+      stageHeader.append(
+        element(
+          "h4",
+          "django-ray-workflow-graph__stage-title",
+          `Stage ${layerIndex + 1}`,
+        ),
+        element(
+          "span",
+          "django-ray-workflow-graph__stage-copy",
+          `${layerNodes.length} ${
+            layerNodes.length === 1 ? "node" : "parallel nodes"
+          }`,
+        ),
+      );
+      const stageNodes = element(
+        "ul",
+        "django-ray-workflow-graph__stage-nodes",
+      );
+      stageNodes.setAttribute(
+        "aria-label",
+        `Workflow stage ${layerIndex + 1}`,
+      );
+      layerNodes.forEach((node, layerPosition) => {
+        const row = element("li", "django-ray-workflow-graph__node-row");
+        const incomingNode = element(
+          "div",
+          "django-ray-workflow-graph__incoming",
         );
-      }
-      row.append(incomingNode, graphNodeCard(node));
-      list.append(row);
-    }
-    content.replaceChildren(graphLegend(), list);
+        const descriptionId = `django-ray-workflow-graph-predecessors-${nodePosition}`;
+        incomingNode.setAttribute("id", descriptionId);
+        const sources = incoming.get(node.id);
+        if (sources.length === 0) {
+          incomingNode.dataset.root = "true";
+          incomingNode.append(element("p", "", "Workflow entry"));
+        } else {
+          const sourceLabels = sources.map((sourceId) => {
+            const source = nodesById.get(sourceId);
+            return source.label
+              ? `${source.label} (${source.id})`
+              : source.id;
+          });
+          incomingNode.append(
+            element(
+              "p",
+              "",
+              `Incoming from ${sourceLabels.join(", ")}`,
+            ),
+          );
+        }
+        const card = graphNodeCard(
+          node,
+          layerIndex,
+          layerPosition,
+          descriptionId,
+        );
+        cardsById.set(node.id, card);
+        row.append(incomingNode, card);
+        stageNodes.append(row);
+        nodePosition += 1;
+      });
+      stage.append(stageHeader, stageNodes);
+      list.append(stage);
+    });
+    const connectors = graphConnectorOverlay(payload, nodesById);
+    diagram.append(connectors.svg, list);
+    content.replaceChildren(graphLegend(), diagram);
     content.hidden = false;
+    observeGraphConnectors(
+      diagram,
+      connectors.svg,
+      connectors.paths,
+      cardsById,
+    );
   };
 
   const graphDisclosure = () => {

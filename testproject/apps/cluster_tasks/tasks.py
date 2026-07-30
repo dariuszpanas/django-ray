@@ -39,10 +39,14 @@ from django_ray.runtime.distributed import (
 from testproject.apps.cluster_tasks.workflows import (
     COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE,
     ComplexWorkflowFixtureError,
+    WorkflowShowcaseFixtureError,
     inspect_runtime_environment,
     run_complex_branch_workflow,
     run_cpu_fanout_workflow,
+    run_order_fulfillment_showcase_workflow,
     run_runtime_env_cache_benchmark,
+    validate_order_fulfillment_showcase_inputs,
+    workflow_showcase_fixture_error_message,
 )
 
 
@@ -79,6 +83,22 @@ def _is_complex_workflow_fixture_failure(error: Exception) -> bool:
         isinstance(error, RayTaskError)
         and type(getattr(error, "cause", None)) is ComplexWorkflowFixtureError
     )
+
+
+def _workflow_showcase_fixture_cause(
+    error: Exception,
+) -> WorkflowShowcaseFixtureError | None:
+    """Return only the exact local or Ray-wrapped showcase exception."""
+    if type(error) is WorkflowShowcaseFixtureError:
+        return error
+    try:
+        from ray.exceptions import RayTaskError
+    except ImportError:  # pragma: no cover - Ray is a package dependency
+        return None
+    cause = getattr(error, "cause", None)
+    if isinstance(error, RayTaskError) and type(cause) is WorkflowShowcaseFixtureError:
+        return cause
+    return None
 
 
 def _process_single_item(item: Any) -> dict[str, Any]:
@@ -145,6 +165,39 @@ def complex_workflow_benchmark(
         if failure_branch is None or not _is_complex_workflow_fixture_failure(error):
             raise
         raise ComplexWorkflowFixtureError(COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE) from None
+
+
+@task(queue_name="default")
+def order_fulfillment_showcase_task(
+    item_count: int = 3,
+    work_seconds: float = 0.05,
+    failure_stage: Literal["reserve_inventory"] | None = None,
+    failure_item: int | None = None,
+) -> dict[str, Any]:
+    """Run the full-reporting order-fulfillment workflow showcase."""
+    validate_order_fulfillment_showcase_inputs(
+        item_count=item_count,
+        work_seconds=work_seconds,
+        failure_stage=failure_stage,
+        failure_item=failure_item,
+    )
+    try:
+        return run_order_fulfillment_showcase_workflow(
+            item_count,
+            work_seconds,
+            failure_stage=failure_stage,
+            failure_item=failure_item,
+            use_ray=True,
+        )
+    except Exception as error:
+        fixture_cause = _workflow_showcase_fixture_cause(error)
+        if failure_stage is None or fixture_cause is None:
+            raise
+        assert failure_item is not None
+        expected_message = workflow_showcase_fixture_error_message(failure_item)
+        if str(fixture_cause) != expected_message:
+            raise fixture_cause from None
+        raise WorkflowShowcaseFixtureError(str(fixture_cause)) from None
 
 
 @task(queue_name="default")

@@ -8,18 +8,28 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import math
 import os
 import platform
 import time
+from collections.abc import Callable
 from typing import Any, Literal
 
-from django_ray.workflows import chain, group, map_step, report_progress, step
+from django_ray.workflows import Step, chain, group, map_step, report_progress, step
 
 COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE = "Intentional complex workflow fixture failure"
+WORKFLOW_SHOWCASE_FIXTURE_ERROR_MESSAGE = "Intentional workflow showcase reserve_inventory failure"
+WORKFLOW_SHOWCASE_MAX_ITEMS = 8
+WORKFLOW_SHOWCASE_MAX_WORK_SECONDS = 1.0
+WORKFLOW_SHOWCASE_FAILURE_STAGE = "reserve_inventory"
 
 
 class ComplexWorkflowFixtureError(RuntimeError):
     """Stable testproject-only failure used to exercise workflow diagnostics."""
+
+
+class WorkflowShowcaseFixtureError(RuntimeError):
+    """Stable testproject-only failure for the order-fulfillment showcase."""
 
 
 def build_cpu_work_items(
@@ -249,6 +259,447 @@ def run_complex_branch_workflow(
     result = workflow.run(*workflow_args, use_ray=use_ray)
     result["workflow_elapsed_seconds"] = round(time.perf_counter() - started_at, 4)
     return result
+
+
+def validate_order_fulfillment_showcase_inputs(
+    *,
+    item_count: int,
+    work_seconds: float,
+    failure_stage: str | None,
+    failure_item: int | None,
+) -> None:
+    """Validate the deliberately small, visible workflow showcase."""
+    if isinstance(item_count, bool) or not isinstance(item_count, int):
+        raise ValueError("item_count must be an integer")
+    if not 1 <= item_count <= WORKFLOW_SHOWCASE_MAX_ITEMS:
+        raise ValueError(f"item_count must be between 1 and {WORKFLOW_SHOWCASE_MAX_ITEMS}")
+    if isinstance(work_seconds, bool) or not isinstance(work_seconds, int | float):
+        raise ValueError("work_seconds must be a number")
+    if not math.isfinite(work_seconds) or not (
+        0 <= work_seconds <= WORKFLOW_SHOWCASE_MAX_WORK_SECONDS
+    ):
+        raise ValueError(
+            f"work_seconds must be finite and between 0 and {WORKFLOW_SHOWCASE_MAX_WORK_SECONDS:g}"
+        )
+    if (failure_stage is None) != (failure_item is None):
+        raise ValueError("failure_stage and failure_item must be provided together")
+    if failure_stage is None:
+        return
+    if failure_stage != WORKFLOW_SHOWCASE_FAILURE_STAGE:
+        raise ValueError(f"failure_stage must be '{WORKFLOW_SHOWCASE_FAILURE_STAGE}'")
+    if isinstance(failure_item, bool) or not isinstance(failure_item, int):
+        raise ValueError("failure_item must be an integer")
+    if not 0 <= failure_item < item_count:
+        raise ValueError("failure_item must select an item in the order batch")
+
+
+def workflow_showcase_fixture_error_message(item_id: int) -> str:
+    """Return the stable error text shared by local and Ray-wrapped failures."""
+    return f"{WORKFLOW_SHOWCASE_FIXTURE_ERROR_MESSAGE} at item {item_id}"
+
+
+def build_order_batch(
+    item_count: int,
+    work_seconds: float,
+    failure_stage: str | None = None,
+    failure_item: int | None = None,
+) -> dict[str, Any]:
+    """Build one deterministic bounded order batch for repeated DAG joins."""
+    validate_order_fulfillment_showcase_inputs(
+        item_count=item_count,
+        work_seconds=work_seconds,
+        failure_stage=failure_stage,
+        failure_item=failure_item,
+    )
+    return {
+        "order_id": "showcase-order-0001",
+        "customer_id": "showcase-customer-0042",
+        "items": [
+            {
+                "item_id": item_id,
+                "sku": f"SKU-{item_id + 1:03d}",
+                "quantity": (item_id % 2) + 1,
+                "unit_price_cents": 1_000 + (item_id * 100),
+            }
+            for item_id in range(item_count)
+        ],
+        "work_seconds": float(work_seconds),
+        "failure": (
+            {"stage": failure_stage, "item_id": failure_item} if failure_stage is not None else None
+        ),
+    }
+
+
+def select_validation_items(batch: dict[str, Any]) -> list[dict[str, Any]]:
+    """Select compact item inputs for the first dynamic fan-out."""
+    return [
+        {
+            "order_id": batch["order_id"],
+            "item_id": item["item_id"],
+            "sku": item["sku"],
+            "quantity": item["quantity"],
+            "work_seconds": batch["work_seconds"],
+        }
+        for item in batch["items"]
+    ]
+
+
+def validate_order_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Validate one order item without retaining the complete order payload."""
+    work_seconds = float(item["work_seconds"])
+    if work_seconds:
+        time.sleep(work_seconds)
+    item_id = int(item["item_id"])
+    valid = bool(item["sku"]) and int(item["quantity"]) > 0
+    report_progress(
+        1,
+        1,
+        message=f"Validated order item {item_id}",
+        metrics={"item_id": item_id, "valid": valid},
+    )
+    return {
+        "order_id": item["order_id"],
+        "item_id": item_id,
+        "valid": valid,
+    }
+
+
+def load_customer_profile(batch: dict[str, Any]) -> dict[str, Any]:
+    """Load the profile half of the nested customer-context join."""
+    return {
+        "order_id": batch["order_id"],
+        "customer_id": batch["customer_id"],
+        "tier": "GOLD",
+        "region": "us-west",
+    }
+
+
+def load_customer_history(batch: dict[str, Any]) -> dict[str, Any]:
+    """Load the history half of the nested customer-context join."""
+    return {
+        "order_id": batch["order_id"],
+        "customer_id": batch["customer_id"],
+        "completed_orders": 12,
+        "chargebacks": 0,
+    }
+
+
+def join_customer_context(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Join the independently loaded profile and history."""
+    profile, history = parts
+    return {
+        "order_id": profile["order_id"],
+        "customer_id": profile["customer_id"],
+        "tier": profile["tier"],
+        "region": profile["region"],
+        "completed_orders": history["completed_orders"],
+        "chargebacks": history["chargebacks"],
+    }
+
+
+def load_inventory_snapshot(batch: dict[str, Any]) -> dict[str, Any]:
+    """Load inventory and carry the bounded order into the next join."""
+    return {
+        "order_id": batch["order_id"],
+        "items": batch["items"],
+        "available_units": {
+            str(item["item_id"]): int(item["quantity"]) + 2 for item in batch["items"]
+        },
+        "work_seconds": batch["work_seconds"],
+        "failure": batch["failure"],
+    }
+
+
+def join_order_inputs(parts: list[Any]) -> dict[str, Any]:
+    """Join validation, customer, and inventory inputs."""
+    validations, customer, inventory = parts
+    if not all(validation["valid"] is True for validation in validations):
+        raise ValueError("order showcase validation unexpectedly rejected an item")
+    return {
+        "order_id": inventory["order_id"],
+        "items": inventory["items"],
+        "validated_item_ids": [int(validation["item_id"]) for validation in validations],
+        "customer": customer,
+        "available_units": inventory["available_units"],
+        "work_seconds": inventory["work_seconds"],
+        "failure": inventory["failure"],
+    }
+
+
+def select_reservation_items(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Select one bounded reservation input per order item."""
+    failure = context["failure"]
+    return [
+        {
+            "order_id": context["order_id"],
+            "item_id": item["item_id"],
+            "sku": item["sku"],
+            "quantity": item["quantity"],
+            "available_units": context["available_units"][str(item["item_id"])],
+            "work_seconds": context["work_seconds"],
+            "_fail_workflow_showcase_fixture": (
+                isinstance(failure, dict)
+                and failure.get("stage") == WORKFLOW_SHOWCASE_FAILURE_STAGE
+                and failure.get("item_id") == item["item_id"]
+            ),
+        }
+        for item in context["items"]
+    ]
+
+
+def reserve_inventory(item: dict[str, Any]) -> dict[str, Any]:
+    """Reserve one item or raise the exact opt-in showcase failure."""
+    item_id = int(item["item_id"])
+    fail_fixture = item.get("_fail_workflow_showcase_fixture") is True
+    report_progress(
+        0,
+        1,
+        message=f"Reserving inventory for item {item_id}",
+        metrics={"item_id": item_id},
+    )
+    work_seconds = float(item["work_seconds"])
+    if work_seconds:
+        time.sleep(work_seconds)
+    if fail_fixture:
+        raise WorkflowShowcaseFixtureError(workflow_showcase_fixture_error_message(item_id))
+    quantity = int(item["quantity"])
+    if quantity > int(item["available_units"]):
+        raise ValueError(f"insufficient showcase inventory for item {item_id}")
+    report_progress(
+        1,
+        1,
+        message=f"Reserved inventory for item {item_id}",
+        metrics={"item_id": item_id, "reserved_units": quantity},
+    )
+    return {
+        "order_id": item["order_id"],
+        "item_id": item_id,
+        "reserved_units": quantity,
+        "commercial": item["commercial"],
+    }
+
+
+def calculate_order_price(context: dict[str, Any]) -> dict[str, Any]:
+    """Calculate deterministic order pricing in parallel with risk work."""
+    return {
+        "order_id": context["order_id"],
+        "currency": "USD",
+        "total_cents": sum(
+            int(item["quantity"]) * int(item["unit_price_cents"]) for item in context["items"]
+        ),
+    }
+
+
+def score_order_risk(context: dict[str, Any]) -> dict[str, Any]:
+    """Score deterministic customer risk for the nested commercial join."""
+    score = int(context["customer"]["chargebacks"]) * 25
+    return {
+        "order_id": context["order_id"],
+        "risk": "LOW" if score < 25 else "REVIEW",
+        "risk_score": score,
+    }
+
+
+def build_order_recommendation(context: dict[str, Any]) -> dict[str, Any]:
+    """Build a deterministic fulfillment recommendation."""
+    return {
+        "order_id": context["order_id"],
+        "recommendation": (
+            "PRIORITY_FULFILLMENT"
+            if context["customer"]["tier"] == "GOLD"
+            else "STANDARD_FULFILLMENT"
+        ),
+    }
+
+
+def join_risk_recommendation(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Join risk and recommendation before the price branch converges."""
+    risk, recommendation = parts
+    return {
+        "order_id": risk["order_id"],
+        "risk": risk["risk"],
+        "risk_score": risk["risk_score"],
+        "recommendation": recommendation["recommendation"],
+    }
+
+
+def join_commercial_context(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Join pricing with the nested risk/recommendation result."""
+    price, risk_recommendation = parts
+    return {
+        "order_id": price["order_id"],
+        "currency": price["currency"],
+        "total_cents": price["total_cents"],
+        "risk": risk_recommendation["risk"],
+        "risk_score": risk_recommendation["risk_score"],
+        "recommendation": risk_recommendation["recommendation"],
+    }
+
+
+def attach_commercial_context_to_reservations(
+    parts: list[Any],
+) -> list[dict[str, Any]]:
+    """Make commercial completion a structural dependency of every reservation."""
+    reservation_items, commercial = parts
+    if not reservation_items:
+        raise ValueError("order showcase reservation items cannot be empty")
+    if any(item["order_id"] != commercial["order_id"] for item in reservation_items):
+        raise ValueError("order showcase commercial context belongs to another order")
+    return [{**item, "commercial": commercial} for item in reservation_items]
+
+
+def join_fulfillment_decision(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fan in reservations and derive one fulfillment decision."""
+    if not results:
+        raise ValueError("order showcase reservation results cannot be empty")
+    order_id = results[0]["order_id"]
+    commercial = results[0]["commercial"]
+    if any(
+        result["order_id"] != order_id or result["commercial"] != commercial for result in results
+    ):
+        raise ValueError("order showcase reservation results disagree")
+    reserved_item_ids = [int(result["item_id"]) for result in results]
+    reserved_units = sum(int(result["reserved_units"]) for result in results)
+    approved = len(reserved_item_ids) == len(set(reserved_item_ids)) and commercial["risk"] == "LOW"
+    return {
+        "order_id": order_id,
+        "item_count": len(results),
+        "reserved_units": reserved_units,
+        "currency": commercial["currency"],
+        "total_cents": commercial["total_cents"],
+        "risk": commercial["risk"],
+        "recommendation": commercial["recommendation"],
+        "decision": "APPROVED" if approved else "REVIEW",
+    }
+
+
+def write_primary_order(decision: dict[str, Any]) -> dict[str, Any]:
+    """Simulate the primary persistence sink without external side effects."""
+    return {
+        "sink": "primary",
+        "status": "WRITTEN",
+        **decision,
+    }
+
+
+def write_audit_record(decision: dict[str, Any]) -> dict[str, Any]:
+    """Simulate the independent audit sink."""
+    return {
+        "sink": "audit",
+        "status": "WRITTEN",
+        "order_id": decision["order_id"],
+    }
+
+
+def send_order_notification(decision: dict[str, Any]) -> dict[str, Any]:
+    """Simulate the independent notification sink."""
+    return {
+        "sink": "notification",
+        "status": "SENT",
+        "order_id": decision["order_id"],
+    }
+
+
+def finalize_order_fulfillment(sinks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a compact deterministic result after all three sinks join."""
+    by_sink = {str(sink["sink"]): sink for sink in sinks}
+    if set(by_sink) != {"primary", "audit", "notification"}:
+        raise ValueError("order showcase sink set is incomplete")
+    primary = by_sink["primary"]
+    return {
+        "engine": "django-ray-workflow",
+        "workflow": "order-fulfillment-showcase",
+        "durability_boundary": "single RayTaskExecution",
+        "order_id": primary["order_id"],
+        "status": "FULFILLED",
+        "item_count": primary["item_count"],
+        "reserved_units": primary["reserved_units"],
+        "currency": primary["currency"],
+        "total_cents": primary["total_cents"],
+        "risk": primary["risk"],
+        "recommendation": primary["recommendation"],
+        "decision": primary["decision"],
+        "sinks": {name: by_sink[name]["status"] for name in ("primary", "audit", "notification")},
+    }
+
+
+def _showcase_step(callable_obj: Callable[..., Any]) -> Step:
+    """Create one lightweight business-labelled showcase step."""
+    return step(callable_obj, ray_options={"num_cpus": 0.1})
+
+
+_validation_showcase_branch = chain(
+    _showcase_step(select_validation_items),
+    map_step(validate_order_item, ray_options={"num_cpus": 0.1}),
+)
+
+_customer_showcase_branch = chain(
+    group(
+        _showcase_step(load_customer_profile),
+        _showcase_step(load_customer_history),
+    ),
+    _showcase_step(join_customer_context),
+)
+
+_risk_recommendation_showcase_branch = chain(
+    group(
+        _showcase_step(score_order_risk),
+        _showcase_step(build_order_recommendation),
+    ),
+    _showcase_step(join_risk_recommendation),
+)
+
+_commercial_showcase_branch = chain(
+    group(
+        _showcase_step(calculate_order_price),
+        _risk_recommendation_showcase_branch,
+    ),
+    _showcase_step(join_commercial_context),
+)
+
+order_fulfillment_showcase_workflow = chain(
+    _showcase_step(build_order_batch),
+    group(
+        _validation_showcase_branch,
+        _customer_showcase_branch,
+        _showcase_step(load_inventory_snapshot),
+    ),
+    _showcase_step(join_order_inputs),
+    group(
+        _showcase_step(select_reservation_items),
+        _commercial_showcase_branch,
+    ),
+    _showcase_step(attach_commercial_context_to_reservations),
+    map_step(
+        reserve_inventory,
+        ray_options={"num_cpus": 0.1, "max_retries": 0},
+    ),
+    _showcase_step(join_fulfillment_decision),
+    group(
+        _showcase_step(write_primary_order),
+        _showcase_step(write_audit_record),
+        _showcase_step(send_order_notification),
+    ),
+    _showcase_step(finalize_order_fulfillment),
+)
+
+
+def run_order_fulfillment_showcase_workflow(
+    item_count: int,
+    work_seconds: float,
+    *,
+    failure_stage: str | None = None,
+    failure_item: int | None = None,
+    use_ray: bool | None = None,
+) -> dict[str, Any]:
+    """Run the repeated split/join showcase with full progress reporting."""
+    return order_fulfillment_showcase_workflow.with_progress_reporting("full").run(
+        item_count,
+        work_seconds,
+        failure_stage,
+        failure_item,
+        use_ray=use_ray,
+    )
 
 
 def inspect_runtime_environment(package: str | None = None) -> dict[str, Any]:

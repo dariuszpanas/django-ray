@@ -771,7 +771,7 @@ recovery log: after a cluster loss, the outer task retry remains the recovery bo
 
 ## Test Project Examples
 
-The bundled test project exposes two experiments in its Swagger UI:
+The bundled test project exposes several workflow experiments in its Swagger UI:
 
 ```text
 POST /api/cluster/workflow-benchmark
@@ -782,10 +782,15 @@ POST /api/cluster/complex-workflow?failure_branch=slow&failure_item=0
 POST /api/cluster/complex-workflow?reporting_policy=terminal_only
 GET  /api/cluster/complex-workflow/{task_id}
 
+POST /api/cluster/workflow-showcase
+POST /api/cluster/workflow-showcase?item_count=1&work_seconds=0.01
+GET  /api/cluster/workflow-showcase/{task_id}
+
 GET  /api/cluster/workflows/{task_id}
 GET  /api/cluster/workflows/{task_id}/topology/nodes
 GET  /api/cluster/workflows/{task_id}/topology/edges
 GET  /api/cluster/workflows/{task_id}/nodes
+GET  /api/cluster/workflows/{task_id}/node-detail?node_id={node_id}
 GET  /api/cluster/workflows/{task_id}/nodes/{node_id}
 GET  /api/cluster/workflows/{task_id}/nodes/{node_id}?include_logs=true&tail=200
 ```
@@ -816,6 +821,62 @@ Admin graph against the same bounded publication. Open either terminal
 **Execution graph**, to inspect the dependency order. The failed fixture identifies
 the originating map node and its incoming ancestor path while retaining successful
 sibling context.
+
+### Order-fulfillment showcase
+
+The showcase endpoint is the richer visual example. It builds one order, validates
+each item, joins customer and inventory context, splits reservation from commercial
+analysis, joins the decision, and fans out to primary, audit, and notification sinks
+before finalization. The default three-item invocation retains 25 runtime nodes and
+36 edges while still using one outer `RayTaskExecution`:
+
+```text
+POST /api/cluster/workflow-showcase?item_count=3&work_seconds=0.05
+GET  /api/cluster/workflow-showcase/{task_id}
+```
+
+Open that execution in the Admin to inspect the graph as longest-path layers. Every
+card links to the bounded indexed node-detail reader for the same displayed attempt. The
+endpoint always selects full reporting; it deliberately has no reporting-policy knob.
+Use the existing complex-workflow fixture when comparing full, terminal-only, and
+disabled policy behavior.
+
+The graph renderer is package-owned and extends stock Django Admin with scoped
+fallback styles; Unfold remains an optional testproject-only shell rather than a
+renderer dependency.
+
+The guarded local KubeRay gate uses the smaller deterministic success:
+
+```text
+POST /api/cluster/workflow-showcase?item_count=1&work_seconds=0.01
+```
+
+That run must publish exactly 21 runtime nodes, 28 dependency edges, 12 derived
+longest-path layers, 21 usable detail targets, and one durable attempt. The matching
+failure fixture is:
+
+```text
+POST /api/cluster/workflow-showcase?item_count=1&work_seconds=0.01&failure_stage=reserve_inventory&failure_item=0
+```
+
+It fails only reservation leaf `0.5.m0`. The fulfillment decision, three sinks, and
+finalizer remain pending. Commercial analysis joins reservation preparation first, so
+its price, risk, recommendation, and join nodes are structurally guaranteed to have
+succeeded before the selected reservation fails. This makes the Admin failure path
+useful without fabricating independent durable retries for Ray-native leaves.
+
+To keep that successful visual workload moving slowly through a local dashboard, name
+its opt-in Locust class explicitly:
+
+```bash
+export DJANGO_API_TOKEN="<local testproject token>"
+uv run locust -f locustfile.py --host=http://localhost:30080 \
+  --headless -u 1 -r 1 -t 5m WorkflowShowcaseUser
+```
+
+`WorkflowShowcaseUser` is excluded from default class discovery, fixes the population
+at one user, requires each three-item success and complete 25-node/36-edge publication
+before submitting the next, and never injects the expected failure fixture.
 
 Omitting `reporting_policy` preserves the existing full-reporting fixture. Set
 `reporting_policy=terminal_only` to exercise the actor-free summary path with a small

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import copy
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,6 +97,7 @@ def test_broad_capacity_mix_is_rejected_before_spawning() -> None:
         locustfile.DistributedComputingUser,
         locustfile.StressTestUser,
         locustfile.SustainedLoadUser,
+        locustfile.WorkflowShowcaseUser,
     ],
 )
 def test_capacity_user_class_can_run_when_selected_alone(
@@ -107,6 +112,193 @@ def test_capacity_user_class_can_run_when_selected_alone(
 
     assert environment.process_exit_code is None
     assert user_class.weight > 0
+
+
+def test_workflow_showcase_user_is_explicit_only_and_resource_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        locustfile.sys,
+        "argv",
+        ["locust", "-f", "locustfile.py", "WorkflowShowcaseUser"],
+    )
+    user = object.__new__(locustfile.WorkflowShowcaseUser)
+
+    waits = [locustfile.WorkflowShowcaseUser.wait_time(user) for _ in range(25)]
+
+    assert locustfile.WorkflowShowcaseUser.abstract is True
+    assert locustfile._explicit_user_selected("WorkflowShowcaseUser") is True
+    assert locustfile.WorkflowShowcaseUser.fixed_count == 1
+    assert all(8 <= wait <= 12 for wait in waits)
+
+
+@pytest.mark.parametrize(
+    ("selected_class", "expected_visible"),
+    [
+        (None, False),
+        ("WorkflowShowcaseUser", True),
+    ],
+)
+def test_workflow_showcase_user_import_time_discovery(
+    selected_class: str | None,
+    expected_visible: bool,
+) -> None:
+    command = [
+        sys.executable,
+        "-m",
+        "locust",
+        "-f",
+        str(ROOT / "locustfile.py"),
+        "--list",
+    ]
+    if selected_class is not None:
+        command.append(selected_class)
+    environment = dict(os.environ)
+    environment["LOCUST_SKIP_MONKEY_PATCH"] = "1"
+
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert ("WorkflowShowcaseUser" in result.stdout) is expected_visible
+
+
+def _workflow_showcase_result_payload(task_id: str) -> dict[str, Any]:
+    run_identity = {
+        "schema_version": 1,
+        "run_id": "00000000-0000-0000-0000-000000000250",
+        "attempt_number": 1,
+        "execution_generation": 1,
+    }
+    publication = {
+        "summary_revision": 9,
+        "topology_version": 8,
+        "detail_revision": 7,
+    }
+    return {
+        "task_id": task_id,
+        "state": "SUCCEEDED",
+        "error": None,
+        "result": locustfile._WORKFLOW_SHOWCASE_EXPECTED_RESULT,
+        "progress": {
+            "schema": "django-ray.workflow-progress-summary",
+            "schema_version": 1,
+            "task_id": task_id,
+            "availability": "AVAILABLE",
+            "complete": True,
+            "source_schema_version": 3,
+            "run_identity": dict(run_identity),
+            "publication": dict(publication),
+            "summary": {
+                **publication,
+                "run_identity": dict(run_identity),
+                "reporting_policy": "full",
+                "state": "SUCCEEDED",
+                "node_counts": {
+                    "discovered": 25,
+                    "retained_topology": 25,
+                    "retained_detail": 25,
+                    "pending": 0,
+                    "running": 0,
+                    "succeeded": 25,
+                    "failed": 0,
+                },
+                "edge_counts": {
+                    "discovered": 36,
+                    "retained_topology": 36,
+                },
+                "detail": {
+                    "availability": "AVAILABLE",
+                    "complete": True,
+                },
+            },
+        },
+    }
+
+
+def test_workflow_showcase_user_runs_one_success_at_a_time() -> None:
+    user = object.__new__(locustfile.WorkflowShowcaseUser)
+    user.environment = SimpleNamespace(process_exit_code=None)
+    observed: list[tuple[str, object]] = []
+
+    def enqueue(*, item_count: int, work_seconds: float) -> dict[str, str]:
+        observed.append(("enqueue", (item_count, work_seconds)))
+        return {"task_id": "showcase-task-id"}
+
+    def poll(
+        task_id: str,
+        *,
+        timeout_seconds: float,
+        scenario_name: str,
+    ) -> dict[str, str]:
+        observed.append(("poll", (task_id, timeout_seconds, scenario_name)))
+        return {"status": "SUCCEEDED"}
+
+    def result(task_id: str) -> dict[str, object]:
+        observed.append(("result", task_id))
+        return _workflow_showcase_result_payload(task_id)
+
+    user.workflow_showcase = enqueue
+    user._poll_task_to_terminal = poll
+    user.workflow_showcase_result = result
+
+    user.run_workflow_showcase()
+
+    assert observed == [
+        ("enqueue", (3, 0.05)),
+        ("poll", ("showcase-task-id", 120.0, "workflow showcase")),
+        ("result", "showcase-task-id"),
+    ]
+    assert user.environment.process_exit_code is None
+
+
+def test_workflow_showcase_user_rejects_missing_graph_publication() -> None:
+    data = _workflow_showcase_result_payload("showcase-task-id")
+    data["progress"] = None
+
+    assert (
+        locustfile._workflow_showcase_result_matches(
+            data,
+            task_id="showcase-task-id",
+        )
+        is False
+    )
+
+
+def test_workflow_showcase_user_rejects_partial_or_mismatched_publication() -> None:
+    corruptions: tuple[Callable[[dict[str, Any]], None], ...] = (
+        lambda data: data.__setitem__("task_id", "different-task-id"),
+        lambda data: data["progress"]["summary"]["node_counts"].__setitem__(
+            "retained_topology", 24
+        ),
+        lambda data: data["progress"]["summary"]["node_counts"].__setitem__("retained_detail", 24),
+        lambda data: data["progress"]["summary"]["node_counts"].__setitem__("succeeded", 24),
+        lambda data: data["progress"]["summary"]["edge_counts"].__setitem__(
+            "retained_topology", 35
+        ),
+        lambda data: data["progress"]["summary"]["run_identity"].__setitem__(
+            "run_id", "different-run-id"
+        ),
+        lambda data: data["progress"]["summary"].__setitem__("detail_revision", 6),
+    )
+
+    for corrupt in corruptions:
+        data = copy.deepcopy(_workflow_showcase_result_payload("showcase-task-id"))
+        corrupt(data)
+        assert (
+            locustfile._workflow_showcase_result_matches(
+                data,
+                task_id="showcase-task-id",
+            )
+            is False
+        )
 
 
 def test_observability_demo_uses_low_resource_pacing() -> None:

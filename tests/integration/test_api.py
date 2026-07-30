@@ -581,6 +581,67 @@ class TestEnqueueAPI:
         assert response.status_code == 422
         assert RayTaskExecution.objects.count() == 0
 
+    def test_enqueue_workflow_showcase_creates_one_durable_task(self, client):
+        response = client.post("/api/cluster/workflow-showcase?item_count=3&work_seconds=0.05")
+
+        assert response.status_code == 200
+        data = response.json()
+        expected_kwargs = {
+            "item_count": 3,
+            "work_seconds": 0.05,
+        }
+        assert data["kwargs"] == expected_kwargs
+        execution = RayTaskExecution.objects.get(task_id=data["task_id"])
+        assert execution.callable_path == (
+            "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task"
+        )
+        assert json.loads(execution.kwargs_json) == expected_kwargs
+        assert RayTaskExecution.objects.count() == 1
+
+    def test_enqueue_workflow_showcase_accepts_reservation_failure(self, client):
+        response = client.post(
+            "/api/cluster/workflow-showcase"
+            "?item_count=3&work_seconds=0.05"
+            "&failure_stage=reserve_inventory&failure_item=1"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        expected_kwargs = {
+            "item_count": 3,
+            "work_seconds": 0.05,
+            "failure_stage": "reserve_inventory",
+            "failure_item": 1,
+        }
+        assert data["kwargs"] == expected_kwargs
+        execution = RayTaskExecution.objects.get(task_id=data["task_id"])
+        assert json.loads(execution.kwargs_json) == expected_kwargs
+        assert execution.attempt_number == 1
+        assert RayTaskExecution.objects.count() == 1
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "item_count=0",
+            "item_count=9",
+            "work_seconds=-0.01",
+            "work_seconds=1.01",
+            "failure_stage=reserve_inventory",
+            "failure_item=0",
+            "failure_stage=other&failure_item=0",
+            "item_count=3&failure_stage=reserve_inventory&failure_item=3",
+        ],
+    )
+    def test_enqueue_workflow_showcase_rejects_invalid_bounds(
+        self,
+        client,
+        query,
+    ):
+        response = client.post(f"/api/cluster/workflow-showcase?{query}")
+
+        assert response.status_code == 422
+        assert RayTaskExecution.objects.count() == 0
+
     def test_enqueue_runtime_env_benchmark_creates_one_durable_task(self, client):
         response = client.post(
             "/api/cluster/runtime-env/benchmark?profile=numpy-2-3&package=numpy&repeats=3"
@@ -642,6 +703,69 @@ class TestTasksAPI:
         assert data["result"]["effective_parallelism"] == 3.5
         assert data["progress"]["completed_nodes"] == 7
         assert data["progress"]["progress_percent"] == 100.0
+
+    def test_get_workflow_showcase_result(self, client):
+        result = {
+            "engine": "django-ray-workflow",
+            "workflow": "order-fulfillment-showcase",
+            "durability_boundary": "single RayTaskExecution",
+            "order_id": "showcase-order-0001",
+            "status": "FULFILLED",
+            "item_count": 1,
+            "reserved_units": 1,
+            "currency": "USD",
+            "total_cents": 1_000,
+            "risk": "LOW",
+            "recommendation": "PRIORITY_FULFILLMENT",
+            "decision": "APPROVED",
+            "sinks": {
+                "primary": "WRITTEN",
+                "audit": "WRITTEN",
+                "notification": "SENT",
+            },
+        }
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-showcase-result-001",
+            callable_path=("testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task"),
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            result_data=json.dumps(result),
+        )
+
+        response = client.get(f"/api/cluster/workflow-showcase/{execution.task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == TaskState.SUCCEEDED
+        assert data["result"] == result
+        assert data["error"] is None
+        assert data["progress"]["schema"] == "django-ray.workflow-progress-summary"
+        assert data["progress"]["availability"] == "NOT_REPORTED"
+        assert data["progress"]["complete"] is False
+        assert data["progress"]["source_schema_version"] is None
+        assert data["progress"]["summary"] is None
+
+    def test_get_workflow_showcase_failure(self, client):
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-showcase-result-002",
+            callable_path=("testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task"),
+            queue_name="default",
+            state=TaskState.FAILED,
+            error_message=("Intentional workflow showcase reserve_inventory failure at item 0"),
+        )
+
+        response = client.get(f"/api/cluster/workflow-showcase/{execution.task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == TaskState.FAILED
+        assert data["result"] is None
+        assert data["error"] == (
+            "Intentional workflow showcase reserve_inventory failure at item 0"
+        )
+        assert data["progress"]["schema"] == "django-ray.workflow-progress-summary"
+        assert data["progress"]["availability"] == "NOT_REPORTED"
+        assert data["progress"]["complete"] is False
 
     def test_get_runtime_env_result_includes_environment_identity(self, client):
         execution = RayTaskExecution.objects.create(

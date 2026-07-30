@@ -19,7 +19,9 @@ from uuid import UUID
 
 _MAX_RESPONSE_BYTES = 1_048_576
 _REQUEST_TIMEOUT_SECONDS = 5.0
-_WORKFLOW_PAGE_LIMIT = 16
+# One complete smoke page covers the 25-node/36-edge showcase while
+# remaining below the Admin graph's package-enforced limits.
+_WORKFLOW_PAGE_LIMIT = 64
 _WORKFLOW_GRAPH_LIMITS = {
     "nodes": 100,
     "edges": 256,
@@ -778,13 +780,13 @@ def _workflow_admin_graph_evidence(
     elif execution_state == "FAILED":
         if (
             len(origins) != 1
-            or not (succeeded - observed_failure_path)
+            or not (succeeded & observed_failure_path)
             or not observed_failure_path
             or incoming_failure_edges < 1
         ):
             raise DockerSmokeError(
                 "failed admin workflow graph lacked one incoming failed path "
-                "and successful sibling context"
+                "and successful ancestor context"
             )
     else:
         raise DockerSmokeError("admin workflow graph execution was not terminal")

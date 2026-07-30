@@ -19,6 +19,11 @@ Usage:
     # Run the same one-user scenario with the web UI on http://localhost:8089.
     locust -f locustfile.py --host=http://localhost:30080 ObservabilityDemoUser
 
+    # Run only the bounded order-fulfillment workflow showcase. This class is
+    # intentionally absent from default Locust discovery unless named here.
+    locust -f locustfile.py --host=http://localhost:30080 \
+        --headless -u 1 -r 1 -t 5m WorkflowShowcaseUser
+
 Scenarios:
     - BasicTaskUser: Submits quick add_numbers/multiply tasks
     - SyncTaskUser: Uses sync mode tasks (simple calculations)
@@ -30,6 +35,7 @@ Scenarios:
     - StressTestUser: Pushes system to limits
     - MonitoringUser: Monitors task statistics and health
     - ObservabilityDemoUser: Rotates through lightweight task families one at a time
+    - WorkflowShowcaseUser: Runs one bounded successful workflow showcase at a time
 
 Metrics to watch:
     - Response time for task creation (should be fast, just DB insert)
@@ -40,6 +46,7 @@ Metrics to watch:
 
 import os
 import random
+import sys
 import time
 from typing import Any, Literal
 
@@ -60,12 +67,32 @@ _WORKFLOW_POLICY_DETAIL_EXPECTATIONS: dict[
     "terminal_only": ("OMITTED_BY_POLICY", False),
     "disabled": ("DISABLED", False),
 }
+_WORKFLOW_SHOWCASE_EXPECTED_RESULT = {
+    "engine": "django-ray-workflow",
+    "workflow": "order-fulfillment-showcase",
+    "durability_boundary": "single RayTaskExecution",
+    "order_id": "showcase-order-0001",
+    "status": "FULFILLED",
+    "item_count": 3,
+    "reserved_units": 4,
+    "currency": "USD",
+    "total_cents": 4_400,
+    "risk": "LOW",
+    "recommendation": "PRIORITY_FULFILLMENT",
+    "decision": "APPROVED",
+    "sinks": {
+        "primary": "WRITTEN",
+        "audit": "WRITTEN",
+        "notification": "SENT",
+    },
+}
 _EXPLICIT_ONLY_USER_CLASSES = frozenset(
     {
         "BurstTaskUser",
         "DistributedComputingUser",
         "StressTestUser",
         "SustainedLoadUser",
+        "WorkflowShowcaseUser",
     }
 )
 
@@ -81,6 +108,12 @@ def _missing_api_token_error() -> RuntimeError:
     return RuntimeError(
         "DJANGO_API_TOKEN must be set before running Locust against protected task routes"
     )
+
+
+def _explicit_user_selected(class_name: str) -> bool:
+    """Return whether Locust was invoked with one exact user class name."""
+
+    return any(argument == class_name for argument in sys.argv[1:])
 
 
 def _workflow_policy_summary_matches(
@@ -110,6 +143,65 @@ def _workflow_policy_summary_matches(
         and isinstance(detail, dict)
         and detail.get("availability") == expected_availability
         and detail.get("complete") is expected_complete
+    )
+
+
+def _workflow_showcase_result_matches(
+    data: dict[str, Any],
+    *,
+    task_id: str,
+) -> bool:
+    """Require both the compact result and its complete bounded publication."""
+    progress = data.get("progress")
+    summary = progress.get("summary") if isinstance(progress, dict) else None
+    node_counts = summary.get("node_counts") if isinstance(summary, dict) else None
+    edge_counts = summary.get("edge_counts") if isinstance(summary, dict) else None
+    run_identity = progress.get("run_identity") if isinstance(progress, dict) else None
+    publication = progress.get("publication") if isinstance(progress, dict) else None
+    identity_matches = (
+        isinstance(run_identity, dict)
+        and run_identity.get("schema_version") == 1
+        and run_identity.get("attempt_number") == 1
+        and type(run_identity.get("execution_generation")) is int
+        and run_identity["execution_generation"] >= 1
+        and isinstance(run_identity.get("run_id"), str)
+        and bool(run_identity["run_id"])
+        and isinstance(summary, dict)
+        and summary.get("run_identity") == run_identity
+    )
+    publication_matches = isinstance(publication, dict) and all(
+        type(publication.get(field_name)) is int
+        and publication[field_name] >= 1
+        and isinstance(summary, dict)
+        and summary.get(field_name) == publication[field_name]
+        for field_name in ("summary_revision", "topology_version", "detail_revision")
+    )
+    return (
+        data.get("task_id") == task_id
+        and data.get("state") == "SUCCEEDED"
+        and data.get("error") is None
+        and data.get("result") == _WORKFLOW_SHOWCASE_EXPECTED_RESULT
+        and isinstance(progress, dict)
+        and progress.get("schema") == "django-ray.workflow-progress-summary"
+        and progress.get("schema_version") == 1
+        and identity_matches
+        and publication_matches
+        and _workflow_policy_summary_matches(
+            progress,
+            task_id=task_id,
+            expected_policy="full",
+        )
+        and isinstance(node_counts, dict)
+        and node_counts.get("discovered") == 25
+        and node_counts.get("retained_topology") == 25
+        and node_counts.get("retained_detail") == 25
+        and node_counts.get("pending") == 0
+        and node_counts.get("running") == 0
+        and node_counts.get("succeeded") == 25
+        and node_counts.get("failed") == 0
+        and isinstance(edge_counts, dict)
+        and edge_counts.get("discovered") == 36
+        and edge_counts.get("retained_topology") == 36
     )
 
 
@@ -438,6 +530,25 @@ class TaskCreationMixin:
         return self._get(
             f"/api/cluster/complex-workflow/{task_id}",
             "/api/cluster/complex-workflow/[task_id]",
+        )
+
+    def workflow_showcase(
+        self,
+        *,
+        item_count: int,
+        work_seconds: float,
+    ) -> dict[str, Any] | None:
+        """Enqueue the successful order-fulfillment workflow showcase."""
+        return self._post_task(
+            f"/api/cluster/workflow-showcase?item_count={item_count}&work_seconds={work_seconds:g}",
+            "/api/cluster/workflow-showcase",
+        )
+
+    def workflow_showcase_result(self, task_id: str) -> dict[str, Any] | None:
+        """Read the terminal showcase result and its bounded progress summary."""
+        return self._get(
+            f"/api/cluster/workflow-showcase/{task_id}",
+            "/api/cluster/workflow-showcase/[task_id]",
         )
 
     def workflow_policy_summary(
@@ -930,6 +1041,46 @@ class ObservabilityDemoUser(AuthenticatedTaskUser):
     def show_monitoring(self) -> None:
         self._get_stats()
         self._get_metrics()
+
+
+class WorkflowShowcaseUser(AuthenticatedTaskUser):
+    """Run one bounded successful workflow showcase at a deliberately low rate."""
+
+    # Locust filters abstract users during module loading, before applying the
+    # positional class selector. Keeping this conditional makes the showcase
+    # opt-in while preserving normal ``... WorkflowShowcaseUser`` selection.
+    abstract = not _explicit_user_selected("WorkflowShowcaseUser")
+    fixed_count = 1
+    wait_time = between(8, 12)
+
+    @task
+    def run_workflow_showcase(self) -> None:
+        """Submit, await, and verify one three-item success before repeating."""
+        enqueued = self.workflow_showcase(item_count=3, work_seconds=0.05)
+        if enqueued is None:
+            self.environment.process_exit_code = 1
+            raise StopTest("workflow showcase could not be enqueued")
+
+        task_id = enqueued["task_id"]
+        terminal = self._poll_task_to_terminal(
+            task_id,
+            timeout_seconds=120.0,
+            scenario_name="workflow showcase",
+        )
+        terminal_status = (
+            str(terminal.get("status", "")).upper() if isinstance(terminal, dict) else ""
+        )
+        if terminal_status not in _TERMINAL_SUCCESS_STATES:
+            self.environment.process_exit_code = 1
+            raise StopTest("workflow showcase did not reach a successful terminal state")
+
+        detail = self.workflow_showcase_result(task_id)
+        if not isinstance(detail, dict) or not _workflow_showcase_result_matches(
+            detail,
+            task_id=task_id,
+        ):
+            self.environment.process_exit_code = 1
+            raise StopTest("workflow showcase result or bounded graph publication was incomplete")
 
 
 class MLPipelineUser(AuthenticatedTaskUser):

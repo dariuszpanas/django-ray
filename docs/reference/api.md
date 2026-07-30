@@ -42,6 +42,8 @@ If you need a REST API for task management in your project, you can use the test
 | `POST /api/executions/{id}/cancel` | Cancel or request cancellation for an execution |
 | `POST /api/executions/{id}/retry` | Retry failed, cancelled, or lost execution |
 | `POST /api/executions/reset` | Retry matching `FAILED`, `CANCELLED`, or `LOST` executions |
+| `POST /api/cluster/workflow-showcase` | Enqueue the bounded full-reporting order-fulfillment showcase |
+| `GET /api/cluster/workflow-showcase/{task_id}` | Poll its bounded summary and compact result or failure |
 | `GET /api/cluster/workflows/{task_id}` | Get the bounded compatible workflow summary |
 | `GET /api/cluster/workflows/{task_id}/topology/nodes` | Page through immutable topology nodes |
 | `GET /api/cluster/workflows/{task_id}/topology/edges` | Page through immutable topology edges |

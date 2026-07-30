@@ -74,8 +74,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   100 details, and 128 KiB, pins node links to the displayed attempt, and highlights
   failure origins with their incoming ancestor paths. Raw result, callable, argument,
   RuntimeEnv, execution, metric, event, and plan data never enter the graph response.
+  The package renderer extends stock Django Admin with scoped fallback styles and does
+  not depend on the testproject-only Unfold shell.
   The guarded KubeRay gate proves successful and deterministic first-attempt failed
   workflows through the schema-v3 readers and authenticated admin projection.
+- A realistic testproject order-fulfillment workflow showcase now exercises repeated
+  split/join stages, dynamic item validation and reservation, commercial sibling work,
+  and three fulfillment sinks before finalization inside one durable execution. The
+  Admin presents its graph
+  in derived longest-path layers with per-node detail links. An explicitly selected,
+  one-user Locust scenario submits successful three-item runs sequentially, while the
+  guarded local KubeRay gate proves a 21-node, 28-edge, 12-layer one-item success and a
+  deterministic single reservation failure with useful successful-ancestor context
+  and pending descendants.
 - Ray-native workflows can keep the default full node-progress reporting, select
   terminal-only reporting, or disable progress globally and per invocation.
   Terminal-only runs create no progress actor, node/application-progress RPC, legacy
