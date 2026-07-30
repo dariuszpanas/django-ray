@@ -72,6 +72,59 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
     assert 'html[data-theme="auto"]' in stylesheet
     assert "@media (prefers-color-scheme: dark)" in stylesheet
     assert "@media (max-width: 640px)" in stylesheet
+    assert "--django-ray-live-action-bg: #e0f2fe;" in stylesheet
+    assert "--django-ray-live-action-fg: #075985;" in stylesheet
+    assert "--django-ray-live-action-hover-fg: #0c4a6e;" in stylesheet
+    assert "--django-ray-live-state-neutral-fg: inherit;" in stylesheet
+    assert "--django-ray-live-status-error-bg: #fef2f2;" in stylesheet
+    assert "--django-ray-live-status-error-border: #ef4444;" in stylesheet
+    assert "--django-ray-live-workflow-body-bg: transparent;" in stylesheet
+    for neutral_dark_token in (
+        "--django-ray-live-bg: #16171a;",
+        "--django-ray-live-header-bg: #0b0c0f;",
+        "--django-ray-live-surface-bg: #212226;",
+        "--django-ray-live-border: #303238;",
+        "--django-ray-live-heading: #f4f4f5;",
+        "--django-ray-live-muted: #a1a1aa;",
+        "--django-ray-live-accent: #38bdf8;",
+    ):
+        assert neutral_dark_token in stylesheet
+    assert "background: #0c4a6e;" not in stylesheet
+    assert "background: #075985;" not in stylesheet
+
+    summary_arrow_rule = re.search(
+        r"\.django-ray-workflow__summary-arrow\s*\{(?P<body>[^}]*)\}",
+        stylesheet,
+    )
+    assert summary_arrow_rule is not None
+    assert "color: var(--django-ray-live-accent-strong);" in summary_arrow_rule.group("body")
+
+    action_hover_rule = re.search(
+        r":is\(\s*\.django-ray-workflow__actions a,\s*"
+        r"\.django-ray-workflow__copy\s*\):hover\s*\{(?P<body>[^}]*)\}",
+        stylesheet,
+    )
+    assert action_hover_rule is not None
+    assert "color: var(--django-ray-live-action-hover-fg);" in action_hover_rule.group("body")
+
+    explicit_dark_rule = re.search(
+        r":is\(html\.dark, html\[data-theme=\"dark\"\]\) "
+        r"#django-ray-live-observability\s*\{(?P<body>[^}]*)\}",
+        stylesheet,
+    )
+    auto_dark_rule = re.search(
+        r"@media \(prefers-color-scheme: dark\)\s*\{\s*"
+        r"html\[data-theme=\"auto\"\] #django-ray-live-observability\s*"
+        r"\{(?P<body>[^}]*)\}",
+        stylesheet,
+    )
+    assert explicit_dark_rule is not None
+    assert auto_dark_rule is not None
+    variable_pattern = r"(--django-ray-live-[\w-]+):\s*([^;]+);"
+    explicit_dark_variables = dict(re.findall(variable_pattern, explicit_dark_rule.group("body")))
+    auto_dark_variables = dict(re.findall(variable_pattern, auto_dark_rule.group("body")))
+    assert len(explicit_dark_variables) >= 40
+    assert auto_dark_variables == explicit_dark_variables
 
     script = expected_assets[2].read_text(encoding="utf-8")
     assert "setTimeout(refresh, 3000)" in script

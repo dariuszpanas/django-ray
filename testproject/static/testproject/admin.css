@@ -2,6 +2,29 @@
   --django-ray-admin-bg: #f7fafc;
   --django-ray-admin-brand: #111827;
   --django-ray-admin-accent: #38bdf8;
+  --django-ray-admin-accent-strong: #0369a1;
+  --django-ray-admin-dark-canvas: #0b0c0f;
+  --django-ray-admin-dark-surface: #16171a;
+  --django-ray-admin-dark-surface-raised: #212226;
+  --django-ray-admin-dark-border: #303238;
+  --django-ray-admin-dark-text: #f4f4f5;
+  --django-ray-admin-dark-muted: #a1a1aa;
+}
+
+html.dark {
+  --color-base-50: #fafafa;
+  --color-base-100: #f4f4f5;
+  --color-base-200: #e4e4e7;
+  --color-base-300: #d4d4d8;
+  --color-base-400: #a1a1aa;
+  --color-base-500: #71717a;
+  --color-base-600: #52525b;
+  --color-base-700: var(--django-ray-admin-dark-border);
+  --color-base-800: var(--django-ray-admin-dark-surface-raised);
+  --color-base-900: var(--django-ray-admin-dark-surface);
+  --color-base-950: var(--django-ray-admin-dark-canvas);
+  --color-primary-500: var(--django-ray-admin-accent);
+  --color-primary-600: var(--django-ray-admin-accent-strong);
 }
 
 html:not(.dark) body.login #page {
@@ -11,9 +34,7 @@ html:not(.dark) body.login #page {
 }
 
 html.dark body.login #page {
-  background:
-    radial-gradient(circle at 12% 8%, rgb(56 189 248 / 8%), transparent 28%),
-    linear-gradient(180deg, #0f172a, #020617 42%);
+  background: var(--django-ray-admin-dark-canvas);
 }
 
 body.login #page > div:last-child {
@@ -25,8 +46,8 @@ body.login #page > div:last-child {
 }
 
 html.dark body.login #page > div:last-child {
-  background-color: #0f172a;
-  border-left-color: #1e293b;
+  background-color: var(--django-ray-admin-dark-surface);
+  border-left-color: var(--django-ray-admin-dark-border);
 }
 
 body.login h1::before {
@@ -46,12 +67,37 @@ html:not(.dark) body:not(.login) #main {
 }
 
 html.dark body:not(.login) #main {
-  background:
-    radial-gradient(circle at 88% 4%, rgb(56 189 248 / 7%), transparent 22%),
-    linear-gradient(180deg, #0f172a, #020617 34%);
+  background: var(--django-ray-admin-dark-canvas);
+}
+
+html.dark #changelist-actions > div {
+  background-color: var(--django-ray-admin-dark-surface-raised);
+  border: 1px solid var(--django-ray-admin-dark-border);
+  color: var(--django-ray-admin-dark-text);
+}
+
+html.dark #changelist-actions button[name="index"] {
+  background-color: var(--django-ray-admin-accent-strong);
+}
+
+html.dark #nav-sidebar-inner a.active {
+  background-color: var(--django-ray-admin-dark-surface-raised);
+  box-shadow: inset 2px 0 var(--django-ray-admin-accent);
+}
+
+html.dark :focus-visible {
+  outline-color: var(--django-ray-admin-accent);
 }
 
 #nav-sidebar img[alt="Home"] {
   border-radius: 10px;
   box-shadow: 0 8px 18px rgb(15 23 42 / 18%);
+}
+
+html.dark body.login h1::before {
+  filter: drop-shadow(0 10px 20px rgb(0 0 0 / 35%));
+}
+
+html.dark #nav-sidebar img[alt="Home"] {
+  box-shadow: 0 8px 18px rgb(0 0 0 / 35%);
 }

@@ -220,7 +220,10 @@ docker compose exec web python testproject/manage.py createsuperuser
 
 Open the [django-ray administration](http://127.0.0.1:8000/admin/) and sign in. The bundled
 testproject pins [Django Unfold](https://unfoldadmin.com/) for a modern admin shell branded with the
-documentation icon and type treatment plus the landing page's sky/slate palette and graph artwork.
+documentation icon and type treatment plus the landing page's graph artwork. Its light appearance
+keeps the established sky-on-white treatment. The optional dark appearance shares the
+documentation's near-black and neutral-grey surfaces, with django-ray sky blue reserved for links,
+focus rings, active navigation, and compact primary controls instead of broad background washes.
 Open
 [Ray task executions](http://127.0.0.1:8000/admin/django_ray/raytaskexecution/) and inspect the
 completed `add_numbers` record. The task ID should match the API response, its state should be
