@@ -283,6 +283,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workflows under full, terminal-only, and disabled reporting. Stable per-policy
   request labels separate enqueue, terminal polling, and bounded-summary reads, and
   the demo stops when a durable policy contract is missing or malformed.
+- The Celery migration guide now treats Django Tasks backends as a simultaneous
+  portfolio. It provides a copyable Celery-default plus django-ray configuration,
+  backend-qualified result tracking, allowlisted per-submission rollout and rollback,
+  durable alias-retention rules, and an explicit application-owned boundary for
+  mixed-backend orchestration without presenting django-ray workflows as a generic
+  cross-backend engine.
 - Documentation now follows the operating system color preference by default and offers explicit
   light, dark, and automatic controls. The existing light presentation keeps a high-contrast blue
   link treatment, while the new dark presentation shares the testproject's neutral black and grey
