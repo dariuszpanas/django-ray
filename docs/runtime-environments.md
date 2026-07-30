@@ -180,6 +180,18 @@ The backend resolves the profile during enqueue and stores its canonical JSON an
 SHA-256 identity on `RayTaskExecution`. Retries use that immutable snapshot even
 if Django settings change after enqueue.
 
+New writes pass through one storage boundary. Before Sync, Ray Core, or Ray Job
+execution, django-ray requires every identified snapshot to contain canonical mapping
+JSON and its matching SHA-256 hash. Manual and automatic retries repeat that verification
+while holding the task lifecycle lock, before archiving an attempt or resetting task
+metadata. Missing, malformed, noncanonical, or hash-mismatched snapshots fail permanently
+without reaching Ray; bulk retry operations skip the affected row and continue.
+
+Rows created before the snapshot fields existed have neither a profile nor a hash. That
+exact legacy marker continues to resolve the current configured default because migration
+could not reconstruct the environment used by the original task. Canonical `{}` plus its
+hash is instead a valid identified empty RuntimeEnv.
+
 `RAY_RUNTIME_ENV` remains supported as the unnamed default. A backend may also
 provide an inline `RAY_RUNTIME_ENV`, but it cannot combine that option with
 `RUNTIME_ENV_PROFILE`.
@@ -337,6 +349,12 @@ in plaintext on the task row for exact retry execution and may be available thro
 database access, backups, and the Ray runtime. The Django admin intentionally omits
 the raw snapshot and shows only its profile and content hash; that presentation
 boundary does not encrypt the stored value.
+
+The hash detects accidental corruption and incomplete lifecycle state; it is unkeyed and
+does not protect against a database writer that can replace both the snapshot and hash.
+Application-layer encryption and key rotation are a separate opt-in delivery. Until then,
+database access, dumps, and backups must be treated as able to reveal the plaintext
+RuntimeEnv.
 
 RuntimeEnv is packaging and dependency isolation, not a security boundary. Use
 separate Ray clusters for mutually untrusted teams or workloads.

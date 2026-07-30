@@ -16,6 +16,10 @@ from django_ray.runner.ray_core import (
     RayCoreRunner,
     _compiled_graph_submission_transport,
 )
+from django_ray.runtime.runtime_env import (
+    RuntimeEnvSnapshotError,
+    normalize_runtime_env,
+)
 
 
 class _FakeObjectRef:
@@ -393,12 +397,16 @@ class TestRayCoreRunnerRuntime:
         )
 
         runner = RayCoreRunner()
+        runtime_env = normalize_runtime_env(
+            {"env_vars": {"MODE": "thin"}},
+            profile="thin",
+        )
         runner.submit(
             task_execution=_task_execution(
                 12,
-                runtime_env_profile="thin",
-                runtime_env_json='{"env_vars":{"MODE":"thin"}}',
-                runtime_env_hash="",
+                runtime_env_profile=runtime_env.profile,
+                runtime_env_json=runtime_env.serialized,
+                runtime_env_hash=runtime_env.digest,
             ),
             callable_path="testproject.tasks.echo_task",
             args=("hello",),
@@ -406,6 +414,31 @@ class TestRayCoreRunnerRuntime:
         )
 
         assert fake.remote_calls[-1]["runtime_env"] == {"env_vars": {"MODE": "thin"}}
+
+    def test_submit_rejects_corrupt_runtime_env_before_remote_call(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        runtime_env = normalize_runtime_env(
+            {"env_vars": {"VALUE": "arbitrary-customer-marker-7cf3"}},
+            profile="thin",
+        )
+
+        with pytest.raises(RuntimeEnvSnapshotError, match="hash does not match") as exc_info:
+            runner.submit(
+                task_execution=_task_execution(
+                    13,
+                    runtime_env_profile=runtime_env.profile,
+                    runtime_env_json=runtime_env.serialized,
+                    runtime_env_hash="0" * 64,
+                ),
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+
+        assert runner.pending_count == 0
+        assert fake.remote_calls == []
+        assert "arbitrary-customer-marker-7cf3" not in str(exc_info.value)
 
     def test_submit_normalizes_ray_job_id_to_hex(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)

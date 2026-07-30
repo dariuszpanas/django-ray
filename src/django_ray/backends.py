@@ -48,7 +48,10 @@ from django_ray.input_storage import (
 )
 from django_ray.logging import get_backend_logger
 from django_ray.models import RayTaskExecution, TaskState
-from django_ray.runtime.runtime_env import resolve_runtime_env_profile
+from django_ray.runtime.runtime_env import (
+    resolve_runtime_env_profile,
+    runtime_env_for_storage,
+)
 
 if TYPE_CHECKING:
     from django.tasks.base import Task
@@ -154,11 +157,12 @@ class RayTaskBackend(BaseTaskBackend):
         # Get the callable path for the task function
         callable_path = task.module_path
 
-        prepared_input = prepare_task_input(list(args), kwargs)
         runtime_env = resolve_runtime_env_profile(
             self.runtime_env_profile,
             inline_spec=self.inline_runtime_env,
         )
+        stored_runtime_env = runtime_env_for_storage(runtime_env)
+        prepared_input = prepare_task_input(list(args), kwargs)
 
         # Create the task execution record
         now = datetime.now(UTC)
@@ -175,9 +179,9 @@ class RayTaskBackend(BaseTaskBackend):
                 input_reference=prepared_input.input_reference,
                 run_after=task.run_after,
                 ray_target_address=self.ray_target_address,
-                runtime_env_profile=runtime_env.profile,
-                runtime_env_json=runtime_env.serialized,
-                runtime_env_hash=runtime_env.digest,
+                runtime_env_profile=stored_runtime_env.profile,
+                runtime_env_json=stored_runtime_env.serialized,
+                runtime_env_hash=stored_runtime_env.digest,
                 timeout_seconds=self.timeout_seconds,
                 created_at=now,
             )
@@ -214,7 +218,7 @@ class RayTaskBackend(BaseTaskBackend):
             TaskResultDoesNotExist: If no task with the given ID exists
         """
         try:
-            execution = RayTaskExecution.objects.get(task_id=result_id)
+            execution = RayTaskExecution.objects.defer("runtime_env_json").get(task_id=result_id)
         except RayTaskExecution.DoesNotExist:
             raise TaskResultDoesNotExist(f"Task result {result_id} does not exist") from None
 

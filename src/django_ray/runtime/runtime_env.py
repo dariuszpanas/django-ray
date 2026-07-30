@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -21,7 +22,12 @@ if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
 
 _PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
+_SHA256_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _APPENDABLE_FIELDS = {"excludes", "pip", "py_modules", "uv"}
+
+
+class RuntimeEnvSnapshotError(ImproperlyConfigured):
+    """Raised when a persisted RuntimeEnv snapshot cannot be trusted."""
 
 
 @dataclass(frozen=True)
@@ -30,6 +36,15 @@ class ResolvedRuntimeEnv:
 
     profile: str | None
     spec: dict[str, Any]
+    serialized: str
+    digest: str
+
+
+@dataclass(frozen=True)
+class RuntimeEnvStorageFields:
+    """Versionable model-field values for one resolved RuntimeEnv."""
+
+    profile: str | None
     serialized: str
     digest: str
 
@@ -81,13 +96,14 @@ def normalize_runtime_env(
 
     try:
         serialized = json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    except (TypeError, ValueError) as error:
+        encoded = serialized.encode("utf-8")
+    except (TypeError, ValueError, RecursionError, UnicodeError) as error:
         raise ImproperlyConfigured(
             f"django-ray: {source} must contain only JSON-serializable values: {error}"
         ) from error
 
     normalized = json.loads(serialized)
-    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(encoded).hexdigest()
     return ResolvedRuntimeEnv(
         profile=profile,
         spec=normalized,
@@ -224,36 +240,130 @@ def _merge_runtime_envs(parent: dict[str, Any], child: dict[str, Any]) -> dict[s
     return merged
 
 
+def runtime_env_for_storage(runtime_env: ResolvedRuntimeEnv) -> RuntimeEnvStorageFields:
+    """Verify one resolved RuntimeEnv before persisting its durable snapshot."""
+    if not isinstance(runtime_env, ResolvedRuntimeEnv):
+        raise RuntimeEnvSnapshotError(
+            "django-ray: Resolved RuntimeEnv storage snapshot has an invalid type"
+        )
+    profile = runtime_env.profile
+    if profile is not None and (
+        not isinstance(profile, str) or not _PROFILE_NAME.fullmatch(profile)
+    ):
+        raise RuntimeEnvSnapshotError(
+            "django-ray: Resolved RuntimeEnv storage snapshot has invalid profile metadata"
+        )
+
+    canonical: ResolvedRuntimeEnv | None
+    try:
+        canonical = normalize_runtime_env(
+            runtime_env.spec,
+            profile=profile,
+            source="resolved RuntimeEnv storage snapshot",
+        )
+    except ImproperlyConfigured:
+        canonical = None
+    if canonical is None:
+        raise RuntimeEnvSnapshotError("django-ray: Resolved RuntimeEnv storage snapshot is invalid")
+
+    if (
+        not isinstance(runtime_env.serialized, str)
+        or not isinstance(runtime_env.digest, str)
+        or not _SHA256_DIGEST.fullmatch(runtime_env.digest)
+        or canonical.serialized != runtime_env.serialized
+        or not hmac.compare_digest(canonical.digest, runtime_env.digest)
+    ):
+        raise RuntimeEnvSnapshotError(
+            "django-ray: Resolved RuntimeEnv storage snapshot is inconsistent"
+        )
+    return RuntimeEnvStorageFields(
+        profile=profile,
+        serialized=canonical.serialized,
+        digest=canonical.digest,
+    )
+
+
 def runtime_env_for_execution(task_execution: RayTaskExecution) -> ResolvedRuntimeEnv:
     """Load and verify the immutable RuntimeEnv snapshot on an execution."""
-    profile = getattr(task_execution, "runtime_env_profile", None) or None
+    task_pk = getattr(task_execution, "pk", None)
+    task_label = f" for task {task_pk}" if isinstance(task_pk, int) else ""
+    stored_profile = getattr(task_execution, "runtime_env_profile", None)
+    if stored_profile == "":
+        stored_profile = None
     stored_digest = getattr(task_execution, "runtime_env_hash", "")
+    if stored_digest is None:
+        stored_digest = ""
+    if not isinstance(stored_profile, (str, type(None))) or not isinstance(stored_digest, str):
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} has malformed identity metadata"
+        )
+    profile = stored_profile
     if not stored_digest and profile is None:
         # Migration 0002 backfills pre-0.3 rows with "{}" but cannot reconstruct
         # the RuntimeEnv that would previously have been resolved at submission.
         # No digest/profile is the durable legacy marker; new empty snapshots
         # still carry the SHA-256 digest of their canonical "{}" payload.
-        return resolve_runtime_env_profile()
+        legacy_runtime_env: ResolvedRuntimeEnv | None
+        try:
+            legacy_runtime_env = resolve_runtime_env_profile()
+        except ImproperlyConfigured:
+            legacy_runtime_env = None
+        if legacy_runtime_env is None:
+            raise RuntimeEnvSnapshotError(
+                "django-ray: Legacy RuntimeEnv fallback could not be resolved"
+            )
+        return legacy_runtime_env
+
+    if profile is not None and not _PROFILE_NAME.fullmatch(profile):
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} has malformed profile metadata"
+        )
+    if not _SHA256_DIGEST.fullmatch(stored_digest):
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} has an incomplete identity"
+        )
 
     serialized = getattr(task_execution, "runtime_env_json", None)
-    if not serialized:
-        return normalize_runtime_env({})
+    if not isinstance(serialized, str) or not serialized.strip():
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} is missing"
+        )
 
+    decoded = True
     try:
         spec = json.loads(serialized)
-    except (TypeError, json.JSONDecodeError) as error:
-        raise ImproperlyConfigured(
-            f"django-ray: Task {task_execution.pk} has invalid runtime_env_json"
-        ) from error
+    except (TypeError, ValueError, RecursionError):
+        decoded = False
+        spec = None
+    if not decoded:
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} is malformed"
+        )
+    if not isinstance(spec, dict):
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} is not a mapping"
+        )
 
-    resolved = normalize_runtime_env(
-        spec,
-        profile=profile,
-        source=f"task {task_execution.pk} RuntimeEnv",
-    )
-    if stored_digest and stored_digest != resolved.digest:
-        raise ImproperlyConfigured(
-            f"django-ray: Task {task_execution.pk} RuntimeEnv snapshot hash does not match"
+    resolved: ResolvedRuntimeEnv | None
+    try:
+        resolved = normalize_runtime_env(
+            spec,
+            profile=profile,
+            source=f"persisted RuntimeEnv snapshot{task_label}",
+        )
+    except ImproperlyConfigured:
+        resolved = None
+    if resolved is None:
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} is invalid"
+        )
+    if serialized != resolved.serialized:
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} is not canonical"
+        )
+    if not hmac.compare_digest(stored_digest, resolved.digest):
+        raise RuntimeEnvSnapshotError(
+            f"django-ray: Persisted RuntimeEnv snapshot{task_label} hash does not match"
         )
     return resolved
 
@@ -431,10 +541,13 @@ def _contains_local_code_path(spec: dict[str, Any]) -> bool:
 
 __all__ = [
     "ResolvedRuntimeEnv",
+    "RuntimeEnvSnapshotError",
+    "RuntimeEnvStorageFields",
     "normalize_runtime_env",
     "prepare_runtime_env_for_ray_core",
     "resolve_runtime_env_profile",
     "runtime_env_for_execution",
+    "runtime_env_for_storage",
     "snapshot_local_runtime_env",
     "validate_runtime_env_profiles",
 ]

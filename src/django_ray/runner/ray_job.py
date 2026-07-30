@@ -192,9 +192,8 @@ class RayJobRunner(BaseRunner):
     ) -> SubmissionHandle:
         """Submit a task via Ray Job Submission API."""
         handle = self.submission_handle(task_execution)
-        client = self._get_client(handle.ray_address)
-
         runtime_env = runtime_env_for_execution(task_execution)
+        client = self._get_client(handle.ray_address)
         from django_ray.conf.settings import get_settings
         from django_ray.workflow_plans import runtime_env_plan_identity
 

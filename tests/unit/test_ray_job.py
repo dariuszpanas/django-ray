@@ -23,7 +23,7 @@ from django_ray.runner.ray_job import (
     _find_auto_ray_address,
     _resolve_submission_address,
 )
-from django_ray.runtime.runtime_env import normalize_runtime_env
+from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError, normalize_runtime_env
 from django_ray.workflow_plans import WorkflowPlanMismatchError
 
 
@@ -406,12 +406,16 @@ class TestRayJobRunnerSubmit:
         fake_client = FakeJobClient()
         runner = RayJobRunner()
         monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        runtime_env = normalize_runtime_env(
+            {"env_vars": {"API_TOKEN": "do-not-persist"}},
+            profile="secret-profile",
+        )
         task_execution = SimpleNamespace(
             pk=125,
             task_id="django-task-125",
-            runtime_env_profile="secret-profile",
-            runtime_env_json='{"env_vars":{"API_TOKEN":"do-not-persist"}}',
-            runtime_env_hash="",
+            runtime_env_profile=runtime_env.profile,
+            runtime_env_json=runtime_env.serialized,
+            runtime_env_hash=runtime_env.digest,
             attempt_number=1,
             execution_generation=2,
         )
@@ -431,6 +435,40 @@ class TestRayJobRunnerSubmit:
         assert payload["runtime_env_plan_identity"]["unresolved_paths"] == [
             "spec.env_vars.API_TOKEN.value"
         ]
+
+    def test_submit_rejects_corrupt_runtime_env_before_upload_or_request(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = RayJobRunner()
+        monkeypatch.setattr(
+            runner,
+            "_get_client",
+            lambda _ray_address=None: pytest.fail("Ray Job client was opened"),
+        )
+        runtime_env = normalize_runtime_env(
+            {"env_vars": {"VALUE": "arbitrary-customer-marker-7cf3"}},
+            profile="thin",
+        )
+        task_execution = SimpleNamespace(
+            pk=126,
+            task_id="django-task-126-corrupt",
+            runtime_env_profile=runtime_env.profile,
+            runtime_env_json=runtime_env.serialized,
+            runtime_env_hash="0" * 64,
+            attempt_number=1,
+            execution_generation=2,
+        )
+
+        with pytest.raises(RuntimeEnvSnapshotError, match="hash does not match") as exc_info:
+            runner.submit(
+                task_execution=task_execution,
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+
+        assert "arbitrary-customer-marker-7cf3" not in str(exc_info.value)
 
     def test_submit_keeps_large_runtime_env_identity_out_of_entrypoint(self, monkeypatch) -> None:
         fake_client = FakeJobClient()
@@ -592,13 +630,17 @@ class TestRayJobRunnerSubmit:
             lambda ray_address=None: addresses.append(ray_address) or fake_client,
         )
 
+        runtime_env = normalize_runtime_env(
+            {"env_vars": {"MY_ENV": "1"}},
+            profile="custom",
+        )
         handle = runner.submit(
             task_execution=SimpleNamespace(
                 pk=55,
                 task_id="django-task-55",
-                runtime_env_profile="custom",
-                runtime_env_json='{"env_vars":{"MY_ENV":"1"}}',
-                runtime_env_hash="",
+                runtime_env_profile=runtime_env.profile,
+                runtime_env_json=runtime_env.serialized,
+                runtime_env_hash=runtime_env.digest,
                 attempt_number=1,
                 execution_generation=4,
             ),

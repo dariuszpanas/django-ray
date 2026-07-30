@@ -33,6 +33,7 @@ from django_ray.conf.settings import get_settings
 from django_ray.lifecycle import request_task_cancellation, retry_task
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.redaction import redact_text, safe_json_dumps
+from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError
 from django_ray.workflow_plans import (
     MAX_PLAN_BYTES,
     effective_plan_selection_reporting_policy,
@@ -1906,19 +1907,30 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             return
 
         count = 0
+        blocked = 0
         for task in tasks_to_retry.only("pk", "attempt_number", "execution_generation"):
             if task.pk is None:  # pragma: no cover - querysets contain persisted rows
                 continue
-            retried = retry_task(
-                task.pk,
-                expected_attempt_number=task.attempt_number,
-                expected_execution_generation=task.execution_generation,
-            )
+            try:
+                retried = retry_task(
+                    task.pk,
+                    expected_attempt_number=task.attempt_number,
+                    expected_execution_generation=task.execution_generation,
+                )
+            except RuntimeEnvSnapshotError:
+                blocked += 1
+                continue
             count += int(retried is not None)
 
+        message = f"Queued {count} task(s) for retry."
+        if blocked:
+            message += (
+                f" Skipped {blocked} task(s) because their persisted RuntimeEnv "
+                "snapshots failed integrity validation."
+            )
         self.message_user(
             request,
-            f"Queued {count} task(s) for retry.",
+            message,
         )
 
     @admin.action(description="Cancel selected tasks")

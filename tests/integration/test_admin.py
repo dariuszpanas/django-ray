@@ -2806,6 +2806,56 @@ class TestRayTaskExecutionAdmin:
         assert TaskAttempt.objects.get(execution=failed, attempt_number=3).error_message == "boom"
         assert TaskAttempt.objects.get(execution=lost, attempt_number=2).error_message == "lost"
 
+    def test_retry_tasks_skips_corrupt_runtime_env_without_aborting_selection(
+        self,
+        monkeypatch,
+    ) -> None:
+        admin_obj = _task_admin()
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, msg: messages.append(str(msg)),
+        )
+        corrupt = RayTaskExecution.objects.create(
+            task_id="admin-retry-runtime-env-corrupt-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+            attempt_number=2,
+            execution_generation=4,
+            error_message="original failure",
+            runtime_env_json=('{"env_vars":{"VALUE":"arbitrary-customer-marker-7cf3"}}'),
+            runtime_env_hash="0" * 64,
+        )
+        valid = RayTaskExecution.objects.create(
+            task_id="admin-retry-runtime-env-valid-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.LOST,
+            attempt_number=2,
+            execution_generation=4,
+            error_message="worker lost",
+        )
+
+        admin_obj.retry_tasks(
+            _request(),
+            RayTaskExecution.objects.filter(pk__in=[corrupt.pk, valid.pk]),
+        )
+
+        corrupt.refresh_from_db()
+        valid.refresh_from_db()
+        assert corrupt.state == TaskState.FAILED
+        assert corrupt.attempt_number == 2
+        assert corrupt.execution_generation == 4
+        assert corrupt.error_message == "original failure"
+        assert not TaskAttempt.objects.filter(execution=corrupt).exists()
+        assert valid.state == TaskState.QUEUED
+        assert valid.attempt_number == 3
+        assert messages == [
+            "Queued 1 task(s) for retry. Skipped 1 task(s) because their persisted "
+            "RuntimeEnv snapshots failed integrity validation."
+        ]
+        assert "arbitrary-customer-marker-7cf3" not in messages[0]
+
     def test_retry_tasks_noop_when_nothing_retryable(self, monkeypatch) -> None:
         admin_obj = _task_admin()
         messages: list[str] = []

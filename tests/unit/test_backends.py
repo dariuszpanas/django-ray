@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from datetime import UTC, datetime, timedelta
 
@@ -14,6 +15,10 @@ from django.tasks.exceptions import InvalidTask, TaskResultDoesNotExist
 from django_ray.backends import RayTaskBackend
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.result_storage import ResultStorageError
+from django_ray.runtime.runtime_env import (
+    RuntimeEnvSnapshotError,
+    runtime_env_for_storage,
+)
 
 
 async def _async_backend_task(value: int) -> int:
@@ -109,6 +114,79 @@ class TestRayTaskBackend:
         assert execution.timeout_seconds is None
         assert execution.ray_target_address == "auto"
         assert execution.ray_address is None
+
+    def test_enqueue_uses_the_runtime_env_storage_seam(self, monkeypatch) -> None:
+        from testproject.tasks import add_numbers
+
+        observed = []
+
+        def record_storage(runtime_env):
+            observed.append(runtime_env)
+            return runtime_env_for_storage(runtime_env)
+
+        monkeypatch.setattr("django_ray.backends.runtime_env_for_storage", record_storage)
+
+        result = _make_backend().enqueue(
+            add_numbers.using(queue_name="default"),
+            args=(2, 3),
+            kwargs={},
+        )
+
+        execution = RayTaskExecution.objects.get(task_id=result.id)
+        assert len(observed) == 1
+        assert execution.runtime_env_json == observed[0].serialized
+        assert execution.runtime_env_hash == observed[0].digest
+
+    def test_runtime_env_storage_failure_creates_no_execution(self, monkeypatch) -> None:
+        from testproject.tasks import add_numbers
+
+        def reject_storage(_runtime_env):
+            raise RuntimeEnvSnapshotError(
+                "django-ray: Resolved RuntimeEnv storage snapshot is invalid"
+            )
+
+        monkeypatch.setattr("django_ray.backends.runtime_env_for_storage", reject_storage)
+        monkeypatch.setattr(
+            "django_ray.backends.prepare_task_input",
+            lambda *_args, **_kwargs: pytest.fail(
+                "task input was prepared before RuntimeEnv storage validation"
+            ),
+        )
+
+        with pytest.raises(RuntimeEnvSnapshotError, match="snapshot is invalid"):
+            _make_backend().enqueue(
+                add_numbers.using(queue_name="default"),
+                args=(2, 3),
+                kwargs={},
+            )
+
+        assert not RayTaskExecution.objects.exists()
+
+    def test_enqueue_logs_only_runtime_env_identity(self, caplog) -> None:
+        from testproject.tasks import add_numbers
+
+        marker = "arbitrary-customer-marker-7cf3"
+        backend = RayTaskBackend(
+            "inline",
+            {
+                "QUEUES": ["default"],
+                "OPTIONS": {
+                    "RAY_ADDRESS": "auto",
+                    "RAY_RUNTIME_ENV": {"env_vars": {"VALUE": marker}},
+                },
+            },
+        )
+
+        with caplog.at_level(logging.INFO, logger="django_ray.backend"):
+            backend.enqueue(
+                add_numbers.using(queue_name="default"),
+                args=(2, 3),
+                kwargs={},
+            )
+
+        assert caplog.records
+        assert marker not in caplog.text
+        assert all(marker not in repr(record.__dict__) for record in caplog.records)
 
     def test_enqueue_persists_backend_timeout(self) -> None:
         from testproject.tasks import add_numbers
