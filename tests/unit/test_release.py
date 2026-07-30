@@ -10,10 +10,12 @@ from typing import Any
 import pytest
 
 import scripts.validate_release as release
+import scripts.verify_release_source as release_source
 from scripts.validate_release import (
     normalize_version,
     validate_compiled_graph_capability_review,
     validate_release_version,
+    validate_testpypi_candidate,
 )
 
 ROOT = Path(__file__).parents[2]
@@ -379,6 +381,131 @@ def test_repository_development_changelog_is_consistent() -> None:
     release._validate_changelog_development(ROOT)
 
 
+def _write_testpypi_candidate_fixture(root: Path, *, lock_version: str = "0.4.0") -> None:
+    (root / "pyproject.toml").write_text('[project]\nversion = "0.4.0"\n', encoding="utf-8")
+    (root / "uv.lock").write_text(
+        "[[package]]\n"
+        'name = "django-ray"\n'
+        f'version = "{lock_version}"\n'
+        'source = { editable = "." }\n',
+        encoding="utf-8",
+    )
+    module = root / "src" / "django_ray"
+    module.mkdir(parents=True)
+    (module / "__init__.py").write_text('__version__ = "0.4.0"\n', encoding="utf-8")
+    changelog = root / "docs" / "changelog.md"
+    changelog.parent.mkdir()
+    changelog.write_text(
+        "## [Unreleased]\n\n### Added\n\n- still being hardened\n\n"
+        "## [0.3.1] - 2026-07-18\n\n- released\n\n"
+        "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...HEAD\n"
+        "[0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1\n",
+        encoding="utf-8",
+    )
+
+
+def _mock_testpypi_candidate_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    released_versions: set[str],
+) -> None:
+    monkeypatch.setattr(
+        release,
+        "_read_git_release_versions",
+        lambda _root, *, require_complete: released_versions,
+    )
+    monkeypatch.setattr(
+        release,
+        "validate_compiled_graph_capability_review",
+        lambda _root: Path("review.json"),
+    )
+
+
+def test_testpypi_candidate_accepts_unreleased_tree_while_production_rejects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_testpypi_candidate_fixture(tmp_path)
+    _mock_testpypi_candidate_dependencies(
+        monkeypatch,
+        released_versions={"0.3.1"},
+    )
+
+    assert validate_testpypi_candidate(tmp_path, "v0.4.0") == "0.4.0"
+    with pytest.raises(ValueError, match=r"one dated \[0\.4\.0\] release heading"):
+        validate_release_version(tmp_path, "v0.4.0")
+
+
+def test_testpypi_candidate_rejects_mismatched_version_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_testpypi_candidate_fixture(tmp_path, lock_version="0.3.1")
+    _mock_testpypi_candidate_dependencies(
+        monkeypatch,
+        released_versions={"0.3.1"},
+    )
+
+    with pytest.raises(ValueError, match=r"uv\.lock=0\.3\.1"):
+        validate_testpypi_candidate(tmp_path, "0.4.0")
+
+
+def test_testpypi_candidate_rejects_incomplete_tag_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_testpypi_candidate_fixture(tmp_path)
+    _mock_testpypi_candidate_dependencies(
+        monkeypatch,
+        released_versions={"0.3.1", "0.3.2"},
+    )
+
+    with pytest.raises(ValueError, match=r"missing \[0\.3\.2\]"):
+        validate_testpypi_candidate(tmp_path, "0.4.0")
+
+
+def test_testpypi_candidate_rejects_already_tagged_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_testpypi_candidate_fixture(tmp_path)
+    _mock_testpypi_candidate_dependencies(
+        monkeypatch,
+        released_versions={"0.3.1", "0.4.0"},
+    )
+
+    with pytest.raises(ValueError, match=r"v0\.4\.0 is already tagged"):
+        validate_testpypi_candidate(tmp_path, "0.4.0")
+
+
+def test_testpypi_candidate_also_accepts_strict_ready_untagged_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_testpypi_candidate_fixture(tmp_path)
+    changelog = tmp_path / "docs" / "changelog.md"
+    changelog.write_text(
+        (
+            "## [Unreleased]\n\n"
+            "## [0.4.0] - 2026-07-30\n\n- ready\n\n"
+            "## [0.3.1] - 2026-07-18\n\n- released\n\n"
+            "[Unreleased]: "
+            "https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
+            "[0.4.0]: "
+            "https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n"
+            "[0.3.1]: "
+            "https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1\n"
+        ),
+        encoding="utf-8",
+    )
+    _mock_testpypi_candidate_dependencies(
+        monkeypatch,
+        released_versions={"0.3.1"},
+    )
+
+    assert validate_testpypi_candidate(tmp_path, "0.4.0") == "0.4.0"
+
+
 def test_release_candidate_validation_accepts_consistent_fixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -406,6 +533,146 @@ def test_release_candidate_validation_accepts_consistent_fixture(
     )
 
     assert validate_release_version(tmp_path, "v0.4.0") == "0.4.0"
+
+
+def test_manual_release_source_requires_all_identities_to_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_sha = "a" * 40
+
+    def fake_git(_root: Path, *arguments: str) -> str:
+        return {
+            ("rev-parse", "HEAD"): candidate_sha,
+            ("rev-parse", "refs/remotes/origin/main^{commit}"): candidate_sha,
+        }[arguments]
+
+    monkeypatch.setattr(release_source, "_git", fake_git)
+
+    assert (
+        release_source.verify_manual_candidate_source(
+            tmp_path,
+            candidate_sha=candidate_sha,
+            event_sha=candidate_sha,
+        )
+        == candidate_sha
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate_sha", "event_sha", "head_sha", "main_sha"),
+    [
+        ("a" * 40, "b" * 40, "a" * 40, "a" * 40),
+        ("a" * 40, "a" * 40, "b" * 40, "a" * 40),
+        ("a" * 40, "a" * 40, "a" * 40, "b" * 40),
+    ],
+)
+def test_manual_release_source_rejects_each_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_sha: str,
+    event_sha: str,
+    head_sha: str,
+    main_sha: str,
+) -> None:
+    def fake_git(_root: Path, *arguments: str) -> str:
+        return {
+            ("rev-parse", "HEAD"): head_sha,
+            ("rev-parse", "refs/remotes/origin/main^{commit}"): main_sha,
+        }[arguments]
+
+    monkeypatch.setattr(release_source, "_git", fake_git)
+
+    with pytest.raises(ValueError, match="source identities do not agree"):
+        release_source.verify_manual_candidate_source(
+            tmp_path,
+            candidate_sha=candidate_sha,
+            event_sha=event_sha,
+        )
+
+
+def test_manual_release_source_rejects_non_full_sha(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="full 40-character"):
+        release_source.verify_manual_candidate_source(
+            tmp_path,
+            candidate_sha="abc123",
+            event_sha="a" * 40,
+        )
+
+
+def test_production_release_source_requires_annotated_matching_tag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit_sha = "a" * 40
+
+    def fake_git(_root: Path, *arguments: str) -> str:
+        return {
+            ("cat-file", "-t", "refs/tags/v0.4.0"): "tag",
+            ("rev-parse", "HEAD"): commit_sha,
+            ("rev-parse", "refs/tags/v0.4.0^{commit}"): commit_sha,
+            ("rev-parse", "refs/remotes/origin/main^{commit}"): commit_sha,
+        }[arguments]
+
+    monkeypatch.setattr(release_source, "_git", fake_git)
+
+    assert (
+        release_source.verify_production_tag_source(
+            tmp_path,
+            tag="v0.4.0",
+            event_sha=commit_sha,
+        )
+        == "v0.4.0"
+    )
+
+
+@pytest.mark.parametrize(
+    ("event_sha", "head_sha", "tag_sha", "main_sha"),
+    [
+        ("b" * 40, "a" * 40, "a" * 40, "a" * 40),
+        ("a" * 40, "b" * 40, "a" * 40, "a" * 40),
+        ("a" * 40, "a" * 40, "b" * 40, "a" * 40),
+        ("a" * 40, "a" * 40, "a" * 40, "b" * 40),
+    ],
+)
+def test_production_release_source_rejects_each_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event_sha: str,
+    head_sha: str,
+    tag_sha: str,
+    main_sha: str,
+) -> None:
+    def fake_git(_root: Path, *arguments: str) -> str:
+        return {
+            ("cat-file", "-t", "refs/tags/v0.4.0"): "tag",
+            ("rev-parse", "HEAD"): head_sha,
+            ("rev-parse", "refs/tags/v0.4.0^{commit}"): tag_sha,
+            ("rev-parse", "refs/remotes/origin/main^{commit}"): main_sha,
+        }[arguments]
+
+    monkeypatch.setattr(release_source, "_git", fake_git)
+
+    with pytest.raises(ValueError, match="source identities do not agree"):
+        release_source.verify_production_tag_source(
+            tmp_path,
+            tag="v0.4.0",
+            event_sha=event_sha,
+        )
+
+
+def test_production_release_source_rejects_lightweight_tag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(release_source, "_git", lambda *_args: "commit")
+
+    with pytest.raises(ValueError, match="must be annotated"):
+        release_source.verify_production_tag_source(
+            tmp_path,
+            tag="v0.4.0",
+            event_sha="a" * 40,
+        )
 
 
 def test_latest_compiled_graph_review_matches_fail_closed_runtime_policy() -> None:

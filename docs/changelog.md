@@ -263,6 +263,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Manual TestPyPI rehearsals now validate the still-`Unreleased` candidate form
+  without weakening production tag validation. Dispatches require a canonical full
+  commit SHA and fail before dependency installation or build unless the input,
+  dispatch, checkout, and freshly fetched `origin/main` identities agree. Production
+  publication additionally requires an annotated tag resolving to that same commit.
 - The authenticated one-user Locust observability demo now compares tiny nested
   workflows under full, terminal-only, and disabled reporting. Stable per-policy
   request labels separate enqueue, terminal polling, and bounded-summary reads, and

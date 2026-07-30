@@ -10,6 +10,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).parents[2]
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
 WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
 MAKEFILE = PROJECT_ROOT / "Makefile"
 CONTRIBUTING = PROJECT_ROOT / "CONTRIBUTING.md"
@@ -83,6 +84,87 @@ def test_changelog_tag_validation_jobs_fetch_complete_tag_inventory(
     assert "--development" in commands
     assert "--require-git-tags" in commands
     assert "--allow-release-candidate" in commands
+
+
+def test_manual_release_is_bound_to_full_fetched_main_sha_before_build() -> None:
+    workflow = _workflow(RELEASE_WORKFLOW)
+    dispatch = workflow["on"]["workflow_dispatch"]
+    inputs = dispatch["inputs"]
+    assert inputs["candidate_sha"] == {
+        "description": "Authorized full origin/main commit SHA",
+        "required": "true",
+        "type": "string",
+    }
+
+    steps = _jobs(RELEASE_WORKFLOW)["build"]["steps"]
+    by_name = {
+        str(step["name"]): step for step in steps if isinstance(step, dict) and "name" in step
+    }
+    input_validation = by_name["Validate manual candidate input"]
+    assert input_validation["if"] == "github.event_name == 'workflow_dispatch'"
+    assert input_validation["env"] == {
+        "CANDIDATE_SHA": "${{ inputs.candidate_sha }}",
+        "EVENT_SHA": "${{ github.sha }}",
+    }
+    assert "^[0-9a-f]{40}$" in input_validation["run"]
+    assert '"$CANDIDATE_SHA" != "$EVENT_SHA"' in input_validation["run"]
+
+    checkout = by_name["Check out manual candidate"]
+    assert checkout["if"] == "github.event_name == 'workflow_dispatch'"
+    assert checkout["with"]["ref"] == "${{ inputs.candidate_sha }}"
+
+    refresh = by_name["Refresh release refs"]
+    assert "git fetch --force --prune --tags origin" in refresh["run"]
+    assert "+refs/heads/main:refs/remotes/origin/main" in refresh["run"]
+
+    manual = by_name["Verify manual candidate source"]
+    assert manual["if"] == "github.event_name == 'workflow_dispatch'"
+    assert manual["env"] == {
+        "CANDIDATE_SHA": "${{ inputs.candidate_sha }}",
+        "EVENT_SHA": "${{ github.sha }}",
+    }
+    assert "scripts/verify_release_source.py" in manual["run"]
+    assert '--manual-candidate "$CANDIDATE_SHA"' in manual["run"]
+    assert '--event-sha "$EVENT_SHA"' in manual["run"]
+
+    step_names = [
+        str(step.get("name", step.get("uses", ""))) for step in steps if isinstance(step, dict)
+    ]
+    assert step_names.index("Validate manual candidate input") < step_names.index(
+        "Check out manual candidate"
+    )
+    assert step_names.index("Check out manual candidate") < step_names.index("Refresh release refs")
+    assert step_names.index("Refresh release refs") < step_names.index(
+        "Verify manual candidate source"
+    )
+    assert step_names.index("Verify manual candidate source") < step_names.index("Install uv")
+    assert step_names.index("Verify manual candidate source") < step_names.index("Build package")
+
+
+def test_manual_and_production_release_validation_remain_distinct() -> None:
+    steps = _jobs(RELEASE_WORKFLOW)["build"]["steps"]
+    by_name = {
+        str(step["name"]): step for step in steps if isinstance(step, dict) and "name" in step
+    }
+
+    production = by_name["Verify production tag source"]
+    assert production["if"] == (
+        "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+    )
+    assert '--production-tag "$RELEASE_TAG"' in production["run"]
+
+    candidate_validation = by_name["Validate TestPyPI candidate version"]
+    assert candidate_validation["if"] == "github.event_name == 'workflow_dispatch'"
+    assert "--testpypi-candidate" in candidate_validation["run"]
+
+    production_validation = by_name["Validate production release version"]
+    assert production_validation["if"] == (
+        "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+    )
+    assert (
+        'version="$(uv run --no-sync python scripts/validate_release.py "$RELEASE_REF")"'
+        in production_validation["run"]
+    )
 
 
 def _needs(job: dict[str, Any]) -> set[str]:
