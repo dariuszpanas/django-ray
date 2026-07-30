@@ -95,6 +95,7 @@ test-testproject:
 		tests/integration/test_workflow_progress_api.py \
 		tests/unit/test_sample_security.py \
 		tests/unit/test_testproject_workflows.py \
+		tests/unit/test_workflow_reporting_benchmark_command.py \
 		--cov=testproject.api \
 		--cov=testproject.views \
 		--cov=testproject.urls \

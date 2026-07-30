@@ -216,6 +216,14 @@ kubectl --context docker-desktop -n django-ray logs -l app=django-ray,component=
 `make loadtest-stress` are explicit capacity or stress profiles. They are not prerequisites for
 the observability demo and can create substantially more task rows and resource pressure.
 
+When policy cost rather than HTTP behavior is the question, use the opt-in
+[`django_ray_benchmark_workflow_reporting`](../docs/performance.md#attribute-live-workflow-reporting-policies)
+command. It runs the same tiny nested workload sequentially under full,
+terminal-only, and disabled reporting with counterbalanced order, durable
+server-timestamp comparisons, allowlisted ingress/storage evidence, and explicit
+unavailable metrics. The low-resource run retains its execution rows for Admin
+inspection unless `--cleanup` is requested.
+
 ## Verify through Django admin
 
 Create an administrator interactively so the password is not stored in a tracked file or copied into

@@ -117,6 +117,91 @@ durable completion, and validates the bounded summary contract before continuing
 Stable per-policy Locust labels separate enqueue, terminal polling, and summary-read
 latency. The one-user, one-user-per-second defaults remain intentionally conservative.
 
+## Attribute Live Workflow Reporting Policies
+
+The Locust demo proves that the three policy contracts remain usable, but HTTP timings
+cannot attribute their internal cost. Use the testproject's opt-in command for a
+counterbalanced, sequential comparison on the guarded local KubeRay stack. Run it only
+after the exact committed source tree has passed the required cold-Ray local gate:
+
+```powershell
+kubectl --context docker-desktop -n django-ray exec deployment/django-web -- `
+  env DJANGO_RAY_RUN_WORKFLOW_REPORTING_BENCHMARK=1 `
+  python /app/testproject/manage.py `
+  django_ray_benchmark_workflow_reporting `
+  --repetitions 6
+```
+
+The three-repetition default runs nine tiny workflows. Each cycle rotates the order of
+`full`, `terminal_only`, and `disabled`; higher repetition counts must be a multiple of
+three so they repeat that complete Latin square without introducing concurrent
+benchmark tasks. Progress is written to stderr and one versioned JSON report is written
+to stdout, so redirect stdout to an ignored artifact when retaining evidence. The
+report records the command implementation digest, package and database versions, the
+one stable workflow-plan fingerprint, exact workload fingerprint, and whether the
+testproject's schema-v3 pilot was enabled. Checkout-to-deployment source-tree
+attestation remains the responsibility of the guarded local KubeRay gate and is
+labeled that way rather than fabricated by the in-pod command.
+
+Primary comparisons use the durable database timestamps for queue wait, outer
+execution, and end-to-end time. The workload also returns its bounded coordinator
+wall time and summed leaf work. Client polling duration is retained only as a
+diagnostic and is excluded from policy aggregates. Each policy aggregate reports the
+sample count, median, nearest-rank p95, minimum, and maximum; it does not rank a
+winner, calculate a speedup, or claim that an elapsed-time difference was caused by
+reporting.
+
+For full mode, the report exposes only allowlisted terminal ingress counters:
+accepted events by kind, rejections by reason, truncation, and retained logical
+bytes/nodes/edges. The collector's accepted total includes its constructor's one
+`initialized` event, so `processed_ingest_events` subtracts exactly that event. This
+is processed ingress, not producer-attempted RPCs: submission failures, calls made
+after reporting is disabled, and the actor's `snapshot` and `disable` control calls
+are not counted. Before recording those counters, the command reuses the bounded
+terminal-publication validator even when the schema-v3 pilot is disabled, then checks
+the exact run identity, terminal success, plan fingerprint, expanded fixture topology,
+zero ingress rejection/truncation, and retained node/edge agreement.
+
+Durable evidence separates reporting-specific storage from the shared task lifecycle:
+
+- reporting storage includes only UTF-8 byte lengths for `progress_data`, the
+  execution and archived-attempt copies of the bounded summary, plus normalized run,
+  topology, link, and node-detail row/byte counters for the exact run identity;
+- shared storage reports only row counts and encoded lengths for task arguments,
+  result, RuntimeEnv envelope, workflow plan/selection, and the archived attempt row;
+- raw arguments, result items, progress, summaries, RuntimeEnv content, topology
+  payloads, node identifiers, and payload/node digests are never emitted. The
+  allowlisted implementation, workload, and workflow-plan fingerprints remain
+  available for evidence identity.
+
+`WorkflowProgressTopologyManifest.encoded_bytes` is already the complete logical
+topology total, including its linked pages. Likewise,
+`WorkflowProgressRunStorage.detail_encoded_bytes` already aggregates its node-detail
+rows. The report exposes child totals for integrity checking, but those pairs must not
+be added together. None of these logical protocol sizes represents PostgreSQL table,
+index, MVCC, statement, latency, or WAL bytes.
+
+Actor lifetime/RSS/CPU, mailbox depth and lag, producer-attempted RPCs, control-call
+counts, network traffic, and PostgreSQL statement/latency/WAL attribution are
+explicitly `unavailable`. They need later bounded hot-path instrumentation under #79
+and are never estimated from wall time.
+
+Successful runs retain their bounded task rows by default and include an Admin path
+for each execution. This makes the policy-specific summaries available for inspection;
+the full workflow graph is also available when the testproject's schema-v3 pilot is
+enabled. Pass `--cleanup --output-json <new-path>` when evidence should be ephemeral.
+The command first writes the complete report, then deletes only the exact execution
+primary keys it created and their cascading attempt/progress rows, and finally replaces
+the artifact atomically with the completed cleanup receipt. Cleanup is intentionally
+unavailable through the read-only task Admin. A timeout, validation failure, or initial
+artifact-write failure deliberately preserves the task rows for diagnosis; a cleanup
+failure leaves the pre-cleanup report at the requested path.
+
+This command is local evidence, not a production SLO or an ordinary public-CI job. It
+does not enable Compiled Graph, change the compatible full-reporting default, add
+sampled reporting, or replace the isolated PostgreSQL publication/read/preparation
+benchmarks below.
+
 This is faster than making every leaf a Django task, but it changes semantics:
 
 - a leaf does not have an independent durable retry record;

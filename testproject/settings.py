@@ -80,6 +80,8 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     # django-ray
     "django_ray",
+    # Testproject-owned management commands and integration helpers.
+    "testproject",
     # Example apps demonstrating different execution modes
     # (These are in testproject/apps/ for demonstration purposes)
 ]
