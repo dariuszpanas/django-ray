@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import tomllib
 from pathlib import Path
@@ -64,3 +65,89 @@ def test_management_commands_are_discoverable_in_live_guides() -> None:
     )
 
     assert {command for command in commands if command not in live_text} == set()
+
+
+def test_celery_ray_portfolio_recipe_is_parseable_and_complete() -> None:
+    guide = (DOCS / "celery-migration.md").read_text(encoding="utf-8")
+    section = guide.split("### Configure Celery and Ray together", maxsplit=1)[1]
+    match = re.search(r"```python\n(?P<source>.*?)\n```", section, re.DOTALL)
+
+    assert match is not None
+    module = ast.parse(match.group("source"))
+    assignments = {
+        statement.targets[0].id: statement.value
+        for statement in module.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+    }
+
+    assert ast.literal_eval(assignments["CELERY_BROKER_URL"])
+    assert ast.literal_eval(assignments["CELERY_RESULT_BACKEND"])
+    assert ast.literal_eval(assignments["CELERY_RESULT_EXTENDED"]) is True
+
+    tasks = ast.literal_eval(assignments["TASKS"])
+    assert tasks["default"]["BACKEND"] == "django_tasks_celery.CeleryBackend"
+    assert "default" in tasks["default"]["QUEUES"]
+    assert tasks["default"]["OPTIONS"]["CELERY_APP"] == "myproject.celery.app"
+    assert tasks["ray"]["BACKEND"] == "django_ray.backends.RayTaskBackend"
+    assert "ray-batch" in tasks["ray"]["QUEUES"]
+    assert tasks["ray"]["OPTIONS"]["RAY_ADDRESS"] == "auto"
+
+    django_ray = ast.literal_eval(assignments["DJANGO_RAY"])
+    assert django_ray["RAY_ADDRESS"] == "auto"
+    assert django_ray["RUNNER"] == "ray_core"
+
+    route_section = guide.split("### Route only new work with an allowlisted flag", maxsplit=1)[
+        1
+    ].split("### Refresh a Django `TaskResult`", maxsplit=1)[0]
+    route_sources = re.findall(r"```python\n(.*?)\n```", route_section, re.DOTALL)
+    service_source = next(source for source in route_sources if "_REPORT_ROUTES" in source)
+    service_module = ast.parse(service_source)
+    route_assignment = next(
+        statement
+        for statement in service_module.body
+        if isinstance(statement, ast.Assign)
+        and isinstance(statement.targets[0], ast.Name)
+        and statement.targets[0].id == "_REPORT_ROUTES"
+    )
+
+    assert ast.literal_eval(route_assignment.value) == {
+        "default": "default",
+        "ray": "ray-batch",
+    }
+
+    using_call = next(
+        node
+        for node in ast.walk(service_module)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "using"
+    )
+    assert {keyword.arg: ast.unparse(keyword.value) for keyword in using_call.keywords} == {
+        "backend": "backend_alias",
+        "queue_name": "queue_name",
+    }
+
+    receipt_call = next(
+        node
+        for node in ast.walk(service_module)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create"
+    )
+    assert {keyword.arg: ast.unparse(keyword.value) for keyword in receipt_call.keywords} == {
+        "backend_alias": "enqueued.backend",
+        "task_id": "enqueued.id",
+    }
+
+    result_section = guide.split("### Refresh a Django `TaskResult`", maxsplit=1)[1].split(
+        "### Configure retrievable oversized results", maxsplit=1
+    )[0]
+    result_sources = re.findall(r"```python\n(.*?)\n```", result_section, re.DOTALL)
+    tracked_source = next(source for source in result_sources if "task_backends" in source)
+    tracked_module = ast.parse(tracked_source)
+    expressions = {ast.unparse(node) for node in ast.walk(tracked_module)}
+
+    assert "task_backends[receipt.backend_alias]" in expressions
+    assert "backend.get_result(receipt.task_id)" in expressions
