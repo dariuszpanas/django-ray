@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 from pathlib import Path
 from typing import Any, cast
@@ -307,11 +308,6 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     }
     assert live_cluster["name"] == "Live Cluster Fault Tests"
     assert "concurrency" not in live_cluster
-    assert next(
-        step["run"]
-        for step in live_cluster["steps"]
-        if step.get("name") == "Run live cluster fault tests"
-    ) == ("uv run pytest tests/integration/test_live_failure_injection.py -m live_cluster -v")
     assert postgresql["name"] == "PostgreSQL Coordination & Polling"
     assert (
         next(
@@ -325,6 +321,130 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
         "# Validate the bundled sample project's user-facing boundary", maxsplit=1
     )[0]
     assert "tests/integration/test_priority_migration.py" in postgres_target
+
+
+def test_live_cluster_scenarios_are_process_isolated_bounded_and_visible() -> None:
+    live_cluster = _jobs()["live-cluster"]
+    assert live_cluster["env"]["PYTHONUNBUFFERED"] == "1"
+    assert live_cluster["env"]["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] == "0"
+    indexed_steps = {
+        step.get("name"): (index, step)
+        for index, step in enumerate(live_cluster["steps"])
+        if isinstance(step, dict)
+    }
+    install_index = indexed_steps["Install dependencies"][0]
+    readiness_index, readiness_step = indexed_steps["Verify Ray Client readiness"]
+    scenario_index, step = indexed_steps["Run isolated live cluster fault scenarios"]
+    assert install_index < readiness_index < scenario_index
+
+    readiness = readiness_step["run"]
+    assert readiness_step["timeout-minutes"] == "3"
+    assert "for attempt in 1 2; do" in readiness
+    assert readiness.count('.venv/bin/python - "$attempt"') == 1
+    assert "timeout --signal=TERM --kill-after=5s 70s" in readiness
+    assert "RAY_CLIENT_INITIAL_CONNECTION_TIMEOUT_S=3" in readiness
+    assert "RAY_CLIENT_MAX_CONNECTION_TIMEOUT_S=3" in readiness
+    assert "faulthandler.dump_traceback_later(45)" in readiness
+    assert 'address=os.environ["DJANGO_RAY_LIVE_RAY_ADDRESS"]' in readiness
+    assert 'os.environ["DJANGO_RAY_LIVE_MIN_NODES"]' in readiness
+    assert 'node.get("Alive")' in readiness
+    assert "@ray.remote" in readiness
+    assert "ray.get(readiness_probe.remote(), timeout=10)" in readiness
+    assert "ray.shutdown()" in readiness
+    assert "RAY_CLIENT_READINESS_START attempt=$attempt/2" in readiness
+    assert "RAY_CLIENT_READINESS_CONNECTED" in readiness
+    assert "RAY_CLIENT_READINESS_PASS attempt=$attempt/2" in readiness
+    assert "::warning title=Ray Client readiness retry::" in readiness
+    assert "::error title=Ray Client readiness exhausted::" in readiness
+    assert '"$readiness_ready" -eq 1' in readiness
+    assert '"$readiness_ready" -ne 1' in readiness
+    assert readiness.count("sleep 2") == 1
+    assert readiness.count("sleep ") == 1
+    assert "&" not in readiness
+    assert "pytest" not in readiness
+    assert "uv run" not in readiness
+    assert readiness_step.get("continue-on-error") is None
+
+    command = step["run"]
+    scenarios = (
+        "tests/integration/test_live_failure_injection.py::"
+        "TestLiveFailureInjection::"
+        "test_ray_core_runner_submits_project_code_to_generic_cluster",
+        "tests/integration/test_live_failure_injection.py::"
+        "TestLiveFailureInjection::"
+        "test_disconnect_retries_pending_ray_core_task",
+        "tests/integration/test_live_failure_injection.py::"
+        "TestLiveFailureInjection::"
+        "test_cancellation_finalizes_live_pending_task",
+    )
+
+    assert command.count(".venv/bin/python -m pytest") == 1
+    assert 'for scenario in "${live_cluster_scenarios[@]}"; do' in command
+    scenario_block = re.search(
+        r"^live_cluster_scenarios=\(\n(?P<body>.*?)^\)\n",
+        command,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert scenario_block is not None
+    scenario_lines = tuple(
+        line.strip() for line in scenario_block.group("body").splitlines() if line.strip()
+    )
+    assert all(re.fullmatch(r'"[^"]+"', line) for line in scenario_lines)
+    declared_scenarios = tuple(line[1:-1] for line in scenario_lines)
+    assert declared_scenarios == scenarios
+    assert "timeout --signal=TERM --kill-after=15s 165s" in command
+    assert '"$scenario" -m live_cluster -vv -s' in command
+    assert "--setup-show -o faulthandler_timeout=90" in command
+    assert "LIVE_CLUSTER_SCENARIO_START node_id=$scenario" in command
+    assert "LIVE_CLUSTER_SCENARIO_PASS node_id=$scenario" in command
+    assert "::error title=Live cluster scenario timed out::" in command
+    assert "180-second hard ceiling; elapsed ${elapsed_seconds}s" in command
+    assert '"$status" -eq 137 && "$elapsed_seconds" -ge 180' in command
+    assert "reached the 180-second forced-kill ceiling" in command
+    assert "::error title=Live cluster scenario was killed early::" in command
+    assert "received SIGKILL before the timeout ceiling" in command
+    assert "::error title=Live cluster scenario failed::" in command
+    assert "uv run" not in command
+    assert re.search(r"(?<!\S)-n(?:=?(?:auto|logical|\d+))?(?:\s|$)", command) is None
+    assert re.search(r"(?<!\S)--numprocesses(?:[=\s]|$)", command) is None
+    assert re.search(r"(?<!\S)--dist(?:[=\s]|$)", command) is None
+    assert "strategy" not in live_cluster
+
+    diagnostics_index, diagnostics_step = indexed_steps["Show bounded Ray Client diagnostics"]
+    logs_index, logs_step = indexed_steps["Show Ray container logs"]
+    cleanup_index, cleanup_step = indexed_steps["Remove Ray containers"]
+    assert scenario_index < diagnostics_index < logs_index < cleanup_index
+    assert diagnostics_step["if"] == "always()"
+    diagnostics = diagnostics_step["run"]
+    assert "/tmp/ray/session_latest/logs/ray_client_server*.err*" in diagnostics
+    assert '[[ -s "$path" ]] || continue' in diagnostics
+    assert 'tail -n 400 "$path"' in diagnostics
+    assert "scripts/bounded_redact.py" in diagnostics
+    assert "--max-chars 65536" in diagnostics
+    secret_env_names = (
+        "DJANGO_API_TOKEN",
+        "DJANGO_SECRET_KEY",
+        "DATABASE_URL",
+        "DATABASE_PASSWORD",
+        "POSTGRES_PASSWORD",
+        "GITHUB_TOKEN",
+        "RAY_JOB_HEADERS",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    )
+    assert diagnostics.count("--secret-env") == len(secret_env_names)
+    for secret_env_name in secret_env_names:
+        assert f"--secret-env {secret_env_name}" in diagnostics
+    start_cluster = indexed_steps["Start a two-node Ray cluster"][1]["run"]
+    assert re.search(r"(?<!\S)(?:-e|--env)(?:[=\s]|$)", start_cluster) is None
+    assert "--env-file" not in start_cluster
+    assert logs_step["if"] == "always()"
+    assert "docker logs ray-head || true" in logs_step["run"]
+    assert "docker logs ray-worker || true" in logs_step["run"]
+    assert cleanup_step["if"] == "always()"
+    assert "docker rm --force ray-worker ray-head || true" in cleanup_step["run"]
+    assert "docker network rm django-ray-live-cluster || true" in cleanup_step["run"]
 
 
 def test_package_job_smokes_the_installed_wheel_without_a_new_matrix() -> None:

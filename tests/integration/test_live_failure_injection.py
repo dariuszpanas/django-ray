@@ -11,6 +11,7 @@ import os
 import time
 from datetime import UTC, datetime
 from io import StringIO
+from typing import cast
 
 import pytest
 
@@ -40,6 +41,29 @@ if not LIVE_CLUSTER_ENABLED:
             reason=("live cluster tests disabled; set DJANGO_RAY_LIVE_CLUSTER_TESTS=1 to enable")
         )
     )
+
+
+def _live_project_runtime_env_spec() -> dict[str, object]:
+    """Build the generic-cluster smoke environment from project dependencies."""
+    from testproject import settings as testproject_settings
+
+    if LIVE_WORKING_DIR_URI is None:
+        raise RuntimeError("The live project RuntimeEnv requires a working directory URI")
+    django_ray_config = cast(dict[str, object], testproject_settings.DJANGO_RAY)
+    project_profiles = cast(
+        dict[str, dict[str, object]],
+        django_ray_config["RUNTIME_ENV_PROFILES"],
+    )
+    project_packages = cast(list[str], project_profiles["project"]["pip"])
+    return {
+        "working_dir": LIVE_WORKING_DIR_URI,
+        "pip": list(project_packages),
+        "env_vars": {
+            "DATABASE_ENGINE": "django.db.backends.sqlite3",
+            "DJANGO_SETTINGS_MODULE": "testproject.settings",
+            "PYTHONPATH": "src",
+        },
+    }
 
 
 @pytest.fixture()
@@ -115,15 +139,7 @@ class TestLiveFailureInjection:
 
         assert LIVE_WORKING_DIR_URI is not None
         runtime_env = normalize_runtime_env(
-            {
-                "working_dir": LIVE_WORKING_DIR_URI,
-                "pip": ["django>=6.0"],
-                "env_vars": {
-                    "DATABASE_ENGINE": "django.db.backends.sqlite3",
-                    "DJANGO_SETTINGS_MODULE": "testproject.settings",
-                    "PYTHONPATH": "src",
-                },
-            },
+            _live_project_runtime_env_spec(),
             profile="live-project",
         )
         task = RayTaskExecution.objects.create(

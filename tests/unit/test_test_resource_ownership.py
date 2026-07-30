@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
+from typing import cast
 
 import pytest
 
@@ -198,6 +199,40 @@ def test_enabled_live_cluster_success_tears_down_owned_connection(monkeypatch) -
         next(fixture)
 
     assert fake_ray.shutdown_calls == 1
+
+
+def test_live_submission_tracks_declared_testproject_runtime_packages(monkeypatch) -> None:
+    from testproject import settings as testproject_settings
+
+    working_dir_uri = "file:///runtime-env/django-ray-source.zip"
+    django_ray_config = cast(dict[str, object], testproject_settings.DJANGO_RAY)
+    project_profiles = cast(
+        dict[str, dict[str, object]],
+        django_ray_config["RUNTIME_ENV_PROFILES"],
+    )
+    declared_packages = cast(list[str], project_profiles["project"]["pip"])
+    monkeypatch.setattr(
+        test_live_failure_injection,
+        "LIVE_WORKING_DIR_URI",
+        working_dir_uri,
+    )
+
+    runtime_env = test_live_failure_injection._live_project_runtime_env_spec()
+
+    assert runtime_env == {
+        "working_dir": working_dir_uri,
+        "pip": declared_packages,
+        "env_vars": {
+            "DATABASE_ENGINE": "django.db.backends.sqlite3",
+            "DJANGO_SETTINGS_MODULE": "testproject.settings",
+            "PYTHONPATH": "src",
+        },
+    }
+    assert runtime_env["pip"] is not declared_packages
+    runtime_packages = runtime_env["pip"]
+    assert isinstance(runtime_packages, list)
+    assert all(isinstance(requirement, str) for requirement in runtime_packages)
+    assert any(requirement.startswith("django-unfold==") for requirement in runtime_packages)
 
 
 def test_external_resource_guard_is_tryfirst() -> None:

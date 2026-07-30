@@ -297,6 +297,27 @@ CI strategy:
 - The default test matrix excludes `live_cluster` tests to keep its coverage runs deterministic.
 - The CI workflow runs these tests separately against a disposable two-node Docker Ray cluster and
   stages the checked-out project archive on both generic Ray nodes.
+- The in-container readiness check proves GCS membership first. After dependency installation, a
+  separate host-side Ray Client preflight proves the published proxy, its per-client backend, both
+  live nodes, and one trivial remote task. At most two disposable Python processes may try that
+  preflight: each dumps threads after 45 seconds, receives `TERM` after 70 seconds, and has a
+  75-second hard ceiling, so readiness cannot consume the job timeout. The live-cluster driver
+  invokes the synced virtual environment directly and disables Ray's implicit `uv run` RuntimeEnv
+  propagation because the generic containers do not share the runner's virtual environment; the
+  explicit per-task RuntimeEnv smoke remains enabled.
+- The generic-cluster submission smoke derives its remote package list from the testproject's
+  declared `project` RuntimeEnv profile. Testproject-only applications such as Unfold therefore
+  remain explicit remote dependencies instead of being supplied accidentally by the CI runner.
+- The three declared scenarios run sequentially against that one cluster but in fresh pytest
+  processes, so the deliberate Ray Client disconnect cannot contaminate the following scenario.
+  A process still running after 90 seconds emits a Python thread dump. If it remains running after
+  165 seconds it receives `TERM`, and if it still does not exit it is forcibly killed 15 seconds
+  later, keeping a 180-second hard ceiling. The job records the exact node ID plus elapsed outcome.
+  This is process isolation inside one visible CI job, not an xdist worker, matrix shard, or
+  concurrent test protocol. Bounded Ray Client backend error files and container logs are emitted
+  before the exact container and network cleanup runs on every outcome. The internal diagnostic
+  stream is capped at 64 KiB and redacts the reviewed job credential environment inventory; the
+  Ray containers receive no runner secret environment flags.
 - CI also supports `workflow_dispatch` for a manual rerun; it does not need a repository variable
   or an externally reachable Ray cluster.
 
