@@ -228,6 +228,7 @@ docs-build:
 
 # Build docs in strict mode (CI)
 docs-build-strict:
+	uv run python scripts/validate_release.py --development --allow-release-candidate
 	uv run zensical build --strict --clean
 
 # Serve docs locally at http://127.0.0.1:8000
