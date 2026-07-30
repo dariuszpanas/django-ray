@@ -37,11 +37,48 @@ from django_ray.runtime.distributed import (
     parallel_starmap,
 )
 from testproject.apps.cluster_tasks.workflows import (
+    COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE,
+    ComplexWorkflowFixtureError,
     inspect_runtime_environment,
     run_complex_branch_workflow,
     run_cpu_fanout_workflow,
     run_runtime_env_cache_benchmark,
 )
+
+
+def validate_complex_workflow_failure_controls(
+    *,
+    fast_items: int,
+    slow_items: int,
+    failure_branch: str | None,
+    failure_item: int | None,
+) -> None:
+    """Validate the opt-in deterministic failure without changing normal runs."""
+    if (failure_branch is None) != (failure_item is None):
+        raise ValueError("failure_branch and failure_item must be provided together")
+    if failure_branch is None:
+        return
+    if failure_branch not in {"fast", "slow"}:
+        raise ValueError("failure_branch must be 'fast' or 'slow'")
+    if isinstance(failure_item, bool) or not isinstance(failure_item, int):
+        raise ValueError("failure_item must be an integer")
+    branch_items = fast_items if failure_branch == "fast" else slow_items
+    if not 0 <= failure_item < branch_items:
+        raise ValueError(f"failure_item must select an item in the {failure_branch} branch")
+
+
+def _is_complex_workflow_fixture_failure(error: Exception) -> bool:
+    """Recognize only the exact local or Ray-wrapped fixture exception."""
+    if type(error) is ComplexWorkflowFixtureError:
+        return True
+    try:
+        from ray.exceptions import RayTaskError
+    except ImportError:  # pragma: no cover - Ray is a package dependency
+        return False
+    return (
+        isinstance(error, RayTaskError)
+        and type(getattr(error, "cause", None)) is ComplexWorkflowFixtureError
+    )
 
 
 def _process_single_item(item: Any) -> dict[str, Any]:
@@ -70,20 +107,43 @@ def complex_workflow_benchmark(
     slow_items: int = 4,
     fast_seconds: float = 0.02,
     slow_seconds: float = 0.5,
+    failure_branch: str | None = None,
+    failure_item: int | None = None,
 ) -> dict[str, Any]:
     """Run nested fast and slow workflow branches behind one durable task."""
     if not 1 <= fast_items <= 100 or not 1 <= slow_items <= 100:
         raise ValueError("branch item counts must be between 1 and 100")
     if not 0.01 <= fast_seconds <= 10 or not 0.01 <= slow_seconds <= 10:
         raise ValueError("branch durations must be between 0.01 and 10")
-
-    return run_complex_branch_workflow(
-        fast_items,
-        slow_items,
-        fast_seconds,
-        slow_seconds,
-        use_ray=True,
+    validate_complex_workflow_failure_controls(
+        fast_items=fast_items,
+        slow_items=slow_items,
+        failure_branch=failure_branch,
+        failure_item=failure_item,
     )
+
+    try:
+        if failure_branch is None:
+            return run_complex_branch_workflow(
+                fast_items,
+                slow_items,
+                fast_seconds,
+                slow_seconds,
+                use_ray=True,
+            )
+        return run_complex_branch_workflow(
+            fast_items,
+            slow_items,
+            fast_seconds,
+            slow_seconds,
+            failure_branch=failure_branch,
+            failure_item=failure_item,
+            use_ray=True,
+        )
+    except Exception as error:
+        if failure_branch is None or not _is_complex_workflow_fixture_failure(error):
+            raise
+        raise ComplexWorkflowFixtureError(COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE) from None
 
 
 @task(queue_name="default")

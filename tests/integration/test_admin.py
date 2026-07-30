@@ -2116,27 +2116,27 @@ class TestRayTaskExecutionAdmin:
             }
 
         def fake_nodes(candidate, *, authorize, **kwargs):
-            del kwargs
             assert authorize(candidate) is True
+            assert kwargs["attempt_number"] == 2
             called.append("topology_nodes")
             return page_payload("topology_nodes")
 
         def fake_edges(candidate, *, authorize, **kwargs):
-            del kwargs
             assert authorize(candidate) is True
+            assert kwargs["attempt_number"] == 2
             called.append("topology_edges")
             return page_payload("topology_edges")
 
         def fake_details(candidate, *, authorize, **kwargs):
-            del kwargs
             assert authorize(candidate) is True
+            assert kwargs["attempt_number"] == 2
             called.append("node_details")
             return page_payload("node_details")
 
         def fake_node(candidate, node_id, *, authorize, **kwargs):
-            del kwargs
             assert node_id == "node/one"
             assert authorize(candidate) is True
+            assert kwargs["attempt_number"] == 2
             called.append("node")
             return {
                 **page_payload("node_details"),
@@ -2156,12 +2156,14 @@ class TestRayTaskExecutionAdmin:
                 admin_obj.workflow_topology_edges_view,
                 admin_obj.workflow_node_details_view,
             ):
-                request = RequestFactory().get("/admin/workflow/?limit=10")
+                request = RequestFactory().get("/admin/workflow/?limit=10&attempt_number=2")
                 request.user = user
                 response = view(request, str(execution.pk))
                 assert response.status_code == 200
                 assert response["Cache-Control"] == "no-store"
-            request = RequestFactory().get("/admin/workflow/node/?node_id=node%2Fone")
+            request = RequestFactory().get(
+                "/admin/workflow/node/?attempt_number=2&node_id=node%2Fone"
+            )
             request.user = user
             response = admin_obj.workflow_node_detail_view(request, str(execution.pk))
             assert response.status_code == 200
@@ -2351,6 +2353,11 @@ class TestRayTaskExecutionAdmin:
             "admin:django_ray_raytaskexecution_workflow_plan_selection_download",
             args=[execution.pk],
         )
+        graph_url = reverse(
+            "admin:django_ray_raytaskexecution_workflow_graph",
+            args=[execution.pk],
+        )
+        attempt_query = f"?attempt_number={execution.attempt_number}"
         assert response.status_code == 200
         assert 'id="django-ray-live-observability"' in content
         assert f'data-observability-url="{endpoint}"' in content
@@ -2370,6 +2377,8 @@ class TestRayTaskExecutionAdmin:
         assert "data-workflow-diagnostics-content" in content
         assert 'aria-atomic="true"' in content
         assert f'data-diagnostics-url="{diagnostics_url}"' in content
+        assert f'data-pinned-attempt-number="{execution.attempt_number}"' in content
+        assert f'data-graph-url="{graph_url}{attempt_query}"' in content
         assert f'data-plan-download-url="{plan_download_url}"' in content
         assert f'data-selection-download-url="{selection_download_url}"' in content
         assert "Workflow execution" in content
@@ -2392,12 +2401,19 @@ class TestRayTaskExecutionAdmin:
             "admin:django_ray_raytaskexecution_workflow_node_details",
             args=[execution.pk],
         )
-        assert f'data-topology-nodes-url="{topology_nodes_url}"' in content
-        assert f'data-topology-edges-url="{topology_edges_url}"' in content
-        assert f'data-node-details-url="{node_details_url}"' in content
+        node_detail_url = reverse(
+            "admin:django_ray_raytaskexecution_workflow_node_detail",
+            args=[execution.pk],
+        )
+        assert f'data-topology-nodes-url="{topology_nodes_url}{attempt_query}"' in content
+        assert f'data-topology-edges-url="{topology_edges_url}{attempt_query}"' in content
+        assert f'data-node-details-url="{node_details_url}{attempt_query}"' in content
+        assert f'data-node-detail-url="{node_detail_url}{attempt_query}"' in content
+        assert f'href="{graph_url}"' not in content
         assert f'href="{topology_nodes_url}"' not in content
         assert f'href="{topology_edges_url}"' not in content
         assert f'href="{node_details_url}"' not in content
+        assert f'href="{node_detail_url}"' not in content
         task_selects = [
             query["sql"]
             for query in queries.captured_queries

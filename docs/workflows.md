@@ -524,10 +524,26 @@ When `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT=True`, one complete terminal schema-v2 a
 snapshot may also be normalized into the bounded schema-v3 summary, immutable topology
 pages, and latest-state node detail. A successful publication becomes the preferred
 source for authorized bounded readers; it does not replace the live schema-v2 writes.
-The current Admin exposes the real retained topology and detail through bounded
-tabular routes. An accessible, lazy-loaded graph built from those readers—not from
-application result JSON—is tracked in
-[issue #219](https://github.com/dariuszpanas/django-ray/issues/219).
+
+The task Admin can project one coherent terminal schema-v3 publication into an accessible
+execution graph. The section stays collapsed and performs no graph request until an
+operator opens it. One successful response is cached for that page; a pre-terminal
+`NOT_REPORTED` response or transport failure can be retried by closing and reopening the
+section. The graph is limited to 100 nodes, 256 edges, 100 detail records, and a 128 KiB
+response. It reads only the first bounded page of each collection and refuses cycles,
+unknown endpoints, count or publication mismatches, cursors, truncation, and over-limit
+runs without rendering a partial graph.
+
+Graph nodes are semantic links in dependency order, while the connecting artwork is
+decorative. Labels, states, bounded progress messages, map fan-out counts, and bounded
+failure text are the complete display allowlist. Callable paths, arguments, results,
+RuntimeEnv data, Ray identifiers, raw metrics and events, and workflow-plan payloads are
+never returned by the graph endpoint. A failed run marks each failure origin and its
+incoming ancestor path without using color alone. Node links are pinned to the same
+retained task attempt as the graph, and the graph summary names that page-rendered
+attempt. If live polling advances the task to a newer attempt, reload the page before
+opening its graph. The bounded topology and detail JSON routes remain available as
+explicit diagnostic fallbacks.
 
 ## Local Execution
 
@@ -726,6 +742,7 @@ POST /api/cluster/workflow-benchmark
 GET  /api/cluster/workflow-benchmark/{task_id}
 
 POST /api/cluster/complex-workflow
+POST /api/cluster/complex-workflow?failure_branch=slow&failure_item=0
 GET  /api/cluster/complex-workflow/{task_id}
 
 GET  /api/cluster/workflows/{task_id}
@@ -755,8 +772,13 @@ Django task runs. The bundled testproject enables
 available through the bounded summary, topology-node, topology-edge, and node-detail
 routes above. The guarded local KubeRay gate exercises those routes against the real
 producer path and requires non-empty, mutually consistent topology and detail.
-Rendering that normalized evidence as an interactive graph remains the scoped
-[issue #219](https://github.com/dariuszpanas/django-ray/issues/219) follow-up.
+It runs both the small successful shape and a deterministic slow-branch failure,
+requires the failed task to remain on its first attempt, and verifies the authenticated
+Admin graph against the same bounded publication. Open either terminal
+`RayTaskExecution` in the Admin and expand **Workflow execution**, then
+**Execution graph**, to inspect the dependency order. The failed fixture identifies
+the originating map node and its incoming ancestor path while retaining successful
+sibling context.
 
 ## API Reference
 

@@ -88,6 +88,26 @@ RUNTIME_ENV_REQUIRED_MEMBER = "src/django_ray/runtime/remote.py"
 COMPLEX_WORKFLOW_ENQUEUE_PATH = (
     "/api/cluster/complex-workflow?fast_items=2&slow_items=1&fast_seconds=0.01&slow_seconds=0.02"
 )
+COMPLEX_WORKFLOW_ENQUEUE_KWARGS = {
+    "fast_items": 2,
+    "slow_items": 1,
+    "fast_seconds": 0.01,
+    "slow_seconds": 0.02,
+}
+COMPLEX_WORKFLOW_FAILURE_ENQUEUE_PATH = (
+    "/api/cluster/complex-workflow?fast_items=2&slow_items=1"
+    "&fast_seconds=0.01&slow_seconds=0.05"
+    "&failure_branch=slow&failure_item=0"
+)
+COMPLEX_WORKFLOW_FAILURE_ENQUEUE_KWARGS = {
+    "fast_items": 2,
+    "slow_items": 1,
+    "fast_seconds": 0.01,
+    "slow_seconds": 0.05,
+    "failure_branch": "slow",
+    "failure_item": 0,
+}
+COMPLEX_WORKFLOW_FAILURE_MESSAGE = "Intentional complex workflow fixture failure"
 WORKFLOW_ADMIN_LOOPBACK_URL = "http://127.0.0.1:8000"
 WORKFLOW_PROGRESS_SCHEMA_VERSION = 3
 WORKFLOW_PROGRESS_PAGE_LIMIT = 16
@@ -608,6 +628,7 @@ class GateEvidence:
     task_result: object = None
     workflow_task_id: str = ""
     workflow_task_state: str = ""
+    workflow_attempt_number: int = 0
     workflow_schema_version: int = 0
     workflow_availability: str = ""
     workflow_topology_nodes: int = 0
@@ -619,7 +640,47 @@ class GateEvidence:
     workflow_current_manifests: int = 0
     workflow_pending_manifests: int = 0
     workflow_unlinked_pages: int = 0
+    workflow_failure_task_id: str = ""
+    workflow_failure_task_state: str = ""
+    workflow_failure_attempt_number: int = 0
+    workflow_failure_schema_version: int = 0
+    workflow_failure_availability: str = ""
+    workflow_failure_topology_nodes: int = 0
+    workflow_failure_topology_edges: int = 0
+    workflow_failure_node_details: int = 0
+    workflow_failure_leaf_tasks: int = 0
+    workflow_failure_pending_nodes: int = 0
+    workflow_failure_running_nodes: int = 0
+    workflow_failure_succeeded_nodes: int = 0
+    workflow_failure_failed_nodes: int = 0
+    workflow_failure_path_nodes: int = 0
+    workflow_failure_origins: int = 0
+    workflow_failure_incoming_edges: int = 0
+    workflow_failure_admin_routes: int = 0
+    workflow_failure_admin_actions: int = 0
+    workflow_failure_current_manifests: int = 0
+    workflow_failure_pending_manifests: int = 0
+    workflow_failure_unlinked_pages: int = 0
     prometheus_counts: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WorkflowGateObservation:
+    """One terminal schema-v3 workflow verified through every bounded API reader."""
+
+    task_id: str
+    state: str
+    attempt_number: int
+    schema_version: int
+    availability: str
+    topology_nodes: int
+    topology_edges: int
+    node_details: int
+    leaf_tasks: int
+    pending_nodes: int
+    running_nodes: int
+    succeeded_nodes: int
+    failed_nodes: int
 
 
 def validate_namespace(namespace: str) -> None:
@@ -3811,19 +3872,43 @@ class LocalKubeRayGate:
             raise ValueError("workflow summary contains an invalid durable count")
         return value
 
-    def _verify_complex_workflow_progress(self) -> None:
-        """Prove one real nested workflow reaches every bounded API reader."""
+    def _verify_complex_workflow_run(
+        self,
+        *,
+        enqueue_path: str,
+        expected_enqueue_kwargs: Mapping[str, object],
+        expected_state: str,
+        expected_error: str | None = None,
+    ) -> WorkflowGateObservation:
+        """Verify one terminal nested workflow through every bounded API reader."""
 
         token = self._secret_token()
         headers = {"Authorization": f"Bearer {token}"}
-        status, body = self._http(
-            COMPLEX_WORKFLOW_ENQUEUE_PATH,
-            method="POST",
-            headers=headers,
-        )
+        status, body = self._http(enqueue_path, method="POST", headers=headers)
         if status != 200:
             raise ValueError("complex workflow enqueue returned a non-success status")
         enqueue = self._json_body(body, endpoint="complex workflow enqueue")
+        enqueue_kwargs = _mapping(
+            enqueue.get("kwargs"),
+            field_name="complex workflow enqueue kwargs",
+        )
+        if (
+            enqueue.get("args") != []
+            or set(enqueue_kwargs) != set(expected_enqueue_kwargs)
+            or any(
+                type(enqueue_kwargs.get(field_name)) is not type(expected_value)
+                or enqueue_kwargs.get(field_name) != expected_value
+                for field_name, expected_value in expected_enqueue_kwargs.items()
+            )
+        ):
+            raise ValueError("complex workflow enqueue did not retain the exact requested inputs")
+        fast_items = enqueue_kwargs.get("fast_items")
+        slow_items = enqueue_kwargs.get("slow_items")
+        if type(fast_items) is not int or type(slow_items) is not int:
+            raise ValueError("complex workflow enqueue returned invalid branch item counts")
+        expected_leaf_tasks = cast(int, fast_items) + cast(int, slow_items)
+        if not 2 <= expected_leaf_tasks <= 200:
+            raise ValueError("complex workflow enqueue returned invalid total leaf work")
         task_id = enqueue.get("task_id")
         try:
             parsed_task_id = UUID(cast(str, task_id))
@@ -3839,6 +3924,7 @@ class LocalKubeRayGate:
 
         deadline = time.monotonic() + self.config.task_timeout
         last_state = "missing"
+        terminal_states = WORKFLOW_PROGRESS_FAILURE_STATES | {"SUCCEEDED"}
         while True:
             status, body = self._http(
                 f"/api/cluster/complex-workflow/{task_id}",
@@ -3852,28 +3938,61 @@ class LocalKubeRayGate:
             if not isinstance(state, str) or state not in WORKFLOW_PROGRESS_TASK_STATES:
                 raise ValueError("complex workflow polling returned an invalid task state")
             last_state = state
-            if state == "SUCCEEDED":
-                result = _mapping(
-                    execution.get("result"),
-                    field_name="complex workflow result",
-                )
-                if (
-                    result.get("shape") != "chain(group(chain(map), chain(map)), step)"
-                    or result.get("durability_boundary") != "single RayTaskExecution"
-                    or result.get("total_leaf_tasks") != 3
+            if state in terminal_states:
+                if state != expected_state:
+                    raise ValueError("complex workflow reached an unexpected terminal state")
+                if state == "SUCCEEDED":
+                    result = _mapping(
+                        execution.get("result"),
+                        field_name="complex workflow result",
+                    )
+                    if (
+                        result.get("shape") != "chain(group(chain(map), chain(map)), step)"
+                        or result.get("durability_boundary") != "single RayTaskExecution"
+                        or result.get("total_leaf_tasks") != expected_leaf_tasks
+                        or execution.get("error") is not None
+                    ):
+                        raise ValueError(
+                            "complex workflow result did not match the tiny nested workload"
+                        )
+                elif (
+                    execution.get("result") is not None or execution.get("error") != expected_error
                 ):
                     raise ValueError(
-                        "complex workflow result did not match the tiny nested workload"
+                        "failed complex workflow did not retain its normalized fixture error"
                     )
                 break
-            if state in WORKFLOW_PROGRESS_FAILURE_STATES:
-                raise ValueError("complex workflow reached a failed terminal state")
             if time.monotonic() >= deadline:
                 raise ValueError(
-                    f"complex workflow did not reach SUCCEEDED within "
+                    f"complex workflow did not reach {expected_state} within "
                     f"{self.config.task_timeout}s (last state: {last_state})"
                 )
             time.sleep(2)
+
+        execution_query = urlencode({"task_id": task_id, "limit": 1})
+        status, body = self._http(
+            f"/api/executions?{execution_query}",
+            method="GET",
+            headers=headers,
+        )
+        if status != 200:
+            raise ValueError("complex workflow execution read returned a non-success status")
+        execution_list = self._json_body(body, endpoint="complex workflow execution")
+        task_records = _sequence(
+            execution_list.get("tasks"),
+            field_name="complex workflow execution tasks",
+        )
+        if len(task_records) != 1:
+            raise ValueError("complex workflow execution read did not return exactly one row")
+        task_record = _mapping(task_records[0], field_name="complex workflow execution row")
+        if (
+            task_record.get("task_id") != task_id
+            or task_record.get("state") != expected_state
+            or task_record.get("callable_path")
+            != "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"
+            or task_record.get("attempt_number") != 1
+        ):
+            raise ValueError("complex workflow did not remain on its first durable attempt")
 
         summary_endpoint = f"/api/cluster/workflows/{task_id}"
         status, body = self._http(summary_endpoint, method="GET", headers=headers)
@@ -3894,7 +4013,8 @@ class LocalKubeRayGate:
             summary_envelope.get("source_schema_version") != WORKFLOW_PROGRESS_SCHEMA_VERSION
             or summary.get("schema_version") != WORKFLOW_PROGRESS_SCHEMA_VERSION
             or summary.get("run_identity") != run_identity
-            or summary.get("state") != "SUCCEEDED"
+            or run_identity.get("attempt_number") != 1
+            or summary.get("state") != expected_state
             or summary.get("reporting_policy") != "full"
             or summary.get("selected_strategy") != "dynamic_tasks"
             or summary.get("summary_revision") != publication["summary_revision"]
@@ -3902,6 +4022,10 @@ class LocalKubeRayGate:
             or summary.get("detail_revision") != publication["detail_revision"]
         ):
             raise ValueError("workflow summary did not report the expected terminal schema-v3 run")
+        if task_record.get("execution_generation") != run_identity.get(
+            "execution_generation"
+        ) or str(task_record.get("workflow_run_id")) != run_identity.get("run_id"):
+            raise ValueError("workflow summary identity did not match the execution row")
         fingerprint = summary.get("plan_fingerprint")
         if (
             not isinstance(fingerprint, str)
@@ -3960,8 +4084,23 @@ class LocalKubeRayGate:
             edges.add((source, target))
         if not edges:
             raise ValueError("workflow topology did not contain dependency edges")
-        if any(detail_item.get("state") != "SUCCEEDED" for detail_item in node_details):
-            raise ValueError("terminal workflow detail contains a non-succeeded node")
+        states = [detail_item.get("state") for detail_item in node_details]
+        if any(state not in {"PENDING", "RUNNING", "SUCCEEDED", "FAILED"} for state in states):
+            raise ValueError("terminal workflow detail contains an invalid node state")
+        pending_nodes = states.count("PENDING")
+        running_nodes = states.count("RUNNING")
+        succeeded_nodes = states.count("SUCCEEDED")
+        failed_nodes = states.count("FAILED")
+        if expected_state == "SUCCEEDED":
+            if (
+                pending_nodes != 0
+                or running_nodes != 0
+                or succeeded_nodes != len(states)
+                or failed_nodes != 0
+            ):
+                raise ValueError("successful workflow detail was not fully succeeded")
+        elif failed_nodes < 1:
+            raise ValueError("failed workflow detail did not retain a failed node")
 
         node_counts = _mapping(
             summary.get("node_counts"),
@@ -3977,10 +4116,10 @@ class LocalKubeRayGate:
             "discovered": expected_node_count,
             "retained_topology": expected_node_count,
             "retained_detail": len(detail_node_ids),
-            "pending": 0,
-            "running": 0,
-            "succeeded": expected_node_count,
-            "failed": 0,
+            "pending": pending_nodes,
+            "running": running_nodes,
+            "succeeded": succeeded_nodes,
+            "failed": failed_nodes,
         }
         if any(
             self._workflow_summary_count(node_counts, field_name) != expected
@@ -4007,87 +4146,216 @@ class LocalKubeRayGate:
                 "workflow summary declared edges did not match bounded reader evidence"
             )
 
-        self.evidence.workflow_task_id = task_id
-        self.evidence.workflow_task_state = "SUCCEEDED"
-        self.evidence.workflow_schema_version = WORKFLOW_PROGRESS_SCHEMA_VERSION
-        self.evidence.workflow_availability = "AVAILABLE"
-        self.evidence.workflow_topology_nodes = expected_node_count
-        self.evidence.workflow_topology_edges = expected_edge_count
-        self.evidence.workflow_node_details = len(detail_node_ids)
-        self.evidence.workflow_leaf_tasks = 3
+        return WorkflowGateObservation(
+            task_id=task_id,
+            state=expected_state,
+            attempt_number=1,
+            schema_version=WORKFLOW_PROGRESS_SCHEMA_VERSION,
+            availability="AVAILABLE",
+            topology_nodes=expected_node_count,
+            topology_edges=expected_edge_count,
+            node_details=len(detail_node_ids),
+            leaf_tasks=expected_leaf_tasks,
+            pending_nodes=pending_nodes,
+            running_nodes=running_nodes,
+            succeeded_nodes=succeeded_nodes,
+            failed_nodes=failed_nodes,
+        )
+
+    def _verify_complex_workflow_progress(self) -> None:
+        """Prove successful and deterministic failed nested workflows end to end."""
+
+        succeeded = self._verify_complex_workflow_run(
+            enqueue_path=COMPLEX_WORKFLOW_ENQUEUE_PATH,
+            expected_enqueue_kwargs=COMPLEX_WORKFLOW_ENQUEUE_KWARGS,
+            expected_state="SUCCEEDED",
+        )
+        failed = self._verify_complex_workflow_run(
+            enqueue_path=COMPLEX_WORKFLOW_FAILURE_ENQUEUE_PATH,
+            expected_enqueue_kwargs=COMPLEX_WORKFLOW_FAILURE_ENQUEUE_KWARGS,
+            expected_state="FAILED",
+            expected_error=COMPLEX_WORKFLOW_FAILURE_MESSAGE,
+        )
+
+        self.evidence.workflow_task_id = succeeded.task_id
+        self.evidence.workflow_task_state = succeeded.state
+        self.evidence.workflow_attempt_number = succeeded.attempt_number
+        self.evidence.workflow_schema_version = succeeded.schema_version
+        self.evidence.workflow_availability = succeeded.availability
+        self.evidence.workflow_topology_nodes = succeeded.topology_nodes
+        self.evidence.workflow_topology_edges = succeeded.topology_edges
+        self.evidence.workflow_node_details = succeeded.node_details
+        self.evidence.workflow_leaf_tasks = succeeded.leaf_tasks
+        self.evidence.workflow_failure_task_id = failed.task_id
+        self.evidence.workflow_failure_task_state = failed.state
+        self.evidence.workflow_failure_attempt_number = failed.attempt_number
+        self.evidence.workflow_failure_schema_version = failed.schema_version
+        self.evidence.workflow_failure_availability = failed.availability
+        self.evidence.workflow_failure_topology_nodes = failed.topology_nodes
+        self.evidence.workflow_failure_topology_edges = failed.topology_edges
+        self.evidence.workflow_failure_node_details = failed.node_details
+        self.evidence.workflow_failure_leaf_tasks = failed.leaf_tasks
+        self.evidence.workflow_failure_pending_nodes = failed.pending_nodes
+        self.evidence.workflow_failure_running_nodes = failed.running_nodes
+        self.evidence.workflow_failure_succeeded_nodes = failed.succeeded_nodes
+        self.evidence.workflow_failure_failed_nodes = failed.failed_nodes
 
     def _verify_workflow_admin(self) -> None:
-        """Exercise the same terminal workflow through real loopback admin readers."""
+        """Exercise both terminal workflows through authenticated admin readers."""
 
-        task_id = self.evidence.workflow_task_id
-        expected_counts = {
-            "topology_nodes": self.evidence.workflow_topology_nodes,
-            "topology_edges": self.evidence.workflow_topology_edges,
-            "node_details": self.evidence.workflow_node_details,
-        }
-        if not task_id or any(
-            type(value) is not int or value < 1 for value in expected_counts.values()
-        ):
-            raise ValueError("workflow API evidence was not ready for admin verification")
-
-        result = self._kubectl(
-            "exec",
-            "deployment/django-web",
-            "-c",
-            "django-web",
-            "--",
-            "python",
-            "-m",
-            "testproject.docker_smoke",
-            "--base-url",
-            WORKFLOW_ADMIN_LOOPBACK_URL,
-            "--timeout",
-            str(self.config.task_timeout),
-            "--existing-workflow-task-id",
-            task_id,
-            timeout=(self.config.task_timeout + self.config.kubectl_request_timeout + 5),
-            sensitive_output=True,
-        )
-        payload = self._json_command(
-            result,
-            field_name="existing workflow admin smoke response",
-        )
         expected_fields = {
             "admin_workflow",
             "task_id",
+            "task_state",
+            "attempt_number",
             "admin_routes",
             "admin_actions",
             "topology_nodes",
             "topology_edges",
             "node_details",
+            "graph_status",
+            "graph_nodes",
+            "graph_edges",
+            "graph_pending_nodes",
+            "graph_running_nodes",
+            "graph_succeeded_nodes",
+            "graph_failed_nodes",
+            "graph_failure_path_nodes",
+            "graph_failure_origins",
+            "graph_incoming_failure_edges",
             "current_manifests",
             "pending_manifests",
             "unlinked_pages",
         }
-        if set(payload) != expected_fields or any(
-            type(payload.get(field_name)) is not int
-            for field_name in expected_fields - {"admin_workflow", "task_id"}
-        ):
-            raise ValueError("existing workflow admin smoke returned non-scalar evidence")
-        if (
-            payload.get("admin_workflow") != "verified"
-            or payload.get("task_id") != task_id
-            or payload.get("admin_routes") != 5
-            or payload.get("admin_actions") != 3
-            or any(
-                payload.get(field_name) != value for field_name, value in expected_counts.items()
-            )
-            or payload.get("current_manifests") != 1
-            or payload.get("pending_manifests") != 0
-            or payload.get("unlinked_pages") != 0
-        ):
-            raise ValueError("existing workflow admin smoke did not match API and storage evidence")
+        runs = (
+            (
+                "successful",
+                self.evidence.workflow_task_id,
+                self.evidence.workflow_task_state,
+                self.evidence.workflow_attempt_number,
+                {
+                    "topology_nodes": self.evidence.workflow_topology_nodes,
+                    "topology_edges": self.evidence.workflow_topology_edges,
+                    "node_details": self.evidence.workflow_node_details,
+                    "graph_nodes": self.evidence.workflow_topology_nodes,
+                    "graph_edges": self.evidence.workflow_topology_edges,
+                    "graph_pending_nodes": 0,
+                    "graph_running_nodes": 0,
+                    "graph_succeeded_nodes": self.evidence.workflow_node_details,
+                    "graph_failed_nodes": 0,
+                    "graph_failure_path_nodes": 0,
+                    "graph_failure_origins": 0,
+                    "graph_incoming_failure_edges": 0,
+                },
+            ),
+            (
+                "failed",
+                self.evidence.workflow_failure_task_id,
+                self.evidence.workflow_failure_task_state,
+                self.evidence.workflow_failure_attempt_number,
+                {
+                    "topology_nodes": self.evidence.workflow_failure_topology_nodes,
+                    "topology_edges": self.evidence.workflow_failure_topology_edges,
+                    "node_details": self.evidence.workflow_failure_node_details,
+                    "graph_nodes": self.evidence.workflow_failure_topology_nodes,
+                    "graph_edges": self.evidence.workflow_failure_topology_edges,
+                    "graph_pending_nodes": self.evidence.workflow_failure_pending_nodes,
+                    "graph_running_nodes": self.evidence.workflow_failure_running_nodes,
+                    "graph_succeeded_nodes": (self.evidence.workflow_failure_succeeded_nodes),
+                    "graph_failed_nodes": self.evidence.workflow_failure_failed_nodes,
+                },
+            ),
+        )
+        verified: dict[str, Mapping[str, Any]] = {}
+        for label, task_id, task_state, attempt_number, expected_counts in runs:
+            if (
+                not task_id
+                or task_state not in {"SUCCEEDED", "FAILED"}
+                or attempt_number != 1
+                or any(type(value) is not int or value < 0 for value in expected_counts.values())
+                or any(
+                    expected_counts[field_name] < 1
+                    for field_name in (
+                        "topology_nodes",
+                        "topology_edges",
+                        "node_details",
+                    )
+                )
+            ):
+                raise ValueError("workflow API evidence was not ready for admin verification")
 
-        self.evidence.workflow_admin_routes = 5
-        self.evidence.workflow_admin_actions = 3
-        self.evidence.workflow_current_manifests = 1
-        self.evidence.workflow_pending_manifests = 0
-        self.evidence.workflow_unlinked_pages = 0
+            result = self._kubectl(
+                "exec",
+                "deployment/django-web",
+                "-c",
+                "django-web",
+                "--",
+                "python",
+                "-m",
+                "testproject.docker_smoke",
+                "--base-url",
+                WORKFLOW_ADMIN_LOOPBACK_URL,
+                "--timeout",
+                str(self.config.task_timeout),
+                "--existing-workflow-task-id",
+                task_id,
+                timeout=(self.config.task_timeout + self.config.kubectl_request_timeout + 5),
+                sensitive_output=True,
+            )
+            payload = self._json_command(
+                result,
+                field_name=f"{label} workflow admin smoke response",
+            )
+            if set(payload) != expected_fields or any(
+                type(payload.get(field_name)) is not int
+                for field_name in expected_fields
+                - {"admin_workflow", "task_id", "task_state", "graph_status"}
+            ):
+                raise ValueError("existing workflow admin smoke returned non-scalar evidence")
+            if (
+                payload.get("admin_workflow") != "verified"
+                or payload.get("task_id") != task_id
+                or payload.get("task_state") != task_state
+                or payload.get("attempt_number") != attempt_number
+                or payload.get("graph_status") != "AVAILABLE"
+                or payload.get("admin_routes") != 6
+                or payload.get("admin_actions") != 3
+                or any(
+                    payload.get(field_name) != value
+                    for field_name, value in expected_counts.items()
+                )
+                or payload.get("current_manifests") != 1
+                or payload.get("pending_manifests") != 0
+                or payload.get("unlinked_pages") != 0
+            ):
+                raise ValueError(
+                    "existing workflow admin smoke did not match API and storage evidence"
+                )
+            if label == "failed" and (
+                payload.get("graph_failure_path_nodes", 0) < 1
+                or payload.get("graph_failure_origins") != 1
+                or payload.get("graph_incoming_failure_edges", 0) < 1
+            ):
+                raise ValueError("failed workflow admin graph lacked one incoming failed path")
+            verified[label] = payload
+
+        successful = verified["successful"]
+        failed = verified["failed"]
+        self.evidence.workflow_admin_routes = cast(int, successful["admin_routes"])
+        self.evidence.workflow_admin_actions = cast(int, successful["admin_actions"])
+        self.evidence.workflow_current_manifests = cast(int, successful["current_manifests"])
+        self.evidence.workflow_pending_manifests = cast(int, successful["pending_manifests"])
+        self.evidence.workflow_unlinked_pages = cast(int, successful["unlinked_pages"])
+        self.evidence.workflow_failure_path_nodes = cast(int, failed["graph_failure_path_nodes"])
+        self.evidence.workflow_failure_origins = cast(int, failed["graph_failure_origins"])
+        self.evidence.workflow_failure_incoming_edges = cast(
+            int, failed["graph_incoming_failure_edges"]
+        )
+        self.evidence.workflow_failure_admin_routes = cast(int, failed["admin_routes"])
+        self.evidence.workflow_failure_admin_actions = cast(int, failed["admin_actions"])
+        self.evidence.workflow_failure_current_manifests = cast(int, failed["current_manifests"])
+        self.evidence.workflow_failure_pending_manifests = cast(int, failed["pending_manifests"])
+        self.evidence.workflow_failure_unlinked_pages = cast(int, failed["unlinked_pages"])
 
     def _verify_ray_identity(self) -> None:
         """Re-pin the exact RayCluster UID, topology, and complete owned pod inventory."""
@@ -4196,6 +4464,7 @@ class LocalKubeRayGate:
             ("task_result", self.evidence.task_result),
             ("workflow_task_id", self.evidence.workflow_task_id),
             ("workflow_task_state", self.evidence.workflow_task_state),
+            ("workflow_attempt_number", self.evidence.workflow_attempt_number),
             ("workflow_schema_version", self.evidence.workflow_schema_version),
             ("workflow_availability", self.evidence.workflow_availability),
             ("workflow_topology_nodes", self.evidence.workflow_topology_nodes),
@@ -4213,6 +4482,87 @@ class LocalKubeRayGate:
                 self.evidence.workflow_pending_manifests,
             ),
             ("workflow_unlinked_pages", self.evidence.workflow_unlinked_pages),
+            ("workflow_failure_task_id", self.evidence.workflow_failure_task_id),
+            (
+                "workflow_failure_task_state",
+                self.evidence.workflow_failure_task_state,
+            ),
+            (
+                "workflow_failure_attempt_number",
+                self.evidence.workflow_failure_attempt_number,
+            ),
+            (
+                "workflow_failure_schema_version",
+                self.evidence.workflow_failure_schema_version,
+            ),
+            (
+                "workflow_failure_availability",
+                self.evidence.workflow_failure_availability,
+            ),
+            (
+                "workflow_failure_topology_nodes",
+                self.evidence.workflow_failure_topology_nodes,
+            ),
+            (
+                "workflow_failure_topology_edges",
+                self.evidence.workflow_failure_topology_edges,
+            ),
+            (
+                "workflow_failure_node_details",
+                self.evidence.workflow_failure_node_details,
+            ),
+            (
+                "workflow_failure_leaf_tasks",
+                self.evidence.workflow_failure_leaf_tasks,
+            ),
+            (
+                "workflow_failure_pending_nodes",
+                self.evidence.workflow_failure_pending_nodes,
+            ),
+            (
+                "workflow_failure_running_nodes",
+                self.evidence.workflow_failure_running_nodes,
+            ),
+            (
+                "workflow_failure_succeeded_nodes",
+                self.evidence.workflow_failure_succeeded_nodes,
+            ),
+            (
+                "workflow_failure_failed_nodes",
+                self.evidence.workflow_failure_failed_nodes,
+            ),
+            (
+                "workflow_failure_path_nodes",
+                self.evidence.workflow_failure_path_nodes,
+            ),
+            (
+                "workflow_failure_origins",
+                self.evidence.workflow_failure_origins,
+            ),
+            (
+                "workflow_failure_incoming_edges",
+                self.evidence.workflow_failure_incoming_edges,
+            ),
+            (
+                "workflow_failure_admin_routes",
+                self.evidence.workflow_failure_admin_routes,
+            ),
+            (
+                "workflow_failure_admin_actions",
+                self.evidence.workflow_failure_admin_actions,
+            ),
+            (
+                "workflow_failure_current_manifests",
+                self.evidence.workflow_failure_current_manifests,
+            ),
+            (
+                "workflow_failure_pending_manifests",
+                self.evidence.workflow_failure_pending_manifests,
+            ),
+            (
+                "workflow_failure_unlinked_pages",
+                self.evidence.workflow_failure_unlinked_pages,
+            ),
             ("probe_path", EXPECTED_PROBE_PATH),
             ("probe_host", EXPECTED_PROBE_HOST),
             ("web_restarts", self.evidence.web_restart_count),

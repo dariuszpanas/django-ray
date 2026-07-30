@@ -15,6 +15,12 @@ from typing import Any
 
 from django_ray.workflows import chain, group, map_step, report_progress, step
 
+COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE = "Intentional complex workflow fixture failure"
+
+
+class ComplexWorkflowFixtureError(RuntimeError):
+    """Stable testproject-only failure used to exercise workflow diagnostics."""
+
 
 def build_cpu_work_items(
     num_items: int,
@@ -33,6 +39,7 @@ def build_cpu_work_items(
 def run_cpu_work_item(item: dict[str, Any]) -> dict[str, Any]:
     """Burn CPU for one workflow leaf and report its execution details."""
     item_id = int(item["item_id"])
+    fail_fixture = item.get("_fail_complex_workflow_fixture") is True
     duration = float(item["seconds_per_item"])
     wall_started_at = time.time()
     started_at = time.perf_counter()
@@ -54,6 +61,8 @@ def run_cpu_work_item(item: dict[str, Any]) -> dict[str, Any]:
             next_report += 0.25
 
     elapsed = time.perf_counter() - started_at
+    if fail_fixture:
+        raise ComplexWorkflowFixtureError(COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE)
     report_progress(
         1.0,
         1.0,
@@ -129,12 +138,20 @@ def build_complex_config(
     slow_items: int,
     fast_seconds: float,
     slow_seconds: float,
+    failure_branch: str | None = None,
+    failure_item: int | None = None,
 ) -> dict[str, Any]:
     """Build shared input for two nested workflow branches."""
-    return {
+    config: dict[str, Any] = {
         "fast": {"items": fast_items, "seconds": fast_seconds},
         "slow": {"items": slow_items, "seconds": slow_seconds},
     }
+    if failure_branch is not None:
+        config["failure"] = {
+            "branch": failure_branch,
+            "item": failure_item,
+        }
+    return config
 
 
 def build_branch_work_items(
@@ -143,14 +160,22 @@ def build_branch_work_items(
 ) -> list[dict[str, Any]]:
     """Expand one branch's dynamic work."""
     branch_config = config[branch]
-    return [
-        {
+    failure = config.get("failure")
+    items = []
+    for item_id in range(int(branch_config["items"])):
+        item = {
             "item_id": item_id,
             "seconds_per_item": branch_config["seconds"],
             "branch": branch,
         }
-        for item_id in range(int(branch_config["items"]))
-    ]
+        if (
+            isinstance(failure, dict)
+            and failure.get("branch") == branch
+            and failure.get("item") == item_id
+        ):
+            item["_fail_complex_workflow_fixture"] = True
+        items.append(item)
+    return items
 
 
 def summarize_branch(
@@ -201,17 +226,30 @@ def run_complex_branch_workflow(
     fast_seconds: float,
     slow_seconds: float,
     *,
+    failure_branch: str | None = None,
+    failure_item: int | None = None,
     use_ray: bool | None = None,
 ) -> dict[str, Any]:
     """Run nested fast and slow branches and record total wall time."""
     started_at = time.perf_counter()
-    result = complex_branch_workflow.run(
-        fast_items,
-        slow_items,
-        fast_seconds,
-        slow_seconds,
-        use_ray=use_ray,
-    )
+    if failure_branch is None:
+        result = complex_branch_workflow.run(
+            fast_items,
+            slow_items,
+            fast_seconds,
+            slow_seconds,
+            use_ray=use_ray,
+        )
+    else:
+        result = complex_branch_workflow.run(
+            fast_items,
+            slow_items,
+            fast_seconds,
+            slow_seconds,
+            failure_branch,
+            failure_item,
+            use_ray=use_ray,
+        )
     result["workflow_elapsed_seconds"] = round(time.perf_counter() - started_at, 4)
     return result
 

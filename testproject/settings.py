@@ -335,5 +335,6 @@ DJANGO_RAY = {
     # Exceptions that won't trigger auto-retry (use for manual retry testing)
     "RETRY_EXCEPTION_DENYLIST": [
         "testproject.tasks.NoRetryError",
+        "testproject.apps.cluster_tasks.workflows.ComplexWorkflowFixtureError",
     ],
 }

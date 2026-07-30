@@ -19,6 +19,16 @@ from django.utils.html import format_html
 from django.utils.http import quote, unquote
 from django.utils.text import Truncator
 
+from django_ray.admin_workflow_graph import (
+    ADMIN_WORKFLOW_GRAPH_MAX_DETAILS,
+    ADMIN_WORKFLOW_GRAPH_MAX_EDGES,
+    ADMIN_WORKFLOW_GRAPH_MAX_NODES,
+    ADMIN_WORKFLOW_GRAPH_MAX_RESPONSE_BYTES,
+    AdminWorkflowGraphError,
+    build_admin_workflow_graph,
+    degraded_admin_workflow_graph,
+    inspect_admin_workflow_graph_summary,
+)
 from django_ray.conf.settings import get_settings
 from django_ray.lifecycle import request_task_cancellation, retry_task
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
@@ -636,6 +646,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 name=f"{opts.app_label}_{opts.model_name}_workflow_plan_selection_download",
             ),
             path(
+                "<path:object_id>/workflow/graph/",
+                self.admin_site.admin_view(self.workflow_graph_view),
+                name=f"{opts.app_label}_{opts.model_name}_workflow_graph",
+            ),
+            path(
                 "<path:object_id>/workflow/topology/nodes/",
                 self.admin_site.admin_view(self.workflow_topology_nodes_view),
                 name=f"{opts.app_label}_{opts.model_name}_workflow_topology_nodes",
@@ -694,6 +709,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 args=[quote(object_id)],
                 current_app=self.admin_site.name,
             ),
+            "django_ray_workflow_graph_url": reverse(
+                f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_workflow_graph",
+                args=[quote(object_id)],
+                current_app=self.admin_site.name,
+            ),
             "django_ray_workflow_topology_nodes_url": reverse(
                 f"{self.admin_site.name}:"
                 f"{opts.app_label}_{opts.model_name}_workflow_topology_nodes",
@@ -708,6 +728,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             ),
             "django_ray_workflow_node_details_url": reverse(
                 f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_workflow_node_details",
+                args=[quote(object_id)],
+                current_app=self.admin_site.name,
+            ),
+            "django_ray_workflow_node_detail_url": reverse(
+                f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_workflow_node_detail",
                 args=[quote(object_id)],
                 current_app=self.admin_site.name,
             ),
@@ -1365,6 +1390,109 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         response = JsonResponse(summary)
         response["Cache-Control"] = "no-store"
         return response
+
+    @staticmethod
+    def _workflow_graph_issue_response(issue: AdminWorkflowGraphError) -> HttpResponse:
+        """Return one fixed-shape graph degradation without partial records."""
+        return _admin_json_response(
+            degraded_admin_workflow_graph(issue.status),
+            status=issue.http_status,
+            max_bytes=ADMIN_WORKFLOW_GRAPH_MAX_RESPONSE_BYTES,
+        )
+
+    def _workflow_graph_read_error_response(
+        self,
+        error: WorkflowProgressReadError,
+    ) -> HttpResponse:
+        """Collapse bounded read failures into the graph's safe status vocabulary."""
+        if error.code is WorkflowProgressReadErrorCode.ACCESS_DENIED:
+            raise PermissionDenied from error
+        if error.code is WorkflowProgressReadErrorCode.NOT_FOUND:
+            raise Http404("Ray task execution was not found") from error
+        if error.code is WorkflowProgressReadErrorCode.MISSING:
+            return self._workflow_graph_issue_response(AdminWorkflowGraphError("UNAVAILABLE"))
+        return self._workflow_graph_issue_response(
+            AdminWorkflowGraphError("CORRUPT", http_status=503)
+        )
+
+    def workflow_graph_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+    ) -> HttpResponse:
+        """Return one coherent terminal graph from fixed bounded first-page reads."""
+        if request.method != "GET":
+            return _secure_admin_response(HttpResponseNotAllowed(["GET"]))
+        execution = self._authorized_workflow_read_execution(request, object_id)
+        try:
+            attempt_number = self._attempt_number(request)
+        except ValueError:
+            return self._workflow_graph_issue_response(
+                AdminWorkflowGraphError("CORRUPT", http_status=503)
+            )
+        authorizer = self._workflow_authorizer(request)
+        try:
+            summary = get_workflow_progress_summary(
+                execution,
+                authorize=authorizer,
+                include_legacy=False,
+                infer_current_reporting_policy=False,
+                attempt_number=attempt_number,
+            )
+        except WorkflowProgressReadError as error:
+            return self._workflow_graph_read_error_response(error)
+
+        try:
+            expectation = inspect_admin_workflow_graph_summary(summary)
+        except AdminWorkflowGraphError as issue:
+            return self._workflow_graph_issue_response(issue)
+        except (AttributeError, KeyError, TypeError, UnicodeError, ValueError):
+            return self._workflow_graph_issue_response(
+                AdminWorkflowGraphError("CORRUPT", http_status=503)
+            )
+
+        try:
+            topology_nodes = list_workflow_topology_nodes(
+                execution,
+                authorize=authorizer,
+                attempt_number=attempt_number,
+                limit=ADMIN_WORKFLOW_GRAPH_MAX_NODES,
+            )
+            topology_edges = list_workflow_topology_edges(
+                execution,
+                authorize=authorizer,
+                attempt_number=attempt_number,
+                limit=ADMIN_WORKFLOW_GRAPH_MAX_EDGES,
+            )
+            node_details = list_workflow_node_details(
+                execution,
+                authorize=authorizer,
+                attempt_number=attempt_number,
+                limit=ADMIN_WORKFLOW_GRAPH_MAX_DETAILS,
+            )
+        except WorkflowProgressReadError as error:
+            return self._workflow_graph_read_error_response(error)
+
+        try:
+            payload = build_admin_workflow_graph(
+                expectation,
+                topology_nodes=topology_nodes,
+                topology_edges=topology_edges,
+                node_details=node_details,
+            )
+        except AdminWorkflowGraphError as issue:
+            return self._workflow_graph_issue_response(issue)
+        except (AttributeError, KeyError, TypeError, UnicodeError, ValueError):
+            return self._workflow_graph_issue_response(
+                AdminWorkflowGraphError("CORRUPT", http_status=503)
+            )
+        try:
+            return _admin_json_response(
+                payload,
+                max_bytes=ADMIN_WORKFLOW_GRAPH_MAX_RESPONSE_BYTES,
+            )
+        except ValueError:
+            return self._workflow_graph_issue_response(AdminWorkflowGraphError("LIMIT_EXCEEDED"))
 
     def workflow_topology_nodes_view(
         self,

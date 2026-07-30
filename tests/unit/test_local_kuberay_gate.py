@@ -76,6 +76,8 @@ IMAGE_ID = f"sha256:{'b' * 64}"
 TASK_ID = "15200000-0000-4000-8000-000000000001"
 WORKFLOW_TASK_ID = "25200000-0000-4000-8000-000000000002"
 WORKFLOW_RUN_ID = "35200000-0000-4000-8000-000000000003"
+FAILED_WORKFLOW_TASK_ID = "45200000-0000-4000-8000-000000000004"
+FAILED_WORKFLOW_RUN_ID = "55200000-0000-4000-8000-000000000005"
 TOKEN68 = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/=="
 
 
@@ -2901,6 +2903,9 @@ def test_every_evidence_field_passes_through_the_token_redactor(
         "workflow_task_id",
         "workflow_task_state",
         "workflow_availability",
+        "workflow_failure_task_id",
+        "workflow_failure_task_state",
+        "workflow_failure_availability",
     ):
         setattr(evidence, field_name, token)
     evidence.setup_bundle_bytes = cast(Any, token)
@@ -2909,6 +2914,7 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.web_restart_count = cast(Any, token)
     evidence.task_result = token
     evidence.workflow_schema_version = cast(Any, token)
+    evidence.workflow_attempt_number = cast(Any, token)
     evidence.workflow_topology_nodes = cast(Any, token)
     evidence.workflow_topology_edges = cast(Any, token)
     evidence.workflow_node_details = cast(Any, token)
@@ -2918,6 +2924,24 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.workflow_current_manifests = cast(Any, token)
     evidence.workflow_pending_manifests = cast(Any, token)
     evidence.workflow_unlinked_pages = cast(Any, token)
+    evidence.workflow_failure_attempt_number = cast(Any, token)
+    evidence.workflow_failure_schema_version = cast(Any, token)
+    evidence.workflow_failure_topology_nodes = cast(Any, token)
+    evidence.workflow_failure_topology_edges = cast(Any, token)
+    evidence.workflow_failure_node_details = cast(Any, token)
+    evidence.workflow_failure_leaf_tasks = cast(Any, token)
+    evidence.workflow_failure_pending_nodes = cast(Any, token)
+    evidence.workflow_failure_running_nodes = cast(Any, token)
+    evidence.workflow_failure_succeeded_nodes = cast(Any, token)
+    evidence.workflow_failure_failed_nodes = cast(Any, token)
+    evidence.workflow_failure_path_nodes = cast(Any, token)
+    evidence.workflow_failure_origins = cast(Any, token)
+    evidence.workflow_failure_incoming_edges = cast(Any, token)
+    evidence.workflow_failure_admin_routes = cast(Any, token)
+    evidence.workflow_failure_admin_actions = cast(Any, token)
+    evidence.workflow_failure_current_manifests = cast(Any, token)
+    evidence.workflow_failure_pending_manifests = cast(Any, token)
+    evidence.workflow_failure_unlinked_pages = cast(Any, token)
     evidence.deployments = cast(dict[str, int], dict.fromkeys(APP_DEPLOYMENTS, token))
     evidence.prometheus_counts = cast(
         dict[str, int], dict.fromkeys(("django-ray", "ray-head", "ray-workers"), token)
@@ -2927,7 +2951,7 @@ def test_every_evidence_field_passes_through_the_token_redactor(
 
     serialized = "\n".join(output)
     assert token not in serialized
-    assert serialized.count("[REDACTED]") >= 33
+    assert serialized.count("[REDACTED]") >= 55
 
 
 def test_secret_token_is_decoded_in_memory_and_registered_for_redaction(
@@ -3229,106 +3253,189 @@ def test_api_smoke_rejects_task_id_evidence_injection(monkeypatch: pytest.Monkey
 
 
 def _complex_workflow_gate_responses() -> dict[str, dict[str, Any]]:
-    run_identity = {
-        "schema_version": 1,
-        "run_id": WORKFLOW_RUN_ID,
-        "attempt_number": 1,
-        "execution_generation": 1,
-    }
-    publication = {
-        "summary_revision": 9,
-        "topology_version": 8,
-        "detail_revision": 1,
-    }
-    node_ids = ["0.0", "0.1.g0.0", "0.2"]
-    edges = [
-        {"source": "0.0", "target": "0.1.g0.0"},
-        {"source": "0.1.g0.0", "target": "0.2"},
-    ]
-
-    def envelope() -> dict[str, Any]:
-        return {
-            "schema_version": 1,
-            "task_id": WORKFLOW_TASK_ID,
-            "run_identity": dict(run_identity),
-            "publication": dict(publication),
-            "availability": "AVAILABLE",
-            "complete": True,
-        }
-
-    def page(collection: str, items: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
-            **envelope(),
-            "schema": "django-ray.workflow-progress-page",
-            "collection": collection,
-            "returned_count": len(items),
-            "items": items,
-            "next_cursor": None,
-        }
-
-    summary = {
-        "schema_version": 3,
-        "run_identity": dict(run_identity),
-        "reporting_policy": "full",
-        "selected_strategy": "dynamic_tasks",
-        "plan_fingerprint": f"sha256:{'a' * 64}",
-        **publication,
-        "state": "SUCCEEDED",
-        "node_counts": {
-            "declared": None,
-            "discovered": len(node_ids),
-            "retained_topology": len(node_ids),
-            "retained_detail": len(node_ids),
-            "pending": 0,
-            "running": 0,
-            "succeeded": len(node_ids),
-            "failed": 0,
-        },
-        "edge_counts": {
-            "declared": None,
-            "discovered": len(edges),
-            "retained_topology": len(edges),
-        },
-        "detail": {
-            "availability": "AVAILABLE",
-            "complete": True,
-            "truncation_reasons": [],
-        },
-    }
     page_query = f"?limit={gate_module.WORKFLOW_PROGRESS_PAGE_LIMIT}"
-    return {
-        gate_module.COMPLEX_WORKFLOW_ENQUEUE_PATH: {
-            "task_id": WORKFLOW_TASK_ID,
-            "status": "READY",
-        },
-        f"/api/cluster/complex-workflow/{WORKFLOW_TASK_ID}": {
-            "task_id": WORKFLOW_TASK_ID,
-            "state": "SUCCEEDED",
-            "result": {
+
+    def run_responses(
+        *,
+        enqueue_path: str,
+        enqueue_kwargs: dict[str, object],
+        task_id: str,
+        run_id: str,
+        state: str,
+        node_states: dict[str, str],
+        edges: list[dict[str, str]],
+        leaf_tasks: int,
+    ) -> dict[str, dict[str, Any]]:
+        run_identity = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "attempt_number": 1,
+            "execution_generation": 1,
+        }
+        publication = {
+            "summary_revision": 9,
+            "topology_version": 8,
+            "detail_revision": 1,
+        }
+
+        def envelope() -> dict[str, Any]:
+            return {
+                "schema_version": 1,
+                "task_id": task_id,
+                "run_identity": dict(run_identity),
+                "publication": dict(publication),
+                "availability": "AVAILABLE",
+                "complete": True,
+            }
+
+        def page(collection: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+            return {
+                **envelope(),
+                "schema": "django-ray.workflow-progress-page",
+                "collection": collection,
+                "returned_count": len(items),
+                "items": items,
+                "next_cursor": None,
+            }
+
+        state_counts = {
+            node_state: sum(value == node_state for value in node_states.values())
+            for node_state in ("PENDING", "RUNNING", "SUCCEEDED", "FAILED")
+        }
+        summary = {
+            "schema_version": 3,
+            "run_identity": dict(run_identity),
+            "reporting_policy": "full",
+            "selected_strategy": "dynamic_tasks",
+            "plan_fingerprint": f"sha256:{'a' * 64}",
+            **publication,
+            "state": state,
+            "node_counts": {
+                "declared": None,
+                "discovered": len(node_states),
+                "retained_topology": len(node_states),
+                "retained_detail": len(node_states),
+                "pending": state_counts["PENDING"],
+                "running": state_counts["RUNNING"],
+                "succeeded": state_counts["SUCCEEDED"],
+                "failed": state_counts["FAILED"],
+            },
+            "edge_counts": {
+                "declared": None,
+                "discovered": len(edges),
+                "retained_topology": len(edges),
+            },
+            "detail": {
+                "availability": "AVAILABLE",
+                "complete": True,
+                "truncation_reasons": [],
+            },
+        }
+        poll_result: dict[str, Any] | None = None
+        poll_error: str | None = gate_module.COMPLEX_WORKFLOW_FAILURE_MESSAGE
+        if state == "SUCCEEDED":
+            poll_result = {
                 "shape": "chain(group(chain(map), chain(map)), step)",
                 "durability_boundary": "single RayTaskExecution",
-                "total_leaf_tasks": 3,
+                "total_leaf_tasks": leaf_tasks,
+            }
+            poll_error = None
+        execution_query = urlencode({"task_id": task_id, "limit": 1})
+        return {
+            enqueue_path: {
+                "task_id": task_id,
+                "status": "READY",
+                "args": [],
+                "kwargs": dict(enqueue_kwargs),
             },
-        },
-        f"/api/cluster/workflows/{WORKFLOW_TASK_ID}": {
-            **envelope(),
-            "schema": "django-ray.workflow-progress-summary",
-            "source_schema_version": 3,
-            "summary": summary,
-        },
-        f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/topology/nodes{page_query}": page(
-            "topology_nodes",
-            [{"node_id": node_id, "kind": "step"} for node_id in node_ids],
-        ),
-        f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/topology/edges{page_query}": page(
-            "topology_edges",
-            edges,
-        ),
-        f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/nodes{page_query}": page(
-            "node_details",
-            [{"node_id": node_id, "state": "SUCCEEDED"} for node_id in node_ids],
-        ),
+            f"/api/cluster/complex-workflow/{task_id}": {
+                "task_id": task_id,
+                "state": state,
+                "result": poll_result,
+                "error": poll_error,
+            },
+            f"/api/executions?{execution_query}": {
+                "tasks": [
+                    {
+                        "task_id": task_id,
+                        "state": state,
+                        "callable_path": (
+                            "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"
+                        ),
+                        "attempt_number": 1,
+                        "execution_generation": 1,
+                        "workflow_run_id": run_id,
+                    }
+                ]
+            },
+            f"/api/cluster/workflows/{task_id}": {
+                **envelope(),
+                "schema": "django-ray.workflow-progress-summary",
+                "source_schema_version": 3,
+                "summary": summary,
+            },
+            f"/api/cluster/workflows/{task_id}/topology/nodes{page_query}": page(
+                "topology_nodes",
+                [{"node_id": node_id, "kind": "step"} for node_id in node_states],
+            ),
+            f"/api/cluster/workflows/{task_id}/topology/edges{page_query}": page(
+                "topology_edges",
+                edges,
+            ),
+            f"/api/cluster/workflows/{task_id}/nodes{page_query}": page(
+                "node_details",
+                [
+                    {"node_id": node_id, "state": node_state}
+                    for node_id, node_state in node_states.items()
+                ],
+            ),
+        }
+
+    success_nodes = {
+        "0.0": "SUCCEEDED",
+        "0.1.g0.0": "SUCCEEDED",
+        "0.2": "SUCCEEDED",
     }
+    failure_nodes = {
+        "0.0": "SUCCEEDED",
+        "0.1.g0.0": "SUCCEEDED",
+        "0.1.g0.1": "FAILED",
+        "0.1.g1.0": "RUNNING",
+        "0.2": "PENDING",
+    }
+    responses = run_responses(
+        enqueue_path=gate_module.COMPLEX_WORKFLOW_ENQUEUE_PATH,
+        enqueue_kwargs=gate_module.COMPLEX_WORKFLOW_ENQUEUE_KWARGS,
+        task_id=WORKFLOW_TASK_ID,
+        run_id=WORKFLOW_RUN_ID,
+        state="SUCCEEDED",
+        node_states=success_nodes,
+        edges=[
+            {"source": "0.0", "target": "0.1.g0.0"},
+            {"source": "0.1.g0.0", "target": "0.2"},
+        ],
+        leaf_tasks=3,
+    )
+    responses.update(
+        run_responses(
+            enqueue_path=gate_module.COMPLEX_WORKFLOW_FAILURE_ENQUEUE_PATH,
+            enqueue_kwargs=gate_module.COMPLEX_WORKFLOW_FAILURE_ENQUEUE_KWARGS,
+            task_id=FAILED_WORKFLOW_TASK_ID,
+            run_id=FAILED_WORKFLOW_RUN_ID,
+            state="FAILED",
+            node_states=failure_nodes,
+            edges=[
+                {"source": "0.0", "target": "0.1.g0.0"},
+                {"source": "0.0", "target": "0.1.g0.1"},
+                {"source": "0.0", "target": "0.1.g1.0"},
+                {"source": "0.1.g0.0", "target": "0.2"},
+                {"source": "0.1.g0.1", "target": "0.2"},
+                {"source": "0.1.g1.0", "target": "0.2"},
+            ],
+            leaf_tasks=3,
+        )
+    )
+    return responses
 
 
 def test_complex_workflow_gate_requires_terminal_consistent_schema_v3_api(
@@ -3354,28 +3461,53 @@ def test_complex_workflow_gate_requires_terminal_consistent_schema_v3_api(
 
     gate._verify_complex_workflow_progress()
 
-    assert calls == [
-        (gate_module.COMPLEX_WORKFLOW_ENQUEUE_PATH, "POST"),
-        (f"/api/cluster/complex-workflow/{WORKFLOW_TASK_ID}", "GET"),
-        (f"/api/cluster/workflows/{WORKFLOW_TASK_ID}", "GET"),
-        (
-            f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/topology/nodes?limit=16",
-            "GET",
-        ),
-        (
-            f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/topology/edges?limit=16",
-            "GET",
-        ),
-        (f"/api/cluster/workflows/{WORKFLOW_TASK_ID}/nodes?limit=16", "GET"),
-    ]
+    def run_calls(enqueue_path: str, task_id: str) -> list[tuple[str, str]]:
+        execution_query = urlencode({"task_id": task_id, "limit": 1})
+        return [
+            (enqueue_path, "POST"),
+            (f"/api/cluster/complex-workflow/{task_id}", "GET"),
+            (f"/api/executions?{execution_query}", "GET"),
+            (f"/api/cluster/workflows/{task_id}", "GET"),
+            (
+                f"/api/cluster/workflows/{task_id}/topology/nodes?limit=16",
+                "GET",
+            ),
+            (
+                f"/api/cluster/workflows/{task_id}/topology/edges?limit=16",
+                "GET",
+            ),
+            (f"/api/cluster/workflows/{task_id}/nodes?limit=16", "GET"),
+        ]
+
+    assert calls == run_calls(
+        gate_module.COMPLEX_WORKFLOW_ENQUEUE_PATH,
+        WORKFLOW_TASK_ID,
+    ) + run_calls(
+        gate_module.COMPLEX_WORKFLOW_FAILURE_ENQUEUE_PATH,
+        FAILED_WORKFLOW_TASK_ID,
+    )
     assert gate.evidence.workflow_task_id == WORKFLOW_TASK_ID
     assert gate.evidence.workflow_task_state == "SUCCEEDED"
+    assert gate.evidence.workflow_attempt_number == 1
     assert gate.evidence.workflow_schema_version == 3
     assert gate.evidence.workflow_availability == "AVAILABLE"
     assert gate.evidence.workflow_topology_nodes == 3
     assert gate.evidence.workflow_topology_edges == 2
     assert gate.evidence.workflow_node_details == 3
     assert gate.evidence.workflow_leaf_tasks == 3
+    assert gate.evidence.workflow_failure_task_id == FAILED_WORKFLOW_TASK_ID
+    assert gate.evidence.workflow_failure_task_state == "FAILED"
+    assert gate.evidence.workflow_failure_attempt_number == 1
+    assert gate.evidence.workflow_failure_schema_version == 3
+    assert gate.evidence.workflow_failure_availability == "AVAILABLE"
+    assert gate.evidence.workflow_failure_topology_nodes == 5
+    assert gate.evidence.workflow_failure_topology_edges == 6
+    assert gate.evidence.workflow_failure_node_details == 5
+    assert gate.evidence.workflow_failure_leaf_tasks == 3
+    assert gate.evidence.workflow_failure_pending_nodes == 1
+    assert gate.evidence.workflow_failure_running_nodes == 1
+    assert gate.evidence.workflow_failure_succeeded_nodes == 2
+    assert gate.evidence.workflow_failure_failed_nodes == 1
 
 
 @pytest.mark.parametrize(
@@ -3389,6 +3521,10 @@ def test_complex_workflow_gate_requires_terminal_consistent_schema_v3_api(
         "missing_detail",
         "publication_mismatch",
         "count_mismatch",
+        "failed_error",
+        "failed_retry_attempt",
+        "missing_failed_enqueue_kwargs",
+        "forged_failed_enqueue_kwargs",
     ],
 )
 def test_complex_workflow_gate_rejects_incomplete_or_inconsistent_api_evidence(
@@ -3404,6 +3540,11 @@ def test_complex_workflow_gate_rejects_incomplete_or_inconsistent_api_evidence(
     edge_path = f"{summary_path}/topology/edges{page_query}"
     detail_path = f"{summary_path}/nodes{page_query}"
     poll_path = f"/api/cluster/complex-workflow/{WORKFLOW_TASK_ID}"
+    failed_poll_path = f"/api/cluster/complex-workflow/{FAILED_WORKFLOW_TASK_ID}"
+    failed_execution_path = (
+        f"/api/executions?{urlencode({'task_id': FAILED_WORKFLOW_TASK_ID, 'limit': 1})}"
+    )
+    failed_enqueue_path = gate_module.COMPLEX_WORKFLOW_FAILURE_ENQUEUE_PATH
 
     if failure == "terminal_failure":
         responses[poll_path]["state"] = "FAILED"
@@ -3423,8 +3564,16 @@ def test_complex_workflow_gate_rejects_incomplete_or_inconsistent_api_evidence(
         responses[detail_path]["returned_count"] -= 1
     elif failure == "publication_mismatch":
         responses[edge_path]["publication"]["summary_revision"] += 1
-    else:
+    elif failure == "count_mismatch":
         responses[summary_path]["summary"]["node_counts"]["discovered"] -= 1
+    elif failure == "failed_error":
+        responses[failed_poll_path]["error"] = "unexpected failure"
+    elif failure == "failed_retry_attempt":
+        responses[failed_execution_path]["tasks"][0]["attempt_number"] = 2
+    elif failure == "missing_failed_enqueue_kwargs":
+        responses[failed_enqueue_path].pop("kwargs")
+    elif failure == "forged_failed_enqueue_kwargs":
+        responses[failed_enqueue_path]["kwargs"]["slow_items"] = 2
 
     monkeypatch.setattr(gate, "_secret_token", lambda: token)
 
@@ -3447,41 +3596,100 @@ def test_complex_workflow_gate_rejects_incomplete_or_inconsistent_api_evidence(
     assert gate.evidence.workflow_topology_nodes == 0
 
 
-def _workflow_admin_smoke_evidence() -> dict[str, str | int]:
+def _workflow_admin_smoke_evidence(
+    *,
+    task_id: str = WORKFLOW_TASK_ID,
+    task_state: str = "SUCCEEDED",
+    topology_nodes: int = 3,
+    topology_edges: int = 2,
+    pending_nodes: int = 0,
+    running_nodes: int = 0,
+    succeeded_nodes: int = 3,
+    failed_nodes: int = 0,
+    failure_path_nodes: int = 0,
+    failure_origins: int = 0,
+    incoming_failure_edges: int = 0,
+) -> dict[str, str | int]:
     return {
         "admin_workflow": "verified",
-        "task_id": WORKFLOW_TASK_ID,
-        "admin_routes": 5,
+        "task_id": task_id,
+        "task_state": task_state,
+        "attempt_number": 1,
+        "admin_routes": 6,
         "admin_actions": 3,
-        "topology_nodes": 3,
-        "topology_edges": 2,
-        "node_details": 3,
+        "topology_nodes": topology_nodes,
+        "topology_edges": topology_edges,
+        "node_details": topology_nodes,
+        "graph_status": "AVAILABLE",
+        "graph_nodes": topology_nodes,
+        "graph_edges": topology_edges,
+        "graph_pending_nodes": pending_nodes,
+        "graph_running_nodes": running_nodes,
+        "graph_succeeded_nodes": succeeded_nodes,
+        "graph_failed_nodes": failed_nodes,
+        "graph_failure_path_nodes": failure_path_nodes,
+        "graph_failure_origins": failure_origins,
+        "graph_incoming_failure_edges": incoming_failure_edges,
         "current_manifests": 1,
         "pending_manifests": 0,
         "unlinked_pages": 0,
     }
 
 
+def _seed_workflow_admin_evidence(gate: LocalKubeRayGate) -> None:
+    gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
+    gate.evidence.workflow_task_state = "SUCCEEDED"
+    gate.evidence.workflow_attempt_number = 1
+    gate.evidence.workflow_topology_nodes = 3
+    gate.evidence.workflow_topology_edges = 2
+    gate.evidence.workflow_node_details = 3
+    gate.evidence.workflow_failure_task_id = FAILED_WORKFLOW_TASK_ID
+    gate.evidence.workflow_failure_task_state = "FAILED"
+    gate.evidence.workflow_failure_attempt_number = 1
+    gate.evidence.workflow_failure_topology_nodes = 5
+    gate.evidence.workflow_failure_topology_edges = 6
+    gate.evidence.workflow_failure_node_details = 5
+    gate.evidence.workflow_failure_pending_nodes = 1
+    gate.evidence.workflow_failure_running_nodes = 1
+    gate.evidence.workflow_failure_succeeded_nodes = 2
+    gate.evidence.workflow_failure_failed_nodes = 1
+
+
 def test_workflow_admin_gate_executes_same_task_inside_django_web(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = LocalKubeRayGate(_config())
-    gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
-    gate.evidence.workflow_topology_nodes = 3
-    gate.evidence.workflow_topology_edges = 2
-    gate.evidence.workflow_node_details = 3
+    _seed_workflow_admin_evidence(gate)
     calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
 
     def kubectl(*args: str, **kwargs: object) -> CommandResult:
         calls.append((args, kwargs))
-        return CommandResult(json.dumps(_workflow_admin_smoke_evidence()), "", 0)
+        task_id = args[-1]
+        payload = (
+            _workflow_admin_smoke_evidence()
+            if task_id == WORKFLOW_TASK_ID
+            else _workflow_admin_smoke_evidence(
+                task_id=FAILED_WORKFLOW_TASK_ID,
+                task_state="FAILED",
+                topology_nodes=5,
+                topology_edges=6,
+                pending_nodes=1,
+                running_nodes=1,
+                succeeded_nodes=2,
+                failed_nodes=1,
+                failure_path_nodes=2,
+                failure_origins=1,
+                incoming_failure_edges=1,
+            )
+        )
+        return CommandResult(json.dumps(payload), "", 0)
 
     monkeypatch.setattr(gate, "_kubectl", kubectl)
 
     gate._verify_workflow_admin()
 
-    assert calls == [
-        (
+    def expected_call(task_id: str):
+        return (
             (
                 "exec",
                 "deployment/django-web",
@@ -3496,19 +3704,28 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                 "--timeout",
                 "180",
                 "--existing-workflow-task-id",
-                WORKFLOW_TASK_ID,
+                task_id,
             ),
             {
                 "timeout": 215,
                 "sensitive_output": True,
             },
         )
+
+    assert calls == [
+        expected_call(WORKFLOW_TASK_ID),
+        expected_call(FAILED_WORKFLOW_TASK_ID),
     ]
-    assert gate.evidence.workflow_admin_routes == 5
+    assert gate.evidence.workflow_admin_routes == 6
     assert gate.evidence.workflow_admin_actions == 3
     assert gate.evidence.workflow_current_manifests == 1
     assert gate.evidence.workflow_pending_manifests == 0
     assert gate.evidence.workflow_unlinked_pages == 0
+    assert gate.evidence.workflow_failure_path_nodes == 2
+    assert gate.evidence.workflow_failure_origins == 1
+    assert gate.evidence.workflow_failure_incoming_edges == 1
+    assert gate.evidence.workflow_failure_admin_routes == 6
+    assert gate.evidence.workflow_failure_current_manifests == 1
 
 
 @pytest.mark.parametrize(
@@ -3528,10 +3745,7 @@ def test_workflow_admin_gate_rejects_non_scalar_or_inconsistent_evidence(
     value: object,
 ) -> None:
     gate = LocalKubeRayGate(_config())
-    gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
-    gate.evidence.workflow_topology_nodes = 3
-    gate.evidence.workflow_topology_edges = 2
-    gate.evidence.workflow_node_details = 3
+    _seed_workflow_admin_evidence(gate)
     payload = _workflow_admin_smoke_evidence()
     payload[field_name] = cast(Any, value)
     monkeypatch.setattr(
@@ -3774,9 +3988,14 @@ def test_gate_guide_separates_runtime_evidence_from_durable_summary() -> None:
     assert "=== Local KubeRay final gate evidence ===" in guide
     assert "Do not copy the complete block into a retained commit or PR" in guide
     assert "exact `uv run make k8s-final-gate` command and arguments" in guide
-    assert "`K8S_RAY_RESTART=skip`: passed" in guide
+    assert "`K8S_RAY_RESTART=required`: passed" in guide
     assert "authenticated API smoke" in guide
     assert "task succeeded with result 5" in guide
+    assert "`workflow-progress`" in guide
+    assert "`workflow-admin`" in guide
+    assert "deterministic first-attempt failure" in guide
+    assert "authenticated admin graph retained the incoming" in guide
+    assert "all Ray pods were cold-replaced" in guide
     assert "data-bearing resources were preserved" in guide
     assert "focused value or artifact in an issue or PR comment" in guide
     assert "without copying the tree hash into history" in guide

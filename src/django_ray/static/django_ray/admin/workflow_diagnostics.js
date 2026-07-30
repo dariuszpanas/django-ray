@@ -18,16 +18,88 @@
 
   const endpoints = {
     diagnostics: disclosure.dataset.diagnosticsUrl ?? "",
+    graph: disclosure.dataset.graphUrl ?? "",
     planDownload: disclosure.dataset.planDownloadUrl ?? "",
     selectionDownload: disclosure.dataset.selectionDownloadUrl ?? "",
     topologyNodes: disclosure.dataset.topologyNodesUrl ?? "",
     topologyEdges: disclosure.dataset.topologyEdgesUrl ?? "",
     nodeDetails: disclosure.dataset.nodeDetailsUrl ?? "",
+    nodeDetail: disclosure.dataset.nodeDetailUrl ?? "",
   };
+  const pinnedAttemptNumber = disclosure.dataset.pinnedAttemptNumber ?? "";
+  const pinnedAttemptLabel = /^[1-9][0-9]*$/.test(pinnedAttemptNumber)
+    ? `Attempt ${pinnedAttemptNumber}`
+    : "Page-rendered attempt";
+  const newerAttemptGuidance =
+    "Reload the task page to inspect a newer live attempt.";
   let requested = false;
 
   const isRecord = (value) =>
     value !== null && typeof value === "object" && !Array.isArray(value);
+
+  const graphStatuses = new Set([
+    "AVAILABLE",
+    "NOT_REPORTED",
+    "UNSUPPORTED",
+    "TRUNCATED",
+    "UNAVAILABLE",
+    "LIMIT_EXCEEDED",
+    "CORRUPT",
+  ]);
+  const graphNodeKinds = new Set(["task", "map"]);
+  const graphNodeStates = new Set([
+    "PENDING",
+    "RUNNING",
+    "SUCCEEDED",
+    "FAILED",
+  ]);
+  const graphStatePresentation = {
+    PENDING: { symbol: "\u25cb", text: "Pending" },
+    RUNNING: { symbol: "\u25b6", text: "Running" },
+    SUCCEEDED: { symbol: "\u2713", text: "Succeeded" },
+    FAILED: { symbol: "!", text: "Failed" },
+  };
+  const graphKindPresentation = {
+    task: { symbol: "\u25a1", text: "Task" },
+    map: { symbol: "\u25c7", text: "Aggregate map" },
+  };
+  const graphLimits = {
+    nodes: 100,
+    edges: 256,
+    details: 100,
+    response_bytes: 131072,
+  };
+  const graphTextLimits = {
+    rootMessageBytes: 256,
+    nodeIdBytes: 256,
+    nodeLabelBytes: 512,
+    nodeDetailBytes: 2048,
+  };
+
+  const hasExactKeys = (value, expectedKeys) => {
+    if (!isRecord(value)) {
+      return false;
+    }
+    const actual = Object.keys(value).sort();
+    const expected = [...expectedKeys].sort();
+    return (
+      actual.length === expected.length &&
+      actual.every((key, index) => key === expected[index])
+    );
+  };
+
+  const isBoundedText = (
+    value,
+    maximumBytes,
+    { nullable = false, nonempty = false } = {},
+  ) =>
+    (nullable && value === null) ||
+    (typeof value === "string" &&
+      (!nonempty || value.length > 0) &&
+      new TextEncoder().encode(value).byteLength <= maximumBytes);
+
+  const isBoundedInteger = (value, maximum) =>
+    Number.isInteger(value) && value >= 0 && value <= maximum;
 
   const asText = (value, fallback = "\u2014") => {
     if (value === null || value === undefined || value === "") {
@@ -287,6 +359,588 @@
     return wrapper;
   };
 
+  const validateGraphNode = (node) => {
+    const baseKeys = [
+      "id",
+      "label",
+      "kind",
+      "state",
+      "message",
+      "error",
+      "failure_path",
+    ];
+    const expectedKeys =
+      isRecord(node) && node.kind === "map"
+        ? [...baseKeys, "fanout"]
+        : baseKeys;
+    if (
+      !hasExactKeys(node, expectedKeys) ||
+      !isBoundedText(node.id, graphTextLimits.nodeIdBytes, {
+        nonempty: true,
+      }) ||
+      !isBoundedText(node.label, graphTextLimits.nodeLabelBytes) ||
+      !graphNodeKinds.has(node.kind) ||
+      !graphNodeStates.has(node.state) ||
+      !isBoundedText(node.message, graphTextLimits.nodeDetailBytes, {
+        nullable: true,
+      }) ||
+      !isBoundedText(node.error, graphTextLimits.nodeDetailBytes, {
+        nullable: true,
+      }) ||
+      typeof node.failure_path !== "boolean" ||
+      (node.state === "FAILED") !== (node.error !== null)
+    ) {
+      throw new Error("Invalid workflow graph node");
+    }
+    if (node.kind !== "map") {
+      return;
+    }
+    const fanout = node.fanout;
+    if (
+      !hasExactKeys(fanout, [
+        "submitted_items",
+        "completed_items",
+        "in_flight_items",
+        "input_exhausted",
+      ]) ||
+      !isBoundedInteger(fanout.submitted_items, Number.MAX_SAFE_INTEGER) ||
+      !isBoundedInteger(fanout.completed_items, fanout.submitted_items) ||
+      !isBoundedInteger(fanout.in_flight_items, Number.MAX_SAFE_INTEGER) ||
+      fanout.in_flight_items !==
+        fanout.submitted_items - fanout.completed_items ||
+      typeof fanout.input_exhausted !== "boolean"
+    ) {
+      throw new Error("Invalid aggregate-map graph node");
+    }
+  };
+
+  const validateGraphPayload = (payload) => {
+    if (
+      !hasExactKeys(payload, [
+        "schema",
+        "schema_version",
+        "status",
+        "message",
+        "complete",
+        "counts",
+        "limits",
+        "nodes",
+        "edges",
+      ]) ||
+      payload.schema !== "django-ray.admin-workflow-graph" ||
+      payload.schema_version !== 1 ||
+      !graphStatuses.has(payload.status) ||
+      !isBoundedText(
+        payload.message,
+        graphTextLimits.rootMessageBytes,
+        { nonempty: true },
+      ) ||
+      typeof payload.complete !== "boolean" ||
+      !hasExactKeys(payload.counts, ["nodes", "edges"]) ||
+      !hasExactKeys(payload.limits, [
+        "nodes",
+        "edges",
+        "details",
+        "response_bytes",
+      ]) ||
+      Object.entries(graphLimits).some(
+        ([key, value]) => payload.limits[key] !== value,
+      ) ||
+      !isBoundedInteger(payload.counts.nodes, graphLimits.nodes) ||
+      !isBoundedInteger(payload.counts.edges, graphLimits.edges) ||
+      !Array.isArray(payload.nodes) ||
+      !Array.isArray(payload.edges) ||
+      payload.nodes.length !== payload.counts.nodes ||
+      payload.edges.length !== payload.counts.edges ||
+      new TextEncoder().encode(JSON.stringify(payload)).byteLength >
+        graphLimits.response_bytes
+    ) {
+      throw new Error("Invalid workflow graph payload");
+    }
+
+    if (payload.status !== "AVAILABLE") {
+      if (
+        payload.complete ||
+        payload.counts.nodes !== 0 ||
+        payload.counts.edges !== 0 ||
+        payload.nodes.length !== 0 ||
+        payload.edges.length !== 0
+      ) {
+        throw new Error("Partial workflow graph payload");
+      }
+      return { incoming: new Map(), nodesById: new Map(), payload };
+    }
+    if (!payload.complete) {
+      throw new Error("Incomplete workflow graph payload");
+    }
+    if (payload.counts.nodes === 0) {
+      throw new Error("Empty workflow graph payload");
+    }
+
+    const nodesById = new Map();
+    const nodeIndexes = new Map();
+    payload.nodes.forEach((node, index) => {
+      validateGraphNode(node);
+      if (nodesById.has(node.id)) {
+        throw new Error("Duplicate workflow graph node");
+      }
+      nodesById.set(node.id, node);
+      nodeIndexes.set(node.id, index);
+    });
+
+    const incoming = new Map(
+      payload.nodes.map((node) => [node.id, []]),
+    );
+    const retainedEdges = new Set();
+    for (const edge of payload.edges) {
+      if (
+        !hasExactKeys(edge, ["source", "target"]) ||
+        !isBoundedText(edge.source, graphTextLimits.nodeIdBytes, {
+          nonempty: true,
+        }) ||
+        !isBoundedText(edge.target, graphTextLimits.nodeIdBytes, {
+          nonempty: true,
+        }) ||
+        !nodesById.has(edge.source) ||
+        !nodesById.has(edge.target) ||
+        nodeIndexes.get(edge.source) >= nodeIndexes.get(edge.target)
+      ) {
+        throw new Error("Invalid workflow graph edge");
+      }
+      const edgeKey = JSON.stringify([edge.source, edge.target]);
+      if (retainedEdges.has(edgeKey)) {
+        throw new Error("Duplicate workflow graph edge");
+      }
+      retainedEdges.add(edgeKey);
+      incoming.get(edge.target).push(edge.source);
+    }
+    for (const sources of incoming.values()) {
+      sources.sort(
+        (left, right) => nodeIndexes.get(left) - nodeIndexes.get(right),
+      );
+    }
+    return { incoming, nodesById, payload };
+  };
+
+  const nodeDetailUrl = (nodeId) => {
+    if (!endpoints.nodeDetail) {
+      throw new Error("Node detail endpoint unavailable");
+    }
+    const fragmentIndex = endpoints.nodeDetail.indexOf("#");
+    const fragment =
+      fragmentIndex === -1
+        ? ""
+        : endpoints.nodeDetail.slice(fragmentIndex);
+    const withoutFragment =
+      fragmentIndex === -1
+        ? endpoints.nodeDetail
+        : endpoints.nodeDetail.slice(0, fragmentIndex);
+    const queryIndex = withoutFragment.indexOf("?");
+    const path =
+      queryIndex === -1
+        ? withoutFragment
+        : withoutFragment.slice(0, queryIndex);
+    const query =
+      queryIndex === -1 ? "" : withoutFragment.slice(queryIndex + 1);
+    const parameters = new URLSearchParams(query);
+    parameters.set("node_id", nodeId);
+    return `${path}?${parameters.toString()}${fragment}`;
+  };
+
+  const graphFallbackActions = () => {
+    const actions = element(
+      "nav",
+      "django-ray-workflow__actions django-ray-workflow-graph__fallbacks",
+    );
+    actions.setAttribute("aria-label", "Bounded workflow JSON fallback views");
+    addAction(
+      actions,
+      "Topology nodes JSON",
+      endpoints.topologyNodes,
+      "topology",
+    );
+    addAction(
+      actions,
+      "Topology edges JSON",
+      endpoints.topologyEdges,
+      "topology",
+    );
+    addAction(
+      actions,
+      "Node details JSON",
+      endpoints.nodeDetails,
+      "topology",
+    );
+    return actions;
+  };
+
+  const graphConnector = () => {
+    const namespace = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(namespace, "svg");
+    svg.setAttribute("class", "django-ray-workflow-graph__connector");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    svg.setAttribute("viewBox", "0 0 32 40");
+    const path = document.createElementNS(namespace, "path");
+    path.setAttribute("d", "M16 1v30m-7-7 7 7 7-7");
+    svg.append(path);
+    return svg;
+  };
+
+  const graphLegend = () => {
+    const legend = element("ul", "django-ray-workflow-graph__legend");
+    legend.setAttribute("aria-label", "Workflow node shapes");
+    for (const presentation of Object.values(graphKindPresentation)) {
+      const item = element(
+        "li",
+        "django-ray-workflow-graph__legend-item",
+      );
+      const symbol = element("span", "", presentation.symbol);
+      symbol.setAttribute("aria-hidden", "true");
+      item.append(symbol, element("span", "", presentation.text));
+      legend.append(item);
+    }
+    return legend;
+  };
+
+  const graphNodeCard = (node) => {
+    const link = element("a", "django-ray-workflow-graph__node");
+    link.href = nodeDetailUrl(node.id);
+    link.dataset.kind = node.kind;
+    link.dataset.state = node.state;
+    if (node.failure_path) {
+      link.dataset.failurePath = "true";
+    }
+
+    const identity = element("span", "");
+    identity.append(
+      element(
+        "span",
+        "django-ray-workflow-graph__node-title",
+        node.label || node.id,
+      ),
+      element("span", "django-ray-workflow-graph__node-id", node.id),
+    );
+
+    const statePresentation = graphStatePresentation[node.state];
+    const state = element("span", "django-ray-workflow-graph__state");
+    state.dataset.state = node.state;
+    const stateSymbol = element("span", "", statePresentation.symbol);
+    stateSymbol.setAttribute("aria-hidden", "true");
+    state.append(stateSymbol, element("span", "", statePresentation.text));
+    link.append(identity, state);
+
+    const kindPresentation = graphKindPresentation[node.kind];
+    const metadata = element(
+      "span",
+      "django-ray-workflow-graph__node-meta",
+    );
+    const kind = element("span", "");
+    const kindSymbol = element("span", "", kindPresentation.symbol);
+    kindSymbol.setAttribute("aria-hidden", "true");
+    kind.append(kindSymbol, element("span", "", ` ${kindPresentation.text}`));
+    metadata.append(kind);
+    if (node.failure_path) {
+      metadata.append(element("span", "", "Failure path"));
+    }
+    if (node.kind === "map") {
+      metadata.append(
+        element(
+          "span",
+          "",
+          `${node.fanout.completed_items} of ${node.fanout.submitted_items} items completed`,
+        ),
+        element(
+          "span",
+          "",
+          `${node.fanout.in_flight_items} in flight`,
+        ),
+        element(
+          "span",
+          "",
+          node.fanout.input_exhausted
+            ? "Input exhausted"
+            : "Input still open",
+        ),
+      );
+    }
+    link.append(metadata);
+
+    if (node.message !== null) {
+      link.append(
+        element(
+          "span",
+          "django-ray-workflow-graph__node-message",
+          node.message,
+        ),
+      );
+    }
+    if (node.error !== null) {
+      const error = element(
+        "span",
+        "django-ray-workflow-graph__node-message",
+        `Failure: ${node.error}`,
+      );
+      error.dataset.failure = "true";
+      link.append(error);
+    }
+    return link;
+  };
+
+  const renderGraph = (validated, content) => {
+    const { incoming, nodesById, payload } = validated;
+    const list = element("ol", "django-ray-workflow-graph__nodes");
+    list.setAttribute("aria-label", "Workflow nodes in topological order");
+    for (const node of payload.nodes) {
+      const row = element("li", "django-ray-workflow-graph__node-row");
+      const incomingNode = element(
+        "div",
+        "django-ray-workflow-graph__incoming",
+      );
+      const sources = incoming.get(node.id);
+      if (node.failure_path) {
+        incomingNode.dataset.failurePath = "true";
+      }
+      if (sources.length === 0) {
+        incomingNode.dataset.root = "true";
+        incomingNode.append(element("p", "", "Workflow entry"));
+      } else {
+        incomingNode.append(graphConnector());
+        const sourceLabels = sources.map((sourceId) => {
+          const source = nodesById.get(sourceId);
+          return source.label
+            ? `${source.label} (${source.id})`
+            : source.id;
+        });
+        incomingNode.append(
+          element(
+            "p",
+            "",
+            `Incoming from ${sourceLabels.join(", ")}`,
+          ),
+        );
+      }
+      row.append(incomingNode, graphNodeCard(node));
+      list.append(row);
+    }
+    content.replaceChildren(graphLegend(), list);
+    content.hidden = false;
+  };
+
+  const graphDisclosure = () => {
+    const graph = element("details", "django-ray-workflow-graph");
+    const summary = element(
+      "summary",
+      "django-ray-workflow-graph__summary",
+    );
+    const summaryText = element("span", "");
+    const summaryCopy = element(
+      "span",
+      "django-ray-workflow-graph__summary-copy",
+    );
+    const summaryCopyMessage = element(
+      "span",
+      "",
+      "Open to load the bounded graph.",
+    );
+    summaryCopy.append(
+      summaryCopyMessage,
+      element("span", "", ` ${newerAttemptGuidance}`),
+    );
+    summaryText.append(
+      element(
+        "span",
+        "django-ray-workflow-graph__summary-title",
+        `Execution graph \u2014 ${pinnedAttemptLabel}`,
+      ),
+      summaryCopy,
+    );
+    const arrow = element(
+      "span",
+      "django-ray-workflow-graph__summary-arrow",
+      "\u25b8",
+    );
+    arrow.setAttribute("aria-hidden", "true");
+    summary.append(summaryText, arrow);
+
+    const body = element("div", "django-ray-workflow-graph__body");
+    const graphStatus = element(
+      "p",
+      "django-ray-workflow-graph__status",
+    );
+    graphStatus.setAttribute("role", "status");
+    graphStatus.setAttribute("aria-live", "polite");
+    graphStatus.setAttribute("aria-atomic", "true");
+    const graphStatusMessage = element(
+      "span",
+      "",
+      "Open this section to load the bounded workflow graph.",
+    );
+    graphStatus.append(
+      element("span", "", `${pinnedAttemptLabel}. `),
+      graphStatusMessage,
+      element("span", "", ` ${newerAttemptGuidance}`),
+    );
+    const graphContent = element(
+      "div",
+      "django-ray-workflow-graph__content",
+    );
+    graphContent.hidden = true;
+    body.append(graphStatus, graphContent);
+    graph.append(summary, body);
+
+    let graphRequested = false;
+    let fallbackActions = null;
+    const showFallbacks = () => {
+      if (fallbackActions !== null) {
+        return;
+      }
+      const fallbacks = graphFallbackActions();
+      if (fallbacks.children.length > 0) {
+        body.append(fallbacks);
+        fallbackActions = fallbacks;
+      }
+    };
+    const removeFallbacks = () => {
+      if (fallbackActions === null) {
+        return;
+      }
+      fallbackActions.remove();
+      fallbackActions = null;
+    };
+    const setGraphStatus = (message, state = "ready") => {
+      graphStatusMessage.textContent = message;
+      graphStatus.dataset.state = state;
+      graphStatus.setAttribute(
+        "aria-busy",
+        state === "loading" ? "true" : "false",
+      );
+    };
+    const setGraphSummary = (message) => {
+      summaryCopyMessage.textContent = message;
+    };
+    const recoverableFailure = (message) => {
+      graphRequested = false;
+      graphContent.hidden = true;
+      showFallbacks();
+      setGraphSummary("Unavailable; reopen to retry.");
+      setGraphStatus(
+        `${message} Close and reopen this graph to retry, or use the bounded JSON views below.`,
+        "error",
+      );
+    };
+    const loadGraph = async () => {
+      if (!endpoints.graph) {
+        showFallbacks();
+        setGraphSummary("Unavailable.");
+        setGraphStatus(
+          "The workflow graph endpoint is unavailable. Use the bounded JSON views below.",
+          "error",
+        );
+        return;
+      }
+      setGraphStatus("Loading the bounded workflow graph\u2026", "loading");
+      try {
+        const response = await window.fetch(endpoints.graph, {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        const contentType = response.headers?.get("content-type") ?? "";
+        if (response.redirected || [401, 403].includes(response.status)) {
+          graphContent.hidden = true;
+          showFallbacks();
+          setGraphSummary("Authentication required.");
+          setGraphStatus(
+            "Workflow graph unavailable; reload after signing in again. The bounded JSON views remain available after authentication.",
+            "error",
+          );
+          return;
+        }
+        if (response.status === 404) {
+          graphContent.hidden = true;
+          showFallbacks();
+          setGraphSummary("No longer available.");
+          setGraphStatus(
+            "The workflow graph is no longer available for this execution. Use the bounded JSON views below.",
+            "error",
+          );
+          return;
+        }
+        if (!contentType.includes("application/json")) {
+          if (response.ok) {
+            graphContent.hidden = true;
+            showFallbacks();
+            setGraphSummary("Authentication required.");
+            setGraphStatus(
+              "Workflow graph unavailable; reload after signing in again. No graph data was displayed.",
+              "error",
+            );
+          } else {
+            recoverableFailure("The workflow graph is temporarily unavailable.");
+          }
+          return;
+        }
+
+        const validated = validateGraphPayload(await response.json());
+        const expectedStatusCode =
+          validated.payload.status === "CORRUPT" ? 503 : 200;
+        if (response.status !== expectedStatusCode) {
+          throw new Error("Unexpected workflow graph response");
+        }
+        if (validated.payload.status !== "AVAILABLE") {
+          graphContent.hidden = true;
+          showFallbacks();
+          setGraphSummary(`${asIdentifier(validated.payload.status)}.`);
+          if (validated.payload.status === "NOT_REPORTED") {
+            graphRequested = false;
+            setGraphStatus(
+              `${validated.payload.message} Close and reopen this graph after the workflow reaches a terminal state to try again, or use the bounded JSON views below.`,
+              "warning",
+            );
+            return;
+          }
+          const presentationState = [
+            "UNSUPPORTED",
+            "TRUNCATED",
+            "LIMIT_EXCEEDED",
+          ].includes(validated.payload.status)
+            ? "warning"
+            : "error";
+          setGraphStatus(
+            `${validated.payload.message} Use the bounded JSON views below.`,
+            presentationState,
+          );
+          return;
+        }
+        renderGraph(validated, graphContent);
+        removeFallbacks();
+        const { edges, nodes } = validated.payload.counts;
+        setGraphSummary(
+          `${nodes} ${nodes === 1 ? "node" : "nodes"}, ${edges} ${
+            edges === 1 ? "connection" : "connections"
+          }.`,
+        );
+        setGraphStatus(
+          `${validated.payload.message} ${nodes} ${
+            nodes === 1 ? "node" : "nodes"
+          } and ${edges} ${edges === 1 ? "connection" : "connections"}.`,
+        );
+      } catch (error) {
+        recoverableFailure("The workflow graph could not be displayed safely.");
+      }
+    };
+    graph.addEventListener("toggle", () => {
+      if (!graph.open || graphRequested) {
+        return;
+      }
+      graphRequested = true;
+      void loadGraph();
+    });
+    return graph;
+  };
+
   const renderProgress = (progress) => {
     const wrapper = section(
       "Progress and topology",
@@ -318,6 +972,11 @@
         ),
       );
       addChips(wrapper, progress.truncation_reasons);
+    }
+
+    if (endpoints.graph) {
+      wrapper.append(graphDisclosure());
+      return wrapper;
     }
 
     const availableActions = isRecord(progress.actions)

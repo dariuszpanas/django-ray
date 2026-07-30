@@ -225,18 +225,36 @@ assert "django-ray-workflow__summary" in change_html
 assert 'aria-labelledby="django-ray-live-heading"' in change_html
 assert change_html.count('role="status"') == 2
 assert "Workflow execution" in change_html
+workflow_attempt_query = f"?attempt_number={execution.attempt_number}"
 workflow_paths = {
+    "data-graph-url": (
+        reverse(
+            "admin:django_ray_raytaskexecution_workflow_graph",
+            args=[execution.pk],
+        )
+        + workflow_attempt_query
+    ),
     "data-topology-nodes-url": reverse(
         "admin:django_ray_raytaskexecution_workflow_topology_nodes",
         args=[execution.pk],
-    ),
+    )
+    + workflow_attempt_query,
     "data-topology-edges-url": reverse(
         "admin:django_ray_raytaskexecution_workflow_topology_edges",
         args=[execution.pk],
-    ),
+    )
+    + workflow_attempt_query,
     "data-node-details-url": reverse(
         "admin:django_ray_raytaskexecution_workflow_node_details",
         args=[execution.pk],
+    )
+    + workflow_attempt_query,
+    "data-node-detail-url": (
+        reverse(
+            "admin:django_ray_raytaskexecution_workflow_node_detail",
+            args=[execution.pk],
+        )
+        + workflow_attempt_query
     ),
 }
 for attribute, workflow_path in workflow_paths.items():

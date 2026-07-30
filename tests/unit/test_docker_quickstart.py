@@ -259,11 +259,23 @@ def test_existing_workflow_main_needs_no_api_token_and_prints_scalar_json(
     expected = {
         "admin_workflow": "verified",
         "task_id": WORKFLOW_TASK_ID,
-        "admin_routes": 5,
+        "task_state": "SUCCEEDED",
+        "attempt_number": 1,
+        "admin_routes": 6,
         "admin_actions": 3,
         "topology_nodes": 3,
         "topology_edges": 2,
         "node_details": 3,
+        "graph_status": "AVAILABLE",
+        "graph_nodes": 3,
+        "graph_edges": 2,
+        "graph_pending_nodes": 0,
+        "graph_running_nodes": 0,
+        "graph_succeeded_nodes": 3,
+        "graph_failed_nodes": 0,
+        "graph_failure_path_nodes": 0,
+        "graph_failure_origins": 0,
+        "graph_incoming_failure_edges": 0,
         "current_manifests": 1,
         "pending_manifests": 0,
         "unlinked_pages": 0,
@@ -298,18 +310,23 @@ def _admin_workflow_responses(
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
     diagnostics_path = f"{root}/workflow/diagnostics/"
+    graph_path = f"{root}/workflow/graph/"
+    node_detail_path = f"{root}/workflow/node/"
     collection_paths = {
         "topology_nodes": f"{root}/workflow/topology/nodes/",
         "topology_edges": f"{root}/workflow/topology/edges/",
         "node_details": f"{root}/workflow/nodes/",
     }
+    attempt_query = f"?attempt_number={execution.attempt_number}"
     change_html = "".join(
         (
             '<section id="django-ray-workflow-diagnostics" ',
             f'data-diagnostics-url="{diagnostics_path}" ',
-            f'data-topology-nodes-url="{collection_paths["topology_nodes"]}" ',
-            f'data-topology-edges-url="{collection_paths["topology_edges"]}" ',
-            f'data-node-details-url="{collection_paths["node_details"]}"></section>',
+            f'data-graph-url="{graph_path}{attempt_query}" ',
+            f'data-topology-nodes-url="{collection_paths["topology_nodes"]}{attempt_query}" ',
+            f'data-topology-edges-url="{collection_paths["topology_edges"]}{attempt_query}" ',
+            f'data-node-details-url="{collection_paths["node_details"]}{attempt_query}" ',
+            f'data-node-detail-url="{node_detail_path}{attempt_query}"></section>',
         )
     )
     node_ids = ("0.0", "0.1", "0.2")
@@ -327,7 +344,7 @@ def _admin_workflow_responses(
             "next_cursor": None,
         }
 
-    query = f"?limit={docker_smoke._WORKFLOW_PAGE_LIMIT}"
+    page_query = f"{attempt_query}&limit={docker_smoke._WORKFLOW_PAGE_LIMIT}"
     responses = {
         diagnostics_path: {
             "schema": "django-ray.admin-workflow-diagnostics",
@@ -344,21 +361,46 @@ def _admin_workflow_responses(
                 },
             },
         },
-        f"{collection_paths['topology_nodes']}{query}": page(
+        f"{collection_paths['topology_nodes']}{page_query}": page(
             "topology_nodes",
             [{"node_id": node_id} for node_id in node_ids],
         ),
-        f"{collection_paths['topology_edges']}{query}": page(
+        f"{collection_paths['topology_edges']}{page_query}": page(
             "topology_edges",
             [
                 {"source": node_ids[0], "target": node_ids[1]},
                 {"source": node_ids[1], "target": node_ids[2]},
             ],
         ),
-        f"{collection_paths['node_details']}{query}": page(
+        f"{collection_paths['node_details']}{page_query}": page(
             "node_details",
             [{"node_id": node_id, "state": "SUCCEEDED"} for node_id in node_ids],
         ),
+        f"{graph_path}{attempt_query}": {
+            "schema": "django-ray.admin-workflow-graph",
+            "schema_version": 1,
+            "status": "AVAILABLE",
+            "message": "Bounded terminal workflow graph is available.",
+            "complete": True,
+            "counts": {"nodes": 3, "edges": 2},
+            "limits": dict(docker_smoke._WORKFLOW_GRAPH_LIMITS),
+            "nodes": [
+                {
+                    "id": node_id,
+                    "label": f"Step {index}",
+                    "kind": "task",
+                    "state": "SUCCEEDED",
+                    "message": None,
+                    "error": None,
+                    "failure_path": False,
+                }
+                for index, node_id in enumerate(node_ids)
+            ],
+            "edges": [
+                {"source": node_ids[0], "target": node_ids[1]},
+                {"source": node_ids[1], "target": node_ids[2]},
+            ],
+        },
     }
     return change_html, responses
 
@@ -372,6 +414,7 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
         attempt_number=1,
         execution_generation=1,
         workflow_run_id="35200000-0000-4000-8000-000000000003",
+        state="SUCCEEDED",
     )
     change_html, responses = _admin_workflow_responses(execution)
     cookie = "sessionid=private-admin-session"
@@ -441,9 +484,10 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
     assert requested_paths == [
         f"{root}/change/",
         f"{root}/workflow/diagnostics/",
-        f"{root}/workflow/topology/nodes/?limit=16",
-        f"{root}/workflow/topology/edges/?limit=16",
-        f"{root}/workflow/nodes/?limit=16",
+        f"{root}/workflow/topology/nodes/?attempt_number=1&limit=16",
+        f"{root}/workflow/topology/edges/?attempt_number=1&limit=16",
+        f"{root}/workflow/nodes/?attempt_number=1&limit=16",
+        f"{root}/workflow/graph/?attempt_number=1",
     ]
     assert storage_calls == [
         {
@@ -451,16 +495,31 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
             "topology_nodes": 3,
             "topology_edges": 2,
             "node_details": 3,
+            "pending_nodes": 0,
+            "running_nodes": 0,
+            "failed_nodes": 0,
         }
     ]
     assert evidence == {
         "admin_workflow": "verified",
         "task_id": WORKFLOW_TASK_ID,
-        "admin_routes": 5,
+        "task_state": "SUCCEEDED",
+        "attempt_number": 1,
+        "admin_routes": 6,
         "admin_actions": 3,
         "topology_nodes": 3,
         "topology_edges": 2,
         "node_details": 3,
+        "graph_status": "AVAILABLE",
+        "graph_nodes": 3,
+        "graph_edges": 2,
+        "graph_pending_nodes": 0,
+        "graph_running_nodes": 0,
+        "graph_succeeded_nodes": 3,
+        "graph_failed_nodes": 0,
+        "graph_failure_path_nodes": 0,
+        "graph_failure_origins": 0,
+        "graph_incoming_failure_edges": 0,
         "current_manifests": 1,
         "pending_manifests": 0,
         "unlinked_pages": 0,
@@ -487,10 +546,11 @@ def test_existing_workflow_admin_rejects_unavailable_or_inconsistent_routes(
         attempt_number=1,
         execution_generation=1,
         workflow_run_id="35200000-0000-4000-8000-000000000003",
+        state="SUCCEEDED",
     )
     change_html, responses = _admin_workflow_responses(execution)
     root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
-    query = f"?limit={docker_smoke._WORKFLOW_PAGE_LIMIT}"
+    query = f"?attempt_number=1&limit={docker_smoke._WORKFLOW_PAGE_LIMIT}"
     diagnostics_path = f"{root}/workflow/diagnostics/"
     node_path = f"{root}/workflow/topology/nodes/{query}"
     if failure == "unavailable_diagnostics":
@@ -530,6 +590,178 @@ def test_existing_workflow_admin_rejects_unavailable_or_inconsistent_routes(
             base_url="http://127.0.0.1:8000",
             deadline=100.0,
             execution=execution,
+        )
+
+
+def _failed_admin_graph_fixture() -> tuple[
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    node_ids = ("0.0", "0.1", "0.2", "0.3")
+    states = {
+        "0.0": "SUCCEEDED",
+        "0.1": "FAILED",
+        "0.2": "FAILED",
+        "0.3": "SUCCEEDED",
+    }
+    topology_nodes = [{"node_id": node_id} for node_id in node_ids]
+    topology_edges = [
+        {"source": "0.0", "target": "0.1"},
+        {"source": "0.1", "target": "0.2"},
+        {"source": "0.0", "target": "0.3"},
+    ]
+    node_details = [{"node_id": node_id, "state": state} for node_id, state in states.items()]
+    graph = {
+        "schema": "django-ray.admin-workflow-graph",
+        "schema_version": 1,
+        "status": "AVAILABLE",
+        "message": "Bounded terminal workflow graph is available.",
+        "complete": True,
+        "counts": {"nodes": 4, "edges": 3},
+        "limits": dict(docker_smoke._WORKFLOW_GRAPH_LIMITS),
+        "nodes": [
+            {
+                "id": node_id,
+                "label": f"Step {index}",
+                "kind": "task",
+                "state": states[node_id],
+                "message": None,
+                "error": (
+                    "Intentional complex workflow fixture failure"
+                    if states[node_id] == "FAILED"
+                    else None
+                ),
+                "failure_path": node_id in {"0.0", "0.1"},
+            }
+            for index, node_id in enumerate(node_ids)
+        ],
+        "edges": list(topology_edges),
+    }
+    return graph, topology_nodes, topology_edges, node_details
+
+
+def test_failed_admin_graph_retains_incoming_failure_path_and_sibling_context() -> None:
+    graph, topology_nodes, topology_edges, node_details = _failed_admin_graph_fixture()
+
+    assert docker_smoke._workflow_admin_graph_evidence(
+        graph,
+        execution_state="FAILED",
+        topology_nodes=topology_nodes,
+        topology_edges=topology_edges,
+        node_details=node_details,
+    ) == {
+        "graph_status": "AVAILABLE",
+        "graph_nodes": 4,
+        "graph_edges": 3,
+        "graph_pending_nodes": 0,
+        "graph_running_nodes": 0,
+        "graph_succeeded_nodes": 2,
+        "graph_failed_nodes": 2,
+        "graph_failure_path_nodes": 2,
+        "graph_failure_origins": 1,
+        "graph_incoming_failure_edges": 1,
+    }
+
+
+def test_failed_admin_graph_accepts_unfinished_downstream_nodes() -> None:
+    graph, topology_nodes, topology_edges, node_details = _failed_admin_graph_fixture()
+    extra_states = {"0.4": "PENDING", "0.5": "RUNNING"}
+    for index, (node_id, state) in enumerate(extra_states.items(), start=4):
+        topology_nodes.append({"node_id": node_id})
+        node_details.append({"node_id": node_id, "state": state})
+        graph["nodes"].append(
+            {
+                "id": node_id,
+                "label": f"Step {index}",
+                "kind": "task",
+                "state": state,
+                "message": None,
+                "error": None,
+                "failure_path": False,
+            }
+        )
+    extra_edges = [
+        {"source": "0.3", "target": "0.4"},
+        {"source": "0.4", "target": "0.5"},
+    ]
+    topology_edges.extend(extra_edges)
+    graph["edges"].extend(extra_edges)
+    graph["counts"] = {"nodes": 6, "edges": 5}
+
+    evidence = docker_smoke._workflow_admin_graph_evidence(
+        graph,
+        execution_state="FAILED",
+        topology_nodes=topology_nodes,
+        topology_edges=topology_edges,
+        node_details=node_details,
+    )
+
+    assert evidence["graph_pending_nodes"] == 1
+    assert evidence["graph_running_nodes"] == 1
+    assert evidence["graph_succeeded_nodes"] == 2
+    assert evidence["graph_failed_nodes"] == 2
+
+
+def test_failed_admin_graph_does_not_treat_a_succeeded_ancestor_as_sibling() -> None:
+    graph, topology_nodes, topology_edges, node_details = _failed_admin_graph_fixture()
+    graph["nodes"][3]["state"] = "PENDING"
+    graph["nodes"][3]["error"] = None
+    node_details[3]["state"] = "PENDING"
+
+    with pytest.raises(
+        docker_smoke.DockerSmokeError,
+        match="successful sibling context",
+    ):
+        docker_smoke._workflow_admin_graph_evidence(
+            graph,
+            execution_state="FAILED",
+            topology_nodes=topology_nodes,
+            topology_edges=topology_edges,
+            node_details=node_details,
+        )
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "private_field",
+        "wrong_failure_path",
+        "no_successful_sibling",
+        "no_incoming_origin",
+    ],
+)
+def test_failed_admin_graph_rejects_private_or_inconsistent_failure_evidence(
+    corruption: str,
+) -> None:
+    graph, topology_nodes, topology_edges, node_details = _failed_admin_graph_fixture()
+    if corruption == "private_field":
+        graph["nodes"][0]["runtime_env"] = {"env_vars": {"SECRET": "forbidden"}}
+    elif corruption == "wrong_failure_path":
+        graph["nodes"][0]["failure_path"] = False
+    elif corruption == "no_successful_sibling":
+        for node in graph["nodes"]:
+            node["state"] = "FAILED"
+            node["error"] = "failure"
+        for detail in node_details:
+            detail["state"] = "FAILED"
+    else:
+        graph["edges"] = [
+            edge
+            for edge in graph["edges"]
+            if not (edge["source"] == "0.0" and edge["target"] == "0.1")
+        ]
+        topology_edges[:] = list(graph["edges"])
+        graph["counts"]["edges"] = len(graph["edges"])
+
+    with pytest.raises(docker_smoke.DockerSmokeError):
+        docker_smoke._workflow_admin_graph_evidence(
+            graph,
+            execution_state="FAILED",
+            topology_nodes=topology_nodes,
+            topology_edges=topology_edges,
+            node_details=node_details,
         )
 
 
@@ -615,6 +847,61 @@ def test_existing_workflow_storage_requires_one_clean_current_publication() -> N
         topology_nodes=3,
         topology_edges=2,
         node_details=3,
+    ) == {
+        "current_manifests": 1,
+        "pending_manifests": 0,
+        "unlinked_pages": 0,
+    }
+
+
+@pytest.mark.django_db
+def test_existing_failed_workflow_storage_accepts_terminal_mixed_detail() -> None:
+    execution, run_storage = _stored_workflow_admin_execution()
+    execution.state = "FAILED"
+    execution.save(update_fields=["state"])
+    run_storage.detail_succeeded_count = 2
+    run_storage.detail_failed_count = 1
+    run_storage.save(update_fields=["detail_succeeded_count", "detail_failed_count"])
+
+    assert docker_smoke._verify_existing_workflow_storage_contract(
+        execution=execution,
+        topology_nodes=3,
+        topology_edges=2,
+        node_details=3,
+        failed_nodes=1,
+    ) == {
+        "current_manifests": 1,
+        "pending_manifests": 0,
+        "unlinked_pages": 0,
+    }
+
+
+@pytest.mark.django_db
+def test_existing_failed_workflow_storage_accepts_unfinished_detail() -> None:
+    execution, run_storage = _stored_workflow_admin_execution()
+    execution.state = "FAILED"
+    execution.save(update_fields=["state"])
+    run_storage.detail_pending_count = 1
+    run_storage.detail_running_count = 1
+    run_storage.detail_succeeded_count = 0
+    run_storage.detail_failed_count = 1
+    run_storage.save(
+        update_fields=[
+            "detail_pending_count",
+            "detail_running_count",
+            "detail_succeeded_count",
+            "detail_failed_count",
+        ]
+    )
+
+    assert docker_smoke._verify_existing_workflow_storage_contract(
+        execution=execution,
+        topology_nodes=3,
+        topology_edges=2,
+        node_details=3,
+        pending_nodes=1,
+        running_nodes=1,
+        failed_nodes=1,
     ) == {
         "current_manifests": 1,
         "pending_manifests": 0,

@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
+
 from testproject.apps.cluster_tasks.workflows import (
+    COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE,
+    ComplexWorkflowFixtureError,
+    build_branch_work_items,
+    build_complex_config,
     inspect_runtime_environment,
     run_complex_branch_workflow,
     run_cpu_fanout_workflow,
+    run_cpu_work_item,
     run_runtime_env_cache_benchmark,
 )
 
@@ -37,6 +44,54 @@ def test_complex_workflow_runs_nested_branches_locally() -> None:
     assert result["shape"] == "chain(group(chain(map), chain(map)), step)"
     assert result["total_leaf_tasks"] == 5
     assert [branch["branch"] for branch in result["branches"]] == ["fast", "slow"]
+
+
+def test_complex_workflow_default_config_remains_unchanged() -> None:
+    config = build_complex_config(3, 2, 0.01, 0.02)
+
+    assert config == {
+        "fast": {"items": 3, "seconds": 0.01},
+        "slow": {"items": 2, "seconds": 0.02},
+    }
+    assert build_branch_work_items(config, "fast") == [
+        {"item_id": 0, "seconds_per_item": 0.01, "branch": "fast"},
+        {"item_id": 1, "seconds_per_item": 0.01, "branch": "fast"},
+        {"item_id": 2, "seconds_per_item": 0.01, "branch": "fast"},
+    ]
+
+
+def test_complex_workflow_failure_selects_one_stable_leaf_and_keeps_sibling_valid() -> None:
+    config = build_complex_config(3, 2, 0.01, 0.01, "fast", 1)
+    fast_items = build_branch_work_items(config, "fast")
+    slow_items = build_branch_work_items(config, "slow")
+
+    assert [
+        item["item_id"] for item in fast_items if item.get("_fail_complex_workflow_fixture") is True
+    ] == [1]
+    assert all("_fail_complex_workflow_fixture" not in item for item in slow_items)
+    sibling_result = run_cpu_work_item(slow_items[0])
+    assert sibling_result["item_id"] == 0
+    with pytest.raises(
+        ComplexWorkflowFixtureError,
+        match=COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE,
+    ):
+        run_cpu_work_item(fast_items[1])
+
+
+def test_complex_workflow_failure_control_reaches_selected_leaf_locally() -> None:
+    with pytest.raises(
+        ComplexWorkflowFixtureError,
+        match=COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE,
+    ):
+        run_complex_branch_workflow(
+            fast_items=2,
+            slow_items=2,
+            fast_seconds=0.01,
+            slow_seconds=0.01,
+            failure_branch="slow",
+            failure_item=1,
+            use_ray=False,
+        )
 
 
 def test_runtime_env_cache_benchmark_has_local_fallback(settings) -> None:
