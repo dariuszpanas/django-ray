@@ -218,7 +218,7 @@ def _publish_workflow_with_edges(
 
 
 def test_summary_pages_and_indexed_node_use_public_bounded_contract() -> None:
-    published = publish_initial_workflow(300, case_id=127_001)
+    published = publish_initial_workflow(257, case_id=127_001)
 
     summary = get_workflow_progress_summary(published.execution, authorize=_allow)
     topology = list_workflow_topology_nodes(
@@ -314,7 +314,7 @@ def test_cursor_tampering_and_request_mismatch_fail_explicitly() -> None:
 
 
 def test_detail_cursor_expires_but_topology_cursor_survives_detail_only_update() -> None:
-    published = publish_initial_workflow(300, case_id=127_004)
+    published = publish_initial_workflow(151, case_id=127_004)
     topology_first = list_workflow_topology_nodes(
         published.execution,
         authorize=_allow,
@@ -334,7 +334,7 @@ def test_detail_cursor_expires_but_topology_cursor_survives_detail_only_update()
         workflow_summary(
             published.identity,
             summary_revision=2,
-            node_count=300,
+            node_count=151,
             running_count=1,
         ),
         manifest_id=published.manifest_id,
@@ -2155,22 +2155,29 @@ def test_topology_response_shrinks_to_the_wire_cap(monkeypatch) -> None:
 
 
 def test_topology_pages_keep_stable_node_and_edge_order_across_cursors() -> None:
-    nodes = publish_initial_workflow(300, case_id=127_216)
-    node_first = list_workflow_topology_nodes(nodes.execution, authorize=_allow, limit=256)
+    published = _publish_workflow_with_edges(257, 257, case_id=127_217)
+    node_first = list_workflow_topology_nodes(
+        published.execution,
+        authorize=_allow,
+        limit=256,
+    )
     assert node_first["next_cursor"] is not None
     node_second = list_workflow_topology_nodes(
-        nodes.execution,
+        published.execution,
         authorize=_allow,
         cursor=node_first["next_cursor"],
         limit=256,
     )
     assert node_second["items"][0]["node_id"] == workflow_node_id(256)
 
-    edges = _publish_workflow_with_edges(300, 300, case_id=127_217)
-    edge_first = list_workflow_topology_edges(edges.execution, authorize=_allow, limit=256)
+    edge_first = list_workflow_topology_edges(
+        published.execution,
+        authorize=_allow,
+        limit=256,
+    )
     assert edge_first["next_cursor"] is not None
     edge_second = list_workflow_topology_edges(
-        edges.execution,
+        published.execution,
         authorize=_allow,
         cursor=edge_first["next_cursor"],
         limit=256,
@@ -2181,7 +2188,7 @@ def test_topology_pages_keep_stable_node_and_edge_order_across_cursors() -> None
 
 
 def test_topology_cursor_positions_are_checked_against_authenticated_pages() -> None:
-    published = publish_initial_workflow(300, case_id=127_218)
+    published = publish_initial_workflow(257, case_id=127_218)
     first = list_workflow_topology_nodes(published.execution, authorize=_allow, limit=100)
     boundary = list_workflow_topology_nodes(
         published.execution,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -151,8 +152,20 @@ def running_execution(db) -> RayTaskExecution:
     )
 
 
-def test_schema_v3_is_canonical_bounded_and_hides_internal_manifest(running_execution) -> None:
-    identity = _identity(running_execution)
+@pytest.fixture
+def workflow_run_identity() -> WorkflowRunIdentity:
+    return WorkflowRunIdentity(
+        task_execution_pk=125,
+        attempt_number=2,
+        execution_generation=4,
+        run_id="00000000-0000-0000-0000-000000000125",
+    )
+
+
+def test_schema_v3_is_canonical_bounded_and_hides_internal_manifest(
+    workflow_run_identity,
+) -> None:
+    identity = workflow_run_identity
     value = _summary(identity, published_detail=True)
 
     serialized = serialize_workflow_progress_summary(value, expected_identity=identity)
@@ -171,14 +184,14 @@ def test_schema_v3_is_canonical_bounded_and_hides_internal_manifest(running_exec
     assert public["storage"] == {"kind": "database", "manifest_id": None}
     assert "task_execution_pk" not in public["run_identity"]
     assert decoded["storage"]["manifest_id"] == "manifest_125"
-    assert decoded["run_identity"]["task_execution_pk"] == running_execution.pk
+    assert decoded["run_identity"]["task_execution_pk"] == identity.task_execution_pk
 
 
 def test_summary_byte_limit_accepts_exact_boundary_and_rejects_next_byte(
-    running_execution,
+    workflow_run_identity,
     monkeypatch,
 ) -> None:
-    value = _summary(_identity(running_execution))
+    value = _summary(workflow_run_identity)
     serialized = serialize_workflow_progress_summary(value)
     byte_count = len(serialized.encode("utf-8"))
 
@@ -204,8 +217,11 @@ def test_summary_byte_limit_accepts_exact_boundary_and_rejects_next_byte(
         lambda value: value["run_identity"].update(invocation_id="private"),
     ],
 )
-def test_summary_rejects_graph_records_and_unknown_fields(running_execution, mutation) -> None:
-    value = _summary(_identity(running_execution))
+def test_summary_rejects_graph_records_and_unknown_fields(
+    workflow_run_identity,
+    mutation,
+) -> None:
+    value = _summary(workflow_run_identity)
     mutation(value)
 
     with pytest.raises(WorkflowProgressSummaryError, match="exact protocol fields"):
@@ -242,12 +258,12 @@ def test_summary_rejects_graph_records_and_unknown_fields(running_execution, mut
     ],
 )
 def test_summary_rejects_invalid_scalar_boundaries(
-    running_execution,
+    workflow_run_identity,
     path,
     value,
     message,
 ) -> None:
-    summary = _summary(_identity(running_execution))
+    summary = _summary(workflow_run_identity)
     target: object = summary
     for item in path[:-1]:
         assert isinstance(target, dict)
@@ -273,8 +289,12 @@ def test_summary_rejects_invalid_scalar_boundaries(
         ("schema_version", 1.0),
     ],
 )
-def test_summary_requires_canonical_complete_run_identity(running_execution, field, value) -> None:
-    summary = _summary(_identity(running_execution))
+def test_summary_requires_canonical_complete_run_identity(
+    workflow_run_identity,
+    field,
+    value,
+) -> None:
+    summary = _summary(workflow_run_identity)
     summary["run_identity"][field] = value  # type: ignore[index]
 
     with pytest.raises(WorkflowProgressSummaryError):
@@ -323,11 +343,11 @@ def test_summary_requires_canonical_complete_run_identity(running_execution, fie
     ],
 )
 def test_summary_rejects_remaining_protocol_inconsistencies(
-    running_execution,
+    workflow_run_identity,
     mutation,
     message,
 ) -> None:
-    summary = _summary(_identity(running_execution))
+    summary = _summary(workflow_run_identity)
     mutation(summary)
 
     with pytest.raises(WorkflowProgressSummaryError, match=message):
@@ -335,9 +355,9 @@ def test_summary_rejects_remaining_protocol_inconsistencies(
 
 
 def test_summary_requires_topology_for_detail_and_complete_available_detail(
-    running_execution,
+    workflow_run_identity,
 ) -> None:
-    identity = _identity(running_execution)
+    identity = workflow_run_identity
     missing_topology = _summary(identity)
     missing_topology["detail_revision"] = 1
     missing_topology["detail"] = {
@@ -363,13 +383,13 @@ def test_summary_requires_topology_for_detail_and_complete_available_detail(
     ],
 )
 def test_published_detail_expiry_matches_terminal_retention(
-    running_execution,
+    workflow_run_identity,
     state,
     expires_at,
     message,
 ) -> None:
     summary = _summary(
-        _identity(running_execution),
+        workflow_run_identity,
         published_detail=True,
         state=state,
     )
@@ -384,9 +404,12 @@ def test_canonical_json_wraps_unserializable_values() -> None:
         summary_module._canonical_json({"unsupported": object()})
 
 
-def test_summary_rejects_a_different_expected_run(running_execution) -> None:
-    summary = _summary(_identity(running_execution))
-    other = _identity(running_execution, "00000000-0000-0000-0000-000000000126")
+def test_summary_rejects_a_different_expected_run(workflow_run_identity) -> None:
+    summary = _summary(workflow_run_identity)
+    other = replace(
+        workflow_run_identity,
+        run_id="00000000-0000-0000-0000-000000000126",
+    )
 
     with pytest.raises(WorkflowProgressSummaryError, match="does not match"):
         normalize_workflow_progress_summary(summary, expected_identity=other)
@@ -409,10 +432,10 @@ def test_summary_rejects_a_different_expected_run(running_execution) -> None:
     ],
 )
 def test_summary_requires_publication_revisions_for_retained_counts(
-    running_execution,
+    workflow_run_identity,
     mutation,
 ) -> None:
-    summary = _summary(_identity(running_execution))
+    summary = _summary(workflow_run_identity)
     mutation(summary)
 
     with pytest.raises(WorkflowProgressSummaryError, match="published .* (?:version|revision)"):
@@ -430,8 +453,11 @@ def test_summary_requires_publication_revisions_for_retained_counts(
         lambda value: value["node_counts"].update(pending=0),
     ],
 )
-def test_summary_rejects_inconsistent_aggregate_counts(running_execution, mutate) -> None:
-    summary = _summary(_identity(running_execution))
+def test_summary_rejects_inconsistent_aggregate_counts(
+    workflow_run_identity,
+    mutate,
+) -> None:
+    summary = _summary(workflow_run_identity)
     mutate(summary)
 
     with pytest.raises(WorkflowProgressSummaryError):
@@ -449,10 +475,10 @@ def test_summary_rejects_inconsistent_aggregate_counts(running_execution, mutate
     ],
 )
 def test_successful_summary_requires_complete_discovered_counts(
-    running_execution,
+    workflow_run_identity,
     mutate,
 ) -> None:
-    summary = _summary(_identity(running_execution), state="SUCCEEDED")
+    summary = _summary(workflow_run_identity, state="SUCCEEDED")
     mutate(summary)
 
     with pytest.raises(WorkflowProgressSummaryError, match="every discovered node succeeded"):
@@ -481,8 +507,11 @@ def test_successful_summary_requires_complete_discovered_counts(
         ),
     ],
 )
-def test_summary_rejects_inconsistent_detail_availability(running_execution, mutate) -> None:
-    summary = _summary(_identity(running_execution))
+def test_summary_rejects_inconsistent_detail_availability(
+    workflow_run_identity,
+    mutate,
+) -> None:
+    summary = _summary(workflow_run_identity)
     mutate(summary)
 
     with pytest.raises(WorkflowProgressSummaryError):
@@ -499,11 +528,11 @@ def test_summary_rejects_inconsistent_detail_availability(running_execution, mut
     ],
 )
 def test_summary_rejects_reporting_policy_availability_conflicts(
-    running_execution,
+    workflow_run_identity,
     reporting_policy: str,
     availability: str,
 ) -> None:
-    summary = _summary(_identity(running_execution))
+    summary = _summary(workflow_run_identity)
     summary["reporting_policy"] = reporting_policy
     summary["detail"]["availability"] = availability  # type: ignore[index]
 
@@ -514,8 +543,10 @@ def test_summary_rejects_reporting_policy_availability_conflicts(
         normalize_workflow_progress_summary(summary)
 
 
-def test_truncated_detail_requires_sorted_unique_protocol_reasons(running_execution) -> None:
-    summary = _summary(_identity(running_execution), published_detail=True)
+def test_truncated_detail_requires_sorted_unique_protocol_reasons(
+    workflow_run_identity,
+) -> None:
+    summary = _summary(workflow_run_identity, published_detail=True)
     summary["detail"] = {
         "availability": "TRUNCATED",
         "complete": False,
@@ -531,8 +562,8 @@ def test_truncated_detail_requires_sorted_unique_protocol_reasons(running_execut
     ]
 
 
-def test_expired_detail_requires_terminal_workflow_state(running_execution) -> None:
-    summary = _summary(_identity(running_execution), published_detail=True)
+def test_expired_detail_requires_terminal_workflow_state(workflow_run_identity) -> None:
+    summary = _summary(workflow_run_identity, published_detail=True)
     summary["detail"].update(
         availability="EXPIRED",
         complete=False,
@@ -552,15 +583,18 @@ def test_expired_detail_requires_terminal_workflow_state(running_execution) -> N
         lambda value: value["terminal"].update(finished_at="2026-07-20T12:00:02Z"),
     ],
 )
-def test_summary_rejects_noncanonical_time_and_terminal_metadata(running_execution, mutate) -> None:
-    summary = _summary(_identity(running_execution))
+def test_summary_rejects_noncanonical_time_and_terminal_metadata(
+    workflow_run_identity,
+    mutate,
+) -> None:
+    summary = _summary(workflow_run_identity)
     mutate(summary)
 
     with pytest.raises(WorkflowProgressSummaryError):
         normalize_workflow_progress_summary(summary)
 
 
-def test_deserializer_rejects_non_text_malformed_and_non_object(running_execution) -> None:
+def test_deserializer_rejects_non_text_malformed_and_non_object() -> None:
     with pytest.raises(WorkflowProgressSummaryError, match="must be JSON text"):
         deserialize_workflow_progress_summary({})
     with pytest.raises(WorkflowProgressSummaryError, match="invalid JSON"):
@@ -569,8 +603,8 @@ def test_deserializer_rejects_non_text_malformed_and_non_object(running_executio
         deserialize_workflow_progress_summary("[]")
 
 
-def test_deserializer_rejects_invalid_utf8_surrogates(running_execution) -> None:
-    serialized = serialize_workflow_progress_summary(_summary(_identity(running_execution)))
+def test_deserializer_rejects_invalid_utf8_surrogates(workflow_run_identity) -> None:
+    serialized = serialize_workflow_progress_summary(_summary(workflow_run_identity))
     corrupted = serialized.replace(
         '"started_at":"2026-07-20T12:00:00Z"',
         r'"started_at":"\ud800Z"',
@@ -1642,11 +1676,10 @@ def test_lifecycle_success_preserves_producer_terminal_detail(running_execution)
     }
 
 
-@pytest.mark.django_db
 def test_terminal_state_unreported_reason_requires_successful_truncated_detail(
-    running_execution,
+    workflow_run_identity,
 ) -> None:
-    identity = _identity(running_execution)
+    identity = workflow_run_identity
     invalid = _summary(identity, published_detail=True)
     invalid["detail"] = {
         "availability": "TRUNCATED",
