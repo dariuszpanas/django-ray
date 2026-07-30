@@ -53,12 +53,13 @@ The best batch size sits between those constraints.
 A workflow creates one `RayTaskExecution` for the outer Django task. Internal leaves
 exchange Ray object references. With the default
 `WORKFLOW_PROGRESS_REPORTING_POLICY="full"`, they also report events to an in-memory
-progress actor and django-ray writes a complete graph snapshot when a changed revision
-is flushed. Each data event is canonical, identity-fenced, and bounded before its Ray
-call: payloads are at most 16 KiB, complete wire and decoded envelopes are at most
-32 KiB, and dependency edges are sent in batches of at most 32. The actor revalidates
-the envelope and caps retained nodes, edges, recent events, and bytes. Package-default
-execution uses the durable V1 profile and remains a schema-v2 writer.
+progress actor and django-ray writes a schema-v2 compatibility snapshot of retained
+actor state when a changed revision is flushed. Each data event is canonical,
+identity-fenced, and bounded before its Ray call: payloads are at most 16 KiB, complete
+wire and decoded envelopes are at most 32 KiB, and dependency edges are sent in batches
+of at most 32. The actor revalidates the envelope and caps retained nodes, edges, recent
+events, and bytes. Package-default execution uses the durable V1 profile and remains a
+schema-v2 writer.
 
 `WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not bound the
 aggregate Ray actor mailbox, queued bytes, update frequency, or transient snapshot and
@@ -146,7 +147,7 @@ The benchmark-only representations have these meanings:
 
 | Representation | What the benchmark models |
 |---|---|
-| `current_full_row` | The current behavior: re-encode and replace one complete graph snapshot in the task row. |
+| `current_full_row` | Legacy/full-row persistence baseline: re-encode and replace one whole logical graph row. This is a benchmark model, not a claim that the bounded runtime actor can retain every modeled node. |
 | `bounded_inline` | A fixed-size task-row summary plus count- and byte-bounded invocation detail retained inline. |
 | `chunked_database` | A bounded task-row summary with bounded detail split into database chunks. |
 | `normalized` | A bounded summary with node detail stored as independently addressable relational rows. |

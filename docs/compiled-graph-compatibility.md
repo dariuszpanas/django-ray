@@ -411,10 +411,10 @@ This retained record is explicitly incomplete: the original Windows pass did not
 raw stdout/stderr, an exact dependency inventory, or the policy-v2 Python ABI, libc,
 specific container, immutable deployment/image, shared-memory, and object-store
 profiles. It cannot support a Windows capability promotion or an upstream report by
-itself. Issue #100 owns the fresh Windows release/nightly evidence and upstream report,
-targeted for 2026-07-27. That follow-up is non-blocking for issue #86 / PR #92's
-Linux/Kubernetes fail-closed infrastructure; fresh Windows or nightly evidence is not
-required before this infrastructure change merges.
+itself. Issue #100 owns the fresh Windows release/nightly evidence and upstream report
+and remains an open, non-blocking upstream follow-up. The Linux/Kubernetes fail-closed
+infrastructure delivered by issue #86 / PR #92 does not wait for it; fresh Windows or
+nightly evidence is not required before guarded local KubeRay work continues.
 
 No nightly wheel was run. Nightly wheel URLs and ABIs rotate, while this pass was
 designed to classify the three exact published candidates. A nightly result would be

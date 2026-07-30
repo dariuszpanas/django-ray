@@ -588,10 +588,10 @@ do not bound the aggregate number or bytes of events already queued in Ray's act
 mailbox, coalesce repeated producer updates, provide producer backpressure, or provide
 the bounded actor-to-preparation drain needed at the hard V1 ceilings. Those remain
 separate scale and default-activation work. The stricter pilot is therefore
-experimental and default-off rather than a general V1-scale claim. If any event is
-rejected or truncated, the terminal adapter refuses schema-v3 publication instead of
-claiming that an incomplete graph is complete. A bounded event or actor snapshot is
-observational state, not a recovery or flow-control protocol.
+experimental and default-off rather than a general V1-scale claim. If actor ingress
+records any rejection or accepted truncation, the terminal adapter refuses schema-v3
+publication instead of claiming that an incomplete graph is complete. A bounded event
+or actor snapshot is observational state, not a recovery or flow-control protocol.
 
 ## Durability Semantics
 
@@ -599,13 +599,15 @@ The outer Django task is the durability and retry boundary:
 
 - Internal steps do not create individual Django tasks.
 - In full reporting mode, an in-memory Ray coordinator collects node events. The outer
-  task writes a complete schema-v2 progress snapshot to
-  `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
+  task writes a schema-v2 compatibility snapshot of the actor's retained bounded state
+  to `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
   Individual producer envelopes and retained actor nodes, edges, events, and bytes are
-  bounded. The aggregate Ray mailbox, snapshot-to-preparer drain, and transient
-  snapshot materialization are not yet governed by the later admission/backpressure
-  contract. Disabled mode bypasses the coordinator, codec, actor, and snapshot path
-  while leaving the durable outer-task boundary intact.
+  bounded. Actor ingress diagnostics report actor-side rejection counts and accepted
+  events marked truncated; a producer-side failure before actor submission cannot
+  appear in those counters. The aggregate Ray mailbox, snapshot-to-preparer drain, and
+  transient snapshot materialization are not yet governed by the later
+  admission/backpressure contract. Disabled mode bypasses the coordinator, codec,
+  actor, and snapshot path while leaving the durable outer-task boundary intact.
 - A separate nullable `workflow_progress_summary_json` field and schema-v3 codec are
   deployed reader-first. The field is fixed-shape and capped at 16 KiB of canonical
   UTF-8 JSON. Package-owned topology/detail tables and the internal storage writer can
@@ -614,15 +616,15 @@ The outer Django task is the durability and retry boundary:
   topology/detail pointers; it is the only path for an intentional summary-only
   `DISABLED` or `OMITTED_BY_POLICY` record, which creates no empty detail storage.
   Authorized public readers are implemented. The default-off pilot makes one
-  best-effort terminal publication from a complete full-reporting actor snapshot,
-  revalidates the pinned plan and exact run fence, then stages and atomically promotes
-  topology, detail, and summary. Rejected or truncated ingress, invalid cross-field
-  evidence, admission overflow, preparation truncation, a stale fence, or storage
-  failure leaves schema v3 unpublished and emits a stable bounded diagnostic; it never
-  changes the application result. The periodic schema-v2 writer remains active for
-  rolling compatibility. General or default activation still requires the remaining
-  mailbox/backpressure, composite-preparation, aggregate-spill, migration, and
-  old-writer-drain work.
+  best-effort terminal publication from an internally consistent full-reporting actor
+  snapshot, revalidates the pinned plan and exact run fence, then stages and atomically
+  promotes topology, detail, and summary. Rejected or truncated ingress, invalid
+  cross-field evidence, admission overflow, preparation truncation, a stale fence, or
+  storage failure leaves schema v3 unpublished and emits a stable bounded diagnostic;
+  it never changes the application result. The periodic schema-v2 writer remains
+  active for rolling compatibility. General or default activation still requires the
+  remaining mailbox/backpressure, composite-preparation, aggregate-spill, migration,
+  and old-writer-drain work.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -663,9 +665,9 @@ monotonic exact-run writer primitive, bounded rolling reader, and lifecycle arch
 Its second delivery adds the run-scoped topology manifests/pages, normalized
 latest-state rows, bounded staging and integrity verification, sparse atomic
 publication, terminal expiry, and retention/orphan cleanup. Public detail services are
-implemented. The runtime producer continues to write complete schema-v2 snapshots and
-may additionally publish one terminal schema-v3 record only when the stricter pilot is
-explicitly enabled and admitted.
+implemented. The runtime producer continues to write schema-v2 compatibility snapshots
+of retained actor state and may additionally publish one terminal schema-v3 record only
+when the stricter pilot is explicitly enabled and admitted.
 ADR-0005's production topology phase now externalizes exact node/edge identity,
 duplicate, reference, and selection state into a private bounded SQLite workspace and
 removes it before returning prepared evidence. The unchanged result still includes

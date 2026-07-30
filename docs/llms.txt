@@ -20,6 +20,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   versioned task services, bounded metrics, live admin updates, and optional Ray data.
 - [Compatibility](https://django-ray.readthedocs.io/en/latest/compatibility/):
   supported Python, Django, Ray, CI, and platform policy.
+- [Migrating from Celery](https://django-ray.readthedocs.io/en/latest/celery-migration/):
+  move producers through Django Tasks, classify semantic gaps, coexist safely, and
+  drain Celery before removing it.
 - [Tasks](https://django-ray.readthedocs.io/en/latest/tasks/): Django task arguments,
   results, errors, batching, and distributed utilities.
 - [Ray-native workflows](https://django-ray.readthedocs.io/en/latest/workflows/):
@@ -37,8 +40,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   Always-bounded summaries, immutable topology pages, normalized latest-state detail,
   fenced publication, pagination, retention, and legacy snapshot rollout.
 - [Bounded workflow progress preparation](https://django-ray.readthedocs.io/en/latest/design/adr-0005-bounded-workflow-preparation/):
-  Selected non-production contract and prototype for exact one-shot preparation through
-  a private, budgeted SQLite spill workspace; #141/#142 still own runtime integration.
+  Selected contract, prototype, and #141 spill-backed production topology adapter for
+  exact one-shot preparation; #142 owns the remaining composite topology/detail
+  lifetime.
 - [Compiled Graph compatibility](https://django-ray.readthedocs.io/en/latest/compiled-graph-compatibility/):
   fail-closed candidate and verified tuples, native probe outcomes, topology,
   transport, dependencies, and canary maintenance.
@@ -86,14 +90,17 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - Compiled lifecycle protocol version 1 is fingerprinted in the effective plan. It
   closes fallback before preparation and same-invocation replay when submission starts;
   no native Compiled Graph strategy is enabled by the reducer.
-- Current workflow actors still emit complete, size-unbounded schema-v2 graph snapshots.
-  ADR-0004's additive schema-v3 summary columns, strict 16 KiB codec, fenced writer
-  primitive, rolling reader, terminal attempt archival, bounded topology/detail
-  storage, atomic publication, retention cleanup, authorized public readers, and
-  spill-backed bounded topology preparation are implemented. The compatibility
-  topology still contains complete observed membership; writer activation waits for
-  bounded live ingestion (#79), composite detail preparation (#142), and an old-writer
-  drain.
+- Full workflow reporting now sends canonical, identity-fenced, redacted, byte-bounded
+  event envelopes to an actor with bounded nodes, edges, recent events, and retained
+  bytes. The actor still emits schema-v2 compatibility snapshots of that retained
+  bounded state; actor ingress diagnostics report actor-side rejection counts and
+  accepted events marked truncated rather than implying that an over-limit graph is
+  complete. ADR-0004's additive schema-v3 summary, bounded topology/detail storage,
+  atomic publication, retention cleanup, authorized readers, and #141 spill-backed
+  topology preparation are implemented. A default-off stricter pilot may publish one
+  admitted terminal schema-v3 snapshot. Default and higher-scale activation still wait
+  for #79's aggregate mailbox/backpressure work, #142's composite topology/detail
+  lifetime, capacity and migration gates, and an old-writer drain.
 - The result returned by `enqueue()` is a snapshot. Fetch current state with
   `task_backends[alias].get_result(task_id)`.
 - Per-task numeric priority is persisted from `-100` through `100`; larger values are

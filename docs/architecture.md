@@ -175,7 +175,7 @@ Primary execution record for one task attempt chain.
 | `input_reference` | Optional durable pointer to a versioned combined input envelope |
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
-| `progress_data` | Current schema-v1/v2 complete workflow snapshot; retained for rolling compatibility |
+| `progress_data` | Current schema-v1/v2 compatibility snapshot of retained actor state; actor-side rejection/truncation diagnostics remain in the envelope |
 | `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence or an accepted default-off terminal-pilot publication |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
@@ -492,11 +492,11 @@ produced a terminal state.
 - Worker lease heartbeat + cross-worker orphan recovery.
 - Task monitor heartbeats for active reconciliation paths.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
-- Per-workflow in-memory progress coordination emits revision-based complete schema-v2
-  snapshots. Bounded schema-v3 summary/detail storage and authorized readers are
-  present, with a default-off, stricter terminal publication pilot. Default and
-  higher-scale activation still wait for the remaining ingestion, preparation,
-  capacity, migration, and old-writer-drain work.
+- Per-workflow in-memory progress coordination emits revision-based schema-v2
+  compatibility snapshots of retained actor state. Bounded schema-v3 summary/detail
+  storage and authorized readers are present, with a default-off, stricter terminal
+  publication pilot. Default and higher-scale activation still wait for the remaining
+  ingestion, preparation, capacity, migration, and old-writer-drain work.
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.

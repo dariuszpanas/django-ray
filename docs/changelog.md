@@ -275,6 +275,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changelog integrity checks now keep all post-release work under `Unreleased`, match
   dated headings and comparison chains to the complete Git tag inventory, and preserve
   one fully validated release-candidate path before its tag is cut.
+- Read the Docs layouts now reserve fixed-footer clearance in the page footer and both
+  independently scrolling navigation sidebars, keeping the final navigation rows above
+  the hosted EthicalAds footer at desktop and narrow widths.
 - The tracked Locust harness now authenticates with a secret-safe environment token and provides
   a deterministic one-user observability demo that follows lightweight default, priority, sync,
   cluster/workflow, RuntimeEnv, and ML tasks to terminal state. Quick, moderate, historical

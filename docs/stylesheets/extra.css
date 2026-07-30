@@ -1,6 +1,30 @@
+:root {
+  /*
+   * Read the Docs may inject a fixed EthicalAds footer. Preserve enough empty
+   * space that it covers neither the site footer nor the last sticky-nav row.
+   */
+  --django-ray-docs-fixed-footer-clearance: 3.5rem;
+}
+
 .md-logo img {
   height: 1.35rem;
   width: 1.35rem;
+}
+
+.md-sidebar__scrollwrap {
+  scroll-padding-bottom: var(--django-ray-docs-fixed-footer-clearance);
+}
+
+.md-sidebar--primary .md-sidebar__inner {
+  padding-bottom: var(--django-ray-docs-fixed-footer-clearance);
+}
+
+.md-sidebar--secondary .md-sidebar__inner {
+  padding-bottom: var(--django-ray-docs-fixed-footer-clearance);
+}
+
+.md-footer {
+  padding-bottom: var(--django-ray-docs-fixed-footer-clearance);
 }
 
 /*
