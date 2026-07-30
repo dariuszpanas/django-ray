@@ -23,8 +23,10 @@ from tests.workflow_progress_summary_helpers import (
 
 
 @pytest.fixture
-def client() -> Client:
-    return Client(HTTP_AUTHORIZATION="Bearer test-api-token-for-pytest")
+def client(settings) -> Client:
+    token = settings.DJANGO_API_TOKEN
+    assert isinstance(token, str) and token
+    return Client(HTTP_AUTHORIZATION=f"Bearer {token}")
 
 
 def _publication() -> dict[str, int]:
