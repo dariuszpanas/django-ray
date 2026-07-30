@@ -132,12 +132,22 @@ rejects topology/detail pointers. The package-owned storage transaction alone ma
 promote a verified pending manifest, apply sparse latest-state changes, and advance
 the summary pointer together. A summary-only `DISABLED` or `OMITTED_BY_POLICY` update
 creates no topology or detail rows. The current workflow actor deliberately continues
-to publish schema v2 in full mode. An invocation can instead select disabled reporting:
-the versioned bounded plan selection retains the effective policy and execution
-strategy, while no progress actor, node RPC, legacy snapshot, or schema-v3 writer is
-created. Authorized paginated services are implemented, but full-mode producer
-activation still requires the remaining live-ingestion bounds from #79, composite
-bounded preparation completion under #142, and an old-writer drain. See
+to publish schema v2 during full-mode execution. When
+`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` is explicitly enabled, the actor and one terminal
+publication attempt use the narrower `schema-v3-pilot-v1` profile. The adapter
+revalidates the pinned plan, complete snapshot, ingress evidence, and exact run fence,
+then stages and atomically promotes topology, detail, and summary. Any rejected or
+truncated ingress, invalid or over-limit evidence, preparation truncation, stale
+ownership, or storage failure refuses publication without changing the application
+result or removing schema-v2 compatibility evidence. The package default remains
+disabled.
+
+An invocation can instead select disabled reporting: the versioned bounded plan
+selection retains the effective policy and execution strategy, while no progress
+actor, node RPC, legacy snapshot, or schema-v3 writer is created. Authorized paginated
+services are implemented. General or default schema-v3 activation still requires the
+remaining live-ingestion, composite-preparation, aggregate-spill, migration, and
+old-writer-drain work. See
 [ADR-0004](design/adr-0004-bounded-workflow-progress.md) and
 [ADR-0005](design/adr-0005-bounded-workflow-preparation.md).
 
@@ -166,7 +176,7 @@ Primary execution record for one task attempt chain.
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
 | `progress_data` | Current schema-v1/v2 complete workflow snapshot; retained for rolling compatibility |
-| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; runtime publication remains disabled until #79 and #132 bounds plus the writer drain are complete |
+| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence or an accepted default-off terminal-pilot publication |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
 | `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
@@ -307,8 +317,10 @@ needed by initial detail, so this is not yet an end-to-end O(retained) preparati
 claim. #142 completes composite detail preparation under
 [issue #132](https://github.com/dariuszpanas/django-ray/issues/132). #79 separately
 owns live wire, mailbox, producer backpressure, and aggregate workspace admission.
-Schema-v3 activation must compose both boundaries for workflows larger than the
-retained V1 limits.
+The current pilot avoids claiming those broader boundaries by using a fixed profile of
+512 nodes, 2,048 edges, 2 MiB of topology, 1 MiB of detail, and 4 MiB combined.
+Default or higher-scale schema-v3 activation must compose all of the remaining
+boundaries.
 
 Terminal detail expiry is derived from the canonical terminal timestamp and
 `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`. Every accepted detail publication records
@@ -440,12 +452,13 @@ selection, and pinned-attempt fields. They do not rewrite legacy progress, and o
 writers can continue inserting rows during the rollout.
 
 Migrations `0012` and `0013` implement the additive reader-first progress-storage
-boundary: nullable schema-v3 summaries followed by dormant package-owned topology and
-detail tables. Existing rows and older writers continue using `progress_data`;
-`0013` does not backfill or reinterpret legacy snapshots. Keep schema-v3 producer
-activation disabled until authorized bounded readers are deployed, #79 bounds live
-ingestion, #142 completes composite bounded preparation, and old workflow writers are
-drained. The schema-v2 coordinator remains the production writer in 0.4.0. Reversing
+boundary: nullable schema-v3 summaries followed by package-owned topology and detail
+tables. Existing rows and older writers continue using `progress_data`; `0013` does
+not backfill or reinterpret legacy snapshots. Schema v2 remains the live compatibility
+writer. The schema-v3 producer is disabled by default and may be enabled only as the
+strict terminal pilot after authorized bounded readers and storage are deployed;
+enabling it applies the smaller actor and publication profile and does not make
+hard-V1-scale production supported. Reversing
 `0013` discards normalized detail tables, while reversing `0012` drops the summary
 columns. Export any retained schema-v3 data needed for audit before either rollback;
 legacy progress remains unchanged.
@@ -479,10 +492,11 @@ produced a terminal state.
 - Worker lease heartbeat + cross-worker orphan recovery.
 - Task monitor heartbeats for active reconciliation paths.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
-- Per-workflow in-memory progress coordination still emits revision-based complete
-  schema-v2 snapshots. Bounded schema-v3 summary/detail storage and authorized readers
-  are present, but producer activation still waits for bounded live ingestion, bounded
-  preparation, and an old-writer drain.
+- Per-workflow in-memory progress coordination emits revision-based complete schema-v2
+  snapshots. Bounded schema-v3 summary/detail storage and authorized readers are
+  present, with a default-off, stricter terminal publication pilot. Default and
+  higher-scale activation still wait for the remaining ingestion, preparation,
+  capacity, migration, and old-writer-drain work.
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.

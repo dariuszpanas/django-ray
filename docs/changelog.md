@@ -21,9 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed; public CI is hermetic, and native evidence is produced only by the guarded local
   KubeRay pilot. A functional native probe does not make the current profile promotable because
   Ray 2.56 teardown still violates the residual-resource invariant.
-- Schema-v3 workflow-progress readers and dormant storage are present, but the production
-  coordinator remains a schema-v2 writer. Static-actor and Compiled Graph workflow strategies,
-  schema-v3 publication, and a resident prepared-graph cache remain inactive.
+- Schema-v3 workflow-progress readers and storage are present while the production coordinator
+  remains a schema-v2 live writer. A default-off, stricter pilot can additionally publish one
+  admitted terminal snapshot; the bundled testproject and guarded local KubeRay gate enable and
+  prove that path. Static-actor and Compiled Graph workflow strategies and a resident
+  prepared-graph cache remain inactive.
 
 ### Added
 
@@ -34,6 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the durable V1 limits. The actor exposes only `ingest`, `snapshot`, and `disable`;
   aggregate mailbox admission, coalescing, and default schema-v3 production remain
   follow-up work.
+- A boolean `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` setting, disabled by default, applies
+  the `schema-v3-pilot-v1` profile to actor collection and one terminal publication:
+  512 nodes, 2,048 edges, 2 MiB of topology, 1 MiB of node detail, and 4 MiB combined,
+  with encoded and decoded byte ceilings. The adapter revalidates the pinned plan,
+  complete actor evidence, and exact run fence, then uses the existing bounded storage
+  primitives to atomically publish summary, topology, and detail. Rejected or
+  truncated ingress, malformed or over-limit evidence, preparation truncation, stale
+  ownership, and storage failure all refuse publication with bounded diagnostics and
+  without changing the workflow result. Schema-v2 live writes remain the rolling
+  compatibility path. The bundled testproject enables the pilot through
+  `DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT`, and the guarded local KubeRay gate
+  proves non-empty mutually consistent summary, topology, edges, and node detail from
+  the real producer. Accessible graph rendering remains the bounded-reader follow-up
+  in [issue #219](https://github.com/dariuszpanas/django-ray/issues/219).
 - Ray-native workflows can keep the default full node-progress reporting or disable it
   globally and per invocation. Disabled runs retain the durable outer-task lifecycle
   and bounded plan/strategy metadata while creating no progress actor, node-reporting
@@ -164,9 +180,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one-query bounded v1/v2/v3 compatibility reads, bounded diagnostics, public internal
   identifier removal, and terminal lifecycle archival or derivation under the task-row
   lock. Routine Admin and bundled monitoring reads omit or defer complete progress
-  payloads. The standalone writer cannot claim topology/detail pointers, and the current
-  workflow actor remains a schema-v2 writer; schema-v3 activation waits for bounded
-  live ingestion, bounded preparation, and the old-writer drain.
+  payloads. The standalone writer cannot claim topology/detail pointers. The workflow
+  actor remains a schema-v2 live writer, while the explicit stricter pilot may publish
+  one terminal schema-v3 record; default and higher-scale activation still wait for
+  the remaining ingestion, preparation, capacity, migration, and old-writer-drain work.
 - Package-owned, run-scoped workflow-progress topology manifests and content-addressed
   pages, normalized bounded latest-state node rows, deterministic truncation evidence,
   sparse aggregate updates, bounded integrity verification, and exact-fence atomic
@@ -175,9 +192,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   detail store. Terminal expiry uses a validated 0-30 day retention setting, and a
   bounded dry-run-first management command removes only due inactive detail and old
   unpublished orphans while preserving task and attempt summaries. Authorized public
-  readers are implemented, but the runtime writer remains inactive until bounded live
-  ingestion, bounded preparation, and the old-writer drain are complete. Durable rows
-  and pages are bounded independently from preparer memory.
+  readers are implemented, and the default-off terminal pilot is the only runtime
+  topology/detail producer in this release. Durable rows and pages are bounded
+  independently from preparer memory.
 - A bounded workflow-progress preparation decision and non-production SQLite spill
   prototype. The exact one-shot path externalizes duplicate and reference state into a
   private, fixed-cache, no-mmap workspace with explicit item and file budgets,
@@ -197,8 +214,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   complete `observed_node_ids` compatibility field is still materialized only at
   detachment, so #142 must complete composite topology/detail preparation before #132
   can claim an end-to-end O(retained) bound. Schema-v3 workflow publication remains
-  disabled, and #79 still owns live transfer, mailbox, and concurrent-workspace
-  admission limits.
+  default-off and limited to the stricter terminal pilot; #79 still owns live transfer,
+  mailbox, and concurrent-workspace admission limits.
 - A fail-closed Ray Compiled Graph capability policy, subprocess-isolated native probe
   with a dedicated bounded control-record channel, hermetic public policy coverage, and
   guarded local KubeRay evidence tooling. Exact capability identity includes immutable
@@ -342,9 +359,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the global fallback because old writers used it even without an alias target. Drain
   pre-`0014` task managers before relying on alias routing and drain targeted tasks
   before reversing the migration.
-- Keep the schema-v3 producer disabled through the public-reader rollout, #79
-  live-ingestion bound, #142 composite preparation, and old-writer drain. The current
-  schema-v2 coordinator remains the production writer throughout the 0.4.0 rollout.
+- Keep the schema-v3 pilot disabled by default through the 0.4.0 rollout. The current
+  schema-v2 coordinator remains the live compatibility writer; opt-in terminal
+  publication is limited to the documented pilot profile until the remaining
+  ingestion, preparation, capacity, migration, and old-writer-drain work is complete.
 
 ## [0.3.1] - 2026-07-18
 

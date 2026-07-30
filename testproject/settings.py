@@ -326,6 +326,10 @@ DJANGO_RAY = {
         },
     },
     "DEFAULT_RUNTIME_ENV_PROFILE": "project",
+    "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": _env_bool(
+        "DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT",
+        default=True,
+    ),
     "MAX_TASK_ATTEMPTS": int(os.environ.get("RAY_MAX_RETRIES", "3")),
     "RETRY_BACKOFF_SECONDS": int(os.environ.get("RAY_RETRY_DELAY_SECONDS", "5")),
     # Exceptions that won't trigger auto-retry (use for manual retry testing)

@@ -518,6 +518,7 @@ class _RayExecutor(_Executor):
         import ray
 
         from django_ray.runtime.context import get_current_task_context
+        from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_LIMITS_V1
 
         self.ray = ray
         self.materialized_plan = materialized_plan
@@ -537,6 +538,8 @@ class _RayExecutor(_Executor):
         self._pending_progress_snapshot_ref = None
         self._progress_suppression_depth = 0
         self._map_progress_sent_at: dict[str, float] = {}
+        self._terminal_progress_publication_attempted = False
+        self.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
         self.progress_actor_cls = progress_actor_cls
         if materialized_plan is not None:
             self.bind_plan(
@@ -596,17 +599,38 @@ class _RayExecutor(_Executor):
         self.workflow_run_identity = identity
         if reporting_policy == "disabled":
             return
+        from django_ray.conf.settings import get_settings
+        from django_ray.workflow_progress_limits import (
+            WORKFLOW_PROGRESS_LIMITS_V1,
+            WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
+        )
         from django_ray.workflow_progress_protocol import (
             WorkflowProgressEventKind,
             prepare_workflow_progress_event,
         )
 
+        pilot_enabled = get_settings().get("WORKFLOW_PROGRESS_SCHEMA_V3_PILOT") is True
+        progress_limits = (
+            WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
+            if pilot_enabled
+            else WORKFLOW_PROGRESS_LIMITS_V1
+        )
+        self.workflow_progress_limits = progress_limits
+
         initialized_event = prepare_workflow_progress_event(
             identity.as_dict(),
             WorkflowProgressEventKind.INITIALIZED,
             {"plan": materialized_plan.plan.summary()},
+            limits=progress_limits,
         )
-        self.progress_actor = self.progress_actor_cls.remote(initialized_event)
+        self.progress_actor = (
+            self.progress_actor_cls.remote(
+                initialized_event,
+                limits=progress_limits,
+            )
+            if pilot_enabled
+            else self.progress_actor_cls.remote(initialized_event)
+        )
 
     def _send_progress_event(
         self,
@@ -623,7 +647,13 @@ class _RayExecutor(_Executor):
         from django_ray.workflow_progress_protocol import send_workflow_progress_event
 
         try:
-            send_workflow_progress_event(actor, identity.as_dict(), kind, payload)
+            send_workflow_progress_event(
+                actor,
+                identity.as_dict(),
+                kind,
+                payload,
+                limits=self.workflow_progress_limits,
+            )
         except BaseException:
             # Workflow observability remains best effort. The protocol prepares and
             # validates before the actor call, so invalid internal metadata cannot
@@ -641,15 +671,12 @@ class _RayExecutor(_Executor):
         """Send dependency edges in independently bounded protocol batches."""
         if actor is None or not dependencies:
             return
-        from django_ray.workflow_progress_limits import (
-            WORKFLOW_PROGRESS_EDGE_BATCH_MAX_ITEMS,
-        )
         from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
 
         edge_batch: list[dict[str, str]] = []
         for dependency in dependencies:
             edge_batch.append({"source": dependency, "target": node_id})
-            if len(edge_batch) < WORKFLOW_PROGRESS_EDGE_BATCH_MAX_ITEMS:
+            if len(edge_batch) < self.workflow_progress_limits.edge_batch_max_items:
                 continue
             self._send_progress_event(
                 actor,
@@ -754,6 +781,17 @@ class _RayExecutor(_Executor):
             from django_ray.runtime.runtime_env import prepare_runtime_env_for_ray_core
 
             options["runtime_env"] = prepare_runtime_env_for_ray_core(resolved_runtime_env)
+        remote_progress_kwargs: dict[str, Any] = {
+            "workflow_run_identity": (
+                self.workflow_run_identity.as_dict()
+                if self.workflow_run_identity is not None
+                else None
+            )
+        }
+        from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_LIMITS_V1
+
+        if self.workflow_progress_limits != WORKFLOW_PROGRESS_LIMITS_V1:
+            remote_progress_kwargs["workflow_progress_limits"] = self.workflow_progress_limits
         object_ref = self.remote_step.options(**options).remote(
             signature.callable_path,
             signature.bootstrap_django,
@@ -764,11 +802,7 @@ class _RayExecutor(_Executor):
             progress_actor,
             node_id,
             *input_args,
-            workflow_run_identity=(
-                self.workflow_run_identity.as_dict()
-                if self.workflow_run_identity is not None
-                else None
-            ),
+            **remote_progress_kwargs,
         )
         if progress_actor is not None:
             try:
@@ -1505,12 +1539,14 @@ class _RayExecutor(_Executor):
 
         from django_ray.conf.settings import get_settings
 
+        config = get_settings()
         timeout_seconds = float(
-            get_settings().get(
+            config.get(
                 "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS",
                 15,
             )
         )
+        schema_v3_pilot_enabled = config.get("WORKFLOW_PROGRESS_SCHEMA_V3_PILOT") is True
         deadline = time.monotonic() + timeout_seconds
         saw_snapshot = False
 
@@ -1532,7 +1568,21 @@ class _RayExecutor(_Executor):
             if snapshot is not None:
                 saw_snapshot = True
                 terminal = snapshot["completed_nodes"] + snapshot["failed_nodes"]
-                if failed or terminal == snapshot["total_nodes"]:
+                ingress = snapshot.get("ingress")
+                ingress_cannot_publish = (
+                    schema_v3_pilot_enabled
+                    and isinstance(ingress, Mapping)
+                    and bool(ingress.get("rejected") or ingress.get("truncated"))
+                )
+                failure_evidence_ready = failed and (
+                    not schema_v3_pilot_enabled or snapshot["failed_nodes"] > 0
+                )
+                if (
+                    ingress_cannot_publish
+                    or failure_evidence_ready
+                    or (not failed and terminal == snapshot["total_nodes"])
+                ):
+                    self._publish_terminal_progress(snapshot)
                     return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1547,6 +1597,45 @@ class _RayExecutor(_Executor):
             failed_workflow=failed,
         )
         self._disable_progress_reporting()
+
+    def _publish_terminal_progress(self, snapshot: dict[str, Any]) -> bool:
+        """Best-effort one default-off schema-v3 terminal publication."""
+        if self.workflow_run_identity is None or getattr(
+            self,
+            "_terminal_progress_publication_attempted",
+            False,
+        ):
+            return False
+
+        from django_ray.conf.settings import get_settings
+
+        config = get_settings()
+        if config.get("WORKFLOW_PROGRESS_SCHEMA_V3_PILOT") is not True:
+            return False
+        self._terminal_progress_publication_attempted = True
+        try:
+            from django_ray.workflow_progress_publication import (
+                publish_terminal_workflow_progress,
+            )
+
+            publication = publish_terminal_workflow_progress(
+                self.workflow_run_identity,
+                snapshot,
+                detail_days=int(config.get("WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS", 7)),
+            )
+        except BaseException:
+            self._progress_warning(
+                "Workflow schema-v3 pilot publication was not completed",
+                reason="publication_failed",
+            )
+            return False
+        if not publication.accepted:
+            self._progress_warning(
+                "Workflow schema-v3 pilot publication was not completed",
+                reason=publication.reason.value,
+            )
+            return False
+        return True
 
 
 class WorkflowSignature(ABC):

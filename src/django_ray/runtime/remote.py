@@ -12,6 +12,10 @@ from typing import Any
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
 )
+from django_ray.workflow_progress_limits import (
+    canonical_workflow_progress_retained_size,
+    workflow_progress_retained_state_size,
+)
 from django_ray.workflow_progress_protocol import (
     WORKFLOW_PROGRESS_LIMITS_V1,
     WorkflowProgressEvent,
@@ -86,6 +90,7 @@ def execute_workflow_step_remote(
     node_id: str,
     *input_args: Any,
     workflow_run_identity: dict[str, Any] | None = None,
+    workflow_progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
 ) -> Any:
     """Execute a lightweight workflow step without database coordination."""
     if bootstrap_django:
@@ -122,6 +127,7 @@ def execute_workflow_step_remote(
             "label": label,
             "execution": execution,
         },
+        limits=workflow_progress_limits,
     )
     logger.info("Workflow step started")
     try:
@@ -129,6 +135,7 @@ def execute_workflow_step_remote(
             progress_actor,
             node_id,
             workflow_run_identity,
+            workflow_progress_limits,
         ):
             result = callable_obj(*input_args, *bound_args, **kwargs)
     except BaseException as error:
@@ -149,6 +156,7 @@ def execute_workflow_step_remote(
             workflow_run_identity,
             WorkflowProgressEventKind.FAILED,
             failure_payload,
+            limits=workflow_progress_limits,
         )
         logger.exception("Workflow step failed")
         raise
@@ -160,6 +168,7 @@ def execute_workflow_step_remote(
             "node_id": node_id,
             "label": label,
         },
+        limits=workflow_progress_limits,
     )
     logger.info("Workflow step completed")
     return result
@@ -170,6 +179,8 @@ def _send_step_progress_event(
     workflow_run_identity: dict[str, Any] | None,
     kind: WorkflowProgressEventKind,
     payload: dict[str, Any],
+    *,
+    limits: WorkflowProgressLimits,
 ) -> None:
     """Report one leaf event without making observability task-critical."""
     if progress_actor is None or workflow_run_identity is None:
@@ -180,6 +191,7 @@ def _send_step_progress_event(
             workflow_run_identity,
             kind,
             payload,
+            limits=limits,
         )
     except Exception:
         return
@@ -242,8 +254,8 @@ class _WorkflowProgressCollector:
         self._node_payload_bytes = 0
         self._edge_payload_bytes = 0
         self._event_payload_bytes = 0
-        self._plan_size = _canonical_retained_size(self.plan_summary)
-        self._retained_bytes = _canonical_retained_state_size(
+        self._plan_size = canonical_workflow_progress_retained_size(self.plan_summary)
+        self._retained_bytes = workflow_progress_retained_state_size(
             plan_bytes=self._plan_size,
             node_bytes=0,
             node_count=0,
@@ -371,10 +383,11 @@ class _WorkflowProgressCollector:
             return "edge_limit"
 
         node_sizes = {
-            node_id: _canonical_retained_size(node) for node_id, node in node_updates.items()
+            node_id: canonical_workflow_progress_retained_size(node)
+            for node_id, node in node_updates.items()
         }
         edge_sizes = {
-            edge: _canonical_retained_size({"source": edge[0], "target": edge[1]})
+            edge: canonical_workflow_progress_retained_size({"source": edge[0], "target": edge[1]})
             for edge in new_edges
         }
         candidate_events = list(self.events)
@@ -382,7 +395,7 @@ class _WorkflowProgressCollector:
         event_payload_bytes = self._event_payload_bytes
         if recent_event is not None and self._recent_event_limit:
             candidate_events.append(recent_event)
-            recent_event_size = _canonical_retained_size(recent_event)
+            recent_event_size = canonical_workflow_progress_retained_size(recent_event)
             candidate_event_sizes.append(recent_event_size)
             event_payload_bytes += recent_event_size
             excess = len(candidate_events) - self._recent_event_limit
@@ -395,7 +408,7 @@ class _WorkflowProgressCollector:
         for node_id, size in node_sizes.items():
             node_payload_bytes += size - self._node_sizes.get(node_id, 0)
         edge_payload_bytes = self._edge_payload_bytes + sum(edge_sizes.values())
-        retained_bytes = _canonical_retained_state_size(
+        retained_bytes = workflow_progress_retained_state_size(
             plan_bytes=self._plan_size,
             node_bytes=node_payload_bytes,
             node_count=len(self.nodes) + new_node_count,
@@ -687,50 +700,6 @@ class WorkflowProgressActor:
 
 
 _TERMINAL_NODE_STATES = frozenset({"SUCCEEDED", "FAILED"})
-
-
-def _canonical_retained_size(value: Any) -> int:
-    return len(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    )
-
-
-_RETAINED_STATE_FRAME_BYTES = _canonical_retained_size(
-    {
-        "edges": [],
-        "nodes": [],
-        "plan": None,
-        "recent_events": [],
-    }
-) - len(b"null")
-
-
-def _canonical_retained_state_size(
-    *,
-    plan_bytes: int,
-    node_bytes: int,
-    node_count: int,
-    edge_bytes: int,
-    edge_count: int,
-    event_bytes: int,
-    event_count: int,
-) -> int:
-    return (
-        _RETAINED_STATE_FRAME_BYTES
-        + plan_bytes
-        + node_bytes
-        + max(0, node_count - 1)
-        + edge_bytes
-        + max(0, edge_count - 1)
-        + event_bytes
-        + max(0, event_count - 1)
-    )
 
 
 def _event_timestamp(value: str) -> float:

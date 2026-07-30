@@ -372,6 +372,51 @@ separate from keyword arguments forwarded to the root application callable.
 "WORKFLOW_PROGRESS_REPORTING_POLICY": "disabled"
 ```
 
+### WORKFLOW_PROGRESS_SCHEMA_V3_PILOT
+
+- **Type**: `bool`
+- **Default**: `False`
+
+Experimental terminal publication of admitted full-reporting workflow progress into
+the schema-v3 summary, topology, and normalized node-detail storage. The package
+default is disabled. A value such as `1`, `"true"`, or `None` is not accepted in
+`DJANGO_RAY`; configure a real Python boolean.
+
+When enabled, both the progress actor and the terminal publication adapter use the
+fixed `schema-v3-pilot-v1` admission profile:
+
+| Evidence | Maximum items | Maximum encoded bytes | Maximum decoded bytes |
+|---|---:|---:|---:|
+| Topology nodes | 512 | 2 MiB for all topology | 2 MiB for all topology |
+| Topology edges | 2,048 | 2 MiB for all topology | 2 MiB for all topology |
+| Node detail | 512 | 1 MiB | 1 MiB |
+| Combined topology and detail | — | 4 MiB | 4 MiB |
+
+The adapter makes one best-effort publication attempt from a complete terminal actor
+snapshot while the exact task, attempt, execution generation, and workflow run still
+own the `RUNNING` fence. It derives policy, strategy, and plan identity from the pinned
+effective selection. Any rejected or truncated ingress, malformed cross-field
+evidence, admission overflow, preparation truncation, stale fence, or atomic storage
+failure refuses schema-v3 publication instead of presenting an incomplete graph as
+complete. Publication failure does not change the workflow result. Full mode continues
+to write bounded schema-v2 `progress_data` snapshots for live and rolling
+compatibility; disabled reporting still creates no progress actor and publishes no
+progress data.
+
+The bundled testproject is intentionally different from the package default:
+`DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` defaults to enabled there so the sample
+workflow and guarded local KubeRay gate exercise the real producer path. Set that
+environment variable to a false value to test the package's ordinary default-off
+behavior.
+
+This pilot is not support for workloads near the hard protocol-v1 ceilings or for
+arbitrary concurrent publication. Keep it disabled unless the workload fits the
+documented profile and the deployment has been validated.
+
+```python
+"WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True
+```
+
 ### WORKFLOW_PROGRESS_FLUSH_SECONDS
 
 - **Type**: `int`
@@ -739,6 +784,7 @@ DJANGO_RAY = {
     "WORKER_HEARTBEAT_SECONDS": 15,
     "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
     "WORKFLOW_PROGRESS_REPORTING_POLICY": "full",
+    "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
     "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
     "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 15,
     "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7,

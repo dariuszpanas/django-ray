@@ -21,6 +21,7 @@ from django_ray.runtime.context import (
     workflow_step_execution,
 )
 from django_ray.runtime.remote import WorkflowProgressActor
+from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_LIMITS_V1
 from django_ray.workflow_progress_protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
@@ -131,6 +132,11 @@ def fail_on_two(value: int) -> int:
     if value == 2:
         raise RuntimeError("original map failure")
     return value
+
+
+def fail_workflow_step(value: int) -> int:
+    del value
+    raise RuntimeError("intentional workflow failure")
 
 
 def cleanup_failure(value: Any) -> Any:
@@ -1405,6 +1411,7 @@ def test_finish_progress_polls_without_rewriting_unchanged_snapshot(monkeypatch)
 def test_finish_progress_retries_transient_snapshot_unavailability(monkeypatch) -> None:
     executor = object.__new__(_RayExecutor)
     executor.progress_actor = object()
+    executor.workflow_run_identity = None
     snapshots = iter(
         [
             None,
@@ -1669,6 +1676,7 @@ def test_finish_progress_reports_incomplete_terminal_snapshot(
 def test_finish_progress_waits_for_terminal_snapshot(monkeypatch) -> None:
     executor = object.__new__(_RayExecutor)
     executor.progress_actor = object()
+    executor.workflow_run_identity = None
     snapshots = iter(
         [
             {"completed_nodes": 0, "failed_nodes": 0, "total_nodes": 1},
@@ -1684,7 +1692,344 @@ def test_finish_progress_waits_for_terminal_snapshot(monkeypatch) -> None:
     assert sleeps == [0.05]
 
 
+def test_finish_progress_waits_for_failed_node_evidence_when_pilot_enabled(
+    monkeypatch,
+    settings,
+) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+    }
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    executor.workflow_run_identity = None
+    snapshots = iter(
+        [
+            {"completed_nodes": 0, "failed_nodes": 0, "total_nodes": 2},
+            {"completed_nodes": 0, "failed_nodes": 1, "total_nodes": 2},
+        ]
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(executor, "_flush_progress", lambda **kwargs: next(snapshots))
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
+
+    executor.finish_progress(failed=True)
+
+    assert sleeps == [0.05]
+
+
+def test_finish_progress_preserves_immediate_failure_flush_when_pilot_disabled(
+    monkeypatch,
+    settings,
+) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
+    }
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    executor.workflow_run_identity = None
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        executor,
+        "_flush_progress",
+        lambda **kwargs: {
+            "completed_nodes": 0,
+            "failed_nodes": 0,
+            "total_nodes": 2,
+        },
+    )
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
+
+    executor.finish_progress(failed=True)
+
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("ingress_field", ["rejected", "truncated"])
+def test_finish_progress_reports_unpublishable_ingress_without_waiting(
+    ingress_field,
+    failed,
+    monkeypatch,
+    settings,
+) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+    }
+    snapshot = {
+        "completed_nodes": 0,
+        "failed_nodes": 0,
+        "total_nodes": 2,
+        "ingress": {
+            "rejected": int(ingress_field == "rejected"),
+            "truncated": int(ingress_field == "truncated"),
+        },
+    }
+    publications: list[dict[str, Any]] = []
+    sleeps: list[float] = []
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    executor.workflow_run_identity = _workflow_identity()
+    monkeypatch.setattr(executor, "_flush_progress", lambda **kwargs: snapshot)
+    monkeypatch.setattr(
+        executor,
+        "_publish_terminal_progress",
+        lambda value: publications.append(value) or False,
+    )
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
+
+    executor.finish_progress(failed=failed)
+
+    assert publications == [snapshot]
+    assert sleeps == []
+
+
+def test_finish_progress_preserves_pilot_disabled_success_retry_with_rejected_ingress(
+    monkeypatch,
+    settings,
+) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
+    }
+    snapshots = iter(
+        [
+            {
+                "completed_nodes": 0,
+                "failed_nodes": 0,
+                "total_nodes": 1,
+                "ingress": {"rejected": 1, "truncated": 0},
+            },
+            {
+                "completed_nodes": 1,
+                "failed_nodes": 0,
+                "total_nodes": 1,
+                "ingress": {"rejected": 1, "truncated": 0},
+            },
+        ]
+    )
+    sleeps: list[float] = []
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    executor.workflow_run_identity = None
+    monkeypatch.setattr(executor, "_flush_progress", lambda **kwargs: next(snapshots))
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
+
+    executor.finish_progress()
+
+    assert sleeps == [0.05]
+
+
+def test_terminal_schema_v3_publication_is_default_off(
+    monkeypatch,
+    settings,
+) -> None:
+    import django_ray.workflow_progress_publication as publication_module
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
+    }
+    publications: list[tuple[object, object, dict[str, Any]]] = []
+
+    def publish(identity, snapshot, **kwargs):
+        publications.append((identity, snapshot, kwargs))
+        raise AssertionError("the default-off pilot must not invoke its publisher")
+
+    monkeypatch.setattr(
+        publication_module,
+        "publish_terminal_workflow_progress",
+        publish,
+    )
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    executor.workflow_run_identity = _workflow_identity()
+    executor._terminal_progress_publication_attempted = False
+    snapshot = {"completed_nodes": 1, "failed_nodes": 0, "total_nodes": 1}
+    monkeypatch.setattr(executor, "_flush_progress", lambda **kwargs: snapshot)
+
+    executor.finish_progress()
+
+    assert publications == []
+    assert executor._terminal_progress_publication_attempted is False
+
+
+def test_enabled_terminal_schema_v3_publication_is_attempted_exactly_once(
+    monkeypatch,
+    settings,
+) -> None:
+    import django_ray.workflow_progress_publication as publication_module
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+        "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 9,
+    }
+    identity = _workflow_identity()
+    snapshot = {"completed_nodes": 1, "failed_nodes": 0, "total_nodes": 1}
+    publications: list[tuple[object, object, dict[str, Any]]] = []
+
+    def publish(reported_identity, reported_snapshot, **kwargs):
+        publications.append((reported_identity, reported_snapshot, kwargs))
+        return publication_module.WorkflowProgressPilotPublicationResult(
+            accepted=True,
+            reason=publication_module.WorkflowProgressPilotReason.PUBLISHED,
+            summary={},
+        )
+
+    monkeypatch.setattr(
+        publication_module,
+        "publish_terminal_workflow_progress",
+        publish,
+    )
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    executor.workflow_run_identity = identity
+    executor._terminal_progress_publication_attempted = False
+    monkeypatch.setattr(executor, "_flush_progress", lambda **kwargs: snapshot)
+
+    executor.finish_progress()
+    executor.finish_progress()
+
+    assert publications == [
+        (
+            identity,
+            snapshot,
+            {"detail_days": 9},
+        )
+    ]
+    assert executor._terminal_progress_publication_attempted is True
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_reason"),
+    [
+        ("rejected", "ingress_rejected"),
+        ("exception", "publication_failed"),
+    ],
+)
+def test_terminal_schema_v3_publication_failures_are_bounded_and_best_effort(
+    failure_mode,
+    expected_reason,
+    monkeypatch,
+    settings,
+    workflow_progress_warning_records,
+) -> None:
+    import django_ray.workflow_progress_publication as publication_module
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+    }
+    identity = _workflow_identity()
+    calls = 0
+
+    def publish(*args, **kwargs):
+        del args, kwargs
+        nonlocal calls
+        calls += 1
+        if failure_mode == "exception":
+            raise RuntimeError("password=do-not-leak")
+        return publication_module.WorkflowProgressPilotPublicationResult(
+            accepted=False,
+            reason=publication_module.WorkflowProgressPilotReason.INGRESS_REJECTED,
+        )
+
+    monkeypatch.setattr(
+        publication_module,
+        "publish_terminal_workflow_progress",
+        publish,
+    )
+    executor = object.__new__(_RayExecutor)
+    executor.workflow_run_identity = identity
+    executor._terminal_progress_publication_attempted = False
+
+    assert executor._publish_terminal_progress({"state": "SUCCEEDED"}) is False
+    assert executor._publish_terminal_progress({"state": "SUCCEEDED"}) is False
+
+    assert calls == 1
+    assert workflow_progress_warning_records == [
+        {
+            "message": "Workflow schema-v3 pilot publication was not completed",
+            "component": "workflow_progress",
+            "task_execution_pk": identity.task_execution_pk,
+            "workflow_run_id": identity.run_id,
+            "reason": expected_reason,
+        }
+    ]
+    assert "do-not-leak" not in json.dumps(workflow_progress_warning_records)
+
+
+@pytest.mark.django_db
+def test_schema_v3_pilot_passes_strict_limits_to_the_progress_actor(
+    settings,
+) -> None:
+    from django_ray.models import RayTaskExecution, TaskState
+    from django_ray.runtime.context import DurableTaskContext
+    from django_ray.workflow_plans import materialize_workflow_plan
+    from django_ray.workflow_progress_publication import (
+        WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
+    )
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+    }
+    execution = RayTaskExecution.objects.create(
+        task_id="workflow-progress-pilot-limits",
+        callable_path=f"{__name__}.increment",
+        state=TaskState.RUNNING,
+        execution_generation=2,
+    )
+    materialized = materialize_workflow_plan(
+        step(increment),
+        invocation_args=(1,),
+        invocation_kwargs={},
+    )
+    actor = object()
+    actor_calls: list[tuple[bytes, dict[str, Any]]] = []
+
+    class ProgressActor:
+        @staticmethod
+        def remote(initialized_event: bytes, **kwargs):
+            actor_calls.append((initialized_event, kwargs))
+            return actor
+
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = DurableTaskContext(
+        task_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+    executor.progress_actor = None
+    executor.progress_actor_cls = ProgressActor()
+
+    executor.bind_plan(
+        materialized,
+        requested_policy="auto",
+        reporting_policy="full",
+    )
+
+    assert executor.progress_actor is actor
+    assert executor.workflow_progress_limits is WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
+    assert len(actor_calls) == 1
+    initialized_event, actor_kwargs = actor_calls[0]
+    assert actor_kwargs == {"limits": WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS}
+    assert executor.workflow_run_identity is not None
+    decoded = decode_workflow_progress_event(
+        initialized_event,
+        expected_run_identity=executor.workflow_run_identity.as_dict(),
+        limits=WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
+    )
+    assert decoded.kind is WorkflowProgressEventKind.INITIALIZED
+    assert decoded.payload == {"plan": materialized.plan.summary()}
+
+
 def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> None:
+    remote_calls: list[dict[str, Any]] = []
+
     class _BadRef:
         def task_id(self):
             raise RuntimeError("task id unavailable")
@@ -1694,6 +2039,7 @@ def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> No
             return self
 
         def remote(self, *args, **kwargs):
+            remote_calls.append(kwargs)
             return _BadRef()
 
     identity = _workflow_identity()
@@ -1702,12 +2048,18 @@ def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> No
     executor.task_context = None
     executor.task_execution_pk = identity.task_execution_pk
     executor.workflow_run_identity = identity
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
     executor.progress_actor = actor
     executor.remote_step = _RemoteStep()
 
     executor.submit_step(step(increment), (), {}, "0.0", ())
 
     events = _decoded_ingests(actor, identity)
+    assert remote_calls == [
+        {
+            "workflow_run_identity": identity.as_dict(),
+        }
+    ]
     assert [event.kind for event in events] == [WorkflowProgressEventKind.NODE_REGISTERED]
     assert events[0].payload == {
         "callable_path": "tests.unit.test_workflows.increment",
@@ -1716,6 +2068,44 @@ def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> No
         "ray_options": {},
         "runtime_env": {"mode": "inherit"},
     }
+
+
+def test_ray_executor_submit_passes_strict_pilot_limits_to_remote_step() -> None:
+    from django_ray.workflow_progress_limits import (
+        WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
+    )
+
+    class _BadRef:
+        def task_id(self):
+            raise RuntimeError("task id unavailable")
+
+    remote_calls: list[dict[str, Any]] = []
+
+    class _RemoteStep:
+        def options(self, **kwargs):
+            return self
+
+        def remote(self, *args, **kwargs):
+            remote_calls.append(kwargs)
+            return _BadRef()
+
+    identity = _workflow_identity()
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = None
+    executor.task_execution_pk = identity.task_execution_pk
+    executor.workflow_run_identity = identity
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
+    executor.progress_actor = _IngestOnlyProgressActor()
+    executor.remote_step = _RemoteStep()
+
+    executor.submit_step(step(increment), (), {}, "0.0", ())
+
+    assert remote_calls == [
+        {
+            "workflow_progress_limits": WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
+            "workflow_run_identity": identity.as_dict(),
+        }
+    ]
 
 
 def test_ray_executor_submit_chunks_edges_and_uses_only_bounded_ingest() -> None:
@@ -1742,6 +2132,7 @@ def test_ray_executor_submit_chunks_edges_and_uses_only_bounded_ingest() -> None
     executor.task_context = None
     executor.task_execution_pk = identity.task_execution_pk
     executor.workflow_run_identity = identity
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
     executor.progress_actor = actor
     executor.remote_step = _RemoteStep()
     dependencies = tuple(f"0.upstream-{index}" for index in range(65))
@@ -1800,6 +2191,7 @@ def test_ray_executor_invalid_internal_progress_never_calls_actor() -> None:
     executor.task_context = None
     executor.task_execution_pk = identity.task_execution_pk
     executor.workflow_run_identity = identity
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
     executor.progress_actor = actor
     executor.remote_step = remote_step
 
@@ -1825,6 +2217,7 @@ def test_ray_executor_map_lifecycle_uses_only_bounded_ingest(
     executor = object.__new__(_RayExecutor)
     executor.progress_actor = actor
     executor.workflow_run_identity = identity
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
     executor._progress_suppression_depth = 0
     executor._map_progress_sent_at = {}
     dependencies = tuple(f"0.upstream-{index}" for index in range(65))
@@ -2067,10 +2460,15 @@ def test_workflow_executes_on_real_ray() -> None:
 
 @pytest.mark.django_db
 @pytest.mark.real_ray
-def test_real_ray_workflow_can_disable_node_reporting() -> None:
+def test_real_ray_workflow_can_disable_node_reporting(settings) -> None:
     import ray
 
-    from django_ray.models import RayTaskExecution, TaskState
+    from django_ray.models import RayTaskExecution, TaskState, WorkflowProgressRunStorage
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+    }
 
     execution = RayTaskExecution.objects.create(
         task_id="real-ray-disabled-progress",
@@ -2096,6 +2494,8 @@ def test_real_ray_workflow_can_disable_node_reporting() -> None:
     assert result == (False, 6)
     assert selection["reporting_policy"] == "disabled"
     assert execution.progress_data is None
+    assert execution.workflow_progress_summary_json is None
+    assert not WorkflowProgressRunStorage.objects.filter(execution=execution).exists()
 
 
 @pytest.mark.real_ray
@@ -2229,11 +2629,12 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
     import ray
 
     import django_ray.workflows as workflow_module
-    from django_ray.models import RayTaskExecution
+    from django_ray.models import RayTaskExecution, WorkflowProgressRunStorage
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
         "WORKFLOW_PROGRESS_FLUSH_SECONDS": 300,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
     }
     execution = RayTaskExecution.objects.create(
         task_id="real-ray-workflow-graph",
@@ -2281,21 +2682,43 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
     assert nodes[0]["runtime_env"]["hash"].startswith("sha256:")
     assert nodes[0]["execution"]["ray_task_id"]
     assert nodes[0]["execution"]["ray_node_id"]
+    assert not WorkflowProgressRunStorage.objects.filter(execution=execution).exists()
 
 
 @pytest.mark.real_ray
 @pytest.mark.django_db
-def test_real_ray_cached_actor_ingests_application_progress_and_bounded_map() -> None:
+def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
+    settings,
+) -> None:
     import ray
 
     import django_ray.workflows as workflow_module
-    from django_ray.models import RayTaskExecution, WorkflowProgressRunStorage
-    from django_ray.workflow_progress_limits import (
-        WORKFLOW_PROGRESS_COMBINED_MAX_DECODED_BYTES,
-        WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS,
-        WORKFLOW_PROGRESS_TOPOLOGY_EDGE_MAX_ITEMS,
-        WORKFLOW_PROGRESS_TOPOLOGY_NODE_MAX_ITEMS,
+    from django_ray.models import (
+        RayTaskExecution,
+        WorkflowProgressNodeDetail,
+        WorkflowProgressRunStorage,
+        WorkflowProgressTopologyManifest,
+        WorkflowProgressTopologyPage,
+        WorkflowProgressTopologySlot,
     )
+    from django_ray.workflow_progress_limits import (
+        WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS,
+    )
+    from django_ray.workflow_progress_publication import (
+        WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
+    )
+    from django_ray.workflow_progress_reads import (
+        get_workflow_node_detail,
+        get_workflow_progress_summary,
+        list_workflow_topology_edges,
+        list_workflow_topology_nodes,
+    )
+    from django_ray.workflow_progress_summary import deserialize_workflow_progress_summary
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+    }
 
     execution = RayTaskExecution.objects.create(
         task_id="real-ray-bounded-map-graph",
@@ -2367,13 +2790,158 @@ def test_real_ray_cached_actor_ingests_application_progress_and_bounded_map() ->
     assert ingress["truncated"] == 0
     assert ingress["retained_nodes"] == 2
     assert ingress["retained_edges"] == 1
-    assert ingress["retained_nodes"] <= WORKFLOW_PROGRESS_TOPOLOGY_NODE_MAX_ITEMS
-    assert ingress["retained_edges"] <= WORKFLOW_PROGRESS_TOPOLOGY_EDGE_MAX_ITEMS
-    assert 0 < ingress["retained_bytes"] <= WORKFLOW_PROGRESS_COMBINED_MAX_DECODED_BYTES
+    assert (
+        ingress["retained_nodes"]
+        <= WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.topology_node_max_items
+    )
+    assert (
+        ingress["retained_edges"]
+        <= WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.topology_edge_max_items
+    )
+    assert (
+        0
+        < ingress["retained_bytes"]
+        <= WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.combined_max_decoded_bytes
+    )
     assert 0 < len(progress["recent_events"]) <= WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS
 
-    assert execution.workflow_progress_summary_json is None
-    assert not WorkflowProgressRunStorage.objects.filter(execution=execution).exists()
+    assert execution.workflow_progress_summary_json is not None
+    summary = deserialize_workflow_progress_summary(
+        execution.workflow_progress_summary_json,
+    )
+    run_storage = WorkflowProgressRunStorage.objects.get(execution=execution)
+    manifest = WorkflowProgressTopologyManifest.objects.get(run_storage=run_storage)
+    assert manifest.slot == WorkflowProgressTopologySlot.CURRENT
+    assert not WorkflowProgressTopologyManifest.objects.filter(
+        run_storage=run_storage,
+        slot=WorkflowProgressTopologySlot.PENDING,
+    ).exists()
+    assert not WorkflowProgressTopologyPage.objects.filter(
+        run_storage=run_storage,
+        manifest_links__isnull=True,
+    ).exists()
+    assert WorkflowProgressNodeDetail.objects.filter(run_storage=run_storage).count() == 2
+    assert summary["state"] == "SUCCEEDED"
+    assert summary["detail"]["availability"] == "AVAILABLE"
+    assert summary["node_counts"] == {
+        "declared": None,
+        "discovered": 2,
+        "retained_topology": 2,
+        "retained_detail": 2,
+        "pending": 0,
+        "running": 0,
+        "succeeded": 2,
+        "failed": 0,
+    }
+    assert summary["edge_counts"] == {
+        "declared": None,
+        "discovered": 1,
+        "retained_topology": 1,
+    }
+    assert summary["topology_version"] == manifest.topology_version == 1
+    assert summary["detail_revision"] == run_storage.detail_revision == 1
+    assert summary["storage"]["manifest_id"] == str(manifest.pk)
+
+    def authorize(candidate):
+        return candidate.pk == execution.pk
+
+    public_summary = get_workflow_progress_summary(execution, authorize=authorize)
+    topology_nodes = list_workflow_topology_nodes(execution, authorize=authorize)
+    topology_edges = list_workflow_topology_edges(execution, authorize=authorize)
+    root_detail = get_workflow_node_detail(execution, "0.0", authorize=authorize)
+    map_detail = get_workflow_node_detail(execution, "0.1", authorize=authorize)
+    assert public_summary["source_schema_version"] == 3
+    assert public_summary["availability"] == "AVAILABLE"
+    assert topology_nodes["returned_count"] == 2
+    assert {node["node_id"] for node in topology_nodes["items"]} == {"0.0", "0.1"}
+    assert topology_edges["items"] == [{"source": "0.0", "target": "0.1"}]
+    assert root_detail["found"] is True
+    assert root_detail["item"]["state"] == "SUCCEEDED"
+    assert root_detail["item"]["execution"]["ray_task_id"]
+    assert root_detail["item"]["execution"]["ray_node_id"]
+    assert root_detail["item"]["progress"]["message"] == "Preparing bounded fan-out"
+    assert root_detail["item"]["progress"]["metrics"] == {"items": 6}
+    assert map_detail["found"] is True
+    assert map_detail["item"]["state"] == "SUCCEEDED"
+    assert map_detail["item"]["execution"] is None
+    assert map_detail["item"]["fanout"] == {
+        "max_concurrency": 2,
+        "max_items": 10,
+        "submitted_items": 6,
+        "completed_items": 6,
+        "in_flight_items": 0,
+        "input_exhausted": True,
+    }
+
+
+@pytest.mark.real_ray
+@pytest.mark.django_db
+def test_real_ray_failed_leaf_publishes_failed_schema_v3_graph(settings) -> None:
+    import ray
+    from ray.exceptions import RayTaskError
+
+    from django_ray.models import (
+        RayTaskExecution,
+        WorkflowProgressTopologyManifest,
+        WorkflowProgressTopologySlot,
+    )
+    from django_ray.workflow_progress_reads import (
+        get_workflow_progress_summary,
+        list_workflow_node_details,
+        list_workflow_topology_edges,
+    )
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+    }
+    execution = RayTaskExecution.objects.create(
+        task_id="real-ray-failed-workflow-graph",
+        callable_path="tests.unit.test_workflows.fail_workflow_step",
+        state="RUNNING",
+        execution_generation=1,
+    )
+    workflow = chain(
+        step(increment),
+        step(fail_workflow_step),
+    )
+
+    assert not ray.is_initialized()
+    ray.init(address="local", include_dashboard=False, num_cpus=2)
+    try:
+        with durable_task_execution(
+            execution.pk,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+        ):
+            with pytest.raises(RayTaskError, match="intentional workflow failure"):
+                workflow.run(1, use_ray=True)
+    finally:
+        ray.shutdown()
+
+    execution.refresh_from_db()
+
+    def authorize(candidate):
+        return candidate.pk == execution.pk
+
+    summary = get_workflow_progress_summary(execution, authorize=authorize)
+    edges = list_workflow_topology_edges(execution, authorize=authorize)
+    details = list_workflow_node_details(execution, authorize=authorize)
+    details_by_id = {item["node_id"]: item for item in details["items"]}
+    assert summary["source_schema_version"] == 3
+    assert summary["availability"] == "AVAILABLE"
+    assert summary["summary"]["state"] == "FAILED"
+    assert summary["summary"]["node_counts"]["succeeded"] == 1
+    assert summary["summary"]["node_counts"]["failed"] == 1
+    assert edges["items"] == [{"source": "0.0", "target": "0.1"}]
+    assert details_by_id["0.0"]["state"] == "SUCCEEDED"
+    assert details_by_id["0.1"]["state"] == "FAILED"
+    assert "intentional workflow failure" in details_by_id["0.1"]["error"]
+    manifests = WorkflowProgressTopologyManifest.objects.filter(
+        run_storage__execution=execution,
+    )
+    assert manifests.filter(slot=WorkflowProgressTopologySlot.CURRENT).count() == 1
+    assert not manifests.filter(slot=WorkflowProgressTopologySlot.PENDING).exists()
 
 
 def test_durable_task_context_is_scoped() -> None:

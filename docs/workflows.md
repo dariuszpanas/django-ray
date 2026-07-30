@@ -470,7 +470,8 @@ are redacted or replaced before the event crosses Ray.
 
 ## Graph and Progress Schema
 
-Every snapshot is a versioned graph suitable for a custom task-tracking UI:
+During execution, full reporting writes a versioned schema-v2 compatibility snapshot
+suitable for a custom task-tracking UI:
 
 ```json
 {
@@ -519,6 +520,15 @@ generation. Database writes occur only when the coordinator revision changes and
 the task is still `RUNNING` with that exact attempt, generation, and run ID. The
 independent task-monitor heartbeat still proves that the owning worker is alive.
 
+When `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT=True`, one complete terminal schema-v2 actor
+snapshot may also be normalized into the bounded schema-v3 summary, immutable topology
+pages, and latest-state node detail. A successful publication becomes the preferred
+source for authorized bounded readers; it does not replace the live schema-v2 writes.
+The current Admin exposes the real retained topology and detail through bounded
+tabular routes. An accessible, lazy-loaded graph built from those readers—not from
+application result JSON—is tracked in
+[issue #219](https://github.com/dariuszpanas/django-ray/issues/219).
+
 ## Local Execution
 
 Signatures run locally when Ray is not initialized. This makes workflow logic easy to
@@ -558,25 +568,30 @@ Local execution has no progress actor and is recorded as disabled regardless of 
 configured Ray reporting default.
 
 Only `"full"` and `"disabled"` are executable policies today. Sampled and terminal-only
-collection remain later #79 work; changing
+collection policies remain later #79 work; the schema-v3 pilot still collects in full
+mode and changes only terminal publication. Changing
 `WORKFLOW_PROGRESS_FLUSH_SECONDS` only throttles full-mode database snapshots and does
 not remove producer or actor overhead.
 
 Full reporting prepares every data event as canonical identity-bound JSON before the
 Ray call. Event payloads are capped at 16 KiB, complete wire and decoded envelopes at
 32 KiB, and dependency-edge batches at 32 edges. The actor revalidates the complete
-task, attempt, generation, and workflow-run fence before mutation. Its node, edge,
-recent-event, and retained-byte state uses the same V1 limits as durable workflow
-progress, with bounded accepted, rejected, and truncated diagnostics. Descriptive
-metadata is redacted before it crosses Ray.
+task, attempt, generation, and workflow-run fence before mutation. With the schema-v3
+pilot disabled, its node, edge, recent-event, and retained-byte state uses the durable
+V1 limits. Enabling the pilot narrows actor collection and publication to the fixed
+`schema-v3-pilot-v1` profile: 512 nodes, 2,048 edges, 2 MiB of topology, 1 MiB of
+detail, and 4 MiB combined, with the byte ceilings applied to encoded and decoded
+evidence. Descriptive metadata is redacted before it crosses Ray.
 
 These bounds close the individual producer-to-actor and retained-collector gap. They
 do not bound the aggregate number or bytes of events already queued in Ray's actor
 mailbox, coalesce repeated producer updates, provide producer backpressure, or provide
 the bounded actor-to-preparation drain needed at the hard V1 ceilings. Those remain
-separate #79 scale and default-activation work. They do not block #212 from proving a
-default-off schema-v3 pilot under stricter admission limits. A bounded event or actor
-snapshot is observational state, not a recovery or flow-control protocol.
+separate scale and default-activation work. The stricter pilot is therefore
+experimental and default-off rather than a general V1-scale claim. If any event is
+rejected or truncated, the terminal adapter refuses schema-v3 publication instead of
+claiming that an incomplete graph is complete. A bounded event or actor snapshot is
+observational state, not a recovery or flow-control protocol.
 
 ## Durability Semantics
 
@@ -584,7 +599,7 @@ The outer Django task is the durability and retry boundary:
 
 - Internal steps do not create individual Django tasks.
 - In full reporting mode, an in-memory Ray coordinator collects node events. The outer
-  task currently writes a complete progress snapshot to
+  task writes a complete schema-v2 progress snapshot to
   `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
   Individual producer envelopes and retained actor nodes, edges, events, and bytes are
   bounded. The aggregate Ray mailbox, snapshot-to-preparer drain, and transient
@@ -598,14 +613,16 @@ The outer Django task is the durability and retry boundary:
   and that summary pointer in one transaction. The standalone schema-v3 writer rejects
   topology/detail pointers; it is the only path for an intentional summary-only
   `DISABLED` or `OMITTED_BY_POLICY` record, which creates no empty detail storage.
-  Current coordinators intentionally remain schema-v2 writers. Authorized public
-  readers are implemented. Issue #212 owns a default-off initial producer that applies
-  admission limits below the hard V1 ceilings, uses the existing compatibility
-  preparer, and is proved through the bundled project and local KubeRay. General or
-  default activation still requires #79's mailbox controls, #142's composite bounded
-  preparation, aggregate spill capacity ownership, and an old-writer drain. Topology
-  preparation already uses ADR-0005's spill-backed package path, while the compatibility
-  result still carries complete observed membership for materialized initial detail.
+  Authorized public readers are implemented. The default-off pilot makes one
+  best-effort terminal publication from a complete full-reporting actor snapshot,
+  revalidates the pinned plan and exact run fence, then stages and atomically promotes
+  topology, detail, and summary. Rejected or truncated ingress, invalid cross-field
+  evidence, admission overflow, preparation truncation, a stale fence, or storage
+  failure leaves schema v3 unpublished and emits a stable bounded diagnostic; it never
+  changes the application result. The periodic schema-v2 writer remains active for
+  rolling compatibility. General or default activation still requires the remaining
+  mailbox/backpressure, composite-preparation, aggregate-spill, migration, and
+  old-writer-drain work.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -646,12 +663,14 @@ monotonic exact-run writer primitive, bounded rolling reader, and lifecycle arch
 Its second delivery adds the run-scoped topology manifests/pages, normalized
 latest-state rows, bounded staging and integrity verification, sparse atomic
 publication, terminal expiry, and retention/orphan cleanup. Public detail services are
-implemented, but the runtime producer still writes complete schema-v2 snapshots.
+implemented. The runtime producer continues to write complete schema-v2 snapshots and
+may additionally publish one terminal schema-v3 record only when the stricter pilot is
+explicitly enabled and admitted.
 ADR-0005's production topology phase now externalizes exact node/edge identity,
 duplicate, reference, and selection state into a private bounded SQLite workspace and
 removes it before returning prepared evidence. The unchanged result still includes
 complete `observed_node_ids` for the existing materialized detail API, so #142 must
-complete the shared topology/detail lifetime before activation. See
+complete the shared topology/detail lifetime before broader activation. See
 [ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md)
 and
 [ADR-0005: Bounded Workflow Progress Preparation](design/adr-0005-bounded-workflow-preparation.md).
@@ -667,14 +686,14 @@ See [Workflow Plans and Execution Strategies](workflow-plans.md).
 
 Apply database migrations before starting upgraded workers. Migration
 `0012_workflow_progress_summary` adds nullable summary fields, and migration
-`0013_workflow_progress_detail_storage` adds dormant package-owned topology and detail
+`0013_workflow_progress_detail_storage` adds package-owned topology and detail
 tables. Neither migration rewrites existing `progress_data`; older writers continue to
-work and upgraded readers retain the 64 MiB schema-v1/v2 compatibility cap. Do not
-enable unguarded schema-v3 production yet. Deploy the authorized public facade and
-bounded ingress first, then use #212's default-off pilot and stricter admission profile
-while old workflow writers drain. Complete #79's remaining mailbox controls, #142's
-composite preparation, and aggregate spill ownership before enabling schema v3 by
-default or admitting workloads near the hard V1 ceilings.
+work and upgraded readers retain the 64 MiB schema-v1/v2 compatibility cap. The
+package-level pilot remains disabled unless explicitly configured. Deploy the
+authorized public facade and bounded storage before opting in, keep old workflow
+writers compatible through the rollout, and complete the remaining mailbox,
+preparation, aggregate-spill, and migration work before enabling schema v3 by default
+or admitting workloads near the hard V1 ceilings.
 
 Existing rows start with `workflow_run_id = NULL` and a nullable plan identity so an
 older writer can still insert during the rollout; the first upgraded, fully identified
@@ -707,7 +726,10 @@ GET  /api/cluster/workflow-benchmark/{task_id}
 POST /api/cluster/complex-workflow
 GET  /api/cluster/complex-workflow/{task_id}
 
-GET  /api/cluster/workflows/{task_id}/graph
+GET  /api/cluster/workflows/{task_id}
+GET  /api/cluster/workflows/{task_id}/topology/nodes
+GET  /api/cluster/workflows/{task_id}/topology/edges
+GET  /api/cluster/workflows/{task_id}/nodes
 GET  /api/cluster/workflows/{task_id}/nodes/{node_id}
 GET  /api/cluster/workflows/{task_id}/nodes/{node_id}?include_logs=true&tail=200
 ```
@@ -725,8 +747,14 @@ chain(
 )
 ```
 
-The GET endpoints return live progress while the outer Django task is running and
-the timing/result tree after it completes.
+The complex-workflow polling endpoint retains live schema-v2 progress while the outer
+Django task runs. The bundled testproject enables
+`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` by default, so an admitted terminal run becomes
+available through the bounded summary, topology-node, topology-edge, and node-detail
+routes above. The guarded local KubeRay gate exercises those routes against the real
+producer path and requires non-empty, mutually consistent topology and detail.
+Rendering that normalized evidence as an interactive graph remains the scoped
+[issue #219](https://github.com/dariuszpanas/django-ray/issues/219) follow-up.
 
 ## API Reference
 
