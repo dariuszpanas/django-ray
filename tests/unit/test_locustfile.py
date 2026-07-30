@@ -13,6 +13,7 @@ import locustfile
 
 ROOT = Path(__file__).parents[2]
 LOADTEST_MAKEFILE = ROOT / "mk" / "loadtest.mk"
+TESTPROJECT_README = ROOT / "testproject" / "README.md"
 
 
 class _ConcreteAuthenticatedTaskUser(locustfile.AuthenticatedTaskUser):
@@ -156,6 +157,153 @@ def test_observability_demo_rotates_required_scenarios_deterministically() -> No
     assert observed == [*expected_scenarios, *expected_scenarios]
 
 
+@pytest.mark.parametrize(
+    ("scenario", "expected_request", "expected_follow"),
+    [
+        (
+            "show_basic_add",
+            (
+                "/api/enqueue/add/21/21",
+                "/api/enqueue/add/[a]/[b]",
+                None,
+            ),
+            ("basic add", 60.0),
+        ),
+        (
+            "show_slow_task",
+            (
+                "/api/enqueue/slow/1.5",
+                "/api/enqueue/slow/[seconds]",
+                None,
+            ),
+            ("slow task", 60.0),
+        ),
+        (
+            "show_priority_task",
+            (
+                "/api/local/urgent?message=locust-observability-demo",
+                "/api/local/urgent",
+                None,
+            ),
+            ("priority task", 60.0),
+        ),
+        (
+            "show_sync_task",
+            (
+                "/api/sync/calculate?a=42&b=6&operation=divide",
+                "/api/sync/calculate",
+                None,
+            ),
+            ("sync task", 60.0),
+        ),
+        (
+            "show_cluster_search",
+            (
+                "/api/cluster/search",
+                None,
+                {
+                    "pattern": "demo",
+                    "data_sources": [
+                        "demo-source-a",
+                        "other-source",
+                        "demo-source-b",
+                    ],
+                    "case_sensitive": False,
+                },
+            ),
+            ("cluster search", 60.0),
+        ),
+        (
+            "show_workflow",
+            (
+                "/api/cluster/workflow-benchmark?num_items=3&seconds_per_item=0.25",
+                "/api/cluster/workflow-benchmark",
+                None,
+            ),
+            ("tiny workflow", 60.0),
+        ),
+        (
+            "show_runtime_env",
+            (
+                "/api/cluster/runtime-env/probe?profile=thin",
+                "/api/cluster/runtime-env/probe",
+                None,
+            ),
+            ("RuntimeEnv probe", 120.0),
+        ),
+        (
+            "show_ml_inference",
+            (
+                "/api/ml/inference",
+                None,
+                {
+                    "model_id": "locust-demo-model",
+                    "samples": [
+                        {
+                            "features": [
+                                index / 10,
+                                (index + 1) / 10,
+                            ]
+                        }
+                        for index in range(12)
+                    ],
+                },
+            ),
+            ("ML inference", 60.0),
+        ),
+    ],
+)
+def test_observability_demo_routes_and_resource_caps_are_stable(
+    scenario: str,
+    expected_request: tuple[str, str | None, dict[str, Any] | None],
+    expected_follow: tuple[str, float],
+) -> None:
+    user = object.__new__(locustfile.ObservabilityDemoUser)
+    requests: list[tuple[str, str | None, dict[str, Any] | None]] = []
+    follows: list[tuple[dict[str, str] | None, str, float]] = []
+
+    def record_post(
+        endpoint: str,
+        name: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        requests.append((endpoint, name, payload))
+        return {"task_id": "bounded-demo-task"}
+
+    def record_follow(
+        result: dict[str, str] | None,
+        *,
+        scenario_name: str,
+        timeout_seconds: float = 60.0,
+    ) -> None:
+        follows.append((result, scenario_name, timeout_seconds))
+
+    user._post_task = record_post  # type: ignore[method-assign]
+    user._submit_and_follow = record_follow  # type: ignore[method-assign]
+
+    getattr(user, scenario)()
+
+    assert requests == [expected_request]
+    assert follows == [
+        (
+            {"task_id": "bounded-demo-task"},
+            expected_follow[0],
+            expected_follow[1],
+        )
+    ]
+
+
+def test_observability_demo_monitoring_checks_stats_then_metrics() -> None:
+    user = object.__new__(locustfile.ObservabilityDemoUser)
+    checks: list[str] = []
+    user._get_stats = lambda: checks.append("stats")  # type: ignore[method-assign]
+    user._get_metrics = lambda: checks.append("metrics")  # type: ignore[method-assign]
+
+    user.show_monitoring()
+
+    assert checks == ["stats", "metrics"]
+
+
 def test_observability_demo_follows_every_successful_enqueue() -> None:
     user = object.__new__(locustfile.ObservabilityDemoUser)
     user.environment = SimpleNamespace(process_exit_code=None)
@@ -223,6 +371,22 @@ def test_loadtest_defaults_to_the_explicit_low_resource_demo() -> None:
     assert "--headless -u 1 -r 1 -t 300s ObservabilityDemoUser" in demo
 
 
+def test_powershell_loadtest_example_clears_plaintext_and_encoded_token() -> None:
+    readme = TESTPROJECT_README.read_text(encoding="utf-8")
+    loadtest_section = readme.split(
+        "Load the current Kubernetes secret into the Locust process",
+        maxsplit=1,
+    )[1]
+    powershell = loadtest_section.split("### PowerShell", maxsplit=1)[1].split(
+        "For an interactive Locust session",
+        maxsplit=1,
+    )[0]
+
+    assert powershell.index("try {") < powershell.index("kubectl --context")
+    assert "Remove-Item Env:DJANGO_API_TOKEN -ErrorAction SilentlyContinue" in powershell
+    assert "Remove-Variable djangoRayEncodedToken -ErrorAction SilentlyContinue" in powershell
+
+
 @pytest.mark.parametrize(
     ("target", "expected_class"),
     [
@@ -244,9 +408,10 @@ def test_capacity_targets_select_one_intended_user_class(
 
 
 class _Response:
-    def __init__(self, payload: dict[str, Any]) -> None:
+    def __init__(self, payload: dict[str, Any], *, text: str = "") -> None:
         self.status_code = 200
         self._payload = payload
+        self.text = text
         self.failures: list[str] = []
         self.successes = 0
 
@@ -283,6 +448,24 @@ def _polling_user(*responses: _Response) -> locustfile.AuthenticatedTaskUser:
     user = object.__new__(locustfile.AuthenticatedTaskUser)
     user.client = _PollingClient(list(responses))  # type: ignore[assignment]
     return user
+
+
+def test_metrics_request_uses_shared_client_timeout() -> None:
+    response = _Response({}, text="# django_ray_tasks_total")
+    user = _polling_user(response)
+
+    result = user._get_metrics()
+
+    assert result == "# django_ray_tasks_total"
+    assert response.successes == 1
+    assert response.failures == []
+    assert user.client.request_kwargs == [
+        {
+            "name": "/api/metrics",
+            "catch_response": True,
+            "timeout": locustfile._REQUEST_TIMEOUT_SECONDS,
+        }
+    ]
 
 
 @pytest.mark.parametrize("terminal_state", ["FAILED", "CANCELLED", "LOST"])

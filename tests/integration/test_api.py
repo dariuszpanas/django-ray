@@ -339,6 +339,148 @@ class TestEnqueueAPI:
         task = RayTaskExecution.objects.get(task_id=data["task_id"])
         assert task.queue_name == "high-priority"
 
+    def test_observability_demo_routes_keep_bounded_queue_contract(
+        self,
+        client,
+        settings,
+    ):
+        """The fixed demo payload stays small and reaches every intended queue."""
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "RUNTIME_ENV_PROFILES": {"thin": {}},
+        }
+        settings.TASKS = {
+            **settings.TASKS,
+            "thin": {
+                "BACKEND": "django_ray.backends.RayTaskBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {
+                    "RAY_ADDRESS": "auto",
+                    "RUNTIME_ENV_PROFILE": "thin",
+                },
+            },
+        }
+        ml_samples = [{"features": [index / 10, (index + 1) / 10]} for index in range(12)]
+        search_payload = {
+            "pattern": "demo",
+            "data_sources": [
+                "demo-source-a",
+                "other-source",
+                "demo-source-b",
+            ],
+            "case_sensitive": False,
+        }
+        ml_payload = {
+            "model_id": "locust-demo-model",
+            "samples": ml_samples,
+        }
+        requests = [
+            (
+                client.post("/api/enqueue/add/21/21"),
+                "testproject.tasks.add_numbers",
+                "default",
+                0,
+                [21, 21],
+                {},
+                None,
+            ),
+            (
+                client.post("/api/enqueue/slow/1.5"),
+                "testproject.tasks.slow_task",
+                "default",
+                0,
+                [],
+                {"seconds": 1.5},
+                None,
+            ),
+            (
+                client.post("/api/local/urgent?message=locust-observability-demo"),
+                "testproject.apps.local_ray.tasks.urgent_task",
+                "high-priority",
+                100,
+                ["locust-observability-demo"],
+                {},
+                None,
+            ),
+            (
+                client.post("/api/sync/calculate?a=42&b=6&operation=divide"),
+                "testproject.apps.sync_tasks.tasks.simple_calculation",
+                "sync",
+                0,
+                [42, 6],
+                {"operation": "divide"},
+                None,
+            ),
+            (
+                client.post(
+                    "/api/cluster/search",
+                    data=json.dumps(search_payload),
+                    content_type="application/json",
+                ),
+                "testproject.apps.cluster_tasks.tasks.distributed_search",
+                "default",
+                0,
+                [],
+                search_payload,
+                None,
+            ),
+            (
+                client.post("/api/cluster/workflow-benchmark?num_items=3&seconds_per_item=0.25"),
+                "testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark",
+                "default",
+                0,
+                [],
+                {"num_items": 3, "seconds_per_item": 0.25},
+                None,
+            ),
+            (
+                client.post("/api/cluster/runtime-env/probe?profile=thin"),
+                "testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+                "default",
+                0,
+                [],
+                {"package": None},
+                "thin",
+            ),
+            (
+                client.post(
+                    "/api/ml/inference",
+                    data=json.dumps(ml_payload),
+                    content_type="application/json",
+                ),
+                "testproject.apps.ml_pipeline.tasks.batch_inference",
+                "ml",
+                0,
+                [],
+                ml_payload,
+                None,
+            ),
+        ]
+
+        for (
+            response,
+            callable_path,
+            queue_name,
+            priority,
+            args,
+            kwargs,
+            runtime_env_profile,
+        ) in requests:
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "READY"
+            execution = RayTaskExecution.objects.get(task_id=data["task_id"])
+            assert execution.callable_path == callable_path
+            assert execution.queue_name == queue_name
+            assert execution.priority == priority
+            assert json.loads(execution.args_json) == args
+            assert json.loads(execution.kwargs_json) == kwargs
+            assert execution.runtime_env_profile == runtime_env_profile
+
+        assert RayTaskExecution.objects.count() == 8
+        assert client.get("/api/executions/stats").status_code == 200
+        assert client.get("/api/metrics").status_code == 200
+
     def test_enqueue_workflow_benchmark_creates_one_durable_task(self, client):
         response = client.post("/api/cluster/workflow-benchmark?num_items=6&seconds_per_item=0.1")
 
