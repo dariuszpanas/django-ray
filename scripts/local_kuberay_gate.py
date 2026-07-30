@@ -226,6 +226,7 @@ MAX_COMMAND_ERROR_LINES = 60
 MAX_DIAGNOSTIC_LINES = 80
 MAX_OUTPUT_CHARACTERS = 16_000
 MAX_GATE_ERROR_CHARACTERS = MAX_OUTPUT_CHARACTERS - 256
+MAX_OPENAPI_SCHEMA_BYTES = 128_000
 MAX_FAILURE_CONTEXT_CHARACTERS = 4_000
 EVIDENCE_LINE_LIMIT = 72
 BEARER_TOKEN68_PATTERN = re.compile(r"[A-Za-z0-9._~+/-]+={0,2}\Z")
@@ -729,6 +730,7 @@ class GateEvidence:
     task_id: str = ""
     task_state: str = ""
     task_result: object = None
+    api_execution_delete_rejected: bool = False
     runtime_env_encryption_overlay: bool = False
     runtime_env_encryption_canary: bool = False
     runtime_env_encryption_envelope: bool = False
@@ -4093,14 +4095,15 @@ class LocalKubeRayGate:
         *,
         method: str,
         headers: Mapping[str, str] | None = None,
+        response_limit: int = MAX_OUTPUT_CHARACTERS,
     ) -> tuple[int, bytes]:
         url = build_local_http_request_url(base_url=self.config.web_url, path=path)
         request = Request(url, method=method, headers=dict(headers or {}))
         try:
             with self.http_opener.open(request, timeout=10) as response:
-                return response.status, response.read(MAX_OUTPUT_CHARACTERS)
+                return response.status, response.read(response_limit)
         except HTTPError as error:
-            return error.code, error.read(MAX_OUTPUT_CHARACTERS)
+            return error.code, error.read(response_limit)
         except URLError as error:
             raise ValueError(f"local HTTP request failed: {error.reason}") from error
 
@@ -4122,6 +4125,24 @@ class LocalKubeRayGate:
             status, _ = self._http(endpoint, method=method)
             if status != 401:
                 raise ValueError(f"unauthenticated {endpoint} returned {status}, expected 401")
+
+        status, body = self._http(
+            "/api/openapi.json",
+            method="GET",
+            response_limit=MAX_OPENAPI_SCHEMA_BYTES,
+        )
+        if status != 200:
+            raise ValueError(f"OpenAPI schema returned {status}, expected 200")
+        schema = self._json_body(body, endpoint="OpenAPI schema")
+        paths = _mapping(schema.get("paths"), field_name="OpenAPI paths")
+        execution_path = _mapping(
+            paths.get("/api/executions/{execution_id}"),
+            field_name="OpenAPI execution detail path",
+        )
+        if "get" not in execution_path:
+            raise ValueError("OpenAPI execution detail path does not advertise GET")
+        if "delete" in execution_path:
+            raise ValueError("OpenAPI execution detail path advertises unsafe DELETE")
 
         token = self._secret_token()
         headers = {"Authorization": f"Bearer {token}"}
@@ -4172,11 +4193,41 @@ class LocalKubeRayGate:
             if execution is not None:
                 last_state = str(execution.get("state"))
                 if last_state == "SUCCEEDED":
+                    execution_id = execution.get("id")
+                    if (
+                        not isinstance(execution_id, int)
+                        or isinstance(execution_id, bool)
+                        or execution_id < 1
+                    ):
+                        raise ValueError("add_numbers execution has no positive integer id")
                     result = parse_task_result(execution.get("result_data"))
                     if result != 5:
                         raise ValueError(f"add_numbers durable result is {result!r}, expected 5")
+                    detail_path = f"/api/executions/{execution_id}"
+                    status, _ = self._http(detail_path, method="DELETE", headers=headers)
+                    if status != 405:
+                        raise ValueError(
+                            f"authenticated execution DELETE returned {status}, expected 405"
+                        )
+                    status, body = self._http(detail_path, method="GET", headers=headers)
+                    if status != 200:
+                        raise ValueError(
+                            f"execution detail after rejected DELETE returned {status}, expected 200"
+                        )
+                    detail = self._json_body(body, endpoint="execution detail")
+                    detail_result = parse_task_result(detail.get("result_data"))
+                    if (
+                        detail.get("id") != execution_id
+                        or detail.get("task_id") != task_id
+                        or detail.get("state") != "SUCCEEDED"
+                        or detail_result != 5
+                    ):
+                        raise ValueError(
+                            "execution changed after the rejected DELETE lifecycle probe"
+                        )
                     self.evidence.task_state = last_state
                     self.evidence.task_result = result
+                    self.evidence.api_execution_delete_rejected = True
                     return
                 if last_state in {"FAILED", "CANCELLED", "LOST"}:
                     raise ValueError(f"add_numbers reached terminal state {last_state}")
@@ -5961,6 +6012,10 @@ class LocalKubeRayGate:
             ("task_id", self.evidence.task_id),
             ("task_state", self.evidence.task_state),
             ("task_result", self.evidence.task_result),
+            (
+                "api_execution_delete_rejected",
+                self.evidence.api_execution_delete_rejected,
+            ),
             (
                 "runtime_env_encryption_overlay",
                 self.evidence.runtime_env_encryption_overlay,

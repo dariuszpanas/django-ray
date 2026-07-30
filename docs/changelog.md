@@ -318,6 +318,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The bundled testproject no longer exposes direct execution-row deletion. Removing a
+  running row could orphan Ray work from its durable lifecycle owner, while deleting a
+  terminal row would not constitute complete external-result or workflow-detail
+  cleanup. Example integrations now keep reads plus fenced cancellation and retry
+  without presenting model deletion as a lifecycle operation.
 - The repository-root and published `llms.txt` agent guides now share one exact
   content contract, restoring current workflow bounds, schema-v3 pilot status,
   numeric priority behavior, Celery migration, durable-input, and RuntimeEnv
