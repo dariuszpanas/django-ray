@@ -731,6 +731,7 @@ class GateEvidence:
     task_state: str = ""
     task_result: object = None
     api_execution_delete_rejected: bool = False
+    api_legacy_workflow_graph_absent: bool = False
     runtime_env_encryption_overlay: bool = False
     runtime_env_encryption_canary: bool = False
     runtime_env_encryption_envelope: bool = False
@@ -4143,6 +4144,9 @@ class LocalKubeRayGate:
             raise ValueError("OpenAPI execution detail path does not advertise GET")
         if "delete" in execution_path:
             raise ValueError("OpenAPI execution detail path advertises unsafe DELETE")
+        if "/api/cluster/workflows/{task_id}/graph" in paths:
+            raise ValueError("OpenAPI advertises the removed legacy workflow graph")
+        self.evidence.api_legacy_workflow_graph_absent = True
 
         token = self._secret_token()
         headers = {"Authorization": f"Bearer {token}"}
@@ -6015,6 +6019,10 @@ class LocalKubeRayGate:
             (
                 "api_execution_delete_rejected",
                 self.evidence.api_execution_delete_rejected,
+            ),
+            (
+                "api_legacy_workflow_graph_absent",
+                self.evidence.api_legacy_workflow_graph_absent,
             ),
             (
                 "runtime_env_encryption_overlay",

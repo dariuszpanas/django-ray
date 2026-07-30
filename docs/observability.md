@@ -176,8 +176,9 @@ topology-edge, node-detail-page, and indexed-node examples below
 `/api/cluster/workflows/{task_id}`. The indexed read is
 `/node-detail?node_id=...`; the query parameter round-trips bounded UTF-8 identifiers
 such as `namespace/apply`. Applications must replace the sample callable allowlist with
-their tenant or ownership policy. The old `/graph` endpoint remains a deprecated
-schema-v1/v2 compatibility example and should not be used for new clients.
+their tenant or ownership policy. The pre-0.4.0 `/graph` complete-graph example was
+removed. Existing schema-v1/v2 rows remain aggregate-readable through the summary
+route, while topology and node detail require the bounded page routes.
 
 `get_workflow_node_snapshot()` always returns durable node data first. Live Ray state
 and logs are opt-in:

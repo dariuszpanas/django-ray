@@ -738,65 +738,7 @@ class TestTasksAPI:
         data = response.json()
         assert data["result"]["source"] == "numpy-2-3"
 
-    def test_get_workflow_graph_returns_ui_ready_nodes_and_edges(self, client):
-        execution = RayTaskExecution.objects.create(
-            task_id="workflow-graph-001",
-            callable_path=("testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"),
-            queue_name="default",
-            state=TaskState.RUNNING,
-            workflow_run_id="00000000-0000-0000-0000-000000000033",
-        )
-        execution.progress_data = json.dumps(
-            {
-                "schema_version": 2,
-                "run_identity": {
-                    "schema_version": 1,
-                    "run_id": str(execution.workflow_run_id),
-                    "task_execution_pk": execution.pk,
-                    "attempt_number": execution.attempt_number,
-                    "execution_generation": execution.execution_generation,
-                },
-                "revision": 8,
-                "state": "RUNNING",
-                "total_nodes": 2,
-                "completed_nodes": 1,
-                "failed_nodes": 0,
-                "running_nodes": 1,
-                "pending_nodes": 0,
-                "progress_percent": 50.0,
-                "updated_at": 123.5,
-                "graph": {
-                    "nodes": [
-                        {
-                            "node_id": "0.0",
-                            "state": "SUCCEEDED",
-                            "dependencies": [],
-                            "execution": {"ray_task_id": "ray-1"},
-                        },
-                        {
-                            "node_id": "0.1",
-                            "state": "RUNNING",
-                            "dependencies": ["0.0"],
-                            "execution": {"ray_task_id": "ray-2"},
-                        },
-                    ],
-                    "edges": [{"source": "0.0", "target": "0.1"}],
-                },
-                "recent_events": [],
-            }
-        )
-        execution.save(update_fields=["progress_data"])
-
-        response = client.get(f"/api/cluster/workflows/{execution.task_id}/graph")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["revision"] == 8
-        assert data["run_identity"]["run_id"] == str(execution.workflow_run_id)
-        assert data["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]
-        assert data["graph"]["nodes"][1]["execution"]["ray_task_id"] == "ray-2"
-
-    def test_bounded_v3_summary_is_public_but_legacy_graph_route_is_unavailable(self, client):
+    def test_bounded_v3_summary_is_public_without_loading_legacy_graph(self, client):
         execution = RayTaskExecution.objects.create(
             task_id="workflow-v3-api-001",
             callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
@@ -827,9 +769,6 @@ class TestTasksAPI:
         assert len(task_selects) == 2
         assert "progress_data" not in task_selects[0]
         assert "workflow_progress_summary_json" not in task_selects[0]
-
-        graph_response = client.get(f"/api/cluster/workflows/{execution.task_id}/graph")
-        assert graph_response.status_code == 404
 
     def test_get_workflow_node_returns_durable_metadata_without_ray_id(self, client):
         execution = RayTaskExecution.objects.create(

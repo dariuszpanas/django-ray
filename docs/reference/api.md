@@ -49,7 +49,27 @@ If you need a REST API for task management in your project, you can use the test
 | `GET /api/cluster/workflows/{task_id}/node-detail?node_id={node_id}` | Get one indexed durable node record without scanning the graph |
 | `GET /api/cluster/workflows/{task_id}/nodes/{node_id}` | Get legacy durable node metadata and live Ray state |
 | `GET /api/cluster/workflows/{task_id}/nodes/{node_id}?include_logs=true` | Include bounded Ray stdout/stderr tails |
-| `GET /api/cluster/workflows/{task_id}/graph` | Deprecated schema-v1/v2 complete-graph example |
+
+### 0.4.0 workflow graph migration
+
+The pre-1.0 complete-graph route
+`GET /api/cluster/workflows/{task_id}/graph` was removed without an alias or
+deprecation window. Replace each use with the bounded operation that matches the data
+needed:
+
+| Former complete-graph use | Bounded replacement |
+|---|---|
+| Aggregate workflow state and counts | `GET /api/cluster/workflows/{task_id}` |
+| Immutable topology nodes | `GET /api/cluster/workflows/{task_id}/topology/nodes` |
+| Immutable dependency edges | `GET /api/cluster/workflows/{task_id}/topology/edges` |
+| Current normalized node states | `GET /api/cluster/workflows/{task_id}/nodes` |
+| One durable node by its full identifier | `GET /api/cluster/workflows/{task_id}/node-detail?node_id={node_id}` |
+
+Follow each page's bounded cursor instead of reconstructing one unbounded graph
+response. Existing schema-v1/v2 database snapshots are not rewritten or deleted; the
+summary route can still expose their sanitized aggregate counts. It never returns the
+stored complete graph. The private Django Admin visualization remains available to
+authorized staff and builds its display from bounded readers.
 
 When the testproject server is running:
 - **Swagger UI**: http://localhost:8000/api/docs
