@@ -16,6 +16,10 @@ from django_ray.lifecycle import (
     succeed_task,
 )
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.runtime.runtime_env import (
+    RuntimeEnvSnapshotError,
+    normalize_runtime_env,
+)
 
 
 @pytest.mark.django_db
@@ -137,6 +141,110 @@ def test_retry_task_rejects_a_stale_execution_generation() -> None:
     assert task.attempt_number == 3
     assert task.execution_generation == 7
     assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+@pytest.mark.django_db
+def test_retry_task_integrity_preflight_preserves_the_complete_execution(monkeypatch) -> None:
+    snapshot = normalize_runtime_env(
+        {"env_vars": {"VALUE": "arbitrary-customer-marker-7cf3"}},
+        profile="thin",
+    )
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-retry-runtime-env-integrity-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        attempt_number=2,
+        execution_generation=4,
+        run_after=datetime(2026, 8, 1, tzinfo=UTC),
+        result_data='{"partial":true}',
+        result_reference="digest:retained-result",
+        progress_data='{"revision":7}',
+        workflow_progress_summary_json='{"schema_version":3}',
+        workflow_run_id="00000000-0000-0000-0000-000000000232",
+        workflow_plan_selection='{"selected_strategy":"dynamic_tasks"}',
+        completion_data='{"completion":"retained"}',
+        error_message="original failure",
+        error_traceback="OriginalError: retained",
+        started_at=datetime(2026, 7, 29, tzinfo=UTC),
+        finished_at=datetime(2026, 7, 30, tzinfo=UTC),
+        last_heartbeat_at=datetime(2026, 7, 29, 12, tzinfo=UTC),
+        claimed_by_worker="retained-worker",
+        ray_target_address="ray://target:10001",
+        ray_job_id="raysubmit_retained",
+        ray_address="ray://submitted:10001",
+        cancellation_status="INDETERMINATE",
+        cancellation_error="retained cancellation diagnostic",
+        runtime_env_profile=snapshot.profile,
+        runtime_env_json=snapshot.serialized,
+        runtime_env_hash="0" * 64,
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    monkeypatch.setattr(
+        "django_ray.lifecycle._record_attempt",
+        lambda _execution: pytest.fail("attempt archival ran before RuntimeEnv preflight"),
+    )
+
+    with pytest.raises(RuntimeEnvSnapshotError, match="hash does not match") as exc_info:
+        retry_task(task.pk)
+
+    after = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    assert after == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+    assert "arbitrary-customer-marker-7cf3" not in str(exc_info.value)
+
+
+@pytest.mark.django_db
+def test_automatic_retry_integrity_preflight_rolls_back_before_attempt_history() -> None:
+    snapshot = normalize_runtime_env(
+        {"env_vars": {"VALUE": "arbitrary-customer-marker-7cf3"}},
+    )
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-auto-retry-runtime-env-integrity-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=3,
+        error_message="previous diagnostic",
+        claimed_by_worker="retained-worker",
+        runtime_env_json=snapshot.serialized,
+        runtime_env_hash="0" * 64,
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+
+    with pytest.raises(RuntimeEnvSnapshotError, match="hash does not match"):
+        record_failure(
+            task,
+            error_message="current callable failure",
+            retry=True,
+        )
+
+    after = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    assert after == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+@pytest.mark.django_db
+def test_terminal_failure_can_record_a_corrupt_snapshot_without_retrying() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-terminal-runtime-env-integrity-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=3,
+        runtime_env_json='{"env_vars":{"VALUE":"arbitrary-customer-marker-7cf3"}}',
+        runtime_env_hash="0" * 64,
+    )
+
+    assert record_failure(
+        task,
+        error_message="Persisted RuntimeEnv snapshot failed integrity validation",
+        retry=False,
+    )
+
+    task.refresh_from_db()
+    assert task.state == TaskState.FAILED
+    assert task.attempt_number == 1
+    assert TaskAttempt.objects.filter(execution=task, attempt_number=1).exists()
 
 
 @pytest.mark.django_db

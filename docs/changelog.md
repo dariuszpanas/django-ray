@@ -261,6 +261,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   URIs can contain credentials; the profile and content hash remain available for correlation.
   Execution rows are otherwise read-only: queue, priority, lifecycle, generation, and worker
   ownership remain visible, while controlled writes use the fenced Retry and Cancel actions.
+- Persisted RuntimeEnv snapshots now cross one storage seam and fail closed when an
+  identified row is missing, malformed, noncanonical, or hash-mismatched. Sync, Ray Core,
+  and Ray Job workers classify the failure as permanent before submission. Manual and
+  automatic retry paths verify under the lifecycle row lock before attempt archival or
+  metadata reset, while exact no-profile/no-hash legacy rows keep their default-resolution
+  compatibility. This integrity boundary does not encrypt the plaintext snapshot.
 - `make test-xdist` provides an ordinary four-worker local speed path for the
   default-resource subset. Markers identify tests that own real Ray, live-cluster, or
   PostgreSQL resources; they do not create CI shards or cross-test coordination, and

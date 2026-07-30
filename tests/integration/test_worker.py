@@ -70,6 +70,93 @@ class TestWorkerSync:
         assert task.finished_at is not None
         assert task.claimed_by_worker == "test-worker"
 
+    @pytest.mark.parametrize("execution_mode", ["sync", "local", "ray"])
+    def test_runtime_env_integrity_failure_is_permanent_before_mode_dispatch(
+        self,
+        monkeypatch,
+        execution_mode,
+    ):
+        """Every execution mode rejects a corrupt durable snapshot before submission."""
+        task = RayTaskExecution.objects.create(
+            task_id=f"test-worker-runtime-env-integrity-{execution_mode}",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+            runtime_env_profile="thin",
+            runtime_env_json=('{"env_vars":{"VALUE":"arbitrary-customer-marker-7cf3"}}'),
+            runtime_env_hash="0" * 64,
+        )
+
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = execution_mode
+        cmd.worker_id = "runtime-env-integrity-worker"
+        cmd.active_tasks = {}
+
+        def unexpected_dispatch(_task):
+            pytest.fail(f"{execution_mode} dispatch ran before RuntimeEnv integrity preflight")
+
+        monkeypatch.setattr(cmd, "execute_task_sync", unexpected_dispatch)
+        monkeypatch.setattr(cmd, "submit_task_to_ray_core", unexpected_dispatch)
+        monkeypatch.setattr(cmd, "submit_task_to_ray", unexpected_dispatch)
+
+        assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.execution_generation == 1
+        assert task.error_traceback is None
+        assert "hash does not match" in task.error_message
+        assert "arbitrary-customer-marker-7cf3" not in task.error_message
+        assert "arbitrary-customer-marker-7cf3" not in cmd.stdout.getvalue()
+        assert TaskAttempt.objects.filter(execution=task, attempt_number=1).count() == 1
+
+    def test_automatic_retry_integrity_failure_records_only_the_current_attempt(self):
+        """A snapshot corrupted after submission blocks replacement without losing failure."""
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-auto-retry-runtime-env-integrity",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            attempt_number=1,
+            execution_generation=3,
+            claimed_by_worker="runtime-env-integrity-worker",
+            runtime_env_json=('{"env_vars":{"VALUE":"arbitrary-customer-marker-7cf3"}}'),
+            runtime_env_hash="0" * 64,
+        )
+
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+
+        assert cmd._handle_task_failure(
+            task,
+            error_message="callable failed",
+            error_traceback="OriginalError: callable failed",
+            exception_type="RuntimeError",
+            expected_claimed_by_worker="runtime-env-integrity-worker",
+            expected_attempt_number=1,
+            expected_execution_generation=3,
+        )
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.execution_generation == 3
+        assert task.run_after is None
+        assert "callable failed" in task.error_message
+        assert "Automatic retry blocked" in task.error_message
+        assert "arbitrary-customer-marker-7cf3" not in task.error_message
+        assert task.error_traceback == "OriginalError: callable failed"
+        assert "arbitrary-customer-marker-7cf3" not in cmd.stdout.getvalue()
+        assert TaskAttempt.objects.filter(execution=task, attempt_number=1).count() == 1
+
     def test_worker_claim_clears_stale_progress_summary(self, setup_django_env, monkeypatch):
         """A new execution generation never inherits the previous run summary."""
         task = RayTaskExecution.objects.create(

@@ -187,8 +187,8 @@ Primary execution record for one task attempt chain.
 | `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence, one accepted terminal-only summary, or an accepted default-off terminal-pilot publication |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
-| `runtime_env_json` | Canonical immutable RuntimeEnv snapshot used by retries |
-| `runtime_env_hash` | SHA-256 content identity used to correlate cache reuse |
+| `runtime_env_json` | Canonical immutable plaintext RuntimeEnv snapshot used by execution and retries; identified rows are verified through the centralized storage boundary before submission or retry mutation |
+| `runtime_env_hash` | Unkeyed SHA-256 content identity used for integrity checks and cache correlation; it is not encryption or protection from a database writer |
 | `error_message`, `error_traceback` | Failure metadata |
 | `ray_target_address` | Immutable Ray Job routing target selected by the enqueueing backend |
 | `ray_job_id`, `ray_address` | Runner-specific execution handle metadata |

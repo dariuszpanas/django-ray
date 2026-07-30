@@ -666,13 +666,22 @@ class TestTasksAPI:
             ),
         )
 
-        response = client.get(f"/api/cluster/runtime-env/{execution.task_id}")
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get(f"/api/cluster/runtime-env/{execution.task_id}")
 
         assert response.status_code == 200
         data = response.json()
         assert data["runtime_env_profile"] == "numpy-2-3"
         assert data["runtime_env_hash"] == "a" * 64
         assert data["result"]["package_version"] == "2.3.5"
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if "django_ray_raytaskexecution" in query["sql"]
+            and query["sql"].lstrip().upper().startswith("SELECT")
+        ]
+        assert task_selects
+        assert all("runtime_env_json" not in query for query in task_selects)
 
     def test_get_workflow_benchmark_resolves_backend_result(self, client, monkeypatch):
         execution = RayTaskExecution.objects.create(
@@ -1134,6 +1143,32 @@ class TestExecutionsAPI:
         assert duplicate.json()["attempt_number"] == 2
         assert duplicate.json()["execution_generation"] == 1
 
+    def test_retry_rejects_corrupt_runtime_env_without_disclosure(self, client):
+        task = RayTaskExecution.objects.create(
+            task_id="test-retry-runtime-env-corrupt",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            error_message="original failure",
+            attempt_number=2,
+            execution_generation=4,
+            runtime_env_json=('{"env_vars":{"VALUE":"arbitrary-customer-marker-7cf3"}}'),
+            runtime_env_hash="0" * 64,
+        )
+
+        response = client.post(f"/api/executions/{task.pk}/retry")
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": "Persisted RuntimeEnv snapshot failed integrity validation"
+        }
+        assert "arbitrary-customer-marker-7cf3" not in response.content.decode()
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 2
+        assert task.execution_generation == 4
+        assert task.error_message == "original failure"
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
     def test_reset_executions(self, client):
         """Reset only terminal retryable executions and preserve active work."""
         running = RayTaskExecution.objects.create(
@@ -1198,6 +1233,46 @@ class TestExecutionsAPI:
         assert running.workflow_progress_summary_json == running_summary
         assert running.attempt_number == 1
         assert not TaskAttempt.objects.filter(execution=running).exists()
+
+    def test_reset_executions_skips_corrupt_runtime_env_and_continues(self, client):
+        corrupt = RayTaskExecution.objects.create(
+            task_id="test-reset-runtime-env-corrupt",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            error_message="original failure",
+            attempt_number=2,
+            execution_generation=4,
+            runtime_env_json=('{"env_vars":{"VALUE":"arbitrary-customer-marker-7cf3"}}'),
+            runtime_env_hash="0" * 64,
+        )
+        valid = RayTaskExecution.objects.create(
+            task_id="test-reset-runtime-env-valid",
+            callable_path="test.task",
+            state=TaskState.LOST,
+            error_message="worker lost",
+            attempt_number=2,
+            execution_generation=4,
+        )
+
+        response = client.post("/api/executions/reset")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "message": (
+                "Reset 1 execution(s) to QUEUED state; blocked 1 execution(s) "
+                "because their persisted RuntimeEnv snapshots failed integrity validation"
+            )
+        }
+        assert "arbitrary-customer-marker-7cf3" not in response.content.decode()
+        corrupt.refresh_from_db()
+        valid.refresh_from_db()
+        assert corrupt.state == TaskState.FAILED
+        assert corrupt.attempt_number == 2
+        assert corrupt.execution_generation == 4
+        assert corrupt.error_message == "original failure"
+        assert not TaskAttempt.objects.filter(execution=corrupt).exists()
+        assert valid.state == TaskState.QUEUED
+        assert valid.attempt_number == 3
 
     def test_reset_executions_rejects_active_state_filter(self, client):
         """The bulk reset endpoint accepts only terminal retryable states."""

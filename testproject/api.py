@@ -36,6 +36,7 @@ from django_ray.observability import (
     get_workflow_progress,
 )
 from django_ray.redaction import redact_text, redact_value, safe_json_dumps
+from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError
 from django_ray.workflow_progress_reads import (
     WorkflowProgressReadError,
     WorkflowProgressReadErrorCode,
@@ -60,6 +61,7 @@ def _workflow_observability_executions():
     return RayTaskExecution.objects.defer(
         "progress_data",
         "workflow_progress_summary_json",
+        "runtime_env_json",
     )
 
 
@@ -753,6 +755,7 @@ def reset_executions(
 
     execution_ids = list(queryset.values_list("pk", flat=True))
     count = 0
+    blocked = 0
     for execution_id in execution_ids:
         execution = (
             RayTaskExecution.objects.only(
@@ -766,17 +769,27 @@ def reset_executions(
         )
         if execution is None:
             continue
-        reset = (
-            retry_task(
-                execution.pk,
-                expected_attempt_number=execution.attempt_number,
-                expected_execution_generation=execution.execution_generation,
+        try:
+            reset = (
+                retry_task(
+                    execution.pk,
+                    expected_attempt_number=execution.attempt_number,
+                    expected_execution_generation=execution.execution_generation,
+                )
+                is not None
             )
-            is not None
-        )
+        except RuntimeEnvSnapshotError:
+            blocked += 1
+            continue
         count += int(reset)
 
-    return {"message": f"Reset {count} execution(s) to QUEUED state"}
+    message = f"Reset {count} execution(s) to QUEUED state"
+    if blocked:
+        message += (
+            f"; blocked {blocked} execution(s) because their persisted RuntimeEnv "
+            "snapshots failed integrity validation"
+        )
+    return {"message": message}
 
 
 @api.get("/executions/{execution_id}", response=TaskExecutionSchema, tags=["Admin"])
@@ -812,11 +825,17 @@ def cancel_execution(request, execution_id: int):
 def retry_execution(request, execution_id: int):
     """Retry a failed, cancelled, or lost task execution."""
     task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
-    retried = retry_task(
-        task.pk,
-        expected_attempt_number=task.attempt_number,
-        expected_execution_generation=task.execution_generation,
-    )
+    try:
+        retried = retry_task(
+            task.pk,
+            expected_attempt_number=task.attempt_number,
+            expected_execution_generation=task.execution_generation,
+        )
+    except RuntimeEnvSnapshotError:
+        raise HttpError(
+            409,
+            "Persisted RuntimeEnv snapshot failed integrity validation",
+        ) from None
     if retried is not None:
         return retried
     task.refresh_from_db()
@@ -1622,7 +1641,7 @@ def cluster_runtime_env_benchmark(
 def get_cluster_runtime_env_result(request, task_id: str):
     """Return a probe or benchmark result with the durable environment identity."""
     execution = get_object_or_404(
-        RayTaskExecution,
+        RayTaskExecution.objects.defer("runtime_env_json"),
         task_id=task_id,
         callable_path__in=[
             "testproject.apps.cluster_tasks.tasks.runtime_env_probe",

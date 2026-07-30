@@ -13,6 +13,7 @@ from django.db import transaction
 
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.runtime.context import WorkflowRunIdentity
+from django_ray.runtime.runtime_env import runtime_env_for_execution
 from django_ray.workflow_progress_summary import (
     WORKFLOW_PROGRESS_TERMINAL_STATES,
     WorkflowProgressDetailAvailability,
@@ -478,6 +479,7 @@ def retry_task(
             )
         ):
             return None
+        runtime_env_for_execution(current)
         _record_attempt(current)
         current.state = TaskState.QUEUED
         current.attempt_number = int(current.attempt_number) + 1
@@ -562,6 +564,8 @@ def record_failure(
         current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
         if current is None:
             return False
+        if retry:
+            runtime_env_for_execution(current)
 
         current.error_message = error_message
         current.error_traceback = error_traceback

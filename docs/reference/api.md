@@ -87,6 +87,7 @@ def cancel_authorized_execution(execution: RayTaskExecution):
 
 def retry_authorized_execution(execution: RayTaskExecution) -> bool:
     # The generation fence prevents a stale request from retrying a newer attempt.
+    # RuntimeEnvSnapshotError remains distinct for the HTTP boundary to map.
     return (
         retry_task(
             execution.pk,
@@ -96,6 +97,12 @@ def retry_authorized_execution(execution: RayTaskExecution) -> bool:
         is not None
     )
 ```
+
+`None` means that the state or attempt/generation fence no longer permits the
+transition. `RuntimeEnvSnapshotError` instead means the locked row has an identified
+snapshot that cannot be verified; do not retry it or include the stored payload in an
+API response. The bundled testproject maps the single retry endpoint to a fixed `409`
+and lets bulk retry skip the corrupt row while continuing with other authorized rows.
 
 `request_task_cancellation()` locks and reloads the durable execution row. Its bounded
 `TaskCancellationRequestResult.status` is one of:

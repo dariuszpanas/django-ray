@@ -45,6 +45,10 @@ from django_ray.runner.reconciliation import (
     mark_task_timed_out,
 )
 from django_ray.runner.retry import RetryDecision, should_retry
+from django_ray.runtime.runtime_env import (
+    RuntimeEnvSnapshotError,
+    runtime_env_for_execution,
+)
 
 
 class Command(BaseCommand):
@@ -934,6 +938,20 @@ class Command(BaseCommand):
         self.last_task_processed = time.time()
         self.tasks_processed_count += 1
 
+        try:
+            runtime_env_for_execution(task)
+        except RuntimeEnvSnapshotError as error:
+            self._handle_task_failure(
+                task,
+                error_message=str(error),
+                exception_type=type(error).__name__,
+                retryable=False,
+                expected_claimed_by_worker=task.claimed_by_worker,
+                expected_attempt_number=int(task.attempt_number),
+                expected_execution_generation=int(task.execution_generation),
+            )
+            return
+
         if self.execution_mode == "sync":
             # Execute without Ray - purely synchronous
             self.execute_task_sync(task)
@@ -949,7 +967,6 @@ class Command(BaseCommand):
         """Execute a task synchronously (without Ray)."""
         from django_ray.conf.settings import get_settings
         from django_ray.runtime.entrypoint import execute_task
-        from django_ray.runtime.runtime_env import runtime_env_for_execution
         from django_ray.workflow_plans import runtime_env_plan_identity
 
         expected_attempt_number = int(task.attempt_number)
@@ -1017,6 +1034,7 @@ class Command(BaseCommand):
                 task,
                 error_message=str(e),
                 exception_type=type(e).__name__,
+                retryable=False if isinstance(e, RuntimeEnvSnapshotError) else None,
                 expected_attempt_number=expected_attempt_number,
                 expected_execution_generation=expected_execution_generation,
             )
@@ -1163,21 +1181,42 @@ class Command(BaseCommand):
             else should_retry(task, exception_type)
         )
 
-        handled = record_failure(
-            task,
-            error_message=error_message,
-            error_traceback=error_traceback,
-            retry=retry_decision.should_retry,
-            next_attempt_at=retry_decision.next_attempt_at,
-            expected_ray_job_id=expected_ray_job_id,
-            expected_claimed_by_worker=expected_claimed_by_worker,
-            expected_attempt_number=expected_attempt_number,
-            expected_execution_generation=expected_execution_generation,
-            expected_completion_data=expected_completion_data,
-            require_completion_data_match=require_completion_data_match,
-            cancellation_status=cancellation_status,
-            cancellation_error=cancellation_error,
-        )
+        try:
+            handled = record_failure(
+                task,
+                error_message=error_message,
+                error_traceback=error_traceback,
+                retry=retry_decision.should_retry,
+                next_attempt_at=retry_decision.next_attempt_at,
+                expected_ray_job_id=expected_ray_job_id,
+                expected_claimed_by_worker=expected_claimed_by_worker,
+                expected_attempt_number=expected_attempt_number,
+                expected_execution_generation=expected_execution_generation,
+                expected_completion_data=expected_completion_data,
+                require_completion_data_match=require_completion_data_match,
+                cancellation_status=cancellation_status,
+                cancellation_error=cancellation_error,
+            )
+        except RuntimeEnvSnapshotError as storage_error:
+            retry_decision = RetryDecision(
+                should_retry=False,
+                reason="Persisted RuntimeEnv snapshot failed integrity validation",
+            )
+            error_message = f"{error_message}\nAutomatic retry blocked: {storage_error}"
+            handled = record_failure(
+                task,
+                error_message=error_message,
+                error_traceback=error_traceback,
+                retry=False,
+                expected_ray_job_id=expected_ray_job_id,
+                expected_claimed_by_worker=expected_claimed_by_worker,
+                expected_attempt_number=expected_attempt_number,
+                expected_execution_generation=expected_execution_generation,
+                expected_completion_data=expected_completion_data,
+                require_completion_data_match=require_completion_data_match,
+                cancellation_status=cancellation_status,
+                cancellation_error=cancellation_error,
+            )
         if not handled:
             return False
         if retry_decision.should_retry:
@@ -1624,9 +1663,15 @@ class Command(BaseCommand):
             self._handle_task_failure(
                 task,
                 error_message=f"Failed to submit to Ray Core: {e}",
-                error_traceback=traceback.format_exc(),
+                error_traceback=(
+                    None if isinstance(e, RuntimeEnvSnapshotError) else traceback.format_exc()
+                ),
                 exception_type=type(e).__name__,
-                retryable=False if isinstance(e, WorkflowPlanMismatchError) else None,
+                retryable=(
+                    False
+                    if isinstance(e, (RuntimeEnvSnapshotError, WorkflowPlanMismatchError))
+                    else None
+                ),
                 expected_claimed_by_worker=expected_worker_id,
                 expected_attempt_number=expected_attempt_number,
                 expected_execution_generation=expected_execution_generation,
@@ -1836,9 +1881,15 @@ class Command(BaseCommand):
             self._handle_task_failure(
                 task,
                 error_message=f"Failed to submit to Ray: {e}",
-                error_traceback=traceback.format_exc(),
+                error_traceback=(
+                    None if isinstance(e, RuntimeEnvSnapshotError) else traceback.format_exc()
+                ),
                 exception_type=type(e).__name__,
-                retryable=False if isinstance(e, WorkflowPlanMismatchError) else None,
+                retryable=(
+                    False
+                    if isinstance(e, (RuntimeEnvSnapshotError, WorkflowPlanMismatchError))
+                    else None
+                ),
                 expected_claimed_by_worker=expected_worker_id,
                 expected_attempt_number=expected_attempt_number,
                 expected_execution_generation=expected_execution_generation,
@@ -1861,9 +1912,15 @@ class Command(BaseCommand):
             self._handle_task_failure(
                 task,
                 error_message=f"Failed to reserve Ray Job submission identity: {exc}",
-                error_traceback=traceback.format_exc(),
+                error_traceback=(
+                    None if isinstance(exc, RuntimeEnvSnapshotError) else traceback.format_exc()
+                ),
                 exception_type=type(exc).__name__,
-                retryable=False if isinstance(exc, WorkflowPlanMismatchError) else None,
+                retryable=(
+                    False
+                    if isinstance(exc, (RuntimeEnvSnapshotError, WorkflowPlanMismatchError))
+                    else None
+                ),
                 expected_claimed_by_worker=expected_worker_id,
                 expected_attempt_number=expected_attempt_number,
                 expected_execution_generation=expected_execution_generation,
@@ -1964,9 +2021,18 @@ class Command(BaseCommand):
                 self._handle_task_failure(
                     task,
                     error_message=f"Failed to submit to Ray: {exc}",
-                    error_traceback=traceback.format_exc(),
+                    error_traceback=(
+                        None if isinstance(exc, RuntimeEnvSnapshotError) else traceback.format_exc()
+                    ),
                     exception_type=type(exc).__name__,
-                    retryable=False if isinstance(exc, WorkflowPlanMismatchError) else None,
+                    retryable=(
+                        False
+                        if isinstance(
+                            exc,
+                            (RuntimeEnvSnapshotError, WorkflowPlanMismatchError),
+                        )
+                        else None
+                    ),
                     expected_claimed_by_worker=expected_worker_id,
                     expected_attempt_number=expected_attempt_number,
                     expected_execution_generation=expected_execution_generation,
@@ -2657,13 +2723,17 @@ class Command(BaseCommand):
                 # Check if we should retry the lost task
                 retry_decision = should_retry(task, exception_type="TaskLost")
                 if retry_decision.should_retry:
-                    retried = retry_task(
-                        task.pk,
-                        allowed_states=(TaskState.LOST,),
-                        next_attempt_at=retry_decision.next_attempt_at,
-                        expected_attempt_number=task.attempt_number,
-                        expected_execution_generation=task.execution_generation,
-                    )
+                    try:
+                        retried = retry_task(
+                            task.pk,
+                            allowed_states=(TaskState.LOST,),
+                            next_attempt_at=retry_decision.next_attempt_at,
+                            expected_attempt_number=task.attempt_number,
+                            expected_execution_generation=task.execution_generation,
+                        )
+                    except RuntimeEnvSnapshotError as error:
+                        retried = None
+                        self.stdout.write(self.style.ERROR(f"  Automatic retry blocked: {error}"))
                     if retried is not None:
                         task = retried
                         self.stdout.write(
