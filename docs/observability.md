@@ -84,11 +84,13 @@ reaches a terminal task state without publishing schema v3, readers return `MISS
 instead of presenting an empty graph. Historical attempts need an archived schema-v3
 summary to retain these distinctions; otherwise they remain `NOT_REPORTED`.
 
-Full-mode schema-v3 publication stays disabled until #79 bounds the remaining live
-ingestion path, #142 completes ADR-0005's composite topology/detail preparation after
-#141's spill-backed topology delivery, and old writers have drained. Until then,
-schema-v3 graph and node helpers report detail unavailable rather than fabricating an
-empty workflow.
+General/default full-mode schema-v3 publication stays disabled until #79 bounds the
+remaining live ingestion path, #142 completes ADR-0005's composite topology/detail
+preparation after #141's spill-backed topology delivery, and old writers have drained.
+The default-off `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` is the only current producer
+exception: one admitted terminal snapshot may make bounded graph and node helpers
+available for that run. Runs without an accepted pilot publication report detail
+unavailable rather than fabricating an empty workflow.
 
 Once activated, `AVAILABLE` and `TRUNCATED` summaries may reference the manifest and
 detail revisions committed by the atomic storage writer. `DISABLED` and

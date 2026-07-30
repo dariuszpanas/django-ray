@@ -45,9 +45,10 @@ producer that issued it. A general one-shot contract must therefore externalize
 exact state or weaken an existing invariant. This decision preserves the
 invariants.
 
-The runtime workflow actor still builds and persists schema-v2 complete graph
-snapshots. The schema-v3 storage and reader path is dormant. That permits this
-preparation boundary to be delivered and proved before any writer activation.
+The runtime workflow actor persists schema-v2 compatibility snapshots of retained
+bounded state. Schema-v3 storage and readers are deployed, and a default-off stricter
+pilot may publish one admitted terminal snapshot. General writer activation still
+waits for this preparation boundary and the remaining documented gates.
 
 ## Decision
 
@@ -381,11 +382,12 @@ no candidate; it does not silently select a smaller topology. Raising or lowerin
 workspace resource limit requires evidence and release documentation but no migration
 or storage-protocol bump unless canonical durable behavior also changes.
 
-Schema-v3 producer activation remains disabled while issue #142 completes bounded
-composite preparation. After #142 proves that boundary, activation still waits for #79's
-bounded producer messages, mailbox, reporting policies, and admission behavior, plus
-the ADR-0004 reader-first writer drain. Neither this ADR nor a successful preparation
-benchmark authorizes production writer activation.
+General/default schema-v3 producer activation remains disabled while issue #142
+completes bounded composite preparation. After #142 proves that boundary, activation
+still waits for #79's bounded producer messages, mailbox, reporting policies, and
+admission behavior, plus the ADR-0004 reader-first writer drain. The default-off strict
+terminal pilot is the only current producer exception; neither this ADR nor a
+successful preparation benchmark authorizes broader production writer activation.
 
 ## Prototype boundary
 

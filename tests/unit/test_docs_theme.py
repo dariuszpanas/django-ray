@@ -106,3 +106,23 @@ def test_docs_dark_palette_keeps_neutrals_and_reserves_blue_for_accents() -> Non
     assert _contrast_ratio("#0369a1", "#ffffff") >= 4.5
     for foreground in ("#38bdf8", "#a1a1aa", "#f4f4f5"):
         assert _contrast_ratio(foreground, "#16171a") >= 4.5
+
+
+def test_docs_keep_navigation_clear_of_fixed_hosted_footer() -> None:
+    stylesheet = STYLESHEET_PATH.read_text(encoding="utf-8")
+    root = _css_block(stylesheet, ":root")
+
+    assert "--django-ray-docs-fixed-footer-clearance: 3.5rem;" in root
+    assert "scroll-padding-bottom: var(--django-ray-docs-fixed-footer-clearance);" in _css_block(
+        stylesheet, ".md-sidebar__scrollwrap"
+    )
+    for selector in (
+        ".md-sidebar--primary .md-sidebar__inner",
+        ".md-sidebar--secondary .md-sidebar__inner",
+    ):
+        assert "padding-bottom: var(--django-ray-docs-fixed-footer-clearance);" in _css_block(
+            stylesheet, selector
+        )
+    assert "padding-bottom: var(--django-ray-docs-fixed-footer-clearance);" in _css_block(
+        stylesheet, ".md-footer"
+    )

@@ -1,6 +1,6 @@
 # ADR-0004: Bounded Workflow Progress Storage
 
-- **Status:** Accepted; bounded storage and public readers implemented, producer activation pending
+- **Status:** Accepted; bounded storage/readers and strict terminal pilot implemented; general/default producer activation pending
 - **Date:** 2026-07-20
 - **Decision owners:** django-ray maintainers
 - **Related contracts:** [Ray-Native Workflows](../workflows.md),
