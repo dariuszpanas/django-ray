@@ -27,23 +27,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prepared-graph cache remain inactive.
 - Full workflow progress remains the default. Terminal-only reporting is an actor-free,
   summary-only option; it does not enable the default-off full-detail schema-v3 pilot or
-  close the remaining #79 full-mode scale boundaries.
+  close the remaining #79 full-mode scale boundaries. Full mode now bounds each leaf's
+  application-progress producer state, while aggregate admission across forked handles
+  remains open before a sampled policy can be offered.
 
 ### Added
 
+- Full-reporting workflow leaf invocations now keep at most one outstanding
+  application-progress acknowledgement and one canonical latest-value replacement.
+  Slow acknowledgements coalesce replaceable progress locally, leaf exit makes at most
+  one bounded latest-value handoff, and structural plus `STARTED`, `COMPLETED`, and
+  `FAILED` evidence remains ordered and uncoalesced. `report_progress()` returning
+  `True` means the validated value entered this best-effort session, not that the actor
+  processed or Django persisted it. One fixed-shape secret-free producer report per
+  participating leaf invocation lets the actor aggregate offers, submissions,
+  supersession, local drops, producer-observed acknowledgements, and terminal-handoff
+  outcomes.
+  Full reporting remains acknowledgement-driven rather than time-sampled; aggregate
+  multi-handle mailbox admission is still required before adding a sampled policy.
 - An opt-in testproject/local-KubeRay workflow reporting benchmark now runs the
   same tiny nested workflow sequentially under full, terminal-only, and disabled
-  policies with counterbalanced order. Versioned secret-free JSON separates
-  durable server timing, useful leaf work, processed actor ingress, logical
-  progress storage, and shared lifecycle bytes. Full-mode snapshots now add
+  policies with counterbalanced order. Benchmark-report schema 3 uses secret-free JSON
+  to separate durable server timing, useful leaf work, processed actor ingress,
+  logical progress storage, and shared lifecycle bytes. Full-mode snapshots now add
   fixed-shape saturating actor-observed cost evidence for received logical
   calls/bytes, exact-run-fenced decoded event kinds, processed delivery delay,
-  ingest handling,
-  and snapshot building without another RPC or database write. The report keeps
-  producer attempts, actual network traffic, true mailbox depth, complete
-  actor-lifetime resources, and physical PostgreSQL attribution explicitly
-  unavailable. It retains bounded executions for Admin inspection by default
-  and can delete only its exact owned rows after successful validation.
+  ingest handling, and snapshot building without another RPC or database write.
+  It also aggregates the producer reports with explicit count units and reconciles
+  offered/submitted/terminal outcomes. Structural and lifecycle calls, actual network
+  traffic, true aggregate mailbox depth, complete actor-lifetime resources, and
+  physical PostgreSQL attribution remain explicitly outside the measurement. The
+  report retains bounded executions for Admin inspection by default and can delete
+  only its exact owned rows after successful validation.
 - Opt-in authenticated encryption for durable RuntimeEnv snapshots, using strict
   AES-256-GCM envelopes with either a dedicated rotating key ring or an explicit
   Django-secret fallback. Readers remain plaintext/encrypted compatible; encrypted

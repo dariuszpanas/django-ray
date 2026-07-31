@@ -461,12 +461,24 @@ def normalize_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return normalized
 ```
 
-`report_progress()` is a no-op that returns `False` during local workflow
-execution. On Ray it updates the node through the in-memory coordinator and
-returns `True`. Metrics are bounded operational metadata: use at most 32 scalar
-string, number, boolean, or null values. Keys are capped at 64 UTF-8 bytes, strings at
-256 UTF-8 bytes, and the normalized mapping at 4 KiB; sensitive or oversized values
-are redacted or replaced before the event crosses Ray.
+`report_progress()` is a no-op that returns `False` during local or actor-free
+workflow execution. In full-reporting Ray execution, `True` means that the validated
+value was accepted into the leaf's best-effort producer session. It is not proof that
+the progress actor processed the value or that Django persisted it.
+
+Each reporting leaf invocation retains at most one outstanding application-progress
+acknowledgement and one canonical latest-value replacement slot. When the
+acknowledgement is still pending, another valid call replaces that slot instead of
+adding another actor call. At leaf exit, the producer makes at most one bounded
+latest-value handoff before sending `COMPLETED` or `FAILED`. Structural and lifecycle
+events, including `STARTED`, `COMPLETED`, and `FAILED`, are never coalesced. Producer,
+acknowledgement, or diagnostic failure remains observational and cannot replace the
+callable's result or exception.
+
+Metrics are bounded operational metadata: use at most 32 scalar string, number,
+boolean, or null values. Keys are capped at 64 UTF-8 bytes, strings at 256 UTF-8
+bytes, and the normalized mapping at 4 KiB; sensitive or oversized values are
+redacted or replaced before a value can enter the replacement slot or cross Ray.
 
 ## Graph and Progress Schema
 
@@ -627,16 +639,22 @@ V1 limits. Enabling the pilot narrows actor collection and publication to the fi
 detail, and 4 MiB combined, with the byte ceilings applied to encoded and decoded
 evidence. Descriptive metadata is redacted before it crosses Ray.
 
-These bounds close the individual producer-to-actor and retained-collector gap for
-full reporting. They
-do not bound the aggregate number or bytes of events already queued in Ray's actor
-mailbox, coalesce repeated producer updates, provide producer backpressure, or provide
-the bounded actor-to-preparation drain needed at the hard V1 ceilings. Those remain
-separate scale and default-activation work. The stricter pilot is therefore
-experimental and default-off rather than a general V1-scale claim. If actor ingress
-records any rejection or accepted truncation, the terminal adapter refuses schema-v3
-publication instead of claiming that an incomplete graph is complete. A bounded event
-or actor snapshot is observational state, not a recovery or flow-control protocol.
+Full reporting is acknowledgement-driven, not time-sampled. When acknowledgements
+keep up, it may submit every accepted application update. Under a slow acknowledgement,
+one leaf invocation coalesces replaceable application progress into its one latest-value slot.
+There is no selectable `sampled` policy or sampling interval.
+
+These bounds close the individual envelope, retained collector, and per-leaf
+application-progress state gaps for full reporting. They do not bound the aggregate
+number of independently bounded sessions created by forked actor handles, their
+combined calls or bytes, or the actor mailbox across a whole workflow. Aggregate
+admission/coalescing must be proven before sampled reporting can be introduced.
+Bounded actor-to-preparation draining at the hard V1 ceilings also remains separate
+scale and default-activation work. The stricter full-detail producer pilot is
+therefore experimental and default-off rather than a general V1-scale claim. If actor
+ingress records any rejection or accepted truncation, the terminal adapter refuses
+schema-v3 publication instead of claiming that an incomplete graph is complete. A
+bounded event or actor snapshot is observational state, not a recovery protocol.
 
 ## Durability Semantics
 
@@ -647,8 +665,18 @@ The outer Django task is the durability and retry boundary:
   task writes a schema-v2 compatibility snapshot of the actor's retained bounded state
   to `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
   Individual producer envelopes and retained actor nodes, edges, events, and bytes are
-  bounded. Actor ingress diagnostics report actor-side rejection counts, accepted
-  events marked truncated, and a versioned fixed-shape cost block. That block uses
+  bounded. Each reporting leaf invocation also holds no more than one outstanding mutable
+  application-progress acknowledgement and one canonical latest-value slot during
+  execution, followed by one bounded terminal handoff/report. Structural and lifecycle
+  evidence is never coalesced. Actor ingress diagnostics report actor-side rejection
+  counts, accepted events marked truncated, a versioned fixed-shape cost block, and an
+  optional fixed-shape aggregate of accepted leaf producer reports. The producer
+  aggregate counts valid offers, submissions, superseded and locally dropped values,
+  producer-observed acknowledgement outcomes, and terminal-handoff outcomes. It
+  contains no producer identities or application values. A pending acknowledgement
+  means only that the leaf had not observed its result when it sealed the report; the
+  actor may still process that application-progress call before the report.
+  The actor-cost block uses
   saturating counters for actor-received logical calls/bytes, calls decoded under the
   exact run fence by fixed event kind, end-to-end processed delivery delay, ingest
   handler wall/process CPU
@@ -656,13 +684,13 @@ The outer Django task is the durability and retry boundary:
   contains no application payloads or variable-cardinality producer labels. A
   producer-side failure before actor submission cannot appear in those counters, and
   processed delivery delay includes transport, scheduling, queueing, and clock effects
-  rather than isolating mailbox lag. The aggregate Ray mailbox,
-  snapshot-to-preparer drain, and transient snapshot materialization are not yet governed by the later
-  admission/backpressure contract. Terminal-only and disabled modes bypass that live
-  coordinator, event codec, actor, and snapshot path while leaving the durable
-  outer-task boundary intact. Terminal-only still makes its one bounded best-effort
-  summary publication after the application reaches success or failure; disabled does
-  not.
+  rather than isolating mailbox lag. The aggregate Ray mailbox across forked handles,
+  snapshot-to-preparer drain, and transient snapshot materialization are not yet
+  governed by the later admission/backpressure contract. Terminal-only and disabled
+  modes bypass that live coordinator, event codec, actor, producer session, and
+  snapshot path while leaving the durable outer-task boundary intact. Terminal-only
+  still makes its one bounded best-effort summary publication after the application
+  reaches success or failure; disabled does not.
 - A separate nullable `workflow_progress_summary_json` field and schema-v3 codec are
   deployed reader-first. The field is fixed-shape and capped at 16 KiB of canonical
   UTF-8 JSON. Package-owned topology/detail tables and the internal storage writer can
@@ -680,10 +708,11 @@ The outer Django task is the durability and retry boundary:
   storage failure leaves schema v3 unpublished and emits a stable bounded diagnostic;
   it never changes the application result. The periodic schema-v2 writer remains
   active for rolling compatibility. Terminal-only does not solve or weaken the
-  remaining full-reporting boundaries: sampled/coalesced reporting, aggregate
-  producer/mailbox admission, bounded actor-to-preparer draining, live cost
-  attribution, large-fan-out slow-consumer evidence, default schema-v3 activation, and
-  old-writer drain remain #79 and its dependent deliveries.
+  remaining full-reporting boundaries: aggregate producer/mailbox admission and
+  coalescing across forked handles, the sampled policy that depends on that aggregate
+  bound, bounded actor-to-preparer draining, remaining live cost attribution,
+  large-fan-out slow-consumer evidence, default schema-v3 activation, and old-writer
+  drain remain #79 and its dependent deliveries.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.

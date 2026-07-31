@@ -78,6 +78,29 @@ _PROTOCOL_ERROR_REASONS = frozenset(
         "protocol_error",
     }
 )
+_PRODUCER_REPORT_KEYS = frozenset(
+    {
+        "schema_version",
+        "saturated",
+        "offered",
+        "submitted",
+        "superseded",
+        "locally_dropped",
+        "acknowledged",
+        "actor_rejected",
+        "ack_failed",
+        "pending_acknowledgements",
+        "terminal_handoff",
+    }
+)
+_PRODUCER_TERMINAL_HANDOFFS = frozenset(
+    {
+        "not_needed",
+        "submitted",
+        "failed",
+        "actor_unavailable",
+    }
+)
 
 WorkflowProgressProtocolReason = Literal[
     "fence_mismatch",
@@ -99,6 +122,7 @@ class WorkflowProgressEventKind(StrEnum):
     MAP_PROGRESS = "map_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    PRODUCER_REPORT = "producer_report"
 
 
 class WorkflowProgressProtocolError(ValueError):
@@ -585,6 +609,100 @@ def _payload_mapping(
     return _exact_mapping(value, keys, f"{kind.value} payload")
 
 
+def _normalize_producer_report(
+    value: Any,
+    *,
+    limits: WorkflowProgressLimits,
+) -> dict[str, Any]:
+    report = _exact_mapping(
+        value,
+        _PRODUCER_REPORT_KEYS,
+        "producer_report payload",
+    )
+    if type(report["schema_version"]) is not int or report["schema_version"] != 1:
+        raise WorkflowProgressProtocolError("producer_report.schema_version is unsupported")
+    saturated = report["saturated"]
+    if type(saturated) is not bool:
+        raise WorkflowProgressProtocolError("producer_report.saturated must be a boolean")
+    counter_names = (
+        "offered",
+        "submitted",
+        "superseded",
+        "locally_dropped",
+        "acknowledged",
+        "actor_rejected",
+        "ack_failed",
+        "pending_acknowledgements",
+    )
+    counters: dict[str, int] = {}
+    for name in counter_names:
+        counter = _bounded_int(
+            report[name],
+            f"producer_report.{name}",
+            limits=limits,
+        )
+        if counter is None:
+            raise AssertionError("non-null producer report counter normalized to None")
+        counters[name] = counter
+    terminal_handoff = report["terminal_handoff"]
+    if not isinstance(terminal_handoff, str) or terminal_handoff not in _PRODUCER_TERMINAL_HANDOFFS:
+        raise WorkflowProgressProtocolError("producer_report.terminal_handoff is unsupported")
+    counter_max = limits.identity_max_integer
+    if counters["offered"] < 1:
+        raise WorkflowProgressProtocolError(
+            "producer_report.offered must include at least one accepted value"
+        )
+    offered_parts_total = (
+        counters["submitted"] + counters["superseded"] + counters["locally_dropped"]
+    )
+    acknowledgement_outcomes_total = (
+        counters["acknowledged"]
+        + counters["actor_rejected"]
+        + counters["ack_failed"]
+        + counters["pending_acknowledgements"]
+    )
+    if (
+        counters["offered"] != min(counter_max, offered_parts_total)
+        or counters["submitted"] != min(counter_max, acknowledgement_outcomes_total)
+        or (
+            not saturated
+            and (offered_parts_total > counter_max or acknowledgement_outcomes_total > counter_max)
+        )
+    ):
+        raise WorkflowProgressProtocolError("producer_report counters are inconsistent")
+    terminal_requires_buffered_replacement = terminal_handoff != "not_needed"
+    minimum_terminal_offers = 2 if terminal_requires_buffered_replacement else 1
+    minimum_terminal_submissions = (
+        2 if terminal_handoff == "submitted" else int(terminal_requires_buffered_replacement)
+    )
+    if (
+        counters["offered"] < min(counter_max, minimum_terminal_offers)
+        or counters["submitted"] < min(counter_max, minimum_terminal_submissions)
+        or (
+            not saturated
+            and (
+                minimum_terminal_offers > counter_max or minimum_terminal_submissions > counter_max
+            )
+        )
+        or (terminal_handoff in {"failed", "actor_unavailable"} and counters["locally_dropped"] < 1)
+        or (
+            terminal_handoff == "actor_unavailable"
+            and counters["actor_rejected"] + counters["ack_failed"] < 1
+        )
+    ):
+        raise WorkflowProgressProtocolError("producer_report terminal handoff is inconsistent")
+    if saturated and counters["offered"] != counter_max:
+        raise WorkflowProgressProtocolError(
+            "producer_report saturation requires a saturated offered counter"
+        )
+    return {
+        "schema_version": 1,
+        "saturated": saturated,
+        **counters,
+        "terminal_handoff": terminal_handoff,
+    }
+
+
 def _normalize_payload(
     kind: WorkflowProgressEventKind,
     value: Any,
@@ -880,6 +998,11 @@ def _normalize_payload(
             ),
         }
         truncated = error_truncated or label_truncated
+    elif kind is WorkflowProgressEventKind.PRODUCER_REPORT:
+        normalized = _normalize_producer_report(
+            value,
+            limits=limits,
+        )
     else:  # pragma: no cover - enum exhaustiveness guard
         raise WorkflowProgressProtocolError("workflow progress event kind is unsupported")
 

@@ -170,6 +170,7 @@ def _ingress_progress_for(execution: RayTaskExecution) -> str:
         started=expected_nodes,
         application_progress=3,
         completed=expected_nodes,
+        producer_report=3,
     )
     accepted = sum(accepted_by_kind.values())
     decoded_by_kind = dict(accepted_by_kind)
@@ -266,6 +267,25 @@ def _ingress_progress_for(execution: RayTaskExecution) -> str:
                     "build_cpu_ns_max": 40_000,
                 },
             },
+            "producer": {
+                "schema_version": 1,
+                "saturated": False,
+                "reports": 3,
+                "offered": 9,
+                "submitted": 3,
+                "superseded": 6,
+                "locally_dropped": 0,
+                "acknowledged": 3,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoffs": {
+                    "not_needed": 3,
+                    "submitted": 0,
+                    "failed": 0,
+                    "actor_unavailable": 0,
+                },
+            },
         },
     }
     _refresh_retained_bytes(snapshot)
@@ -328,6 +348,67 @@ def _execution(policy: benchmark.Policy) -> RayTaskExecution:
         workflow_progress_summary_json=execution.workflow_progress_summary_json,
     )
     return execution
+
+
+@pytest.mark.parametrize(
+    (
+        "terminal_handoff",
+        "submitted",
+        "superseded",
+        "locally_dropped",
+        "pending_acknowledgements",
+    ),
+    [
+        pytest.param("submitted", 0, 1, 0, 0, id="submitted-without-submission"),
+        pytest.param("failed", 0, 1, 0, 0, id="failed-without-local-drop"),
+        pytest.param(
+            "actor_unavailable",
+            0,
+            0,
+            1,
+            0,
+            id="actor-unavailable-without-failure",
+        ),
+        pytest.param(
+            "submitted",
+            1,
+            0,
+            0,
+            1,
+            id="submitted-without-buffered-replacement",
+        ),
+        pytest.param("failed", 0, 0, 1, 0, id="failed-without-prior-submission"),
+    ],
+)
+def test_producer_progress_rejects_impossible_terminal_handoff(
+    terminal_handoff: str,
+    submitted: int,
+    superseded: int,
+    locally_dropped: int,
+    pending_acknowledgements: int,
+) -> None:
+    terminal_handoffs = dict.fromkeys(benchmark._EXPECTED_TERMINAL_HANDOFFS, 0)
+    terminal_handoffs[terminal_handoff] = 1
+    producer = {
+        "schema_version": 1,
+        "saturated": False,
+        "reports": 1,
+        "offered": 1,
+        "submitted": submitted,
+        "superseded": superseded,
+        "locally_dropped": locally_dropped,
+        "acknowledged": 0,
+        "actor_rejected": 0,
+        "ack_failed": 0,
+        "pending_acknowledgements": pending_acknowledgements,
+        "terminal_handoffs": terminal_handoffs,
+    }
+
+    with pytest.raises(
+        benchmark.WorkflowReportingBenchmarkError,
+        match="producer counters are inconsistent",
+    ):
+        benchmark._producer_progress(producer)
 
 
 def _cleanup_report(pk: int = 41) -> dict[str, object]:
@@ -404,6 +485,8 @@ def test_workload_and_measurement_coverage_are_bounded() -> None:
     assert coverage["actor_creation_count"]["status"] == "derived"
     assert coverage["actor_observed_logical_ingress"]["status"] == "measured"
     assert "logical wire bytes" in coverage["actor_observed_logical_ingress"]["scope"]
+    assert coverage["producer_progress_sessions"]["status"] == "measured"
+    assert coverage["producer_attempted_rpcs"]["status"] == "partial"
     assert coverage["producer_to_actor_delivery_delay"]["status"] == "measured"
     assert coverage["actor_handler_and_snapshot_cost"]["status"] == "measured"
     assert coverage["mailbox_depth_and_lag"]["status"] == "unavailable"
@@ -678,6 +761,17 @@ def test_sample_validates_actor_free_and_package_default_contracts(
         assert actor_cost["ingest"]["wire_bytes_received"] == 12_345
         assert actor_cost["delivery_delay"]["negative_clock_samples"] == 0
         assert actor_cost["snapshot"]["calls"] == 2
+        producer = cast(dict[str, Any], ingress["producer"])
+        assert producer["reports"] == 3
+        assert producer["offered"] == 9
+        assert producer["submitted"] == 3
+        assert producer["superseded"] == 6
+        assert producer["terminal_handoffs"] == {
+            "actor_unavailable": 0,
+            "failed": 0,
+            "not_needed": 3,
+            "submitted": 0,
+        }
     selection = cast(dict[str, Any], sample["selection"])
     assert selection["plan_node_count"] == 13
     assert selection["plan_edge_count"] == 13
@@ -759,6 +853,10 @@ def test_sample_rejects_invalid_plan_and_selection_evidence() -> None:
         "topology",
         "erased_decoded_cost",
         "saturated_cost",
+        "inconsistent_producer",
+        "saturated_producer",
+        "producer_submission_underreports",
+        "producer_acknowledgement_overreports",
     ],
 )
 def test_full_sample_rejects_incomplete_actor_evidence(corruption: str) -> None:
@@ -783,14 +881,38 @@ def test_full_sample_rejects_incomplete_actor_evidence(corruption: str) -> None:
             "max_us": 0,
             "negative_clock_samples": 0,
         }
-    else:
+    elif corruption == "saturated_cost":
         snapshot["ingress"]["cost"]["saturated"] = True
         snapshot["ingress"]["cost"]["initialization"]["handler_wall_ns"] = (1 << 63) - 1
+    elif corruption == "inconsistent_producer":
+        snapshot["ingress"]["producer"]["offered"] += 1
+    elif corruption == "saturated_producer":
+        snapshot["ingress"]["producer"]["saturated"] = True
+        snapshot["ingress"]["producer"]["offered"] = (1 << 63) - 1
+        snapshot["ingress"]["producer"]["superseded"] = (1 << 63) - 1
+    elif corruption == "producer_submission_underreports":
+        snapshot["ingress"]["producer"].update(
+            {
+                "submitted": 2,
+                "superseded": 7,
+                "acknowledged": 2,
+            }
+        )
+    else:
+        snapshot["ingress"]["producer"].update(
+            {
+                "submitted": 4,
+                "superseded": 5,
+                "acknowledged": 4,
+            }
+        )
     execution.progress_data = json.dumps(snapshot)
     execution.save(update_fields=["progress_data"])
 
     expected_error = (
-        "saturated" if corruption == "saturated_cost" else "invalid or incomplete|expanded workload"
+        "saturated"
+        if corruption in {"saturated_cost", "saturated_producer"}
+        else "invalid or incomplete|expanded workload|inconsistent"
     )
     with pytest.raises(
         benchmark.WorkflowReportingBenchmarkError,
@@ -1017,7 +1139,24 @@ def test_policy_aggregates_never_rank_or_claim_causality() -> None:
                                         "build_cpu_ns_total": 20_000,
                                         "build_cpu_ns_max": 12_000,
                                     },
-                                }
+                                },
+                                "producer": {
+                                    "reports": 3,
+                                    "offered": 21,
+                                    "submitted": 12,
+                                    "superseded": 9,
+                                    "locally_dropped": 0,
+                                    "acknowledged": 9,
+                                    "actor_rejected": 1,
+                                    "ack_failed": 1,
+                                    "pending_acknowledgements": 1,
+                                    "terminal_handoffs": {
+                                        "not_needed": 2,
+                                        "submitted": 1,
+                                        "failed": 0,
+                                        "actor_unavailable": 0,
+                                    },
+                                },
                             }
                             if policy == "full"
                             else None
@@ -1073,11 +1212,36 @@ def test_policy_aggregates_never_rank_or_claim_causality() -> None:
     assert full_delay["negative_clock_samples"]["median"] == 1.0
     full_snapshot = cast(dict[str, Any], full_cost["snapshot"])
     assert full_snapshot["build_cpu_ns_max"]["median"] == 12_000.0
+    full_producer = cast(
+        dict[str, Any],
+        cast(dict[str, Any], aggregates["full"])["producer_progress"],
+    )
+    assert full_producer["status"] == "measured"
+    assert full_producer["source_schema_version"] == 1
+    assert full_producer["reports"]["median"] == 3.0
+    assert full_producer["offered"]["median"] == 21.0
+    assert full_producer["submitted"]["median"] == 12.0
+    assert full_producer["pending_acknowledgements"]["median"] == 1.0
+    assert cast(dict[str, Any], full_producer["terminal_handoffs"])["submitted"]["median"] == 1.0
+    expected_producer_units: dict[str, object] = dict.fromkeys(
+        benchmark._PRODUCER_NUMERIC_FIELDS,
+        "count",
+    )
+    expected_producer_units["terminal_handoffs"] = dict.fromkeys(
+        sorted(benchmark._EXPECTED_TERMINAL_HANDOFFS),
+        "count",
+    )
+    assert full_producer["units"] == expected_producer_units
     for policy in ("terminal_only", "disabled"):
         policy_cost = cast(
             dict[str, Any],
             cast(dict[str, Any], aggregates[policy])["actor_observed_cost"],
         )
         assert policy_cost["status"] == "not_applicable"
+        policy_producer = cast(
+            dict[str, Any],
+            cast(dict[str, Any], aggregates[policy])["producer_progress"],
+        )
+        assert policy_producer["status"] == "not_applicable"
     assert "winner" not in json.dumps(aggregates)
     assert "speedup" not in json.dumps(aggregates)

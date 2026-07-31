@@ -118,6 +118,7 @@ class WorkflowStepContext:
     node_id: str
     run_identity: dict[str, Any] | None = None
     progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1
+    producer: Any | None = None
 
 
 _current_task: ContextVar[DurableTaskContext | None] = ContextVar(
@@ -190,24 +191,59 @@ def workflow_step_execution(
     node_id: str,
     run_identity: dict[str, Any] | None = None,
     progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
-) -> Iterator[None]:
+) -> Iterator[WorkflowStepContext | None]:
     """Expose the progress actor to code running inside one workflow step."""
     if progress_actor is None and run_identity is None:
-        yield
+        yield None
         return
 
-    token = _current_workflow_step.set(
-        WorkflowStepContext(
-            progress_actor=progress_actor,
-            node_id=node_id,
-            run_identity=run_identity,
-            progress_limits=progress_limits,
+    producer = None
+    if progress_actor is not None and run_identity is not None:
+        from django_ray.workflow_progress_producer import WorkflowProgressProducerSession
+
+        producer = WorkflowProgressProducerSession(
+            progress_actor,
+            run_identity,
+            node_id,
+            limits=progress_limits,
         )
+    context = WorkflowStepContext(
+        progress_actor=progress_actor,
+        node_id=node_id,
+        run_identity=run_identity,
+        progress_limits=progress_limits,
+        producer=producer,
     )
+    token = _current_workflow_step.set(context)
     try:
-        yield
+        yield context
     finally:
-        _current_workflow_step.reset(token)
+        try:
+            if producer is not None:
+                report = producer.finish()
+                if report["offered"]:
+                    from django_ray.workflow_progress_protocol import (
+                        WorkflowProgressEventKind,
+                        send_workflow_progress_event,
+                    )
+
+                    try:
+                        send_workflow_progress_event(
+                            progress_actor,
+                            run_identity,
+                            WorkflowProgressEventKind.PRODUCER_REPORT,
+                            report,
+                            limits=progress_limits,
+                        )
+                    except Exception:
+                        # Producer diagnostics are best-effort observability and
+                        # must not replace the application result or error.
+                        pass
+        except Exception:
+            # A producer-session failure must not mask the callable outcome.
+            pass
+        finally:
+            _current_workflow_step.reset(token)
 
 
 def report_workflow_progress(
@@ -223,26 +259,15 @@ def report_workflow_progress(
         return False
     if context.run_identity is None:
         raise AssertionError("a workflow progress actor requires a complete run identity")
+    if context.producer is None:
+        return False
     if total <= 0:
         raise ValueError("total must be greater than zero")
     if current < 0 or current > total:
         raise ValueError("current must be between zero and total")
-    from django_ray.workflow_progress_protocol import (
-        WorkflowProgressEventKind,
-        send_workflow_progress_event,
+    return context.producer.offer(
+        current,
+        total,
+        message=message,
+        metrics=metrics,
     )
-
-    send_workflow_progress_event(
-        context.progress_actor,
-        context.run_identity,
-        WorkflowProgressEventKind.APPLICATION_PROGRESS,
-        {
-            "node_id": context.node_id,
-            "current": float(current),
-            "total": float(total),
-            "message": message,
-            "metrics": {} if metrics is None else metrics,
-        },
-        limits=context.progress_limits,
-    )
-    return True

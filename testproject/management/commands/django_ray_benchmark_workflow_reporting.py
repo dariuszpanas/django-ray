@@ -54,7 +54,7 @@ from django_ray.workflow_progress_summary import (
 )
 from testproject.apps.cluster_tasks.tasks import complex_workflow_benchmark
 
-BENCHMARK_SCHEMA_VERSION = 2
+BENCHMARK_SCHEMA_VERSION = 3
 BENCHMARK_ID = "django-ray-live-workflow-reporting-policies"
 OPT_IN_ENV = "DJANGO_RAY_RUN_WORKFLOW_REPORTING_BENCHMARK"
 EXPECTED_CALLABLE_PATH = "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"
@@ -88,6 +88,7 @@ _EXPECTED_INGRESS_KINDS = frozenset(
         "application_progress",
         "map_registered",
         "map_progress",
+        "producer_report",
     }
 )
 _EXPECTED_REJECTION_REASONS = frozenset(
@@ -130,6 +131,25 @@ _ACTOR_COST_NUMERIC_FIELDS = {
         "build_cpu_ns_max",
     ),
 }
+_PRODUCER_NUMERIC_FIELDS = (
+    "reports",
+    "offered",
+    "submitted",
+    "superseded",
+    "locally_dropped",
+    "acknowledged",
+    "actor_rejected",
+    "ack_failed",
+    "pending_acknowledgements",
+)
+_EXPECTED_TERMINAL_HANDOFFS = frozenset(
+    {
+        "not_needed",
+        "submitted",
+        "failed",
+        "actor_unavailable",
+    }
+)
 _SOURCE_REVISION_NAMES = (
     "DJANGO_RAY_BUILD_REVISION",
     "GITHUB_SHA",
@@ -309,6 +329,14 @@ def _measurement_coverage() -> dict[str, dict[str, str]]:
                 "before its retained terminal snapshot"
             ),
         },
+        "producer_progress_sessions": {
+            "status": "measured",
+            "scope": (
+                "actor-accepted fixed-shape leaf reports of valid progress offers, "
+                "submissions, local supersession/drop, producer-observed acknowledgements, "
+                "and one terminal handoff outcome"
+            ),
+        },
         "producer_to_actor_delivery_delay": {
             "status": "measured",
             "scope": (
@@ -332,10 +360,12 @@ def _measurement_coverage() -> dict[str, dict[str, str]]:
             "scope": "exact run identity; logical protocol bytes, not PostgreSQL bytes",
         },
         "producer_attempted_rpcs": {
-            "status": "unavailable",
-            "reason": (
-                "actor receipt cannot observe producer submission failures or calls "
-                "that never reach the actor"
+            "status": "partial",
+            "scope": (
+                "application-progress submissions reported by participating leaves; "
+                "a terminal latest-value handoff is included, while structural and "
+                "lifecycle events, producer reports, and coordinator snapshot/disable "
+                "calls are excluded"
             ),
         },
         "actor_lifetime_rss_and_cpu": {
@@ -562,7 +592,7 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(ingress_value, dict):
         raise WorkflowReportingBenchmarkError("workflow progress ingress is missing")
     ingress = cast(dict[str, Any], ingress_value)
-    if set(ingress) != {
+    expected_fields = {
         "accepted",
         "rejected",
         "truncated",
@@ -572,7 +602,8 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
         "retained_nodes",
         "retained_edges",
         "cost",
-    }:
+    }
+    if set(ingress) not in (expected_fields, expected_fields | {"producer"}):
         raise WorkflowReportingBenchmarkError("workflow progress ingress has unexpected fields")
     accepted = _non_negative_int(ingress["accepted"], "ingress.accepted")
     rejected = _non_negative_int(ingress["rejected"], "ingress.rejected")
@@ -598,6 +629,7 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
         rejected=rejected,
         accepted_by_kind=accepted_by_kind,
     )
+    producer = _producer_progress(ingress["producer"]) if "producer" in ingress else None
     return {
         "collector_events_accepted": accepted,
         "processed_ingest_events": accepted - 1,
@@ -618,6 +650,73 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
             "ingress.retained_edges",
         ),
         "actor_cost": cost,
+        "producer": producer,
+    }
+
+
+def _producer_progress(value: object) -> dict[str, object]:
+    expected_fields = {
+        "schema_version",
+        "saturated",
+        *_PRODUCER_NUMERIC_FIELDS,
+        "terminal_handoffs",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise WorkflowReportingBenchmarkError("ingress.producer has unexpected fields")
+    producer = cast(dict[str, Any], value)
+    if type(producer["schema_version"]) is not int or producer["schema_version"] != 1:
+        raise WorkflowReportingBenchmarkError("ingress.producer schema version is unsupported")
+    if type(producer["saturated"]) is not bool:
+        raise WorkflowReportingBenchmarkError("ingress.producer saturation evidence is invalid")
+    counters = {
+        field: _non_negative_int(
+            producer[field],
+            f"ingress.producer.{field}",
+        )
+        for field in _PRODUCER_NUMERIC_FIELDS
+    }
+    terminal_handoffs = _integer_mapping(
+        producer["terminal_handoffs"],
+        name="ingress.producer.terminal_handoffs",
+        expected_keys=_EXPECTED_TERMINAL_HANDOFFS,
+    )
+    if producer["saturated"]:
+        raise WorkflowReportingBenchmarkError(
+            "benchmark producer counters saturated before terminal retention"
+        )
+    nontrivial_terminal_handoffs = (
+        terminal_handoffs["submitted"]
+        + terminal_handoffs["failed"]
+        + terminal_handoffs["actor_unavailable"]
+    )
+    minimum_terminal_offers = counters["reports"] + nontrivial_terminal_handoffs
+    minimum_terminal_submissions = (
+        2 * terminal_handoffs["submitted"]
+        + terminal_handoffs["failed"]
+        + terminal_handoffs["actor_unavailable"]
+    )
+    if (
+        counters["offered"]
+        != counters["submitted"] + counters["superseded"] + counters["locally_dropped"]
+        or counters["submitted"]
+        != counters["acknowledged"]
+        + counters["actor_rejected"]
+        + counters["ack_failed"]
+        + counters["pending_acknowledgements"]
+        or sum(terminal_handoffs.values()) != counters["reports"]
+        or counters["offered"] < minimum_terminal_offers
+        or counters["submitted"] < minimum_terminal_submissions
+        or terminal_handoffs["failed"] + terminal_handoffs["actor_unavailable"]
+        > counters["locally_dropped"]
+        or terminal_handoffs["actor_unavailable"]
+        > counters["actor_rejected"] + counters["ack_failed"]
+    ):
+        raise WorkflowReportingBenchmarkError("ingress.producer counters are inconsistent")
+    return {
+        "schema_version": 1,
+        "saturated": False,
+        **counters,
+        "terminal_handoffs": terminal_handoffs,
     }
 
 
@@ -800,6 +899,27 @@ def _full_snapshot_evidence(
         accepted_by_kind.get("application_progress"),
         "ingress.accepted_by_kind.application_progress",
     )
+    producer_value = ingress.get("producer")
+    if not isinstance(producer_value, Mapping):
+        raise WorkflowReportingBenchmarkError(
+            "full execution retained no producer progress evidence"
+        )
+    producer_reports = _non_negative_int(
+        producer_value.get("reports"),
+        "ingress.producer.reports",
+    )
+    producer_submitted = _non_negative_int(
+        producer_value.get("submitted"),
+        "ingress.producer.submitted",
+    )
+    producer_acknowledged = _non_negative_int(
+        producer_value.get("acknowledged"),
+        "ingress.producer.acknowledged",
+    )
+    producer_actor_rejected = _non_negative_int(
+        producer_value.get("actor_rejected"),
+        "ingress.producer.actor_rejected",
+    )
     if (
         prepared.summary["state"] != TaskState.SUCCEEDED
         or topology.observed_node_count != expected_nodes
@@ -817,7 +937,11 @@ def _full_snapshot_evidence(
         or accepted_by_kind.get("started") != expected_nodes
         or accepted_by_kind.get("completed") != expected_nodes
         or accepted_by_kind.get("failed") != 0
+        or accepted_by_kind.get("producer_report") != producer_reports
+        or producer_acknowledged > application_progress
+        or application_progress > producer_submitted - producer_actor_rejected
         or application_progress < fast_items + slow_items
+        or producer_reports != fast_items + slow_items
     ):
         raise WorkflowReportingBenchmarkError(
             "full execution actor evidence does not match the fixed expanded workload"
@@ -1259,10 +1383,15 @@ def _policy_aggregates(samples: Sequence[Mapping[str, object]]) -> dict[str, obj
         }
         if policy == "full":
             policy_aggregate["actor_observed_cost"] = _actor_cost_aggregate(selected)
+            policy_aggregate["producer_progress"] = _producer_progress_aggregate(selected)
         else:
             policy_aggregate["actor_observed_cost"] = {
                 "status": "not_applicable",
                 "reason": f"{policy} reporting creates no progress actor",
+            }
+            policy_aggregate["producer_progress"] = {
+                "status": "not_applicable",
+                "reason": f"{policy} reporting has no progress producer session",
             }
         aggregates[policy] = policy_aggregate
     return aggregates
@@ -1331,6 +1460,73 @@ def _actor_cost_values(
             _non_negative_int(
                 value,
                 f"full.reporting.ingress.actor_cost.{field_path}",
+            )
+        )
+    return collected
+
+
+def _producer_progress_aggregate(
+    samples: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    units: dict[str, object] = dict.fromkeys(_PRODUCER_NUMERIC_FIELDS, "count")
+    units["terminal_handoffs"] = dict.fromkeys(
+        sorted(_EXPECTED_TERMINAL_HANDOFFS),
+        "count",
+    )
+    return {
+        "status": "measured",
+        "source_schema_version": 1,
+        "units": units,
+        **{
+            field: _distribution(
+                _producer_progress_values(
+                    samples,
+                    field=field,
+                )
+            )
+            for field in _PRODUCER_NUMERIC_FIELDS
+        },
+        "terminal_handoffs": {
+            outcome: _distribution(
+                _producer_progress_values(
+                    samples,
+                    field="terminal_handoffs",
+                    nested_field=outcome,
+                )
+            )
+            for outcome in sorted(_EXPECTED_TERMINAL_HANDOFFS)
+        },
+    }
+
+
+def _producer_progress_values(
+    samples: Sequence[Mapping[str, object]],
+    *,
+    field: str,
+    nested_field: str | None = None,
+) -> list[int]:
+    collected: list[int] = []
+    for sample in samples:
+        reporting = sample.get("reporting")
+        ingress = reporting.get("ingress") if isinstance(reporting, Mapping) else None
+        producer = ingress.get("producer") if isinstance(ingress, Mapping) else None
+        if not isinstance(producer, Mapping):
+            raise WorkflowReportingBenchmarkError(
+                "full reporting sample has no producer progress evidence"
+            )
+        value = producer.get(field)
+        field_path = field
+        if nested_field is not None:
+            if not isinstance(value, Mapping):
+                raise WorkflowReportingBenchmarkError(
+                    f"full producer progress field {field_path} is invalid"
+                )
+            value = value.get(nested_field)
+            field_path = f"{field_path}.{nested_field}"
+        collected.append(
+            _non_negative_int(
+                value,
+                f"full.reporting.ingress.producer.{field_path}",
             )
         )
     return collected

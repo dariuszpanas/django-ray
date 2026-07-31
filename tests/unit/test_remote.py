@@ -66,12 +66,14 @@ def _progress_wire(
     payload: dict[str, object],
     *,
     run_identity: dict[str, object] | None = None,
+    limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
 ) -> bytes:
     return prepare_workflow_progress_event(
         _WORKFLOW_RUN_IDENTITY if run_identity is None else run_identity,
         kind,
         payload,
         occurred_at=_OCCURRED_AT,
+        limits=limits,
     )
 
 
@@ -86,6 +88,23 @@ def _progress_actor(
         ),
         limits=limits,
     )
+
+
+def _producer_report(**overrides: object) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "saturated": False,
+        "offered": 5,
+        "submitted": 2,
+        "superseded": 2,
+        "locally_dropped": 1,
+        "acknowledged": 1,
+        "actor_rejected": 0,
+        "ack_failed": 0,
+        "pending_acknowledgements": 1,
+        "terminal_handoff": "submitted",
+        **overrides,
+    }
 
 
 def workflow_target(value: int, increment: int = 0) -> int:
@@ -137,6 +156,16 @@ def workflow_context_target() -> dict[str, object] | None:
     from django_ray.runtime.context import get_current_workflow_run_identity
 
     return get_current_workflow_run_identity()
+
+
+def workflow_progress_target(value: int, *, fail: bool = False) -> int:
+    from django_ray.workflows import report_progress
+
+    assert report_progress(1, 2)
+    assert report_progress(2, 2)
+    if fail:
+        raise RuntimeError(f"progress-failed:{value}")
+    return value
 
 
 def test_execute_django_task_remote_logs_failure(monkeypatch, capsys) -> None:
@@ -376,6 +405,142 @@ def test_execute_workflow_step_ignores_progress_reporting_failures() -> None:
     )
 
     assert result == 5
+
+
+@pytest.mark.parametrize(
+    ("fail", "terminal_kind"),
+    [
+        (False, WorkflowProgressEventKind.COMPLETED),
+        (True, WorkflowProgressEventKind.FAILED),
+    ],
+)
+def test_execute_workflow_step_orders_terminal_latest_value_before_terminal_event(
+    monkeypatch,
+    fail: bool,
+    terminal_kind: WorkflowProgressEventKind,
+) -> None:
+    actor = _ProgressActor()
+
+    def pending_remote(*args) -> object:
+        actor.ingest.calls.append(args)
+        return object()
+
+    actor.ingest.remote = pending_remote
+    monkeypatch.setattr(
+        "django_ray.workflow_progress_producer._poll_ray_ack",
+        lambda _reference: "pending",
+    )
+    run_identity = dict(_WORKFLOW_RUN_IDENTITY)
+
+    if fail:
+        with pytest.raises(RuntimeError, match="progress-failed:3"):
+            execute_workflow_step_remote(
+                "tests.unit.test_remote.workflow_progress_target",
+                False,
+                (),
+                {"fail": True},
+                {},
+                9,
+                actor,
+                "0.0",
+                3,
+                workflow_run_identity=run_identity,
+            )
+    else:
+        assert (
+            execute_workflow_step_remote(
+                "tests.unit.test_remote.workflow_progress_target",
+                False,
+                (),
+                {},
+                {},
+                9,
+                actor,
+                "0.0",
+                3,
+                workflow_run_identity=run_identity,
+            )
+            == 3
+        )
+
+    events = [
+        decode_workflow_progress_event(
+            call[0],
+            expected_run_identity=run_identity,
+        )
+        for call in actor.ingest.calls
+    ]
+    assert [event.kind for event in events] == [
+        WorkflowProgressEventKind.STARTED,
+        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        WorkflowProgressEventKind.PRODUCER_REPORT,
+        terminal_kind,
+    ]
+    assert events[1].payload["current"] == 1.0
+    assert events[2].payload["current"] == 2.0
+    assert events[3].payload["terminal_handoff"] == "submitted"
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_execute_workflow_step_preserves_outcome_when_producer_report_fails(
+    fail: bool,
+) -> None:
+    actor = _ProgressActor()
+    attempted_kinds: list[WorkflowProgressEventKind] = []
+    run_identity = dict(_WORKFLOW_RUN_IDENTITY)
+
+    def selective_failure(wire: bytes) -> None:
+        event = decode_workflow_progress_event(
+            wire,
+            expected_run_identity=run_identity,
+        )
+        attempted_kinds.append(event.kind)
+        if event.kind is WorkflowProgressEventKind.PRODUCER_REPORT:
+            raise RuntimeError("producer report unavailable")
+
+    actor.ingest.remote = selective_failure
+
+    if fail:
+        with pytest.raises(RuntimeError, match="progress-failed:3"):
+            execute_workflow_step_remote(
+                "tests.unit.test_remote.workflow_progress_target",
+                False,
+                (),
+                {"fail": True},
+                {},
+                9,
+                actor,
+                "0.0",
+                3,
+                workflow_run_identity=run_identity,
+            )
+        terminal_kind = WorkflowProgressEventKind.FAILED
+    else:
+        assert (
+            execute_workflow_step_remote(
+                "tests.unit.test_remote.workflow_progress_target",
+                False,
+                (),
+                {},
+                {},
+                9,
+                actor,
+                "0.0",
+                3,
+                workflow_run_identity=run_identity,
+            )
+            == 3
+        )
+        terminal_kind = WorkflowProgressEventKind.COMPLETED
+
+    assert attempted_kinds == [
+        WorkflowProgressEventKind.STARTED,
+        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        WorkflowProgressEventKind.PRODUCER_REPORT,
+        terminal_kind,
+    ]
 
 
 def test_ray_execution_metadata_handles_context_and_runtime_errors(monkeypatch) -> None:
@@ -619,6 +784,91 @@ def test_progress_actor_ingests_bounded_events_and_preserves_terminal_state() ->
     assert cost["delivery_delay"]["samples"] == len(events)
     assert cost["delivery_delay"]["negative_clock_samples"] == 0
     assert cost["snapshot"]["calls"] == 1
+
+
+def test_progress_actor_aggregates_fixed_producer_reports_without_graph_mutation() -> None:
+    actor = _progress_actor()
+    baseline = actor.snapshot()
+    reports = [
+        _progress_wire(
+            WorkflowProgressEventKind.PRODUCER_REPORT,
+            _producer_report(),
+        ),
+        _progress_wire(
+            WorkflowProgressEventKind.PRODUCER_REPORT,
+            _producer_report(
+                offered=3,
+                submitted=1,
+                superseded=1,
+                locally_dropped=1,
+                acknowledged=0,
+                actor_rejected=1,
+                pending_acknowledgements=0,
+                terminal_handoff="failed",
+            ),
+        ),
+    ]
+
+    assert all(actor.ingest(report) for report in reports)
+
+    snapshot = actor.snapshot()
+    assert snapshot["graph"] == baseline["graph"]
+    assert snapshot["recent_events"] == baseline["recent_events"]
+    assert snapshot["ingress"]["retained_bytes"] == baseline["ingress"]["retained_bytes"]
+    assert snapshot["ingress"]["accepted_by_kind"]["producer_report"] == 2
+    assert snapshot["ingress"]["cost"]["ingest"]["decoded_by_kind"]["producer_report"] == 2
+    assert snapshot["ingress"]["producer"] == {
+        "schema_version": 1,
+        "saturated": False,
+        "reports": 2,
+        "offered": 8,
+        "submitted": 3,
+        "superseded": 3,
+        "locally_dropped": 2,
+        "acknowledged": 1,
+        "actor_rejected": 1,
+        "ack_failed": 0,
+        "pending_acknowledgements": 1,
+        "terminal_handoffs": {
+            "not_needed": 0,
+            "submitted": 1,
+            "failed": 1,
+            "actor_unavailable": 0,
+        },
+    }
+
+
+def test_progress_actor_saturates_producer_report_aggregates() -> None:
+    limits = replace(
+        WORKFLOW_PROGRESS_LIMITS_V1,
+        identity_max_integer=9,
+    )
+    actor = _progress_actor(limits=limits)
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.PRODUCER_REPORT,
+            _producer_report(),
+            limits=limits,
+        )
+    )
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.PRODUCER_REPORT,
+            _producer_report(),
+            limits=limits,
+        )
+    )
+
+    producer = actor.snapshot()["ingress"]["producer"]
+    assert producer["saturated"] is True
+    assert producer["reports"] == 2
+    assert producer["offered"] == limits.identity_max_integer
+    assert producer["terminal_handoffs"] == {
+        "not_needed": 0,
+        "submitted": 2,
+        "failed": 0,
+        "actor_unavailable": 0,
+    }
 
 
 def test_progress_actor_requires_one_canonical_initialization_event() -> None:

@@ -96,6 +96,58 @@ def _ingress_cost(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ingress_producer() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "saturated": False,
+        "reports": 1,
+        "offered": 8,
+        "submitted": 3,
+        "superseded": 4,
+        "locally_dropped": 1,
+        "acknowledged": 1,
+        "actor_rejected": 1,
+        "ack_failed": 0,
+        "pending_acknowledgements": 1,
+        "terminal_handoffs": {
+            "not_needed": 0,
+            "submitted": 1,
+            "failed": 0,
+            "actor_unavailable": 0,
+        },
+    }
+
+
+def _zeroed_ingress_producer() -> dict[str, Any]:
+    producer = _ingress_producer()
+    producer.update(
+        {
+            "reports": 0,
+            "offered": 0,
+            "submitted": 0,
+            "superseded": 0,
+            "locally_dropped": 0,
+            "acknowledged": 0,
+            "actor_rejected": 0,
+            "ack_failed": 0,
+            "pending_acknowledgements": 0,
+            "terminal_handoffs": dict.fromkeys(
+                producer["terminal_handoffs"],
+                0,
+            ),
+        }
+    )
+    return producer
+
+
+def _attach_ingress_producer(snapshot: dict[str, Any]) -> None:
+    producer = _ingress_producer()
+    snapshot["ingress"]["accepted_by_kind"]["producer_report"] = producer["reports"]
+    snapshot["ingress"]["accepted"] = sum(snapshot["ingress"]["accepted_by_kind"].values())
+    snapshot["revision"] = snapshot["ingress"]["accepted"] - 1
+    snapshot["ingress"]["producer"] = producer
+
+
 def _erase_decoded_cost(ingress: dict[str, Any]) -> None:
     cost = ingress["cost"]
     cost["ingest"]["decoded_calls"] = 0
@@ -402,6 +454,499 @@ def test_terminal_adapter_accepts_historical_ingress_without_cost() -> None:
     )
 
     assert prepared.summary["state"] == "SUCCEEDED"
+
+
+def test_terminal_adapter_accepts_strict_optional_ingress_producer() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    _attach_ingress_producer(snapshot)
+
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+
+    assert prepared.summary["state"] == "SUCCEEDED"
+
+
+def test_terminal_adapter_accepts_zeroed_ingress_producer() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    snapshot["ingress"]["producer"] = _zeroed_ingress_producer()
+
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+
+    assert prepared.summary["state"] == "SUCCEEDED"
+
+
+def test_terminal_adapter_accepts_cost_and_producer_together() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    _attach_ingress_producer(snapshot)
+    snapshot["ingress"]["cost"] = _ingress_cost(snapshot)
+
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+
+    assert prepared.summary["state"] == "SUCCEEDED"
+
+
+def test_terminal_adapter_accepts_saturated_ingress_producer() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    _attach_ingress_producer(snapshot)
+    snapshot["ingress"]["producer"].update(
+        {
+            "saturated": True,
+            "offered": publication.WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.identity_max_integer,
+            "superseded": (
+                publication.WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.identity_max_integer
+            ),
+        }
+    )
+
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+
+    assert prepared.summary["state"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        pytest.param(
+            {
+                "offered": 16,
+                "superseded": 16,
+            },
+            id="offered-components",
+        ),
+        pytest.param(
+            {
+                "offered": 16,
+                "submitted": 16,
+                "superseded": 0,
+                "locally_dropped": 0,
+                "acknowledged": 16,
+                "actor_rejected": 1,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+            },
+            id="acknowledgement-components",
+        ),
+    ],
+)
+def test_terminal_adapter_rejects_hidden_unsaturated_producer_counters(
+    updates: dict[str, int],
+) -> None:
+    identity = _identity()
+    limits = replace(
+        publication.WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
+        identity_max_integer=16,
+    )
+    snapshot = _snapshot(identity)
+    _attach_ingress_producer(snapshot)
+    snapshot["ingress"]["producer"].update(updates)
+
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+            limits=limits,
+        )
+
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.INVALID_SNAPSHOT
+
+
+def test_terminal_adapter_rejects_hidden_unsaturated_terminal_handoff_total() -> None:
+    identity = _identity()
+    limits = replace(
+        publication.WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
+        identity_max_integer=16,
+    )
+    snapshot = _snapshot(identity)
+    _attach_ingress_producer(snapshot)
+    snapshot["ingress"]["producer"].update(
+        {
+            "reports": 16,
+            "offered": 16,
+            "submitted": 16,
+            "superseded": 0,
+            "locally_dropped": 0,
+            "acknowledged": 16,
+            "actor_rejected": 0,
+            "ack_failed": 0,
+            "pending_acknowledgements": 0,
+            "terminal_handoffs": {
+                "not_needed": 16,
+                "submitted": 1,
+                "failed": 0,
+                "actor_unavailable": 0,
+            },
+        }
+    )
+    snapshot["ingress"]["accepted_by_kind"]["producer_report"] = 16
+    snapshot["ingress"]["accepted"] = sum(snapshot["ingress"]["accepted_by_kind"].values())
+    snapshot["revision"] = snapshot["ingress"]["accepted"] - 1
+
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+            limits=limits,
+        )
+
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.INVALID_SNAPSHOT
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda ingress: ingress.update({"producer": []}),
+            id="malformed-producer",
+        ),
+        pytest.param(
+            lambda ingress: ingress.update({"producer": None}),
+            id="explicit-null-producer",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].pop("terminal_handoffs"),
+            id="missing-producer-field",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].update({"unknown": 0}),
+            id="unknown-producer-field",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].update({"schema_version": 2}),
+            id="unsupported-producer-schema",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].update({"saturated": 1}),
+            id="non-boolean-producer-saturation",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].update({"offered": -1}),
+            id="negative-producer-counter",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].update({"reports": 0}),
+            id="producer-report-count-mismatch",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"]["terminal_handoffs"].pop("not_needed"),
+            id="missing-terminal-handoff-counter",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"]["terminal_handoffs"].update({"unknown": 0}),
+            id="unknown-terminal-handoff-counter",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"]["terminal_handoffs"].update({"failed": 1}),
+            id="terminal-handoff-count-mismatch",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].update({"offered": 9}),
+            id="offered-counter-mismatch",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].update({"submitted": 4}),
+            id="submitted-counter-mismatch",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].update({"saturated": True}),
+            id="saturated-without-capped-producer-counter",
+        ),
+        pytest.param(
+            lambda ingress: ingress["producer"].update(
+                {
+                    "saturated": True,
+                    "offered": (
+                        publication.WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.identity_max_integer
+                    ),
+                }
+            ),
+            id="saturated-offered-counter-mismatch",
+        ),
+    ],
+)
+def test_terminal_adapter_rejects_invalid_optional_ingress_producer(
+    mutate,
+) -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    _attach_ingress_producer(snapshot)
+    mutate(snapshot["ingress"])
+
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+        )
+
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.INVALID_SNAPSHOT
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 1,
+                "locally_dropped": 0,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoffs": {
+                    "not_needed": 0,
+                    "submitted": 1,
+                    "failed": 0,
+                    "actor_unavailable": 0,
+                },
+            },
+            id="submitted-without-submission",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 1,
+                "superseded": 0,
+                "locally_dropped": 0,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 1,
+                "terminal_handoffs": {
+                    "not_needed": 0,
+                    "submitted": 1,
+                    "failed": 0,
+                    "actor_unavailable": 0,
+                },
+            },
+            id="submitted-without-buffered-replacement",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 1,
+                "locally_dropped": 0,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoffs": {
+                    "not_needed": 0,
+                    "submitted": 0,
+                    "failed": 1,
+                    "actor_unavailable": 0,
+                },
+            },
+            id="failed-without-local-drop",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 0,
+                "locally_dropped": 1,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoffs": {
+                    "not_needed": 0,
+                    "submitted": 0,
+                    "failed": 1,
+                    "actor_unavailable": 0,
+                },
+            },
+            id="failed-without-prior-submission",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 1,
+                "locally_dropped": 0,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoffs": {
+                    "not_needed": 0,
+                    "submitted": 0,
+                    "failed": 0,
+                    "actor_unavailable": 1,
+                },
+            },
+            id="actor-unavailable-without-local-drop",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 0,
+                "locally_dropped": 1,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoffs": {
+                    "not_needed": 0,
+                    "submitted": 0,
+                    "failed": 0,
+                    "actor_unavailable": 1,
+                },
+            },
+            id="actor-unavailable-without-acknowledgement-failure",
+        ),
+    ],
+)
+def test_terminal_adapter_rejects_inconsistent_producer_terminal_handoffs(
+    updates: dict[str, Any],
+) -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    _attach_ingress_producer(snapshot)
+    snapshot["ingress"]["producer"].update(updates)
+
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+        )
+
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.INVALID_SNAPSHOT
+
+
+def test_terminal_adapter_rejects_zero_report_producer_with_nonzero_counters() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    producer = _zeroed_ingress_producer()
+    producer.update(
+        {
+            "offered": 1,
+            "submitted": 1,
+            "acknowledged": 1,
+        }
+    )
+    snapshot["ingress"]["producer"] = producer
+
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+        )
+
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.INVALID_SNAPSHOT
+
+
+def test_terminal_adapter_rejects_fewer_offers_than_producer_reports() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    producer = _ingress_producer()
+    producer.update(
+        {
+            "reports": 2,
+            "offered": 1,
+            "submitted": 1,
+            "superseded": 0,
+            "locally_dropped": 0,
+            "acknowledged": 1,
+            "actor_rejected": 0,
+            "pending_acknowledgements": 0,
+            "terminal_handoffs": {
+                "not_needed": 0,
+                "submitted": 2,
+                "failed": 0,
+                "actor_unavailable": 0,
+            },
+        }
+    )
+    snapshot["ingress"]["accepted_by_kind"]["producer_report"] = producer["reports"]
+    snapshot["ingress"]["accepted"] = sum(snapshot["ingress"]["accepted_by_kind"].values())
+    snapshot["revision"] = snapshot["ingress"]["accepted"] - 1
+    snapshot["ingress"]["producer"] = producer
+
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+        )
+
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.INVALID_SNAPSHOT
+
+
+def test_terminal_adapter_rejects_producer_event_without_aggregate() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    snapshot["ingress"]["accepted_by_kind"]["producer_report"] = 1
+    snapshot["ingress"]["accepted"] += 1
+    snapshot["revision"] += 1
+
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+        )
+
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.INVALID_SNAPSHOT
 
 
 def test_terminal_adapter_accepts_strict_optional_ingress_cost() -> None:
