@@ -18,7 +18,7 @@ loadtest:
 
 # Resource-bounded deterministic demo for logs, admin, and the Ray dashboard
 loadtest-demo:
-	uv run locust -f locustfile.py --host=$(LOADTEST_HOST) --headless -u 1 -r 1 -t 300s --stop-timeout $(LOADTEST_STOP_TIMEOUT) ObservabilityDemoUser
+	uv run locust -f locustfile.py --host=$(LOADTEST_HOST) --headless -u 1 -r 1 -t 300s --stop-timeout $(LOADTEST_STOP_TIMEOUT) --require-complete-tour ObservabilityDemoUser
 
 # Generic headless load test; defaults to the one-user observability demo
 loadtest-headless:
