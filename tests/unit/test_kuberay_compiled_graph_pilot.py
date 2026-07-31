@@ -868,13 +868,14 @@ def _rewrite_pilot_asset_line_endings(
 
 def test_profile_pins_every_runtime_and_resource_dimension() -> None:
     profile = pilot._load_profile()
+    source_version = pilot._load_source_package_version()
 
     assert profile["profile_name"] == pilot.PROFILE_NAME
     assert profile["base_image"].endswith(
         "@sha256:2951c07de396a8b746f9c678b52c6e2282e614e00f80e6846a9ccd12945ae6b0"
     )
     assert profile["dependency_profile"] == {
-        "django-ray": "0.3.1",
+        "django-ray": source_version,
         "django": "6.0.7",
         "asgiref": "3.11.1",
         "sqlparse": "0.5.5",
@@ -934,6 +935,24 @@ def test_profile_pins_every_runtime_and_resource_dimension() -> None:
     assert profile["probe"]["topologies"] == ["direct-driver", "nested-ray-task"]
 
 
+def test_profile_rejects_django_ray_version_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = json.loads(pilot.PROFILE_PATH.read_text(encoding="utf-8"))
+    source_version = pilot._load_source_package_version()
+    profile["dependency_profile"]["django-ray"] = f"{source_version}.drift"
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    monkeypatch.setattr(pilot, "PROFILE_PATH", profile_path)
+
+    with pytest.raises(
+        pilot.PilotError,
+        match="django-ray dependency must match source package version",
+    ):
+        pilot._load_profile()
+
+
 def test_dockerfile_keeps_runtime_dependencies_on_the_pinned_base() -> None:
     dockerfile = pilot.DOCKERFILE_PATH.read_text(encoding="utf-8")
 
@@ -943,6 +962,8 @@ def test_dockerfile_keeps_runtime_dependencies_on_the_pinned_base() -> None:
     )
     assert "django==6.0.7 asgiref==3.11.1 sqlparse==0.5.5 fastrlock==0.8.3" in dockerfile
     assert "pip install --disable-pip-version-check --no-cache-dir --no-deps ." in dockerfile
+    assert 'project_version = tomllib.load(project_file)["project"]["version"]' in dockerfile
+    assert '"django-ray": project_version' in dockerfile
     assert '"ray": "2.56.0"' in dockerfile
     assert '"cupy-cuda12x": "13.4.0"' in dockerfile
     assert '"fastrlock": "0.8.3"' in dockerfile
@@ -3291,7 +3312,10 @@ def test_blocked_record_requires_zero_other_residuals_and_links_trackers() -> No
         "pilot_child_process_count": 0,
     }
     assert result["failure"]["tracker_urls"] == list(pilot.BLOCKER_TRACKERS)
-    pilot._validate_blocked_evidence_record(result, require_namespace_deleted=True)
+    pilot._validate_current_blocked_evidence_record(
+        result,
+        require_namespace_deleted=True,
+    )
 
 
 @pytest.mark.parametrize("field", sorted(pilot.BLOCKED_EVIDENCE_ROOT_KEYS))
@@ -3300,7 +3324,10 @@ def test_blocked_evidence_requires_every_root_field(field: str) -> None:
     del record[field]
 
     with pytest.raises(pilot.PilotError, match="root schema is not exact"):
-        pilot._validate_blocked_evidence_record(record, require_namespace_deleted=True)
+        pilot._validate_current_blocked_evidence_record(
+            record,
+            require_namespace_deleted=True,
+        )
 
 
 def test_blocked_evidence_rejects_an_unallowlisted_root_field() -> None:
@@ -3308,7 +3335,10 @@ def test_blocked_evidence_rejects_an_unallowlisted_root_field() -> None:
     record["raw_pod_logs"] = "must not be retained"
 
     with pytest.raises(pilot.PilotError, match="root schema is not exact"):
-        pilot._validate_blocked_evidence_record(record, require_namespace_deleted=True)
+        pilot._validate_current_blocked_evidence_record(
+            record,
+            require_namespace_deleted=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -3439,7 +3469,10 @@ def test_blocked_evidence_rejects_mutated_nested_context(mutation: str) -> None:
         record["zero_residual_state"]["object_count"] = False
 
     with pytest.raises(pilot.PilotError, match="evidence"):
-        pilot._validate_blocked_evidence_record(record, require_namespace_deleted=True)
+        pilot._validate_current_blocked_evidence_record(
+            record,
+            require_namespace_deleted=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -3536,7 +3569,10 @@ def test_blocked_evidence_rejects_bool_and_float_integer_coercion(
     target[path[-1]] = invalid_value
 
     with pytest.raises(pilot.PilotError):
-        pilot._validate_blocked_evidence_record(record, require_namespace_deleted=True)
+        pilot._validate_current_blocked_evidence_record(
+            record,
+            require_namespace_deleted=True,
+        )
 
 
 def test_blocked_evidence_writer_requires_clean_current_head_identity(
@@ -3565,7 +3601,10 @@ def test_retained_context_and_writer_accept_checkout_eol_changes_but_not_content
     record = _valid_blocked_record()
     _rewrite_pilot_asset_line_endings(paths, line_endings="crlf")
 
-    pilot._validate_blocked_evidence_record(record, require_namespace_deleted=True)
+    pilot._validate_current_blocked_evidence_record(
+        record,
+        require_namespace_deleted=True,
+    )
     monkeypatch.setattr(pilot, "_git_source_revision", lambda: record["source_revision"])
     output = tmp_path / "compiled-graph-kuberay-blocked-2026-07-21.json"
     pilot._write_blocked_evidence(output, record)
@@ -3577,6 +3616,32 @@ def test_retained_context_and_writer_accept_checkout_eol_changes_but_not_content
     with pytest.raises(pilot.PilotError, match="Docker context is inconsistent"):
         pilot._write_blocked_evidence(rejected_output, record)
     assert not rejected_output.exists()
+
+
+def test_historical_blocked_evidence_remains_self_consistent_across_profile_versions() -> None:
+    evidence_path = (
+        pilot.ROOT / "docs" / "investigations" / "compiled-graph-kuberay-blocked-2026-07-21.json"
+    )
+    evidence_bytes = pilot._canonical_source_text_bytes(evidence_path)
+    assert len(evidence_bytes) == 164_686
+    assert (
+        pilot.sha256(evidence_bytes).hexdigest()
+        == "972d9d9ad3f39f2e97ebc9bd491cd5222a69cb39f01ec7c28578b7ae0976d702"
+    )
+    record = json.loads(evidence_bytes)
+
+    pilot._validate_blocked_evidence_record(
+        record,
+        require_namespace_deleted=True,
+    )
+    with pytest.raises(
+        pilot.PilotError,
+        match="does not use the current tracked profile",
+    ):
+        pilot._validate_current_blocked_evidence_record(
+            record,
+            require_namespace_deleted=True,
+        )
 
 
 def test_exact_profile_admission_accepts_baseline_and_rejects_near_neighbor_without_spawning(

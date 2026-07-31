@@ -368,6 +368,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The guarded local Compiled Graph pilot now derives the installed django-ray
+  expectation from archived project metadata and rejects an active dependency
+  profile that disagrees with the source package version. Project version bumps
+  can no longer leave the documented pilot failing against a duplicated stale
+  literal before KubeRay execution. Historical records remain self-consistent
+  against their embedded profile, while new evidence must match current tracked
+  assets; no retained evidence is changed and no capability is promoted.
 - The authenticated low-resource Locust demo now grants its active scenario a
   bounded graceful-stop window after the five-minute scheduling period. The
   window exceeds the longest scenario polling deadline, preventing a final

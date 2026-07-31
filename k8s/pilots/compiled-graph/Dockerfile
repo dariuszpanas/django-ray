@@ -31,9 +31,13 @@ RUN python -m pip install --disable-pip-version-check --no-cache-dir --no-deps \
     python - <<'PY'
 from importlib import metadata
 import platform
+import tomllib
+
+with open("pyproject.toml", "rb") as project_file:
+    project_version = tomllib.load(project_file)["project"]["version"]
 
 expected = {
-    "django-ray": "0.3.1",
+    "django-ray": project_version,
     "django": "6.0.7",
     "asgiref": "3.11.1",
     "sqlparse": "0.5.5",
