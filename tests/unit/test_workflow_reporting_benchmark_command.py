@@ -172,6 +172,9 @@ def _ingress_progress_for(execution: RayTaskExecution) -> str:
         completed=expected_nodes,
     )
     accepted = sum(accepted_by_kind.values())
+    decoded_by_kind = dict(accepted_by_kind)
+    decoded_by_kind["initialized"] = 0
+    decoded_calls = sum(decoded_by_kind.values())
     identity = benchmark._run_identity(execution)
     snapshot: dict[str, Any] = {
         "schema_version": 2,
@@ -230,6 +233,39 @@ def _ingress_progress_for(execution: RayTaskExecution) -> str:
             "retained_bytes": 0,
             "retained_nodes": expected_nodes,
             "retained_edges": expected_edges,
+            "cost": {
+                "schema_version": 1,
+                "saturated": False,
+                "initialization": {
+                    "wire_bytes": 256,
+                    "handler_wall_ns": 10_000,
+                    "handler_cpu_ns": 7_500,
+                },
+                "ingest": {
+                    "calls_received": accepted - 1,
+                    "wire_bytes_received": 12_345,
+                    "decoded_calls": decoded_calls,
+                    "post_disable_calls": 0,
+                    "decoded_by_kind": decoded_by_kind,
+                    "handler_wall_ns_total": 200_000,
+                    "handler_wall_ns_max": 20_000,
+                    "handler_cpu_ns_total": 150_000,
+                    "handler_cpu_ns_max": 15_000,
+                },
+                "delivery_delay": {
+                    "samples": decoded_calls,
+                    "total_us": 2_000,
+                    "max_us": 200,
+                    "negative_clock_samples": 0,
+                },
+                "snapshot": {
+                    "calls": 2,
+                    "build_wall_ns_total": 80_000,
+                    "build_wall_ns_max": 50_000,
+                    "build_cpu_ns_total": 60_000,
+                    "build_cpu_ns_max": 40_000,
+                },
+            },
         },
     }
     _refresh_retained_bytes(snapshot)
@@ -366,7 +402,12 @@ def test_workload_and_measurement_coverage_are_bounded() -> None:
     assert benchmark._expected_dynamic_topology(fast_items=2, slow_items=1) == (9, 10)
     assert coverage["durable_task_timing"]["status"] == "measured"
     assert coverage["actor_creation_count"]["status"] == "derived"
+    assert coverage["actor_observed_logical_ingress"]["status"] == "measured"
+    assert "logical wire bytes" in coverage["actor_observed_logical_ingress"]["scope"]
+    assert coverage["producer_to_actor_delivery_delay"]["status"] == "measured"
+    assert coverage["actor_handler_and_snapshot_cost"]["status"] == "measured"
     assert coverage["mailbox_depth_and_lag"]["status"] == "unavailable"
+    assert coverage["snapshot_and_disable_rpcs"]["status"] == "partial"
     assert coverage["database_statements_latency_and_wal"]["status"] == "unavailable"
 
 
@@ -383,7 +424,10 @@ def test_command_emits_json_and_forwards_bounded_options(monkeypatch, tmp_path: 
 
     def run_benchmark(**options: object) -> dict[str, object]:
         captured.update(options)
-        return {"benchmark": benchmark.BENCHMARK_ID, "schema_version": 1}
+        return {
+            "benchmark": benchmark.BENCHMARK_ID,
+            "schema_version": benchmark.BENCHMARK_SCHEMA_VERSION,
+        }
 
     monkeypatch.setattr(benchmark, "_run_benchmark", run_benchmark)
     stdout = StringIO()
@@ -405,7 +449,10 @@ def test_command_emits_json_and_forwards_bounded_options(monkeypatch, tmp_path: 
         stderr=stderr,
     )
 
-    expected = {"benchmark": benchmark.BENCHMARK_ID, "schema_version": 1}
+    expected = {
+        "benchmark": benchmark.BENCHMARK_ID,
+        "schema_version": benchmark.BENCHMARK_SCHEMA_VERSION,
+    }
     assert json.loads(stdout.getvalue()) == expected
     assert json.loads(output.read_text(encoding="utf-8")) == expected
     assert captured["repetitions"] == 6
@@ -623,6 +670,14 @@ def test_sample_validates_actor_free_and_package_default_contracts(
     reporting = cast(dict[str, Any], sample["reporting"])
     assert reporting["actor_expected_count"] == int(policy == "full")
     assert (reporting["ingress"] is not None) is (policy == "full")
+    if policy == "full":
+        ingress = cast(dict[str, Any], reporting["ingress"])
+        actor_cost = cast(dict[str, Any], ingress["actor_cost"])
+        assert actor_cost["saturated"] is False
+        assert actor_cost["ingest"]["calls_received"] == (ingress["processed_ingest_events"])
+        assert actor_cost["ingest"]["wire_bytes_received"] == 12_345
+        assert actor_cost["delivery_delay"]["negative_clock_samples"] == 0
+        assert actor_cost["snapshot"]["calls"] == 2
     selection = cast(dict[str, Any], sample["selection"])
     assert selection["plan_node_count"] == 13
     assert selection["plan_edge_count"] == 13
@@ -696,7 +751,16 @@ def test_sample_rejects_invalid_plan_and_selection_evidence() -> None:
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("corruption", ["identity", "truncated", "topology"])
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "identity",
+        "truncated",
+        "topology",
+        "erased_decoded_cost",
+        "saturated_cost",
+    ],
+)
 def test_full_sample_rejects_incomplete_actor_evidence(corruption: str) -> None:
     execution = _execution("full")
     snapshot = json.loads(cast(str, execution.progress_data))
@@ -704,14 +768,33 @@ def test_full_sample_rejects_incomplete_actor_evidence(corruption: str) -> None:
         snapshot["run_identity"]["run_id"] = str(uuid4())
     elif corruption == "truncated":
         snapshot["ingress"]["truncated"] = 1
-    else:
+    elif corruption == "topology":
         snapshot["graph"]["nodes"].pop()
+    elif corruption == "erased_decoded_cost":
+        cost = snapshot["ingress"]["cost"]
+        cost["ingest"]["decoded_calls"] = 0
+        cost["ingest"]["decoded_by_kind"] = dict.fromkeys(
+            cost["ingest"]["decoded_by_kind"],
+            0,
+        )
+        cost["delivery_delay"] = {
+            "samples": 0,
+            "total_us": 0,
+            "max_us": 0,
+            "negative_clock_samples": 0,
+        }
+    else:
+        snapshot["ingress"]["cost"]["saturated"] = True
+        snapshot["ingress"]["cost"]["initialization"]["handler_wall_ns"] = (1 << 63) - 1
     execution.progress_data = json.dumps(snapshot)
     execution.save(update_fields=["progress_data"])
 
+    expected_error = (
+        "saturated" if corruption == "saturated_cost" else "invalid or incomplete|expanded workload"
+    )
     with pytest.raises(
         benchmark.WorkflowReportingBenchmarkError,
-        match="invalid or incomplete|expanded workload",
+        match=expected_error,
     ):
         benchmark._sample(
             execution,
@@ -898,6 +981,48 @@ def test_policy_aggregates_never_rank_or_claim_causality() -> None:
                         "workflow_elapsed_seconds": value - 0.1,
                         "useful_leaf_seconds": 0.04,
                     },
+                    "reporting": {
+                        "ingress": (
+                            {
+                                "actor_cost": {
+                                    "initialization": {
+                                        "wire_bytes": 256,
+                                        "handler_wall_ns": 10_000,
+                                        "handler_cpu_ns": 7_500,
+                                    },
+                                    "ingest": {
+                                        "calls_received": 12,
+                                        "wire_bytes_received": 4096,
+                                        "decoded_calls": 12,
+                                        "post_disable_calls": 0,
+                                        "decoded_by_kind": {
+                                            kind: int(kind == "completed") * 12
+                                            for kind in benchmark._EXPECTED_INGRESS_KINDS
+                                        },
+                                        "handler_wall_ns_total": 20_000,
+                                        "handler_wall_ns_max": 2_500,
+                                        "handler_cpu_ns_total": 15_000,
+                                        "handler_cpu_ns_max": 2_000,
+                                    },
+                                    "delivery_delay": {
+                                        "samples": 11,
+                                        "total_us": 800,
+                                        "max_us": 100,
+                                        "negative_clock_samples": 1,
+                                    },
+                                    "snapshot": {
+                                        "calls": 2,
+                                        "build_wall_ns_total": 30_000,
+                                        "build_wall_ns_max": 20_000,
+                                        "build_cpu_ns_total": 20_000,
+                                        "build_cpu_ns_max": 12_000,
+                                    },
+                                }
+                            }
+                            if policy == "full"
+                            else None
+                        )
+                    },
                 }
             )
 
@@ -905,5 +1030,54 @@ def test_policy_aggregates_never_rank_or_claim_causality() -> None:
 
     assert set(aggregates) == set(benchmark.POLICIES)
     assert cast(dict[str, Any], aggregates["full"])["sample_count"] == 3
+    full_cost = cast(
+        dict[str, Any],
+        cast(dict[str, Any], aggregates["full"])["actor_observed_cost"],
+    )
+    assert full_cost["status"] == "measured"
+    assert full_cost["source_schema_version"] == 1
+    distribution_keys = {
+        "samples",
+        "median",
+        "p95_nearest_rank",
+        "minimum",
+        "maximum",
+    }
+    for group, fields in benchmark._ACTOR_COST_NUMERIC_FIELDS.items():
+        group_aggregate = cast(dict[str, Any], full_cost[group])
+        expected_fields = set(fields)
+        if group == "ingest":
+            expected_fields.add("decoded_by_kind")
+        assert set(group_aggregate) == expected_fields
+        for field in fields:
+            assert set(cast(dict[str, Any], group_aggregate[field])) == distribution_keys
+    assert set(cast(dict[str, Any], full_cost["initialization"])) == {
+        "wire_bytes",
+        "handler_wall_ns",
+        "handler_cpu_ns",
+    }
+    full_ingest = cast(dict[str, Any], full_cost["ingest"])
+    assert full_ingest["calls_received"]["median"] == 12.0
+    assert full_ingest["handler_wall_ns_max"]["median"] == 2_500.0
+    assert cast(dict[str, Any], full_ingest["decoded_by_kind"])["completed"]["median"] == 12.0
+    assert set(cast(dict[str, Any], full_ingest["decoded_by_kind"])) == set(
+        benchmark._EXPECTED_INGRESS_KINDS
+    )
+    assert all(
+        set(cast(dict[str, Any], distribution)) == distribution_keys
+        for distribution in cast(dict[str, Any], full_ingest["decoded_by_kind"]).values()
+    )
+    full_delay = cast(dict[str, Any], full_cost["delivery_delay"])
+    assert full_delay["samples"]["median"] == 11.0
+    assert full_delay["max_us"]["median"] == 100.0
+    assert full_delay["negative_clock_samples"]["median"] == 1.0
+    full_snapshot = cast(dict[str, Any], full_cost["snapshot"])
+    assert full_snapshot["build_cpu_ns_max"]["median"] == 12_000.0
+    for policy in ("terminal_only", "disabled"):
+        policy_cost = cast(
+            dict[str, Any],
+            cast(dict[str, Any], aggregates[policy])["actor_observed_cost"],
+        )
+        assert policy_cost["status"] == "not_applicable"
     assert "winner" not in json.dumps(aggregates)
     assert "speedup" not in json.dumps(aggregates)

@@ -220,9 +220,11 @@ When policy cost rather than HTTP behavior is the question, use the opt-in
 [`django_ray_benchmark_workflow_reporting`](../docs/performance.md#attribute-live-workflow-reporting-policies)
 command. It runs the same tiny nested workload sequentially under full,
 terminal-only, and disabled reporting with counterbalanced order, durable
-server-timestamp comparisons, allowlisted ingress/storage evidence, and explicit
-unavailable metrics. The low-resource run retains its execution rows for Admin
-inspection unless `--cleanup` is requested.
+server-timestamp comparisons, allowlisted ingress/storage evidence, actor-observed
+logical traffic/delivery/handler cost, and explicit unavailable metrics. Logical
+event bytes are not presented as network traffic, and end-to-end processed delivery
+delay is not presented as pure mailbox lag. The low-resource run retains its execution
+rows for Admin inspection unless `--cleanup` is requested.
 
 ## Verify through Django admin
 

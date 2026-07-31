@@ -647,10 +647,17 @@ The outer Django task is the durability and retry boundary:
   task writes a schema-v2 compatibility snapshot of the actor's retained bounded state
   to `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
   Individual producer envelopes and retained actor nodes, edges, events, and bytes are
-  bounded. Actor ingress diagnostics report actor-side rejection counts and accepted
-  events marked truncated; a producer-side failure before actor submission cannot
-  appear in those counters. The aggregate Ray mailbox, snapshot-to-preparer drain, and
-  transient snapshot materialization are not yet governed by the later
+  bounded. Actor ingress diagnostics report actor-side rejection counts, accepted
+  events marked truncated, and a versioned fixed-shape cost block. That block uses
+  saturating counters for actor-received logical calls/bytes, calls decoded under the
+  exact run fence by fixed event kind, end-to-end processed delivery delay, ingest
+  handler wall/process CPU
+  time, and snapshot-build wall/process CPU time through the retained snapshot. It
+  contains no application payloads or variable-cardinality producer labels. A
+  producer-side failure before actor submission cannot appear in those counters, and
+  processed delivery delay includes transport, scheduling, queueing, and clock effects
+  rather than isolating mailbox lag. The aggregate Ray mailbox,
+  snapshot-to-preparer drain, and transient snapshot materialization are not yet governed by the later
   admission/backpressure contract. Terminal-only and disabled modes bypass that live
   coordinator, event codec, actor, and snapshot path while leaving the durable
   outer-task boundary intact. Terminal-only still makes its one bounded best-effort
