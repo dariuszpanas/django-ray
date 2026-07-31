@@ -18,6 +18,7 @@ import locustfile
 ROOT = Path(__file__).parents[2]
 LOADTEST_MAKEFILE = ROOT / "mk" / "loadtest.mk"
 TESTPROJECT_README = ROOT / "testproject" / "README.md"
+WORKFLOWS_DOC = ROOT / "docs" / "workflows.md"
 
 
 class _ConcreteAuthenticatedTaskUser(locustfile.AuthenticatedTaskUser):
@@ -651,11 +652,33 @@ def test_loadtest_defaults_to_the_explicit_low_resource_demo() -> None:
     assert "LOADTEST_USERS ?= 1" in makefile
     assert "LOADTEST_SPAWN_RATE ?= 1" in makefile
     assert "LOADTEST_CLASSES ?= ObservabilityDemoUser" in makefile
+    stop_timeout_line = next(
+        line for line in makefile.splitlines() if line.startswith("LOADTEST_STOP_TIMEOUT ?=")
+    )
+    stop_timeout_seconds = int(stop_timeout_line.rsplit(maxsplit=1)[1])
+    assert stop_timeout_seconds >= 150
     assert "$(LOADTEST_CLASSES)" in interactive
     assert "-u $(LOADTEST_USERS)" in interactive
     assert "-r $(LOADTEST_SPAWN_RATE)" in interactive
     assert "$(LOADTEST_CLASSES)" in headless
-    assert "--headless -u 1 -r 1 -t 300s ObservabilityDemoUser" in demo
+    assert "--headless -u 1 -r 1 -t 300s" in demo
+    assert demo.strip().endswith("ObservabilityDemoUser")
+    for recipe in (interactive, demo, headless):
+        assert "--stop-timeout $(LOADTEST_STOP_TIMEOUT)" in recipe
+
+
+def test_workflow_showcase_direct_command_drains_the_active_scenario() -> None:
+    workflows = WORKFLOWS_DOC.read_text(encoding="utf-8")
+    showcase_section = workflows.split(
+        "To keep that successful visual workload moving slowly",
+        maxsplit=1,
+    )[1].split(
+        "Omitting `reporting_policy`",
+        maxsplit=1,
+    )[0]
+
+    assert "--stop-timeout 150 WorkflowShowcaseUser" in showcase_section
+    assert "150-second graceful-stop window" in showcase_section
 
 
 def test_powershell_loadtest_example_clears_plaintext_and_encoded_token() -> None:

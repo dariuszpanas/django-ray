@@ -368,6 +368,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The authenticated low-resource Locust demo now grants its active scenario a
+  bounded graceful-stop window after the five-minute scheduling period. The
+  window exceeds the longest scenario polling deadline, preventing a final
+  enqueued task or workflow-summary check from being silently abandoned while
+  the run still exits successfully.
 - Live-cluster fault scenarios now keep one visible serial CI job and one disposable Ray
   cluster while executing in fresh pytest processes with individual hard deadlines,
   diagnostic thread dumps, and explicit node-ID timing markers. A bounded host-side

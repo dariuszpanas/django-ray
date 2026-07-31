@@ -165,7 +165,10 @@ must report `DISABLED` without fabricating a summary. The demo stops instead of 
 to another task when any of those contracts is missing or malformed.
 
 Load the current Kubernetes secret into the Locust process without printing it, run the five-minute
-one-user demo, and remove the shell variable afterwards.
+one-user demo, and remove the shell variable afterwards. At five minutes Locust stops scheduling
+new scenarios, then waits for at most 150 additional seconds for the active scenario's bounded
+terminal and workflow-summary validation. This keeps the reported run from silently abandoning a
+task that was already enqueued.
 
 ### POSIX
 
@@ -204,7 +207,8 @@ finally {
 For an interactive Locust session, use `make loadtest` and open
 [localhost:8089](http://localhost:8089). The target explicitly selects
 `ObservabilityDemoUser`, prefills one user at one user per second, and does not silently mix in
-capacity, burst, or stress scenarios.
+capacity, burst, or stress scenarios. Stopping the interactive run also grants the active scenario
+the same bounded 150-second drain window.
 
 Follow every worker while the demo runs:
 
