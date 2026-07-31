@@ -187,6 +187,9 @@ patches:
 
   - patch: |-
       - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: replace
         path: /spec/template/spec/containers/0/env
         value:
           - name: RAY_ADDRESS
@@ -230,6 +233,15 @@ patches:
       - op: replace
         path: /spec/headGroupSpec/template/spec/containers/0/env/4/value
         value: http://grafana.localhost:30080
+      - op: replace
+        path: /spec/workerGroupSpecs/0/replicas
+        value: 4
+      - op: replace
+        path: /spec/workerGroupSpecs/0/minReplicas
+        value: 4
+      - op: replace
+        path: /spec/workerGroupSpecs/0/maxReplicas
+        value: 4
       - op: replace
         path: /spec/workerGroupSpecs/0/rayStartParams/num-cpus
         value: "3"

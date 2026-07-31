@@ -141,9 +141,11 @@ needs investigation.
 
 The guarded local KubeRay stack exposes the application on
 [localhost:30080](http://localhost:30080) and includes consumers for the default and priority
-queues, a synchronous worker, and an ML worker. The tracked `ObservabilityDemoUser` submits only
-one task at a time, waits for its terminal result, pauses for two to four seconds, and then moves to
-the next task family. One cycle covers:
+queues, a synchronous worker, and an ML worker. Its direct exploratory profile uses one
+default/priority task manager and two fixed two-CPU Ray workers; the heavier Kong profile is for
+capacity and backlog exercises. The tracked `ObservabilityDemoUser` submits only one task at a time,
+waits for its terminal result, pauses for two to four seconds, and then moves to the next task family.
+One cycle covers:
 
 - basic and deliberately slow default-queue tasks;
 - a high-priority task;
@@ -212,17 +214,21 @@ For an interactive Locust session, use `make loadtest` and open
 capacity, burst, or stress scenarios. Stopping the interactive run also grants the active scenario
 the same bounded 150-second drain window.
 
-Follow the Django task-manager workers while the demo runs:
+Follow the Django task managers that claim durable rows and submit work:
 
 ```bash
 kubectl --context docker-desktop -n django-ray logs -l app=django-ray,component=worker -c django-ray-worker --prefix --tail=0 --follow --max-log-requests=8
 ```
 
-Ray execution logs are separate because the KubeRay pods use different labels and containers:
+Follow the Ray execution processes separately:
 
 ```bash
+kubectl --context docker-desktop -n django-ray logs -l app=ray,component=head -c ray-head --prefix --tail=0 --follow
 kubectl --context docker-desktop -n django-ray logs -l app=ray,component=worker -c ray-worker --prefix --tail=0 --follow --max-log-requests=8
 ```
+
+An unqualified `component=worker` selector mixes both families and makes it
+harder to tell task claiming from Ray execution.
 
 The demo neither scales nor stops the Kubernetes stack, and it retains the completed task rows for
 Admin inspection. Use the explicit deployment teardown only after the exploratory test window is

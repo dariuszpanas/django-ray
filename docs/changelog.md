@@ -293,6 +293,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The direct local KubeRay exploratory profile now keeps one default/priority
+  task manager and two fixed Ray workers while retaining dedicated sync and ML
+  consumers, monitoring, encrypted RuntimeEnv coverage, and the complete
+  guarded workflow surface. Its rendered steady state drops from 13 to 10
+  running workload pods, excluding the completed setup Job, from 5.3 to 3.2
+  requested CPUs, and from 7,104 to 4,800 MiB requested memory. The heavier
+  Kong profile now explicitly restores two default task managers and four Ray
+  workers, and local log guidance separates Django task managers from Ray
+  execution processes.
 - Manual TestPyPI rehearsals now validate the still-`Unreleased` candidate form
   without weakening production tag validation. Dispatches require a canonical full
   commit SHA and fail before dependency installation or build unless the input,

@@ -1451,7 +1451,7 @@ def test_preserved_secret_rejects_runtime_env_selector_injection(
         gate._secret_token()
 
 
-def test_real_kuberay_overlay_pins_exact_static_ray_topology(tmp_path: Path) -> None:
+def test_real_kuberay_overlay_pins_exact_lean_ray_topology(tmp_path: Path) -> None:
     kubectl = shutil.which("kubectl")
     if kubectl is None:
         pytest.skip("kubectl is required to render the KubeRay overlay")
@@ -1473,7 +1473,7 @@ def test_real_kuberay_overlay_pins_exact_static_ray_topology(tmp_path: Path) -> 
         if resource.get("kind") == "RayCluster"
     )
 
-    assert expected_ray_topology(ray_cluster) == (1, 4)
+    assert expected_ray_topology(ray_cluster) == (1, 2)
 
     ray_cluster["spec"]["workerGroupSpecs"][0]["minReplicas"] = 3
     with pytest.raises(ValueError, match="must pin minReplicas"):

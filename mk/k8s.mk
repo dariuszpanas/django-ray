@@ -3,8 +3,9 @@
 
 .PHONY: k8s-build k8s-deploy k8s-deploy-local k8s-deploy-tls k8s-delete k8s-status k8s-reset k8s-urls k8s-urls-kong
 .PHONY: k8s-check-prometheus-targets k8s-final-gate-preflight k8s-final-gate
-.PHONY: k8s-install-kuberay k8s-uninstall-kuberay k8s-kind-load k8s-deploy-kuberay-kind k8s-delete-kuberay-kind
-.PHONY: k8s-install-kong-local k8s-deploy-kong-local
+.PHONY: k8s-install-kuberay k8s-uninstall-kuberay k8s-kind-load k8s-prepare-kuberay-kind k8s-delete-local-raycluster k8s-deploy-kuberay-kind k8s-delete-kuberay-kind
+.PHONY: k8s-install-kong-local k8s-uninstall-kong-local k8s-deploy-kong-local
+.PHONY: k8s-logs k8s-logs-web k8s-logs-worker k8s-logs-ray k8s-logs-ray-head k8s-logs-ray-workers
 
 KIND_CLUSTER_NAME ?= kind
 K8S_URL_SCHEME ?= http
@@ -102,15 +103,32 @@ k8s-kind-load:
 	-@kind load docker-image django-ray-worker:latest --name $(KIND_CLUSTER_NAME)
 	@echo "If 'kind' is unavailable, these load steps can be ignored (Docker Desktop uses local images directly)."
 
+# Shared non-applying prerequisites for both local KubeRay capacity profiles.
+k8s-prepare-kuberay-kind: k8s-build k8s-kind-load k8s-install-kuberay
+
+# Replace the package-owned local RayCluster instead of trusting an in-place
+# profile edit to recreate worker pods or the generated head Service.
+k8s-delete-local-raycluster:
+	kubectl delete raycluster/ray -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=240s
+	kubectl delete service/ray-head-svc -n django-ray --ignore-not-found --wait=true
+
 # Deploy using KubeRay operator on kind
-k8s-deploy-kuberay-kind: k8s-build k8s-kind-load k8s-install-kuberay
+k8s-deploy-kuberay-kind: k8s-prepare-kuberay-kind
+	$(MAKE) --no-print-directory k8s-uninstall-kong-local
+	$(MAKE) --no-print-directory k8s-delete-local-raycluster
 	kubectl apply -k k8s/overlays/kuberay-kind
 	@echo "Waiting for deployments and Ray pods..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
 	kubectl wait --for=condition=available deployment/django-web -n django-ray --timeout=180s || true
 	kubectl wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s || true
-	kubectl wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s || true
+	kubectl wait --for=create service/ray-head-svc -n django-ray --timeout=240s
+	kubectl wait --for=create pod -l app=ray,component=head -n django-ray --timeout=240s
+	kubectl wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s
+	kubectl wait --for=create pod -l app=ray,component=worker -n django-ray --timeout=240s
+	kubectl wait --for=jsonpath='{.status.desiredWorkerReplicas}'=2 raycluster/ray -n django-ray --timeout=240s
+	kubectl wait --for=jsonpath='{.status.readyWorkerReplicas}'=2 raycluster/ray -n django-ray --timeout=240s
+	kubectl wait --for=jsonpath='{.status.availableWorkerReplicas}'=2 raycluster/ray -n django-ray --timeout=240s
+	kubectl wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s
 	@echo ""
 	@echo "KubeRay deployment complete!"
 	@$(MAKE) --no-print-directory k8s-urls
@@ -128,11 +146,24 @@ k8s-install-kong-local:
 	kubectl rollout status deployment/kong-controller -n kong --timeout=180s
 	kubectl rollout status deployment/kong-gateway -n kong --timeout=180s
 
+# Remove only the package-owned local Kong release and its application routes.
+k8s-uninstall-kong-local:
+	helm uninstall kong --namespace kong --ignore-not-found --wait --timeout 180s
+	kubectl delete ingress/grafana-ingress ingress/prometheus-ingress ingress/ray-dashboard-ingress -n django-ray --ignore-not-found --wait=true
+
 # Deploy KubeRay plus Kong host-based local routes
-k8s-deploy-kong-local: k8s-deploy-kuberay-kind k8s-install-kong-local
+k8s-deploy-kong-local: k8s-prepare-kuberay-kind k8s-install-kong-local
+	$(MAKE) --no-print-directory k8s-delete-local-raycluster
 	kubectl apply -k k8s/overlays/kong-local
-	kubectl delete pod -l app=ray,component=head -n django-ray --ignore-not-found
+	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s
+	kubectl wait --for=create service/ray-head-svc -n django-ray --timeout=240s
+	kubectl wait --for=create pod -l app=ray,component=head -n django-ray --timeout=240s
 	kubectl wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s
+	kubectl wait --for=create pod -l app=ray,component=worker -n django-ray --timeout=240s
+	kubectl wait --for=jsonpath='{.status.desiredWorkerReplicas}'=4 raycluster/ray -n django-ray --timeout=240s
+	kubectl wait --for=jsonpath='{.status.readyWorkerReplicas}'=4 raycluster/ray -n django-ray --timeout=240s
+	kubectl wait --for=jsonpath='{.status.availableWorkerReplicas}'=4 raycluster/ray -n django-ray --timeout=240s
+	kubectl wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s
 	kubectl rollout restart deployment/django-web -n django-ray
 	kubectl rollout restart deployment/django-ray-worker -n django-ray
 	-kubectl rollout restart deployment/django-ray-worker-sync -n django-ray
@@ -231,18 +262,26 @@ k8s-reset:
 	@echo "Redeploying..."
 	$(MAKE) k8s-deploy
 
-# View logs
+# View Django application logs
 k8s-logs:
-	kubectl logs -n django-ray -l app=django-ray --tail=50 -f
+	kubectl logs -n django-ray -l app=django-ray --all-containers=true --prefix --tail=50 -f --max-log-requests=16
 
 k8s-logs-web:
-	kubectl logs -n django-ray -l app=django-ray,component=web --tail=50 -f
+	kubectl logs -n django-ray -l app=django-ray,component=web -c django-web --prefix --tail=50 -f
 
+# Django task managers claim durable rows and submit work to Ray.
 k8s-logs-worker:
-	kubectl logs -n django-ray -l app=django-ray,component=worker --tail=50 -f
+	kubectl logs -n django-ray -l app=django-ray,component=worker -c django-ray-worker --prefix --tail=50 -f --max-log-requests=8
 
+# Follow every Ray container, including the one-shot dashboard importer.
 k8s-logs-ray:
-	kubectl logs -n django-ray -l app=ray --tail=50 -f
+	kubectl logs -n django-ray -l app=ray --all-containers=true --prefix --tail=50 -f --max-log-requests=16
+
+k8s-logs-ray-head:
+	kubectl logs -n django-ray -l app=ray,component=head -c ray-head --prefix --tail=50 -f
+
+k8s-logs-ray-workers:
+	kubectl logs -n django-ray -l app=ray,component=worker -c ray-worker --prefix --tail=50 -f --max-log-requests=8
 
 # Restart deployments
 k8s-restart:

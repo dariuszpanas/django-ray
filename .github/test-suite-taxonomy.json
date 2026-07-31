@@ -154,6 +154,7 @@
           "tests/unit/test_compiled_graph_lifecycle.py",
           "tests/unit/test_compiled_graph_probe.py",
           "tests/unit/test_kuberay_compiled_graph_pilot.py",
+          "tests/unit/test_kuberay_resource_profiles.py",
           "tests/unit/test_kubernetes_web_probes.py",
           "tests/unit/test_local_kuberay_gate.py"
         ]
@@ -467,10 +468,11 @@
       "id": "kuberay-overlay-render",
       "owner": "Guarded local KubeRay overlay policy",
       "paths": [
+        "tests/unit/test_kuberay_resource_profiles.py",
         "tests/unit/test_local_kuberay_gate.py"
       ],
-      "reason": "Two overlay-policy tests copy and render the same immutable Kustomize overlay independently.",
-      "review": "Share one module-scoped raw render and deep-copy parsed data while retaining separate source-binding and topology assertions."
+      "reason": "The gate source-binding test and the local capacity-profile contract render the direct Kustomize overlay independently; the profile contract also renders the heavier Kong overlay.",
+      "review": "Share one raw direct-overlay render only if it preserves the gate's temporary source-tag rewrite and the profile test's distinct direct-versus-Kong assertions."
     }
   ]
 }
