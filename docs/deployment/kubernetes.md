@@ -169,6 +169,21 @@ For source-bound validation before merging deployment-sensitive work, use the gu
 renders unique immutable application tags without editing this overlay, and records the live API,
 probe, image-ID, RuntimeEnv, and Prometheus evidence.
 
+The direct `kuberay-kind` overlay is the constrained-laptop exploratory
+profile: one default/priority task manager, one sync task manager, one ML task
+manager, and two fixed two-CPU Ray workers. The optional `kong-local` overlay
+explicitly restores two default task managers and four fixed three-CPU Ray
+workers, alongside its larger web and PostgreSQL settings, for backlog and
+capacity work.
+
+Rendered steady-state totals exclude the completed setup Job, the KubeRay
+operator, the Kong controller/gateway, and Kubernetes/Docker overhead:
+
+| Profile | `django-ray` pods | CPU requests | Memory requests | CPU limits | Memory limits |
+|---|---:|---:|---:|---:|---:|
+| Direct `kuberay-kind` | 10 | 3.2 | 4,800 MiB | 9.3 | 11,648 MiB |
+| Heavier `kong-local` | 16 | 10.1 | 16,832 MiB | 26.8 | 37,760 MiB |
+
 ### 1. Install Operator + Deploy
 
 ```bash
@@ -439,18 +454,19 @@ See [TLS Configuration](tls.md) for details.
 ### View Logs
 
 ```bash
-# All components
-kubectl logs -n django-ray -l app=django-ray -f
-
 # Django web
-kubectl logs -n django-ray -l app=django-ray,component=web -f
+kubectl logs -n django-ray -l app=django-ray,component=web -c django-web --prefix -f
 
-# Worker
-kubectl logs -n django-ray -l app=django-ray,component=worker -f
+# Django task managers claim durable rows and submit cluster-mode work
+kubectl logs -n django-ray -l app=django-ray,component=worker -c django-ray-worker --prefix -f --max-log-requests=8
 
-# Ray
-kubectl logs -n django-ray -l app=ray -f
+# Ray execution and coordination processes
+kubectl logs -n django-ray -l app=ray,component=head -c ray-head --prefix -f
+kubectl logs -n django-ray -l app=ray,component=worker -c ray-worker --prefix -f --max-log-requests=8
 ```
+
+Do not use `component=worker` without the `app` label: both Django task
+managers and Ray execution pods use that component name.
 
 ### Check Task Stats
 
@@ -532,13 +548,17 @@ kubectl exec -n django-ray deployment/django-web -- \
 ### Ray Connection Issues
 
 ```bash
-# Check Ray head
-kubectl logs -n django-ray deployment/ray-head
+# Check the KubeRay-managed head
+kubectl logs -n django-ray -l app=ray,component=head -c ray-head --prefix
 
-# Test Ray connection from worker
-kubectl exec -n django-ray deployment/django-ray-worker -- \
+# Test Ray connection from a Django task manager
+kubectl exec -n django-ray deployment/django-ray-worker -c django-ray-worker -- \
   python -c "import ray; ray.init('ray://ray-head-svc:10001'); print(ray.cluster_resources())"
 ```
+
+The older `Deployment/ray-head` troubleshooting form applies only to the
+legacy static manifests; the KubeRay path owns the head through
+`RayCluster/ray`.
 
 ## Production Recommendations
 

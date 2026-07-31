@@ -107,6 +107,30 @@ production key isolation: the example Ray pods still import the shared Django si
 secret used by the fallback. Use a dedicated key delivered only to Django application
 processes when separation from read-only database access is required.
 
+### Local capacity profiles
+
+The direct `kuberay-kind` overlay is the laptop-oriented exploratory baseline. It
+runs one default task manager for `default,high-priority,low-priority`, one
+synchronous task manager, one ML task manager, and two fixed Ray workers. Each
+Ray worker still advertises two CPUs, so the workers alone can schedule the
+testproject's default 12-leaf complex workflow, whose leaves request three CPUs
+in total. The Ray head, web, PostgreSQL, Prometheus, and Grafana retain their
+existing profiles.
+
+`kong-local` is the explicit heavier backlog/capacity profile. It restores two
+default task managers and four fixed Ray workers, then applies its larger web,
+PostgreSQL, and Ray resource settings. It is not the low-resource choice for
+ordinary Admin, dashboard, or one-user Locust exploration.
+
+The following rendered steady-state totals exclude the completed setup Job,
+the KubeRay operator, the Kong controller/gateway, and Docker
+Desktop/Kubernetes overhead:
+
+| Profile | Pods in `django-ray` | CPU requests | Memory requests | CPU limits | Memory limits |
+|---|---:|---:|---:|---:|---:|
+| Direct `kuberay-kind` | 10 | 3.2 | 4,800 MiB | 9.3 | 11,648 MiB |
+| Heavier `kong-local` | 16 | 10.1 | 16,832 MiB | 26.8 | 37,760 MiB |
+
 ```bash
 # Build app images, load them into kind, install operator, deploy KubeRay overlay.
 # Ray head/workers use the upstream image; RuntimeEnv supplies project code.
@@ -130,8 +154,10 @@ make k8s-deploy-kuberay-kind KIND_CLUSTER_NAME=my-kind
 If production will use Kong, you can validate the same ingress class locally with
 KubeRay plus Kong Ingress Controller.
 
-This path requires `helm`; the one-command path also runs the KubeRay kind target,
-so it expects `kind` unless your environment provides an equivalent image-loading path.
+This path requires `helm`; the one-command path shares the KubeRay build,
+image-load, and operator prerequisites but applies only the `kong-local`
+workload render. It expects `kind` unless your environment provides an
+equivalent image-loading path.
 
 ```bash
 # One command path
@@ -170,7 +196,7 @@ This overlay:
     `maintenance_work_mem=256MB`, `wal_buffers=16MB`, `max_wal_size=2GB`
 - increases the local web and Ray capacity profile toward the older stress-test setup:
   - `django-web` runs `4` replicas and uses `8` Gunicorn workers
-  - Ray worker pods advertise `3` CPUs each instead of `2`
+  - `4` fixed Ray worker pods advertise `3` CPUs each instead of `2`
   - Ray head gets a larger memory budget for scheduling and dashboard stability
 - uses a split local web probe model aimed at overloaded containers:
   - `startupProbe`: `GET /api/livez` to confirm Django/Gunicorn actually comes up
@@ -264,14 +290,19 @@ Notes:
 ### 4. View Logs
 
 ```bash
-# All django-ray components
-kubectl logs -n django-ray -l app=django-ray -f
+# Django web and task-manager processes
+kubectl logs -n django-ray -l app=django-ray,component=web -c django-web --prefix -f
+kubectl logs -n django-ray -l app=django-ray,component=worker -c django-ray-worker --prefix -f --max-log-requests=8
 
-# Specific components
-kubectl logs -n django-ray -l component=web -f
-kubectl logs -n django-ray -l component=worker -f
-kubectl logs -n django-ray -l app=ray -f
+# Ray execution processes
+kubectl logs -n django-ray -l app=ray,component=head -c ray-head --prefix -f
+kubectl logs -n django-ray -l app=ray,component=worker -c ray-worker --prefix -f --max-log-requests=8
 ```
+
+The Django task managers claim durable task rows and submit cluster-mode work;
+the Ray head and Ray workers execute and coordinate that submitted work. Do not
+use the unqualified `component=worker` selector because it matches both worker
+families.
 
 ### 5. Check Status
 

@@ -110,9 +110,9 @@ spec:
 
   workerGroupSpecs:
     - groupName: worker-group
-      replicas: 4
-      minReplicas: 4
-      maxReplicas: 4
+      replicas: 2
+      minReplicas: 2
+      maxReplicas: 2
       rayStartParams:
         num-cpus: "2"
         metrics-export-port: "8080"

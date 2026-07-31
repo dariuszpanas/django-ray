@@ -48,6 +48,23 @@ specific reason it was not run. The detailed evidence still binds the run to the
 rather than relying on a commit SHA that changes when only the commit message is amended. Never copy
 a token, Secret payload, unbounded log, or browser credential into history.
 
+## Guarded local capacity
+
+The gate renders the direct `kuberay-kind` exploratory profile: one default
+task-manager replica consuming `default,high-priority,low-priority`, one sync
+replica, one ML replica, one Ray head, and two fixed Ray workers. The rendered
+steady state is 10 running workload pods with 3.2 CPU and 4,800 MiB requested
+and 9.3 CPU and 11,648 MiB limited. These totals exclude the completed setup
+Job, the cluster-wide KubeRay operator, and Docker Desktop/Kubernetes overhead.
+
+Preflight derives the application replica contracts and complete static Ray
+topology from that source-bound render. The full gate then requires the live
+Deployments, ReplicaSets, application pods, RayCluster, Ray pods, and
+Prometheus targets to converge to those exact counts; it does not scale the
+profile independently. The optional `kong-local` overlay is deliberately
+outside this gate and explicitly restores two default task managers and four
+Ray workers for its heavier backlog/capacity role.
+
 ## Prerequisites
 
 - A clean checkout whose committed tree is the exact source under test. Untracked files also fail

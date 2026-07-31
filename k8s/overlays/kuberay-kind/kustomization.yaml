@@ -108,11 +108,12 @@ patches:
       kind: ConfigMap
       name: django-ray-config
 
-  # Use multiple Django workers to better saturate a multi-node local cluster.
+  # Keep one default/priority task manager for the bounded local exploratory
+  # profile. The heavier Kong overlay explicitly restores two replicas.
   - patch: |-
       - op: replace
         path: /spec/replicas
-        value: 2
+        value: 1
     target:
       kind: Deployment
       name: django-ray-worker
