@@ -183,7 +183,7 @@ Primary execution record for one task attempt chain.
 | `input_reference` | Optional durable pointer to a versioned combined input envelope |
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
-| `progress_data` | Current schema-v1/v2 compatibility snapshot of retained actor state; actor-side rejection/truncation diagnostics remain in the envelope |
+| `progress_data` | Current schema-v1/v2 compatibility snapshot of retained actor state; actor-side rejection/truncation and fixed-shape, secret-free cost diagnostics remain in the envelope |
 | `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence, one accepted terminal-only summary, or an accepted default-off terminal-pilot publication |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |

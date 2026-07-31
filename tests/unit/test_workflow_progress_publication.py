@@ -57,6 +57,80 @@ def _accepted_by_kind() -> dict[str, int]:
     }
 
 
+def _ingress_cost(snapshot: dict[str, Any]) -> dict[str, Any]:
+    decoded_by_kind = dict(snapshot["ingress"]["accepted_by_kind"])
+    decoded_by_kind["initialized"] = 0
+    decoded_calls = sum(decoded_by_kind.values())
+    return {
+        "schema_version": 1,
+        "saturated": False,
+        "initialization": {
+            "wire_bytes": 128,
+            "handler_wall_ns": 20,
+            "handler_cpu_ns": 10,
+        },
+        "ingest": {
+            "calls_received": snapshot["ingress"]["accepted"] - 1,
+            "wire_bytes_received": 1_024,
+            "decoded_calls": decoded_calls,
+            "post_disable_calls": 0,
+            "decoded_by_kind": decoded_by_kind,
+            "handler_wall_ns_total": 160,
+            "handler_wall_ns_max": 20,
+            "handler_cpu_ns_total": 80,
+            "handler_cpu_ns_max": 10,
+        },
+        "delivery_delay": {
+            "samples": decoded_calls,
+            "total_us": 400,
+            "max_us": 50,
+            "negative_clock_samples": 0,
+        },
+        "snapshot": {
+            "calls": 1,
+            "build_wall_ns_total": 100,
+            "build_wall_ns_max": 100,
+            "build_cpu_ns_total": 50,
+            "build_cpu_ns_max": 50,
+        },
+    }
+
+
+def _erase_decoded_cost(ingress: dict[str, Any]) -> None:
+    cost = ingress["cost"]
+    cost["ingest"]["decoded_calls"] = 0
+    cost["ingest"]["decoded_by_kind"] = dict.fromkeys(
+        cost["ingest"]["decoded_by_kind"],
+        0,
+    )
+    cost["delivery_delay"].update(
+        {
+            "samples": 0,
+            "total_us": 0,
+            "max_us": 0,
+            "negative_clock_samples": 0,
+        }
+    )
+
+
+def _saturate_unrelated_and_erase_decoded_cost(
+    ingress: dict[str, Any],
+) -> None:
+    _erase_decoded_cost(ingress)
+    ingress["cost"]["saturated"] = True
+    ingress["cost"]["initialization"]["handler_wall_ns"] = (1 << 63) - 1
+
+
+def _make_zero_delivery_samples_with_nonzero_timing(
+    ingress: dict[str, Any],
+) -> None:
+    delivery = ingress["cost"]["delivery_delay"]
+    delivery["samples"] = 0
+    delivery["negative_clock_samples"] = ingress["cost"]["ingest"]["decoded_calls"]
+    delivery["total_us"] = 1
+    delivery["max_us"] = 1
+
+
 def _snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
     accepted_by_kind = _accepted_by_kind()
     accepted = sum(accepted_by_kind.values())
@@ -311,6 +385,220 @@ def test_terminal_adapter_splits_topology_detail_and_groups_events() -> None:
     assert prepared.summary["plan_fingerprint"] == FINGERPRINT
     assert prepared.summary["limits_profile"] == "schema-v3-pilot-v1"
     assert prepared.summary["summary_revision"] == 1
+
+
+def test_terminal_adapter_accepts_historical_ingress_without_cost() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+
+    assert "cost" not in snapshot["ingress"]
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+
+    assert prepared.summary["state"] == "SUCCEEDED"
+
+
+def test_terminal_adapter_accepts_strict_optional_ingress_cost() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    snapshot["ingress"]["cost"] = _ingress_cost(snapshot)
+
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+
+    assert prepared.summary["state"] == "SUCCEEDED"
+
+
+def test_terminal_adapter_accepts_consistent_saturated_ingress_cost() -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    snapshot["ingress"]["cost"] = _ingress_cost(snapshot)
+    snapshot["ingress"]["cost"]["saturated"] = True
+    snapshot["ingress"]["cost"]["initialization"]["handler_wall_ns"] = (1 << 63) - 1
+
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+
+    assert prepared.summary["state"] == "SUCCEEDED"
+
+
+def test_terminal_adapter_applies_active_counter_and_wire_limits_to_cost() -> None:
+    identity = _identity()
+    limits = replace(
+        publication.WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
+        identity_max_integer=1_024,
+        event_wire_max_bytes=128,
+    )
+    snapshot = _snapshot(identity)
+    snapshot["ingress"]["cost"] = _ingress_cost(snapshot)
+
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+        limits=limits,
+    )
+    assert prepared.summary["state"] == "SUCCEEDED"
+
+    snapshot["ingress"]["cost"]["initialization"]["handler_wall_ns"] = 1_025
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+            limits=limits,
+        )
+
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.INVALID_SNAPSHOT
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda ingress: ingress.update({"cost": []}),
+            id="malformed-cost",
+        ),
+        pytest.param(
+            lambda ingress: ingress.update({"cost": None}),
+            id="explicit-null-cost",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"].pop("snapshot"),
+            id="missing-cost-field",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["initialization"].update({"handler_wall_ns": -1}),
+            id="negative-counter",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["initialization"].update(
+                {
+                    "wire_bytes": (
+                        publication.WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.event_wire_max_bytes
+                        + 1
+                    )
+                }
+            ),
+            id="initialization-wire-exceeds-event-bound",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"].update({"unknown": 0}),
+            id="unknown-cost-field",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["ingest"].update(
+                {"calls_received": ingress["cost"]["ingest"]["calls_received"] + 1}
+            ),
+            id="calls-received-inconsistent",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["ingest"].update(
+                {"decoded_calls": ingress["cost"]["ingest"]["decoded_calls"] + 1}
+            ),
+            id="decoded-calls-inconsistent",
+        ),
+        pytest.param(
+            _erase_decoded_cost,
+            id="accepted-calls-erased-from-decoded-evidence",
+        ),
+        pytest.param(
+            _saturate_unrelated_and_erase_decoded_cost,
+            id="unrelated-saturation-does-not-bypass-arithmetic",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["ingest"].update(
+                {"post_disable_calls": (ingress["cost"]["ingest"]["calls_received"] + 1)}
+            ),
+            id="post-disable-exceeds-calls",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["ingest"].update({"wire_bytes_received": 0}),
+            id="received-calls-without-wire-bytes",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["ingest"].update(
+                {
+                    "wire_bytes_received": (
+                        ingress["cost"]["ingest"]["decoded_calls"]
+                        * publication.WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.event_wire_max_bytes
+                        + 1
+                    )
+                }
+            ),
+            id="received-wire-exceeds-per-call-bound",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["ingest"].update({"handler_wall_ns_total": 161}),
+            id="handler-total-exceeds-call-count-times-maximum",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["delivery_delay"].update(
+                {"samples": ingress["cost"]["delivery_delay"]["samples"] - 1}
+            ),
+            id="delivery-samples-inconsistent",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["snapshot"].update(
+                {"build_wall_ns_max": ingress["cost"]["snapshot"]["build_wall_ns_total"] + 1}
+            ),
+            id="maximum-exceeds-total",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"]["snapshot"].update({"build_wall_ns_total": 101}),
+            id="single-snapshot-total-differs-from-maximum",
+        ),
+        pytest.param(
+            _make_zero_delivery_samples_with_nonzero_timing,
+            id="zero-sample-delivery-has-nonzero-timing",
+        ),
+        pytest.param(
+            lambda ingress: ingress["cost"].update({"saturated": True}),
+            id="saturated-without-capped-counter",
+        ),
+    ],
+)
+def test_terminal_adapter_rejects_invalid_optional_ingress_cost(mutate) -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    snapshot["ingress"]["cost"] = _ingress_cost(snapshot)
+    mutate(snapshot["ingress"])
+
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+        )
+
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.INVALID_SNAPSHOT
 
 
 def test_terminal_adapter_preserves_a_mid_graph_failure() -> None:

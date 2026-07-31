@@ -2590,9 +2590,13 @@ def test_workflow_executes_on_real_ray() -> None:
 
 @pytest.mark.django_db
 @pytest.mark.real_ray
-def test_real_ray_workflow_can_disable_node_reporting(settings) -> None:
+def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
+    monkeypatch,
+    settings,
+) -> None:
     import ray
 
+    import django_ray.workflows as workflow_module
     from django_ray.models import RayTaskExecution, TaskState, WorkflowProgressRunStorage
 
     settings.DJANGO_RAY = {
@@ -2600,32 +2604,58 @@ def test_real_ray_workflow_can_disable_node_reporting(settings) -> None:
         "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     }
 
-    execution = RayTaskExecution.objects.create(
-        task_id="real-ray-disabled-progress",
-        callable_path=f"{__name__}.report_and_increment",
-        state=TaskState.RUNNING,
-        execution_generation=1,
-    )
+    policies = ("terminal_only", "disabled")
+    executions = {
+        policy: RayTaskExecution.objects.create(
+            task_id=f"real-ray-{policy}-progress",
+            callable_path=f"{__name__}.report_and_increment",
+            state=TaskState.RUNNING,
+            execution_generation=1,
+        )
+        for policy in policies
+    }
+    actor_creation_attempts: list[str] = []
+
+    class ForbiddenProgressActor:
+        @staticmethod
+        def remote(*args, **kwargs):
+            del args, kwargs
+            actor_creation_attempts.append("created")
+            raise AssertionError("actor-free reporting policy created a progress actor")
+
     ray.init(ignore_reinit_error=True)
     try:
-        with durable_task_execution(
-            execution.pk,
-            attempt_number=execution.attempt_number,
-            execution_generation=execution.execution_generation,
-        ):
-            result = (
-                step(report_and_increment).with_progress_reporting("disabled").run(5, use_ray=True)
-            )
+        remote_step, remote_collect, _ = workflow_module._get_cached_workflow_remotes()
+        monkeypatch.setattr(
+            workflow_module,
+            "_get_cached_workflow_remotes",
+            lambda: (remote_step, remote_collect, ForbiddenProgressActor),
+        )
+        results = {}
+        for policy, execution in executions.items():
+            with durable_task_execution(
+                execution.pk,
+                attempt_number=execution.attempt_number,
+                execution_generation=execution.execution_generation,
+            ):
+                results[policy] = (
+                    step(report_and_increment).with_progress_reporting(policy).run(5, use_ray=True)
+                )
     finally:
         ray.shutdown()
 
-    execution.refresh_from_db()
-    selection = json.loads(execution.workflow_plan_selection)
-    assert result == (False, 6)
-    assert selection["reporting_policy"] == "disabled"
-    assert execution.progress_data is None
-    assert execution.workflow_progress_summary_json is None
-    assert not WorkflowProgressRunStorage.objects.filter(execution=execution).exists()
+    assert actor_creation_attempts == []
+    assert results == {
+        "terminal_only": (False, 6),
+        "disabled": (False, 6),
+    }
+    for policy, execution in executions.items():
+        execution.refresh_from_db()
+        selection = json.loads(execution.workflow_plan_selection)
+        assert selection["reporting_policy"] == policy
+        assert execution.progress_data is None
+        assert execution.workflow_progress_summary_json is None
+        assert not WorkflowProgressRunStorage.objects.filter(execution=execution).exists()
 
 
 @pytest.mark.real_ray
@@ -2934,6 +2964,116 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         <= WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.combined_max_decoded_bytes
     )
     assert 0 < len(progress["recent_events"]) <= WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS
+    cost = ingress["cost"]
+    assert set(cost) == {
+        "schema_version",
+        "saturated",
+        "initialization",
+        "ingest",
+        "delivery_delay",
+        "snapshot",
+    }
+    assert cost["schema_version"] == 1
+    assert cost["saturated"] is False
+    initialization_cost = cost["initialization"]
+    assert set(initialization_cost) == {
+        "wire_bytes",
+        "handler_wall_ns",
+        "handler_cpu_ns",
+    }
+    assert (
+        0
+        < initialization_cost["wire_bytes"]
+        <= WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.event_wire_max_bytes
+    )
+    assert initialization_cost["handler_wall_ns"] > 0
+    # Windows can account very short process-CPU intervals as zero even though
+    # the monotonic wall timer observes the constructor work.
+    assert initialization_cost["handler_cpu_ns"] >= 0
+
+    ingest_cost = cost["ingest"]
+    assert set(ingest_cost) == {
+        "calls_received",
+        "wire_bytes_received",
+        "decoded_calls",
+        "post_disable_calls",
+        "decoded_by_kind",
+        "handler_wall_ns_total",
+        "handler_wall_ns_max",
+        "handler_cpu_ns_total",
+        "handler_cpu_ns_max",
+    }
+    accepted_ingest_calls = ingress["accepted"] - 1
+    assert ingest_cost["calls_received"] == accepted_ingest_calls
+    assert ingest_cost["decoded_calls"] == accepted_ingest_calls
+    assert ingest_cost["post_disable_calls"] == 0
+    assert (
+        accepted_ingest_calls
+        <= ingest_cost["wire_bytes_received"]
+        <= (accepted_ingest_calls * WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.event_wire_max_bytes)
+    )
+    assert ingest_cost["decoded_by_kind"] == {
+        kind.value: (
+            0
+            if kind is WorkflowProgressEventKind.INITIALIZED
+            else ingress["accepted_by_kind"][kind.value]
+        )
+        for kind in WorkflowProgressEventKind
+    }
+    assert (
+        0
+        < ingest_cost["handler_wall_ns_max"]
+        <= ingest_cost["handler_wall_ns_total"]
+        <= accepted_ingest_calls * ingest_cost["handler_wall_ns_max"]
+    )
+    assert (
+        0
+        <= ingest_cost["handler_cpu_ns_max"]
+        <= ingest_cost["handler_cpu_ns_total"]
+        <= accepted_ingest_calls * ingest_cost["handler_cpu_ns_max"]
+    )
+
+    delivery_cost = cost["delivery_delay"]
+    assert set(delivery_cost) == {
+        "samples",
+        "total_us",
+        "max_us",
+        "negative_clock_samples",
+    }
+    assert delivery_cost["negative_clock_samples"] == 0
+    assert delivery_cost["samples"] == accepted_ingest_calls
+    assert (
+        0
+        < delivery_cost["max_us"]
+        <= delivery_cost["total_us"]
+        <= delivery_cost["samples"] * delivery_cost["max_us"]
+    )
+
+    snapshot_cost = cost["snapshot"]
+    assert set(snapshot_cost) == {
+        "calls",
+        "build_wall_ns_total",
+        "build_wall_ns_max",
+        "build_cpu_ns_total",
+        "build_cpu_ns_max",
+    }
+    assert snapshot_cost["calls"] >= 1
+    assert (
+        0
+        < snapshot_cost["build_wall_ns_max"]
+        <= snapshot_cost["build_wall_ns_total"]
+        <= snapshot_cost["calls"] * snapshot_cost["build_wall_ns_max"]
+    )
+    assert (
+        0
+        <= snapshot_cost["build_cpu_ns_max"]
+        <= snapshot_cost["build_cpu_ns_total"]
+        <= snapshot_cost["calls"] * snapshot_cost["build_cpu_ns_max"]
+    )
+    serialized_cost = json.dumps(cost, sort_keys=True)
+    assert "Preparing bounded fan-out" not in serialized_cost
+    assert "0.0" not in serialized_cost
+    assert "0.1" not in serialized_cost
 
     assert execution.workflow_progress_summary_json is not None
     summary = deserialize_workflow_progress_summary(

@@ -506,6 +506,14 @@ print("DJANGO_RAY_METADATA_PROBE=" + json.dumps(payload, sort_keys=True))
     assert "local ray instance" not in combined_output
 
 
+def test_progress_cost_timestamp_conversion_is_platform_independent() -> None:
+    assert remote_module._event_timestamp_us("1970-01-01T00:00:00Z") == 0
+    assert remote_module._event_timestamp_us("1969-12-31T23:59:59.999999Z") == -1
+    assert (
+        remote_module._event_timestamp_us("9999-12-31T23:59:59.999999Z") > 253_402_300_000_000_000
+    )
+
+
 def test_progress_actor_ingests_bounded_events_and_preserves_terminal_state() -> None:
     actor = _progress_actor()
     events = [
@@ -599,6 +607,18 @@ def test_progress_actor_ingests_bounded_events_and_preserves_terminal_state() ->
     assert snapshot["ingress"]["rejected"] == 0
     assert snapshot["ingress"]["retained_nodes"] == 2
     assert snapshot["ingress"]["retained_edges"] == 1
+    cost = snapshot["ingress"]["cost"]
+    assert cost["schema_version"] == 1
+    assert cost["saturated"] is False
+    assert cost["initialization"]["wire_bytes"] > 0
+    assert cost["ingest"]["calls_received"] == len(events)
+    assert cost["ingest"]["decoded_calls"] == len(events)
+    assert cost["ingest"]["wire_bytes_received"] == sum(map(len, events))
+    assert cost["ingest"]["post_disable_calls"] == 0
+    assert cost["ingest"]["decoded_by_kind"]["failed"] == 1
+    assert cost["delivery_delay"]["samples"] == len(events)
+    assert cost["delivery_delay"]["negative_clock_samples"] == 0
+    assert cost["snapshot"]["calls"] == 1
 
 
 def test_progress_actor_requires_one_canonical_initialization_event() -> None:
@@ -718,6 +738,24 @@ def test_progress_actor_rejects_before_mutation_and_exposes_no_legacy_rpc() -> N
         **_WORKFLOW_RUN_IDENTITY,
         "run_id": "00000000-0000-0000-0000-000000000218",
     }
+    wrong_fence_malformed = json.loads(
+        _progress_wire(
+            WorkflowProgressEventKind.FAILED,
+            {
+                "node_id": "wrong-fence-malformed",
+                "label": "wrong-fence-malformed",
+                "error": "wrong-fence-malformed-secret",
+            },
+            run_identity=wrong_identity,
+        )
+    )
+    wrong_fence_malformed["payload"] = {"invalid": "wrong-fence-payload-secret"}
+    wrong_fence_malformed_wire = json.dumps(
+        wrong_fence_malformed,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
     assert actor.ingest(b'{"secret":"rejected-value"}') is False
     assert (
@@ -734,6 +772,7 @@ def test_progress_actor_rejects_before_mutation_and_exposes_no_legacy_rpc() -> N
         )
         is False
     )
+    assert actor.ingest(wrong_fence_malformed_wire) is False
     assert (
         actor.ingest(
             _progress_wire(
@@ -750,9 +789,9 @@ def test_progress_actor_rejects_before_mutation_and_exposes_no_legacy_rpc() -> N
     assert snapshot["graph"] == baseline["graph"]
     assert snapshot["recent_events"] == baseline["recent_events"]
     assert snapshot["ingress"]["retained_bytes"] == baseline["ingress"]["retained_bytes"]
-    assert snapshot["ingress"]["rejected"] == 3
+    assert snapshot["ingress"]["rejected"] == 4
     assert snapshot["ingress"]["rejected_by_reason"]["protocol_error"] == 1
-    assert snapshot["ingress"]["rejected_by_reason"]["fence_mismatch"] == 1
+    assert snapshot["ingress"]["rejected_by_reason"]["fence_mismatch"] == 2
     assert snapshot["ingress"]["rejected_by_reason"]["unexpected_initialized"] == 1
     assert set(snapshot["ingress"]["rejected_by_reason"]) == {
         "protocol_error",
@@ -764,6 +803,7 @@ def test_progress_actor_rejects_before_mutation_and_exposes_no_legacy_rpc() -> N
     }
     assert "rejected-value" not in json.dumps(snapshot)
     assert "wrong-fence-secret" not in json.dumps(snapshot)
+    assert "wrong-fence-payload-secret" not in json.dumps(snapshot)
     assert {name for name, value in vars(WorkflowProgressActor).items() if callable(value)} == {
         "__init__",
         "ingest",
@@ -956,6 +996,11 @@ def test_progress_actor_counts_protocol_truncation_without_raw_retention() -> No
     assert snapshot["ingress"]["truncated"] == 1
     assert raw_error not in json.dumps(snapshot)
     assert snapshot["graph"]["nodes"][0]["error"] != raw_error
+    cost = snapshot["ingress"]["cost"]
+    assert cost["ingest"]["calls_received"] == 1
+    assert cost["ingest"]["wire_bytes_received"] == len(wire)
+    assert cost["ingest"]["decoded_by_kind"]["failed"] == 1
+    assert raw_error not in json.dumps(cost)
 
 
 def test_progress_actor_ingress_counters_saturate_at_injected_identity_limit() -> None:
@@ -998,6 +1043,16 @@ def test_progress_actor_ingress_counters_saturate_at_injected_identity_limit() -
         == limits.identity_max_integer
     )
     assert ingress["rejected_by_reason"]["protocol_error"] == limits.identity_max_integer
+    cost = ingress["cost"]
+    assert cost["saturated"] is True
+    assert cost["initialization"]["wire_bytes"] == limits.identity_max_integer
+    assert cost["ingest"]["calls_received"] == limits.identity_max_integer
+    assert cost["ingest"]["wire_bytes_received"] == limits.identity_max_integer
+    assert cost["ingest"]["decoded_calls"] == limits.identity_max_integer
+    assert (
+        cost["ingest"]["decoded_by_kind"][WorkflowProgressEventKind.SUBMITTED.value]
+        == limits.identity_max_integer
+    )
 
 
 def test_progress_actor_recent_events_are_a_fixed_ring() -> None:
@@ -1035,4 +1090,143 @@ def test_progress_actor_drains_ingests_after_disable_without_diagnostics() -> No
         )
         is False
     )
-    assert actor.snapshot() == before
+    after = actor.snapshot()
+    assert after["revision"] == before["revision"]
+    assert after["updated_at"] == before["updated_at"]
+    assert after["graph"] == before["graph"]
+    assert after["recent_events"] == before["recent_events"]
+    assert after["ingress"]["accepted"] == before["ingress"]["accepted"]
+    assert after["ingress"]["rejected"] == before["ingress"]["rejected"]
+    assert after["ingress"]["retained_bytes"] == before["ingress"]["retained_bytes"]
+    before_cost = before["ingress"]["cost"]
+    after_cost = after["ingress"]["cost"]
+    assert after_cost["ingest"]["calls_received"] == (before_cost["ingest"]["calls_received"] + 1)
+    assert after_cost["ingest"]["post_disable_calls"] == (
+        before_cost["ingest"]["post_disable_calls"] + 1
+    )
+    assert after_cost["snapshot"]["calls"] == before_cost["snapshot"]["calls"] + 1
+    assert "late-secret" not in json.dumps(after_cost)
+
+
+def test_progress_actor_cost_is_fixed_bounded_and_actor_observed(monkeypatch) -> None:
+    actor = _progress_actor()
+    wall_ticks = iter([0, 10, 20, 35, 40, 60, 70, 80, 90, 105, 110, 140])
+    cpu_ticks = iter([0, 4, 10, 16, 20, 27, 30, 32, 40, 45, 50, 59])
+    received_ticks = iter([1_000, 1_000, 1_000, 1_000, 1_000])
+    occurred_ticks = iter([900, 1_100])
+    monkeypatch.setattr(remote_module, "_wall_time_ns", lambda: next(wall_ticks))
+    monkeypatch.setattr(remote_module, "_process_cpu_ns", lambda: next(cpu_ticks))
+    monkeypatch.setattr(remote_module, "_utc_time_us", lambda: next(received_ticks))
+    monkeypatch.setattr(
+        remote_module,
+        "_event_timestamp_us",
+        lambda _value: next(occurred_ticks),
+    )
+
+    accepted_wire = _progress_wire(
+        WorkflowProgressEventKind.SUBMITTED,
+        {
+            "node_id": "accepted",
+            "label": "accepted",
+            "ray_task_id": "task-accepted",
+        },
+    )
+    accepted_negative_clock_wire = _progress_wire(
+        WorkflowProgressEventKind.COMPLETED,
+        {
+            "node_id": "accepted",
+            "label": "accepted",
+        },
+    )
+    wrong_fence_wire = _progress_wire(
+        WorkflowProgressEventKind.FAILED,
+        {
+            "node_id": "wrong-fence",
+            "label": "wrong-fence",
+            "error": "must-not-enter-cost",
+        },
+        run_identity={
+            **_WORKFLOW_RUN_IDENTITY,
+            "run_id": "00000000-0000-0000-0000-000000000218",
+        },
+    )
+    malformed_wire = b'{"private":"must-not-enter-cost"}'
+    post_disable_wire = _progress_wire(
+        WorkflowProgressEventKind.COMPLETED,
+        {
+            "node_id": "post-disable",
+            "label": "post-disable",
+        },
+    )
+
+    assert actor.ingest(accepted_wire) is True
+    assert actor.ingest(accepted_negative_clock_wire) is True
+    assert actor.ingest(wrong_fence_wire) is False
+    assert actor.ingest(malformed_wire) is False
+    actor.disable()
+    assert actor.ingest(post_disable_wire) is False
+
+    ingress = actor.snapshot()["ingress"]
+    cost = ingress["cost"]
+    assert set(cost) == {
+        "schema_version",
+        "saturated",
+        "initialization",
+        "ingest",
+        "delivery_delay",
+        "snapshot",
+    }
+    assert cost["saturated"] is False
+    assert cost["ingest"] == {
+        "calls_received": 5,
+        "wire_bytes_received": sum(
+            map(
+                len,
+                (
+                    accepted_wire,
+                    accepted_negative_clock_wire,
+                    wrong_fence_wire,
+                    malformed_wire,
+                    post_disable_wire,
+                ),
+            )
+        ),
+        "decoded_calls": 2,
+        "post_disable_calls": 1,
+        "decoded_by_kind": {
+            kind.value: int(
+                kind
+                in {
+                    WorkflowProgressEventKind.SUBMITTED,
+                    WorkflowProgressEventKind.COMPLETED,
+                }
+            )
+            for kind in WorkflowProgressEventKind
+        },
+        "handler_wall_ns_total": 70,
+        "handler_wall_ns_max": 20,
+        "handler_cpu_ns_total": 24,
+        "handler_cpu_ns_max": 7,
+    }
+    assert cost["delivery_delay"] == {
+        "samples": 1,
+        "total_us": 100,
+        "max_us": 100,
+        "negative_clock_samples": 1,
+    }
+    assert cost["snapshot"] == {
+        "calls": 1,
+        "build_wall_ns_total": 30,
+        "build_wall_ns_max": 30,
+        "build_cpu_ns_total": 9,
+        "build_cpu_ns_max": 9,
+    }
+    assert ingress["accepted"] - 1 == 2
+    assert ingress["rejected"] == 2
+    assert (
+        cost["ingest"]["calls_received"]
+        == ingress["accepted"] - 1 + ingress["rejected"] + cost["ingest"]["post_disable_calls"]
+    )
+    serialized_cost = json.dumps(cost)
+    assert "must-not-enter-cost" not in serialized_cost
+    assert "accepted" not in serialized_cost

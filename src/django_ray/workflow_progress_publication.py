@@ -119,6 +119,53 @@ _INGRESS_KEYS = frozenset(
         "retained_edges",
     }
 )
+_INGRESS_COST_KEYS = frozenset(
+    {
+        "schema_version",
+        "saturated",
+        "initialization",
+        "ingest",
+        "delivery_delay",
+        "snapshot",
+    }
+)
+_INGRESS_COST_INITIALIZATION_KEYS = frozenset(
+    {
+        "wire_bytes",
+        "handler_wall_ns",
+        "handler_cpu_ns",
+    }
+)
+_INGRESS_COST_INGEST_KEYS = frozenset(
+    {
+        "calls_received",
+        "wire_bytes_received",
+        "decoded_calls",
+        "post_disable_calls",
+        "decoded_by_kind",
+        "handler_wall_ns_total",
+        "handler_wall_ns_max",
+        "handler_cpu_ns_total",
+        "handler_cpu_ns_max",
+    }
+)
+_INGRESS_COST_DELIVERY_DELAY_KEYS = frozenset(
+    {
+        "samples",
+        "total_us",
+        "max_us",
+        "negative_clock_samples",
+    }
+)
+_INGRESS_COST_SNAPSHOT_KEYS = frozenset(
+    {
+        "calls",
+        "build_wall_ns_total",
+        "build_wall_ns_max",
+        "build_cpu_ns_total",
+        "build_cpu_ns_max",
+    }
+)
 _ACCEPTED_EVENT_KINDS = frozenset(
     {
         "initialized",
@@ -283,8 +330,17 @@ def _validate_ingress_envelope(
     ingress_value: Any,
     *,
     revision: int,
+    limits: WorkflowProgressLimits,
 ) -> Mapping[str, Any]:
-    ingress = _exact_mapping(ingress_value, _INGRESS_KEYS)
+    if not isinstance(ingress_value, Mapping):
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    ingress_keys = frozenset(ingress_value)
+    if ingress_keys == _INGRESS_KEYS:
+        ingress = ingress_value
+    elif ingress_keys == _INGRESS_KEYS | {"cost"}:
+        ingress = ingress_value
+    else:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     accepted_by_kind = _exact_mapping(
         ingress["accepted_by_kind"],
         _ACCEPTED_EVENT_KINDS,
@@ -293,12 +349,22 @@ def _validate_ingress_envelope(
         ingress["rejected_by_reason"],
         _REJECTED_EVENT_REASONS,
     )
-    accepted_counts = [_counter(value) for value in accepted_by_kind.values()]
-    rejected_counts = [_counter(value) for value in rejected_by_reason.values()]
-    accepted = _counter(ingress["accepted"])
-    rejected = _counter(ingress["rejected"])
-    truncated = _counter(ingress["truncated"])
-    if accepted != sum(accepted_counts) or revision != accepted - 1:
+    counter_max = limits.identity_max_integer
+    accepted_counts = {
+        name: _counter(accepted_by_kind[name], maximum=counter_max)
+        for name in _ACCEPTED_EVENT_KINDS
+    }
+    rejected_counts = [
+        _counter(value, maximum=counter_max) for value in rejected_by_reason.values()
+    ]
+    accepted = _counter(ingress["accepted"], maximum=counter_max)
+    rejected = _counter(ingress["rejected"], maximum=counter_max)
+    truncated = _counter(ingress["truncated"], maximum=counter_max)
+    if (
+        accepted != sum(accepted_counts.values())
+        or accepted_counts["initialized"] != 1
+        or revision != accepted - 1
+    ):
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     if rejected != sum(rejected_counts):
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
@@ -306,7 +372,201 @@ def _validate_ingress_envelope(
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INGRESS_REJECTED)
     if truncated:
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INGRESS_TRUNCATED)
+    if "cost" in ingress:
+        _validate_ingress_cost(
+            ingress["cost"],
+            accepted=accepted,
+            rejected=rejected,
+            accepted_by_kind=accepted_counts,
+            limits=limits,
+        )
     return ingress
+
+
+def _validate_ingress_cost(
+    value: Any,
+    *,
+    accepted: int,
+    rejected: int,
+    accepted_by_kind: Mapping[str, int],
+    limits: WorkflowProgressLimits,
+) -> None:
+    cost = _exact_mapping(value, _INGRESS_COST_KEYS)
+    if type(cost["schema_version"]) is not int or cost["schema_version"] != 1:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    saturated = cost["saturated"]
+    if type(saturated) is not bool:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+
+    initialization = _exact_mapping(
+        cost["initialization"],
+        _INGRESS_COST_INITIALIZATION_KEYS,
+    )
+    initialization_values = {
+        name: _counter(
+            initialization[name],
+            maximum=limits.identity_max_integer,
+        )
+        for name in _INGRESS_COST_INITIALIZATION_KEYS
+    }
+    if not 0 < initialization_values["wire_bytes"] <= limits.event_wire_max_bytes:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+
+    ingest = _exact_mapping(
+        cost["ingest"],
+        _INGRESS_COST_INGEST_KEYS,
+    )
+    decoded_by_kind = _exact_mapping(
+        ingest["decoded_by_kind"],
+        _ACCEPTED_EVENT_KINDS,
+    )
+    decoded_counts = {
+        name: _counter(
+            decoded_by_kind[name],
+            maximum=limits.identity_max_integer,
+        )
+        for name in _ACCEPTED_EVENT_KINDS
+    }
+    ingest_values = {
+        name: _counter(
+            ingest[name],
+            maximum=limits.identity_max_integer,
+        )
+        for name in _INGRESS_COST_INGEST_KEYS
+        if name != "decoded_by_kind"
+    }
+
+    delivery = _exact_mapping(
+        cost["delivery_delay"],
+        _INGRESS_COST_DELIVERY_DELAY_KEYS,
+    )
+    delivery_values = {
+        name: _counter(
+            delivery[name],
+            maximum=limits.identity_max_integer,
+        )
+        for name in _INGRESS_COST_DELIVERY_DELAY_KEYS
+    }
+
+    snapshot = _exact_mapping(
+        cost["snapshot"],
+        _INGRESS_COST_SNAPSHOT_KEYS,
+    )
+    snapshot_values = {
+        name: _counter(
+            snapshot[name],
+            maximum=limits.identity_max_integer,
+        )
+        for name in _INGRESS_COST_SNAPSHOT_KEYS
+    }
+
+    if (
+        not _valid_sample_aggregate(
+            count=ingest_values["calls_received"],
+            total=ingest_values["handler_wall_ns_total"],
+            maximum=ingest_values["handler_wall_ns_max"],
+            counter_max=limits.identity_max_integer,
+        )
+        or not _valid_sample_aggregate(
+            count=ingest_values["calls_received"],
+            total=ingest_values["handler_cpu_ns_total"],
+            maximum=ingest_values["handler_cpu_ns_max"],
+            counter_max=limits.identity_max_integer,
+        )
+        or not _valid_sample_aggregate(
+            count=delivery_values["samples"],
+            total=delivery_values["total_us"],
+            maximum=delivery_values["max_us"],
+            counter_max=limits.identity_max_integer,
+        )
+        or snapshot_values["calls"] == 0
+        or not _valid_sample_aggregate(
+            count=snapshot_values["calls"],
+            total=snapshot_values["build_wall_ns_total"],
+            maximum=snapshot_values["build_wall_ns_max"],
+            counter_max=limits.identity_max_integer,
+        )
+        or not _valid_sample_aggregate(
+            count=snapshot_values["calls"],
+            total=snapshot_values["build_cpu_ns_total"],
+            maximum=snapshot_values["build_cpu_ns_max"],
+            counter_max=limits.identity_max_integer,
+        )
+    ):
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+
+    expected_decoded_by_kind = {
+        name: 0 if name == "initialized" else accepted_by_kind[name]
+        for name in _ACCEPTED_EVENT_KINDS
+    }
+    expected_decoded = accepted - 1
+    expected_received = _saturating_counter_sum(
+        limits.identity_max_integer,
+        expected_decoded,
+        rejected,
+        ingest_values["post_disable_calls"],
+    )
+    minimum_wire_bytes = expected_decoded
+    maximum_wire_bytes = (
+        _saturating_counter_product(
+            limits.identity_max_integer,
+            expected_decoded,
+            limits.event_wire_max_bytes,
+        )
+        if rejected == 0 and ingest_values["post_disable_calls"] == 0
+        else limits.identity_max_integer
+    )
+    if (
+        ingest_values["calls_received"] != expected_received
+        or ingest_values["decoded_calls"] != expected_decoded
+        or decoded_counts != expected_decoded_by_kind
+        or _saturating_counter_sum(
+            limits.identity_max_integer,
+            delivery_values["samples"],
+            delivery_values["negative_clock_samples"],
+        )
+        != expected_decoded
+        or not minimum_wire_bytes <= ingest_values["wire_bytes_received"] <= maximum_wire_bytes
+    ):
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    if saturated:
+        numeric_values = [
+            *initialization_values.values(),
+            *ingest_values.values(),
+            *decoded_counts.values(),
+            *delivery_values.values(),
+            *snapshot_values.values(),
+        ]
+        if limits.identity_max_integer not in numeric_values:
+            raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+
+
+def _saturating_counter_sum(counter_max: int, *values: int) -> int:
+    return min(counter_max, sum(values))
+
+
+def _saturating_counter_product(
+    counter_max: int,
+    left: int,
+    right: int,
+) -> int:
+    return min(counter_max, left * right)
+
+
+def _valid_sample_aggregate(
+    *,
+    count: int,
+    total: int,
+    maximum: int,
+    counter_max: int,
+) -> bool:
+    if count == 0:
+        return total == maximum == 0
+    return maximum <= total and total <= _saturating_counter_product(
+        counter_max,
+        count,
+        maximum,
+    )
 
 
 def _validate_ingress_retention(
@@ -516,12 +776,16 @@ def prepare_terminal_workflow_progress_publication(
     ):
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SELECTION)
 
-    revision = _counter(snapshot["revision"])
-    if revision == 0 or revision == _MAX_COUNTER:
+    revision = _counter(
+        snapshot["revision"],
+        maximum=limits.identity_max_integer,
+    )
+    if revision == 0 or revision == limits.identity_max_integer:
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     ingress = _validate_ingress_envelope(
         snapshot["ingress"],
         revision=revision,
+        limits=limits,
     )
     state = snapshot["state"]
     if state not in _TERMINAL_WORKFLOW_STATES:

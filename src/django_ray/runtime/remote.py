@@ -6,8 +6,8 @@ import copy
 import json
 import sys
 import time
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
@@ -25,6 +25,26 @@ from django_ray.workflow_progress_protocol import (
     decode_workflow_progress_event,
     send_workflow_progress_event,
 )
+
+_COST_SCHEMA_VERSION = 1
+
+
+def _wall_time_ns() -> int:
+    return time.perf_counter_ns()
+
+
+def _process_cpu_ns() -> int:
+    return time.process_time_ns()
+
+
+def _utc_time_us() -> int:
+    return time.time_ns() // 1_000
+
+
+def _event_timestamp_us(value: str) -> int:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    delta = parsed - datetime(1970, 1, 1, tzinfo=UTC)
+    return (delta.days * 24 * 60 * 60 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
 def execute_django_task_remote(
@@ -231,6 +251,8 @@ class _WorkflowProgressCollector:
         *,
         limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
     ) -> None:
+        handler_wall_started = _wall_time_ns()
+        handler_cpu_started = _process_cpu_ns()
         event = decode_workflow_progress_event(initialization_event, limits=limits)
         if event.kind is not WorkflowProgressEventKind.INITIALIZED:
             raise WorkflowProgressProtocolError(
@@ -240,6 +262,7 @@ class _WorkflowProgressCollector:
         self.started_at = time.time()
         self.updated_at = self.started_at
         self._limits = limits
+        self._cost_counter_max = limits.identity_max_integer
         self.task_execution_pk = int(event.run_identity["task_execution_pk"])
         self.run_identity = copy.deepcopy(event.run_identity)
         self.accepting_updates = True
@@ -282,6 +305,137 @@ class _WorkflowProgressCollector:
             "edge_limit": 0,
             "retained_bytes_limit": 0,
         }
+        self._cost = self._initial_cost(
+            initialization_event,
+            handler_wall_ns=max(0, _wall_time_ns() - handler_wall_started),
+            handler_cpu_ns=max(0, _process_cpu_ns() - handler_cpu_started),
+        )
+
+    @staticmethod
+    def _empty_kind_counters() -> dict[str, int]:
+        return {kind.value: 0 for kind in WorkflowProgressEventKind}
+
+    def _initial_cost(
+        self,
+        initialization_event: bytes,
+        *,
+        handler_wall_ns: int,
+        handler_cpu_ns: int,
+    ) -> dict[str, Any]:
+        cost: dict[str, Any] = {
+            "schema_version": _COST_SCHEMA_VERSION,
+            "saturated": False,
+            "initialization": {
+                "wire_bytes": 0,
+                "handler_wall_ns": 0,
+                "handler_cpu_ns": 0,
+            },
+            "ingest": {
+                "calls_received": 0,
+                "wire_bytes_received": 0,
+                "decoded_calls": 0,
+                "post_disable_calls": 0,
+                "decoded_by_kind": self._empty_kind_counters(),
+                "handler_wall_ns_total": 0,
+                "handler_wall_ns_max": 0,
+                "handler_cpu_ns_total": 0,
+                "handler_cpu_ns_max": 0,
+            },
+            "delivery_delay": {
+                "samples": 0,
+                "total_us": 0,
+                "max_us": 0,
+                "negative_clock_samples": 0,
+            },
+            "snapshot": {
+                "calls": 0,
+                "build_wall_ns_total": 0,
+                "build_wall_ns_max": 0,
+                "build_cpu_ns_total": 0,
+                "build_cpu_ns_max": 0,
+            },
+        }
+        self._cost = cost
+        self._set_cost_counter(
+            cost["initialization"],
+            "wire_bytes",
+            len(initialization_event),
+        )
+        self._set_cost_counter(
+            cost["initialization"],
+            "handler_wall_ns",
+            handler_wall_ns,
+        )
+        self._set_cost_counter(
+            cost["initialization"],
+            "handler_cpu_ns",
+            handler_cpu_ns,
+        )
+        return cost
+
+    def _bounded_cost_value(self, value: int) -> int:
+        if value >= self._cost_counter_max:
+            if value > self._cost_counter_max:
+                self._cost["saturated"] = True
+            return self._cost_counter_max
+        return value
+
+    def _set_cost_counter(
+        self,
+        section: dict[str, Any],
+        field: str,
+        value: int,
+    ) -> None:
+        section[field] = self._bounded_cost_value(max(0, value))
+
+    def _add_cost_counter(
+        self,
+        section: dict[str, Any],
+        field: str,
+        increment: int,
+    ) -> None:
+        current = int(section[field])
+        increment = max(0, increment)
+        if increment == 0:
+            return
+        if current >= self._cost_counter_max or increment > self._cost_counter_max - current:
+            section[field] = self._cost_counter_max
+            self._cost["saturated"] = True
+            return
+        section[field] = current + increment
+
+    def _observe_cost_max(
+        self,
+        section: dict[str, Any],
+        field: str,
+        value: int,
+    ) -> None:
+        bounded = self._bounded_cost_value(max(0, value))
+        section[field] = max(int(section[field]), bounded)
+
+    def _record_ingest_handler_cost(
+        self,
+        *,
+        wall_started: int,
+        cpu_started: int,
+    ) -> None:
+        wall_ns = max(0, _wall_time_ns() - wall_started)
+        cpu_ns = max(0, _process_cpu_ns() - cpu_started)
+        ingest = self._cost["ingest"]
+        self._add_cost_counter(ingest, "handler_wall_ns_total", wall_ns)
+        self._observe_cost_max(ingest, "handler_wall_ns_max", wall_ns)
+        self._add_cost_counter(ingest, "handler_cpu_ns_total", cpu_ns)
+        self._observe_cost_max(ingest, "handler_cpu_ns_max", cpu_ns)
+
+    def _record_delivery_delay(self, event: WorkflowProgressEvent, received_at_us: int) -> None:
+        delay_us = received_at_us - _event_timestamp_us(event.occurred_at)
+        delivery = self._cost["delivery_delay"]
+        if delay_us < 0:
+            self._add_cost_counter(delivery, "negative_clock_samples", 1)
+            return
+        self._add_cost_counter(delivery, "samples", 1)
+        self._add_cost_counter(delivery, "total_us", delay_us)
+        self._observe_cost_max(delivery, "max_us", delay_us)
 
     @property
     def _node_limit(self) -> int:
@@ -578,51 +732,79 @@ class _WorkflowProgressCollector:
 
     def ingest(self, wire: bytes) -> bool:
         """Decode, fence, and atomically retain one bounded event."""
-        if not self.accepting_updates:
-            return False
+        handler_wall_started = _wall_time_ns()
+        handler_cpu_started = _process_cpu_ns()
+        received_at_us = _utc_time_us()
+        ingest_cost = cast(dict[str, Any], self._cost["ingest"])
+        self._add_cost_counter(ingest_cost, "calls_received", 1)
+        if type(wire) is bytes:
+            self._add_cost_counter(ingest_cost, "wire_bytes_received", len(wire))
         try:
-            event = decode_workflow_progress_event(
-                wire,
-                expected_run_identity=self.run_identity,
-                limits=self._limits,
-            )
-        except WorkflowProgressProtocolError as error:
-            reason = (
-                "fence_mismatch"
-                if getattr(error, "reason", None) == "fence_mismatch"
-                else "protocol_error"
-            )
-            return self._reject(reason)
-        if event.run_identity != self.run_identity:
-            return self._reject("fence_mismatch")
-        if event.kind is WorkflowProgressEventKind.INITIALIZED:
-            return self._reject("unexpected_initialized")
+            if not self.accepting_updates:
+                self._add_cost_counter(ingest_cost, "post_disable_calls", 1)
+                return False
+            try:
+                # Preserve the existing fence-before-payload contract. Rejected
+                # wrong-run calls remain visible in received bytes/calls and
+                # handler cost, but are not successful decoded-kind or delay
+                # samples for this run.
+                event = decode_workflow_progress_event(
+                    wire,
+                    expected_run_identity=self.run_identity,
+                    limits=self._limits,
+                )
+            except WorkflowProgressProtocolError as error:
+                reason = (
+                    "fence_mismatch"
+                    if getattr(error, "reason", None) == "fence_mismatch"
+                    else "protocol_error"
+                )
+                return self._reject(reason)
 
-        node_updates: dict[str, dict[str, Any]] = {}
-        edge_additions: set[tuple[str, str]] = set()
-        recent_event = None
-        if event.kind is WorkflowProgressEventKind.EDGES_REGISTERED:
-            for edge in event.payload["edges"]:
-                source = edge["source"]
-                target = edge["target"]
-                edge_additions.add((source, target))
-        else:
-            node_updates, recent_event = self._node_event_candidate(event)
+            self._add_cost_counter(ingest_cost, "decoded_calls", 1)
+            self._add_cost_counter(
+                ingest_cost["decoded_by_kind"],
+                event.kind.value,
+                1,
+            )
+            self._record_delivery_delay(event, received_at_us)
+            if event.kind is WorkflowProgressEventKind.INITIALIZED:
+                return self._reject("unexpected_initialized")
 
-        rejection = self._commit(
-            node_updates=node_updates,
-            edge_additions=edge_additions,
-            recent_event=recent_event,
-        )
-        if rejection is not None:
-            return self._reject(rejection)
-        return self._accept(event)
+            node_updates: dict[str, dict[str, Any]] = {}
+            edge_additions: set[tuple[str, str]] = set()
+            recent_event = None
+            if event.kind is WorkflowProgressEventKind.EDGES_REGISTERED:
+                for edge in event.payload["edges"]:
+                    source = edge["source"]
+                    target = edge["target"]
+                    edge_additions.add((source, target))
+            else:
+                node_updates, recent_event = self._node_event_candidate(event)
+
+            rejection = self._commit(
+                node_updates=node_updates,
+                edge_additions=edge_additions,
+                recent_event=recent_event,
+            )
+            if rejection is not None:
+                return self._reject(rejection)
+            return self._accept(event)
+        finally:
+            self._record_ingest_handler_cost(
+                wall_started=handler_wall_started,
+                cpu_started=handler_cpu_started,
+            )
 
     def disable(self) -> None:
         """Drain future leaf reports without mutating this obsolete snapshot."""
         self.accepting_updates = False
 
     def snapshot(self) -> dict[str, Any]:
+        build_wall_started = _wall_time_ns()
+        build_cpu_started = _process_cpu_ns()
+        snapshot_cost = cast(dict[str, Any], self._cost["snapshot"])
+        self._add_cost_counter(snapshot_cost, "calls", 1)
         states = [node["state"] for node in self.nodes.values()]
         completed = states.count("SUCCEEDED")
         failed = states.count("FAILED")
@@ -637,7 +819,8 @@ class _WorkflowProgressCollector:
             node["dependencies"] = sorted(dependencies.get(node_id, []))
             nodes.append(node)
         edges = [{"source": source, "target": target} for source, target in sorted(self.edges)]
-        return {
+        cost = copy.deepcopy(self._cost)
+        snapshot = {
             "schema_version": WORKFLOW_PROGRESS_SCHEMA_VERSION,
             "workflow_id": f"django-ray:{self.task_execution_pk}",
             "run_identity": copy.deepcopy(self.run_identity),
@@ -668,8 +851,26 @@ class _WorkflowProgressCollector:
                 "retained_bytes": self._retained_bytes,
                 "retained_nodes": len(self.nodes),
                 "retained_edges": len(self.edges),
+                "cost": cost,
             },
         }
+        build_wall_ns = max(0, _wall_time_ns() - build_wall_started)
+        build_cpu_ns = max(0, _process_cpu_ns() - build_cpu_started)
+        self._add_cost_counter(snapshot_cost, "build_wall_ns_total", build_wall_ns)
+        self._observe_cost_max(snapshot_cost, "build_wall_ns_max", build_wall_ns)
+        self._add_cost_counter(snapshot_cost, "build_cpu_ns_total", build_cpu_ns)
+        self._observe_cost_max(snapshot_cost, "build_cpu_ns_max", build_cpu_ns)
+        cost["saturated"] = self._cost["saturated"]
+        cost_snapshot = cast(dict[str, Any], cost["snapshot"])
+        for field in (
+            "calls",
+            "build_wall_ns_total",
+            "build_wall_ns_max",
+            "build_cpu_ns_total",
+            "build_cpu_ns_max",
+        ):
+            cost_snapshot[field] = snapshot_cost[field]
+        return snapshot
 
 
 class WorkflowProgressActor:

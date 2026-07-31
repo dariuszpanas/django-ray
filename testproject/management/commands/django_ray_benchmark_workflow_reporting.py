@@ -54,7 +54,7 @@ from django_ray.workflow_progress_summary import (
 )
 from testproject.apps.cluster_tasks.tasks import complex_workflow_benchmark
 
-BENCHMARK_SCHEMA_VERSION = 1
+BENCHMARK_SCHEMA_VERSION = 2
 BENCHMARK_ID = "django-ray-live-workflow-reporting-policies"
 OPT_IN_ENV = "DJANGO_RAY_RUN_WORKFLOW_REPORTING_BENCHMARK"
 EXPECTED_CALLABLE_PATH = "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"
@@ -100,6 +100,36 @@ _EXPECTED_REJECTION_REASONS = frozenset(
         "retained_bytes_limit",
     }
 )
+_ACTOR_COST_NUMERIC_FIELDS = {
+    "initialization": (
+        "wire_bytes",
+        "handler_wall_ns",
+        "handler_cpu_ns",
+    ),
+    "ingest": (
+        "calls_received",
+        "wire_bytes_received",
+        "decoded_calls",
+        "post_disable_calls",
+        "handler_wall_ns_total",
+        "handler_wall_ns_max",
+        "handler_cpu_ns_total",
+        "handler_cpu_ns_max",
+    ),
+    "delivery_delay": (
+        "samples",
+        "total_us",
+        "max_us",
+        "negative_clock_samples",
+    ),
+    "snapshot": (
+        "calls",
+        "build_wall_ns_total",
+        "build_wall_ns_max",
+        "build_cpu_ns_total",
+        "build_cpu_ns_max",
+    ),
+}
 _SOURCE_REVISION_NAMES = (
     "DJANGO_RAY_BUILD_REVISION",
     "GITHUB_SHA",
@@ -272,6 +302,27 @@ def _measurement_coverage() -> dict[str, dict[str, str]]:
             "status": "measured",
             "scope": "full-mode retained terminal collector snapshot",
         },
+        "actor_observed_logical_ingress": {
+            "status": "measured",
+            "scope": (
+                "calls and logical wire bytes received by the full-mode actor "
+                "before its retained terminal snapshot"
+            ),
+        },
+        "producer_to_actor_delivery_delay": {
+            "status": "measured",
+            "scope": (
+                "decoded event timestamp to actor handler entry; includes serialization, "
+                "transport, scheduling, queueing, and clock effects"
+            ),
+        },
+        "actor_handler_and_snapshot_cost": {
+            "status": "measured",
+            "scope": (
+                "actor-process wall and process CPU time through the retained terminal "
+                "snapshot; not complete actor lifetime attribution"
+            ),
+        },
         "actor_creation_count": {
             "status": "derived",
             "scope": "policy contract plus full-mode ingress; not a Ray State count",
@@ -282,19 +333,31 @@ def _measurement_coverage() -> dict[str, dict[str, str]]:
         },
         "producer_attempted_rpcs": {
             "status": "unavailable",
-            "reason": "processed ingress excludes submission failures and disabled calls",
+            "reason": (
+                "actor receipt cannot observe producer submission failures or calls "
+                "that never reach the actor"
+            ),
         },
         "actor_lifetime_rss_and_cpu": {
             "status": "unavailable",
-            "reason": "no bounded per-workflow actor resource sampler exists",
+            "reason": (
+                "handler CPU is measured, but no bounded lifetime RSS or complete "
+                "actor-process sampler exists"
+            ),
         },
         "mailbox_depth_and_lag": {
             "status": "unavailable",
-            "reason": "the collector exposes no aggregate mailbox timing",
+            "reason": (
+                "end-to-end processed delivery delay is measured but cannot isolate "
+                "mailbox depth or pure queue latency"
+            ),
         },
         "snapshot_and_disable_rpcs": {
-            "status": "unavailable",
-            "reason": "these control calls are not counted by collector ingress",
+            "status": "partial",
+            "scope": (
+                "snapshot calls/build cost through retained evidence; disable calls after "
+                "the last snapshot remain unavailable"
+            ),
         },
         "database_statements_latency_and_wal": {
             "status": "unavailable",
@@ -508,6 +571,7 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
         "retained_bytes",
         "retained_nodes",
         "retained_edges",
+        "cost",
     }:
         raise WorkflowReportingBenchmarkError("workflow progress ingress has unexpected fields")
     accepted = _non_negative_int(ingress["accepted"], "ingress.accepted")
@@ -528,6 +592,12 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
         or accepted_by_kind["initialized"] != 1
     ):
         raise WorkflowReportingBenchmarkError("workflow ingress counters are inconsistent")
+    cost = _actor_cost(
+        ingress["cost"],
+        accepted=accepted,
+        rejected=rejected,
+        accepted_by_kind=accepted_by_kind,
+    )
     return {
         "collector_events_accepted": accepted,
         "processed_ingest_events": accepted - 1,
@@ -547,7 +617,145 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
             ingress["retained_edges"],
             "ingress.retained_edges",
         ),
+        "actor_cost": cost,
     }
+
+
+def _actor_cost(
+    value: object,
+    *,
+    accepted: int,
+    rejected: int,
+    accepted_by_kind: Mapping[str, int],
+) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "saturated",
+        "initialization",
+        "ingest",
+        "delivery_delay",
+        "snapshot",
+    }:
+        raise WorkflowReportingBenchmarkError("ingress.cost has unexpected fields")
+    cost = cast(dict[str, Any], value)
+    if type(cost["schema_version"]) is not int or cost["schema_version"] != 1:
+        raise WorkflowReportingBenchmarkError("ingress.cost schema version is unsupported")
+    if type(cost["saturated"]) is not bool:
+        raise WorkflowReportingBenchmarkError("ingress.cost saturation evidence is invalid")
+    initialization = _cost_integer_section(
+        cost["initialization"],
+        name="ingress.cost.initialization",
+        expected_keys=frozenset(
+            {
+                "wire_bytes",
+                "handler_wall_ns",
+                "handler_cpu_ns",
+            }
+        ),
+    )
+    ingest = _cost_integer_section(
+        cost["ingest"],
+        name="ingress.cost.ingest",
+        expected_keys=frozenset(
+            {
+                "calls_received",
+                "wire_bytes_received",
+                "decoded_calls",
+                "post_disable_calls",
+                "handler_wall_ns_total",
+                "handler_wall_ns_max",
+                "handler_cpu_ns_total",
+                "handler_cpu_ns_max",
+            }
+        ),
+        nested_key="decoded_by_kind",
+    )
+    decoded_by_kind = _integer_mapping(
+        cast(dict[str, Any], cost["ingest"])["decoded_by_kind"],
+        name="ingress.cost.ingest.decoded_by_kind",
+        expected_keys=_EXPECTED_INGRESS_KINDS,
+    )
+    delivery = _cost_integer_section(
+        cost["delivery_delay"],
+        name="ingress.cost.delivery_delay",
+        expected_keys=frozenset(
+            {
+                "samples",
+                "total_us",
+                "max_us",
+                "negative_clock_samples",
+            }
+        ),
+    )
+    snapshot = _cost_integer_section(
+        cost["snapshot"],
+        name="ingress.cost.snapshot",
+        expected_keys=frozenset(
+            {
+                "calls",
+                "build_wall_ns_total",
+                "build_wall_ns_max",
+                "build_cpu_ns_total",
+                "build_cpu_ns_max",
+            }
+        ),
+    )
+    if (
+        initialization["wire_bytes"] == 0
+        or snapshot["calls"] == 0
+        or ingest["handler_wall_ns_max"] > ingest["handler_wall_ns_total"]
+        or ingest["handler_cpu_ns_max"] > ingest["handler_cpu_ns_total"]
+        or delivery["max_us"] > delivery["total_us"]
+        or snapshot["build_wall_ns_max"] > snapshot["build_wall_ns_total"]
+        or snapshot["build_cpu_ns_max"] > snapshot["build_cpu_ns_total"]
+    ):
+        raise WorkflowReportingBenchmarkError("ingress.cost counters are inconsistent")
+    if cost["saturated"]:
+        raise WorkflowReportingBenchmarkError(
+            "benchmark actor cost saturated before terminal retention"
+        )
+    expected_decoded_by_kind = {
+        name: 0 if name == "initialized" else accepted_by_kind[name]
+        for name in _EXPECTED_INGRESS_KINDS
+    }
+    expected_decoded = accepted - 1
+    if (
+        ingest["calls_received"] != expected_decoded + rejected + ingest["post_disable_calls"]
+        or ingest["decoded_calls"] != expected_decoded
+        or decoded_by_kind != expected_decoded_by_kind
+        or delivery["samples"] + delivery["negative_clock_samples"] != expected_decoded
+        or (ingest["calls_received"] > 0 and ingest["wire_bytes_received"] == 0)
+    ):
+        raise WorkflowReportingBenchmarkError("ingress.cost counters are inconsistent")
+    return {
+        "schema_version": 1,
+        "saturated": False,
+        "initialization": initialization,
+        "ingest": {
+            **ingest,
+            "decoded_by_kind": decoded_by_kind,
+        },
+        "delivery_delay": delivery,
+        "snapshot": snapshot,
+    }
+
+
+def _cost_integer_section(
+    value: object,
+    *,
+    name: str,
+    expected_keys: frozenset[str],
+    nested_key: str | None = None,
+) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise WorkflowReportingBenchmarkError(f"{name} has unexpected fields")
+    keys = set(value)
+    required = set(expected_keys)
+    if nested_key is not None:
+        required.add(nested_key)
+    if keys != required:
+        raise WorkflowReportingBenchmarkError(f"{name} has unexpected fields")
+    return {key: _non_negative_int(value[key], f"{name}.{key}") for key in sorted(expected_keys)}
 
 
 def _full_snapshot_evidence(
@@ -1014,7 +1222,7 @@ def _policy_aggregates(samples: Sequence[Mapping[str, object]]) -> dict[str, obj
         if not selected:
             raise WorkflowReportingBenchmarkError(f"benchmark has no {policy} samples")
 
-        aggregates[policy] = {
+        policy_aggregate: dict[str, object] = {
             "sample_count": len(selected),
             "outer_execution_seconds": _distribution(
                 _aggregate_values(
@@ -1049,7 +1257,83 @@ def _policy_aggregates(samples: Sequence[Mapping[str, object]]) -> dict[str, obj
                 )
             ),
         }
+        if policy == "full":
+            policy_aggregate["actor_observed_cost"] = _actor_cost_aggregate(selected)
+        else:
+            policy_aggregate["actor_observed_cost"] = {
+                "status": "not_applicable",
+                "reason": f"{policy} reporting creates no progress actor",
+            }
+        aggregates[policy] = policy_aggregate
     return aggregates
+
+
+def _actor_cost_aggregate(
+    samples: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    aggregate: dict[str, object] = {
+        "status": "measured",
+        "source_schema_version": 1,
+    }
+    for group, fields in _ACTOR_COST_NUMERIC_FIELDS.items():
+        aggregate[group] = {
+            field: _distribution(
+                _actor_cost_values(
+                    samples,
+                    group=group,
+                    field=field,
+                )
+            )
+            for field in fields
+        }
+    ingest = aggregate["ingest"]
+    if not isinstance(ingest, dict):
+        raise AssertionError("actor cost aggregate ingest group must be an object")
+    ingest["decoded_by_kind"] = {
+        kind: _distribution(
+            _actor_cost_values(
+                samples,
+                group="ingest",
+                field="decoded_by_kind",
+                nested_field=kind,
+            )
+        )
+        for kind in sorted(_EXPECTED_INGRESS_KINDS)
+    }
+    return aggregate
+
+
+def _actor_cost_values(
+    samples: Sequence[Mapping[str, object]],
+    *,
+    group: str,
+    field: str,
+    nested_field: str | None = None,
+) -> list[int]:
+    collected: list[int] = []
+    for sample in samples:
+        reporting = sample.get("reporting")
+        ingress = reporting.get("ingress") if isinstance(reporting, Mapping) else None
+        actor_cost = ingress.get("actor_cost") if isinstance(ingress, Mapping) else None
+        group_value = actor_cost.get(group) if isinstance(actor_cost, Mapping) else None
+        if not isinstance(group_value, Mapping):
+            raise WorkflowReportingBenchmarkError(f"full actor cost group {group} is invalid")
+        value = group_value.get(field)
+        field_path = f"{group}.{field}"
+        if nested_field is not None:
+            if not isinstance(value, Mapping):
+                raise WorkflowReportingBenchmarkError(
+                    f"full actor cost field {field_path} is invalid"
+                )
+            value = value.get(nested_field)
+            field_path = f"{field_path}.{nested_field}"
+        collected.append(
+            _non_negative_int(
+                value,
+                f"full.reporting.ingress.actor_cost.{field_path}",
+            )
+        )
+    return collected
 
 
 def _aggregate_values(

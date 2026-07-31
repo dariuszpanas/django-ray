@@ -58,8 +58,12 @@ actor state when a changed revision is flushed. Each data event is canonical,
 identity-fenced, and bounded before its Ray call: payloads are at most 16 KiB, complete
 wire and decoded envelopes are at most 32 KiB, and dependency edges are sent in batches
 of at most 32. The actor revalidates the envelope and caps retained nodes, edges, recent
-events, and bytes. Package-default execution uses the durable V1 profile and remains a
-schema-v2 writer.
+events, and bytes. Its snapshots also carry a versioned, fixed-shape cost block with
+saturating counters for logical event calls/bytes received, decoded calls by the fixed
+event-kind enum, producer-to-actor delivery delay, handler wall/process CPU time, and
+snapshot-build wall/process CPU time. The block retains no producer identifiers,
+payloads, labels, errors, metric names, or other application data. Package-default
+execution uses the durable V1 profile and remains a schema-v2 writer.
 
 `WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not bound the
 aggregate Ray actor mailbox, queued bytes, update frequency, or transient snapshot and
@@ -107,8 +111,8 @@ deployment-wide default because node-level live progress is intentionally unavai
 Terminal-only avoids the current full-mode producer and mailbox cost; it does not make
 those costs bounded for workflows that still choose full reporting. Sampled/coalesced
 reporting, aggregate producer/mailbox admission, bounded actor-to-preparer draining,
-live cost attribution, and large-fan-out slow-consumer evidence remain separate #79
-work.
+the still-unavailable producer/network/database and lifetime-resource cost layers, and
+large-fan-out slow-consumer evidence remain separate #79 work.
 
 The bundled `ObservabilityDemoUser` makes the three shipped policies directly
 comparable without becoming a load benchmark. `make loadtest-demo` runs one tiny
@@ -159,18 +163,48 @@ wall time and summed leaf work. Client polling duration is retained only as a
 diagnostic and is excluded from policy aggregates. Each policy aggregate reports the
 sample count, median, nearest-rank p95, minimum, and maximum; it does not rank a
 winner, calculate a speedup, or claim that an elapsed-time difference was caused by
-reporting.
+reporting. Full-mode actor-cost aggregates retain the fixed initialization, ingest,
+delivery-delay, and snapshot groups. Every numeric field, including per-kind decoded
+counts and negative-clock samples, has its own distribution.
+
+The fixed cost fields retain their source units in both samples and aggregates:
+
+| Cost field | Unit |
+| --- | --- |
+| `initialization.wire_bytes`, `ingest.wire_bytes_received` | Logical bytes received by the actor |
+| `ingest.calls_received`, `ingest.decoded_calls`, `ingest.post_disable_calls` | Calls |
+| `ingest.decoded_by_kind.*` | Calls decoded under the exact run fence |
+| `delivery_delay.samples`, `delivery_delay.negative_clock_samples` | Samples |
+| `delivery_delay.total_us`, `delivery_delay.max_us` | Microseconds |
+| `initialization.handler_wall_ns`, `initialization.handler_cpu_ns` | Nanoseconds |
+| `ingest.handler_wall_ns_total`, `ingest.handler_wall_ns_max` | Nanoseconds |
+| `ingest.handler_cpu_ns_total`, `ingest.handler_cpu_ns_max` | Nanoseconds |
+| `snapshot.calls` | Calls |
+| `snapshot.build_wall_ns_total`, `snapshot.build_wall_ns_max` | Nanoseconds |
+| `snapshot.build_cpu_ns_total`, `snapshot.build_cpu_ns_max` | Nanoseconds |
 
 For full mode, the report exposes only allowlisted terminal ingress counters:
-accepted events by kind, rejections by reason, truncation, and retained logical
-bytes/nodes/edges. The collector's accepted total includes its constructor's one
-`initialized` event, so `processed_ingest_events` subtracts exactly that event. This
-is processed ingress, not producer-attempted RPCs: submission failures, calls made
-after reporting is disabled, and the actor's `snapshot` and `disable` control calls
-are not counted. Before recording those counters, the command reuses the bounded
+accepted events by kind, rejections by reason, truncation, retained logical
+bytes/nodes/edges, and the actor-authored cost block. The collector's accepted total
+includes its constructor's one `initialized` event, so `processed_ingest_events`
+subtracts exactly that event. Actor-observed ingress calls and logical wire bytes
+include malformed and rejected calls that reached the handler. Calls successfully
+decoded under the exact run fence are counted by the fixed event-kind enum. Delivery
+delay is the producer event
+timestamp to actor-handler entry; it includes serialization, transport, scheduling,
+queueing, and clock effects, so it is neither a pure mailbox-lag measurement nor a
+network-timing claim. Negative clock samples are counted and excluded from the
+non-negative delay total.
+
+Handler and snapshot-build wall/process CPU totals cover only work observed through
+the retained terminal snapshot. Snapshot-call counts include that returned snapshot;
+later calls and a `disable` made after it cannot appear. Every counter saturates at the
+signed 64-bit protocol ceiling, and the benchmark fails instead of aggregating a
+saturated run. Before recording the evidence, the command reuses the bounded
 terminal-publication validator even when the schema-v3 pilot is disabled, then checks
 the exact run identity, terminal success, plan fingerprint, expanded fixture topology,
-zero ingress rejection/truncation, and retained node/edge agreement.
+zero ingress rejection/truncation, fixed cost shape and arithmetic, and retained
+node/edge agreement.
 
 Durable evidence separates reporting-specific storage from the shared task lifecycle:
 
@@ -191,10 +225,14 @@ rows. The report exposes child totals for integrity checking, but those pairs mu
 be added together. None of these logical protocol sizes represents PostgreSQL table,
 index, MVCC, statement, latency, or WAL bytes.
 
-Actor lifetime/RSS/CPU, mailbox depth and lag, producer-attempted RPCs, control-call
-counts, network traffic, and PostgreSQL statement/latency/WAL attribution are
-explicitly `unavailable`. They need later bounded hot-path instrumentation under #79
-and are never estimated from wall time.
+Producer-attempted RPCs remain `unavailable`: a submission failure before actor receipt
+cannot be counted. Actual Ray/network traffic, mailbox depth or pure queue latency,
+complete actor-lifetime RSS/process CPU, disable calls after the last snapshot, and
+PostgreSQL statement/latency/WAL attribution also remain unavailable. Canonical event
+bytes and malformed actor-received bytes are logical wire bytes, not network traffic;
+actor-handler timings are likewise not relabeled as any of those missing layers. The
+report distinguishes the directly measured, partial, derived, not-applicable, and
+unavailable scopes instead of estimating them from workflow wall time.
 
 Successful runs retain their bounded task rows by default and include an Admin path
 for each execution. This makes the policy-specific summaries available for inspection;
