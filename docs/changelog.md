@@ -391,6 +391,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window exceeds the longest scenario polling deadline, preventing a final
   enqueued task or workflow-summary check from being silently abandoned while
   the run still exits successfully.
+- The headless Locust observability demo now also requires one complete ordered
+  task-family tour before it can exit successfully. Interactive observation can
+  still stop early, while documentation distinguishes Django task-manager logs
+  from Ray worker logs and states that the stack and completed rows are retained.
 - Live-cluster fault scenarios now keep one visible serial CI job and one disposable Ray
   cluster while executing in fresh pytest processes with individual hard deadlines,
   diagnostic thread dumps, and explicit node-ID timing markers. A bounded host-side

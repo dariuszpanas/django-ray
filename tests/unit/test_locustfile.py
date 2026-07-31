@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import copy
+import logging
 import os
 import subprocess
 import sys
+import textwrap
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -350,6 +353,137 @@ def test_observability_demo_rotates_required_scenarios_deterministically() -> No
         demo_task(user)
 
     assert observed == [*expected_scenarios, *expected_scenarios]
+    assert user._scenario_index == len(expected_scenarios) * 2
+
+
+def test_observability_demo_advances_only_after_scenario_completion() -> None:
+    user = object.__new__(locustfile.ObservabilityDemoUser)
+    user._scenario_index = 0
+
+    def stop_scenario() -> None:
+        raise StopTest("scenario stopped")
+
+    user.show_basic_add = stop_scenario
+
+    with pytest.raises(StopTest, match="scenario stopped"):
+        user.run_next_scenario()
+
+    assert user._scenario_index == 0
+
+
+def test_complete_tour_option_is_explicit_and_defaults_off() -> None:
+    parser = argparse.ArgumentParser()
+
+    locustfile._add_django_ray_loadtest_arguments(parser)
+
+    assert parser.parse_args([]).require_complete_tour is False
+    assert parser.parse_args(["--require-complete-tour"]).require_complete_tour is True
+
+
+@pytest.mark.parametrize(
+    ("requires_complete_tour", "completed_scenarios", "expected_exit_code"),
+    [
+        (False, 0, None),
+        (True, len(locustfile.ObservabilityDemoUser._SCENARIOS), None),
+        (True, len(locustfile.ObservabilityDemoUser._SCENARIOS) * 2, None),
+    ],
+)
+def test_observability_demo_accepts_optional_or_complete_shutdown(
+    requires_complete_tour: bool,
+    completed_scenarios: int,
+    expected_exit_code: int | None,
+) -> None:
+    user = object.__new__(locustfile.ObservabilityDemoUser)
+    user.environment = SimpleNamespace(
+        process_exit_code=None,
+        parsed_options=SimpleNamespace(
+            require_complete_tour=requires_complete_tour,
+        ),
+    )
+    user._scenario_index = completed_scenarios
+
+    user.on_stop()
+
+    assert user.environment.process_exit_code is expected_exit_code
+
+
+def test_observability_demo_rejects_incomplete_required_tour(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    user = object.__new__(locustfile.ObservabilityDemoUser)
+    user.environment = SimpleNamespace(
+        process_exit_code=None,
+        parsed_options=SimpleNamespace(require_complete_tour=True),
+    )
+    user._scenario_index = len(user._SCENARIOS) - 1
+
+    with caplog.at_level(logging.ERROR, logger=locustfile.__name__):
+        user.on_stop()
+
+    assert user.environment.process_exit_code == 1
+    assert caplog.messages == [locustfile._INCOMPLETE_DEMO_TOUR_MESSAGE]
+
+
+def test_locust_process_rejects_incomplete_required_tour(tmp_path: Path) -> None:
+    probe = tmp_path / "incomplete_tour_locustfile.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            import gevent
+
+            from locustfile import ObservabilityDemoUser
+
+
+            class IncompleteTourUser(ObservabilityDemoUser):
+                _SCENARIOS = ("block_until_shutdown",)
+
+                def on_start(self):
+                    self._scenario_index = 0
+
+                def block_until_shutdown(self):
+                    gevent.sleep(5)
+            """
+        ),
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["DJANGO_API_TOKEN"] = "subprocess-test-token"
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (str(ROOT), environment.get("PYTHONPATH")))
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "locust",
+            "-f",
+            str(probe),
+            "--host=http://127.0.0.1:1",
+            "--headless",
+            "-u",
+            "1",
+            "-r",
+            "1",
+            "-t",
+            "1s",
+            "--stop-timeout",
+            "1",
+            "--require-complete-tour",
+            "IncompleteTourUser",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert locustfile._INCOMPLETE_DEMO_TOUR_MESSAGE in output
+    assert "Shutting down (exit code 1)" in output
 
 
 @pytest.mark.parametrize(
@@ -662,7 +796,10 @@ def test_loadtest_defaults_to_the_explicit_low_resource_demo() -> None:
     assert "-r $(LOADTEST_SPAWN_RATE)" in interactive
     assert "$(LOADTEST_CLASSES)" in headless
     assert "--headless -u 1 -r 1 -t 300s" in demo
+    assert "--require-complete-tour" in demo
     assert demo.strip().endswith("ObservabilityDemoUser")
+    assert "--require-complete-tour" not in interactive
+    assert "--require-complete-tour" not in headless
     for recipe in (interactive, demo, headless):
         assert "--stop-timeout $(LOADTEST_STOP_TIMEOUT)" in recipe
 
@@ -695,6 +832,22 @@ def test_powershell_loadtest_example_clears_plaintext_and_encoded_token() -> Non
     assert powershell.index("try {") < powershell.index("kubectl --context")
     assert "Remove-Item Env:DJANGO_API_TOKEN -ErrorAction SilentlyContinue" in powershell
     assert "Remove-Variable djangoRayEncodedToken -ErrorAction SilentlyContinue" in powershell
+
+
+def test_loadtest_docs_separate_worker_logs_and_retained_state() -> None:
+    readme = TESTPROJECT_README.read_text(encoding="utf-8")
+    loadtest_section = readme.split(
+        "## Observe a low-resource mixed workload",
+        maxsplit=1,
+    )[1].split(
+        "## Verify through Django admin",
+        maxsplit=1,
+    )[0]
+
+    assert "app=django-ray,component=worker -c django-ray-worker" in loadtest_section
+    assert "app=ray,component=worker -c ray-worker" in loadtest_section
+    assert "neither scales nor stops the Kubernetes stack" in loadtest_section
+    assert "retains the completed task rows for" in loadtest_section
 
 
 @pytest.mark.parametrize(

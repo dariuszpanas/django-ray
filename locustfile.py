@@ -14,7 +14,8 @@ Usage:
     # command line, then run the resource-bounded observability demo.
     export DJANGO_API_TOKEN="<local demo token>"
     locust -f locustfile.py --host=http://localhost:30080 \
-        --headless -u 1 -r 1 -t 5m --stop-timeout 150 ObservabilityDemoUser
+        --headless -u 1 -r 1 -t 5m --stop-timeout 150 \
+        --require-complete-tour ObservabilityDemoUser
 
     # Run the same one-user scenario with the web UI on http://localhost:8089.
     locust -f locustfile.py --host=http://localhost:30080 \
@@ -45,6 +46,7 @@ Metrics to watch:
     - Task completion rate (check /api/executions/stats)
 """
 
+import logging
 import os
 import random
 import sys
@@ -55,6 +57,8 @@ from locust import HttpUser, between, events, task
 from locust.exception import StopTest
 
 _API_TOKEN_ENV = "DJANGO_API_TOKEN"
+_LOGGER = logging.getLogger(__name__)
+_INCOMPLETE_DEMO_TOUR_MESSAGE = "Observability demo ended before one complete task-family tour."
 _TERMINAL_SUCCESS_STATES = frozenset({"SUCCESSFUL", "SUCCEEDED"})
 _TERMINAL_FAILURE_STATES = frozenset({"FAILED", "CANCELLED", "LOST"})
 _ACTIVE_STATES = frozenset({"READY", "QUEUED", "RUNNING", "CANCELLING"})
@@ -96,6 +100,18 @@ _EXPLICIT_ONLY_USER_CLASSES = frozenset(
         "WorkflowShowcaseUser",
     }
 )
+
+
+@events.init_command_line_parser.add_listener
+def _add_django_ray_loadtest_arguments(parser: Any, **_kwargs: Any) -> None:
+    """Register opt-in assertions used by deterministic headless demos."""
+
+    parser.add_argument(
+        "--require-complete-tour",
+        action="store_true",
+        default=False,
+        help=("Fail when ObservabilityDemoUser stops before completing every task family once"),
+    )
 
 
 def _configured_api_token() -> str | None:
@@ -924,6 +940,17 @@ class ObservabilityDemoUser(AuthenticatedTaskUser):
         super().on_start()
         self._scenario_index = 0
 
+    def on_stop(self) -> None:
+        """Fail an explicitly complete demo when no whole tour finished."""
+
+        parsed_options = getattr(self.environment, "parsed_options", None)
+        if not getattr(parsed_options, "require_complete_tour", False):
+            return
+        if getattr(self, "_scenario_index", 0) >= len(self._SCENARIOS):
+            return
+        self.environment.process_exit_code = 1
+        _LOGGER.error(_INCOMPLETE_DEMO_TOUR_MESSAGE)
+
     def _submit_and_follow(
         self,
         result: dict[str, Any] | None,
@@ -957,8 +984,8 @@ class ObservabilityDemoUser(AuthenticatedTaskUser):
     def run_next_scenario(self) -> None:
         """Run each task family once before starting the sequence again."""
         scenario = self._SCENARIOS[self._scenario_index % len(self._SCENARIOS)]
-        self._scenario_index += 1
         getattr(self, scenario)()
+        self._scenario_index += 1
 
     def show_basic_add(self) -> None:
         self._submit_and_follow(

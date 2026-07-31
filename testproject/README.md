@@ -168,7 +168,9 @@ Load the current Kubernetes secret into the Locust process without printing it, 
 one-user demo, and remove the shell variable afterwards. At five minutes Locust stops scheduling
 new scenarios, then waits for at most 150 additional seconds for the active scenario's bounded
 terminal and workflow-summary validation. This keeps the reported run from silently abandoning a
-task that was already enqueued.
+task that was already enqueued. The headless demo also exits nonzero unless all eleven task
+families complete at least once; a slow machine cannot report success after reaching only a partial
+tour.
 
 ### POSIX
 
@@ -210,11 +212,21 @@ For an interactive Locust session, use `make loadtest` and open
 capacity, burst, or stress scenarios. Stopping the interactive run also grants the active scenario
 the same bounded 150-second drain window.
 
-Follow every worker while the demo runs:
+Follow the Django task-manager workers while the demo runs:
 
 ```bash
 kubectl --context docker-desktop -n django-ray logs -l app=django-ray,component=worker -c django-ray-worker --prefix --tail=0 --follow --max-log-requests=8
 ```
+
+Ray execution logs are separate because the KubeRay pods use different labels and containers:
+
+```bash
+kubectl --context docker-desktop -n django-ray logs -l app=ray,component=worker -c ray-worker --prefix --tail=0 --follow --max-log-requests=8
+```
+
+The demo neither scales nor stops the Kubernetes stack, and it retains the completed task rows for
+Admin inspection. Use the explicit deployment teardown only after the exploratory test window is
+finished.
 
 `make loadtest-quick`, `make loadtest-moderate`, `make loadtest-18`, and
 `make loadtest-stress` are explicit capacity or stress profiles. They are not prerequisites for
