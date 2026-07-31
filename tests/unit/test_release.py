@@ -21,6 +21,10 @@ from scripts.validate_release import (
 ROOT = Path(__file__).parents[2]
 
 
+def test_local_python_version_allows_patch_updates() -> None:
+    assert (ROOT / ".python-version").read_text(encoding="utf-8").strip() == "3.12"
+
+
 def test_normalize_version_accepts_tag_and_manual_forms() -> None:
     assert normalize_version("v0.3.0") == "0.3.0"
     assert normalize_version("0.3.0-rc1") == "0.3.0-rc1"

@@ -374,6 +374,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Local environment bootstrap now selects the available Python 3.12 patch release instead of
+  requiring an unavailable historical patch, so `uv` and `make` commands work in fresh development
+  containers and continue receiving compatible Python patch updates.
 - Documentation now uses the rich `docs/README.md` as its single homepage source.
   Removing the competing `docs/index.md` prevents Zensical's undefined duplicate-index
   resolution from replacing the published product landing page with a source-orientation
