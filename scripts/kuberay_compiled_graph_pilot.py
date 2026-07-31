@@ -24,6 +24,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import tomllib
 import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -184,6 +185,7 @@ KUBERNETES_NODE_RESOURCE_KEYS = frozenset(
     }
 )
 ROOT = Path(__file__).resolve().parents[1]
+PYPROJECT_PATH = ROOT / "pyproject.toml"
 PILOT_DIRECTORY = ROOT / "k8s" / "pilots" / "compiled-graph"
 PROFILE_PATH = PILOT_DIRECTORY / "profile.json"
 MANIFEST_PATH = PILOT_DIRECTORY / "raycluster.yaml"
@@ -647,6 +649,20 @@ def _run_json_command(
     return _parse_json_command_output(result, command, expected_type=expected_type)
 
 
+def _load_source_package_version(path: Path | None = None) -> str:
+    pyproject_path = PYPROJECT_PATH if path is None else path
+    try:
+        with pyproject_path.open("rb") as pyproject_file:
+            pyproject = tomllib.load(pyproject_file)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise PilotError("Compiled Graph pilot could not read source package metadata") from error
+    project = pyproject.get("project")
+    version = project.get("version") if isinstance(project, dict) else None
+    if not isinstance(version, str) or not version or version != version.strip():
+        raise PilotError("Compiled Graph pilot source package version is invalid")
+    return version
+
+
 def _load_profile() -> dict[str, Any]:
     value = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or not _is_exact_json_integer(
@@ -659,6 +675,13 @@ def _load_profile() -> dict[str, Any]:
     cluster = value.get("cluster")
     if not isinstance(cluster, dict) or cluster.get("namespace") != PILOT_NAMESPACE:
         raise PilotError("Compiled Graph pilot profile must retain its dedicated namespace")
+    dependencies = value.get("dependency_profile")
+    source_version = _load_source_package_version()
+    if not isinstance(dependencies, dict) or dependencies.get("django-ray") != source_version:
+        raise PilotError(
+            "Compiled Graph pilot django-ray dependency must match "
+            f"source package version {source_version}"
+        )
     return value
 
 
@@ -2912,7 +2935,10 @@ def _blocked_runtime_cleanup_result(
         "zero_residual_state": zero_residual_state,
     }
     if known_upstream_blocker:
-        _validate_blocked_evidence_record(result, require_namespace_deleted=False)
+        _validate_current_blocked_evidence_record(
+            result,
+            require_namespace_deleted=False,
+        )
     return result
 
 
@@ -4053,17 +4079,23 @@ def _validate_native_observation(
     payload: dict[str, Any],
     decision: Any,
     topology: str,
+    *,
+    profile: dict[str, Any] | None = None,
+    configuration_id: str | None = None,
 ) -> None:
-    profile = _load_profile()
+    expected_profile = _load_profile() if profile is None else profile
+    expected_configuration_id = (
+        _configuration_identity() if configuration_id is None else configuration_id
+    )
     runtime = payload.get("runtime")
     if not isinstance(runtime, dict):
         raise PilotError("native pilot omitted its sanitized runtime record")
 
-    expected_dependencies = profile["dependency_profile"]
+    expected_dependencies = expected_profile["dependency_profile"]
     if runtime.get("dependencies") != expected_dependencies:
         raise PilotError(f"native dependency profile changed: {runtime.get('dependencies')!r}")
-    expected_runtime = profile["runtime_expectations"]
-    if runtime.get("python_version") != profile["python_version"]:
+    expected_runtime = expected_profile["runtime_expectations"]
+    if runtime.get("python_version") != expected_profile["python_version"]:
         raise PilotError("native Python version changed")
     if (
         runtime.get("python_implementation", "").strip().casefold()
@@ -4080,7 +4112,7 @@ def _validate_native_observation(
         raise PilotError("native container operating-system profile changed")
     if not _is_exact_json_integer(
         runtime.get("shared_memory_bytes"),
-        expected=profile["cluster"]["shared_memory_bytes_per_pod"],
+        expected=expected_profile["cluster"]["shared_memory_bytes_per_pod"],
     ):
         raise PilotError("native /dev/shm capacity changed")
     if not _is_exact_json_integer(runtime.get("alive_ray_nodes"), expected=3):
@@ -4091,8 +4123,13 @@ def _validate_native_observation(
     if not _is_nonnegative_finite_number(cpu_resources) or float(cpu_resources) != 2.0:
         raise PilotError("native Ray CPU resources changed")
     object_store_memory = cluster_resources.get("object_store_memory")
-    node_count = profile["cluster"]["head"]["replicas"] + profile["cluster"]["workers"]["replicas"]
-    expected_object_store_memory = profile["cluster"]["object_store_bytes_per_pod"] * node_count
+    node_count = (
+        expected_profile["cluster"]["head"]["replicas"]
+        + expected_profile["cluster"]["workers"]["replicas"]
+    )
+    expected_object_store_memory = (
+        expected_profile["cluster"]["object_store_bytes_per_pod"] * node_count
+    )
     if (
         isinstance(object_store_memory, bool)
         or not isinstance(object_store_memory, (int, float))
@@ -4111,19 +4148,19 @@ def _validate_native_observation(
         raise PilotError("native source revision is not immutable")
     if not SHA256_PATTERN.fullmatch(image_id):
         raise PilotError("native image identity is not immutable")
-    if configuration_id != _configuration_identity():
+    if configuration_id != expected_configuration_id:
         raise PilotError("native configuration identity changed")
-    if runtime.get("kuberay_version") != profile["kuberay"]["operator_version"]:
+    if runtime.get("kuberay_version") != expected_profile["kuberay"]["operator_version"]:
         raise PilotError("native KubeRay version changed")
 
     identity = runtime.get("runtime_identity")
     expected_identity = _expected_policy_identity(
-        profile,
+        expected_profile,
         revision=revision,
         image_id=image_id,
         configuration_id=configuration_id,
         shared_memory_profile=(
-            f"tmpfs:/dev/shm:size={profile['cluster']['shared_memory_bytes_per_pod']}"
+            f"tmpfs:/dev/shm:size={expected_profile['cluster']['shared_memory_bytes_per_pod']}"
         ),
     )
     if identity != expected_identity:
@@ -4622,7 +4659,13 @@ def _validate_retained_topology_outcome(
         )
     ):
         raise PilotError("blocked evidence native observation is incomplete")
-    _validate_native_observation(observation, expected_decision, topology)
+    _validate_native_observation(
+        observation,
+        expected_decision,
+        topology,
+        profile=profile,
+        configuration_id=record["configuration_id"],
+    )
     runtime = observation.get("runtime")
     _require_exact_keys(
         runtime,
@@ -5357,11 +5400,9 @@ def _validate_blocked_evidence_record(
     ):
         if not SHA256_PATTERN.fullmatch(str(record.get(identity_name, ""))):
             raise PilotError(f"blocked evidence requires an exact {identity_name}")
-    tracked_profile = _load_profile()
     profile = record.get("profile")
     if (
         not isinstance(profile, dict)
-        or not _json_exact_equal(profile, tracked_profile)
         or record.get("profile_name") != PROFILE_NAME
         or profile.get("profile_name") != PROFILE_NAME
         or _profile_identity(profile) != record.get("profile_id")
@@ -5390,18 +5431,6 @@ def _validate_blocked_evidence_record(
         record.get("raycluster_lease"),
         retained_namespace_lease,
     )
-    expected_configuration_id = _configuration_identity()
-    _manifest, rendered_configuration_id, expected_manifest_id = _render_manifest(
-        record["image"],
-        record["image_id"],
-        retained_namespace_lease,
-    )
-    if (
-        record["configuration_id"] != expected_configuration_id
-        or rendered_configuration_id != expected_configuration_id
-        or record["rendered_manifest_id"] != expected_manifest_id
-    ):
-        raise PilotError("blocked evidence tracked configuration or rendered manifest changed")
     if (
         record.get("candidate_native") is not True
         or record.get("promotion_eligible") is not False
@@ -5651,11 +5680,43 @@ def _validate_blocked_evidence_record(
         raise PilotError("blocked evidence does not independently prove zero other residuals")
 
 
+def _validate_current_blocked_evidence_record(
+    record: dict[str, Any],
+    *,
+    require_namespace_deleted: bool,
+) -> None:
+    """Validate a record and bind it to the active source/profile assets."""
+
+    _validate_blocked_evidence_record(
+        record,
+        require_namespace_deleted=require_namespace_deleted,
+    )
+    tracked_profile = _load_profile()
+    if not _json_exact_equal(record["profile"], tracked_profile):
+        raise PilotError("blocked evidence does not use the current tracked profile")
+    retained_namespace_lease = _validate_retained_namespace_lease(
+        record.get("namespace_lease"),
+        record,
+    )
+    expected_configuration_id = _configuration_identity()
+    _manifest, rendered_configuration_id, expected_manifest_id = _render_manifest(
+        record["image"],
+        record["image_id"],
+        retained_namespace_lease,
+    )
+    if (
+        record["configuration_id"] != expected_configuration_id
+        or rendered_configuration_id != expected_configuration_id
+        or record["rendered_manifest_id"] != expected_manifest_id
+    ):
+        raise PilotError("blocked evidence tracked configuration or rendered manifest changed")
+
+
 def _write_blocked_evidence(path: Path, record: dict[str, Any]) -> None:
     current_revision = _git_source_revision()
     if current_revision != record.get("source_revision"):
         raise PilotError("blocked evidence source revision no longer matches clean current HEAD")
-    _validate_blocked_evidence_record(record, require_namespace_deleted=True)
+    _validate_current_blocked_evidence_record(record, require_namespace_deleted=True)
     serialized = _serialize_retained_evidence(record, pretty=True)
     try:
         with path.open("x", encoding="utf-8", newline="\n") as evidence_file:

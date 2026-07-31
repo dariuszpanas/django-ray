@@ -141,6 +141,15 @@ uv run python scripts/kuberay_compiled_graph_pilot.py run `
   --context docker-desktop
 ```
 
+The active profile's `django-ray` dependency must equal the source package version in
+`pyproject.toml`, and the image build derives the same expectation from its archived
+project metadata. A source version change therefore fails closed until the tracked
+profile is updated and creates a new profile identity. Retained evidence embeds its
+original dependency profile and remains immutable. Its self-contained record is
+validated against that embedded profile, while the fresh-evidence writer separately
+requires the current tracked profile and configuration. Updating the active profile
+therefore does not rewrite or reclassify an older record.
+
 The reference operator installation uses the versioned upstream chart and tag; the
 runner then verifies the running image digest before it creates the pilot namespace:
 
