@@ -907,12 +907,14 @@ its opt-in Locust class explicitly:
 ```bash
 export DJANGO_API_TOKEN="<local testproject token>"
 uv run locust -f locustfile.py --host=http://localhost:30080 \
-  --headless -u 1 -r 1 -t 5m WorkflowShowcaseUser
+  --headless -u 1 -r 1 -t 5m --stop-timeout 150 WorkflowShowcaseUser
 ```
 
 `WorkflowShowcaseUser` is excluded from default class discovery, fixes the population
 at one user, requires each three-item success and complete 25-node/36-edge publication
-before submitting the next, and never injects the expected failure fixture.
+before submitting the next, and never injects the expected failure fixture. The
+150-second graceful-stop window covers bounded enqueue, terminal polling, final detail
+validation, and scheduling margin for the scenario active at the five-minute cutoff.
 
 Omitting `reporting_policy` preserves the existing full-reporting fixture. Set
 `reporting_policy=terminal_only` to exercise the actor-free summary path with a small

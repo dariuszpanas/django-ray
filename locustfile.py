@@ -14,15 +14,16 @@ Usage:
     # command line, then run the resource-bounded observability demo.
     export DJANGO_API_TOKEN="<local demo token>"
     locust -f locustfile.py --host=http://localhost:30080 \
-        --headless -u 1 -r 1 -t 5m ObservabilityDemoUser
+        --headless -u 1 -r 1 -t 5m --stop-timeout 150 ObservabilityDemoUser
 
     # Run the same one-user scenario with the web UI on http://localhost:8089.
-    locust -f locustfile.py --host=http://localhost:30080 ObservabilityDemoUser
+    locust -f locustfile.py --host=http://localhost:30080 \
+        --stop-timeout 150 ObservabilityDemoUser
 
     # Run only the bounded order-fulfillment workflow showcase. This class is
     # intentionally absent from default Locust discovery unless named here.
     locust -f locustfile.py --host=http://localhost:30080 \
-        --headless -u 1 -r 1 -t 5m WorkflowShowcaseUser
+        --headless -u 1 -r 1 -t 5m --stop-timeout 150 WorkflowShowcaseUser
 
 Scenarios:
     - BasicTaskUser: Submits quick add_numbers/multiply tasks

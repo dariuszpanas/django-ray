@@ -135,6 +135,11 @@ nested workflow at a time under full, terminal-only, and disabled reporting, wai
 durable completion, and validates the bounded summary contract before continuing.
 Stable per-policy Locust labels separate enqueue, terminal polling, and summary-read
 latency. The one-user, one-user-per-second defaults remain intentionally conservative.
+After the five-minute active window, Locust schedules no new scenario and grants the
+current one a bounded 150-second drain window. That covers the client-bounded enqueue,
+the longest 120-second poll, the final detail read, and scheduling margin, so an
+already-enqueued task still reaches terminal and summary validation instead of
+disappearing from an otherwise green run.
 
 `WorkflowShowcaseUser` serves a different purpose: it keeps one realistic
 order-fulfillment graph moving through the Admin and Ray dashboard at a readable
