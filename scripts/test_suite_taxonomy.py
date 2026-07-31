@@ -9,22 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-MANIFEST_SCHEMA_VERSION = 3
-XDIST_WORKERS = 2
-XDIST_DISTRIBUTION = "worksteal"
-XDIST_MAX_WORKER_RESTART = 0
-XDIST_FORBIDDEN_MARKERS = frozenset({"django_db", "live_cluster", "postgresql", "real_ray"})
-XDIST_FORBIDDEN_FIXTURES = frozenset(
-    {
-        "admin_client",
-        "admin_user",
-        "db",
-        "django_db_reset_sequences",
-        "django_db_serialized_rollback",
-        "live_server",
-        "transactional_db",
-    }
-)
+MANIFEST_SCHEMA_VERSION = 4
 
 
 class InventoryError(ValueError):
@@ -104,7 +89,7 @@ class CollectedTest:
         return self.nodeid.split("[", maxsplit=1)[0]
 
     def contract_mapping(self) -> dict[str, object]:
-        """Return the collection identity needed for worker parity checks."""
+        """Return the collection identity used by source-fenced timing evidence."""
         return {
             "nodeid": self.nodeid,
             "path": self.path,
@@ -220,72 +205,6 @@ def path_matches(item_path: str, selected_path: str) -> bool:
 
 
 @dataclass(frozen=True)
-class ExecutionPolicy:
-    """Fixed execution topology declared by one taxonomy group."""
-
-    mode: str = "serial"
-    workers: int = 0
-    distribution: str = "no"
-    max_worker_restart: int = 0
-
-    @classmethod
-    def from_mapping(cls, value: object, label: str) -> ExecutionPolicy:
-        if value is None:
-            return cls()
-        if not isinstance(value, dict):
-            raise InventoryError(f"{label} execution must be an object")
-        expected_keys = {"mode", "workers", "distribution", "max_worker_restart"}
-        if set(value) != expected_keys:
-            raise InventoryError(f"{label} execution must declare exactly {sorted(expected_keys)}")
-        if (
-            type(value.get("mode")) is not str
-            or type(value.get("workers")) is not int
-            or type(value.get("distribution")) is not str
-            or type(value.get("max_worker_restart")) is not int
-        ):
-            raise InventoryError(
-                f"{label} execution must use fixed xdist topology with exact scalar types"
-            )
-        policy = cls(
-            mode=value.get("mode"),
-            workers=value.get("workers"),
-            distribution=value.get("distribution"),
-            max_worker_restart=value.get("max_worker_restart"),
-        )
-        if policy != cls(
-            mode="xdist",
-            workers=XDIST_WORKERS,
-            distribution=XDIST_DISTRIBUTION,
-            max_worker_restart=XDIST_MAX_WORKER_RESTART,
-        ):
-            raise InventoryError(
-                f"{label} execution must use fixed xdist topology: "
-                f"{XDIST_WORKERS} workers, {XDIST_DISTRIBUTION}, zero restarts"
-            )
-        return policy
-
-    def as_mapping(self) -> dict[str, object]:
-        return {
-            "mode": self.mode,
-            "workers": self.workers,
-            "distribution": self.distribution,
-            "max_worker_restart": self.max_worker_restart,
-        }
-
-    def pytest_arguments(self) -> list[str]:
-        if self.mode == "serial":
-            return []
-        return [
-            "-n",
-            str(self.workers),
-            "--dist",
-            self.distribution,
-            "--max-worker-restart",
-            str(self.max_worker_restart),
-        ]
-
-
-@dataclass(frozen=True)
 class SkipPolicy:
     """Whether a successful timing observation may contain skipped cases."""
 
@@ -304,7 +223,6 @@ class Group:
     selection: Selection
     skip_policy: SkipPolicy
     django_settings_modules: tuple[str, ...]
-    execution: ExecutionPolicy
     variants: int = 1
 
 
@@ -387,26 +305,12 @@ def _group(value: object, kind: str, index: int) -> Group:
         for module in django_settings_modules
     ):
         raise InventoryError(f"{label} has an invalid Django settings module identity")
-    execution = ExecutionPolicy.from_mapping(value.get("execution"), label)
+    if "execution" in value:
+        raise InventoryError(
+            f"{label} cannot declare an execution policy; manifest-backed runs are serial"
+        )
     normalized_group_id = group_id.strip()
-    if execution.mode == "xdist" and (
-        kind != "execution_contract" or normalized_group_id != "hermetic"
-    ):
-        raise InventoryError("only the hermetic execution contract may declare xdist")
     selection = Selection.from_mapping(value.get("selection"), f"{label} selection")
-    if execution.mode == "xdist":
-        missing_markers = XDIST_FORBIDDEN_MARKERS - set(selection.exclude_markers)
-        missing_fixtures = XDIST_FORBIDDEN_FIXTURES - set(selection.exclude_fixtures)
-        if missing_markers or missing_fixtures:
-            missing: list[str] = []
-            if missing_markers:
-                missing.append("markers " + ", ".join(sorted(missing_markers)))
-            if missing_fixtures:
-                missing.append("fixtures " + ", ".join(sorted(missing_fixtures)))
-            raise InventoryError(
-                "hermetic xdist selection must exclude every external or database owner: "
-                + "; ".join(missing)
-            )
     return Group(
         id=normalized_group_id,
         kind=kind,
@@ -415,7 +319,6 @@ def _group(value: object, kind: str, index: int) -> Group:
         selection=selection,
         skip_policy=skip_policy,
         django_settings_modules=django_settings_modules,
-        execution=execution,
         variants=variants,
     )
 

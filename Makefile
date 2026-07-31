@@ -5,7 +5,7 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install format fix lint typecheck test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-cov-phased _test-cov-phased-body test-suite-inventory coverage-debt check ci build clean help
+.PHONY: all install format fix lint typecheck test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
@@ -23,12 +23,6 @@ COVERAGE_TESTPROJECT_MIN ?= 80
 COVERAGE_DEBT_OUTPUT_DIR ?= artifacts/coverage-debt
 COVERAGE_DEBT_SOURCE_COMMIT ?= $(shell git rev-parse HEAD)
 TEST_SUITE_INVENTORY_OUTPUT_DIR ?= artifacts/test-suite-inventory
-TEST_SUITE_PHASED_OUTPUT_DIR ?= artifacts/test-suite-phased-coverage
-TEST_SUITE_RAY_TMP_DIR ?= $(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/ray-tmp)
-TEST_SUITE_HERMETIC_EXECUTION ?= serial
-TEST_SUITE_OBSERVATION ?= local-canonical
-TEST_SUITE_VARIANT ?= locked-dependencies
-TEST_SUITE_EXTERNAL_NOTE ?= Queue and environment setup are outside pytest timing.
 TEST_XDIST_WORKERS ?= 4
 
 # =============================================================================
@@ -107,76 +101,6 @@ test-cov:
 	pytest -m "not live_cluster" --cov=src --cov-report=html --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
-
-# Build one canonical coverage dataset while isolating external resource owners.
-# Keep one outer `uv run make` boundary; the phase commands intentionally do not
-# enforce coverage until hermetic, SQLite, required local-Ray, and the default
-# settings self-skip remainder recreate the supported-Python canonical dataset.
-test-cov-phased:
-	python scripts/test_suite_benchmark.py prepare --output-dir "$(TEST_SUITE_PHASED_OUTPUT_DIR)"
-	python scripts/ray_residue.py snapshot --output "$(TEST_SUITE_PHASED_OUTPUT_DIR)/ray-baseline.json"
-	python scripts/ray_residue.py guard \
-		--baseline "$(TEST_SUITE_PHASED_OUTPUT_DIR)/ray-baseline.json" \
-		--owned-temp-dir "$(TEST_SUITE_PHASED_OUTPUT_DIR)/ray-tmp" \
-		--output "$(TEST_SUITE_PHASED_OUTPUT_DIR)/ray-residue.json" \
-		-- $(MAKE) --no-print-directory _test-cov-phased-body
-
-# Internal body: the Python guard above owns finally-style Ray cleanup.
-_test-cov-phased-body:
-	@python scripts/ray_residue.py verify-guard --output-dir "$(TEST_SUITE_PHASED_OUTPUT_DIR)"
-	coverage erase --data-file="$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)"
-	python scripts/test_suite_inventory.py run \
-		--lane hermetic \
-		--execution "$(TEST_SUITE_HERMETIC_EXECUTION)" \
-		--observation "$(TEST_SUITE_OBSERVATION)-hermetic" \
-		--variant "$(TEST_SUITE_VARIANT)" \
-		--timing-output "$(TEST_SUITE_PHASED_OUTPUT_DIR)/hermetic.json" \
-		--coverage-file "$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" \
-		--ray-tmp-dir "$(TEST_SUITE_RAY_TMP_DIR)" \
-		--external-note "$(TEST_SUITE_EXTERNAL_NOTE)" \
-		-- --cov=src --cov-config=pyproject.toml --cov-append --cov-fail-under=0 --cov-report= -q
-	python scripts/test_suite_inventory.py run \
-		--lane sqlite-django \
-		--execution serial \
-		--observation "$(TEST_SUITE_OBSERVATION)-sqlite-django" \
-		--variant "$(TEST_SUITE_VARIANT)" \
-		--timing-output "$(TEST_SUITE_PHASED_OUTPUT_DIR)/sqlite-django.json" \
-		--coverage-file "$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" \
-		--ray-tmp-dir "$(TEST_SUITE_RAY_TMP_DIR)" \
-		--external-note "$(TEST_SUITE_EXTERNAL_NOTE)" \
-		-- --cov=src --cov-config=pyproject.toml --cov-append --cov-fail-under=0 --cov-report= -q
-	python scripts/test_suite_inventory.py run \
-		--lane local-ray \
-		--execution serial \
-		--observation "$(TEST_SUITE_OBSERVATION)-local-ray" \
-		--variant "$(TEST_SUITE_VARIANT)" \
-		--timing-output "$(TEST_SUITE_PHASED_OUTPUT_DIR)/local-ray.json" \
-		--coverage-file "$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" \
-		--ray-tmp-dir "$(TEST_SUITE_RAY_TMP_DIR)" \
-		--external-note "$(TEST_SUITE_EXTERNAL_NOTE)" \
-		-- --cov=src --cov-config=pyproject.toml --cov-append --cov-fail-under=0 --cov-report= -q
-	python scripts/test_suite_inventory.py run \
-		--lane default-serial-remainder \
-		--execution serial \
-		--observation "$(TEST_SUITE_OBSERVATION)-default-serial-remainder" \
-		--variant "$(TEST_SUITE_VARIANT)" \
-		--timing-output "$(TEST_SUITE_PHASED_OUTPUT_DIR)/default-serial-remainder.json" \
-		--coverage-file "$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" \
-		--ray-tmp-dir "$(TEST_SUITE_RAY_TMP_DIR)" \
-		--external-note "$(TEST_SUITE_EXTERNAL_NOTE)" \
-		-- --cov=src --cov-config=pyproject.toml --cov-append --cov-fail-under=0 --cov-report= -q
-	python scripts/test_suite_inventory.py collect \
-		--timing "$(TEST_SUITE_PHASED_OUTPUT_DIR)/hermetic.json" \
-		--timing "$(TEST_SUITE_PHASED_OUTPUT_DIR)/sqlite-django.json" \
-		--timing "$(TEST_SUITE_PHASED_OUTPUT_DIR)/local-ray.json" \
-		--timing "$(TEST_SUITE_PHASED_OUTPUT_DIR)/default-serial-remainder.json" \
-		--json-output "$(TEST_SUITE_PHASED_OUTPUT_DIR)/inventory.json" \
-		--markdown-output "$(TEST_SUITE_PHASED_OUTPUT_DIR)/inventory.md"
-	coverage report --data-file="$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" --fail-under=$(COVERAGE_GLOBAL_MIN)
-	coverage report --data-file="$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
-	coverage report --data-file="$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
-	coverage xml --data-file="$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" -o "$(TEST_SUITE_PHASED_OUTPUT_DIR)/coverage.xml"
-	coverage json --data-file="$(abspath $(TEST_SUITE_PHASED_OUTPUT_DIR)/.coverage)" --pretty-print -o "$(TEST_SUITE_PHASED_OUTPUT_DIR)/coverage.json"
 
 # Collect exact execution-contract and CI-lane counts without running tests.
 test-suite-inventory:
@@ -311,7 +235,6 @@ help:
 	@echo "  test-postgres  - Run PostgreSQL coordination tests"
 	@echo "  test-testproject - Validate the bundled sample project"
 	@echo "  test-cov       - Run tests with coverage"
-	@echo "  test-cov-phased - Build opt-in serial/xdist canonical coverage evidence"
 	@echo "  test-suite-inventory - Classify collected tests by execution contract"
 	@echo "  coverage-debt  - Build exact JSON and Markdown line-coverage debt reports"
 	@echo "  k8s-final-gate-preflight - Validate a guarded local KubeRay gate without mutations"

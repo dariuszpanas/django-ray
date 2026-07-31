@@ -23,10 +23,6 @@ REQUIRED_CHECK_JOBS = {
 }
 REQUIRED_CHECK_NAMES = set(REQUIRED_CHECK_JOBS.values())
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {}
-EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS = {
-    ("ci.yml", "pytest-xdist-benchmark-pair"): "pair",
-    ("ci.yml", "pytest-xdist-benchmark-aggregate"): "aggregate",
-}
 
 
 def _workflow_paths() -> list[Path]:
@@ -217,12 +213,7 @@ def _contains_key(value: object, key: str) -> bool:
 def test_ci_gate_covers_every_pr_ci_job_and_runs_after_failures() -> None:
     jobs = _jobs()
     gate = jobs["ci-gate"]
-    dispatch_only = {
-        job_id
-        for workflow_name, job_id in EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS
-        if workflow_name == CI_WORKFLOW.name
-    }
-    blocking = set(jobs) - {"build", "ci-gate"} - dispatch_only
+    blocking = set(jobs) - {"build", "ci-gate"}
 
     assert gate["name"] == "CI Gate"
     assert gate["if"] == "always()"
@@ -231,30 +222,49 @@ def test_ci_gate_covers_every_pr_ci_job_and_runs_after_failures() -> None:
     assert _needs(jobs["build"]) == blocking
 
 
-def test_optional_benchmark_jobs_are_exactly_workflow_dispatch_only() -> None:
-    jobs = _jobs()
-    gate_needs = _needs(jobs["ci-gate"])
-    build_needs = _needs(jobs["build"])
+def test_manual_ci_has_no_obsolete_xdist_retention_controls_or_jobs() -> None:
+    workflow = _workflow()
+    assert workflow["on"]["workflow_dispatch"] == ""
+    assert {
+        "pytest-xdist-benchmark-pair",
+        "pytest-xdist-benchmark-aggregate",
+    }.isdisjoint(_jobs())
 
-    assert set(EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS) == {
-        ("ci.yml", "pytest-xdist-benchmark-pair"),
-        ("ci.yml", "pytest-xdist-benchmark-aggregate"),
-    }
-    for (workflow_name, job_id), mode in EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS.items():
-        assert workflow_name == CI_WORKFLOW.name
-        assert job_id not in gate_needs
-        assert job_id not in build_needs
-        assert jobs[job_id]["if"] == (
-            f"github.event_name == 'workflow_dispatch' && inputs.xdist_benchmark_mode == '{mode}'"
-        )
-        install_uv = next(
-            step for step in jobs[job_id]["steps"] if step.get("name") == "Install uv"
-        )
-        assert install_uv["with"]["version"] == "0.9.18"
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    for obsolete in (
+        "xdist_benchmark_mode",
+        "xdist_benchmark_sample",
+        "xdist_benchmark_order",
+        "xdist_benchmark_pair_run_ids",
+        "test-cov-phased",
+        "test_suite_benchmark.py",
+    ):
+        assert obsolete not in source
 
+
+def test_obsolete_xdist_retention_harness_is_absent() -> None:
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    assert "test-cov-phased" not in makefile
+    assert "_test-cov-phased-body" not in makefile
+    assert "TEST_SUITE_PHASED_" not in makefile
+
+    gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "artifacts/test-suite-phased-coverage/" not in gitignore
+    assert "artifacts/pytest-xdist-" not in gitignore
+
+    for relative in (
+        "scripts/ray_residue.py",
+        "scripts/test_suite_benchmark.py",
+        "tests/unit/test_ray_residue.py",
+        "tests/unit/test_test_suite_benchmark.py",
+    ):
+        assert not (PROJECT_ROOT / relative).exists()
+
+
+def test_minimum_dependency_lane_pins_local_xdist_dependency() -> None:
     minimum_install = next(
         step
-        for step in jobs["dependency-compatibility"]["steps"]
+        for step in _jobs()["dependency-compatibility"]["steps"]
         if step.get("name") == "Install minimum supported dependencies"
     )
     assert '"pytest-xdist==3.8.0"' in minimum_install["run"]
@@ -532,7 +542,6 @@ def test_blocking_ci_jobs_cannot_tolerate_job_or_step_failures() -> None:
 def test_pull_request_jobs_are_gated_required_or_explicitly_nonblocking() -> None:
     gate_needs = _needs(_gate_job())
     observed_nonblocking: set[tuple[str, str]] = set()
-    observed_dispatch_only: set[tuple[str, str]] = set()
 
     for path in _workflow_paths():
         if not _events(path) & {"pull_request", "pull_request_target"}:
@@ -544,15 +553,11 @@ def test_pull_request_jobs_are_gated_required_or_explicitly_nonblocking() -> Non
                 continue
             gated = path == CI_WORKFLOW and job_id in gate_needs
             nonblocking = key in EXPLICIT_NONBLOCKING_PR_JOBS
-            dispatch_only = key in EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS
-            assert sum((gated, nonblocking, dispatch_only)) == 1, key
+            assert sum((gated, nonblocking)) == 1, key
             if nonblocking:
                 observed_nonblocking.add(key)
-            if dispatch_only:
-                observed_dispatch_only.add(key)
 
     assert observed_nonblocking == set(EXPLICIT_NONBLOCKING_PR_JOBS)
-    assert observed_dispatch_only == set(EXPLICIT_WORKFLOW_DISPATCH_ONLY_JOBS)
 
 
 def test_ci_gate_accepts_only_complete_success(

@@ -365,6 +365,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   topology-node, topology-edge, node-detail-page, and indexed-node routes. Existing
   schema-v1/v2 database rows remain unchanged and aggregate-readable, and the private
   bounded Admin graph remains available.
+- The manual paired/aggregate pytest-xdist retention experiment and its phased
+  coverage, fixed-topology taxonomy extensions, residue checks, timing aggregation,
+  and artifact tooling have been removed. `make test-xdist` remains one configurable
+  ordinary pytest invocation, while the supported-Python matrix and serial
+  external-resource jobs are unchanged. Retained serial inventory now uses internal
+  test-suite evidence schema 4; the dated baseline remains immutable.
 
 ### Fixed
 
