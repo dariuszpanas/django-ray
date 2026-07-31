@@ -14,6 +14,7 @@ CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 RELEASE_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
 WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
 MAKEFILE = PROJECT_ROOT / "Makefile"
+TEST_SUITE_TAXONOMY = PROJECT_ROOT / ".github" / "test-suite-taxonomy.json"
 CONTRIBUTING = PROJECT_ROOT / "CONTRIBUTING.md"
 CONTRIBUTING_DOCS = PROJECT_ROOT / "docs" / "contributing.md"
 REQUIRED_CHECK_JOBS = {
@@ -317,10 +318,18 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
         )
         == "uv run --no-sync --python 3.12 make test-postgres"
     )
-    postgres_target = MAKEFILE.read_text(encoding="utf-8").split(
-        "# Validate the bundled sample project's user-facing boundary", maxsplit=1
-    )[0]
-    assert "tests/integration/test_priority_migration.py" in postgres_target
+    postgres_target = re.search(
+        r"(?m)^test-postgres:\n(?P<recipe>(?:\t.*\n)+)",
+        MAKEFILE.read_text(encoding="utf-8"),
+    )
+    assert postgres_target is not None
+    makefile_paths = set(re.findall(r"tests/[^\s\\]+\.py", postgres_target.group("recipe")))
+    taxonomy = json.loads(TEST_SUITE_TAXONOMY.read_text(encoding="utf-8"))
+    postgresql_lane = next(
+        lane for lane in taxonomy["ci_lanes"] if lane["id"] == "postgresql-evidence"
+    )
+
+    assert makefile_paths == set(postgresql_lane["selection"]["paths"])
 
 
 def test_live_cluster_scenarios_are_process_isolated_bounded_and_visible() -> None:

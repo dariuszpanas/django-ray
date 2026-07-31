@@ -395,7 +395,8 @@
           "tests/integration/test_postgresql_metrics.py",
           "tests/integration/test_postgresql_polling.py",
           "tests/integration/test_postgresql_workflow_progress_reads.py",
-          "tests/integration/test_postgresql_workflow_progress_storage.py"
+          "tests/integration/test_postgresql_workflow_progress_storage.py",
+          "tests/integration/test_priority_migration.py"
         ],
         "include_markers": ["postgresql"]
       }

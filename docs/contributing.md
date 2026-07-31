@@ -605,7 +605,7 @@ paths, ports, subprocesses, or global state as isolation defects to fix, not as 
 inter-test synchronization or split CI by marker.
 
 Plain pytest reports selected skips without failing its exit status. Record required local-Ray evidence
-through the manifest runner so its `forbid` skip policy proves that all 22 selected cases executed:
+through the manifest runner so its `forbid` skip policy proves that every selected case executed:
 
 ```bash
 uv run python scripts/test_suite_inventory.py run \
@@ -622,14 +622,11 @@ matching marker. Add a new external-resource fixture to `EXTERNAL_RESOURCE_FIXTU
 `tests/conftest.py` so an unmarked consumer cannot silently enter another lane.
 `compiled_graph_opt_in` also fails collection unless the same case carries `real_ray`.
 
-The current post-#168 collection has 23 raw `real_ray` marker cases: 22 required local-Ray cases and
-one separately owned `compiled_graph_opt_in` case. It also has 32 `postgresql` cases, 3
-`live_cluster` cases, and 85 path-selected testproject cases. This is distinct from issue #166's
-frozen 2026-07-22 comparison snapshot, which records 33 `local-ray` cases before this ownership
-correction and must remain unchanged. The five required real-Ray cases in
-`TestRayRemoteExecution` share one module-scoped runtime and dashboard on port 8265; the other ten
-tests in that module are ordinary in-process Django tests. Recheck marker counts without executing
-their resources:
+Treat the checked-in taxonomy and live collection as the authority for current test counts; do not
+copy transient totals into contributor guidance. Run `uv run make test-suite-inventory` to generate
+the exact execution-contract and CI-lane inventory without executing tests. Issue #166's frozen
+2026-07-22 comparison snapshot remains immutable historical evidence rather than a current count.
+Recheck marker selections without executing their resources:
 
 ```bash
 uv run pytest --collect-only -q -m real_ray
