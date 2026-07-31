@@ -374,6 +374,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Documentation now uses the rich `docs/README.md` as its single homepage source.
+  Removing the competing `docs/index.md` prevents Zensical's undefined duplicate-index
+  resolution from replacing the published product landing page with a source-orientation
+  stub on hosted Linux builds.
 - The PostgreSQL evidence manifest now includes the priority-migration contract already
   executed by the blocking serial database target, and a repository test keeps those two
   path selections identical. Contributor guidance now points to live inventory commands

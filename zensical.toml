@@ -11,7 +11,7 @@ use_directory_urls = true
 extra_css = ["stylesheets/extra.css"]
 
 nav = [
-  { "Home" = "index.md" },
+  { "Home" = "README.md" },
   { "User Guide" = [
     { "Getting Started" = "getting-started.md" },
     { "Configuration" = "configuration.md" },
