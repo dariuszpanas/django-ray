@@ -368,6 +368,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The PostgreSQL evidence manifest now includes the priority-migration contract already
+  executed by the blocking serial database target, and a repository test keeps those two
+  path selections identical. Contributor guidance now points to live inventory commands
+  instead of embedding test totals that drift as coverage grows. The supported-Python
+  matrix and ordinary local pytest-xdist workflow are unchanged.
 - The guarded local Compiled Graph pilot now derives the installed django-ray
   expectation from archived project metadata and rejects an active dependency
   profile that disagrees with the source package version. Project version bumps

@@ -20,9 +20,10 @@ pytest-cov, pytest-django, and pytest-xdist identity.
 The dated baseline is comparison evidence, not a claim that counts never change and not a new gate on
 every test-only pull request. Regenerate artifacts for any tree being measured; add a new dated
 snapshot when a later optimization decision needs a durable before/after reference.
-The frozen 2026-07-22 snapshot records 33 `local-ray` cases. The post-#168 taxonomy instead assigns
-22 cases to required `local-ray` evidence and one capability-gated case to
-`compiled-graph-opt-in`; the raw `real_ray` marker still selects all 23.
+The frozen 2026-07-22 snapshot records 33 `local-ray` cases. Current counts belong to
+the checked-in manifest and a fresh generated inventory: the taxonomy distinguishes
+required `local-ray` evidence from the capability-gated `compiled-graph-opt-in` case,
+while the raw `real_ray` marker selects both groups.
 
 ## Reproduce the collection baseline
 
