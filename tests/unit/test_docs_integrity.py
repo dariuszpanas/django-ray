@@ -12,7 +12,6 @@ from django_ray.conf.defaults import DEFAULTS
 
 ROOT = Path(__file__).parents[2]
 DOCS = ROOT / "docs"
-SOURCE_ONLY_PAGES = {Path("README.md")}
 EVIDENCE_DIRECTORIES = {"benchmarks", "investigations"}
 SETTINGS_OUTSIDE_DJANGO_RAY = {"RAY_DASHBOARD_URL"}
 
@@ -31,7 +30,7 @@ def _nav_markdown_paths(value: Any) -> set[Path]:
     return set()
 
 
-def test_live_documentation_pages_are_navigable_or_source_only() -> None:
+def test_live_documentation_pages_are_navigable() -> None:
     config = tomllib.loads((ROOT / "zensical.toml").read_text(encoding="utf-8"))
     nav_paths = _nav_markdown_paths(config["project"]["nav"])
     all_pages = {path.relative_to(DOCS) for path in DOCS.rglob("*.md")}
@@ -40,7 +39,21 @@ def test_live_documentation_pages_are_navigable_or_source_only() -> None:
     }
 
     assert nav_paths <= all_pages
-    assert live_pages - nav_paths == SOURCE_ONLY_PAGES
+    assert live_pages <= nav_paths
+
+
+def test_docs_use_one_rich_homepage_source() -> None:
+    config = tomllib.loads((ROOT / "zensical.toml").read_text(encoding="utf-8"))
+    homepage = DOCS / "README.md"
+    homepage_text = homepage.read_text(encoding="utf-8")
+
+    assert config["project"]["nav"][0] == {"Home": "README.md"}
+    assert homepage.is_file()
+    assert not (DOCS / "index.md").exists()
+    assert "# django-ray Documentation" in homepage_text
+    assert "## What is django-ray?" in homepage_text
+    assert "assets/images/testproject-landing.png" in homepage_text
+    assert "# Documentation source" not in homepage_text
 
 
 def test_settings_reference_tracks_every_package_default() -> None:
@@ -57,7 +70,7 @@ def test_management_commands_are_discoverable_in_live_guides() -> None:
         path.read_text(encoding="utf-8")
         for path in DOCS.rglob("*")
         if path.suffix in {".md", ".txt"}
-        and path.name not in {"README.md", "changelog.md"}
+        and path.name != "changelog.md"
         and (
             not path.relative_to(DOCS).parts
             or path.relative_to(DOCS).parts[0] not in EVIDENCE_DIRECTORIES
