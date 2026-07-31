@@ -27,6 +27,23 @@ from django_ray.workflow_progress_protocol import (
 )
 
 _COST_SCHEMA_VERSION = 1
+_PRODUCER_SCHEMA_VERSION = 1
+_PRODUCER_COUNTER_FIELDS = (
+    "offered",
+    "submitted",
+    "superseded",
+    "locally_dropped",
+    "acknowledged",
+    "actor_rejected",
+    "ack_failed",
+    "pending_acknowledgements",
+)
+_PRODUCER_TERMINAL_HANDOFFS = (
+    "not_needed",
+    "submitted",
+    "failed",
+    "actor_unavailable",
+)
 
 
 def _wall_time_ns() -> int:
@@ -310,6 +327,16 @@ class _WorkflowProgressCollector:
             handler_wall_ns=max(0, _wall_time_ns() - handler_wall_started),
             handler_cpu_ns=max(0, _process_cpu_ns() - handler_cpu_started),
         )
+        self._producer: dict[str, Any] = {
+            "schema_version": _PRODUCER_SCHEMA_VERSION,
+            "saturated": False,
+            "reports": 0,
+            **dict.fromkeys(_PRODUCER_COUNTER_FIELDS, 0),
+            "terminal_handoffs": dict.fromkeys(
+                _PRODUCER_TERMINAL_HANDOFFS,
+                0,
+            ),
+        }
 
     @staticmethod
     def _empty_kind_counters() -> dict[str, int]:
@@ -436,6 +463,46 @@ class _WorkflowProgressCollector:
         self._add_cost_counter(delivery, "samples", 1)
         self._add_cost_counter(delivery, "total_us", delay_us)
         self._observe_cost_max(delivery, "max_us", delay_us)
+
+    def _add_producer_counter(
+        self,
+        section: dict[str, Any],
+        field: str,
+        increment: int,
+    ) -> None:
+        current = int(section[field])
+        if increment == 0:
+            return
+        if current >= self._counter_max or increment > self._counter_max - current:
+            section[field] = self._counter_max
+            self._producer["saturated"] = True
+            return
+        section[field] = current + increment
+
+    def _aggregate_producer_report(self, event: WorkflowProgressEvent) -> None:
+        report = event.payload
+        if report["saturated"]:
+            self._producer["saturated"] = True
+        self._add_producer_counter(
+            self._producer,
+            "reports",
+            1,
+        )
+        for field in _PRODUCER_COUNTER_FIELDS:
+            self._add_producer_counter(
+                self._producer,
+                field,
+                int(report[field]),
+            )
+        terminal_handoff = cast(
+            dict[str, Any],
+            self._producer["terminal_handoffs"],
+        )
+        self._add_producer_counter(
+            terminal_handoff,
+            str(report["terminal_handoff"]),
+            1,
+        )
 
     @property
     def _node_limit(self) -> int:
@@ -770,6 +837,9 @@ class _WorkflowProgressCollector:
             self._record_delivery_delay(event, received_at_us)
             if event.kind is WorkflowProgressEventKind.INITIALIZED:
                 return self._reject("unexpected_initialized")
+            if event.kind is WorkflowProgressEventKind.PRODUCER_REPORT:
+                self._aggregate_producer_report(event)
+                return self._accept(event)
 
             node_updates: dict[str, dict[str, Any]] = {}
             edge_additions: set[tuple[str, str]] = set()
@@ -852,6 +922,7 @@ class _WorkflowProgressCollector:
                 "retained_nodes": len(self.nodes),
                 "retained_edges": len(self.edges),
                 "cost": cost,
+                "producer": copy.deepcopy(self._producer),
             },
         }
         build_wall_ns = max(0, _wall_time_ns() - build_wall_started)

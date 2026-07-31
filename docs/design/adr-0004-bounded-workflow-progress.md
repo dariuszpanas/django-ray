@@ -367,6 +367,13 @@ wire and decoded messages before actor mailbox or collector memory can grow. Thi
 owns the second boundary: normalized values must fit the durable schema before
 topology-page construction or normalized-row writes.
 
+Issue #259 adds a producer-local invariant before the mailbox boundary: each reporting
+leaf invocation retains at most one outstanding application-progress acknowledgement and one
+canonical latest-value slot, followed by one bounded terminal handoff/report.
+Structural and lifecycle events are not coalesced. Because Ray forks the actor handle
+into many leaves, this bounds one producer session but does not bound their aggregate
+calls, bytes, or mailbox admission across the workflow.
+
 If topology pages or a future backend use compression, the decoder must enforce both
 encoded and decoded page limits while streaming and stop before allocating beyond the
 decoded cap. Compression metadata is not trusted. V1 topology pages may use identity
@@ -538,8 +545,11 @@ Implementation remains split into focused deliveries:
    retrieval, mandatory per-request authorization, summary-only Admin polling, and
    public testproject adapters. These readers are necessary but do not authorize
    producer activation.
-4. **Coordinated with #79:** producer and collector memory limits and reporting policy.
-   Do not claim this storage decision bounds the actor mailbox by itself.
+4. **Coordinated with #79:** individual producer envelopes, collector retention, and
+   per-leaf application-progress state are bounded. Aggregate admission across forked
+   actor handles, the sampled policy that depends on it, and the actor-to-preparer
+   drain remain open. Do not claim this storage decision or a per-leaf producer bound
+   governs the aggregate actor mailbox.
 5. **Follow-up #132:** issue #141 now streams topology identity, duplicate, reference,
    and retained-selection state through ADR-0005's package-owned private SQLite
    workspace. The unchanged prepared value still materializes complete

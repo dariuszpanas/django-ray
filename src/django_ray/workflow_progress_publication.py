@@ -166,6 +166,43 @@ _INGRESS_COST_SNAPSHOT_KEYS = frozenset(
         "build_cpu_ns_max",
     }
 )
+_INGRESS_PRODUCER_KEYS = frozenset(
+    {
+        "schema_version",
+        "saturated",
+        "reports",
+        "offered",
+        "submitted",
+        "superseded",
+        "locally_dropped",
+        "acknowledged",
+        "actor_rejected",
+        "ack_failed",
+        "pending_acknowledgements",
+        "terminal_handoffs",
+    }
+)
+_INGRESS_PRODUCER_COUNTER_KEYS = frozenset(
+    {
+        "reports",
+        "offered",
+        "submitted",
+        "superseded",
+        "locally_dropped",
+        "acknowledged",
+        "actor_rejected",
+        "ack_failed",
+        "pending_acknowledgements",
+    }
+)
+_INGRESS_PRODUCER_TERMINAL_HANDOFF_KEYS = frozenset(
+    {
+        "not_needed",
+        "submitted",
+        "failed",
+        "actor_unavailable",
+    }
+)
 _ACCEPTED_EVENT_KINDS = frozenset(
     {
         "initialized",
@@ -178,8 +215,10 @@ _ACCEPTED_EVENT_KINDS = frozenset(
         "map_progress",
         "completed",
         "failed",
+        "producer_report",
     }
 )
+_HISTORICAL_ACCEPTED_EVENT_KINDS = _ACCEPTED_EVENT_KINDS - {"producer_report"}
 _REJECTED_EVENT_REASONS = frozenset(
     {
         "protocol_error",
@@ -335,25 +374,19 @@ def _validate_ingress_envelope(
     if not isinstance(ingress_value, Mapping):
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     ingress_keys = frozenset(ingress_value)
-    if ingress_keys == _INGRESS_KEYS:
-        ingress = ingress_value
-    elif ingress_keys == _INGRESS_KEYS | {"cost"}:
-        ingress = ingress_value
-    else:
+    optional_keys = ingress_keys - _INGRESS_KEYS
+    if not _INGRESS_KEYS <= ingress_keys or not optional_keys <= {"cost", "producer"}:
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
-    accepted_by_kind = _exact_mapping(
+    ingress = ingress_value
+    accepted_counts = _event_kind_counters(
         ingress["accepted_by_kind"],
-        _ACCEPTED_EVENT_KINDS,
+        limits=limits,
     )
     rejected_by_reason = _exact_mapping(
         ingress["rejected_by_reason"],
         _REJECTED_EVENT_REASONS,
     )
     counter_max = limits.identity_max_integer
-    accepted_counts = {
-        name: _counter(accepted_by_kind[name], maximum=counter_max)
-        for name in _ACCEPTED_EVENT_KINDS
-    }
     rejected_counts = [
         _counter(value, maximum=counter_max) for value in rejected_by_reason.values()
     ]
@@ -380,7 +413,40 @@ def _validate_ingress_envelope(
             accepted_by_kind=accepted_counts,
             limits=limits,
         )
+    if "producer" in ingress:
+        _validate_ingress_producer(
+            ingress["producer"],
+            report_count=accepted_counts["producer_report"],
+            limits=limits,
+        )
+    elif accepted_counts["producer_report"] != 0:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     return ingress
+
+
+def _event_kind_counters(
+    value: Any,
+    *,
+    limits: WorkflowProgressLimits,
+) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    keys = frozenset(value)
+    if keys not in {
+        _ACCEPTED_EVENT_KINDS,
+        _HISTORICAL_ACCEPTED_EVENT_KINDS,
+    }:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    counters = {
+        name: _counter(
+            value[name],
+            maximum=limits.identity_max_integer,
+        )
+        for name in _ACCEPTED_EVENT_KINDS
+        if name in value
+    }
+    counters.setdefault("producer_report", 0)
+    return counters
 
 
 def _validate_ingress_cost(
@@ -416,17 +482,10 @@ def _validate_ingress_cost(
         cost["ingest"],
         _INGRESS_COST_INGEST_KEYS,
     )
-    decoded_by_kind = _exact_mapping(
+    decoded_counts = _event_kind_counters(
         ingest["decoded_by_kind"],
-        _ACCEPTED_EVENT_KINDS,
+        limits=limits,
     )
-    decoded_counts = {
-        name: _counter(
-            decoded_by_kind[name],
-            maximum=limits.identity_max_integer,
-        )
-        for name in _ACCEPTED_EVENT_KINDS
-    }
     ingest_values = {
         name: _counter(
             ingest[name],
@@ -539,6 +598,95 @@ def _validate_ingress_cost(
         ]
         if limits.identity_max_integer not in numeric_values:
             raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+
+
+def _validate_ingress_producer(
+    value: Any,
+    *,
+    report_count: int,
+    limits: WorkflowProgressLimits,
+) -> None:
+    producer = _exact_mapping(value, _INGRESS_PRODUCER_KEYS)
+    if type(producer["schema_version"]) is not int or producer["schema_version"] != 1:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    saturated = producer["saturated"]
+    if type(saturated) is not bool:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    counters = {
+        name: _counter(
+            producer[name],
+            maximum=limits.identity_max_integer,
+        )
+        for name in _INGRESS_PRODUCER_COUNTER_KEYS
+    }
+    terminal_handoffs = _exact_mapping(
+        producer["terminal_handoffs"],
+        _INGRESS_PRODUCER_TERMINAL_HANDOFF_KEYS,
+    )
+    terminal_counts = {
+        name: _counter(
+            terminal_handoffs[name],
+            maximum=limits.identity_max_integer,
+        )
+        for name in _INGRESS_PRODUCER_TERMINAL_HANDOFF_KEYS
+    }
+    if counters["reports"] != report_count:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    counter_max = limits.identity_max_integer
+    terminal_handoff_total = sum(terminal_counts.values())
+    offered_parts_total = (
+        counters["submitted"] + counters["superseded"] + counters["locally_dropped"]
+    )
+    acknowledgement_outcomes_total = (
+        counters["acknowledged"]
+        + counters["actor_rejected"]
+        + counters["ack_failed"]
+        + counters["pending_acknowledgements"]
+    )
+    nontrivial_terminal_handoffs = (
+        terminal_counts["submitted"]
+        + terminal_counts["failed"]
+        + terminal_counts["actor_unavailable"]
+    )
+    minimum_terminal_offers = counters["reports"] + nontrivial_terminal_handoffs
+    minimum_terminal_submissions = (
+        2 * terminal_counts["submitted"]
+        + terminal_counts["failed"]
+        + terminal_counts["actor_unavailable"]
+    )
+    if (
+        counters["reports"] != min(counter_max, terminal_handoff_total)
+        or counters["offered"] != min(counter_max, offered_parts_total)
+        or counters["submitted"] != min(counter_max, acknowledgement_outcomes_total)
+        or (
+            not saturated
+            and (
+                terminal_handoff_total > counter_max
+                or offered_parts_total > counter_max
+                or acknowledgement_outcomes_total > counter_max
+                or minimum_terminal_offers > counter_max
+                or minimum_terminal_submissions > counter_max
+            )
+        )
+        or counters["offered"] < min(counter_max, minimum_terminal_offers)
+        or counters["submitted"] < min(counter_max, minimum_terminal_submissions)
+        or _saturating_counter_sum(
+            counter_max,
+            terminal_counts["failed"],
+            terminal_counts["actor_unavailable"],
+        )
+        > counters["locally_dropped"]
+        or terminal_counts["actor_unavailable"]
+        > _saturating_counter_sum(
+            counter_max,
+            counters["actor_rejected"],
+            counters["ack_failed"],
+        )
+        or (counters["reports"] == 0 and (any(counters.values()) or any(terminal_counts.values())))
+    ):
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    if saturated and counters["offered"] != counter_max:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
 
 
 def _saturating_counter_sum(counter_max: int, *values: int) -> int:

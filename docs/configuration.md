@@ -131,7 +131,24 @@ throttled by `TASK_MONITOR_HEARTBEAT_SECONDS`.
 Ray-native workflow progress defaults to `"full"`. Full mode collects node events in
 memory and writes a schema-v2 compatibility snapshot no more often than
 `WORKFLOW_PROGRESS_FLUSH_SECONDS`; the interval limits database write frequency, not
-producer RPCs or actor memory.
+producer admission or actor memory. Each reporting leaf invocation accepts validated
+application progress into a best-effort session with at most one outstanding actor
+acknowledgement and one canonical latest-value slot. A slow acknowledgement causes
+later application updates to replace the slot; leaf exit makes at most one bounded
+handoff before the non-coalesced `COMPLETED` or `FAILED` event. This is
+acknowledgement-driven containment, not time-based sampling, and no `sampled` policy
+is available.
+
+A schema-v2 snapshot may include one versioned, fixed-shape producer
+aggregate. It counts actor-accepted leaf-invocation reports, valid offers, submissions,
+superseded and locally dropped values, producer-observed acknowledgement outcomes,
+and terminal-handoff outcomes without retaining producer identities or application
+values. A pending acknowledgement means that the leaf had not observed its result
+when it sealed the report; it does not prove the actor failed to process the call.
+A physical Ray leaf retry or another forked actor handle within the same run can still
+create another independently bounded leaf session. An outer durable-task retry uses a
+new run identity and actor. Aggregate workflow-wide mailbox admission and coalescing
+therefore remain open prerequisites for a future sampled policy.
 
 Use `"terminal_only"` when the outer task needs one bounded terminal observability
 record without live node reporting. This mode creates no progress actor, sends no node
@@ -188,7 +205,9 @@ after checking its limits against their workloads.
 When a workflow finishes, the coordinator retries one pending actor snapshot for up to
 `WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS`. Exhausting that bounded deadline
 leaves task execution unaffected and emits a structured warning instead of silently
-abandoning a requested full-reporting snapshot.
+abandoning a requested full-reporting snapshot. This coordinator deadline is separate
+from each leaf producer's one bounded terminal latest-value handoff before its
+non-coalesced terminal event.
 Terminal topology and node detail become eligible for cleanup after
 `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`; `0` makes them eligible as soon as the
 terminal state is durably archived. Active current detail is not expired by this

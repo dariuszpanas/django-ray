@@ -352,10 +352,18 @@ Issue #79 owns the earlier live boundary. Before a record reaches this workspace
 producer path must independently bound:
 
 - each serialized message and its decoded or decompressed representation;
-- mailbox depth, queued bytes, and coalesced state;
-- update frequency and backpressure behavior;
+- each leaf invocation's replaceable application-progress state while actor
+  acknowledgements are pending;
+- aggregate mailbox admission, queued bytes, and coalesced state across forked actor
+  handles;
+- workflow-wide update frequency and backpressure behavior;
 - metric and event cardinality; and
 - the number of concurrent preparation workspaces admitted on a worker or node.
+
+Issue #259 implements the per-leaf line with one outstanding acknowledgement, one
+canonical latest-value slot, and one bounded terminal handoff/report. It deliberately
+does not coalesce structural or lifecycle evidence and does not satisfy the aggregate
+multi-handle lines that follow it.
 
 The preparation-v1 adapter consumes at most 256 records and 4 MiB of canonical record
 bytes in one package batch. Issue #79 may impose a smaller wire limit and must define
@@ -384,10 +392,12 @@ or storage-protocol bump unless canonical durable behavior also changes.
 
 General/default schema-v3 producer activation remains disabled while issue #142
 completes bounded composite preparation. After #142 proves that boundary, activation
-still waits for #79's bounded producer messages, mailbox, reporting policies, and
-admission behavior, plus the ADR-0004 reader-first writer drain. The default-off strict
-terminal pilot is the only current producer exception; neither this ADR nor a
-successful preparation benchmark authorizes broader production writer activation.
+still waits for #79's aggregate mailbox admission/coalescing, sampled reporting
+policy, and workspace admission behavior, plus the ADR-0004 reader-first writer drain.
+The producer-local session is bounded, but many forked handles can each create one
+such session. The default-off strict terminal pilot is the only current producer
+exception; neither this ADR nor a successful preparation benchmark authorizes broader
+production writer activation.
 
 ## Prototype boundary
 
@@ -605,9 +615,10 @@ must remain local and package-owned.
 3. **Issue #142:** introduce composite topology/detail preparation, confine or remove
    O(observed) prepared evidence, migrate package callers and benchmarks, and record
    the final memory proof. Issue #132 closes only after this delivery.
-4. **Issue #79 and activation:** bound live messages, decoded input, mailbox pressure,
-   coalescing, reporting policy, and workspace admission. Drain old writers under
-   ADR-0004 before enabling schema-v3 production.
+4. **Issue #79 and activation:** compose the implemented message and per-leaf producer
+   bounds with aggregate mailbox admission/coalescing, the later sampled policy, and
+   workspace admission. Drain old writers under ADR-0004 before enabling schema-v3
+   production.
 
 ## Related work
 

@@ -447,8 +447,13 @@ Validation requires it to be strictly less than `STUCK_TASK_TIMEOUT_SECONDS`.
 
 Default node-reporting policy for Ray-native workflow invocations. `"full"` preserves
 the progress actor, per-node events, application progress, and periodic
-`progress_data` snapshots. `"terminal_only"` creates no progress actor, sends no node
-or application-progress RPCs, and writes no `progress_data`; it makes one best-effort
+`progress_data` snapshots. A full-reporting leaf invocation holds at most one
+outstanding application-progress acknowledgement plus one canonical latest-value
+slot and makes at most one bounded terminal handoff/report. `STARTED`, `COMPLETED`,
+`FAILED`, and other structural or lifecycle events are never coalesced. This is
+acknowledgement-driven containment, not time-based sampling; no `sampled` policy is
+available. `"terminal_only"` creates no progress actor, sends no node or
+application-progress RPCs, and writes no `progress_data`; it makes one best-effort
 fenced schema-v3 summary publication when the durable workflow succeeds or fails.
 That summary has `OMITTED_BY_POLICY` detail and creates no topology or node-detail
 rows. `"disabled"` uses the same actor-free path without the terminal summary attempt.
@@ -516,9 +521,12 @@ documented profile and the deployment has been validated.
 
 Minimum interval between database writes of an active full-reporting Ray-native
 workflow's progress snapshot. Leaf events are collected by a per-workflow Ray actor.
-This setting limits snapshot write frequency; it does not bound producer RPC count,
-actor mailbox depth, or actor memory. Every write is conditional on the current task
-attempt, execution generation, lifecycle state, and workflow run ID.
+This setting limits snapshot write frequency; it is not a sampling or producer
+backpressure interval. Per-leaf application progress is independently contained by one
+outstanding acknowledgement and one canonical latest-value slot, but this setting
+does not bound aggregate RPC count, actor mailbox depth, or actor memory across forked
+handles. Every write is conditional on the current task attempt, execution generation,
+lifecycle state, and workflow run ID.
 
 ```python
 "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1

@@ -120,6 +120,19 @@ def _payloads() -> dict[WorkflowProgressEventKind, dict[str, Any]]:
             "label": "increment",
             "node_id": "node-a",
         },
+        WorkflowProgressEventKind.PRODUCER_REPORT: {
+            "schema_version": 1,
+            "saturated": False,
+            "offered": 8,
+            "submitted": 3,
+            "superseded": 4,
+            "locally_dropped": 1,
+            "acknowledged": 1,
+            "actor_rejected": 1,
+            "ack_failed": 0,
+            "pending_acknowledgements": 1,
+            "terminal_handoff": "submitted",
+        },
     }
 
 
@@ -235,6 +248,255 @@ def test_send_helper_makes_zero_remote_calls_for_invalid_input() -> None:
         )
 
     assert actor.ingest.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 2),
+        ("schema_version", True),
+        ("saturated", 1),
+        ("offered", True),
+        ("offered", 0),
+        ("submitted", -1),
+        (
+            "pending_acknowledgements",
+            WORKFLOW_PROGRESS_LIMITS_V1.identity_max_integer + 1,
+        ),
+        ("terminal_handoff", "unknown"),
+        ("terminal_handoff", []),
+    ],
+)
+def test_prepare_rejects_invalid_producer_report_fields(
+    field: str,
+    value: Any,
+) -> None:
+    payload = _payloads()[WorkflowProgressEventKind.PRODUCER_REPORT]
+    payload[field] = value
+
+    with pytest.raises(WorkflowProgressProtocolError):
+        _prepare(WorkflowProgressEventKind.PRODUCER_REPORT, payload)
+
+
+def test_prepare_requires_the_exact_producer_report_shape() -> None:
+    missing = _payloads()[WorkflowProgressEventKind.PRODUCER_REPORT]
+    missing.pop("ack_failed")
+    unknown = {
+        **_payloads()[WorkflowProgressEventKind.PRODUCER_REPORT],
+        "node_id": "must-not-be-retained",
+    }
+
+    with pytest.raises(WorkflowProgressProtocolError):
+        _prepare(WorkflowProgressEventKind.PRODUCER_REPORT, missing)
+    with pytest.raises(WorkflowProgressProtocolError):
+        _prepare(WorkflowProgressEventKind.PRODUCER_REPORT, unknown)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("offered", 9),
+        ("submitted", 4),
+    ],
+)
+def test_prepare_reconciles_unsaturated_producer_report_counters(
+    field: str,
+    value: int,
+) -> None:
+    payload = _payloads()[WorkflowProgressEventKind.PRODUCER_REPORT]
+    payload[field] = value
+
+    with pytest.raises(
+        WorkflowProgressProtocolError,
+        match="producer_report counters are inconsistent",
+    ):
+        _prepare(WorkflowProgressEventKind.PRODUCER_REPORT, payload)
+
+
+def test_prepare_reconciles_saturated_producer_report_counters() -> None:
+    payload = _payloads()[WorkflowProgressEventKind.PRODUCER_REPORT]
+    counter_max = WORKFLOW_PROGRESS_LIMITS_V1.identity_max_integer
+    payload.update(
+        {
+            "saturated": True,
+            "offered": counter_max,
+            "superseded": counter_max,
+        }
+    )
+
+    event = decode_workflow_progress_event(
+        _prepare(WorkflowProgressEventKind.PRODUCER_REPORT, payload),
+    )
+
+    assert event.payload == payload
+    assert event.truncated is False
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        pytest.param(
+            {
+                "offered": WORKFLOW_PROGRESS_LIMITS_V1.identity_max_integer,
+                "superseded": WORKFLOW_PROGRESS_LIMITS_V1.identity_max_integer,
+            },
+            id="offered-components",
+        ),
+        pytest.param(
+            {
+                "offered": WORKFLOW_PROGRESS_LIMITS_V1.identity_max_integer,
+                "submitted": WORKFLOW_PROGRESS_LIMITS_V1.identity_max_integer,
+                "superseded": 0,
+                "locally_dropped": 0,
+                "acknowledged": WORKFLOW_PROGRESS_LIMITS_V1.identity_max_integer,
+                "actor_rejected": 1,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+            },
+            id="acknowledgement-components",
+        ),
+    ],
+)
+def test_prepare_rejects_hidden_unsaturated_producer_report_counters(
+    updates: dict[str, int],
+) -> None:
+    payload = _payloads()[WorkflowProgressEventKind.PRODUCER_REPORT]
+    payload.update(updates)
+
+    with pytest.raises(
+        WorkflowProgressProtocolError,
+        match="producer_report counters are inconsistent",
+    ):
+        _prepare(WorkflowProgressEventKind.PRODUCER_REPORT, payload)
+
+
+def test_prepare_rejects_inconsistent_saturated_producer_report_counters() -> None:
+    payload = _payloads()[WorkflowProgressEventKind.PRODUCER_REPORT]
+    payload.update(
+        {
+            "saturated": True,
+            "offered": WORKFLOW_PROGRESS_LIMITS_V1.identity_max_integer,
+        }
+    )
+
+    with pytest.raises(
+        WorkflowProgressProtocolError,
+        match="producer_report counters are inconsistent",
+    ):
+        _prepare(WorkflowProgressEventKind.PRODUCER_REPORT, payload)
+
+
+def test_prepare_rejects_unsubstantiated_producer_report_saturation() -> None:
+    payload = _payloads()[WorkflowProgressEventKind.PRODUCER_REPORT]
+    payload["saturated"] = True
+
+    with pytest.raises(
+        WorkflowProgressProtocolError,
+        match="saturation requires a saturated offered counter",
+    ):
+        _prepare(WorkflowProgressEventKind.PRODUCER_REPORT, payload)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 1,
+                "locally_dropped": 0,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoff": "submitted",
+            },
+            id="submitted-without-submission",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 1,
+                "superseded": 0,
+                "locally_dropped": 0,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 1,
+                "terminal_handoff": "submitted",
+            },
+            id="submitted-without-buffered-replacement",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 1,
+                "locally_dropped": 0,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoff": "failed",
+            },
+            id="failed-without-local-drop",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 0,
+                "locally_dropped": 1,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoff": "failed",
+            },
+            id="failed-without-prior-submission",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 1,
+                "locally_dropped": 0,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoff": "actor_unavailable",
+            },
+            id="actor-unavailable-without-local-drop",
+        ),
+        pytest.param(
+            {
+                "offered": 1,
+                "submitted": 0,
+                "superseded": 0,
+                "locally_dropped": 1,
+                "acknowledged": 0,
+                "actor_rejected": 0,
+                "ack_failed": 0,
+                "pending_acknowledgements": 0,
+                "terminal_handoff": "actor_unavailable",
+            },
+            id="actor-unavailable-without-acknowledgement-failure",
+        ),
+    ],
+)
+def test_prepare_rejects_inconsistent_producer_report_terminal_handoff(
+    updates: dict[str, int | str],
+) -> None:
+    payload = _payloads()[WorkflowProgressEventKind.PRODUCER_REPORT]
+    payload.update(updates)
+
+    with pytest.raises(
+        WorkflowProgressProtocolError,
+        match="producer_report terminal handoff is inconsistent",
+    ):
+        _prepare(WorkflowProgressEventKind.PRODUCER_REPORT, payload)
 
 
 def test_prepare_redacts_secrets_before_the_wire_boundary() -> None:

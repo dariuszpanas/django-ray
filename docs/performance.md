@@ -63,13 +63,27 @@ saturating counters for logical event calls/bytes received, decoded calls by the
 event-kind enum, producer-to-actor delivery delay, handler wall/process CPU time, and
 snapshot-build wall/process CPU time. The block retains no producer identifiers,
 payloads, labels, errors, metric names, or other application data. Package-default
-execution uses the durable V1 profile and remains a schema-v2 writer.
+execution uses the durable V1 profile and remains a schema-v2 writer. A terminal
+snapshot can also carry a fixed-shape aggregate of actor-accepted leaf-invocation
+producer reports: valid offers, submissions, superseded and locally dropped values,
+producer-observed acknowledgement outcomes, and terminal-handoff outcomes. It
+retains neither producer identities nor application values.
 
 `WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not bound the
-aggregate Ray actor mailbox, queued bytes, update frequency, or transient snapshot and
-drain allocations. Coalescing, producer backpressure, mailbox admission, and the
-bounded actor-to-preparer drain remain separate scale work. They prevent treating the
-hard V1 ceilings as a safe default production profile.
+aggregate Ray actor mailbox, queued bytes, or transient snapshot and drain
+allocations. During one leaf invocation, full reporting retains at most one outstanding
+application-progress acknowledgement and one canonical latest-value slot. A slow
+acknowledgement coalesces later application values into that slot; leaf exit makes at
+most one bounded terminal handoff before its non-coalesced terminal event. When
+acknowledgements keep up, every accepted update may still be submitted. This is
+acknowledgement-driven containment, not time-based sampling.
+
+A physical Ray leaf retry or another forked actor handle within the same run can still
+contribute another independently bounded leaf session. An outer durable-task retry
+uses a new run identity and actor. Aggregate workflow-wide admission, call/byte limits,
+and mailbox coalescing therefore remain separate scale work, as does the bounded
+actor-to-preparer drain. Those gaps prevent treating the hard V1 ceilings as a safe
+default production profile or offering a truthful sampled policy.
 
 `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT=True` selects the intentionally smaller
 `schema-v3-pilot-v1` profile for both actor retention and one terminal schema-v3
@@ -109,10 +123,11 @@ persistence, and monitor heartbeats remain active. Measure before making this a
 deployment-wide default because node-level live progress is intentionally unavailable.
 
 Terminal-only avoids the current full-mode producer and mailbox cost; it does not make
-those costs bounded for workflows that still choose full reporting. Sampled/coalesced
-reporting, aggregate producer/mailbox admission, bounded actor-to-preparer draining,
-the still-unavailable producer/network/database and lifetime-resource cost layers, and
-large-fan-out slow-consumer evidence remain separate #79 work.
+those costs workflow-wide bounded for workflows that still choose full reporting.
+Aggregate producer/mailbox admission and coalescing across forked handles, the sampled
+policy that depends on that aggregate bound, bounded actor-to-preparer draining, the
+still-unavailable network/database and lifetime-resource cost layers, and large-fan-out
+slow-consumer evidence remain separate #79 work.
 
 The bundled `ObservabilityDemoUser` makes the three shipped policies directly
 comparable without becoming a load benchmark. `make loadtest-demo` runs one tiny
@@ -151,9 +166,10 @@ The three-repetition default runs nine tiny workflows. Each cycle rotates the or
 three so they repeat that complete Latin square without introducing concurrent
 benchmark tasks. Progress is written to stderr and one versioned JSON report is written
 to stdout, so redirect stdout to an ignored artifact when retaining evidence. The
-report records the command implementation digest, package and database versions, the
-one stable workflow-plan fingerprint, exact workload fingerprint, and whether the
-testproject's schema-v3 pilot was enabled. Checkout-to-deployment source-tree
+benchmark report schema is version 3. It records the command implementation digest,
+package and database versions, the one stable workflow-plan fingerprint, exact
+workload fingerprint, and whether the testproject's workflow-progress schema-v3 pilot
+was enabled. These are independent schema versions. Checkout-to-deployment source-tree
 attestation remains the responsibility of the guarded local KubeRay gate and is
 labeled that way rather than fabricated by the in-pod command.
 
@@ -165,7 +181,10 @@ sample count, median, nearest-rank p95, minimum, and maximum; it does not rank a
 winner, calculate a speedup, or claim that an elapsed-time difference was caused by
 reporting. Full-mode actor-cost aggregates retain the fixed initialization, ingest,
 delivery-delay, and snapshot groups. Every numeric field, including per-kind decoded
-counts and negative-clock samples, has its own distribution.
+counts and negative-clock samples, has its own distribution. Full-mode
+`producer_progress` aggregates do the same for fixed producer counters and
+terminal-handoff outcomes. Terminal-only and disabled report producer progress as
+`not_applicable`.
 
 The fixed cost fields retain their source units in both samples and aggregates:
 
@@ -183,14 +202,41 @@ The fixed cost fields retain their source units in both samples and aggregates:
 | `snapshot.build_wall_ns_total`, `snapshot.build_wall_ns_max` | Nanoseconds |
 | `snapshot.build_cpu_ns_total`, `snapshot.build_cpu_ns_max` | Nanoseconds |
 
+All `producer_progress` values use the explicit unit `"count"`:
+
+| Producer field | Meaning |
+| --- | --- |
+| `reports` | Fixed-shape producer reports accepted and aggregated by the collector; at most one per reporting leaf invocation with a valid offer |
+| `offered` | Valid application-progress values accepted into leaf producer sessions |
+| `submitted` | Application-progress actor calls submitted by those sessions |
+| `superseded` | Canonical latest-slot values replaced before submission |
+| `locally_dropped` | Accepted values that could not be submitted locally |
+| `acknowledged` | Submitted calls whose successful acknowledgement the producer observed |
+| `actor_rejected` | Submitted calls whose actor rejection the producer observed |
+| `ack_failed` | Submitted calls whose failed acknowledgement the producer observed |
+| `pending_acknowledgements` | Submitted calls whose result was not observed when the producer report was sealed |
+| `terminal_handoffs.not_needed`, `.submitted`, `.failed`, `.actor_unavailable` | Exactly one terminal latest-value handoff outcome per accepted producer report |
+
+The benchmark validates the unsaturated reconciliation equations
+`offered = submitted + superseded + locally_dropped` and
+`submitted = acknowledged + actor_rejected + ack_failed + pending_acknowledgements`.
+A full sample also requires
+`acknowledged <= actor-accepted application progress <= submitted - actor_rejected`.
+Failed and still-pending acknowledgements remain intentionally uncertain within that
+range.
+A pending acknowledgement is producer-local evidence at report time; actor ordering
+can still process that application-progress call before it processes the report.
+
 For full mode, the report exposes only allowlisted terminal ingress counters:
 accepted events by kind, rejections by reason, truncation, retained logical
-bytes/nodes/edges, and the actor-authored cost block. The collector's accepted total
-includes its constructor's one `initialized` event, so `processed_ingest_events`
-subtracts exactly that event. Actor-observed ingress calls and logical wire bytes
-include malformed and rejected calls that reached the handler. Calls successfully
-decoded under the exact run fence are counted by the fixed event-kind enum. Delivery
-delay is the producer event
+bytes/nodes/edges, the actor-authored cost block, and the fixed producer aggregate.
+The collector's accepted total includes its constructor's one `initialized` event, so
+`processed_ingest_events` subtracts exactly that event. Each accepted
+`producer_report` is also an ingress event, but it contains only fixed-cardinality
+saturating counters. Actor-observed ingress calls and logical wire bytes include
+malformed and rejected calls that reached the handler. Calls successfully decoded
+under the exact run fence are counted by the fixed event-kind enum. Delivery delay is
+the producer event
 timestamp to actor-handler entry; it includes serialization, transport, scheduling,
 queueing, and clock effects, so it is neither a pure mailbox-lag measurement nor a
 network-timing claim. Negative clock samples are counted and excluded from the
@@ -225,14 +271,20 @@ rows. The report exposes child totals for integrity checking, but those pairs mu
 be added together. None of these logical protocol sizes represents PostgreSQL table,
 index, MVCC, statement, latency, or WAL bytes.
 
-Producer-attempted RPCs remain `unavailable`: a submission failure before actor receipt
-cannot be counted. Actual Ray/network traffic, mailbox depth or pure queue latency,
-complete actor-lifetime RSS/process CPU, disable calls after the last snapshot, and
-PostgreSQL statement/latency/WAL attribution also remain unavailable. Canonical event
-bytes and malformed actor-received bytes are logical wire bytes, not network traffic;
-actor-handler timings are likewise not relabeled as any of those missing layers. The
-report distinguishes the directly measured, partial, derived, not-applicable, and
-unavailable scopes instead of estimating them from workflow wall time.
+Application-progress submissions are now partially attributable through accepted leaf
+reports, including producer-observed synchronous/acknowledgement failures and
+still-pending acknowledgements. A terminal latest-value handoff is an
+application-progress submission and is included. Structural and lifecycle events,
+producer reports, and coordinator snapshot/disable calls are excluded; a producer
+report that never reaches the actor is also absent. Actual Ray/network traffic,
+aggregate mailbox depth or pure queue latency, complete actor-lifetime RSS/process
+CPU, disable calls after the last snapshot, and PostgreSQL statement/latency/WAL
+attribution remain unavailable.
+Canonical event bytes and malformed actor-received bytes are logical wire bytes, not
+network traffic; actor-handler timings are likewise not relabeled as any of those
+missing layers. The report distinguishes directly measured, partial, derived,
+not-applicable, and unavailable scopes instead of estimating them from workflow wall
+time.
 
 Successful runs retain their bounded task rows by default and include an Admin path
 for each execution. This makes the policy-specific summaries available for inspection;

@@ -2939,6 +2939,7 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         WorkflowProgressEventKind.SUBMITTED,
         WorkflowProgressEventKind.STARTED,
         WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        WorkflowProgressEventKind.PRODUCER_REPORT,
         WorkflowProgressEventKind.MAP_PROGRESS,
         WorkflowProgressEventKind.COMPLETED,
     }
@@ -2963,6 +2964,23 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         < ingress["retained_bytes"]
         <= WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.combined_max_decoded_bytes
     )
+    producer = ingress["producer"]
+    assert producer["schema_version"] == 1
+    assert producer["saturated"] is False
+    assert producer["reports"] == 1
+    assert producer["offered"] == 1
+    assert producer["submitted"] == 1
+    assert producer["superseded"] == 0
+    assert producer["locally_dropped"] == 0
+    assert producer["acknowledged"] + producer["pending_acknowledgements"] == 1
+    assert producer["actor_rejected"] == 0
+    assert producer["ack_failed"] == 0
+    assert producer["terminal_handoffs"] == {
+        "not_needed": 1,
+        "submitted": 0,
+        "failed": 0,
+        "actor_unavailable": 0,
+    }
     assert 0 < len(progress["recent_events"]) <= WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS
     cost = ingress["cost"]
     assert set(cost) == {
@@ -3426,13 +3444,29 @@ def test_report_progress_uses_current_workflow_context() -> None:
         assert report_progress(1, 2, message="half", metrics={"rows": 5}) is True
 
     events = _decoded_ingests(actor, identity)
-    assert [event.kind for event in events] == [WorkflowProgressEventKind.APPLICATION_PROGRESS]
+    assert [event.kind for event in events] == [
+        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        WorkflowProgressEventKind.PRODUCER_REPORT,
+    ]
     assert events[0].payload == {
         "current": 1.0,
         "message": "half",
         "metrics": {"rows": 5},
         "node_id": "0.1",
         "total": 2.0,
+    }
+    assert events[1].payload == {
+        "schema_version": 1,
+        "saturated": False,
+        "offered": 1,
+        "submitted": 1,
+        "superseded": 0,
+        "locally_dropped": 0,
+        "acknowledged": 1,
+        "actor_rejected": 0,
+        "ack_failed": 0,
+        "pending_acknowledgements": 0,
+        "terminal_handoff": "not_needed",
     }
 
 
