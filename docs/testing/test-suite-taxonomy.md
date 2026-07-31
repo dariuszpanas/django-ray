@@ -2,10 +2,11 @@
 
 The pytest suite is classified by the resources and isolation each case requires. The checked-in
 [manifest](https://github.com/dariuszpanas/django-ray/blob/main/.github/test-suite-taxonomy.json)
-is the shared selection contract for source-fenced inventory evidence and the existing full-suite
-CI lane. It does not schedule ordinary pytest runs, control `test-xdist`, or define marker-derived
-CI shards. Directory names still describe test intent, but they do not determine whether a case can
-run concurrently.
+is the shared selection contract for source-fenced serial inventory evidence. Its current callers
+are the blocking Python 3.12 `supported-python` job, `make test-suite-inventory`, and deliberate
+serial resource-lane observations. It does not schedule ordinary pytest runs, control `test-xdist`,
+or define marker-derived CI shards. Directory names still describe test intent, but they do not
+determine whether a case can run concurrently.
 
 The dated generated [baseline](../investigations/test-suite-baseline-2026-07-22.md) records exact
 counts, large files and parameterized families, fixture usage, CI repetition, and candidate overlap
@@ -14,8 +15,7 @@ domains. Its JSON companion is available at
 The baseline hashes the working contents of every tracked or nonignored Git-visible file, excluding
 only generated dated baseline JSON and Markdown. The runner captures that digest before pytest and
 rejects a run if it changes before pytest returns. Timing records therefore cannot be merged across
-source states, and they retain Python, platform, processor, Django, Ray, coverage, pytest,
-pytest-cov, pytest-django, and pytest-xdist identity.
+source states, and they retain Python, platform, processor, and test-toolchain identity.
 
 The dated baseline is comparison evidence, not a claim that counts never change and not a new gate on
 every test-only pull request. Regenerate artifacts for any tree being measured; add a new dated
@@ -53,17 +53,17 @@ resources. Fixture-aware contracts must use the manifest runner so they cannot s
 database cases.
 
 The `run` command supports every execution contract, domain, product boundary, local profile, and CI
-lane. Schema 3 records whether a run is serial or xdist, the fixed execution policy, selected and
-complete pre-selection collection identities, exact per-test outcomes, and worker collection
-evidence. The selector is an importable pytest plugin loaded by the controller and every xdist
-worker. It remains inert during an ordinary pytest run and activates only when the manifest runner
-supplies an explicit lane. Each observation and variant label is stable for grouping; a generated
-sample UUID makes repeated measurements of the same pair independently mergeable:
+lane as serial, source-fenced evidence. Test-suite evidence schema 4 records selected and complete
+pre-selection collection identities and exact per-test outcomes without the retired execution or
+worker fields. This internal test-tooling schema is unrelated to django-ray's workflow-progress
+schema versions. The selector is an importable pytest plugin loaded by the serial pytest process. It
+remains inert during an ordinary pytest run and activates only when the manifest runner supplies an
+explicit lane. Each observation and variant label is stable for grouping; a generated sample UUID
+distinguishes repeated measurements:
 
 ```bash
 uv run python scripts/test_suite_inventory.py run \
   --lane portable-local \
-  --execution serial \
   --observation windows-local-py312 \
   --variant locked-dependencies \
   --timing-output artifacts/test-suite-inventory/local-timing.json \
@@ -90,28 +90,10 @@ against a fresh collection. Collection baselines require an unset `DJANGO_SETTIN
 PostgreSQL run permits and records only `tests.postgres_settings`. Timing evidence never records
 database credentials.
 
-Within manifest-backed benchmark evidence, only `hermetic` may request xdist, and its policy is
-exactly two workers with work stealing and no restart:
-
-```bash
-uv run python scripts/test_suite_inventory.py run \
-  --lane hermetic \
-  --execution xdist \
-  --observation local-hermetic-xdist \
-  --variant locked-dependencies \
-  --timing-output artifacts/test-suite-inventory/hermetic-xdist.json \
-  --external-note "Queue and environment setup are outside pytest timing." \
-  -- -q
-```
-
-The runner supplies `-n 2 --dist worksteal --max-worker-restart=0`; callers cannot replace those
-arguments through pytest passthrough. It fails closed if a worker starts or restarts outside that
-topology, applies a different configuration, or reports different selected or complete
-pre-selection node IDs and fixture contracts.
-
-That fixed topology belongs only to the optional evidence runner. `uv run make test-xdist` bypasses
-taxonomy lanes and invokes ordinary pytest once with a configurable worker count and the
-external-resource marker exclusions.
+Manifest-backed inventory evidence is deliberately serial. `uv run make test-xdist` is a separate
+developer-speed path: it invokes ordinary pytest once with a configurable worker count, zero worker
+restarts, and the external-resource marker exclusions. It does not load a taxonomy lane or produce
+manifest timing evidence.
 
 ## Execution contracts
 
@@ -119,8 +101,8 @@ Each collected pytest case belongs to exactly one execution contract:
 
 | Contract | Resource and manifest-evidence scheduling boundary | Selection ownership |
 |---|---|---|
-| `hermetic` | No Django database, local Ray runtime, PostgreSQL, or live cluster; serial by default in manifest evidence and eligible for its fixed benchmark | External markers and database fixture closure excluded |
-| `sqlite-django` | pytest-django's default SQLite database; serial in phased manifest evidence and eligible for ordinary local `test-xdist` | Inherited/direct `django_db` or a database-owning fixture; external markers excluded |
+| `hermetic` | No Django database, local Ray runtime, PostgreSQL, or live cluster; serial in manifest evidence and eligible for ordinary local `test-xdist` | External markers and database fixture closure excluded |
+| `sqlite-django` | pytest-django's default SQLite database; serial in manifest evidence and eligible for ordinary local `test-xdist` | Inherited/direct `django_db` or a database-owning fixture; external markers excluded |
 | `local-ray` | Starts and stops required local Ray; always serial | Explicit `real_ray` without `compiled_graph_opt_in`; skips forbidden |
 | `compiled-graph-opt-in` | Starts local Ray for the capability-gated native topology probe; always serial | Both `compiled_graph_opt_in` and `real_ray`; deliberate opt-in skip allowed |
 | `postgresql` | Disposable PostgreSQL service; always serial | Explicit `postgresql`; dedicated evidence lane |
@@ -146,79 +128,6 @@ many unit-directory files use the SQLite database. We therefore reserve explicit
 resource or isolation behavior and rely on module/class inheritance where possible; adding a marker
 to every test would create maintenance work without improving the contract.
 
-## Legacy opt-in phased canonical coverage
-
-`make test-cov-phased` is legacy, opt-in measurement machinery for the bounded experiment. It is not
-the default `test-cov` target, does not control ordinary local `test-xdist`, and is not called by the
-blocking supported-Python matrix. Keep the single outer environment boundary:
-
-```bash
-uv run make test-cov-phased
-```
-
-The default keeps the hermetic phase serial. To exercise the candidate topology, use a new ignored
-output directory and select xdist explicitly:
-
-```bash
-uv run make test-cov-phased \
-  TEST_SUITE_PHASED_OUTPUT_DIR=artifacts/test-suite-phased-coverage/xdist-sample \
-  TEST_SUITE_HERMETIC_EXECUTION=xdist
-```
-
-Ray's Unix-domain sockets can exceed the platform path limit when hosted-runner artifact paths are
-deep. The paired benchmark therefore gives Ray a short `/tmp` symlink through
-`TEST_SUITE_RAY_TMP_DIR`. The resolved target must still be the output directory's exact
-`ray-tmp` sibling; residue checks and deletion continue to use that canonical repository-owned
-path. Local runs use the canonical path by default.
-
-The output directory must be new or empty; stale evidence is rejected rather than overwritten. The
-target executes four nonoverlapping phases that recreate the default-settings `supported-python`
-selection:
-
-1. `hermetic`, using either serial execution or the exact manifest-owned
-   `-n 2 --dist worksteal --max-worker-restart=0` candidate;
-2. `sqlite-django`, serially;
-3. required `local-ray`, serially and with skips forbidden;
-4. `default-serial-remainder`, serially, retaining the PostgreSQL and Compiled Graph cases as their
-   intentional default-settings self-skips.
-
-The remainder preserves the normal suite's collected outcomes; it is not PostgreSQL or native
-Compiled Graph execution evidence. The dedicated PostgreSQL job owns its backend proof. Native
-Compiled Graph proof belongs to the guarded local KubeRay pilot in issue #102, not a public hosted
-workflow. `live-cluster` remains outside the normal supported-Python selection and keeps its
-dedicated serial opt-in lane. Its three scenarios share one disposable Ray cluster but execute in
-fresh sequential pytest processes with individual hard deadlines and diagnostic thread dumps; they
-do not communicate through pytest order, xdist, or workflow matrix shards. Before those processes
-start, one bounded host-side Ray Client preflight uses separate disposable drivers to prove the
-published proxy, per-client backend, two-node view, and trivial remote execution. No preflight
-driver state is shared with a scenario.
-
-Coverage is erased once before the first phase. Every phase, including hermetic, uses
-`--cov-append` against that proven-empty data path and does not enforce an intermediate floor. Only
-after all four timing records merge successfully does the target enforce global 95%, worker-command
-90%, and Ray Job runner 90% coverage, then write `coverage.xml` and line-level `coverage.json`. This
-prevents a partial phase from passing or failing against a dataset that is not the canonical union.
-
-Every phase retains the schema-3 source fence, collection identity, and exact test outcomes. The
-merged inventory must contain all four timing records, prove that their node IDs do not overlap, and
-match the current `supported-python` node-ID digest. Serial and xdist comparisons also require the
-same statement and excluded-line sets, with every serial covered line still covered by xdist.
-
-The target snapshots Ray processes, listening sockets, shared-memory objects, and global Ray
-temporary entries before execution. That baseline must be a clean fresh-runner state. All phases use
-the target-owned `ray-tmp` directory, and final validation rejects any new Ray process, listener,
-shared-memory object, or unowned global temporary entry. It removes only that owned directory, and
-only after the residue checks pass. Its entry-count diagnostic scans at most 10,001 entries and
-records truncation instead of serializing or retaining an unbounded directory inventory. Truncation
-or a bounded scan error does not block deletion: absence after removing the exact validated owned
-root is the cleanup proof. External process, listener, shared-memory, or global-temp residue still
-preserves that directory for diagnosis.
-A Python guard runs the internal Make body and invokes cleanup exactly once even when a phase,
-inventory merge, or coverage command fails. A primary failure keeps its exit status when cleanup
-succeeds; a cleanup failure exits with the cleanup status and records both statuses in bounded
-`ray-residue.json`. The resulting inventory, timing records, coverage files, and residue report stay
-under the ignored output directory as diagnostic evidence.
-
 ## Runtime evidence model
 
 The timing record separates intervals that have different owners:
@@ -235,14 +144,14 @@ The timing record separates intervals that have different owners:
 | Terminal rendering | Terminal summary output, including a precomputed coverage report |
 | Cleanup | Remaining framework/plugin shutdown after terminal reporting |
 
-Phase sums are diagnostic work totals and can overlap across xdist workers; execution wall time is
-the speed metric. Schema 3 therefore records them separately, together with execution topology and
-per-worker collection evidence. Outcome counts and exact per-test records distinguish passed,
-failed, skipped, expected-failed, and unexpected-passed cases. Every runnable group declares whether
-skips are allowed; external-resource contracts and dedicated resource lanes forbid them, except for
-the explicit `compiled-graph-opt-in` contract's capability-gated skip. The machine JSON retains every
-fixture and parameterized family, while Markdown limits those tables for readability. It also
-retains the slowest tests and files, making changes comparable without parsing `--durations` output.
+Timing sums are diagnostic work totals, while execution wall time is the speed metric. Test-suite
+evidence schema 4 records them separately. Outcome counts and exact per-test records distinguish
+passed, failed, skipped, expected-failed, and unexpected-passed cases. Every runnable group declares
+whether skips are allowed; external-resource contracts and dedicated resource lanes forbid them,
+except for the explicit `compiled-graph-opt-in` contract's capability-gated skip. The machine JSON
+retains every fixture and parameterized family, while Markdown limits those tables for readability.
+It also retains the slowest tests and files, making changes comparable without parsing `--durations`
+output.
 
 Two Linux GitHub Actions observations show why queue delay must not be attributed to the suite:
 
@@ -265,85 +174,6 @@ cases may later skip, so it is not labeled completed execution. The JavaScript s
 from the bundled API suite are real gate work, but they are outside that selected-slot count rather
 than disguised as additional pytest cases. Public CI does not run native Compiled Graph probes.
 
-## Legacy hosted paired benchmark and retention decision
-
-The `CI` workflow exposes optional `workflow_dispatch` jobs for comparable Linux evidence. They are
-not pull-request checks, do not control ordinary local `test-xdist`, and do not replace the serial
-supported-Python matrix. Keep the selected ref unchanged until the complete procedure finishes so
-every dispatch checks out the same commit.
-
-Run three pair dispatches:
-
-1. Select `xdist_benchmark_mode=pair`.
-2. Give each run a unique nonempty `xdist_benchmark_sample`.
-3. Alternate `xdist_benchmark_order` between `serial-xdist` and `xdist-serial`; the three retained
-   runs must collectively contain both orders.
-4. Wait for the `Optional pytest-xdist paired benchmark` job and retain its numeric workflow run ID.
-
-The equivalent GitHub CLI calls are:
-
-```bash
-gh workflow run ci.yml --ref <unchanged-branch> \
-  -f xdist_benchmark_mode=pair \
-  -f xdist_benchmark_sample=linux-pair-1 \
-  -f xdist_benchmark_order=serial-xdist
-
-gh workflow run ci.yml --ref <unchanged-branch> \
-  -f xdist_benchmark_mode=pair \
-  -f xdist_benchmark_sample=linux-pair-2 \
-  -f xdist_benchmark_order=xdist-serial
-
-gh workflow run ci.yml --ref <unchanged-branch> \
-  -f xdist_benchmark_mode=pair \
-  -f xdist_benchmark_sample=linux-pair-3 \
-  -f xdist_benchmark_order=serial-xdist
-```
-
-Each dispatch runs the serial and xdist canonical plans on the same fresh hosted runner and in the
-requested order. It records the outer four-phase plan interval separately from pytest timing, then
-compares exact phase selection, collection contracts, per-test outcomes, combined coverage, source
-identity, environment identity, and Ray cleanup. The
-`pytest-xdist-pair-<run-id>` artifact contains the pair report and both plans' bounded evidence for
-14 days.
-
-After all three pair jobs pass, dispatch the aggregate job from that same unchanged ref:
-
-```bash
-gh workflow run ci.yml --ref <unchanged-branch> \
-  -f xdist_benchmark_mode=aggregate \
-  -f xdist_benchmark_pair_run_ids=<run-id-1>,<run-id-2>,<run-id-3>
-```
-
-Aggregate mode requires exactly three distinct pair workflow run IDs, downloads their named
-artifacts, and binds them to its own repository, exact `GITHUB_SHA`, full `HEAD^{tree}` Git tree SHA,
-and source digest. Run it before the 14-day pair artifacts expire. The resulting
-`pytest-xdist-retention-<run-id>-<run-attempt>` JSON and Markdown artifact is also retained for 14
-days.
-
-The aggregate fails as invalid evidence unless all three samples have distinct run IDs and labels,
-the same repository commit, Git tree, and source digest, the same package/environment identity and
-Linux runner-image OS family, both execution orders, identical canonical node outcomes, identical
-combined coverage line sets, and valid residue evidence. Hosted runners may legitimately use
-different image versions during one source-frozen sample set; aggregate schema 2 retains every
-observed version as provenance instead of rejecting otherwise comparable fresh-runner evidence.
-Each pair must also prove exact serial/xdist phase parity, the fixed zero-restart topology, no
-incomplete or unexpected outcome, no source drift, no Ray residue, and xdist coverage equal to or
-better than serial while preserving every floor.
-
-Structurally valid evidence is eligible to retain bounded xdist only when both performance gates
-pass:
-
-- median hermetic pytest execution-wall time improves by at least 25% over serial;
-- median wall time for the complete canonical plan does not regress.
-
-Queue delay and dependency/environment setup remain external intervals and never count as pytest or
-canonical-plan speed. The aggregate runs with `--require-retention`: it exits with status 3 when
-valid evidence says to reject xdist, and with status 2 when evidence is incomplete or inconsistent.
-
-These optional dispatch jobs preserve historical measurement evidence only. They neither authorize
-nor block ordinary local `test-xdist`, and they must not change the supported-Python matrix or create
-marker-derived blocking jobs. Any proposal to activate xdist in blocking CI is a separate change.
-
 ## Ownership and overlap review
 
 The largest files and domain candidates have named owners in the generated baseline. “Candidate”
@@ -365,10 +195,3 @@ Preparation prototype and production subprocess tests look similar but prove dif
 do not consolidate them without a scheduled benchmark or replacement harness. Commit-policy
 parameter tables are fast and preserve useful failure ownership, so they do not justify a cleanup
 issue.
-
-Follow-up ownership is intentionally separated:
-
-- issue #168 makes implicit Ray and external-resource ownership explicit;
-- issue #169 benchmarks bounded xdist against these named contracts;
-- issue #170 reduces duplicated supported-Python and CI-lane work;
-- issue #171 consolidates only scenarios proven equivalent within a domain review.

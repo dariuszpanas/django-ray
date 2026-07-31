@@ -1,14 +1,15 @@
-"""Subprocess and policy tests for the worker-loaded taxonomy selector."""
+"""Subprocess and policy tests for the serial taxonomy selector."""
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from scripts import pytest_taxonomy
 
@@ -25,19 +26,13 @@ def _taxonomy_manifest() -> dict[str, object]:
         "selection": {"paths": ["tests"]},
     }
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "execution_contracts": [
             {
                 "id": "hermetic",
                 "owner": "Miniature pure tests",
                 "contract": "Excludes database fixtures and external owners.",
                 "skip_policy": allow,
-                "execution": {
-                    "mode": "xdist",
-                    "workers": 2,
-                    "distribution": "worksteal",
-                    "max_worker_restart": 0,
-                },
                 "selection": {
                     "paths": ["tests"],
                     "exclude_markers": [
@@ -153,21 +148,6 @@ def _run_pytest(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]
     )
 
 
-def _xdist_arguments() -> tuple[str, ...]:
-    return (
-        "tests",
-        "--taxonomy-lane=hermetic",
-        "--taxonomy-execution=xdist",
-        "-n",
-        "2",
-        "--dist",
-        "worksteal",
-        "--max-worker-restart",
-        "0",
-        "-q",
-    )
-
-
 def test_selector_hook_runs_after_the_external_resource_guard() -> None:
     assert pytest_taxonomy.pytest_collection_modifyitems.pytest_impl["trylast"] is True
 
@@ -181,10 +161,10 @@ def test_plugin_is_inert_without_an_explicit_lane(tmp_path: Path) -> None:
     assert "3 passed" in result.stdout
 
 
-def test_xdist_workers_apply_fixture_aware_hermetic_selection(tmp_path: Path) -> None:
+def test_serial_selector_applies_fixture_aware_hermetic_selection(tmp_path: Path) -> None:
     root = _mini_repository(tmp_path)
 
-    result = _run_pytest(root, *_xdist_arguments())
+    result = _run_pytest(root, "tests", "--taxonomy-lane=hermetic", "-q")
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
@@ -193,55 +173,29 @@ def test_xdist_workers_apply_fixture_aware_hermetic_selection(tmp_path: Path) ->
     assert not (root / "external-owner-ran").exists()
 
 
-def test_xdist_worker_collection_drift_fails_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "xdist_arguments",
+    (
+        ("-n", "2"),
+        ("-d", "--tx", "popen"),
+        ("-f",),
+    ),
+)
+def test_active_taxonomy_lane_rejects_pytest_xdist(
+    tmp_path: Path,
+    xdist_arguments: tuple[str, ...],
+) -> None:
     root = _mini_repository(tmp_path)
-    (root / "tests/test_worker_drift.py").write_text(
-        "import os\n\n"
-        'if os.environ.get("PYTEST_XDIST_WORKER") == "gw0":\n'
-        "    def test_only_on_first_worker():\n"
-        "        assert True\n",
-        encoding="utf-8",
-    )
-
-    result = _run_pytest(root, *_xdist_arguments())
-
-    assert result.returncode != 0
-    output = result.stdout + result.stderr
-    assert "Different tests were collected" in output or "different selected node IDs" in output
-
-
-def test_xdist_excluded_worker_collection_drift_fails_closed(tmp_path: Path) -> None:
-    root = _mini_repository(tmp_path)
-    (root / "tests/test_excluded_worker_drift.py").write_text(
-        "import os\n\n"
-        "import pytest\n\n"
-        'if os.environ.get("PYTEST_XDIST_WORKER") == "gw0":\n'
-        "    @pytest.mark.real_ray\n"
-        "    def test_excluded_only_on_first_worker():\n"
-        "        assert True\n",
-        encoding="utf-8",
-    )
-
-    result = _run_pytest(root, *_xdist_arguments())
-
-    assert result.returncode != 0
-    assert "full pre-selection" in result.stdout + result.stderr
-
-
-def test_default_serial_remainder_preserves_only_intentional_skips() -> None:
     result = _run_pytest(
-        ROOT,
+        root,
         "tests",
-        "--taxonomy-lane=default-serial-remainder",
-        "--taxonomy-execution=serial",
+        "--taxonomy-lane=hermetic",
+        *xdist_arguments,
         "-q",
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    summary = re.search(r"(\d+) skipped", result.stdout)
-    assert summary is not None
-    assert int(summary.group(1)) > 1
-    assert " passed" not in result.stdout
+    assert result.returncode != 0
+    assert "manifest-backed taxonomy runs are serial" in result.stdout + result.stderr
 
 
 def test_inventory_cli_rejects_passthrough_lane_override_before_execution(
@@ -257,12 +211,10 @@ def test_inventory_cli_rejects_passthrough_lane_override_before_execution(
             "run",
             "--lane",
             "hermetic",
-            "--execution",
-            "xdist",
             "--observation",
             "untrusted-override",
             "--variant",
-            "two-workers",
+            "serial",
             "--timing-output",
             str(timing_output),
             "--external-note",

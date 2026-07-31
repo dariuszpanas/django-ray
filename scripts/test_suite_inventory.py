@@ -33,7 +33,6 @@ if str(SCRIPT_ROOT) not in sys.path:
 from scripts import pytest_taxonomy  # noqa: E402
 from scripts.test_suite_taxonomy import (  # noqa: E402
     CollectedTest,
-    ExecutionPolicy,
     Group,
     InventoryError,
     Manifest,
@@ -46,8 +45,8 @@ from scripts.test_suite_taxonomy import (  # noqa: E402
 
 __all__ = ("CollectedTest", "InventoryError", "Selection", "load_manifest")
 
-REPORT_SCHEMA_VERSION = 3
-TIMING_SCHEMA_VERSION = 3
+REPORT_SCHEMA_VERSION = 4
+TIMING_SCHEMA_VERSION = 4
 DEFAULT_MANIFEST = Path(".github/test-suite-taxonomy.json")
 GENERATED_BASELINE_RE = re.compile(
     r"^docs/investigations/test-suite-baseline-\d{4}-\d{2}-\d{2}\.(?:json|md)$"
@@ -137,11 +136,19 @@ def _reject_pytest_environment(
 def _validate_pytest_passthrough(arguments: list[str]) -> None:
     xdist_options = (
         "-d",
+        "-f",
         "-n",
         "--dist",
+        "--loadscope-reorder",
+        "--looponfail",
+        "--maxprocesses",
+        "--maxschedchunk",
         "--max-worker-restart",
+        "--no-loadscope-reorder",
         "--numprocesses",
         "--rsyncdir",
+        "--rsyncignore",
+        "--testrunuid",
         "--tx",
     )
     if any(
@@ -151,9 +158,7 @@ def _validate_pytest_passthrough(arguments: list[str]) -> None:
         for argument in arguments
         for option in xdist_options
     ):
-        raise InventoryError(
-            "xdist options are owned by the manifest-backed taxonomy execution policy"
-        )
+        raise InventoryError("manifest-backed timing runs are serial-only")
     forbidden = (
         "--co",
         "--collect-in-virtualenv",
@@ -183,7 +188,6 @@ def _validate_pytest_passthrough(arguments: list[str]) -> None:
         "--sw",
         "--sw-reset",
         "--sw-skip",
-        "--taxonomy-execution",
         "--taxonomy-lane",
         "--taxonomy-manifest",
         "-k",
@@ -319,53 +323,6 @@ def _validate_collect_path_aliases(
         raise InventoryError("collection outputs must not overwrite timing inputs")
 
 
-def _validated_runtime_paths(
-    root: Path,
-    timing_output: Path,
-    coverage_file: Path | None,
-    ray_tmp_dir: Path | None,
-) -> tuple[Path | None, Path | None]:
-    if (coverage_file is None) != (ray_tmp_dir is None):
-        raise InventoryError("coverage file and Ray temporary directory must be provided together")
-    if coverage_file is None or ray_tmp_dir is None:
-        return None, None
-
-    repository = root.resolve()
-    resolved_timing = (
-        timing_output.resolve()
-        if timing_output.is_absolute()
-        else (repository / timing_output).resolve()
-    )
-    output_directory = resolved_timing.parent
-    try:
-        output_directory.relative_to(repository)
-    except ValueError as error:
-        raise InventoryError("runtime evidence paths must stay inside the repository") from error
-    if output_directory == repository:
-        raise InventoryError("runtime evidence directory cannot be the repository root")
-    resolved_coverage = (
-        coverage_file.resolve()
-        if coverage_file.is_absolute()
-        else (repository / coverage_file).resolve()
-    )
-    absolute_ray_tmp = (
-        ray_tmp_dir.absolute()
-        if ray_tmp_dir.is_absolute()
-        else (repository / ray_tmp_dir).absolute()
-    )
-    resolved_ray_tmp = absolute_ray_tmp.resolve()
-    if resolved_coverage != output_directory / ".coverage":
-        raise InventoryError("coverage data must use the timing output's sibling .coverage path")
-    if resolved_ray_tmp != output_directory / "ray-tmp":
-        raise InventoryError("Ray temporary data must use the timing output's sibling ray-tmp path")
-    _validate_output_path(repository, resolved_coverage, "coverage data")
-    _validate_output_path(repository, resolved_ray_tmp, "Ray temporary directory")
-    # Ray must receive the lexical path so a short, validated symlink can keep
-    # Unix-domain socket paths below the platform limit. Cleanup continues to
-    # own the resolved repository sibling validated above.
-    return resolved_coverage, absolute_ray_tmp
-
-
 def _environment_record(*, include_processor_count: bool = False) -> dict[str, object]:
     packages: dict[str, str] = {}
     for package in ENVIRONMENT_PACKAGES:
@@ -397,7 +354,6 @@ def _group_record(group: Group, items: list[CollectedTest]) -> dict[str, object]
         "contract": group.contract,
         "skip_policy": asdict(group.skip_policy),
         "django_settings_modules": list(group.django_settings_modules),
-        "execution": group.execution.as_mapping(),
         "variants": group.variants,
         "selection": {
             "expression": group.selection.expression(),
@@ -584,23 +540,8 @@ def _validate_timing_detail_records(
                 raise InventoryError(f"timing {field} total must equal its phase sum")
 
 
-def _validate_execution_evidence(
-    value: object,
-    expected: ExecutionPolicy,
-    label: str,
-) -> None:
-    expected_mapping = expected.as_mapping()
-    if not isinstance(value, dict) or set(value) != set(expected_mapping):
-        raise InventoryError(f"{label} must declare the complete execution policy")
-    for field, expected_value in expected_mapping.items():
-        actual_value = value.get(field)
-        if type(actual_value) is not type(expected_value) or actual_value != expected_value:
-            raise InventoryError(f"{label} does not match the exact execution policy")
-
-
 def _validate_collection_evidence(
     value: object,
-    execution: ExecutionPolicy,
     selected_items: list[CollectedTest],
     items: list[CollectedTest],
 ) -> None:
@@ -608,11 +549,10 @@ def _validate_collection_evidence(
         raise InventoryError("timing evidence needs taxonomy collection evidence")
     if value.get("valid") is not True or value.get("errors") != []:
         raise InventoryError("timing taxonomy collection evidence is not valid")
-    if value.get("mode") != execution.mode:
-        raise InventoryError("timing taxonomy collection mode differs from execution policy")
-    _validate_execution_evidence(
-        value.get("execution"), execution, "timing taxonomy collection execution"
-    )
+    if value.get("mode") != "serial":
+        raise InventoryError("timing taxonomy collection must use serial execution")
+    if "execution" in value or "worker_collections" in value:
+        raise InventoryError("schema 4 timing cannot contain legacy xdist collection evidence")
 
     selected_nodeids = [item.nodeid for item in selected_items]
     collected_nodeids = [item.nodeid for item in items]
@@ -631,28 +571,6 @@ def _validate_collection_evidence(
             raise InventoryError(
                 f"timing taxonomy collection {field} does not match current collection"
             )
-
-    worker_collections = value.get("worker_collections")
-    if execution.mode == "serial":
-        if worker_collections != []:
-            raise InventoryError("serial timing evidence cannot contain worker collections")
-        return
-    if not isinstance(worker_collections, list) or len(worker_collections) != execution.workers:
-        raise InventoryError("xdist timing evidence needs every fixed worker collection")
-    worker_ids: set[str] = set()
-    for record in worker_collections:
-        if not isinstance(record, dict):
-            raise InventoryError("xdist worker collection evidence must contain objects")
-        worker_id = record.get("worker")
-        if not isinstance(worker_id, str) or not worker_id.strip() or worker_id in worker_ids:
-            raise InventoryError("xdist worker collection identities must be non-empty and unique")
-        worker_ids.add(worker_id)
-        for field, expected_value in expected_values:
-            actual_value = record.get(field)
-            if type(actual_value) is not type(expected_value) or actual_value != expected_value:
-                raise InventoryError(
-                    f"xdist worker {worker_id} {field} does not match current collection"
-                )
 
 
 def _validate_timing_record(
@@ -717,18 +635,9 @@ def _validate_timing_record(
     if not isinstance(pytest_record, dict) or pytest_record.get("exit_code") != 0:
         raise InventoryError("timing evidence must come from a successful pytest run")
     selected_items = [item for item in items if group.selection.matches(item)]
-    execution_value = timing.get("execution")
-    if not isinstance(execution_value, dict):
-        raise InventoryError("timing evidence needs an execution policy")
-    execution_mode = execution_value.get("mode")
-    if execution_mode == "serial":
-        execution = ExecutionPolicy()
-    elif execution_mode == "xdist" and group.execution.mode == "xdist":
-        execution = group.execution
-    else:
-        raise InventoryError("timing execution mode is not allowed for the taxonomy group")
-    _validate_execution_evidence(execution_value, execution, "timing execution")
-    _validate_collection_evidence(timing.get("collection"), execution, selected_items, items)
+    if "execution" in timing:
+        raise InventoryError("schema 4 timing cannot contain a legacy execution policy")
+    _validate_collection_evidence(timing.get("collection"), selected_items, items)
     selected_count = _require_nonnegative_integer(
         pytest_record.get("selected_count"), "timing selected_count"
     )
@@ -1144,10 +1053,6 @@ class _RuntimePlugin:
     def pytest_collection_finish(self) -> None:
         self.collection_finished = time.perf_counter()
 
-    @pytest.hookimpl(optionalhook=True)
-    def pytest_xdist_node_collection_finished(self) -> None:
-        self.collection_finished = time.perf_counter()
-
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
         nodeid = report.nodeid.replace("\\", "/")
         self.phase_seconds[report.when] += report.duration
@@ -1198,19 +1103,11 @@ def run_lane(
     runner_queue_seconds: float | None,
     environment_setup_seconds: float | None,
     external_note: str,
-    execution_mode: str = "serial",
-    coverage_file: Path | None = None,
-    ray_tmp_dir: Path | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run one named selection and retain phase-level timing evidence."""
     group = manifest.group(lane_id)
     _reject_pytest_environment(group.django_settings_modules)
     _validate_pytest_passthrough(pytest_arguments)
-    if execution_mode not in {"serial", "xdist"}:
-        raise InventoryError("taxonomy execution mode must be serial or xdist")
-    execution = ExecutionPolicy() if execution_mode == "serial" else group.execution
-    if execution_mode == "xdist" and execution.mode != "xdist":
-        raise InventoryError(f"taxonomy group {lane_id!r} does not declare xdist execution")
     try:
         manifest_relative = manifest_path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError as error:
@@ -1221,27 +1118,10 @@ def run_lane(
     arguments = [
         f"--taxonomy-manifest={manifest_relative}",
         f"--taxonomy-lane={lane_id}",
-        f"--taxonomy-execution={execution_mode}",
-        *execution.pytest_arguments(),
         str(root / "tests"),
         *pytest_arguments,
     ]
-    previous_environment = {
-        "COVERAGE_FILE": os.environ.get("COVERAGE_FILE"),
-        "RAY_TMPDIR": os.environ.get("RAY_TMPDIR"),
-    }
-    try:
-        if coverage_file is not None:
-            os.environ["COVERAGE_FILE"] = str(coverage_file)
-        if ray_tmp_dir is not None:
-            os.environ["RAY_TMPDIR"] = str(ray_tmp_dir)
-        exit_code = pytest.main(arguments, plugins=[plugin])
-    finally:
-        for name, previous in previous_environment.items():
-            if previous is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = previous
+    exit_code = pytest.main(arguments, plugins=[plugin])
     collection_report = pytest_taxonomy.consume_last_run_report()
     finished = time.perf_counter()
     source_after = _source_digest(root, manifest_path)
@@ -1310,7 +1190,7 @@ def run_lane(
     if source_before["digest"] != source_after["digest"]:
         integrity_errors.append("Git-visible source changed while pytest was running")
     if collection_report is None:
-        integrity_errors.append("worker-loaded taxonomy plugin produced no collection report")
+        integrity_errors.append("taxonomy selector produced no collection report")
     elif not collection_report.get("valid"):
         integrity_errors.extend(
             f"taxonomy collection: {error}"
@@ -1345,7 +1225,6 @@ def run_lane(
         "variant": variant,
         "selection": group.selection.expression(),
         "skip_policy": asdict(group.skip_policy),
-        "execution": execution.as_mapping(),
         "collection": collection_report,
         "pytest_arguments": pytest_arguments,
         "environment": _environment_record(include_processor_count=True),
@@ -1437,12 +1316,9 @@ def _parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser("run", help="run and time one manifest-backed selection")
     run.add_argument("--lane", required=True)
-    run.add_argument("--execution", choices=("serial", "xdist"), default="serial")
     run.add_argument("--observation", required=True)
     run.add_argument("--variant", required=True)
     run.add_argument("--timing-output", type=Path, required=True)
-    run.add_argument("--coverage-file", type=Path)
-    run.add_argument("--ray-tmp-dir", type=Path)
     run.add_argument("--runner-queue-seconds", type=float)
     run.add_argument("--environment-setup-seconds", type=float)
     run.add_argument("--external-note", required=True)
@@ -1474,7 +1350,6 @@ def main(argv: list[str] | None = None) -> int:
                             "selection": group.selection.as_mapping(),
                             "skip_policy": asdict(group.skip_policy),
                             "django_settings_modules": list(group.django_settings_modules),
-                            "execution": group.execution.as_mapping(),
                             "pytest_arguments": pytest_arguments,
                             "manifest_runner": [
                                 "python",
@@ -1492,12 +1367,6 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if arguments.command == "run":
             _validate_output_path(root, arguments.timing_output, "timing output")
-            coverage_file, ray_tmp_dir = _validated_runtime_paths(
-                root,
-                arguments.timing_output,
-                arguments.coverage_file,
-                arguments.ray_tmp_dir,
-            )
             pytest_arguments = list(arguments.pytest_arguments)
             if pytest_arguments[:1] == ["--"]:
                 pytest_arguments = pytest_arguments[1:]
@@ -1523,9 +1392,6 @@ def main(argv: list[str] | None = None) -> int:
                 runner_queue_seconds=arguments.runner_queue_seconds,
                 environment_setup_seconds=arguments.environment_setup_seconds,
                 external_note=external_note,
-                execution_mode=arguments.execution,
-                coverage_file=coverage_file,
-                ray_tmp_dir=ray_tmp_dir,
             )
             _write_json(arguments.timing_output, timing)
             print(f"Wrote {arguments.timing_output} for taxonomy lane {arguments.lane}.")

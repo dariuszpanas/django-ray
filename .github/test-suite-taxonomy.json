@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "execution_contracts": [
     {
       "id": "hermetic",
@@ -8,12 +8,6 @@
       "skip_policy": {
         "mode": "allow",
         "reason": "Portable profiles preserve explicit platform or optional-capability skips and report them as outcomes."
-      },
-      "execution": {
-        "mode": "xdist",
-        "workers": 2,
-        "distribution": "worksteal",
-        "max_worker_restart": 0
       },
       "selection": {
         "paths": ["tests"],
@@ -347,20 +341,6 @@
       "selection": {
         "paths": ["tests"],
         "exclude_markers": ["live_cluster", "real_ray"]
-      }
-    },
-    {
-      "id": "default-serial-remainder",
-      "owner": "Default-settings canonical remainder",
-      "contract": "Preserves backend-specific and opt-in self-skip outcomes outside parallel and required resource phases.",
-      "skip_policy": {
-        "mode": "allow",
-        "reason": "The default canonical suite retains PostgreSQL and Compiled Graph cases as explicit self-skip outcomes. A dedicated job owns PostgreSQL execution proof; the guarded local KubeRay pilot owns native Compiled Graph proof."
-      },
-      "selection": {
-        "paths": ["tests"],
-        "include_any_markers": ["compiled_graph_opt_in", "postgresql"],
-        "exclude_markers": ["live_cluster"]
       }
     }
   ],

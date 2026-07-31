@@ -17,9 +17,6 @@ venv/
 coverage.xml
 artifacts/coverage-debt/
 artifacts/test-suite-inventory/
-artifacts/test-suite-phased-coverage/
-artifacts/pytest-xdist-*/
-artifacts/pytest-xdist-retention.*
 htmlcov/
 site/
 .idea/
