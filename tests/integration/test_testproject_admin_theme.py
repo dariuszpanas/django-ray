@@ -130,6 +130,7 @@ failed_execution = RayTaskExecution.objects.create(
     task_id="unfold-admin-retry",
     callable_path="testproject.tasks.failing_task",
     state=TaskState.FAILED,
+    error_message="unfold-retry-secret-marker",
     args_json="[]",
     kwargs_json="{}",
 )
@@ -297,6 +298,31 @@ retry_response = authenticated.post(
         "_selected_action": [str(failed_execution.pk)],
     },
 )
+assert retry_response.status_code == 200
+retry_confirmation_html = retry_response.content.decode()
+assert "Confirm full task retry" in retry_confirmation_html
+assert "Retry can repeat external effects" in retry_confirmation_html
+assert "does not resume at the failed node" in retry_confirmation_html
+assert 'role="alert"' in retry_confirmation_html
+assert 'name="csrfmiddlewaretoken"' in retry_confirmation_html
+assert "unfold-retry-secret-marker" not in retry_confirmation_html
+failed_execution.refresh_from_db()
+assert failed_execution.state == TaskState.FAILED
+token_match = re.search(
+    r'name="retry_confirmation_token"[^>]*value="([^"]+)"',
+    retry_confirmation_html,
+    re.DOTALL,
+)
+assert token_match is not None
+confirmed_retry_response = authenticated.post(
+    reverse("admin:django_ray_raytaskexecution_changelist"),
+    {
+        "action": "retry_tasks",
+        "_selected_action": [str(failed_execution.pk)],
+        "post": "yes",
+        "retry_confirmation_token": html.unescape(token_match.group(1)),
+    },
+)
 cancel_response = authenticated.post(
     reverse("admin:django_ray_raytaskexecution_changelist"),
     {
@@ -304,7 +330,7 @@ cancel_response = authenticated.post(
         "_selected_action": [str(queued_execution.pk)],
     },
 )
-assert retry_response.status_code == 302
+assert confirmed_retry_response.status_code == 302
 assert cancel_response.status_code == 302
 failed_execution.refresh_from_db()
 queued_execution.refresh_from_db()
@@ -448,7 +474,9 @@ print(
 """
 
 STANDARD_ADMIN_PROBE = r"""
+import html
 import json
+import re
 import sys
 from types import SimpleNamespace
 
@@ -466,6 +494,28 @@ settings.configure(
     ],
     DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
     DJANGO_RAY={"RAY_ADDRESS": "local"},
+    ROOT_URLCONF=__name__,
+    ALLOWED_HOSTS=["testserver"],
+    MIDDLEWARE=[
+        "django.contrib.sessions.middleware.SessionMiddleware",
+        "django.contrib.auth.middleware.AuthenticationMiddleware",
+        "django.contrib.messages.middleware.MessageMiddleware",
+    ],
+    TEMPLATES=[
+        {
+            "BACKEND": "django.template.backends.django.DjangoTemplates",
+            "APP_DIRS": True,
+            "OPTIONS": {
+                "context_processors": [
+                    "django.template.context_processors.request",
+                    "django.contrib.auth.context_processors.auth",
+                    "django.contrib.messages.context_processors.messages",
+                ]
+            },
+        }
+    ],
+    PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"],
+    USE_TZ=True,
 )
 
 import django
@@ -473,7 +523,10 @@ import django
 django.setup()
 
 from django.contrib import admin
-from django.test import RequestFactory
+from django.contrib.auth import get_user_model
+from django.core.management import call_command
+from django.test import Client, RequestFactory
+from django.urls import path, reverse
 
 from django_ray.admin import (
     RayTaskExecutionAdmin,
@@ -481,7 +534,9 @@ from django_ray.admin import (
     TaskAttemptInline,
     TaskWorkerLeaseAdmin,
 )
-from django_ray.models import RayTaskExecution, TaskAttempt, TaskWorkerLease
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+
+urlpatterns = [path("admin/", admin.site.urls)]
 
 assert "unfold" not in sys.modules
 expected_admins = {
@@ -526,11 +581,57 @@ assert TaskAttemptInline in admin.site._registry[RayTaskExecution].get_inlines(
     ),
 )
 
+call_command("migrate", interactive=False, verbosity=0)
+user = get_user_model().objects.create_superuser(
+    username="standard-admin-retry-probe",
+    password="standard-admin-retry-probe-password",
+)
+failed_execution = RayTaskExecution.objects.create(
+    task_id="standard-admin-retry",
+    callable_path="testproject.tasks.failing_task",
+    state=TaskState.FAILED,
+    error_message="standard-admin-retry-secret-marker",
+)
+client = Client()
+client.force_login(user)
+changelist_url = reverse("admin:django_ray_raytaskexecution_changelist")
+retry_response = client.post(
+    changelist_url,
+    {
+        "action": "retry_tasks",
+        "_selected_action": [str(failed_execution.pk)],
+    },
+)
+assert retry_response.status_code == 200
+retry_html = retry_response.content.decode()
+assert "Confirm full task retry" in retry_html
+assert "Retry can repeat external effects" in retry_html
+assert "standard-admin-retry-secret-marker" not in retry_html
+token_match = re.search(
+    r'name="retry_confirmation_token"[^>]*value="([^"]+)"',
+    retry_html,
+    re.DOTALL,
+)
+assert token_match is not None
+confirmed_response = client.post(
+    changelist_url,
+    {
+        "action": "retry_tasks",
+        "_selected_action": [str(failed_execution.pk)],
+        "post": "yes",
+        "retry_confirmation_token": html.unescape(token_match.group(1)),
+    },
+)
+assert confirmed_response.status_code == 302
+failed_execution.refresh_from_db()
+assert failed_execution.state == TaskState.QUEUED
+
 print(
     json.dumps(
         {
             "admin": type(admin.site).__name__,
             "attempt_inline": "passed",
+            "retry_confirmation": "passed",
             "unfold_imported": False,
         }
     )

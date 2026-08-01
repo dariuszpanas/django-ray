@@ -480,20 +480,33 @@ def retry_task(
     next_attempt_at: Any | None = None,
     expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
+    expected_workflow_identity: tuple[str | None, str | None] | None = None,
 ) -> RayTaskExecution | None:
     """Queue a failed execution for its next one-based attempt.
 
     The row lock makes retries from the admin, API, and workers mutually
     exclusive. ``None`` means another transition won the race, the current
-    state is not retryable, or an optional attempt/generation fence is stale.
+    state is not retryable, or an optional attempt/generation/workflow fence
+    is stale. The workflow identity tuple contains the run ID followed by the
+    plan fingerprint; pass ``(None, None)`` to fence an execution that has no
+    workflow identity.
     """
     execution_id = execution.pk if isinstance(execution, RayTaskExecution) else execution
     allowed = tuple(allowed_states)
     with transaction.atomic():
         current = RayTaskExecution.objects.select_for_update().filter(pk=execution_id).first()
+        if current is None:
+            return None
+        current_workflow_identity = (
+            str(current.workflow_run_id) if current.workflow_run_id is not None else None,
+            (
+                str(current.workflow_plan_fingerprint)
+                if current.workflow_plan_fingerprint is not None
+                else None
+            ),
+        )
         if (
-            current is None
-            or current.state not in allowed
+            current.state not in allowed
             or (
                 expected_attempt_number is not None
                 and current.attempt_number != expected_attempt_number
@@ -501,6 +514,10 @@ def retry_task(
             or (
                 expected_execution_generation is not None
                 and current.execution_generation != expected_execution_generation
+            )
+            or (
+                expected_workflow_identity is not None
+                and current_workflow_identity != expected_workflow_identity
             )
         ):
             return None

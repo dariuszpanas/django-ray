@@ -11,16 +11,21 @@ import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from django.conf import settings as django_settings
 from django.contrib import admin
+from django.contrib import messages as django_messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser, Permission
+from django.core import signing as django_signing
 from django.core.exceptions import PermissionDenied
 from django.db import connection
 from django.http import Http404
+from django.template.response import TemplateResponse
 from django.test import Client, RequestFactory, override_settings
 from django.test.html import Element, parse_html
 from django.test.utils import CaptureQueriesContext
@@ -29,6 +34,7 @@ from django.urls import reverse
 from django_ray.admin import (
     ADMIN_ATTEMPT_INLINE_MAX_CHARS,
     ADMIN_DIAGNOSTIC_MAX_CHARS,
+    ADMIN_RETRY_CONFIRMATION_MAX_TASKS,
     ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES,
     ADMIN_WORKFLOW_PLAN_DOWNLOAD_MAX_BYTES,
     ADMIN_WORKFLOW_PLAN_SELECTION_DOWNLOAD_MAX_BYTES,
@@ -80,10 +86,63 @@ _ADMIN_MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
 ]
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_TEST_RETRY_SESSION_NONCE = "r" * 43
+_TEST_RETRY_ACTOR = SimpleNamespace(
+    is_authenticated=True,
+    is_active=True,
+    is_staff=True,
+    pk=7001,
+    _meta=SimpleNamespace(label_lower="auth.user"),
+    has_perm=lambda permission, obj=None: True,
+    has_module_perms=lambda app_label: True,
+)
 
 
 def _request() -> Any:
-    return RequestFactory().post("/admin/")
+    request = RequestFactory().post("/admin/")
+    request.user = AnonymousUser()
+    return request
+
+
+def _retry_request(
+    *,
+    data: dict[str, str] | None = None,
+    path: str = "/admin/",
+    user: Any = _TEST_RETRY_ACTOR,
+    session_nonce: str = _TEST_RETRY_SESSION_NONCE,
+) -> Any:
+    request = RequestFactory().post(path, data or {})
+    request.user = user
+    request.session = {
+        "django_ray_admin_retry_confirmation_nonce_v1": session_nonce,
+    }
+    return request
+
+
+def _retry_confirmation(
+    admin_obj: RayTaskExecutionAdmin,
+    queryset: Any,
+) -> TemplateResponse:
+    response = admin_obj.retry_tasks(_retry_request(), queryset)
+    assert isinstance(response, TemplateResponse)
+    response.render()
+    return response
+
+
+def _confirmed_retry_request(response: TemplateResponse) -> Any:
+    context = _retry_confirmation_context(response)
+    return _retry_request(
+        data={
+            "post": "yes",
+            "retry_confirmation_token": context["confirmation_token"],
+        },
+    )
+
+
+def _retry_confirmation_context(response: TemplateResponse) -> dict[str, Any]:
+    context = response.context_data
+    assert context is not None
+    return context
 
 
 def _task_admin() -> RayTaskExecutionAdmin:
@@ -2780,7 +2839,10 @@ class TestRayTaskExecutionAdmin:
 
         assert result.returncode == 0, result.stdout + result.stderr
 
-    def test_retry_tasks_requeues_failed_lost_and_expired(self, monkeypatch) -> None:
+    def test_retry_tasks_confirms_full_replay_before_requeue(
+        self,
+        monkeypatch,
+    ) -> None:
         admin_obj = _task_admin()
         messages: list[str] = []
         monkeypatch.setattr(
@@ -2803,7 +2865,7 @@ class TestRayTaskExecutionAdmin:
             callable_path="testproject.tasks.failing_task",
             state=TaskState.LOST,
             attempt_number=2,
-            error_message="lost",
+            error_message="worker-lost-secret-marker",
             args_json="[]",
             kwargs_json="{}",
         )
@@ -2828,7 +2890,44 @@ class TestRayTaskExecutionAdmin:
         )
 
         qs = RayTaskExecution.objects.filter(pk__in=[failed.pk, lost.pk, expired.pk, running.pk])
-        admin_obj.retry_tasks(_request(), qs)
+        response = _retry_confirmation(admin_obj, qs)
+
+        failed.refresh_from_db()
+        lost.refresh_from_db()
+        expired.refresh_from_db()
+        running.refresh_from_db()
+        assert failed.state == TaskState.FAILED
+        assert lost.state == TaskState.LOST
+        assert expired.state == TaskState.EXPIRED
+        assert running.state == TaskState.RUNNING
+
+        content = response.content.decode()
+        context = _retry_confirmation_context(response)
+        assert "Retry can repeat external effects" in content
+        assert "restart at their entry node" in content
+        assert "does not resume at the failed node" in content
+        assert "Confirm full retry" in content
+        assert 'class="django-ray-retry-card"' in content
+        assert 'class="django-ray-retry-card__warning" role="alert"' in content
+        assert 'class="django-ray-retry-card__confirm"' in content
+        assert "Eligible failed, lost, or expired tasks" in content
+        assert context["selected_count"] == 4
+        assert context["retryable_count"] == 3
+        assert context["non_retryable_count"] == 1
+        assert context["known_workflow_count"] == 0
+        assert context["selected_ids"] == [str(failed.pk), str(lost.pk), str(expired.pk)]
+        assert len(context["confirmation_token"]) <= 512
+        assert "boom" not in content
+        assert "worker-lost-secret-marker" not in content
+
+        confirmed_queryset = RayTaskExecution.objects.filter(pk__in=context["selected_ids"])
+        assert (
+            admin_obj.retry_tasks(
+                _confirmed_retry_request(response),
+                confirmed_queryset,
+            )
+            is None
+        )
 
         failed.refresh_from_db()
         lost.refresh_from_db()
@@ -2848,10 +2947,449 @@ class TestRayTaskExecutionAdmin:
         assert running.state == TaskState.RUNNING
         assert messages[-1] == "Queued 3 task(s) for retry."
         assert TaskAttempt.objects.get(execution=failed, attempt_number=3).error_message == "boom"
-        assert TaskAttempt.objects.get(execution=lost, attempt_number=2).error_message == "lost"
+        assert (
+            TaskAttempt.objects.get(execution=lost, attempt_number=2).error_message
+            == "worker-lost-secret-marker"
+        )
         assert (
             TaskAttempt.objects.get(execution=expired, attempt_number=1).state == TaskState.EXPIRED
         )
+
+    def test_retry_confirmation_cancel_preserves_changelist_context(self) -> None:
+        admin_obj = _task_admin()
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-cancel-context",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+        changelist_url = reverse("admin:django_ray_raytaskexecution_changelist")
+        request = _retry_request(path=f"{changelist_url}?state__exact=FAILED&q=invoice&page=2")
+
+        response = admin_obj.retry_tasks(
+            request,
+            RayTaskExecution.objects.filter(pk=task.pk),
+        )
+
+        assert isinstance(response, TemplateResponse)
+        response.render()
+        context = _retry_confirmation_context(response)
+        assert context["changelist_url"] == (
+            f"{changelist_url}?state__exact=FAILED&q=invoice&page=2"
+        )
+        assert (
+            f'href="{changelist_url}?state__exact=FAILED&amp;q=invoice&amp;page=2"'
+            in response.content.decode()
+        )
+
+    def test_retry_confirmation_is_actor_and_session_bound_and_stale_fails_closed(
+        self,
+        monkeypatch,
+    ) -> None:
+        admin_obj = _task_admin()
+        messages: list[tuple[str, int | None]] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, msg, level=None: messages.append((str(msg), level)),
+        )
+        first_actor = get_user_model().objects.create_superuser(
+            username="retry-confirmation-first-actor"
+        )
+        second_actor = get_user_model().objects.create_superuser(
+            username="retry-confirmation-second-actor"
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-confirmation-fence-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+            attempt_number=3,
+            execution_generation=7,
+            workflow_run_id=uuid4(),
+            error_message="do-not-render-this-error",
+        )
+        queryset = RayTaskExecution.objects.filter(pk=task.pk)
+
+        first_request = _retry_request(
+            user=first_actor,
+            session_nonce="f" * 43,
+        )
+        response = admin_obj.retry_tasks(first_request, queryset)
+        assert isinstance(response, TemplateResponse)
+        response.render()
+        context = _retry_confirmation_context(response)
+        assert context["known_workflow_count"] == 1
+        assert "do-not-render-this-error" not in response.content.decode()
+
+        other_actor_request = _retry_request(
+            data={
+                "post": "yes",
+                "retry_confirmation_token": context["confirmation_token"],
+            },
+            user=second_actor,
+            session_nonce="f" * 43,
+        )
+        assert admin_obj.retry_tasks(other_actor_request, queryset) is None
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 3
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+        other_session_request = _retry_request(
+            data={
+                "post": "yes",
+                "retry_confirmation_token": context["confirmation_token"],
+            },
+            user=first_actor,
+            session_nonce="s" * 43,
+        )
+        assert admin_obj.retry_tasks(other_session_request, queryset) is None
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 3
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+        fresh_request = _retry_request(
+            user=first_actor,
+            session_nonce="n" * 43,
+        )
+        fresh_response = admin_obj.retry_tasks(fresh_request, queryset)
+        assert isinstance(fresh_response, TemplateResponse)
+        fresh_context = _retry_confirmation_context(fresh_response)
+        RayTaskExecution.objects.filter(pk=task.pk).update(
+            attempt_number=4,
+            execution_generation=8,
+        )
+        stale_request = _retry_request(
+            data={
+                "post": "yes",
+                "retry_confirmation_token": fresh_context["confirmation_token"],
+            },
+            user=first_actor,
+            session_nonce="n" * 43,
+        )
+        assert admin_obj.retry_tasks(stale_request, queryset) is None
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 4
+        assert task.execution_generation == 8
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        assert len(messages) == 3
+        assert all("No tasks were queued" in message for message, _level in messages)
+
+    def test_retry_confirmation_requires_admin_change_permission(self) -> None:
+        admin_obj = _task_admin()
+        actor = get_user_model().objects.create_user(
+            username="retry-confirmation-no-change-permission",
+            is_staff=True,
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-confirmation-permission-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+
+        with pytest.raises(PermissionDenied):
+            admin_obj.retry_tasks(
+                _retry_request(user=actor),
+                RayTaskExecution.objects.filter(pk=task.pk),
+            )
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_retry_confirmation_requires_csrf_for_both_posts(self) -> None:
+        actor = get_user_model().objects.create_superuser(username="retry-confirmation-csrf-actor")
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-confirmation-csrf-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+        changelist_url = reverse("admin:django_ray_raytaskexecution_changelist")
+        selection = {
+            "action": "retry_tasks",
+            "_selected_action": [str(task.pk)],
+        }
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(actor)
+
+        assert client.post(changelist_url, selection).status_code == 403
+        changelist = client.get(changelist_url)
+        assert changelist.status_code == 200
+        csrf_match = re.search(
+            r'name="csrfmiddlewaretoken" value="([^"]+)"',
+            changelist.content.decode(),
+        )
+        assert csrf_match is not None
+        confirmation = client.post(
+            changelist_url,
+            {**selection, "csrfmiddlewaretoken": csrf_match.group(1)},
+        )
+        assert confirmation.status_code == 200
+        confirmation_token_match = re.search(
+            r'name="retry_confirmation_token"[^>]*value="([^"]+)"',
+            confirmation.content.decode(),
+            re.DOTALL,
+        )
+        assert confirmation_token_match is not None
+        confirmed_selection = {
+            **selection,
+            "post": "yes",
+            "retry_confirmation_token": confirmation_token_match.group(1),
+        }
+
+        assert client.post(changelist_url, confirmed_selection).status_code == 403
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        confirmed = client.post(
+            changelist_url,
+            {**confirmed_selection, "csrfmiddlewaretoken": csrf_match.group(1)},
+        )
+        assert confirmed.status_code == 302
+        task.refresh_from_db()
+        assert task.state == TaskState.QUEUED
+
+    @pytest.mark.parametrize(
+        ("field", "replacement"),
+        [
+            ("workflow_run_id", "00000000-0000-0000-0000-000000000292"),
+            ("workflow_plan_fingerprint", "sha256:" + ("2" * 64)),
+        ],
+    )
+    def test_retry_confirmation_binds_exact_workflow_identity_without_rendering_it(
+        self,
+        monkeypatch,
+        field: str,
+        replacement: str,
+    ) -> None:
+        admin_obj = _task_admin()
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, message, level=None: messages.append(str(message)),
+        )
+        run_id = "00000000-0000-0000-0000-000000000291"
+        fingerprint = "sha256:" + ("1" * 64)
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-confirmation-workflow-fence-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+            attempt_number=2,
+            execution_generation=5,
+            workflow_run_id=run_id,
+            workflow_plan_fingerprint=fingerprint,
+        )
+        queryset = RayTaskExecution.objects.filter(pk=task.pk)
+        response = _retry_confirmation(admin_obj, queryset)
+
+        content = response.content.decode()
+        assert run_id not in content
+        assert fingerprint not in content
+        RayTaskExecution.objects.filter(pk=task.pk).update(**{field: replacement})
+
+        assert admin_obj.retry_tasks(_confirmed_retry_request(response), queryset) is None
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 2
+        assert task.execution_generation == 5
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        assert messages == [
+            "Retry confirmation expired or the selected tasks changed. Review their "
+            "current state and confirm again. No tasks were queued."
+        ]
+
+    def test_retry_confirmation_accepts_django_secret_key_fallback(
+        self,
+        monkeypatch,
+    ) -> None:
+        admin_obj = _task_admin()
+        monkeypatch.setattr(admin_obj, "message_user", lambda request, message: None)
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-confirmation-key-rotation-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+        queryset = RayTaskExecution.objects.filter(pk=task.pk)
+        previous_key = "previous-retry-confirmation-secret-key"
+        active_key = "active-retry-confirmation-secret-key"
+
+        with override_settings(SECRET_KEY=previous_key, SECRET_KEY_FALLBACKS=[]):
+            response = _retry_confirmation(admin_obj, queryset)
+        with override_settings(
+            SECRET_KEY=active_key,
+            SECRET_KEY_FALLBACKS=[previous_key],
+        ):
+            assert admin_obj.retry_tasks(_confirmed_retry_request(response), queryset) is None
+
+        task.refresh_from_db()
+        assert task.state == TaskState.QUEUED
+        assert task.attempt_number == 2
+
+    def test_retry_confirmation_rejects_tampering_and_expiry(
+        self,
+        monkeypatch,
+    ) -> None:
+        admin_obj = _task_admin()
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, message, level=None: messages.append(str(message)),
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-confirmation-expiry-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+        queryset = RayTaskExecution.objects.filter(pk=task.pk)
+        clock = [1_000.0]
+        monkeypatch.setattr(django_signing.time, "time", lambda: clock[0])
+        response = _retry_confirmation(admin_obj, queryset)
+        context = _retry_confirmation_context(response)
+        token = context["confirmation_token"]
+        tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+
+        tampered_request = _retry_request(
+            data={
+                "post": "yes",
+                "retry_confirmation_token": tampered,
+            }
+        )
+        assert admin_obj.retry_tasks(tampered_request, queryset) is None
+        clock[0] += 15 * 60 + 1
+        assert admin_obj.retry_tasks(_confirmed_retry_request(response), queryset) is None
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        assert len(messages) == 2
+        assert all("No tasks were queued" in message for message in messages)
+
+    def test_retry_confirmation_state_fence_survives_the_post_validation_race(
+        self,
+        monkeypatch,
+    ) -> None:
+        from django_ray.lifecycle import retry_task as locked_retry_task
+
+        admin_obj = _task_admin()
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, message: messages.append(str(message)),
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-confirmation-state-race-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+            attempt_number=3,
+            execution_generation=7,
+        )
+        queryset = RayTaskExecution.objects.filter(pk=task.pk)
+        response = _retry_confirmation(admin_obj, queryset)
+
+        def change_state_before_row_lock(execution_id: int | str, **kwargs: Any) -> Any:
+            RayTaskExecution.objects.filter(pk=execution_id).update(state=TaskState.CANCELLED)
+            return locked_retry_task(execution_id, **kwargs)
+
+        monkeypatch.setattr("django_ray.admin.retry_task", change_state_before_row_lock)
+        assert admin_obj.retry_tasks(_confirmed_retry_request(response), queryset) is None
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLED
+        assert task.attempt_number == 3
+        assert task.execution_generation == 7
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        assert messages == [
+            "Queued 0 task(s) for retry. Skipped 1 task(s) because they changed after confirmation."
+        ]
+
+    @pytest.mark.parametrize(
+        ("field", "replacement"),
+        [
+            ("workflow_run_id", "00000000-0000-0000-0000-000000000294"),
+            ("workflow_plan_fingerprint", "sha256:" + ("4" * 64)),
+        ],
+    )
+    def test_retry_confirmation_workflow_fence_survives_the_post_validation_race(
+        self,
+        monkeypatch,
+        field: str,
+        replacement: str,
+    ) -> None:
+        from django_ray.lifecycle import retry_task as locked_retry_task
+
+        admin_obj = _task_admin()
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, message: messages.append(str(message)),
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-confirmation-workflow-race-001",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+            attempt_number=3,
+            execution_generation=7,
+            workflow_run_id="00000000-0000-0000-0000-000000000293",
+            workflow_plan_fingerprint="sha256:" + ("3" * 64),
+        )
+        queryset = RayTaskExecution.objects.filter(pk=task.pk)
+        response = _retry_confirmation(admin_obj, queryset)
+
+        def change_workflow_before_row_lock(execution_id: int | str, **kwargs: Any) -> Any:
+            RayTaskExecution.objects.filter(pk=execution_id).update(**{field: replacement})
+            return locked_retry_task(execution_id, **kwargs)
+
+        monkeypatch.setattr("django_ray.admin.retry_task", change_workflow_before_row_lock)
+        assert admin_obj.retry_tasks(_confirmed_retry_request(response), queryset) is None
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 3
+        assert task.execution_generation == 7
+        assert str(getattr(task, field)) == replacement
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        assert messages == [
+            "Queued 0 task(s) for retry. Skipped 1 task(s) because they changed after confirmation."
+        ]
+
+    def test_retry_confirmation_bounds_bulk_selection(
+        self,
+        monkeypatch,
+    ) -> None:
+        admin_obj = _task_admin()
+        messages: list[tuple[str, int | None]] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, msg, level=None: messages.append((str(msg), level)),
+        )
+        RayTaskExecution.objects.bulk_create(
+            [
+                RayTaskExecution(
+                    task_id=f"admin-retry-bounded-{index:03d}",
+                    callable_path="testproject.tasks.failing_task",
+                    state=TaskState.FAILED,
+                )
+                for index in range(ADMIN_RETRY_CONFIRMATION_MAX_TASKS + 1)
+            ]
+        )
+        queryset = RayTaskExecution.objects.filter(task_id__startswith="admin-retry-bounded-")
+
+        assert admin_obj.retry_tasks(_retry_request(), queryset) is None
+        assert queryset.filter(state=TaskState.FAILED).count() == (
+            ADMIN_RETRY_CONFIRMATION_MAX_TASKS + 1
+        )
+        assert messages == [
+            (
+                "Retry at most 100 failed, lost, or expired tasks at once. No tasks were queued.",
+                django_messages.ERROR,
+            )
+        ]
 
     def test_retry_tasks_skips_corrupt_runtime_env_without_aborting_selection(
         self,
@@ -2883,9 +3421,14 @@ class TestRayTaskExecutionAdmin:
             error_message="worker lost",
         )
 
-        admin_obj.retry_tasks(
-            _request(),
+        response = _retry_confirmation(
+            admin_obj,
             RayTaskExecution.objects.filter(pk__in=[corrupt.pk, valid.pk]),
+        )
+        context = _retry_confirmation_context(response)
+        admin_obj.retry_tasks(
+            _confirmed_retry_request(response),
+            RayTaskExecution.objects.filter(pk__in=context["selected_ids"]),
         )
 
         corrupt.refresh_from_db()
@@ -2918,7 +3461,7 @@ class TestRayTaskExecutionAdmin:
             kwargs_json="{}",
         )
 
-        admin_obj.retry_tasks(_request(), RayTaskExecution.objects.filter(pk=task.pk))
+        admin_obj.retry_tasks(_retry_request(), RayTaskExecution.objects.filter(pk=task.pk))
 
         assert messages[-1] == "No failed, lost, or expired tasks found in selection."
 
