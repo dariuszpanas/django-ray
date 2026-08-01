@@ -407,6 +407,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Django task-result IDs are now globally unique at the database boundary. Enqueue
+  retries a proven UUIDv4 collision a small bounded number of times, recomputes the
+  task-ID-bound RuntimeEnv snapshot, and otherwise fails before creating claimable
+  work. Unrelated integrity failures are not retried, and this does not add enqueue
+  deduplication or exactly-once semantics.
 - `django_ray_worker --all-queues` now discovers and deduplicates queues across
   every configured django-ray backend alias while ignoring Celery and other
   backends. Queue selectors and explicit execution-mode flags are mutually
@@ -540,7 +545,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migration
 
-- Apply migrations `0007` through `0014` before starting upgraded workers:
+- Apply migrations `0007` through `0015` before starting upgraded workers:
   `python manage.py migrate django_ray`.
 - Drain and stop every Ray Job task manager running `0.3.1`-or-older code before
   starting code from this development line. Let in-flight jobs finish and reconcile,
@@ -575,6 +580,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the global fallback because old writers used it even without an alias target. Drain
   pre-`0014` task managers before relying on alias routing and drain targeted tasks
   before reversing the migration.
+- `0015_raytaskexecution_task_id_unique` rejects ambiguous legacy duplicate task IDs
+  without changing rows, then makes the public Django task-result ID globally unique.
+  Keep producers and task managers stopped while resolving any bounded preflight
+  diagnostic and applying the constraint. On a large execution table, measure the
+  preflight and unique-index build on a production-sized staging copy and plan database
+  capacity plus a maintenance window; this is not a zero-downtime migration. Reversal
+  removes the uniqueness guarantee.
 - Keep the schema-v3 pilot disabled by default until the documented activation gates
   are complete. The current schema-v2 coordinator remains the live compatibility
   writer for full reporting; opt-in full-detail terminal publication is limited to the

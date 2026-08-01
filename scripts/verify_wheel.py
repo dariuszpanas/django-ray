@@ -17,11 +17,12 @@ EXPECTED_FILES = {
     "django_ray/templates/admin/django_ray/raytaskexecution/change_form.html",
     "django_ray/migrations/0001_initial.py",
     "django_ray/migrations/0014_raytaskexecution_ray_target_address.py",
+    "django_ray/migrations/0015_raytaskexecution_task_id_unique.py",
     "django_ray/management/commands/django_ray_worker.py",
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0014_raytaskexecution_ray_target_address",
+    "0015_raytaskexecution_task_id_unique",
 )
 
 

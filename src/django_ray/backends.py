@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ImproperlyConfigured
-from django.db import transaction
+from django.db import IntegrityError, connection, transaction
 from django.tasks import TaskResult, TaskResultStatus
 from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.exceptions import TaskResultDoesNotExist
@@ -59,6 +59,10 @@ if TYPE_CHECKING:
 # Module-level logger
 logger = get_backend_logger()
 
+_TASK_ID_ALLOCATION_ATTEMPTS = 3
+_TASK_ID_UNIQUE_CONSTRAINT = "ray_task_id_unique"
+_SQLITE_TASK_ID_UNIQUE_ERROR = "UNIQUE constraint failed: django_ray_raytaskexecution.task_id"
+
 
 # Map our internal TaskState to Django's TaskResultStatus
 STATE_TO_STATUS: dict[str, TaskResultStatus] = {
@@ -70,6 +74,26 @@ STATE_TO_STATUS: dict[str, TaskResultStatus] = {
     TaskState.CANCELLING: TaskResultStatus.RUNNING,
     TaskState.LOST: TaskResultStatus.FAILED,
 }
+
+
+class TaskResultIdAllocationError(RuntimeError):
+    """Raised when bounded task-result ID allocation cannot find a free ID."""
+
+
+def _is_task_id_unique_violation(error: IntegrityError) -> bool:
+    """Identify only the database constraint that owns the public task ID."""
+    cause = error.__cause__
+    diagnostics = getattr(cause, "diag", None)
+    constraint_name = getattr(diagnostics, "constraint_name", None)
+    if constraint_name is not None:
+        return constraint_name == _TASK_ID_UNIQUE_CONSTRAINT
+
+    if connection.vendor != "sqlite" or cause is None:
+        return False
+    return (
+        getattr(cause, "sqlite_errorname", None) == "SQLITE_CONSTRAINT_UNIQUE"
+        and str(cause) == _SQLITE_TASK_ID_UNIQUE_ERROR
+    )
 
 
 class RayTaskBackend(BaseTaskBackend):
@@ -151,7 +175,9 @@ class RayTaskBackend(BaseTaskBackend):
         Returns:
             TaskResult object with task status and metadata
         """
-        # Generate a unique task ID
+        # The database is the authority for uniqueness. UUIDv4 keeps collisions
+        # vanishingly rare, while the bounded retry below makes a collision a
+        # recoverable allocation event instead of an ambiguous durable identity.
         task_id = str(uuid.uuid4())
 
         # Get the callable path for the task function
@@ -164,27 +190,58 @@ class RayTaskBackend(BaseTaskBackend):
         stored_runtime_env = runtime_env_for_storage(runtime_env, task_id=task_id)
         prepared_input = prepare_task_input(list(args), kwargs)
 
-        # Create the task execution record
         now = datetime.now(UTC)
         with transaction.atomic():
             register_task_input(prepared_input)
-            execution = RayTaskExecution.objects.create(
-                task_id=task_id,
-                callable_path=callable_path,
-                queue_name=task.queue_name,
-                priority=task.priority,
-                state=TaskState.QUEUED,
-                args_json=prepared_input.args_json,
-                kwargs_json=prepared_input.kwargs_json,
-                input_reference=prepared_input.input_reference,
-                run_after=task.run_after,
-                ray_target_address=self.ray_target_address,
-                runtime_env_profile=stored_runtime_env.profile,
-                runtime_env_json=stored_runtime_env.serialized,
-                runtime_env_hash=stored_runtime_env.digest,
-                timeout_seconds=self.timeout_seconds,
-                created_at=now,
-            )
+            for allocation_attempt in range(1, _TASK_ID_ALLOCATION_ATTEMPTS + 1):
+                try:
+                    # Keep the expected unique violation inside a savepoint so
+                    # PostgreSQL leaves the outer input-registration transaction
+                    # usable for a replacement candidate.
+                    with transaction.atomic():
+                        execution = RayTaskExecution.objects.create(
+                            task_id=task_id,
+                            callable_path=callable_path,
+                            queue_name=task.queue_name,
+                            priority=task.priority,
+                            state=TaskState.QUEUED,
+                            args_json=prepared_input.args_json,
+                            kwargs_json=prepared_input.kwargs_json,
+                            input_reference=prepared_input.input_reference,
+                            run_after=task.run_after,
+                            ray_target_address=self.ray_target_address,
+                            runtime_env_profile=stored_runtime_env.profile,
+                            runtime_env_json=stored_runtime_env.serialized,
+                            runtime_env_hash=stored_runtime_env.digest,
+                            timeout_seconds=self.timeout_seconds,
+                            created_at=now,
+                        )
+                except IntegrityError as error:
+                    if not _is_task_id_unique_violation(error):
+                        raise
+                    if allocation_attempt == _TASK_ID_ALLOCATION_ATTEMPTS:
+                        logger.error(
+                            "Task result ID allocation exhausted its collision budget",
+                            extra={
+                                "allocation_attempt": allocation_attempt,
+                                "allocation_limit": _TASK_ID_ALLOCATION_ATTEMPTS,
+                            },
+                        )
+                        raise TaskResultIdAllocationError(
+                            "django-ray: could not allocate a unique task result ID "
+                            f"after {_TASK_ID_ALLOCATION_ATTEMPTS} attempts"
+                        ) from None
+                    logger.warning(
+                        "Generated task result ID collided; retrying allocation",
+                        extra={
+                            "allocation_attempt": allocation_attempt,
+                            "allocation_limit": _TASK_ID_ALLOCATION_ATTEMPTS,
+                        },
+                    )
+                    task_id = str(uuid.uuid4())
+                    stored_runtime_env = runtime_env_for_storage(runtime_env, task_id=task_id)
+                    continue
+                break
 
         logger.info(
             "Task enqueued",
