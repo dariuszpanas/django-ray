@@ -263,6 +263,28 @@ class TestEntrypointPayload:
         assert result["exception_type"] == "builtins.ValueError"
         assert result["retryable"] is True
 
+    def test_execute_task_preserves_failure_evidence_inside_json_framing(
+        self,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+
+        def fail() -> None:
+            raise ValueError("\x1b[31mformatted failure\x1b[39m\rnext line")
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: fail,
+        )
+
+        encoded = entrypoint.execute_task("tests.formatted_fail", "[]", "{}")
+        result = json.loads(encoded)
+
+        assert result["error"] == "\x1b[31mformatted failure\x1b[39m\rnext line"
+        assert "ValueError: \x1b[31mformatted failure\x1b[39m\rnext line" in result["traceback"]
+        assert "\x1b" not in encoded
+        assert "\\u001b" in encoded
+
     def test_execute_task_marks_pinned_plan_mismatch_non_retryable(self, monkeypatch) -> None:
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
 
@@ -561,22 +583,30 @@ class TestEntrypointPayload:
 
     @pytest.mark.django_db
     def test_completion_persistence_logs_database_errors(self, monkeypatch, caplog) -> None:
+        secret = "completion-database-password"
         monkeypatch.setattr(
             RayTaskExecution.objects,
             "filter",
-            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+            lambda **_kwargs: (_ for _ in ()).throw(
+                RuntimeError(f"database unavailable password={secret}")
+            ),
         )
 
         entrypoint._persist_task_completion(1, 1, 1, '{"success": true}')
 
         assert "Failed to persist completion envelope for task 1" in caplog.text
+        assert secret not in caplog.text
+        assert "Traceback (most recent call last)" not in caplog.text
+        assert "[REDACTED]" in caplog.text
 
     def test_prepare_completion_falls_back_to_digest_storage(self, monkeypatch, caplog) -> None:
         from django_ray.result_storage import ResultStorageError
 
+        secret = "result-storage-api-key"
+
         class FailingStorage:
             def store(self, *, serialized_result: str) -> str:
-                raise ResultStorageError("object storage unavailable")
+                raise ResultStorageError(f"object storage unavailable api_key={secret}")
 
         monkeypatch.setattr(
             entrypoint,
@@ -598,6 +628,8 @@ class TestEntrypointPayload:
         assert result is None
         assert reference is not None and reference.startswith("oversize://sha256/")
         assert "using digest-only reference" in caplog.text
+        assert secret not in caplog.text
+        assert "ResultStorageError" in caplog.text
 
     def test_module_main_guard_invokes_cli_entrypoint(self, monkeypatch) -> None:
         monkeypatch.setattr(sys, "argv", ["entrypoint", "--payload-b64", "abc"])

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, NoReturn
 
-from django_ray.redaction import REDACTED, redact_value
+from django_ray.redaction import REDACTED, normalize_terminal_text, redact_value
 
 WORKFLOW_OUTPUT_PREVIEW_SCHEMA_VERSION = 1
 WORKFLOW_OUTPUT_PREVIEW_LIMITS_PROFILE = "v1"
@@ -156,6 +156,27 @@ def _normalize_bounded_value(value: Any) -> Any:
     return normalized
 
 
+def _normalize_terminal_value(value: Any) -> Any:
+    """Return the inert display baseline without applying redaction policy."""
+    if type(value) is str:
+        return normalize_terminal_text(value)
+    if type(value) is list:
+        return [_normalize_terminal_value(item) for item in value]
+    if type(value) is dict:
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = normalize_terminal_text(key)
+            normalized_item = _normalize_terminal_value(item)
+            # Distinct raw keys can collapse to one inert display key. Mirror
+            # redact_value's fail-closed collision behavior without applying
+            # the configured redaction patterns to ordinary terminal text.
+            normalized[normalized_key] = (
+                REDACTED if normalized_key in normalized else normalized_item
+            )
+        return normalized
+    return value
+
+
 def _preview(availability: str, value: Any = None) -> dict[str, Any]:
     return {
         "schema_version": WORKFLOW_OUTPUT_PREVIEW_SCHEMA_VERSION,
@@ -182,8 +203,9 @@ def unavailable_workflow_output_preview(
 def prepare_workflow_output_preview(value: Any) -> dict[str, Any]:
     """Prepare one author-projected value without inspecting unsupported objects."""
     try:
-        normalized = _normalize_bounded_value(value)
-        redacted = _normalize_bounded_value(redact_value(normalized))
+        bounded = _normalize_bounded_value(value)
+        normalized = _normalize_bounded_value(_normalize_terminal_value(bounded))
+        redacted = _normalize_bounded_value(redact_value(bounded))
     except _PreviewLimitError:
         return _preview(WorkflowOutputPreviewAvailability.TOO_LARGE.value)
     except _PreviewUnsupportedError:
@@ -231,8 +253,9 @@ def _validate_workflow_output_preview(
     value: Any,
     *,
     enforce_current_redaction: bool,
+    apply_current_presentation: bool = True,
 ) -> dict[str, Any]:
-    """Validate one preview, optionally applying the current redaction policy."""
+    """Validate one preview under either its stored or current presentation rules."""
     if type(value) is not dict or set(value) != _PREVIEW_FIELDS:
         raise WorkflowOutputPreviewError(
             "workflow output preview must contain the exact protocol fields"
@@ -259,7 +282,12 @@ def _validate_workflow_output_preview(
             )
         return _preview(availability.value)
 
-    normalized = _normalize_bounded_value(preview_value)
+    bounded = _normalize_bounded_value(preview_value)
+    normalized = (
+        _normalize_bounded_value(_normalize_terminal_value(bounded))
+        if apply_current_presentation
+        else bounded
+    )
     if availability is WorkflowOutputPreviewAvailability.REDACTED and not _contains_redaction(
         normalized
     ):
@@ -273,7 +301,7 @@ def _validate_workflow_output_preview(
             "available workflow output preview contains a redaction marker"
         )
     if enforce_current_redaction:
-        redacted = _normalize_bounded_value(redact_value(normalized))
+        redacted = _normalize_bounded_value(redact_value(bounded))
         if redacted != normalized:
             raise WorkflowOutputPreviewError(
                 "workflow output preview was not redacted before publication"
@@ -294,16 +322,25 @@ def read_workflow_output_preview(value: Any) -> dict[str, Any]:
     part of a formerly valid value, readers receive one existing, value-safe
     ``REDACTED`` marker instead of the historical projection.
     """
-    preview = _validate_workflow_output_preview(value, enforce_current_redaction=False)
+    preview = _validate_workflow_output_preview(
+        value,
+        enforce_current_redaction=False,
+        apply_current_presentation=False,
+    )
     if preview["availability"] not in _VALUE_AVAILABILITIES:
         return preview
     try:
-        redacted = _normalize_bounded_value(redact_value(preview["value"]))
+        bounded = _normalize_bounded_value(value["value"])
+        normalized = _normalize_bounded_value(_normalize_terminal_value(bounded))
+        redacted = _normalize_bounded_value(redact_value(bounded))
     except Exception:
         return _preview(WorkflowOutputPreviewAvailability.REDACTED.value, REDACTED)
-    if redacted != preview["value"]:
+    if redacted != normalized or (
+        preview["availability"] == WorkflowOutputPreviewAvailability.AVAILABLE.value
+        and _contains_redaction(redacted)
+    ):
         return _preview(WorkflowOutputPreviewAvailability.REDACTED.value, REDACTED)
-    return preview
+    return _preview(preview["availability"], redacted)
 
 
 __all__ = [

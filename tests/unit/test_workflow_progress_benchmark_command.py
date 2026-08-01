@@ -233,6 +233,32 @@ def test_candidate_models_and_samples_are_finite(candidate) -> None:
     assert sample["encoded_bytes"] == len(benchmark._canonical_bytes(payload))
     assert sample["modeled_nodes"] == 1_000
     assert sample["representative_records"] == count
+    assert type(sample["redaction_projection_available"]) is bool
+
+
+def test_measure_sample_handles_fail_closed_root_redaction(monkeypatch) -> None:
+    root_marker = {"<redacted>": "[REDACTED]"}
+    encoded_values: list[object] = []
+    canonical_bytes = benchmark._canonical_bytes
+
+    def record_encoded_value(value: object) -> bytes:
+        encoded_values.append(value)
+        return canonical_bytes(value)
+
+    monkeypatch.setattr(benchmark, "redact_value", lambda _value: root_marker)
+    monkeypatch.setattr(benchmark, "_canonical_bytes", record_encoded_value)
+
+    sample = benchmark._measure_sample(
+        "normalized",
+        record={"node_id": "node-000001", "message": "raw-decoded-sentinel"},
+        record_count=1,
+        nodes=1,
+        change_rate=1.0,
+    )
+
+    assert sample["redaction_projection_available"] is False
+    assert encoded_values[1:] == [root_marker, {"items": []}, None]
+    assert "raw-decoded-sentinel" not in json.dumps(sample)
 
 
 def test_candidate_helpers_reject_unknown_identifier() -> None:

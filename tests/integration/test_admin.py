@@ -370,6 +370,21 @@ class TestRayTaskExecutionAdmin:
         assert len(admin_obj.input_reference_display(task)) <= ADMIN_DIAGNOSTIC_MAX_CHARS
         assert len(admin_obj.result_reference_display(task)) <= ADMIN_DIAGNOSTIC_MAX_CHARS
 
+    @pytest.mark.django_db
+    def test_task_error_message_is_bounded(self) -> None:
+        admin_obj = _task_admin()
+        task = RayTaskExecution.objects.create(
+            task_id="admin-bounded-error-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.FAILED,
+            error_message="safe error " + ("x" * (ADMIN_DIAGNOSTIC_MAX_CHARS + 100)),
+        )
+
+        rendered = admin_obj.error_message_display(task)
+
+        assert len(rendered) <= ADMIN_DIAGNOSTIC_MAX_CHARS
+        assert rendered.endswith("... [truncated]")
+
     def test_runtime_env_snapshot_is_not_presented_in_admin(self) -> None:
         admin_obj = _task_admin()
         fieldset_fields = {
@@ -524,8 +539,9 @@ class TestRayTaskExecutionAdmin:
             result_data="not-json password=secret",
             progress_data='{"step": 1}',
             completion_data='{"success": true}',
+            cancellation_error="\x1b[33mstop uncertain\x1b[39m\rmanual review",
             error_message="password=error-secret",
-            error_traceback="password=traceback-secret",
+            error_traceback="pass\x1b[31mword=traceback-secret",
         )
 
         assert admin_obj.args_json_display(task) == "-"
@@ -533,8 +549,9 @@ class TestRayTaskExecutionAdmin:
         assert admin_obj.result_data_display(task) == "[REDACTED]"
         assert admin_obj.progress_data_display(task) == '{"step": 1}'
         assert admin_obj.completion_data_display(task) == '{"success": true}'
+        assert admin_obj.cancellation_error_display(task) == "stop uncertain\nmanual review"
         assert admin_obj.error_message_display(task) == "[REDACTED]"
-        assert admin_obj.error_traceback_display(task) == "[REDACTED]"
+        assert "[REDACTED]" in admin_obj.error_traceback_display(task)
 
         task.error_message = None
         task.error_traceback = None
@@ -3032,7 +3049,11 @@ class TestRayTaskExecutionAdmin:
         assert detail_form.name == "form"
         assert retry_button.name == "button"
         assert dict(retry_button.attributes) == {
-            "class": "button default django-ray-task-actions__retry",
+            "aria-describedby": "django-ray-task-actions-guidance",
+            "class": (
+                "button default django-ray-admin-action "
+                "django-ray-admin-action--retry django-ray-task-actions__retry"
+            ),
             "form": "raytaskexecution_form",
             "formaction": retry_url,
             "formmethod": "post",
@@ -4167,12 +4188,51 @@ class TestTaskAttemptAdmin:
         assert "error-secret" not in rendered[0]
         assert "result-secret" not in rendered[2]
         assert "result-reference-secret" not in rendered[3]
-        assert all(len(value) <= ADMIN_DIAGNOSTIC_MAX_CHARS for value in rendered)
-        assert rendered[1].endswith("... [truncated]")
+        assert all(len(rendered[index]) <= ADMIN_DIAGNOSTIC_MAX_CHARS for index in (0, 2, 3))
+        assert len(rendered[1]) <= ADMIN_DIAGNOSTIC_MAX_CHARS + 100
+        assert "... [truncated]" in rendered[1]
         assert "error_message" not in admin_obj.fields
         assert "error_traceback" not in admin_obj.fields
         assert "result_data" not in admin_obj.fields
         assert "result_reference" not in admin_obj.fields
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_legacy_traceback_is_inert_line_preserving_and_safely_wrapped(
+        self,
+        client,
+        settings,
+    ) -> None:
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "TASK_ATTEMPT_ADMIN_MODE": "standalone",
+        }
+        user = get_user_model().objects.create_superuser(username="terminal-traceback-admin")
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-terminal-traceback-001",
+            callable_path="testproject.tasks.add_numbers",
+        )
+        attempt = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.FAILED,
+            error_traceback=(
+                "\x1b[36mray::django_ray:task()\x1b[39m\r\n"
+                'File "/app/task.py", line 1\n'
+                "<script>unsafe</script>"
+            ),
+        )
+        client.force_login(user)
+
+        response = client.get(reverse("admin:django_ray_taskattempt_change", args=[attempt.pk]))
+
+        content = response.content.decode("utf-8")
+        assert response.status_code == 200
+        assert "django_ray/admin/diagnostics.css" in content
+        assert "django-ray-diagnostic" in content
+        assert "ray::django_ray:task()\nFile" in content
+        assert "&lt;script&gt;unsafe&lt;/script&gt;" in content
+        assert "<script>unsafe</script>" not in content
+        assert "\x1b" not in content
 
     def test_empty_attempt_diagnostics_render_as_placeholders(self) -> None:
         execution = RayTaskExecution.objects.create(

@@ -65,6 +65,8 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
         package_root / "static" / "django_ray" / "admin" / "task_live.js",
         package_root / "static" / "django_ray" / "admin" / "workflow_diagnostics.js",
         package_root / "static" / "django_ray" / "admin" / "sensitive_task_data.css",
+        package_root / "static" / "django_ray" / "admin" / "sensitive_task_data_theme.js",
+        package_root / "static" / "django_ray" / "admin" / "diagnostics.css",
     ]
     assert all(asset.is_file() and asset.is_relative_to(package_root) for asset in expected_assets)
 
@@ -95,6 +97,30 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
     assert "--django-ray-live-status-error-bg: #fef2f2;" in stylesheet
     assert "--django-ray-live-status-error-border: #ef4444;" in stylesheet
     assert "--django-ray-live-workflow-body-bg: transparent;" in stylesheet
+
+    diagnostics_stylesheet = expected_assets[-1].read_text(encoding="utf-8")
+    assert ".django-ray-diagnostic" in diagnostics_stylesheet
+    assert "white-space: pre-wrap" in diagnostics_stylesheet
+    assert "overflow-wrap: anywhere" in diagnostics_stylesheet
+    sensitive_action_rule = re.search(
+        r"a\.django-ray-admin-action\.django-ray-admin-action--sensitive\s*"
+        r"\{(?P<body>[^}]*)\}",
+        diagnostics_stylesheet,
+    )
+    assert sensitive_action_rule is not None
+    sensitive_action_body = sensitive_action_rule.group("body")
+    for stock_override in (
+        "background: #fff7ed;",
+        "color: #9a3412;",
+        "display: inline-flex;",
+        "float: none;",
+        "font-size: 0.8125rem;",
+        "font-weight: 700;",
+        "letter-spacing: normal;",
+        "padding: 0.375rem 0.75rem;",
+        "text-transform: none;",
+    ):
+        assert stock_override in sensitive_action_body
     for neutral_dark_token in (
         "--django-ray-live-bg: #16171a;",
         "--django-ray-live-header-bg: #0b0c0f;",

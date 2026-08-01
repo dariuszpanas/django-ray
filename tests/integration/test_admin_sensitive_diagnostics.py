@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,6 +20,7 @@ from django.db.models import QuerySet
 from django.test import RequestFactory
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.utils.html import strip_tags
 
 import django_ray.admin as django_ray_admin
 from django_ray.admin import (
@@ -33,7 +38,8 @@ _ADMIN_MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
 ]
 _SENSITIVE_PERMISSION = "view_sensitive_task_data"
-_LINK_LABEL = "View unredacted task data"
+_LINK_LABEL = "Sensitive data"
+_REPOSITORY_ROOT = Path(__file__).parents[2]
 
 pytestmark = pytest.mark.django_db
 
@@ -287,7 +293,12 @@ def test_superuser_can_view_execution_and_attempt_sensitive_data(
     attempt_response = client.get(_attempt_urls(first_attempt)[1])
 
     assert execution_response.status_code == 200
-    assert "current-result-sensitive-marker" in execution_response.content.decode("utf-8")
+    execution_content = execution_response.content.decode("utf-8")
+    assert "current-result-sensitive-marker" in execution_content
+    assert 'class="django-ray-sensitive-data__header"' in execution_content
+    assert execution_content.count("<h1>Unredacted task data</h1>") == 1
+    assert "django_ray/admin/diagnostics.css" in execution_content
+    assert 'class="django-ray-admin-action django-ray-admin-action--secondary"' in execution_content
     assert attempt_response.status_code == 200
     assert "attempt-one-error-sensitive-marker" in attempt_response.content.decode("utf-8")
 
@@ -347,6 +358,64 @@ def test_sensitive_pages_escape_html_are_get_only_and_disable_caching(
     assert "xss-sensitive-marker" in execution_content
 
 
+def test_sensitive_pages_keep_text_unredacted_but_render_terminal_controls_inert(
+    client,
+) -> None:
+    execution = RayTaskExecution.objects.create(
+        task_id="admin-sensitive-terminal-controls",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        error_message=("\x1b[31mprivileged-error-sensitive-marker\x1b[0m\rnext diagnostic line"),
+        error_traceback=(
+            "ray::task()\x1b]8;;https://example.test/private\x1b\\"
+            "privileged-traceback-sensitive-marker\x1b]8;;\x1b\\\x00"
+        ),
+    )
+    attempt = TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=1,
+        state=TaskState.FAILED,
+        error_message="\x9b33mprivileged-attempt-sensitive-marker\x9b0m\rretry detail",
+        error_traceback="\x1bPprivate-control-payload\x1b\\attempt traceback text",
+    )
+    user = _staff_user(
+        "sensitive-terminal-controls-viewer",
+        "view_raytaskexecution",
+        "view_taskattempt",
+        _SENSITIVE_PERMISSION,
+    )
+    client.force_login(user)
+
+    ordinary_responses = (
+        client.get(_execution_urls(execution)[0]),
+        client.get(_attempt_urls(attempt)[0]),
+    )
+    sensitive_responses = (
+        client.get(_execution_urls(execution)[1]),
+        client.get(_attempt_urls(attempt)[1]),
+    )
+
+    for response in ordinary_responses:
+        assert response.status_code == 200
+        assert "sensitive-marker" not in response.content.decode("utf-8")
+    combined = "\n".join(response.content.decode("utf-8") for response in sensitive_responses)
+    assert all(response.status_code == 200 for response in sensitive_responses)
+    for visible in (
+        "privileged-error-sensitive-marker",
+        "next diagnostic line",
+        "privileged-traceback-sensitive-marker",
+        "privileged-attempt-sensitive-marker",
+        "retry detail",
+        "attempt traceback text",
+    ):
+        assert visible in combined
+    for forbidden in ("\x00", "\x1b", "\x90", "\x9b", "\r"):
+        assert forbidden not in combined
+    assert "private-control-payload" not in combined
+    assert "https://example.test/private" not in combined
+    assert "Printable diagnostic text remains unredacted" in combined
+
+
 def test_sensitive_page_enforces_the_rendered_response_byte_limit(
     client,
     sensitive_history,
@@ -371,10 +440,35 @@ def test_sensitive_page_enforces_the_rendered_response_byte_limit(
     assert len(response.content) <= ADMIN_SENSITIVE_DIAGNOSTIC_RESPONSE_MAX_BYTES
     assert b"Sensitive diagnostics response limit reached" in response.content
     assert b"No stored diagnostic values were included" in response.content
+    assert b"django-ray-sensitive-limit-page" in response.content
+    assert b"django-ray-sensitive-data__warning" in response.content
+    assert b"django-ray-admin-action--secondary" in response.content
+    assert b"django_ray/admin/diagnostics.css" in response.content
+    assert b"django_ray/admin/sensitive_task_data.css" in response.content
+    assert b"django_ray/admin/sensitive_task_data_theme.js" in response.content
     assert b"oversized-admin-branding" not in response.content
     assert b"sensitive-marker" not in response.content
     assert "no-store" in response.headers["Cache-Control"]
     assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_sensitive_page_theme_javascript_supports_stock_and_unfold_storage() -> None:
+    node = shutil.which("node")
+    if node is None:
+        if os.environ.get("CI"):
+            pytest.fail("Node.js is required for the sensitive Admin theme contract in CI")
+        pytest.skip("Node.js is unavailable for the sensitive Admin theme contract")
+
+    result = subprocess.run(
+        [node, "--test", "tests/javascript/sensitive_task_data_theme.test.mjs"],
+        cwd=_REPOSITORY_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
@@ -467,6 +561,23 @@ def test_sensitive_sections_distinguish_empty_and_response_limited_values(
     assert empty["value"] == ""
     assert limited["status"] == "response_limit"
     assert limited["value"] is None
+
+
+def test_sensitive_sections_explain_values_empty_after_terminal_normalization() -> None:
+    field_name = "error_traceback"
+    row = {
+        django_ray_admin._sensitive_annotation_name(field_name, "bytes"): 4,
+        django_ray_admin._sensitive_annotation_name(field_name, "value"): "\x1b[0m",
+    }
+
+    sections = django_ray_admin._sensitive_sections(
+        row,
+        (("Diagnostics", (("Traceback", field_name),)),),
+    )
+
+    field = sections[0]["fields"][0]
+    assert field["status"] == "normalized_empty"
+    assert field["value"] == ""
 
 
 def test_object_specific_grants_are_checked_against_the_exact_owning_execution(
@@ -703,4 +814,4 @@ def test_ordinary_execution_errors_are_redacted_and_bounded() -> None:
     assert cancellation == "[REDACTED]"
     assert len(message) <= ADMIN_DIAGNOSTIC_MAX_CHARS
     assert message.endswith("... [truncated]")
-    assert traceback == "[REDACTED]"
+    assert strip_tags(str(traceback)) == "[REDACTED]"

@@ -28,6 +28,7 @@ from django_ray.lifecycle import (
 )
 from django_ray.logging import get_worker_logger
 from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.redaction import redact_text
 from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.cancellation import (
     CancellationOutcome,
@@ -1467,17 +1468,20 @@ class Command(BaseCommand):
             )
         if not handled:
             return False
+        display_error_message = redact_text(task.error_message or error_message)
         if retry_decision.should_retry:
             self.stdout.write(
                 self.style.WARNING(
                     f"  Task {task.pk} failed, scheduling retry "
-                    f"at {retry_decision.next_attempt_at}: {error_message}"
+                    f"at {retry_decision.next_attempt_at}: {display_error_message}"
                 )
             )
         else:
             reason = retry_decision.reason or "No retry configured"
             self.stdout.write(
-                self.style.ERROR(f"  Task {task.pk} failed permanently ({reason}): {error_message}")
+                self.style.ERROR(
+                    f"  Task {task.pk} failed permanently ({reason}): {display_error_message}"
+                )
             )
         return True
 
@@ -3116,7 +3120,11 @@ class Command(BaseCommand):
             if handled is False:
                 return
             complete_tracking()
-            self.stdout.write(self.style.ERROR(f"\nTask {task.pk} failed: {job_info.message}"))
+            self.stdout.write(
+                self.style.ERROR(
+                    f"\nTask {task.pk} failed: {redact_text(task.error_message or 'Ray job failed')}"
+                )
+            )
             return
 
         if job_info.status == JobStatus.STOPPED:
@@ -3157,9 +3165,10 @@ class Command(BaseCommand):
             return
 
         scope = "orphaned " if orphaned else ""
+        unknown_detail = redact_text(job_info.message) if job_info.message else "no details"
         self.stdout.write(
             self.style.WARNING(
-                f"\nTask {task.pk} {scope}Ray job status is unknown: {job_info.message or 'no details'}"
+                f"\nTask {task.pk} {scope}Ray job status is unknown: {unknown_detail}"
             )
         )
 
@@ -3667,7 +3676,6 @@ class Command(BaseCommand):
                     self.stdout.write(
                         self.style.WARNING(f"  Task {task.pk} marked CANCELLING during shutdown")
                     )
-
         # Ray Jobs continue independently of this process.  Drop ownership so
         # another worker can adopt and reconcile their persisted job IDs.
         if self.execution_mode == "ray":

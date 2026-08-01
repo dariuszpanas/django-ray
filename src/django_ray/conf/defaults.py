@@ -78,7 +78,8 @@ DEFAULTS: dict[str, Any] = {
     "RESULT_STORAGE_GCS_BUCKET": None,
     "RESULT_STORAGE_GCS_PREFIX": "django-ray/results",
     # Redaction
-    # Regex patterns applied to log messages, structured fields, and
-    # operator-facing task data.  ``None`` selects the built-in safe defaults.
+    # Startup-validated bounded pattern expressions applied to log messages,
+    # structured fields, and ordinary operator-facing task data. ``None``
+    # keeps only the built-in patterns, which are always active.
     "REDACT_PATTERNS": None,
 }

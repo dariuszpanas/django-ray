@@ -25,6 +25,22 @@ class TestStructuredLogAdapter:
 
         assert "Test message" in caplog.text
 
+    def test_disabled_log_level_does_not_evaluate_message_text(self):
+        class RaisingMessage:
+            calls = 0
+
+            def __str__(self) -> str:
+                self.calls += 1
+                raise AssertionError("disabled logging must remain lazy")
+
+        logger = get_logger("test.disabled-lazy-formatting")
+        logger.logger.setLevel(logging.INFO)
+        message = RaisingMessage()
+
+        logger.debug(message)
+
+        assert message.calls == 0
+
     def test_structured_context(self, caplog):
         """Test structured context is added to messages."""
         logger = get_logger("test.context", component="test")
@@ -131,3 +147,109 @@ class TestStructuredLogAdapter:
         assert "secret-value" not in caplog.text
         assert "RuntimeError" in caplog.text
         assert "Traceback" not in caplog.text
+
+    def test_terminal_formatting_is_removed_without_dropping_format_arguments(self, caplog):
+        logger = get_logger("test.terminal-formatting")
+
+        with caplog.at_level(logging.ERROR):
+            logger.error("\x1b[31mTask %s failed\x1b[39m\rnext line", 42)
+
+        assert "Task 42 failed\nnext line" in caplog.text
+        assert "\x1b" not in caplog.text
+
+    def test_removed_terminal_sequences_consume_only_their_format_arguments(self, caplog):
+        logger = get_logger("test.terminal-placeholder-formatting")
+
+        with caplog.at_level(logging.ERROR):
+            logger.error(
+                "\x1b]hidden=%s\x1b\\Visible %s and \x1b[%smcolored %s\x1b[0m",
+                "suppressed-field",
+                "first-field",
+                31,
+                "second-field",
+            )
+            logger.error("malformed \x1b]field=%s", "retained-field")
+
+        assert "Visible first-field and colored second-field" in caplog.text
+        assert "suppressed-field" not in caplog.text
+        assert "malformed field=retained-field" in caplog.text
+        assert "\x1b" not in caplog.text
+
+    def test_mapping_placeholders_and_mismatches_remain_logging_safe(self, caplog):
+        logger = get_logger("test.mapping-placeholder-formatting")
+
+        with caplog.at_level(logging.INFO):
+            logger.info("Task %(task_id)s", {"task_id": "task-42"})
+            logger.info("Mismatched %s %s", "only-one")
+
+        assert "Task task-42" in caplog.text
+        assert "Mismatched %s %s" in caplog.text
+
+    def test_format_arguments_share_one_redaction_budget(self, monkeypatch):
+        calls: list[object] = []
+
+        def redact_once(value):
+            calls.append(value)
+            return ["first", "second"]
+
+        monkeypatch.setattr(logging_module, "redact_value", redact_once)
+
+        rendered = logging_module._format_redacted_message("%s %s", ("one", "two"))
+
+        assert rendered == "first second"
+        assert calls == [("one", "two")]
+
+    def test_adapter_and_call_extra_share_one_redaction_budget(self, monkeypatch):
+        import django_ray.redaction as redaction
+
+        monkeypatch.setattr(redaction, "_REDACTION_VALUE_MAX_ITEMS", 6)
+        logger = get_logger("test.aggregate-extra", adapter_value="visible")
+
+        message, processed = logger.process(
+            "Aggregate extra",
+            {"extra": {"first": "one", "second": "two"}},
+        )
+
+        assert message == 'Aggregate extra | {"diagnostic": "[REDACTED]"}'
+        assert processed["extra"] == {"diagnostic": "[REDACTED]"}
+
+    def test_percent_characters_in_structured_context_do_not_reenter_interpolation(self, caplog):
+        logger = get_logger("test.structured-percent")
+
+        with caplog.at_level(logging.INFO):
+            logger.info("Progress %s", "50%", extra={"reported": "75%"})
+
+        assert "Progress 50%" in caplog.text
+        assert '"reported": "75%"' in caplog.text
+
+    def test_terminal_formatted_extra_keys_are_normalized_and_redact_values(
+        self,
+        caplog,
+        settings,
+    ):
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"customer_email"]}
+        logger = get_logger("test.terminal-extra-keys")
+        extra = {
+            "pass\x1b]word": "default-key-value",
+            "customer\x1b^_email": "custom-key-value",
+            "safe\x1b[31m_key": "visible",
+        }
+
+        message, processed = logger.process("Structured keys", {"extra": extra})
+
+        assert isinstance(message, str)
+        assert processed["extra"] == {
+            "password": "[REDACTED]",
+            "customer_email": "[REDACTED]",
+            "safe_key": "visible",
+        }
+        assert "default-key-value" not in message
+        assert "custom-key-value" not in message
+        assert "\x1b" not in message
+
+        with caplog.at_level(logging.INFO):
+            logger.info("Structured keys", extra=extra)
+
+        assert "default-key-value" not in caplog.text
+        assert "custom-key-value" not in caplog.text
+        assert "\x1b" not in caplog.text

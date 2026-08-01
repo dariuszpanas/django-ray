@@ -12,6 +12,7 @@ import pytest
 
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.redaction import normalize_terminal_text, redact_text
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
 from django_ray.runner.leasing import WorkerLeaseIdentity
 from django_ray.runner.ray_core import RayCoreCompletion, RayCoreHandle
@@ -944,7 +945,10 @@ class TestWorkerCommandCoverage:
             pending_task_handles = (_pending_handle(task),)
 
             def cancel_pending_with_status(self, _handle: object) -> CancellationOutcome:
-                raise RuntimeError("driver disconnected")
+                raise RuntimeError(
+                    "\x1b[31mdriver disconnected\x1b[39m\rretry\x00status "
+                    "\x9b33mpass\x1b[32mword=shutdown-secret\x1b[0m"
+                )
 
         cmd.ray_core_runner = cast(Any, FailingRayCoreRunner())
 
@@ -953,7 +957,16 @@ class TestWorkerCommandCoverage:
         task.refresh_from_db()
         assert task.state == TaskState.CANCELLING
         assert task.cancellation_status == "INDETERMINATE"
-        assert "driver disconnected" in (task.cancellation_error or "")
+        assert task.cancellation_error == (
+            "Ray Core shutdown cancellation failed: "
+            "\x1b[31mdriver disconnected\x1b[39m\rretry\x00status "
+            "\x9b33mpass\x1b[32mword=shutdown-secret\x1b[0m"
+        )
+        assert normalize_terminal_text(task.cancellation_error) == (
+            "Ray Core shutdown cancellation failed: driver disconnected\n"
+            "retrystatus password=shutdown-secret"
+        )
+        assert redact_text(task.cancellation_error) == "[REDACTED]"
 
     @pytest.mark.django_db
     def test_shutdown_handoff_persists_bounded_ray_core_timeout(self) -> None:

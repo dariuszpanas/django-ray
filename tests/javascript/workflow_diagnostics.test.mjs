@@ -1923,7 +1923,7 @@ test("failed paths and malicious graph text stay visible as plain text", async (
   const maliciousId = "failed/node?<script>steal()</script>";
   const maliciousLabel = "<img src=x onerror=steal-secret()>";
   const maliciousMessage = "<svg onload=steal-message()> waiting";
-  const maliciousError = "<script>steal-error()</script>";
+  const maliciousError = "<script>steal-error()</script>\nSecond traceback line";
   const nodes = [
     {
       id: "entry",
@@ -1989,6 +1989,19 @@ test("failed paths and malicious graph text stay visible as plain text", async (
   assert.equal(app.details.textContent.includes(maliciousMessage), true);
   assert.equal(app.details.textContent.includes(maliciousError), true);
   assert.equal(app.details.textContent.includes("steal-preview()"), true);
+  const failureMessage = elementsByClass(
+    app,
+    "django-ray-workflow-graph__node-message",
+  ).find((message) => message.dataset.failure === "true");
+  assert.ok(failureMessage);
+  assert.equal(
+    failureMessage.textContent,
+    `Failure: ${maliciousError}`,
+  );
+  assert.match(
+    graphStyles,
+    /\.django-ray-workflow-graph__node-message\s*\{[^}]*overflow-wrap: anywhere;[^}]*white-space: pre-wrap;/s,
+  );
   assert.equal(
     findAll(app.details, (element) => element.tagName === "IMG").length,
     0,

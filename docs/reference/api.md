@@ -35,8 +35,8 @@ If you need a REST API for task management in your project, you can use the test
 | `GET /api/readyz` | Readiness check with database reachability |
 | `GET /api/health` | Health check |
 | `GET /api/metrics` | Prometheus metrics |
-| `GET /api/tasks/{task_id}` | Get Django task result/status by task id |
-| `GET /api/executions` | List task executions |
+| `GET /api/tasks/{task_id}` | Get status, timestamps, and redacted arguments by task ID; return values and failure diagnostics are omitted |
+| `GET /api/executions` | List bounded, redacted task-execution projections |
 | `GET /api/executions/stats` | Get statistics |
 | `GET /api/executions/{id}` | Get execution details |
 | `POST /api/executions/{id}/cancel` | Cancel or request cancellation for an execution |
@@ -51,6 +51,10 @@ If you need a REST API for task management in your project, you can use the test
 | `GET /api/cluster/workflows/{task_id}/node-detail?node_id={node_id}` | Get one indexed durable node record without scanning the graph |
 | `GET /api/cluster/workflows/{task_id}/nodes/{node_id}` | Get legacy durable node metadata and live Ray state |
 | `GET /api/cluster/workflows/{task_id}/nodes/{node_id}?include_logs=true` | Include bounded Ray stdout/stderr tails |
+
+`/api/executions` exposes only its ordinary redacted result/error fields. The 0.4.0
+testproject has no pattern-unredacted diagnostics HTTP endpoint; privileged failure
+inspection is deliberately confined to the separately authorized Django Admin view.
 
 ### 0.4.0 workflow graph migration
 

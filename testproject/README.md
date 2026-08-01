@@ -285,6 +285,13 @@ The default
 `TASK_ATTEMPT_ADMIN_MODE="inline"` hides the
 standalone Task Attempt entry from top-level navigation without invalidating authorized list or
 detail URLs. Select `standalone` to restore the previous navigation or `both` to expose both views.
+Ordinary execution and attempt pages keep arguments, results, errors, and tracebacks
+pattern-redacted. Superusers, or operators who hold both the ordinary object-view permission and
+`django_ray.view_sensitive_task_data`, see the **Sensitive data** action on the corresponding detail
+page. That separate incident view exposes only its fixed field allowlist, removes terminal control
+effects, autoescapes HTML, rejects oversized fields before loading them, and is response-bounded;
+it is pattern-unredacted rather than raw. The testproject intentionally exposes no equivalent
+sensitive-diagnostics HTTP endpoint.
 
 The ordinary testproject settings keep new durable RuntimeEnv snapshots in plaintext
 for upgrade compatibility. The local `kuberay-kind` overlay opts only its Django web

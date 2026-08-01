@@ -407,9 +407,10 @@ def _node_id(value: Any) -> str:
         _corrupt()
     try:
         encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
+        normalized = redact_text(value)
+    except (TypeError, UnicodeEncodeError, ValueError):
         _corrupt()
-    if len(encoded) > WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES:
+    if len(encoded) > WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES or normalized != value:
         _corrupt()
     return value
 

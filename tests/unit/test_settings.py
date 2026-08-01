@@ -7,6 +7,10 @@ from django.core.exceptions import ImproperlyConfigured
 
 from django_ray.conf.defaults import DEFAULTS
 from django_ray.conf.settings import validate_settings
+from django_ray.redaction_patterns import (
+    REDACTION_PATTERN_MAX_CONFIGURED_COUNT,
+    REDACTION_PATTERN_MAX_SOURCE_BYTES,
+)
 
 
 class TestValidateSettings:
@@ -688,9 +692,16 @@ class TestValidateSettings:
         "patterns, message",
         [
             (b"password", "must be a string or a sequence"),
-            ([""], "entries must be non-empty strings"),
-            ([123], "entries must be non-empty strings"),
-            (["["], "contains invalid regex"),
+            ([""], "source must be non-empty text"),
+            ([123], "source must be non-empty text"),
+            (["["], "invalid regular-expression syntax"),
+            ([r"^password$"], "anchors and zero-width assertions are not supported"),
+            ([r"(password)\1"], "numeric backreferences are not supported"),
+            (["x" * (REDACTION_PATTERN_MAX_SOURCE_BYTES + 1)], "UTF-8 bytes"),
+            (
+                ["x"] * (REDACTION_PATTERN_MAX_CONFIGURED_COUNT + 1),
+                "configured redaction pattern count",
+            ),
         ],
     )
     def test_validate_redact_patterns_rejects_invalid_values(self, patterns, message: str) -> None:
@@ -715,6 +726,33 @@ class TestValidateSettings:
                 "REDACT_PATTERNS": [r"password", r"api[_-]?key"],
             }
         )
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "REDACT_PATTERNS": [
+                    r"customer_.*_email",
+                    r"bearer\s+\S+",
+                    r"(?:client|customer)[_-]?id",
+                ],
+            }
+        )
+
+    def test_validate_redact_patterns_does_not_echo_rejected_source(self) -> None:
+        pattern = "tenant-private-marker$"
+
+        with pytest.raises(ImproperlyConfigured) as captured:
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "REDACT_PATTERNS": [pattern],
+                }
+            )
+
+        message = str(captured.value)
+        assert "configured pattern at index 0" in message
+        assert pattern not in message
+        assert captured.value.__cause__ is None
+        assert captured.value.__context__ is None
 
     @pytest.mark.parametrize(
         ("overrides", "message"),

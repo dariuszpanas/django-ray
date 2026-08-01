@@ -12,6 +12,7 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
 import django_ray.workflow_progress_reads as reads
+import django_ray.workflow_progress_storage as storage
 from django_ray.lifecycle import succeed_task
 from django_ray.models import (
     RayTaskExecution,
@@ -23,6 +24,7 @@ from django_ray.models import (
     WorkflowProgressTopologyManifestPage,
     WorkflowProgressTopologyPage,
 )
+from django_ray.redaction import REDACTED
 from django_ray.workflow_plans import (
     PLAN_SELECTION_FORMAT,
     PLAN_SELECTION_FORMAT_VERSION,
@@ -215,6 +217,127 @@ def _publish_workflow_with_edges(
     )
     assert result.accepted
     return PublishedWorkflow(execution, identity, topology, manifest_id)
+
+
+def _publish_with_legacy_terminal_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    case_id: int,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, str]],
+    details: list[dict[str, Any]],
+) -> PublishedWorkflow:
+    """Prepare protocol-v1 bytes using the pre-terminal-normalization policy."""
+    execution = RayTaskExecution.objects.create(
+        task_id=f"workflow-legacy-terminal-{case_id}",
+        callable_path="tests.unit.test_workflows.increment",
+        state=TaskState.RUNNING,
+        attempt_number=1,
+        execution_generation=1,
+        workflow_run_id=f"00000000-0000-0000-0000-{case_id:012d}",
+    )
+    identity = reads.WorkflowRunIdentity(
+        task_execution_pk=execution.pk,
+        attempt_number=1,
+        execution_generation=1,
+        run_id=str(execution.workflow_run_id),
+    )
+    current_redact_text = storage.redact_text
+
+    def legacy_redact_text(value: Any) -> str:
+        if isinstance(value, str) and "\x1b" in value:
+            return value
+        return current_redact_text(value)
+
+    monkeypatch.setattr(storage, "redact_text", legacy_redact_text)
+    topology = prepare_workflow_progress_topology(identity, 1, nodes, edges)
+    prepared_detail = prepare_workflow_progress_detail(details, topology=topology)
+    manifest_id = stage_workflow_progress_topology(topology)
+    assert manifest_id is not None
+    summary = workflow_summary(
+        identity,
+        summary_revision=1,
+        node_count=len(nodes),
+        running_count=sum(detail.get("state") == "RUNNING" for detail in details),
+    )
+    edge_counts = summary["edge_counts"]
+    assert isinstance(edge_counts, dict)
+    edge_counts.update(declared=len(edges), discovered=len(edges))
+    result = persist_workflow_progress_publication(
+        identity,
+        summary,
+        manifest_id=manifest_id,
+        prepared_topology=topology,
+        prepared_detail=prepared_detail,
+    )
+    assert result.accepted
+    monkeypatch.setattr(storage, "redact_text", current_redact_text)
+    return PublishedWorkflow(execution, identity, topology, manifest_id)
+
+
+def _legacy_ansi_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    case_id: int,
+) -> PublishedWorkflow:
+    first_id = workflow_node_id(0)
+    second_id = workflow_node_id(1)
+    first_node = workflow_node(first_id)
+    first_node.update(
+        {
+            "label": "\x1b[31mPrepare\x1b[0m",
+            "runtime_env": {"\x1b[36mprofile\x1b[0m": "default"},
+        }
+    )
+    first_detail = workflow_detail(first_id, state="RUNNING")
+    first_detail["progress"] = {
+        "current": 1,
+        "total": 2,
+        "percent": 50,
+        "message": "\x1b[33mWorking\x1b[0m",
+        "metrics": {"\x1b[35mrows\x1b[0m": 1},
+        "updated_at": "2026-07-20T12:00:00Z",
+    }
+    first_detail["recent_events"] = [
+        {
+            "event": "STATE_CHANGE",
+            "state": "RUNNING",
+            "label": "\x1b[34mStarted\x1b[0m",
+            "timestamp": "2026-07-20T12:00:00Z",
+        }
+    ]
+    return _publish_with_legacy_terminal_redaction(
+        monkeypatch,
+        case_id=case_id,
+        nodes=[first_node, workflow_node(second_id)],
+        edges=[{"source": first_id, "target": second_id}],
+        details=[first_detail, workflow_detail(second_id)],
+    )
+
+
+def _archive_workflow_attempt(published: PublishedWorkflow, *, next_run: int) -> int:
+    published.execution.refresh_from_db()
+    summary = published.execution.workflow_progress_summary_json
+    assert summary is not None
+    TaskAttempt.objects.create(
+        execution=published.execution,
+        attempt_number=1,
+        state=TaskState.SUCCEEDED,
+        workflow_progress_summary_json=summary,
+    )
+    published.execution.attempt_number = 2
+    published.execution.execution_generation = 2
+    published.execution.workflow_run_id = f"00000000-0000-0000-0000-{next_run:012d}"
+    published.execution.workflow_progress_summary_json = None
+    published.execution.save(
+        update_fields=[
+            "attempt_number",
+            "execution_generation",
+            "workflow_run_id",
+            "workflow_progress_summary_json",
+        ]
+    )
+    return 1
 
 
 def test_summary_pages_and_indexed_node_use_public_bounded_contract() -> None:
@@ -2534,6 +2657,530 @@ def test_public_detail_redacts_private_execution_pk_from_invocation_identity() -
     assert page["items"][0]["invocation_identity"]["invocation_id"] == ("bounded-public-invocation")
     assert "task_execution_pk" not in page["items"][0]["invocation_identity"]
     assert "task_execution_pk" not in node["item"]["invocation_identity"]
+
+
+def test_public_detail_exposes_only_normalized_metric_and_resource_keys() -> None:
+    published = publish_initial_workflow(1, case_id=127_250)
+    node_input = workflow_node(workflow_node_id(0))
+    node_input["runtime_env"] = {"\x1b[31mprofile\x1b[0m": "default"}
+    node_input["ray_options"] = {
+        "metadata": {"\x9dsafe\x18queue": "ordinary"},
+    }
+    topology = prepare_workflow_progress_topology(
+        published.identity,
+        2,
+        (node_input,),
+        (),
+    )
+    manifest_id = stage_workflow_progress_topology(topology)
+    assert manifest_id is not None
+    detail = workflow_detail(workflow_node_id(0), state="RUNNING")
+    detail["progress"] = {
+        "current": 1,
+        "total": 2,
+        "percent": 50,
+        "message": None,
+        "metrics": {"\x1b[32mrows\x1b[0m": 12},
+        "updated_at": "2026-07-20T12:00:00Z",
+    }
+    detail["execution"] = {
+        "ray_task_id": None,
+        "ray_job_id": None,
+        "ray_node_id": None,
+        "ray_worker_id": None,
+        "assigned_resources": {"\x1b[33mCPU\x1b[0m": 1.0},
+    }
+    changed = prepare_workflow_progress_node_detail(detail, identity=published.identity)
+    result = persist_workflow_progress_publication(
+        published.identity,
+        workflow_summary(
+            published.identity,
+            summary_revision=2,
+            node_count=1,
+            running_count=1,
+        ),
+        manifest_id=manifest_id,
+        prepared_topology=topology,
+        detail_records=(changed,),
+    )
+    assert result.accepted
+
+    topology_page = list_workflow_topology_nodes(published.execution, authorize=_allow)
+    page = list_workflow_node_details(published.execution, authorize=_allow)
+    node = get_workflow_node_detail(
+        published.execution,
+        workflow_node_id(0),
+        authorize=_allow,
+    )
+
+    assert topology_page["items"][0]["runtime_env"] == {"profile": "default"}
+    assert topology_page["items"][0]["ray_options"] == {"metadata": {"queue": "ordinary"}}
+    assert page["items"][0]["progress"]["metrics"] == {"rows": 12}
+    assert page["items"][0]["execution"]["assigned_resources"] == {"CPU": 1.0}
+    assert node["item"]["progress"]["metrics"] == {"rows": 12}
+    assert node["item"]["execution"]["assigned_resources"] == {"CPU": 1.0}
+    assert "\x1b" not in repr(topology_page)
+    assert "\x1b" not in repr(page)
+    assert "\x1b" not in repr(node)
+
+
+@pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
+def test_authenticated_legacy_ansi_records_are_normalized_only_for_presentation(
+    monkeypatch: pytest.MonkeyPatch,
+    archived: bool,
+) -> None:
+    published = _legacy_ansi_workflow(monkeypatch, case_id=127_251)
+    node_page = WorkflowProgressTopologyPage.objects.get(
+        run_storage__execution=published.execution,
+        collection="NODE",
+    )
+    detail_row = WorkflowProgressNodeDetail.objects.get(
+        run_storage__execution=published.execution,
+        node_id=workflow_node_id(0),
+    )
+    original_node_payload = bytes(node_page.payload)
+    original_node_digest = node_page.digest
+    original_detail_payload = bytes(detail_row.payload)
+    original_detail_digest = detail_row.digest
+    assert b"\\u001b" in original_node_payload
+    assert b"\\u001b" in original_detail_payload
+    attempt_number = _archive_workflow_attempt(published, next_run=127_252) if archived else None
+
+    topology = list_workflow_topology_nodes(
+        published.execution,
+        authorize=_allow,
+        attempt_number=attempt_number,
+    )
+    edges = list_workflow_topology_edges(
+        published.execution,
+        authorize=_allow,
+        attempt_number=attempt_number,
+    )
+    details = list_workflow_node_details(
+        published.execution,
+        authorize=_allow,
+        attempt_number=attempt_number,
+    )
+    node = get_workflow_node_detail(
+        published.execution,
+        workflow_node_id(0),
+        authorize=_allow,
+        attempt_number=attempt_number,
+    )
+
+    topology_by_id = {item["node_id"]: item for item in topology["items"]}
+    detail_by_id = {item["node_id"]: item for item in details["items"]}
+    assert topology_by_id[workflow_node_id(0)]["label"] == "Prepare"
+    assert topology_by_id[workflow_node_id(0)]["runtime_env"] == {"profile": "default"}
+    assert edges["items"] == [{"source": workflow_node_id(0), "target": workflow_node_id(1)}]
+    assert detail_by_id[workflow_node_id(0)]["progress"]["message"] == "Working"
+    assert detail_by_id[workflow_node_id(0)]["progress"]["metrics"] == {"rows": 1}
+    assert detail_by_id[workflow_node_id(0)]["recent_events"][0]["label"] == "Started"
+    assert node["item"] == detail_by_id[workflow_node_id(0)]
+    assert "\x1b" not in repr((topology, edges, details, node))
+
+    node_page.refresh_from_db()
+    detail_row.refresh_from_db()
+    assert bytes(node_page.payload) == original_node_payload
+    assert node_page.digest == original_node_digest
+    assert bytes(detail_row.payload) == original_detail_payload
+    assert detail_row.digest == original_detail_digest
+
+
+@pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
+def test_authenticated_records_follow_new_redaction_policy_only_in_presentation(
+    monkeypatch: pytest.MonkeyPatch,
+    settings,
+    archived: bool,
+) -> None:
+    node_id = workflow_node_id(0)
+    node = workflow_node(node_id)
+    node.update(
+        {
+            "label": "newly-sensitive-label",
+            "runtime_env": {
+                "ordinary": "newly-sensitive-runtime-value",
+                "newly-sensitive-runtime-key": "omitted",
+            },
+        }
+    )
+    detail = workflow_detail(node_id, state="RUNNING")
+    detail["progress"] = {
+        "current": 1.0,
+        "total": 2.0,
+        "percent": 50.0,
+        "message": "newly-sensitive-message",
+        "metrics": {
+            "ordinary": "newly-sensitive-metric-value",
+            "newly-sensitive-metric-key": 1,
+        },
+        "updated_at": "2026-07-20T12:00:00Z",
+    }
+    detail["execution"] = {
+        "ray_task_id": None,
+        "ray_job_id": None,
+        "ray_node_id": None,
+        "ray_worker_id": None,
+        "assigned_resources": {
+            "CPU": 1.0,
+            "newly-sensitive-resource": 2.0,
+        },
+    }
+    published = _publish_with_legacy_terminal_redaction(
+        monkeypatch,
+        case_id=127_259,
+        nodes=[node],
+        edges=[],
+        details=[detail],
+    )
+    node_page = WorkflowProgressTopologyPage.objects.get(
+        run_storage__execution=published.execution,
+        collection="NODE",
+    )
+    detail_row = WorkflowProgressNodeDetail.objects.get(
+        run_storage__execution=published.execution,
+        node_id=node_id,
+    )
+    original_node_payload = bytes(node_page.payload)
+    original_node_digest = node_page.digest
+    original_detail_payload = bytes(detail_row.payload)
+    original_detail_digest = detail_row.digest
+    attempt_number = _archive_workflow_attempt(published, next_run=127_260) if archived else None
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "REDACT_PATTERNS": [r"newly-sensitive"],
+    }
+
+    topology = list_workflow_topology_nodes(
+        published.execution,
+        authorize=_allow,
+        attempt_number=attempt_number,
+    )
+    details = list_workflow_node_details(
+        published.execution,
+        authorize=_allow,
+        attempt_number=attempt_number,
+    )
+
+    assert topology["items"][0]["label"] == REDACTED
+    assert topology["items"][0]["runtime_env"] == {"ordinary": REDACTED}
+    assert details["items"][0]["progress"] == {
+        "current": 1.0,
+        "message": REDACTED,
+        "metrics": {"ordinary": REDACTED},
+        "percent": 50.0,
+        "total": 2.0,
+        "updated_at": "2026-07-20T12:00:00Z",
+    }
+    assert details["items"][0]["execution"]["assigned_resources"] == {"CPU": 1.0}
+    assert details["items"][0]["truncated"] is True
+
+    node_page.refresh_from_db()
+    detail_row.refresh_from_db()
+    assert bytes(node_page.payload) == original_node_payload
+    assert node_page.digest == original_node_digest
+    assert bytes(detail_row.payload) == original_detail_payload
+    assert detail_row.digest == original_detail_digest
+
+
+@pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
+@pytest.mark.parametrize("surface", ["node", "edge", "detail"])
+def test_legacy_identity_that_normalizes_is_rejected_without_remapping(
+    monkeypatch: pytest.MonkeyPatch,
+    archived: bool,
+    surface: str,
+) -> None:
+    unsafe_id = "\x1b[31mnode-source\x1b[0m"
+    safe_id = "node-source"
+    published = _publish_with_legacy_terminal_redaction(
+        monkeypatch,
+        case_id=127_253,
+        nodes=[workflow_node(unsafe_id), workflow_node(safe_id)],
+        edges=[{"source": unsafe_id, "target": safe_id}],
+        details=[workflow_detail(unsafe_id), workflow_detail(safe_id)],
+    )
+    attempt_number = _archive_workflow_attempt(published, next_run=127_254) if archived else None
+    operations = {
+        "node": lambda: list_workflow_topology_nodes(
+            published.execution,
+            authorize=_allow,
+            attempt_number=attempt_number,
+        ),
+        "edge": lambda: list_workflow_topology_edges(
+            published.execution,
+            authorize=_allow,
+            attempt_number=attempt_number,
+        ),
+        "detail": lambda: list_workflow_node_details(
+            published.execution,
+            authorize=_allow,
+            attempt_number=attempt_number,
+        ),
+    }
+
+    assert storage.redact_text(unsafe_id) == safe_id
+    assert _error_code(operations[surface]) is WorkflowProgressReadErrorCode.CORRUPT
+
+
+@pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
+@pytest.mark.parametrize("surface", ["topology", "detail"])
+def test_new_redaction_policy_cannot_remap_an_authenticated_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    settings,
+    archived: bool,
+    surface: str,
+) -> None:
+    node_id = "newly-sensitive-node-identity"
+    published = _publish_with_legacy_terminal_redaction(
+        monkeypatch,
+        case_id=127_261,
+        nodes=[workflow_node(node_id)],
+        edges=[],
+        details=[workflow_detail(node_id)],
+    )
+    attempt_number = _archive_workflow_attempt(published, next_run=127_262) if archived else None
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "REDACT_PATTERNS": [r"newly-sensitive"],
+    }
+
+    def operation() -> dict[str, Any]:
+        if surface == "topology":
+            return list_workflow_topology_nodes(
+                published.execution,
+                authorize=_allow,
+                attempt_number=attempt_number,
+            )
+        return list_workflow_node_details(
+            published.execution,
+            authorize=_allow,
+            attempt_number=attempt_number,
+        )
+
+    assert _error_code(operation) is WorkflowProgressReadErrorCode.CORRUPT
+
+
+@pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
+@pytest.mark.parametrize("surface", ["topology", "detail"])
+def test_legacy_display_key_collisions_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    archived: bool,
+    surface: str,
+) -> None:
+    node_id = workflow_node_id(0)
+    node = workflow_node(node_id)
+    node["runtime_env"] = {
+        "profile": "first",
+        "\x1b[31mprofile\x1b[0m": "second",
+    }
+    detail = workflow_detail(node_id, state="RUNNING")
+    detail["progress"] = {
+        "current": 1,
+        "total": 2,
+        "percent": 50,
+        "message": None,
+        "metrics": {"rows": 1, "\x1b[32mrows\x1b[0m": 2},
+        "updated_at": "2026-07-20T12:00:00Z",
+    }
+    published = _publish_with_legacy_terminal_redaction(
+        monkeypatch,
+        case_id=127_255,
+        nodes=[node],
+        edges=[],
+        details=[detail],
+    )
+    attempt_number = _archive_workflow_attempt(published, next_run=127_256) if archived else None
+
+    def operation() -> dict[str, Any]:
+        if surface == "topology":
+            return list_workflow_topology_nodes(
+                published.execution,
+                authorize=_allow,
+                attempt_number=attempt_number,
+            )
+        return list_workflow_node_details(
+            published.execution,
+            authorize=_allow,
+            attempt_number=attempt_number,
+        )
+
+    assert _error_code(operation) is WorkflowProgressReadErrorCode.CORRUPT
+
+
+@pytest.mark.parametrize(
+    "tampering",
+    ["numeric_coercion", "oversized_message", "event_order", "event_retention"],
+)
+def test_recomputed_detail_digest_cannot_authenticate_a_noncanonical_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tampering: str,
+) -> None:
+    node_id = workflow_node_id(0)
+    detail = workflow_detail(node_id, state="RUNNING")
+    detail["progress"] = {
+        "current": 1.0,
+        "total": 2.0,
+        "percent": 50.0,
+        "message": "working",
+        "metrics": {},
+        "updated_at": "2026-07-20T12:00:00Z",
+    }
+    detail["recent_events"] = [
+        {
+            "event": "STATE_CHANGE",
+            "state": "PENDING",
+            "label": "queued",
+            "timestamp": "2026-07-20T11:59:59Z",
+        },
+        {
+            "event": "STATE_CHANGE",
+            "state": "RUNNING",
+            "label": "started",
+            "timestamp": "2026-07-20T12:00:00Z",
+        },
+    ]
+    published = _publish_with_legacy_terminal_redaction(
+        monkeypatch,
+        case_id=127_263,
+        nodes=[workflow_node(node_id)],
+        edges=[],
+        details=[detail],
+    )
+    row = WorkflowProgressNodeDetail.objects.get(
+        run_storage__execution=published.execution,
+        node_id=node_id,
+    )
+    value = json.loads(bytes(row.payload))
+    if tampering == "numeric_coercion":
+        value["progress"]["current"] = 1
+    elif tampering == "oversized_message":
+        value["progress"]["message"] = "x" * (storage.WORKFLOW_PROGRESS_MESSAGE_MAX_BYTES + 1)
+    elif tampering == "event_order":
+        value["recent_events"].reverse()
+    else:
+        value["recent_events"] = [
+            {
+                "event": "STATE_CHANGE",
+                "state": "RUNNING",
+                "label": f"event-{index:02d}",
+                "timestamp": f"2026-07-20T12:00:{index:02d}Z",
+            }
+            for index in range(storage.WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS + 1)
+        ]
+        value["truncated"] = True
+    payload = _canonical_bytes(value)
+    updates: dict[str, Any] = {
+        "payload": payload,
+        "digest": storage._digest(storage._DETAIL_DOMAIN, payload),
+        "encoded_bytes": len(payload),
+        "decoded_bytes": len(payload),
+    }
+    if tampering == "event_retention":
+        updates.update(
+            event_count=storage.WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS,
+            truncated=True,
+        )
+    WorkflowProgressNodeDetail.objects.filter(pk=row.pk).update(**updates)
+
+    assert (
+        _error_code(
+            lambda: get_workflow_node_detail(
+                published.execution,
+                node_id,
+                authorize=_allow,
+            )
+        )
+        is WorkflowProgressReadErrorCode.CORRUPT
+    )
+
+
+def test_recomputed_topology_digest_cannot_authenticate_an_oversized_label() -> None:
+    published = publish_initial_workflow(1, case_id=127_264)
+    page = WorkflowProgressTopologyPage.objects.get(
+        run_storage__execution=published.execution,
+        collection="NODE",
+    )
+    value = json.loads(bytes(page.payload))
+    value["records"][0]["label"] = "x" * (storage.WORKFLOW_PROGRESS_LABEL_MAX_BYTES + 1)
+    payload = _canonical_bytes(value)
+    digest = storage._digest(storage._PAGE_DOMAIN, payload)
+    descriptor = {
+        "collection": "NODE",
+        "decoded_bytes": len(payload),
+        "digest": digest,
+        "encoding": "identity",
+        "encoded_bytes": len(payload),
+        "item_count": 1,
+        "page_index": 0,
+    }
+    row = {
+        "collection": "NODE",
+        "page_index": 0,
+        "page__run_storage_id": page.run_storage_id,
+        "page__collection": "NODE",
+        "page__encoding": "identity",
+        "page__digest": digest,
+        "page__item_count": 1,
+        "page__encoded_bytes": len(payload),
+        "page__decoded_bytes": len(payload),
+        "_payload_octets": len(payload),
+        "_bounded_payload": payload,
+    }
+
+    with pytest.raises(storage.WorkflowProgressStorageIntegrityError):
+        storage.verify_workflow_progress_topology_page_record(
+            row,
+            descriptor=descriptor,
+            expected_run_storage_id=page.run_storage_id,
+        )
+
+
+@pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
+@pytest.mark.parametrize("surface", ["topology", "detail"])
+def test_legacy_payload_digest_authenticates_original_bytes_before_presentation(
+    monkeypatch: pytest.MonkeyPatch,
+    archived: bool,
+    surface: str,
+) -> None:
+    published = _legacy_ansi_workflow(monkeypatch, case_id=127_257)
+    attempt_number = _archive_workflow_attempt(published, next_run=127_258) if archived else None
+    if surface == "topology":
+        row = WorkflowProgressTopologyPage.objects.get(
+            run_storage__execution=published.execution,
+            collection="NODE",
+        )
+        original = bytes(row.payload)
+        tampered = original.replace(b"\\u001b[31m", b"\\u001b[32m", 1)
+    else:
+        row = WorkflowProgressNodeDetail.objects.get(
+            run_storage__execution=published.execution,
+            node_id=workflow_node_id(0),
+        )
+        original = bytes(row.payload)
+        tampered = original.replace(b"\\u001b[33m", b"\\u001b[32m", 1)
+
+    def operation() -> dict[str, Any]:
+        if surface == "topology":
+            return list_workflow_topology_nodes(
+                published.execution,
+                authorize=_allow,
+                attempt_number=attempt_number,
+            )
+        return list_workflow_node_details(
+            published.execution,
+            authorize=_allow,
+            attempt_number=attempt_number,
+        )
+
+    assert tampered != original
+    assert len(tampered) == len(original)
+    type(row).objects.filter(pk=row.pk).update(payload=tampered)
+    assert storage.redact_text("\x1b[31mPrepare\x1b[0m") == storage.redact_text(
+        "\x1b[32mPrepare\x1b[0m"
+    )
+
+    assert _error_code(operation) is WorkflowProgressReadErrorCode.CORRUPT
 
 
 def test_invalid_state_and_utf8_node_identifiers_are_bounded_arguments() -> None:

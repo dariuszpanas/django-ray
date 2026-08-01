@@ -915,7 +915,9 @@ class TestTasksAPI:
             callable_path=("testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task"),
             queue_name="default",
             state=TaskState.FAILED,
-            error_message=("Intentional workflow showcase reserve_inventory failure at item 0"),
+            error_message=(
+                "\x1b[31mIntentional workflow showcase\x1b[39m\rreserve_inventory failure at item 0"
+            ),
         )
 
         response = client.get(f"/api/cluster/workflow-showcase/{execution.task_id}")
@@ -925,7 +927,7 @@ class TestTasksAPI:
         assert data["state"] == TaskState.FAILED
         assert data["result"] is None
         assert data["error"] == (
-            "Intentional workflow showcase reserve_inventory failure at item 0"
+            "Intentional workflow showcase\nreserve_inventory failure at item 0"
         )
         assert data["progress"]["schema"] == "django-ray.workflow-progress-summary"
         assert data["progress"]["availability"] == "NOT_REPORTED"
@@ -1331,7 +1333,7 @@ class TestExecutionsAPI:
             kwargs_json='{"safe":"visible"}',
             result_data='{"password":"result-secret","safe":1}',
             progress_data='{"safe":"visible"}',
-            error_message="password=error-secret",
+            error_message="pass\x1b[31mword=error-secret",
         )
 
         response = client.get(f"/api/executions/{task.pk}")

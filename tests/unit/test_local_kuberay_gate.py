@@ -75,6 +75,7 @@ from scripts.local_kuberay_gate import (
     validate_local_http_url,
     validate_namespace,
     validate_runtime_env_encryption_envelope,
+    validate_terminal_diagnostic_text,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -112,6 +113,15 @@ def test_expired_is_a_terminal_failure_in_all_gate_task_vocabularies() -> None:
     assert "EXPIRED" in gate_module.TASK_FAILURE_STATES
     assert "EXPIRED" in gate_module.WORKFLOW_PROGRESS_TASK_STATES
     assert gate_module.WORKFLOW_PROGRESS_FAILURE_STATES == gate_module.TASK_FAILURE_STATES
+
+
+def test_terminal_diagnostic_gate_accepts_inert_lines_and_rejects_controls() -> None:
+    diagnostic = 'ray::task()\nFile "task.py"\tline 1'
+
+    assert validate_terminal_diagnostic_text(diagnostic, field_name="traceback") == diagnostic
+    for unsafe in ("\x1b[31mfailed", "progress\rfailed", "bad\x00text", "bad\x9b31mtext"):
+        with pytest.raises(ValueError, match="terminal control"):
+            validate_terminal_diagnostic_text(unsafe, field_name="traceback")
 
 
 def _token_representations(token: str) -> tuple[str, ...]:
@@ -4252,6 +4262,7 @@ def _complex_workflow_gate_responses() -> dict[str, dict[str, Any]]:
                         "attempt_number": 1,
                         "execution_generation": 1,
                         "workflow_run_id": run_id,
+                        "error_message": poll_error,
                     }
                 ]
             },
@@ -4393,6 +4404,7 @@ def _complex_workflow_gate_responses() -> dict[str, dict[str, Any]]:
                         "attempt_number": 1,
                         "execution_generation": 1,
                         "workflow_run_id": run_id,
+                        "error_message": poll_error,
                     }
                 ]
             },
@@ -4863,6 +4875,7 @@ def _workflow_showcase_gate_responses() -> dict[str, dict[str, Any]]:
                         "attempt_number": 1,
                         "execution_generation": 1,
                         "workflow_run_id": run_id,
+                        "error_message": poll_error,
                     }
                 ]
             },

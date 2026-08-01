@@ -1,0 +1,154 @@
+.django-ray-diagnostic {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.django-ray-admin-action {
+  align-items: center;
+  background: #0369a1;
+  border: 1px solid #0369a1;
+  border-radius: var(--border-radius, 0.5rem);
+  box-sizing: border-box;
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  justify-content: center;
+  line-height: 1.25;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.875rem;
+  text-decoration: none;
+}
+
+.django-ray-admin-action:hover {
+  background: #075985;
+  border-color: #075985;
+  color: #fff;
+}
+
+.django-ray-admin-action:focus-visible {
+  outline: 3px solid #075985;
+  outline-offset: 2px;
+}
+
+.django-ray-admin-action.django-ray-admin-action--retry {
+  background: #0369a1;
+  border-color: #0369a1;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 18%);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  padding: 0.5rem 0.875rem;
+}
+
+a.django-ray-admin-action.django-ray-admin-action--sensitive {
+  background: #fff7ed;
+  border-color: #fb923c;
+  border-radius: var(--border-radius, 0.5rem);
+  color: #9a3412;
+  cursor: pointer;
+  display: inline-flex;
+  float: none;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: normal;
+  line-height: 1.25;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.75rem;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+a.django-ray-admin-action.django-ray-admin-action--sensitive:hover,
+a.django-ray-admin-action.django-ray-admin-action--sensitive:focus-visible {
+  background: #ffedd5;
+  border-color: #f97316;
+  color: #7c2d12;
+}
+
+.django-ray-admin-action.django-ray-admin-action--secondary {
+  background: transparent;
+  border-color: #94a3b8;
+  color: #334155;
+}
+
+.django-ray-admin-action.django-ray-admin-action--secondary:hover {
+  background: #f1f5f9;
+  border-color: #64748b;
+  color: #0f172a;
+}
+
+:is(html.dark, html[data-theme="dark"])
+  .django-ray-admin-action:focus-visible {
+  outline-color: #38bdf8;
+}
+
+:is(html.dark, html[data-theme="dark"])
+  a.django-ray-admin-action.django-ray-admin-action--sensitive {
+  background: rgb(245 158 11 / 14%);
+  border-color: #b45309;
+  color: #fde68a;
+}
+
+:is(html.dark, html[data-theme="dark"])
+  a.django-ray-admin-action.django-ray-admin-action--sensitive:hover,
+:is(html.dark, html[data-theme="dark"])
+  a.django-ray-admin-action.django-ray-admin-action--sensitive:focus-visible {
+  background: rgb(245 158 11 / 22%);
+  border-color: #f59e0b;
+  color: #fef3c7;
+}
+
+:is(html.dark, html[data-theme="dark"])
+  .django-ray-admin-action.django-ray-admin-action--secondary {
+  background: transparent;
+  border-color: #52525b;
+  color: #e4e4e7;
+}
+
+:is(html.dark, html[data-theme="dark"])
+  .django-ray-admin-action.django-ray-admin-action--secondary:hover {
+  background: #27272a;
+  border-color: #71717a;
+  color: #fafafa;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] .django-ray-admin-action:focus-visible {
+    outline-color: #38bdf8;
+  }
+
+  html[data-theme="auto"]
+    a.django-ray-admin-action.django-ray-admin-action--sensitive {
+    background: rgb(245 158 11 / 14%);
+    border-color: #b45309;
+    color: #fde68a;
+  }
+
+  html[data-theme="auto"]
+    a.django-ray-admin-action.django-ray-admin-action--sensitive:hover,
+  html[data-theme="auto"]
+    a.django-ray-admin-action.django-ray-admin-action--sensitive:focus-visible {
+    background: rgb(245 158 11 / 22%);
+    border-color: #f59e0b;
+    color: #fef3c7;
+  }
+
+  html[data-theme="auto"]
+    .django-ray-admin-action.django-ray-admin-action--secondary {
+    background: transparent;
+    border-color: #52525b;
+    color: #e4e4e7;
+  }
+
+  html[data-theme="auto"]
+    .django-ray-admin-action.django-ray-admin-action--secondary:hover {
+    background: #27272a;
+    border-color: #71717a;
+    color: #fafafa;
+  }
+}

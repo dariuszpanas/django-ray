@@ -206,6 +206,73 @@ Ray logs are bounded independently by line count and UTF-8 byte size, then redac
 The byte bound applies to each returned stream. Logs are live operational data, not a
 durable audit store.
 
+### Terminal-formatted failure diagnostics
+
+Ray status messages and log tails may contain terminal formatting even when an
+application expects plain text. Django-ray deliberately preserves the original failure
+message, traceback, and cancellation evidence in the protected execution and attempt
+fields. Normalizing those values before storage would be irreversible: a valid terminal
+sequence can consume a character from a configured secret marker, preventing a later
+reader from recognizing it, and privileged incident readers need the remaining printable
+diagnostic. Internal completion envelopes use JSON framing, so control characters are
+escaped while crossing that boundary.
+
+Every package-owned reader removes bounded ANSI CSI and OSC/DCS/APC/PM/SOS control
+strings, the remaining C0/C1 controls, unsafe Unicode format/bidi characters, and
+invalid surrogate code points before text leaves the protected diagnostic boundary.
+CRLF and lone carriage returns become one logical newline; tabs, newlines, ordinary
+printable Unicode, emoji joiners/variation selectors, and private-use glyphs remain
+intact. Matching-only projections additionally ignore Unicode default-ignorable
+characters so harmless shaping cannot split a sensitive marker. Incomplete or malformed control
+sequences lose their control introducer, so they cannot silently consume the printable
+traceback which follows them.
+Within every 7-bit or C1 control string, CAN and SUB cancel the hidden payload and
+resume ordinary parsing; visible text after cancellation remains available to
+fail-closed redaction matching.
+The unsafe-format and default-ignorable tables are frozen from Unicode 16.0 rather than
+read from the interpreter at runtime. The same code point therefore has the same display
+and matching projection on supported Python 3.12, 3.13, and 3.14 processes even though
+their bundled Unicode databases differ.
+The streaming parser reads each input position once, performs bounded projection work,
+and caps speculative control-string state, avoiding repeated suffix scans for malformed
+unterminated input. Ordinary redaction fails closed before projecting a text value or
+mapping key longer than 65,536 characters. Admin, graph, log, protocol, API, and
+observability limits remain surface-specific rather than inheriting one universal HTTP
+response bound.
+
+Ordinary Admin, API, graph, logging, observability, and Django `TaskResult.errors`
+projections use the shared terminal-normalization and pattern-redaction boundary before
+their surface-specific display bounds. The permission-gated sensitive Admin view
+normalizes and bounds the same allowlisted fields but deliberately skips pattern
+redaction. Direct database consumers must treat the stored fields as raw sensitive
+evidence and apply an equivalent authorized presentation boundary before rendering them.
+
+Redaction checks raw, normalized, control-removed, and composed terminal forms. A
+configured marker therefore remains sensitive when terminal formatting, Unicode
+zero-width shaping, or more than one control-sequence family splits its characters.
+Accepted patterns compile during startup into one bounded program; evaluation has a hard
+250,000-unit matcher ceiling and fails closed rather than enumerating ambiguous terminal
+forms. The transition and character caches are independently capped; repeated ordinary
+text benefits from them, while high-entropy inputs stop at the same deterministic budget.
+One structured root shares that matcher budget, a 4,096-item traversal ceiling, and a
+65,536-character aggregate ceiling across nested string keys and values.
+Mapping keys, including structured-log extra keys, are normalized and matched through
+the same projections; a
+sensitive-looking key redacts its value, and a normalized-key collision cannot replace
+an earlier redaction. Exact string keys retain their text; other Python key types are
+represented only by type so user-defined string conversion cannot enter diagnostics.
+Workflow-progress producer and storage mappings persist normalized
+keys, reject ambiguous collisions, and reject node/edge identities which normalization
+would change. Structured logging consumes placeholders with already-redacted arguments
+before removing terminal sequences; all positional arguments share one traversal budget,
+as do adapter and call-time structured fields. A hidden placeholder therefore cannot
+shift or invalidate visible arguments, while disabled levels remain lazy and do not
+evaluate message text.
+Normalization is not secret removal and does not weaken the existing requirement for
+authorization and application-specific redaction patterns. Admin tracebacks and graph
+failure messages are inserted as escaped text, retain line separation with scoped
+`pre-wrap`, and wrap long unbroken paths without enabling HTML interpretation.
+
 ## Prometheus Metrics
 
 `render_prometheus_metrics()` builds text exposition data from the durable database:

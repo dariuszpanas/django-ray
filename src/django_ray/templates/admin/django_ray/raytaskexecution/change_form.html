@@ -24,8 +24,12 @@
   {{ block.super }}
   {% if django_ray_sensitive_data_url %}
     <li>
-      <a href="{{ django_ray_sensitive_data_url }}" class="viewsitelink">
-        View unredacted task data
+      <a
+        href="{{ django_ray_sensitive_data_url }}"
+        class="django-ray-admin-action django-ray-admin-action--sensitive"
+        aria-label="View sensitive task data"
+      >
+        Sensitive data
       </a>
     </li>
   {% endif %}
@@ -41,17 +45,22 @@
     >
       <h2 id="django-ray-task-actions-heading">Task actions</h2>
       <div class="django-ray-task-actions__body">
-        <p class="django-ray-task-actions__guidance" role="status">
+        <p
+          class="django-ray-task-actions__guidance"
+          id="django-ray-task-actions-guidance"
+          role="status"
+        >
           {{ django_ray_retry_guidance }}
         </p>
         {% if django_ray_retry_available %}
           <button
             type="submit"
-            class="button default django-ray-task-actions__retry"
+            class="button default django-ray-admin-action django-ray-admin-action--retry django-ray-task-actions__retry"
             form="{{ opts.model_name }}_form"
             formaction="{{ django_ray_retry_url }}"
             formmethod="post"
             formnovalidate
+            aria-describedby="django-ray-task-actions-guidance"
           >
             Retry task...
           </button>

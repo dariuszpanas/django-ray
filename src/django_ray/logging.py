@@ -15,10 +15,52 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any
 
-from django_ray.redaction import redact_exception, redact_text, redact_value
+from django_ray.redaction import REDACTED, redact_exception, redact_text, redact_value
+
+
+def _redacted_combined_extra(adapter_extra: object, call_extra: object) -> dict[str, Any]:
+    """Redact both extra mappings under one aggregate traversal budget."""
+    sources = {
+        "adapter": adapter_extra if isinstance(adapter_extra, Mapping) else {},
+        "call": call_extra if isinstance(call_extra, Mapping) else {},
+    }
+    redacted = redact_value(sources)
+    if not isinstance(redacted, dict) or set(redacted) != {"adapter", "call"}:
+        return {"diagnostic": REDACTED}
+    adapter = redacted["adapter"]
+    call = redacted["call"]
+    if not isinstance(adapter, dict) or not isinstance(call, dict):
+        return {"diagnostic": REDACTED}
+    return {key: value for key, value in {**adapter, **call}.items() if value is not None}
+
+
+def _format_redacted_message(msg: object, args: tuple[Any, ...]) -> str:
+    """Safely consume logging placeholders before terminal normalization.
+
+    Formatting the redacted arguments against the original template preserves
+    Python logging's positional ordering when a complete terminal sequence
+    contains a placeholder which disappears from the rendered message. The
+    formatted text is normalized and redacted before any handler receives it.
+    """
+    template = str(msg)
+    if not args:
+        return redact_text(template)
+
+    redacted_args = redact_value(args)
+    safe_args = tuple(redacted_args) if isinstance(redacted_args, list) else ()
+    format_values: object = safe_args
+    if len(safe_args) == 1 and isinstance(safe_args[0], Mapping):
+        format_values = safe_args[0]
+    try:
+        formatted = template % format_values
+    except (KeyError, OverflowError, TypeError, ValueError):
+        # Keep logging resilient without handing an unsafe or mismatched
+        # argument tuple to a downstream handler.
+        formatted = template
+    return redact_text(formatted)
 
 
 class StructuredLogAdapter(logging.LoggerAdapter):
@@ -46,28 +88,24 @@ class StructuredLogAdapter(logging.LoggerAdapter):
         extra = kwargs.get("extra", {})
 
         # Merge adapter's extra with call-time extra
-        combined_extra = {**self.extra, **extra}
-
         msg = redact_text(msg)
 
         # Python's logging formatter appends exc_info outside ``msg``.  Keep a
         # compact, redacted exception description and suppress the raw
         # traceback, which can contain credentials or personal data.
         exc_info = kwargs.get("exc_info")
+        exception_description: str | None = None
         if exc_info:
             if exc_info is True:
                 exc_info = sys.exc_info()
             exception = exc_info[1] if isinstance(exc_info, tuple) and len(exc_info) > 1 else None
             if isinstance(exception, BaseException):
-                combined_extra = {
-                    **combined_extra,
-                    "exception": redact_exception(exception),
-                }
+                exception_description = redact_exception(exception)
             kwargs["exc_info"] = None
 
-        redacted_extra = {
-            key: redact_value(value) for key, value in combined_extra.items() if value is not None
-        }
+        redacted_extra = _redacted_combined_extra(self.extra, extra)
+        if exception_description is not None:
+            redacted_extra["exception"] = exception_description
 
         # Format structured data as JSON suffix
         if redacted_extra:
@@ -76,7 +114,7 @@ class StructuredLogAdapter(logging.LoggerAdapter):
                 json_extra = json.dumps(redacted_extra, default=str)
                 msg = f"{msg} | {json_extra}"
             except (TypeError, ValueError):
-                # This should be unreachable because safe_json_dumps converts
+                # This should be unreachable because redact_value converts
                 # non-JSON objects to type markers, but keep logging resilient.
                 msg = f"{msg} | {redacted_extra}"
 
@@ -85,13 +123,8 @@ class StructuredLogAdapter(logging.LoggerAdapter):
 
     def log(self, level: int, msg: object, *args: Any, **kwargs: Any) -> None:
         """Redact format arguments before delegating to ``logging``."""
-        safe_msg = redact_text(msg)
-        safe_args = tuple(redact_value(arg) for arg in args)
-        # If the template itself matched a sensitive expression, it has been
-        # replaced wholesale and no longer contains placeholders to consume.
-        if safe_msg != msg:
-            safe_args = ()
-        super().log(level, safe_msg, *safe_args, **kwargs)
+        if self.isEnabledFor(level):
+            super().log(level, _format_redacted_message(msg, args), **kwargs)
 
 
 def get_logger(name: str, **extra: Any) -> StructuredLogAdapter:

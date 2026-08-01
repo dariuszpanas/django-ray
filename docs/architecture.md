@@ -189,7 +189,7 @@ Primary execution record for one task attempt chain.
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
 | `runtime_env_json` | Canonical immutable plaintext mapping or strict versioned AES-256-GCM envelope used by execution and retries; the write format is opt-in while readers always support both |
 | `runtime_env_hash` | Unkeyed SHA-256 identity of canonical plaintext used for integrity checks and cache correlation; it remains visible in encrypted mode and leaks equality |
-| `error_message`, `error_traceback` | Failure metadata |
+| `error_message`, `error_traceback` | Original protected failure evidence; ordinary readers expose terminal-inert, pattern-redacted, surface-bounded projections, while the separately authorized sensitive Admin reader skips only pattern redaction |
 | `ray_target_address` | Immutable Ray Job routing target selected by the enqueueing backend |
 | `ray_job_id`, `ray_address` | Runner-specific execution handle metadata |
 | `claimed_by_worker` | Worker lease owner that currently owns the task |
@@ -599,8 +599,8 @@ pre-`0016` code can submit it without a deadline fence. Reversing `0016` leaves 
 Migration `0017` adds only the `django_ray.view_sensitive_task_data` permission to
 the `RayTaskExecution` model state. It does not add a database column, rewrite task
 rows, or grant the permission to any user or group. Apply it before delegating access
-to the separate unredacted Admin views. Before reversing it, revoke every user and
-group grant explicitly. Django's permission synchronization creates missing custom
+to the separate pattern-unredacted, terminal-inert Admin views. Before reversing it,
+revoke every user and group grant explicitly. Django's permission synchronization creates missing custom
 permissions but does not delete stale permission rows during a schema rollback.
 
 RuntimeEnv encryption has no schema migration. Its rollout is nevertheless
@@ -655,10 +655,16 @@ produced a terminal state.
   non-cacheable allowlist for users who hold both ordinary object view and
   `django_ray.view_sensitive_task_data` on the owning execution. Database byte-length
   guards keep oversized raw values out of the application process; RuntimeEnv,
-  completion, workflow, and log payloads remain outside this surface.
+  completion, workflow, and log payloads remain outside this surface. Protected failure
+  fields retain original diagnostic evidence so control-split redaction patterns remain
+  detectable. Both surfaces render terminal controls inert; only the privileged surface
+  bypasses secret-pattern redaction.
 - Authenticated, polling-based live task state and workflow progress in the task admin.
 - Versioned package services for task, queue, attempt, workflow, bounded paginated
   workflow detail, indexed nodes, and bounded live-Ray data.
+- Workflow node and edge identities are accepted only when they are already valid UTF-8,
+  bounded, and unchanged by terminal normalization/redaction. Opaque identities are
+  rejected rather than rewritten, so normalization cannot merge distinct nodes.
 - Explicit terminal-only API and Admin summaries that never advertise topology,
   node-detail, or execution-graph surfaces.
 - Package-owned Prometheus rendering with explicit queue-label allowlists and fixed labels.

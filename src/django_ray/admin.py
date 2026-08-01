@@ -56,7 +56,7 @@ from django_ray.admin_workflow_graph import (
 from django_ray.conf.settings import get_settings
 from django_ray.lifecycle import request_task_cancellation, retry_task
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
-from django_ray.redaction import redact_text, safe_json_dumps
+from django_ray.redaction import normalize_terminal_text, redact_text, safe_json_dumps
 from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError
 from django_ray.workflow_plans import (
     MAX_PLAN_BYTES,
@@ -488,6 +488,14 @@ def _bounded_redacted_text(value: Any, *, max_chars: int = ADMIN_DIAGNOSTIC_MAX_
     return Truncator(redact_text(value)).chars(max_chars, truncate="... [truncated]")
 
 
+def _bounded_traceback_display(value: Any) -> str:
+    """Render inert traceback text with line breaks and safe wrapping."""
+    rendered = _bounded_redacted_text(value)
+    if rendered == "-":
+        return rendered
+    return format_html('<span class="django-ray-diagnostic">{}</span>', rendered)
+
+
 def _bounded_redacted_json(value: str | None) -> str:
     """Return bounded, redacted JSON without exposing malformed raw payloads."""
     if not value:
@@ -590,8 +598,9 @@ def _sensitive_sections(
                 status = "response_limit"
                 value = None
             else:
-                status = "value"
                 raw_budget -= byte_length
+                value = normalize_terminal_text(value)
+                status = "value" if value else "normalized_empty"
             fields.append(
                 {
                     "name": field_name,
@@ -808,6 +817,9 @@ class TaskAttemptInline(DjangoRayTabularInline):
 @admin.register(RayTaskExecution)
 class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     """Admin for RayTaskExecution model."""
+
+    class Media:
+        css = {"all": ("django_ray/admin/diagnostics.css",)}
 
     change_form_template = "admin/django_ray/raytaskexecution/change_form.html"
     retry_confirmation_template = "admin/django_ray/raytaskexecution/retry_confirmation.html"
@@ -2374,7 +2386,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
 
     @admin.display(description="Traceback")
     def error_traceback_display(self, obj: RayTaskExecution) -> str:
-        return _bounded_redacted_text(obj.error_traceback)
+        return _bounded_traceback_display(obj.error_traceback)
 
     @admin.display(description="Ray Job ID")
     def ray_job_id_display(self, obj: RayTaskExecution) -> str:
@@ -2688,6 +2700,10 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
     """Read-only historical attempt diagnostics."""
 
     change_form_template = "admin/django_ray/taskattempt/change_form.html"
+
+    class Media:
+        css = {"all": ("django_ray/admin/diagnostics.css",)}
+
     list_display = [
         "execution_link",
         "attempt_number",
@@ -2961,7 +2977,7 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
 
     @admin.display(description="Traceback")
     def error_traceback_display(self, obj: TaskAttempt) -> str:
-        return _bounded_redacted_text(obj.error_traceback)
+        return _bounded_traceback_display(obj.error_traceback)
 
     @admin.display(description="Result")
     def result_data_display(self, obj: TaskAttempt) -> str:

@@ -654,6 +654,7 @@ def _bounded_identity_text(
     *,
     max_bytes: int,
     nullable: bool = False,
+    enforce_current_policy: bool = True,
 ) -> str | None:
     """Validate an identity without allowing redaction to create collisions."""
     if nullable and value is None:
@@ -665,13 +666,22 @@ def _bounded_identity_text(
         raise WorkflowProgressStorageError(f"{name} cannot be empty")
     if len(encoded) > max_bytes:
         raise WorkflowProgressStorageLimitError(f"{name} exceeds {max_bytes} UTF-8 bytes")
-    normalized = value
-    if normalized is not None and redact_text(normalized) == REDACTED:
-        raise WorkflowProgressStorageError(f"{name} resembles sensitive data")
-    return normalized
+    if enforce_current_policy:
+        normalized = redact_text(value)
+        if normalized == REDACTED:
+            raise WorkflowProgressStorageError(f"{name} resembles sensitive data")
+        if normalized != value:
+            raise WorkflowProgressStorageError(f"{name} contains unsafe characters")
+    return value
 
 
-def _bounded_identity_characters(value: Any, name: str, *, max_characters: int) -> str:
+def _bounded_identity_characters(
+    value: Any,
+    name: str,
+    *,
+    max_characters: int,
+    enforce_current_policy: bool = True,
+) -> str:
     if not isinstance(value, str):
         raise WorkflowProgressStorageError(f"{name} must be text")
     _utf8_bytes(value, name)
@@ -679,8 +689,12 @@ def _bounded_identity_characters(value: Any, name: str, *, max_characters: int) 
         raise WorkflowProgressStorageLimitError(
             f"{name} must contain between 1 and {max_characters} characters"
         )
-    if redact_text(value) == REDACTED:
-        raise WorkflowProgressStorageError(f"{name} resembles sensitive data")
+    if enforce_current_policy:
+        normalized = redact_text(value)
+        if normalized == REDACTED:
+            raise WorkflowProgressStorageError(f"{name} resembles sensitive data")
+        if normalized != value:
+            raise WorkflowProgressStorageError(f"{name} contains unsafe characters")
     return value
 
 
@@ -690,6 +704,7 @@ def _bounded_redacted_text(
     *,
     max_bytes: int,
     nullable: bool = False,
+    apply_current_policy: bool = True,
 ) -> tuple[str | None, bool]:
     if nullable and value is None:
         return None, False
@@ -698,7 +713,7 @@ def _bounded_redacted_text(
     encoded = _utf8_bytes(value, name)
     if len(encoded) > max_bytes:
         return _OMITTED_OVERSIZED, True
-    normalized = redact_text(value)
+    normalized = redact_text(value) if apply_current_policy else value
     if len(_utf8_bytes(normalized, name)) <= max_bytes:
         return normalized, False
     return _OMITTED_OVERSIZED, True
@@ -769,6 +784,7 @@ def _normalize_metadata(
     *,
     depth: int = 0,
     budget: _MetadataBudget | None = None,
+    apply_current_policy: bool = True,
 ) -> tuple[Any, bool]:
     """Return bounded JSON metadata with redaction applied before digesting."""
     if budget is None:
@@ -797,7 +813,7 @@ def _normalize_metadata(
             budget.consume(len(_OMITTED_OVERSIZED) + 2, name)
             return _OMITTED_OVERSIZED, True
         budget.consume(len(encoded) + 2, name)
-        return redact_text(value), False
+        return (redact_text(value) if apply_current_policy else value), False
     if isinstance(value, Mapping):
         budget.consume(2, name)
         normalized: dict[str, Any] = {}
@@ -809,16 +825,22 @@ def _normalize_metadata(
             if not key_bytes or len(key_bytes) > WORKFLOW_PROGRESS_RECORD_MAX_ENCODED_BYTES:
                 raise WorkflowProgressStorageLimitError(f"{name} contains an oversized key")
             budget.consume(len(key_bytes) + 4, name)
-            if redact_text(key) == REDACTED:
+            normalized_key = redact_text(key) if apply_current_policy else key
+            if normalized_key == REDACTED:
                 truncated = True
                 continue
+            if not normalized_key:
+                raise WorkflowProgressStorageError(f"{name} contains an empty normalized key")
+            if normalized_key in normalized:
+                raise WorkflowProgressStorageError(f"{name} contains a duplicate normalized key")
             normalized_item, item_truncated = _normalize_metadata(
                 item,
-                f"{name}.{key}",
+                f"{name}.{normalized_key}",
                 depth=depth + 1,
                 budget=budget,
+                apply_current_policy=apply_current_policy,
             )
-            normalized[key] = normalized_item
+            normalized[normalized_key] = normalized_item
             truncated = truncated or item_truncated
         return normalized, truncated
     if isinstance(value, list | tuple):
@@ -832,6 +854,7 @@ def _normalize_metadata(
                 f"{name}[{index}]",
                 depth=depth + 1,
                 budget=budget,
+                apply_current_policy=apply_current_policy,
             )
             normalized_items.append(normalized_item)
             truncated = truncated or item_truncated
@@ -839,8 +862,17 @@ def _normalize_metadata(
     raise WorkflowProgressStorageError(f"{name} must contain only JSON values")
 
 
-def _normalize_metadata_object(value: Any, name: str) -> tuple[dict[str, Any], bool]:
-    normalized, truncated = _normalize_metadata(value, name)
+def _normalize_metadata_object(
+    value: Any,
+    name: str,
+    *,
+    apply_current_policy: bool = True,
+) -> tuple[dict[str, Any], bool]:
+    normalized, truncated = _normalize_metadata(
+        value,
+        name,
+        apply_current_policy=apply_current_policy,
+    )
     if not isinstance(normalized, dict):
         raise WorkflowProgressStorageError(f"{name} must be an object")
     return normalized, truncated
@@ -880,6 +912,7 @@ def _normalize_invocation_identity(
     value: Any,
     *,
     identity: WorkflowRunIdentity,
+    enforce_current_policy: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if value is None:
         return None, None
@@ -905,6 +938,7 @@ def _normalize_invocation_identity(
         invocation["invocation_id"],
         "invocation_identity.invocation_id",
         max_characters=128,
+        enforce_current_policy=enforce_current_policy,
     )
     return {
         "attempt_number": identity.attempt_number,
@@ -916,7 +950,12 @@ def _normalize_invocation_identity(
     }, invocation_id
 
 
-def _metrics(value: Any, name: str) -> tuple[dict[str, Any], bool]:
+def _metrics(
+    value: Any,
+    name: str,
+    *,
+    apply_current_policy: bool = True,
+) -> tuple[dict[str, Any], bool]:
     if not isinstance(value, Mapping) or len(value) > WORKFLOW_PROGRESS_METRICS_MAX_ITEMS:
         raise WorkflowProgressStorageLimitError(f"{name} exceeds the metrics item limit")
     normalized: dict[str, Any] = {}
@@ -928,23 +967,28 @@ def _metrics(value: Any, name: str) -> tuple[dict[str, Any], bool]:
         key_bytes = _utf8_bytes(key, f"{name} key")
         if not key_bytes or len(key_bytes) > WORKFLOW_PROGRESS_METRIC_KEY_MAX_BYTES:
             raise WorkflowProgressStorageLimitError(f"{name} contains an oversized key")
-        if redact_text(key) == REDACTED:
+        normalized_key = redact_text(key) if apply_current_policy else key
+        if normalized_key == REDACTED:
             truncated = True
             continue
+        if not normalized_key:
+            raise WorkflowProgressStorageError(f"{name} contains an empty normalized key")
+        if normalized_key in normalized:
+            raise WorkflowProgressStorageError(f"{name} contains a duplicate normalized key")
         item = value[key]
         if isinstance(item, float) and not math.isfinite(item):
-            raise WorkflowProgressStorageError(f"{name}.{key} must be finite")
+            raise WorkflowProgressStorageError(f"{name}.{normalized_key} must be finite")
         if item is None or isinstance(item, (bool, int, float)):
-            normalized[key] = item
+            normalized[normalized_key] = item
         elif isinstance(item, str):
-            encoded = _utf8_bytes(item, f"{name}.{key}")
+            encoded = _utf8_bytes(item, f"{name}.{normalized_key}")
             if len(encoded) > WORKFLOW_PROGRESS_METRIC_STRING_MAX_BYTES:
-                normalized[key] = _OMITTED_OVERSIZED
+                normalized[normalized_key] = _OMITTED_OVERSIZED
                 truncated = True
             else:
-                normalized[key] = redact_text(item)
+                normalized[normalized_key] = redact_text(item) if apply_current_policy else item
         else:
-            raise WorkflowProgressStorageError(f"{name}.{key} must be a scalar")
+            raise WorkflowProgressStorageError(f"{name}.{normalized_key} must be a scalar")
     encoded = _canonical_json_bytes(normalized)
     if len(encoded) <= WORKFLOW_PROGRESS_METRICS_MAX_ENCODED_BYTES:
         return normalized, truncated
@@ -952,10 +996,17 @@ def _metrics(value: Any, name: str) -> tuple[dict[str, Any], bool]:
     return marker, True
 
 
-def _assigned_resources(value: Any, name: str) -> dict[str, float]:
+def _assigned_resources(
+    value: Any,
+    name: str,
+    *,
+    apply_current_policy: bool = True,
+    allow_policy_omission: bool = False,
+) -> tuple[dict[str, float], bool]:
     if not isinstance(value, Mapping) or len(value) > WORKFLOW_PROGRESS_METRICS_MAX_ITEMS:
         raise WorkflowProgressStorageLimitError(f"{name} exceeds the resource item limit")
     normalized: dict[str, float] = {}
+    truncated = False
     keys = list(value)
     if any(not isinstance(key, str) for key in keys):
         raise WorkflowProgressStorageError(f"{name} keys must be text")
@@ -963,20 +1014,37 @@ def _assigned_resources(value: Any, name: str) -> dict[str, float]:
         key_bytes = _utf8_bytes(key, f"{name} key")
         if not key_bytes or len(key_bytes) > WORKFLOW_PROGRESS_METRIC_KEY_MAX_BYTES:
             raise WorkflowProgressStorageLimitError(f"{name} contains an oversized key")
-        if redact_text(key) == REDACTED:
+        normalized_key = redact_text(key) if apply_current_policy else key
+        if normalized_key == REDACTED:
+            if allow_policy_omission:
+                truncated = True
+                continue
             raise WorkflowProgressStorageError(f"{name} contains a sensitive-looking key")
-        normalized[key] = _finite_number(value[key], f"{name}.{key}", minimum=0.0)
+        if not normalized_key:
+            raise WorkflowProgressStorageError(f"{name} contains an empty normalized key")
+        if normalized_key in normalized:
+            raise WorkflowProgressStorageError(f"{name} contains a duplicate normalized key")
+        normalized[normalized_key] = _finite_number(
+            value[key],
+            f"{name}.{normalized_key}",
+            minimum=0.0,
+        )
     if len(_canonical_json_bytes(normalized)) > WORKFLOW_PROGRESS_METRICS_MAX_ENCODED_BYTES:
         raise WorkflowProgressStorageLimitError(f"{name} exceeds its byte limit")
-    return normalized
+    return normalized, truncated
 
 
-def _normalize_topology_node(value: Any) -> tuple[dict[str, Any], bool]:
+def _normalize_topology_node(
+    value: Any,
+    *,
+    apply_current_policy: bool = True,
+) -> tuple[dict[str, Any], bool]:
     node = _exact_mapping(value, _TOPOLOGY_NODE_KEYS, "topology node")
     node_id = _bounded_identity_text(
         node["node_id"],
         "topology node_id",
         max_bytes=WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES,
+        enforce_current_policy=apply_current_policy,
     )
     kind = _identifier(node["kind"], "topology node kind")
     if kind not in _TOPOLOGY_NODE_KINDS:
@@ -985,20 +1053,24 @@ def _normalize_topology_node(value: Any) -> tuple[dict[str, Any], bool]:
         node["label"],
         "topology node label",
         max_bytes=WORKFLOW_PROGRESS_LABEL_MAX_BYTES,
+        apply_current_policy=apply_current_policy,
     )
     callable_path, path_truncated = _bounded_redacted_text(
         node["callable_path"],
         "topology callable_path",
         max_bytes=WORKFLOW_PROGRESS_LABEL_MAX_BYTES,
         nullable=True,
+        apply_current_policy=apply_current_policy,
     )
     runtime_env, runtime_env_truncated = _normalize_metadata_object(
         node["runtime_env"],
         "topology runtime_env",
+        apply_current_policy=apply_current_policy,
     )
     ray_options, ray_options_truncated = _normalize_metadata_object(
         node["ray_options"],
         "topology ray_options",
+        apply_current_policy=apply_current_policy,
     )
     normalized = {
         "callable_path": callable_path,
@@ -1016,17 +1088,23 @@ def _normalize_topology_node(value: Any) -> tuple[dict[str, Any], bool]:
     )
 
 
-def _normalize_topology_edge(value: Any) -> dict[str, str]:
+def _normalize_topology_edge(
+    value: Any,
+    *,
+    apply_current_policy: bool = True,
+) -> dict[str, str]:
     edge = _exact_mapping(value, _TOPOLOGY_EDGE_KEYS, "topology edge")
     source = _bounded_identity_text(
         edge["source"],
         "topology edge source",
         max_bytes=WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES,
+        enforce_current_policy=apply_current_policy,
     )
     target = _bounded_identity_text(
         edge["target"],
         "topology edge target",
         max_bytes=WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES,
+        enforce_current_policy=apply_current_policy,
     )
     if source is None or target is None:
         raise AssertionError("non-null topology edge identity normalized to None")
@@ -1290,12 +1368,17 @@ def prepare_workflow_progress_topology(
     )
 
 
-def _normalize_event(value: Any) -> tuple[dict[str, Any], bool]:
+def _normalize_event(
+    value: Any,
+    *,
+    apply_current_policy: bool = True,
+) -> tuple[dict[str, Any], bool]:
     event = _exact_mapping(value, _EVENT_KEYS, "recent event")
     label, truncated = _bounded_redacted_text(
         event["label"],
         "recent event label",
         max_bytes=WORKFLOW_PROGRESS_LABEL_MAX_BYTES,
+        apply_current_policy=apply_current_policy,
     )
     state = event["state"]
     if not isinstance(state, str) or state not in _NODE_STATES:
@@ -1417,6 +1500,8 @@ def _prepare_workflow_progress_node_detail(
     identity: WorkflowRunIdentity,
     allow_stored_truncation: bool,
     enforce_current_preview_redaction: bool = True,
+    allow_current_policy_truncation: bool = False,
+    apply_current_text_policy: bool = True,
 ) -> PreparedWorkflowProgressNodeDetail:
     """Normalize a producer record or revalidate its durable truncation evidence."""
     _validate_run_identity(identity)
@@ -1457,10 +1542,12 @@ def _prepare_workflow_progress_node_detail(
         detail["node_id"],
         "node detail node_id",
         max_bytes=WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES,
+        enforce_current_policy=apply_current_text_policy,
     )
     invocation_identity, invocation_id = _normalize_invocation_identity(
         detail["invocation_identity"],
         identity=identity,
+        enforce_current_policy=apply_current_text_policy,
     )
     state = detail["state"]
     if not isinstance(state, str) or state not in _NODE_STATES:
@@ -1473,12 +1560,17 @@ def _prepare_workflow_progress_node_detail(
         progress = None
     else:
         progress_input = _exact_mapping(progress_value, _PROGRESS_KEYS, "node progress")
-        metrics, metrics_truncated = _metrics(progress_input["metrics"], "node progress metrics")
+        metrics, metrics_truncated = _metrics(
+            progress_input["metrics"],
+            "node progress metrics",
+            apply_current_policy=apply_current_text_policy,
+        )
         message, message_truncated = _bounded_redacted_text(
             progress_input["message"],
             "node progress message",
             max_bytes=WORKFLOW_PROGRESS_MESSAGE_MAX_BYTES,
             nullable=True,
+            apply_current_policy=apply_current_text_policy,
         )
         current = _finite_number(progress_input["current"], "node progress current", minimum=0.0)
         total = _finite_number(progress_input["total"], "node progress total", minimum=0.0)
@@ -1513,9 +1605,11 @@ def _prepare_workflow_progress_node_detail(
         execution = None
     else:
         execution_input = _exact_mapping(execution_value, _EXECUTION_KEYS, "node execution")
-        assigned = _assigned_resources(
+        assigned, resources_truncated = _assigned_resources(
             execution_input["assigned_resources"],
             "node assigned resources",
+            apply_current_policy=apply_current_text_policy,
+            allow_policy_omission=allow_current_policy_truncation,
         )
         execution = {
             name: _bounded_identity_text(
@@ -1523,10 +1617,12 @@ def _prepare_workflow_progress_node_detail(
                 f"node execution {name}",
                 max_bytes=WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES,
                 nullable=True,
+                enforce_current_policy=apply_current_text_policy,
             )
             for name in ("ray_job_id", "ray_node_id", "ray_task_id", "ray_worker_id")
         }
         execution["assigned_resources"] = assigned
+        truncated = truncated or resources_truncated
 
     fanout = _normalize_fanout(detail["fanout"])
 
@@ -1535,10 +1631,13 @@ def _prepare_workflow_progress_node_detail(
         try:
             if enforce_current_preview_redaction:
                 output_preview = validate_workflow_output_preview(detail["output_preview"])
+            elif apply_current_text_policy:
+                output_preview = read_workflow_output_preview(detail["output_preview"])
             else:
                 output_preview = _validate_workflow_output_preview(
                     detail["output_preview"],
                     enforce_current_redaction=False,
+                    apply_current_presentation=False,
                 )
         except WorkflowOutputPreviewError as error:
             raise WorkflowProgressStorageError("node output preview is invalid") from error
@@ -1548,6 +1647,7 @@ def _prepare_workflow_progress_node_detail(
         "node error",
         max_bytes=WORKFLOW_PROGRESS_MESSAGE_MAX_BYTES,
         nullable=True,
+        apply_current_policy=apply_current_text_policy,
     )
     events_value = detail["recent_events"]
     if not isinstance(events_value, list):
@@ -1558,7 +1658,10 @@ def _prepare_workflow_progress_node_detail(
     events: list[dict[str, Any]] = []
     for event_value in retained_events:
         try:
-            event, event_truncated = _normalize_event(event_value)
+            event, event_truncated = _normalize_event(
+                event_value,
+                apply_current_policy=apply_current_text_policy,
+            )
         except WorkflowProgressStorageLimitError:
             truncated = True
             continue
@@ -1633,11 +1736,13 @@ def _prepare_workflow_progress_node_detail(
             )
     normalized_truncated = truncated or error_truncated
     if stored_truncated is not None:
-        if normalized_truncated and not stored_truncated:
+        if normalized_truncated and not stored_truncated and not allow_current_policy_truncation:
             raise WorkflowProgressStorageError(
                 "stored node detail suppresses deterministic truncation evidence"
             )
-        normalized_truncated = stored_truncated
+        normalized_truncated = stored_truncated or (
+            allow_current_policy_truncation and normalized_truncated
+        )
     return _prepared_node_detail(
         normalized,
         invocation_id=invocation_id,
@@ -1999,6 +2104,8 @@ def _verify_prepared_node_detail(
         or normalized.truncated != record.truncated
         or normalized.payload != record.payload
         or normalized.digest != record.digest
+        or normalized.encoded_bytes != record.encoded_bytes
+        or normalized.decoded_bytes != record.decoded_bytes
         or normalized.event_count != record.event_count
     ):
         raise WorkflowProgressStorageError("prepared node detail is not normalized")
@@ -2321,21 +2428,37 @@ def verify_workflow_progress_topology_page_record(
     try:
         if collection == WorkflowProgressTopologyCollection.NODE.value:
             for item in page["records"]:
-                normalized, _ = _normalize_topology_node(item)
-                if normalized != item:
+                authenticated, _ = _normalize_topology_node(
+                    item,
+                    apply_current_policy=False,
+                )
+                if authenticated != item:
                     raise WorkflowProgressStorageIntegrityError(
-                        "workflow topology node is not normalized"
+                        "workflow topology node is not canonically stored"
                     )
-                records.append(normalized)
+                presented, _ = _normalize_topology_node(authenticated)
+                if presented["node_id"] != authenticated["node_id"]:
+                    raise WorkflowProgressStorageIntegrityError(
+                        "workflow topology node identity is unsafe"
+                    )
+                records.append(presented)
             stable_keys = [str(item["node_id"]) for item in records]
         else:
             for item in page["records"]:
-                normalized = _normalize_topology_edge(item)
-                if normalized != item:
+                authenticated = _normalize_topology_edge(
+                    item,
+                    apply_current_policy=False,
+                )
+                if authenticated != item:
                     raise WorkflowProgressStorageIntegrityError(
-                        "workflow topology edge is not normalized"
+                        "workflow topology edge is not canonically stored"
                     )
-                records.append(normalized)
+                presented = _normalize_topology_edge(authenticated)
+                if presented != authenticated:
+                    raise WorkflowProgressStorageIntegrityError(
+                        "workflow topology edge identity is unsafe"
+                    )
+                records.append(presented)
             stable_keys = [(str(item["source"]), str(item["target"])) for item in records]
     except WorkflowProgressStorageError as error:
         raise WorkflowProgressStorageIntegrityError(
@@ -2544,20 +2667,36 @@ def verify_workflow_progress_topology_manifest(
         try:
             if collection == WorkflowProgressTopologyCollection.NODE.value:
                 for item in page["records"]:
-                    normalized, _ = _normalize_topology_node(item)
-                    if normalized != item:
+                    authenticated, _ = _normalize_topology_node(
+                        item,
+                        apply_current_policy=False,
+                    )
+                    if authenticated != item:
                         raise WorkflowProgressStorageIntegrityError(
-                            "workflow topology node is not normalized"
+                            "workflow topology node is not canonically stored"
                         )
-                    node_records.append(normalized)
+                    presented, _ = _normalize_topology_node(authenticated)
+                    if presented["node_id"] != authenticated["node_id"]:
+                        raise WorkflowProgressStorageIntegrityError(
+                            "workflow topology node identity is unsafe"
+                        )
+                    node_records.append(presented)
             else:
                 for item in page["records"]:
-                    normalized = _normalize_topology_edge(item)
-                    if normalized != item:
+                    authenticated = _normalize_topology_edge(
+                        item,
+                        apply_current_policy=False,
+                    )
+                    if authenticated != item:
                         raise WorkflowProgressStorageIntegrityError(
-                            "workflow topology edge is not normalized"
+                            "workflow topology edge is not canonically stored"
                         )
-                    edge_records.append(normalized)
+                    presented = _normalize_topology_edge(authenticated)
+                    if presented != authenticated:
+                        raise WorkflowProgressStorageIntegrityError(
+                            "workflow topology edge identity is unsafe"
+                        )
+                    edge_records.append(presented)
         except WorkflowProgressStorageError as error:
             raise WorkflowProgressStorageIntegrityError(
                 "workflow topology page record is invalid"
@@ -3049,30 +3188,55 @@ def _verify_stored_node_detail_row(
     if not isinstance(value, dict):
         raise WorkflowProgressStorageIntegrityError("stored workflow node detail must be an object")
     try:
-        normalized = _prepare_workflow_progress_node_detail(
+        authenticated = _prepare_workflow_progress_node_detail(
             value,
             identity=identity,
             allow_stored_truncation=True,
             enforce_current_preview_redaction=False,
+            apply_current_text_policy=False,
         )
     except WorkflowProgressStorageError as error:
         raise WorkflowProgressStorageIntegrityError(
             "stored workflow node detail failed protocol validation"
         ) from error
     if (
-        normalized.node_key != row["node_key"]
-        or normalized.node_id != row["node_id"]
-        or normalized.invocation_id != row["invocation_id"]
-        or normalized.state != row["state"]
-        or normalized.truncated != row["truncated"]
-        or normalized.digest != row["digest"]
-        or normalized.encoded_bytes != row["encoded_bytes"]
-        or normalized.decoded_bytes != row["decoded_bytes"]
-        or normalized.event_count != row["event_count"]
-        or normalized.payload != payload
+        authenticated.node_key != row["node_key"]
+        or authenticated.node_id != row["node_id"]
+        or authenticated.invocation_id != row["invocation_id"]
+        or authenticated.state != row["state"]
+        or authenticated.truncated != row["truncated"]
+        or authenticated.digest != row["digest"]
+        or authenticated.encoded_bytes != row["encoded_bytes"]
+        or authenticated.decoded_bytes != row["decoded_bytes"]
+        or authenticated.event_count != row["event_count"]
+        or authenticated.payload != payload
     ):
-        raise WorkflowProgressStorageIntegrityError("stored workflow node detail is not normalized")
-    return payload, normalized, value["fanout"] is not None
+        raise WorkflowProgressStorageIntegrityError(
+            "stored workflow node detail is not normalized or canonically stored"
+        )
+    try:
+        presented = _prepare_workflow_progress_node_detail(
+            value,
+            identity=identity,
+            allow_stored_truncation=True,
+            enforce_current_preview_redaction=False,
+            allow_current_policy_truncation=True,
+        )
+    except WorkflowProgressStorageError as error:
+        raise WorkflowProgressStorageIntegrityError(
+            "stored workflow node detail failed presentation validation"
+        ) from error
+    if (
+        presented.node_key != authenticated.node_key
+        or presented.node_id != authenticated.node_id
+        or presented.invocation_id != authenticated.invocation_id
+        or presented.state != authenticated.state
+        or presented.event_count != authenticated.event_count
+    ):
+        raise WorkflowProgressStorageIntegrityError(
+            "stored workflow node detail identity is unsafe"
+        )
+    return payload, presented, value["fanout"] is not None
 
 
 def verify_workflow_progress_node_detail_record(
@@ -3083,22 +3247,18 @@ def verify_workflow_progress_node_detail_record(
     maximum_detail_revision: int,
 ) -> dict[str, Any]:
     """Verify and detach one bounded normalized latest-state detail record."""
-    payload, _normalized, _has_fanout = _verify_stored_node_detail_row(
+    _payload, normalized, _has_fanout = _verify_stored_node_detail_row(
         row,
         identity=identity,
         maximum_topology_version=maximum_topology_version,
         maximum_detail_revision=maximum_detail_revision,
     )
-    value = _decode_canonical_payload(payload, "stored workflow node detail")
+    # The stored digest authenticates the original storage-protocol-v1 payload.
+    # Return the independently normalized presentation so terminal formatting
+    # from an older redaction implementation cannot reach current readers.
+    value = _decode_canonical_payload(normalized.payload, "stored workflow node detail")
     if not isinstance(value, dict):
         raise WorkflowProgressStorageIntegrityError("stored workflow node detail must be an object")
-    if value.get("schema_version") == WORKFLOW_PROGRESS_NODE_DETAIL_SCHEMA_VERSION:
-        try:
-            value["output_preview"] = read_workflow_output_preview(value["output_preview"])
-        except (KeyError, WorkflowOutputPreviewError) as error:
-            raise WorkflowProgressStorageIntegrityError(
-                "stored workflow node output preview failed read validation"
-            ) from error
     return value
 
 

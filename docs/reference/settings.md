@@ -628,14 +628,18 @@ otherwise Django cannot resolve its stock attempt-detail link.
 
 ### Unredacted task diagnostics
 
+Here, "unredacted" means that configured name-pattern redaction is bypassed. The
+response is not raw or unbounded: terminal normalization, SQL field gates, HTML
+escaping, and the rendered-response ceiling still apply.
+
 The ordinary execution and attempt detail pages always apply the built-in redaction
 patterns plus `REDACT_PATTERNS`. Redaction is the safe default for every Admin reader;
 there is no setting that globally disables the built-in patterns on those pages.
 
 Migration `0017_raytaskexecution_sensitive_data_permission` adds the explicit
 `django_ray.view_sensitive_task_data` permission. A user who has that permission and
-the ordinary view permission for the requested object sees a **View unredacted task
-data** link on its detail page. Superusers satisfy both checks. The link opens a
+the ordinary view permission for the requested object sees a **Sensitive data** action
+on its detail page. Superusers satisfy both checks. The action opens a
 separate GET-only, non-cacheable page; the ordinary detail never embeds raw values in
 hidden HTML, JavaScript, or data attributes.
 
@@ -888,7 +892,7 @@ Object key prefix used by GCS backend.
 - **Type**: `str | sequence[str] | None`
 - **Default**: `None` (built-in patterns are enabled)
 
-Regular expressions used to redact sensitive mapping keys and matching string
+Bounded pattern expressions used to redact sensitive mapping keys and matching string
 values in structured logs, Ray observability responses, the sample operational
 API, and Django admin task details. A configured string or sequence extends the
 built-in patterns for common names such as `password`, `secret`, `token`,
@@ -899,12 +903,34 @@ These patterns still govern the ordinary Admin detail. The separately authorized
 display redaction only for its fixed field allowlist; use the permission boundary when
 debugging requires the stored value instead of weakening the global redaction policy.
 
+Matching is case-insensitive substring search. Supported syntax is literals and escaped
+literals, `.`, positive/negated character classes and ranges, capturing/noncapturing
+groups, alternation, `?`, `*`, `+`, bounded or open numeric repetition, and the
+single-character classes `\d`, `\D`, `\s`, `\S`, `\w`, and `\W`. Startup rejects
+zero-width anchors/boundaries, lookaround, backreferences, inline flags,
+named/conditional/atomic groups, possessive quantifiers, and expressions which can match
+empty text. Direct helper arguments use the same contract.
+
+Limits are 64 configured entries, 256 UTF-8 bytes per source, and 4,096 configured
+source bytes. Built-ins do not consume those configured allowances. The complete program
+is limited to 80 expressions, 8,192 source bytes, 512 states per expression, 2,048 states
+in aggregate, numeric repeat bounds through 128, and group depth 32. One root value shares
+a 250,000-unit matcher ceiling across all terminal representations and nested members.
+Structured roots also admit at most 4,096 visited items and 65,536 aggregate characters
+across string keys and values. Work or input-limit exhaustion returns a type-compatible
+`[REDACTED]` projection; unsupported configuration raises `ImproperlyConfigured` during
+startup without echoing or chaining the rejected source.
+
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "auto",
     "REDACT_PATTERNS": [r"customer[_-]?email", r"access[_-]?token"],
 }
 ```
+
+Run `python manage.py check` with deployment settings during upgrade. Rewrite rejected
+anchors or boundaries as consuming markers, expand a backreference/lookaround into
+bounded alternatives, or keep richer classification in application code.
 
 Successful task logs expose only result type and serialized size. The completion
 envelope is persisted through the database channel and is not printed to Ray

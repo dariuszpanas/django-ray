@@ -74,6 +74,7 @@ template_origin = loader.get_template("admin/base.html").origin.name.replace("\\
 assert "/unfold/templates/admin/base.html" in template_origin
 assert finders.find("unfold/css/styles.css")
 assert finders.find("unfold/js/app.js")
+assert finders.find("django_ray/admin/diagnostics.css")
 assert finders.find("django_ray/admin/task_live.css")
 assert finders.find("django_ray/admin/workflow_diagnostics.js")
 assert finders.find("testproject/admin.css")
@@ -86,6 +87,7 @@ call_command("collectstatic", interactive=False, verbosity=0)
 static_root = Path(settings.STATIC_ROOT)
 assert (static_root / "unfold/css/styles.css").is_file()
 assert (static_root / "unfold/js/app.js").is_file()
+assert (static_root / "django_ray/admin/diagnostics.css").is_file()
 assert (static_root / "django_ray/admin/task_live.css").is_file()
 assert (static_root / "django_ray/admin/task_live.js").is_file()
 assert (static_root / "django_ray/admin/workflow_diagnostics.js").is_file()
@@ -345,18 +347,29 @@ assert "unfold-attempt-inline-marker" in change_html
 assert str(attempt) not in change_html
 assert change_html.count(attempt_detail_url) == 1
 assert "field-attempt_detail_link" in change_html
-assert "View unredacted task data" in attempt_detail_html
+assert "Sensitive data" in attempt_detail_html
 assert f'href="{attempt_sensitive_url}"' in attempt_detail_html
+assert "django-ray-admin-action--sensitive" in attempt_detail_html
+assert 'class="django-ray-admin-action django-ray-admin-action--sensitive"' in attempt_detail_html
+assert 'aria-label="View sensitive task data"' in attempt_detail_html
 assert "unfold-attempt-output-marker" not in attempt_detail_html
 assert "unfold-attempt-output-marker" in attempt_sensitive_html
+assert "django-ray-sensitive-data__header" in attempt_sensitive_html
+assert "django_ray/admin/diagnostics" in attempt_sensitive_html
 assert "django_ray/admin/sensitive_task_data" in attempt_sensitive_html
 assert "unfold/css/styles" in attempt_sensitive_html
 
 assert "Retry task..." in detail_failed_html
-assert "View unredacted task data" in detail_failed_html
+assert "Sensitive data" in detail_failed_html
 assert f'href="{detail_failed_sensitive_url}"' in detail_failed_html
+assert "django-ray-admin-action--retry" in detail_failed_html
+assert 'aria-describedby="django-ray-task-actions-guidance"' in detail_failed_html
+assert "django-ray-admin-action--sensitive" in detail_failed_html
+assert 'class="django-ray-admin-action django-ray-admin-action--sensitive"' in detail_failed_html
 assert "unfold-detail-retry-secret-marker" not in detail_failed_html
 assert "unfold-detail-retry-secret-marker" in detail_failed_sensitive_html
+assert "django-ray-sensitive-data__header" in detail_failed_sensitive_html
+assert "django_ray/admin/diagnostics" in detail_failed_sensitive_html
 assert "django_ray/admin/sensitive_task_data" in detail_failed_sensitive_html
 assert "unfold/css/styles" in detail_failed_sensitive_html
 assert "no-store" in detail_failed_sensitive["Cache-Control"]
@@ -526,6 +539,48 @@ assert b".django-ray-workflow__summary" in live_stylesheet_body
 assert b"grid-template-columns: repeat(4, minmax(0, 1fr))" in live_stylesheet_body
 assert b".django-ray-workflow__chip" in live_stylesheet_body
 assert b":focus-visible" in live_stylesheet_body
+
+diagnostics_stylesheet_match = re.search(
+    r'''href=["'](?P<path>/static/django_ray/admin/diagnostics[^"']*\.css)["']''',
+    detail_failed_html,
+)
+assert diagnostics_stylesheet_match is not None
+diagnostics_stylesheet_response = authenticated.get(
+    html.unescape(diagnostics_stylesheet_match.group("path")),
+)
+assert diagnostics_stylesheet_response.status_code == 200
+assert diagnostics_stylesheet_response["Content-Type"].startswith("text/css")
+diagnostics_stylesheet_body = b"".join(
+    diagnostics_stylesheet_response.streaming_content
+)
+diagnostics_stylesheet_response.close()
+assert b".django-ray-admin-action--sensitive" in diagnostics_stylesheet_body
+assert b"a.django-ray-admin-action.django-ray-admin-action--sensitive" in diagnostics_stylesheet_body
+assert b".django-ray-admin-action--retry" in diagnostics_stylesheet_body
+assert b".django-ray-admin-action--secondary" in diagnostics_stylesheet_body
+assert b"outline: 3px solid #075985" in diagnostics_stylesheet_body
+assert b"outline-color: #38bdf8" in diagnostics_stylesheet_body
+assert b"html[data-theme=\"dark\"]" in diagnostics_stylesheet_body
+assert b"html[data-theme=\"auto\"]" in diagnostics_stylesheet_body
+
+sensitive_stylesheet_match = re.search(
+    r'''href=["'](?P<path>/static/django_ray/admin/sensitive_task_data[^"']*\.css)["']''',
+    detail_failed_sensitive_html,
+)
+assert sensitive_stylesheet_match is not None
+sensitive_stylesheet_response = authenticated.get(
+    html.unescape(sensitive_stylesheet_match.group("path")),
+)
+assert sensitive_stylesheet_response.status_code == 200
+assert sensitive_stylesheet_response["Content-Type"].startswith("text/css")
+sensitive_stylesheet_body = b"".join(sensitive_stylesheet_response.streaming_content)
+sensitive_stylesheet_response.close()
+assert b".django-ray-sensitive-data__header" in sensitive_stylesheet_body
+assert b"--django-ray-sensitive-code-bg: #0b0c0f" in sensitive_stylesheet_body
+assert b".field-error_message" in sensitive_stylesheet_body
+assert b".field-error_traceback" in sensitive_stylesheet_body
+assert b"html[data-theme=\"dark\"]" in sensitive_stylesheet_body
+assert b"html[data-theme=\"auto\"]" in sensitive_stylesheet_body
 
 workflow_script_match = re.search(
     r'''src=["'](?P<path>/static/django_ray/admin/workflow_diagnostics[^"']*\.js)["']''',
@@ -745,10 +800,17 @@ detail_failed_html = detail_failed_response.content.decode()
 detail_failed_sensitive_html = detail_failed_sensitive_response.content.decode()
 succeeded_detail_html = succeeded_detail_response.content.decode()
 assert "Retry task..." in detail_failed_html
-assert "View unredacted task data" in detail_failed_html
+assert "Sensitive data" in detail_failed_html
 assert f'href="{detail_failed_sensitive_url}"' in detail_failed_html
+assert "django-ray-admin-action--retry" in detail_failed_html
+assert 'aria-describedby="django-ray-task-actions-guidance"' in detail_failed_html
+assert "django-ray-admin-action--sensitive" in detail_failed_html
+assert 'class="django-ray-admin-action django-ray-admin-action--sensitive"' in detail_failed_html
 assert "standard-admin-detail-retry-secret-marker" not in detail_failed_html
 assert "standard-admin-detail-retry-secret-marker" in detail_failed_sensitive_html
+assert detail_failed_sensitive_html.count("<h1>Unredacted task data</h1>") == 1
+assert "django-ray-sensitive-data__header" in detail_failed_sensitive_html
+assert "django_ray/admin/diagnostics" in detail_failed_sensitive_html
 assert "django_ray/admin/sensitive_task_data" in detail_failed_sensitive_html
 assert "unfold/css/styles" not in detail_failed_sensitive_html
 assert "no-store" in detail_failed_sensitive_response["Cache-Control"]
