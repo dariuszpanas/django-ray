@@ -22,6 +22,8 @@ COVERAGE_RAY_JOB_MIN ?= 90
 COVERAGE_TESTPROJECT_MIN ?= 80
 COVERAGE_DEBT_OUTPUT_DIR ?= artifacts/coverage-debt
 COVERAGE_DEBT_SOURCE_COMMIT ?= $(shell git rev-parse HEAD)
+COVERAGE_DEBT_DEFAULT_TIMEOUT_SECONDS ?= 1200
+COVERAGE_DEBT_LOCAL_RAY_TIMEOUT_SECONDS ?= 900
 TEST_SUITE_INVENTORY_OUTPUT_DIR ?= artifacts/test-suite-inventory
 TEST_XDIST_WORKERS ?= 4
 
@@ -114,12 +116,16 @@ test-suite-inventory:
 		--json-output "$(TEST_SUITE_INVENTORY_OUTPUT_DIR)/test-suite-inventory.json" \
 		--markdown-output "$(TEST_SUITE_INVENTORY_OUTPUT_DIR)/test-suite-inventory.md"
 
-# Produce deterministic line-coverage debt evidence from the normal suite.
+# Produce deterministic line-coverage debt evidence from isolated resource phases.
 coverage-debt:
 	python scripts/coverage_debt.py prepare-output --output-dir "$(COVERAGE_DEBT_OUTPUT_DIR)"
-	pytest -m "not live_cluster" --cov=src --cov-config=pyproject.toml --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
+	python scripts/coverage_debt.py run-phases \
+		--output-dir "$(COVERAGE_DEBT_OUTPUT_DIR)" \
+		--default-timeout-seconds $(COVERAGE_DEBT_DEFAULT_TIMEOUT_SECONDS) \
+		--local-ray-timeout-seconds $(COVERAGE_DEBT_LOCAL_RAY_TIMEOUT_SECONDS)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
+	coverage report --fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage json --rcfile=pyproject.toml --pretty-print -o "$(COVERAGE_DEBT_OUTPUT_DIR)/coverage.py.json"
 	python scripts/coverage_debt.py render \
 		--coverage-json "$(COVERAGE_DEBT_OUTPUT_DIR)/coverage.py.json" \

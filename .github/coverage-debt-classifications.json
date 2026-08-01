@@ -7,11 +7,142 @@
         "rationale": "Admin authorization, input validation, and bounded error responses are observable contracts that should be covered with permission and response assertions."
       }
     },
+    "src/django_ray/admin_workflow_graph.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Workflow graph authorization, bounded projection, pagination, and failure-path rendering are observable Admin contracts that should be covered with exact response assertions."
+      }
+    },
+    "src/django_ray/backends.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Task ID collision classification and queue admission are observable backend contracts that should be covered with exact SQLite and PostgreSQL failure assertions."
+      }
+    },
+    "src/django_ray/input_storage.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Task-input serialization, externalization, reference authorization, integrity verification, and cleanup are deterministic durable-storage contracts that should be covered with exact backend and failure assertions."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "290"
+          ],
+          "category": "defensive-invariant",
+          "rationale": "Validated reference metadata exhaustively selects filesystem, S3, or GCS before backend resolution, so this terminal rejection protects an internal invariant."
+        }
+      ]
+    },
     "src/django_ray/lifecycle.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Terminal workflow-summary timestamp and state reconciliation are deterministic lifecycle contracts that can be covered with exact persisted-state assertions."
       }
+    },
+    "src/django_ray/management/__init__.py": {
+      "default": {
+        "category": "dead-or-non-behavioral-code",
+        "rationale": "The management package marker contains only descriptive module metadata and has no runtime branch or user-visible behavior."
+      }
+    },
+    "src/django_ray/management/commands/__init__.py": {
+      "default": {
+        "category": "dead-or-non-behavioral-code",
+        "rationale": "The management command package marker contains only descriptive module metadata and has no runtime branch or user-visible behavior."
+      }
+    },
+    "src/django_ray/management/commands/django_ray_benchmark_polling.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Polling benchmark worker ownership, claim timing, shutdown, and failure recording are deterministic harness contracts that should be covered with controlled clocks, workers, and database assertions."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "568-569"
+          ],
+          "category": "defensive-invariant",
+          "rationale": "Worker lease creation either assigns the fenced lease identity or raises, so the post-call missing-identity guard protects command-internal state."
+        }
+      ]
+    },
+    "src/django_ray/management/commands/django_ray_benchmark_workflow_progress.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Workflow-progress benchmark validation, deterministic workload modeling, bounded sampling, database probing, and evidence rendering are testable harness contracts that should be covered with exact command and provider-double assertions."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "135-136"
+          ],
+          "category": "environment-specific",
+          "rationale": "The optional POSIX resource telemetry fallback depends on host module availability and error behavior; Windows naturally exercises the unavailable-module path while Linux measures real RSS."
+        }
+      ]
+    },
+    "src/django_ray/management/commands/django_ray_worker.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Worker selection, lease ownership, polling, shutdown, and failure handling are observable command contracts that should be covered with exact state and diagnostic assertions."
+      }
+    },
+    "src/django_ray/migrations/0016_raytaskexecution_queue_expiration.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Legacy queue-deadline snapshotting, 500-row batch flushing, opt-out handling, and reverse migration behavior are deterministic data-migration contracts suited to exact migration tests."
+      }
+    },
+    "src/django_ray/migrations/__init__.py": {
+      "default": {
+        "category": "dead-or-non-behavioral-code",
+        "rationale": "The migrations package marker contains only descriptive module metadata and has no runtime branch or user-visible behavior."
+      }
+    },
+    "src/django_ray/observability.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Redaction, bounded status projection, and Ray identifier handling are deterministic observability contracts that should be covered with exact payload assertions."
+      }
+    },
+    "src/django_ray/result_storage.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Result reference parsing, namespace authorization, create-only persistence, integrity verification, and fenced cleanup are deterministic durable-storage contracts that should be covered with exact filesystem and provider-double assertions."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "290-292",
+            "615-617",
+            "1326"
+          ],
+          "category": "defensive-invariant",
+          "rationale": "These terminal rejections protect candidate, relative-path, and backend states already excluded by the preceding reference parser and exhaustive control flow."
+        }
+      ]
+    },
+    "src/django_ray/runner/cancellation.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Cancellation ownership, stale-attempt fencing, and terminal-state precedence are deterministic runner contracts that should be covered with exact transition assertions."
+      }
+    },
+    "src/django_ray/runner/leasing.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Stale lease selection, locking, and deactivation are deterministic coordination contracts that should be covered with exact SQLite and PostgreSQL persistence assertions."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "130-149"
+          ],
+          "category": "environment-specific",
+          "rationale": "The locked stale-lease cleanup branch requires select-for-update support and belongs in the PostgreSQL coordination job rather than the monthly SQLite coverage phases."
+        }
+      ]
     },
     "src/django_ray/runner/ray_core.py": {
       "default": {
@@ -72,6 +203,12 @@
         }
       ]
     },
+    "src/django_ray/runtime/context.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Task execution context binding, lookup, and restoration are deterministic runtime contracts that should be covered with nested and failure-path assertions."
+      }
+    },
     "src/django_ray/runtime/remote.py": {
       "default": {
         "category": "testable-behavior",
@@ -90,10 +227,61 @@
         "rationale": "RuntimeEnv validation and local-file snapshotting can be covered with temporary paths and assertions about immutable packaged content."
       }
     },
+    "src/django_ray/runtime/runtime_env_encryption.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Envelope validation, key selection, authentication failure, and rotation compatibility are deterministic cryptographic-boundary contracts suited to fixed-key tests."
+      }
+    },
+    "src/django_ray/workflow_output_previews.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Output-preview budgets, canonicalization, redaction, validation, and read-time suppression are deterministic safety contracts that should be covered with exact boundary and malformed-payload assertions."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "148-149"
+          ],
+          "category": "defensive-invariant",
+          "rationale": "Canonical encoding receives only the freshly normalized finite, UTF-8, bounded exact-JSON tree, so this exception path protects an internal regression."
+        }
+      ]
+    },
     "src/django_ray/workflow_plans.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Plan validation, normalization, RuntimeEnv identity, and retry-safety decisions are deterministic contracts suited to focused behavioral tests."
+      }
+    },
+    "src/django_ray/workflow_progress.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Workflow progress event normalization and bounded reporting decisions are deterministic public behavior that should be covered with exact event assertions."
+      }
+    },
+    "src/django_ray/workflow_progress_preparation.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Topology and detail preparation limits, truncation reasons, and canonical ordering are deterministic safety contracts that should be covered at exact boundaries."
+      }
+    },
+    "src/django_ray/workflow_progress_producer.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Producer admission, coalescing, acknowledgement, and terminal handoff outcomes are deterministic bounded-delivery contracts suited to controlled actor tests."
+      }
+    },
+    "src/django_ray/workflow_progress_protocol.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Progress protocol encoding, identity fencing, size limits, and malformed-envelope rejection are deterministic compatibility contracts requiring exact round-trip assertions."
+      }
+    },
+    "src/django_ray/workflow_progress_publication.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Terminal publication validation, stale-owner refusal, and bounded storage outcomes are deterministic lifecycle contracts that should be covered with exact persistence assertions."
       }
     },
     "src/django_ray/workflow_progress_reads.py": {

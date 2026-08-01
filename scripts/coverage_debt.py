@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
+import signal
+import stat
+import subprocess
 import sys
+import threading
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -21,7 +27,22 @@ REPORT_COMMENT_MARKER = "<!-- django-ray:coverage-debt-latest-report -->"
 STATE_START_MARKER = "<!-- django-ray:coverage-debt-state\n"
 STATE_END_MARKER = "\n--><!-- /django-ray:coverage-debt-state -->"
 MAX_COMMENT_BYTES = 64_000
-ARTIFACT_NAMES = ("coverage.py.json", "coverage-debt.json", "coverage-debt.md")
+MAX_PHASE_LOG_BYTES = 256 * 1024
+MAX_PHASE_TIMING_BYTES = 16 * 1024 * 1024
+PHASE_OUTPUT_DRAIN_TIMEOUT_SECONDS = 2.0
+PHASE_FORCED_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+PHASE_REPORT_SCHEMA_VERSION = 1
+TEST_TIMING_SCHEMA_VERSION = 4
+ARTIFACT_NAMES = (
+    "coverage.py.json",
+    "coverage-debt.json",
+    "coverage-debt.md",
+    "coverage-phases.json",
+    "coverage-phases.md",
+    "coverage-default-resources.log",
+    "coverage-local-ray.log",
+    "local-ray-timing.json",
+)
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 CATEGORY_LABELS = {
@@ -35,6 +56,72 @@ CATEGORY_LABELS = {
 
 class CoverageDebtError(ValueError):
     """Raised when coverage evidence or tracker state is unsafe to publish."""
+
+
+@dataclass(frozen=True)
+class CoveragePhase:
+    """One isolated coverage collection phase with bounded diagnostics."""
+
+    name: str
+    selection: str
+    coverage_mode: str
+    timeout_seconds: float
+    command: tuple[str, ...]
+    log_path: Path
+    timing_path: Path | None = None
+
+
+@dataclass
+class _OwnedPhaseProcess:
+    """One phase launcher and the platform boundary containing its descendants."""
+
+    process: subprocess.Popen[bytes]
+    windows_job_handle: int | None = None
+
+
+class _BoundedPhaseOutput:
+    """Continuously drain subprocess output while retaining only its tail."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self.output_bytes = 0
+        self.tail = bytearray()
+        self.error: str | None = None
+        self._lock = threading.Lock()
+
+    def append(self, chunk: bytes) -> None:
+        """Count one output chunk and retain at most the configured tail."""
+        with self._lock:
+            self.output_bytes += len(chunk)
+            self.tail.extend(chunk)
+            overflow = len(self.tail) - self.max_bytes
+            if overflow > 0:
+                del self.tail[:overflow]
+
+    def consume(self, stream: Any) -> None:
+        """Drain a binary subprocess pipe until every writer closes it."""
+        try:
+            while chunk := stream.read(64 * 1024):
+                self.append(chunk)
+        except (OSError, ValueError) as error:
+            with self._lock:
+                self.error = " ".join(str(error).split())[:1_000]
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    def mark_error(self, message: str) -> None:
+        """Retain a bounded capture failure without replacing an earlier one."""
+        with self._lock:
+            if self.error is None:
+                self.error = " ".join(message.split())[:1_000]
+
+    def snapshot(self) -> tuple[int, bytes, str | None]:
+        """Return a stable output count, retained tail, and capture error."""
+        with self._lock:
+            return self.output_bytes, bytes(self.tail), self.error
 
 
 @dataclass(frozen=True)
@@ -520,6 +607,874 @@ def prepare_output_directory(path: Path) -> None:
         artifact.with_name(f".{artifact.name}.pending").unlink(missing_ok=True)
 
 
+def coverage_phases(
+    output_dir: Path,
+    *,
+    default_timeout_seconds: float,
+    local_ray_timeout_seconds: float,
+) -> tuple[CoveragePhase, CoveragePhase]:
+    """Build the exact ordered coverage phases used locally and in automation."""
+    for label, value in (
+        ("default-resource", default_timeout_seconds),
+        ("local-Ray", local_ray_timeout_seconds),
+    ):
+        if not math.isfinite(value) or value <= 0:
+            raise CoverageDebtError(f"{label} timeout must be finite and positive")
+
+    coverage_arguments = (
+        "--cov=src",
+        "--cov-config=pyproject.toml",
+        "--cov-report=",
+        "--cov-fail-under=0",
+        "--maxfail=1",
+    )
+    default_resources = CoveragePhase(
+        name="default-resources",
+        selection="not real_ray and not live_cluster and not postgresql",
+        coverage_mode="replace",
+        timeout_seconds=default_timeout_seconds,
+        command=(
+            sys.executable,
+            "-m",
+            "pytest",
+            "-m",
+            "not real_ray and not live_cluster and not postgresql",
+            *coverage_arguments,
+            "-q",
+        ),
+        log_path=output_dir / "coverage-default-resources.log",
+    )
+    local_ray_timing = output_dir / "local-ray-timing.json"
+    local_ray = CoveragePhase(
+        name="local-ray",
+        selection="taxonomy lane local-ray (compiled_graph_opt_in excluded)",
+        coverage_mode="append",
+        timeout_seconds=local_ray_timeout_seconds,
+        command=(
+            sys.executable,
+            "scripts/test_suite_inventory.py",
+            "run",
+            "--lane",
+            "local-ray",
+            "--observation",
+            "coverage-debt-monthly",
+            "--variant",
+            "locked-dependencies",
+            "--timing-output",
+            str(local_ray_timing),
+            "--external-note",
+            "uv environment already synchronized; setup time excluded",
+            "--",
+            *coverage_arguments,
+            "--cov-append",
+            "-vv",
+        ),
+        log_path=output_dir / "coverage-local-ray.log",
+        timing_path=local_ray_timing,
+    )
+    return default_resources, local_ray
+
+
+def _windows_process_handle(process: subprocess.Popen[bytes]) -> int:
+    """Return a Windows ``Popen`` process handle without widening its public API."""
+    try:
+        return int(vars(process)["_handle"])
+    except (KeyError, TypeError, ValueError) as error:  # pragma: no cover - Windows invariant
+        raise CoverageDebtError(
+            "Windows coverage phase omitted its native process handle"
+        ) from error
+
+
+def _create_windows_phase_job(process: subprocess.Popen[bytes]) -> int:
+    """Contain a suspended Windows phase in a kill-on-close Job."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("per_process_user_time_limit", ctypes.c_longlong),
+            ("per_job_user_time_limit", ctypes.c_longlong),
+            ("limit_flags", wintypes.DWORD),
+            ("minimum_working_set_size", ctypes.c_size_t),
+            ("maximum_working_set_size", ctypes.c_size_t),
+            ("active_process_limit", wintypes.DWORD),
+            ("affinity", ctypes.c_size_t),
+            ("priority_class", wintypes.DWORD),
+            ("scheduling_class", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("read_operation_count", ctypes.c_ulonglong),
+            ("write_operation_count", ctypes.c_ulonglong),
+            ("other_operation_count", ctypes.c_ulonglong),
+            ("read_transfer_count", ctypes.c_ulonglong),
+            ("write_transfer_count", ctypes.c_ulonglong),
+            ("other_transfer_count", ctypes.c_ulonglong),
+        ]
+
+    class ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("basic_limit_information", BasicLimitInformation),
+            ("io_info", IoCounters),
+            ("process_memory_limit", ctypes.c_size_t),
+            ("job_memory_limit", ctypes.c_size_t),
+            ("peak_process_memory_used", ctypes.c_size_t),
+            ("peak_job_memory_used", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_job = kernel32.CreateJobObjectW
+    create_job.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    create_job.restype = wintypes.HANDLE
+    set_information = kernel32.SetInformationJobObject
+    set_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    set_information.restype = wintypes.BOOL
+    assign_process = kernel32.AssignProcessToJobObject
+    assign_process.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    assign_process.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_job(None, None)
+    if not handle:
+        raise CoverageDebtError(
+            f"could not create a Windows coverage phase Job: error {ctypes.get_last_error()}"
+        )
+    information = ExtendedLimitInformation()
+    information.basic_limit_information.limit_flags = 0x00002000
+    if not set_information(handle, 9, ctypes.byref(information), ctypes.sizeof(information)):
+        error_code = ctypes.get_last_error()
+        close_handle(handle)
+        raise CoverageDebtError(
+            f"could not configure a Windows coverage phase Job: error {error_code}"
+        )
+    if not assign_process(
+        handle,
+        wintypes.HANDLE(_windows_process_handle(process)),
+    ):
+        error_code = ctypes.get_last_error()
+        close_handle(handle)
+        raise CoverageDebtError(f"could not contain a Windows coverage phase: error {error_code}")
+    return int(handle)
+
+
+def _resume_windows_phase(process: subprocess.Popen[bytes]) -> None:
+    """Resume a Windows phase only after its Job boundary is installed."""
+    import ctypes
+    from ctypes import wintypes
+
+    resume_process = ctypes.WinDLL("ntdll").NtResumeProcess
+    resume_process.argtypes = [wintypes.HANDLE]
+    resume_process.restype = ctypes.c_long
+    status = int(resume_process(wintypes.HANDLE(_windows_process_handle(process))))
+    if status != 0:
+        raise CoverageDebtError(
+            f"could not resume a contained Windows coverage phase: status {status}"
+        )
+
+
+def _windows_job_active_processes(handle: int) -> int:
+    """Return the number of live processes retained by one Windows Job."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicAccountingInformation(ctypes.Structure):
+        _fields_ = [
+            ("total_user_time", ctypes.c_longlong),
+            ("total_kernel_time", ctypes.c_longlong),
+            ("this_period_total_user_time", ctypes.c_longlong),
+            ("this_period_total_kernel_time", ctypes.c_longlong),
+            ("total_page_fault_count", wintypes.DWORD),
+            ("total_processes", wintypes.DWORD),
+            ("active_processes", wintypes.DWORD),
+            ("total_terminated_processes", wintypes.DWORD),
+        ]
+
+    query_information = ctypes.WinDLL("kernel32", use_last_error=True).QueryInformationJobObject
+    query_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    query_information.restype = wintypes.BOOL
+    information = BasicAccountingInformation()
+    if not query_information(
+        wintypes.HANDLE(handle),
+        1,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        None,
+    ):
+        raise CoverageDebtError(
+            f"could not query a Windows coverage phase Job: error {ctypes.get_last_error()}"
+        )
+    return int(information.active_processes)
+
+
+def _terminate_windows_phase_job(handle: int) -> None:
+    """Forcibly stop every live process retained by one Windows Job."""
+    import ctypes
+    from ctypes import wintypes
+
+    terminate_job = ctypes.WinDLL("kernel32", use_last_error=True).TerminateJobObject
+    terminate_job.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    terminate_job.restype = wintypes.BOOL
+    if not terminate_job(wintypes.HANDLE(handle), 1):
+        raise CoverageDebtError(
+            f"could not terminate a Windows coverage phase Job: error {ctypes.get_last_error()}"
+        )
+
+
+def _close_windows_phase_job(handle: int) -> None:
+    """Close a Windows Job handle, activating its final kill-on-close fence."""
+    import ctypes
+    from ctypes import wintypes
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    if not close_handle(wintypes.HANDLE(handle)):
+        raise CoverageDebtError(
+            f"could not close a Windows coverage phase Job: error {ctypes.get_last_error()}"
+        )
+
+
+def _phase_environment() -> dict[str, str]:
+    """Return the deterministic environment inherited by isolated coverage phases."""
+    environment = os.environ.copy()
+    # Local-Ray coverage reuses the synchronized driver instead of asking Ray's
+    # uv hook to create a second packaged environment without installed dependencies.
+    environment["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
+    environment.pop("GIT_CONFIG_PARAMETERS", None)
+    for name in tuple(environment):
+        if re.fullmatch(r"GIT_CONFIG_(?:KEY|VALUE)_\d+", name):
+            environment.pop(name)
+    environment["GIT_CONFIG_COUNT"] = "1"
+    environment["GIT_CONFIG_KEY_0"] = "core.fsmonitor"
+    environment["GIT_CONFIG_VALUE_0"] = "false"
+    return environment
+
+
+def _launch_phase(root: Path, phase: CoveragePhase) -> _OwnedPhaseProcess:
+    launch_options: dict[str, Any] = {"env": _phase_environment()}
+    if os.name == "posix":
+        launch_options["start_new_session"] = True
+    elif os.name == "nt":
+        launch_options["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | 0x00000004  # CREATE_SUSPENDED
+        )
+    else:
+        raise CoverageDebtError(f"unsupported coverage phase platform: {os.name}")
+    process = cast(
+        subprocess.Popen[bytes],
+        subprocess.Popen(
+            phase.command,
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            **launch_options,
+        ),
+    )
+    windows_job_handle: int | None = None
+    try:
+        if os.name == "nt":
+            windows_job_handle = _create_windows_phase_job(process)
+            _resume_windows_phase(process)
+    except BaseException:
+        try:
+            if windows_job_handle is not None:
+                _terminate_windows_phase_job(windows_job_handle)
+            else:
+                process.kill()
+            process.wait(timeout=PHASE_FORCED_SHUTDOWN_TIMEOUT_SECONDS)
+        finally:
+            if windows_job_handle is not None:
+                _close_windows_phase_job(windows_job_handle)
+            if process.stdout is not None:
+                process.stdout.close()
+        raise
+    return _OwnedPhaseProcess(process=process, windows_job_handle=windows_job_handle)
+
+
+def _owned_process_tree_is_active(owned: _OwnedPhaseProcess) -> bool:
+    """Return whether the retained platform boundary still contains live work."""
+    if os.name == "posix":
+        try:
+            os.killpg(owned.process.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    if os.name == "nt":
+        if owned.windows_job_handle is None:  # pragma: no cover - construction is fail closed
+            raise CoverageDebtError("Windows coverage phase has no process-tree containment Job")
+        return _windows_job_active_processes(owned.windows_job_handle) > 0
+    raise CoverageDebtError(f"unsupported coverage phase platform: {os.name}")
+
+
+def _close_owned_process_boundary(owned: _OwnedPhaseProcess) -> str | None:
+    """Release the retained Windows Job handle after phase shutdown."""
+    if owned.windows_job_handle is None:
+        return None
+    handle = owned.windows_job_handle
+    owned.windows_job_handle = None
+    try:
+        _close_windows_phase_job(handle)
+    except CoverageDebtError as error:
+        return " ".join(str(error).split())[:1_000]
+    return None
+
+
+def _terminate_owned_process_tree(owned: _OwnedPhaseProcess) -> str | None:
+    """Terminate only the subprocess tree launched for one coverage phase."""
+    process = owned.process
+    error_message: str | None = None
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            error_message = str(error)
+    elif os.name == "nt" and owned.windows_job_handle is not None:
+        try:
+            _terminate_windows_phase_job(owned.windows_job_handle)
+        except CoverageDebtError as error:
+            error_message = str(error)
+    elif os.name == "nt":  # pragma: no cover - construction is fail closed
+        error_message = "Windows coverage phase has no process-tree containment Job"
+    else:
+        error_message = f"unsupported coverage phase platform: {os.name}"
+
+    if error_message is not None and process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=PHASE_FORCED_SHUTDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=PHASE_FORCED_SHUTDOWN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            return "owned coverage phase process tree did not terminate"
+    deadline = time.monotonic() + PHASE_FORCED_SHUTDOWN_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            if not _owned_process_tree_is_active(owned):
+                break
+        except CoverageDebtError as error:
+            error_message = str(error)
+            break
+        time.sleep(0.05)
+    else:
+        return "owned coverage phase process tree did not terminate"
+    return None if error_message is None else " ".join(error_message.split())[:1_000]
+
+
+def _settle_completed_phase_tree(
+    owned: _OwnedPhaseProcess,
+    reader: threading.Thread,
+) -> tuple[bool, str | None, str | None]:
+    """Allow orderly exit, then fail closed on post-launcher descendants."""
+    deadline = time.monotonic() + PHASE_OUTPUT_DRAIN_TIMEOUT_SECONDS
+    tree_active = True
+    query_error: str | None = None
+    while time.monotonic() < deadline:
+        reader.join(timeout=min(0.05, max(0.0, deadline - time.monotonic())))
+        try:
+            tree_active = _owned_process_tree_is_active(owned)
+        except CoverageDebtError as error:
+            query_error = " ".join(str(error).split())[:1_000]
+            break
+        if not tree_active and not reader.is_alive():
+            return False, None, None
+
+    if query_error is None:
+        try:
+            tree_active = _owned_process_tree_is_active(owned)
+        except CoverageDebtError as error:
+            query_error = " ".join(str(error).split())[:1_000]
+    descendants_terminated = tree_active
+    cleanup_error = query_error
+    if tree_active:
+        cleanup_error = "owned coverage phase descendants outlived the launcher"
+    termination_error = (
+        _terminate_owned_process_tree(owned)
+        if tree_active or query_error is not None or reader.is_alive()
+        else None
+    )
+    return descendants_terminated, cleanup_error, termination_error
+
+
+def _phase_log(
+    tail: bytes,
+    output_bytes: int,
+    phase: CoveragePhase,
+    *,
+    outcome: str,
+    exit_code: int | None,
+    timed_out: bool,
+    termination_error: str | None,
+    cleanup_error: str | None,
+    descendants_terminated: bool,
+    capture_error: str | None,
+    timing_error: str | None,
+) -> bool:
+    truncated = output_bytes > len(tail)
+    body = tail.decode("utf-8", errors="replace")
+    header = "\n".join(
+        (
+            f"phase: {phase.name}",
+            f"selection: {phase.selection}",
+            f"coverage_mode: {phase.coverage_mode}",
+            f"outcome: {outcome}",
+            f"timeout_seconds: {phase.timeout_seconds:g}",
+            f"timed_out: {str(timed_out).lower()}",
+            f"exit_code: {'unavailable' if exit_code is None else exit_code}",
+            f"output_bytes: {output_bytes}",
+            f"tail_truncated: {str(truncated).lower()}",
+            (
+                "termination_error: none"
+                if termination_error is None
+                else f"termination_error: {termination_error}"
+            ),
+            "cleanup_error: none" if cleanup_error is None else f"cleanup_error: {cleanup_error}",
+            f"post_exit_descendants_terminated: {str(descendants_terminated).lower()}",
+            "capture_error: none" if capture_error is None else f"capture_error: {capture_error}",
+            "timing_error: none" if timing_error is None else f"timing_error: {timing_error}",
+            "",
+        )
+    )
+    rendered = header + body
+    if rendered and not rendered.endswith("\n"):
+        rendered += "\n"
+    _atomic_write(phase.log_path, rendered)
+    print(f"Coverage-debt phase {phase.name}: {outcome}.")
+    if body:
+        print(body, end="" if body.endswith("\n") else "\n")
+    return truncated
+
+
+def _reject_json_constant(constant: str) -> None:
+    raise ValueError(f"invalid JSON number: {constant}")
+
+
+def _timing_evidence_error(path: Path, *, expected_lane: str) -> str | None:
+    """Return why required timing evidence is unusable, or ``None``."""
+    try:
+        path_metadata = path.lstat()
+    except OSError:
+        return "required timing evidence was not created"
+    if not stat.S_ISREG(path_metadata.st_mode):
+        return "required timing evidence is not a regular file"
+    if path_metadata.st_size <= 0 or path_metadata.st_size > MAX_PHASE_TIMING_BYTES:
+        return "required timing evidence has an invalid size"
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return "required timing evidence is not a regular file"
+        if metadata.st_size <= 0 or metadata.st_size > MAX_PHASE_TIMING_BYTES:
+            return "required timing evidence has an invalid size"
+        stream = os.fdopen(descriptor, "rb")
+        descriptor = -1
+        with stream:
+            payload = stream.read(MAX_PHASE_TIMING_BYTES + 1)
+    except OSError:
+        return (
+            "required timing evidence was not created"
+            if not path.exists()
+            else "required timing evidence is not a readable regular file"
+        )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not payload or len(payload) > MAX_PHASE_TIMING_BYTES:
+        return "required timing evidence has an invalid size"
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, ValueError):
+        return "required timing evidence is not valid JSON"
+    if not isinstance(value, dict):
+        return "required timing evidence must be a JSON object"
+    if (
+        type(value.get("schema_version")) is not int
+        or value.get("schema_version") != TEST_TIMING_SCHEMA_VERSION
+    ):
+        return "required timing evidence has an unsupported schema"
+    if value.get("lane") != expected_lane:
+        return "required timing evidence identifies a different phase"
+    if (
+        value.get("observation") != "coverage-debt-monthly"
+        or value.get("variant") != "locked-dependencies"
+    ):
+        return "required timing evidence identifies a different observation"
+    source = value.get("source")
+    if (
+        not isinstance(source, dict)
+        or source.get("algorithm") != "sha256"
+        or not isinstance(source.get("digest"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", source["digest"]) is None
+        or type(source.get("file_count")) is not int
+        or source["file_count"] < 1
+        or value.get("source_after_digest") != source["digest"]
+    ):
+        return "required timing evidence does not preserve its source fence"
+    selection = value.get("selection")
+    skip_policy = value.get("skip_policy")
+    collection = value.get("collection")
+    if (
+        not isinstance(selection, str)
+        or not selection.strip()
+        or not isinstance(skip_policy, dict)
+        or skip_policy.get("mode") != "forbid"
+        or not isinstance(collection, dict)
+        or collection.get("mode") != "serial"
+        or collection.get("valid") is not True
+        or collection.get("errors") != []
+    ):
+        return "required timing evidence does not preserve the skip-forbidden selection"
+    integrity = value.get("integrity")
+    pytest_record = value.get("pytest")
+    if (
+        not isinstance(integrity, dict)
+        or integrity.get("valid") is not True
+        or integrity.get("errors") != []
+        or not isinstance(pytest_record, dict)
+        or type(pytest_record.get("exit_code")) is not int
+        or pytest_record.get("exit_code") != 0
+    ):
+        return "required timing evidence does not prove a complete passing phase"
+    counts = (
+        pytest_record.get("selected_count"),
+        pytest_record.get("completed_count"),
+        pytest_record.get("logfinished_count"),
+        collection.get("selected_count"),
+    )
+    if (
+        any(type(count) is not int or count < 1 for count in counts)
+        or len(set(counts)) != 1
+        or pytest_record.get("coverage_enabled") is not True
+    ):
+        return "required timing evidence does not prove every selected test completed"
+    selected_count = cast(int, counts[0])
+    outcomes = pytest_record.get("outcomes")
+    outcome_names = ("failed", "passed", "skipped", "xfailed", "xpassed")
+    if (
+        not isinstance(outcomes, dict)
+        or set(outcomes) != set(outcome_names)
+        or any(type(outcomes.get(name)) is not int or outcomes[name] < 0 for name in outcome_names)
+        or sum(outcomes[name] for name in outcome_names) != selected_count
+        or outcomes["failed"] != 0
+        or outcomes["skipped"] != 0
+        or outcomes["xfailed"] != 0
+    ):
+        return "required timing evidence outcomes violate the passing skip-forbidden contract"
+    test_outcomes = value.get("test_outcomes")
+    observed_outcomes = dict.fromkeys(outcome_names, 0)
+    observed_nodeids: set[str] = set()
+    if not isinstance(test_outcomes, list) or len(test_outcomes) != selected_count:
+        return "required timing evidence omits exact selected-test outcomes"
+    for record in test_outcomes:
+        if not isinstance(record, dict):
+            return "required timing evidence has an invalid selected-test outcome"
+        nodeid = record.get("nodeid")
+        outcome = record.get("outcome")
+        if (
+            not isinstance(nodeid, str)
+            or not nodeid
+            or nodeid in observed_nodeids
+            or outcome not in observed_outcomes
+        ):
+            return "required timing evidence has an invalid selected-test outcome"
+        observed_nodeids.add(nodeid)
+        observed_outcomes[cast(str, outcome)] += 1
+    if observed_outcomes != outcomes or value.get("skipped_tests") != []:
+        return "required timing evidence selected-test outcomes are inconsistent"
+    pytest_arguments = value.get("pytest_arguments")
+    required_arguments = {
+        "--cov=src",
+        "--cov-config=pyproject.toml",
+        "--cov-report=",
+        "--cov-fail-under=0",
+        "--cov-append",
+        "--maxfail=1",
+    }
+    if (
+        not isinstance(pytest_arguments, list)
+        or not all(isinstance(argument, str) for argument in pytest_arguments)
+        or not required_arguments <= set(pytest_arguments)
+        or "--no-cov" in pytest_arguments
+    ):
+        return "required timing evidence does not identify the append-coverage invocation"
+    return None
+
+
+def run_coverage_phase(root: Path, phase: CoveragePhase) -> dict[str, object]:
+    """Run one phase with a hard process-tree deadline and a capped log tail."""
+    phase.log_path.parent.mkdir(parents=True, exist_ok=True)
+    if phase.timing_path is not None:
+        phase.timing_path.unlink(missing_ok=True)
+    started = time.monotonic()
+    timed_out = False
+    termination_error: str | None = None
+    cleanup_error: str | None = None
+    descendants_terminated = False
+    exit_code: int | None = None
+    launch_error: str | None = None
+    capture = _BoundedPhaseOutput(MAX_PHASE_LOG_BYTES)
+    try:
+        owned = _launch_phase(root, phase)
+    except (OSError, CoverageDebtError) as error:
+        launch_error = " ".join(str(error).split())[:1_000]
+        capture.append((launch_error + "\n").encode())
+        outcome = "launch-error"
+    else:
+        process = owned.process
+        if process.stdout is None:  # pragma: no cover - guaranteed by _launch_phase
+            _terminate_owned_process_tree(owned)
+            _close_owned_process_boundary(owned)
+            raise CoverageDebtError("coverage phase output pipe was not created")
+        reader = threading.Thread(
+            target=capture.consume,
+            args=(process.stdout,),
+            name=f"coverage-debt-{phase.name}-output",
+            daemon=True,
+        )
+        try:
+            reader.start()
+        except BaseException as error:
+            termination_error = _terminate_owned_process_tree(owned)
+            boundary_error = _close_owned_process_boundary(owned)
+            if boundary_error is not None and termination_error is None:
+                termination_error = boundary_error
+            try:
+                process.stdout.close()
+            except (OSError, ValueError):
+                pass
+            if not isinstance(error, (OSError, RuntimeError)):
+                raise
+            launch_error = " ".join(
+                f"coverage phase output reader failed to start: {error}".split()
+            )[:1_000]
+            capture.append((launch_error + "\n").encode())
+            exit_code = process.returncode
+            outcome = "launch-error"
+        else:
+            try:
+                try:
+                    process.wait(timeout=phase.timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    termination_error = _terminate_owned_process_tree(owned)
+                else:
+                    (
+                        descendants_terminated,
+                        cleanup_error,
+                        termination_error,
+                    ) = _settle_completed_phase_tree(owned, reader)
+            except BaseException:
+                _terminate_owned_process_tree(owned)
+                raise
+            finally:
+                boundary_error = _close_owned_process_boundary(owned)
+                if boundary_error is not None and termination_error is None:
+                    termination_error = boundary_error
+                reader.join(timeout=PHASE_FORCED_SHUTDOWN_TIMEOUT_SECONDS)
+                if reader.is_alive():
+                    try:
+                        process.stdout.close()
+                    except (OSError, ValueError):
+                        pass
+                    reader.join(timeout=0.1)
+                if reader.is_alive():
+                    capture.mark_error("owned coverage phase output reader did not stop")
+            exit_code = process.returncode
+            _, _, capture_error = capture.snapshot()
+            if timed_out:
+                outcome = "timed-out"
+            elif exit_code != 0:
+                outcome = "failed"
+            elif cleanup_error is not None or termination_error is not None:
+                outcome = "cleanup-error"
+            elif capture_error is not None:
+                outcome = "capture-error"
+            else:
+                outcome = "passed"
+
+    timing_error = (
+        None
+        if phase.timing_path is None
+        else _timing_evidence_error(phase.timing_path, expected_lane=phase.name)
+    )
+    if outcome == "passed" and timing_error is not None:
+        outcome = "invalid-timing-evidence"
+    output_bytes, tail, capture_error = capture.snapshot()
+    log_truncated = _phase_log(
+        tail,
+        output_bytes,
+        phase,
+        outcome=outcome,
+        exit_code=exit_code,
+        timed_out=timed_out,
+        termination_error=termination_error,
+        cleanup_error=cleanup_error,
+        descendants_terminated=descendants_terminated,
+        capture_error=capture_error,
+        timing_error=timing_error,
+    )
+
+    elapsed_seconds = round(time.monotonic() - started, 6)
+    return {
+        "name": phase.name,
+        "selection": phase.selection,
+        "coverage_mode": phase.coverage_mode,
+        "timeout_seconds": phase.timeout_seconds,
+        "elapsed_seconds": elapsed_seconds,
+        "outcome": outcome,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "launch_error": launch_error,
+        "termination_error": termination_error,
+        "cleanup_error": cleanup_error,
+        "post_exit_descendants_terminated": descendants_terminated,
+        "capture_error": capture_error,
+        "output_bytes": output_bytes,
+        "retained_output_bytes": len(tail),
+        "log_truncated": log_truncated,
+        "log_path": phase.log_path.as_posix(),
+        "timing_path": None if phase.timing_path is None else phase.timing_path.as_posix(),
+        "timing_evidence": (
+            phase.timing_path is not None and outcome == "passed" and timing_error is None
+        ),
+        "timing_error": timing_error,
+    }
+
+
+def _render_phase_markdown(
+    records: list[dict[str, object]], *, complete: bool, failure: str | None
+) -> str:
+    lines = [
+        "# Coverage-debt phase diagnostics",
+        "",
+        f"Overall phase collection: **{'complete' if complete else 'incomplete'}**.",
+        "",
+        "| Phase | Selection | Coverage | Outcome | Limit | Duration | Exit |",
+        "|---|---|---|---|---:|---:|---:|",
+    ]
+    for record in records:
+        exit_code = record["exit_code"]
+        lines.append(
+            f"| `{record['name']}` | {_markdown_cell(record['selection'])} | "
+            f"{record['coverage_mode']} | {record['outcome']} | "
+            f"{record['timeout_seconds']}s | {record['elapsed_seconds']}s | "
+            f"{'-' if exit_code is None else exit_code} |"
+        )
+    if not records:
+        lines.append("| _No phase started_ | - | - | incomplete | - | - | - |")
+    lines.extend(
+        [
+            "",
+            (
+                f"Failure: `{_markdown_cell(failure)}`"
+                if failure is not None
+                else "Each phase log retains at most 256 KiB of output."
+            ),
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _write_phase_summary(
+    output_dir: Path,
+    records: list[dict[str, object]],
+    *,
+    complete: bool,
+    failure: str | None,
+) -> None:
+    payload = {
+        "schema_version": PHASE_REPORT_SCHEMA_VERSION,
+        "complete": complete,
+        "failure": failure,
+        "phases": records,
+    }
+    _atomic_write(
+        output_dir / "coverage-phases.json",
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    )
+    _atomic_write(
+        output_dir / "coverage-phases.md",
+        _render_phase_markdown(records, complete=complete, failure=failure),
+    )
+
+
+def run_coverage_phases(
+    root: Path,
+    output_dir: Path,
+    *,
+    default_timeout_seconds: float,
+    local_ray_timeout_seconds: float,
+) -> None:
+    """Collect replace-then-append coverage with durable per-phase diagnostics."""
+    phases = coverage_phases(
+        output_dir,
+        default_timeout_seconds=default_timeout_seconds,
+        local_ray_timeout_seconds=local_ray_timeout_seconds,
+    )
+    records: list[dict[str, object]] = []
+    _write_phase_summary(output_dir, records, complete=False, failure=None)
+    try:
+        erased = subprocess.run(
+            [sys.executable, "-m", "coverage", "erase"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        failure = "cannot erase prior coverage data: " + " ".join(str(error).split())[:1_000]
+        _write_phase_summary(output_dir, records, complete=False, failure=failure)
+        raise CoverageDebtError(failure) from error
+    if erased.returncode != 0:
+        detail = " ".join((erased.stderr or erased.stdout).split())[:1_000]
+        failure = f"coverage erase failed with exit code {erased.returncode}: {detail}"
+        _write_phase_summary(output_dir, records, complete=False, failure=failure)
+        raise CoverageDebtError(failure)
+
+    for phase in phases:
+        record = run_coverage_phase(root, phase)
+        records.append(record)
+        if record["outcome"] != "passed":
+            failure = f"phase {phase.name} ended with outcome {record['outcome']}"
+            _write_phase_summary(output_dir, records, complete=False, failure=failure)
+            raise CoverageDebtError(failure)
+        _write_phase_summary(output_dir, records, complete=False, failure=None)
+    _write_phase_summary(output_dir, records, complete=True, failure=None)
+
+
 def _parse_tracker_state(body: str) -> dict[str, Measurement]:
     if body.count(STATE_START_MARKER) != 1 or body.count(STATE_END_MARKER) != 1:
         raise CoverageDebtError("existing coverage-debt comment has invalid state markers")
@@ -730,6 +1685,13 @@ def _parser() -> argparse.ArgumentParser:
     prepare = subparsers.add_parser("prepare-output", help="remove prior report artifacts")
     prepare.add_argument("--output-dir", type=Path, required=True)
 
+    phases = subparsers.add_parser(
+        "run-phases", help="collect default-resource and bounded local-Ray coverage"
+    )
+    phases.add_argument("--output-dir", type=Path, required=True)
+    phases.add_argument("--default-timeout-seconds", type=float, required=True)
+    phases.add_argument("--local-ray-timeout-seconds", type=float, required=True)
+
     render = subparsers.add_parser("render", help="render exact JSON and Markdown reports")
     render.add_argument("--coverage-json", type=Path, required=True)
     render.add_argument("--classifications", type=Path, required=True)
@@ -752,6 +1714,15 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "prepare-output":
             prepare_output_directory(arguments.output_dir)
             print(f"Prepared {arguments.output_dir} for fresh coverage-debt evidence.")
+            return 0
+        if arguments.command == "run-phases":
+            run_coverage_phases(
+                Path.cwd(),
+                arguments.output_dir,
+                default_timeout_seconds=arguments.default_timeout_seconds,
+                local_ray_timeout_seconds=arguments.local_ray_timeout_seconds,
+            )
+            print("Coverage-debt phases completed with combined coverage data.")
             return 0
         if arguments.command == "render":
             report = build_report(

@@ -527,6 +527,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   certification, documents the shared-Secret and sample-service hazards, emits that boundary before
   every in-repository Kubernetes Make mutator, and replaces promotion of `k8s/base` with an explicit
   production architecture checklist.
+- Monthly coverage-debt reporting now separates default-resource tests from the manifest-owned,
+  skip-forbidden local-Ray lane, excludes the default-off Compiled Graph probe, appends both phases
+  into one line-coverage report, and retains capped phase logs and source-fenced timing evidence.
+  Internal 20-minute and 15-minute process-tree deadlines keep a failing hosted runtime inside the
+  existing 45-minute workflow ceiling without weakening the global, worker, Ray Job, or tracker
+  contracts. Subprocess output is continuously drained into a bounded in-memory tail instead of an
+  unbounded temporary file, post-launcher descendants are terminated and fail closed, and missing
+  or invalid local-Ray timing evidence fails the phase.
 - Local environment bootstrap now selects the available Python 3.12 patch release instead of
   requiring an unavailable historical patch, so `uv` and `make` commands work in fresh development
   containers and continue receiving compatible Python patch updates.
