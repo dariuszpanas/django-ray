@@ -513,6 +513,65 @@ class _RayResultFoldSession:
     closed: bool = False
 
 
+def _failed_snapshot_has_causally_complete_ancestors(snapshot: Mapping[str, Any]) -> bool:
+    """Require every dependency of an observed failed node to be succeeded."""
+
+    graph = snapshot.get("graph")
+    if not isinstance(graph, Mapping):
+        return False
+    raw_nodes = graph.get("nodes")
+    raw_edges = graph.get("edges")
+    if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
+        return False
+
+    states_by_node: dict[str, str] = {}
+    for item in raw_nodes:
+        if not isinstance(item, Mapping):
+            return False
+        node_id = item.get("node_id")
+        state = item.get("state")
+        if (
+            not isinstance(node_id, str)
+            or not node_id
+            or node_id in states_by_node
+            or not isinstance(state, str)
+            or state not in {"PENDING", "RUNNING", "SUCCEEDED", "FAILED"}
+        ):
+            return False
+        states_by_node[node_id] = state
+
+    failed_node_ids = {node_id for node_id, state in states_by_node.items() if state == "FAILED"}
+    if not failed_node_ids:
+        return False
+
+    parents_by_node: dict[str, set[str]] = {node_id: set() for node_id in states_by_node}
+    for item in raw_edges:
+        if not isinstance(item, Mapping):
+            return False
+        source = item.get("source")
+        target = item.get("target")
+        if (
+            not isinstance(source, str)
+            or not isinstance(target, str)
+            or source not in states_by_node
+            or target not in states_by_node
+            or source == target
+        ):
+            return False
+        parents_by_node[target].add(source)
+
+    ancestors: set[str] = set()
+    pending = list(failed_node_ids)
+    while pending:
+        node_id = pending.pop()
+        for parent in parents_by_node[node_id]:
+            if parent in ancestors:
+                continue
+            ancestors.add(parent)
+            pending.append(parent)
+    return all(states_by_node[node_id] == "SUCCEEDED" for node_id in ancestors)
+
+
 class _RayExecutor(_Executor):
     def __init__(self, materialized_plan: Any | None = None) -> None:
         import ray
@@ -534,6 +593,7 @@ class _RayExecutor(_Executor):
         self.progress_actor = None
         self.workflow_run_identity: WorkflowRunIdentity | None = None
         self.last_progress_revision = -1
+        self._last_progress_persisted_failed = False
         self.last_progress_flush_at = time.monotonic()
         self._pending_progress_snapshot_ref = None
         self._progress_suppression_depth = 0
@@ -1517,7 +1577,12 @@ class _RayExecutor(_Executor):
         if failed:
             snapshot["state"] = "FAILED"
         revision = int(snapshot["revision"])
-        if failed or revision != self.last_progress_revision:
+        already_persisted_failed = getattr(
+            self,
+            "_last_progress_persisted_failed",
+            False,
+        )
+        if revision != self.last_progress_revision or (failed and not already_persisted_failed):
             from django_ray.workflow_progress import persist_workflow_progress
 
             try:
@@ -1536,6 +1601,7 @@ class _RayExecutor(_Executor):
                 )
                 return None
             self.last_progress_revision = revision
+            self._last_progress_persisted_failed = failed
         return snapshot
 
     def finish_progress(self, *, failed: bool = False) -> None:
@@ -1582,7 +1648,8 @@ class _RayExecutor(_Executor):
                     and bool(ingress.get("rejected") or ingress.get("truncated"))
                 )
                 failure_evidence_ready = failed and (
-                    not schema_v3_pilot_enabled or snapshot["failed_nodes"] > 0
+                    not schema_v3_pilot_enabled
+                    or _failed_snapshot_has_causally_complete_ancestors(snapshot)
                 )
                 if (
                     ingress_cannot_publish

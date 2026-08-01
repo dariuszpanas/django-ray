@@ -82,8 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   primitives to atomically publish summary, topology, and detail. Rejected or
   truncated ingress, malformed or over-limit evidence, preparation truncation, stale
   ownership, and storage failure all refuse publication with bounded diagnostics and
-  without changing the workflow result. Schema-v2 live writes remain the rolling
-  compatibility path. The bundled testproject enables the pilot through
+  without changing the workflow result. Failed runs also wait within the existing
+  bounded terminal flush deadline until every transitive prerequisite of each failed
+  node is reported succeeded, preventing cross-sender actor delivery from freezing a
+  causally impossible graph. Schema-v2 live writes remain the rolling compatibility
+  path. The bundled testproject enables the pilot through
   `DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT`, and the guarded local KubeRay gate
   proves non-empty mutually consistent summary, topology, edges, and node detail from
   the real producer.
