@@ -31,6 +31,7 @@ from django_ray.workflows import (
     WorkflowDefinitionError,
     _callable_path,
     _Executor,
+    _failed_snapshot_has_causally_complete_ancestors,
     _get_executor,
     _json_safe,
     _LocalExecutor,
@@ -1388,6 +1389,37 @@ def test_flush_progress_reuses_pending_actor_snapshot_request(monkeypatch) -> No
     assert executor._pending_progress_snapshot_ref is None
 
 
+def test_flush_progress_does_not_rewrite_one_unchanged_failed_snapshot(monkeypatch) -> None:
+    identity = object()
+    snapshot_ref = object()
+    persisted: list[dict[str, Any]] = []
+    snapshot = {
+        "revision": 3,
+        "completed_nodes": 0,
+        "failed_nodes": 1,
+        "total_nodes": 2,
+    }
+
+    monkeypatch.setattr(
+        "django_ray.workflow_progress.persist_workflow_progress",
+        lambda reported_identity, value: persisted.append(value) or reported_identity is identity,
+    )
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = SimpleNamespace(snapshot=SimpleNamespace(remote=lambda: snapshot_ref))
+    executor.workflow_run_identity = identity
+    executor.last_progress_revision = -1
+    executor.last_progress_flush_at = 0.0
+    executor.ray = SimpleNamespace(
+        wait=lambda refs, timeout: (refs, []),
+        get=lambda ref: dict(snapshot),
+    )
+
+    assert executor._flush_progress(bypass_interval=True, failed=True) is not None
+    assert executor._flush_progress(bypass_interval=True, failed=True) is not None
+
+    assert persisted == [{**snapshot, "state": "FAILED"}]
+
+
 def test_finish_progress_polls_without_rewriting_unchanged_snapshot(monkeypatch) -> None:
     identity = object()
     persisted: list[dict[str, Any]] = []
@@ -1731,8 +1763,42 @@ def test_finish_progress_waits_for_failed_node_evidence_when_pilot_enabled(
     executor.workflow_run_identity = None
     snapshots = iter(
         [
-            {"completed_nodes": 0, "failed_nodes": 0, "total_nodes": 2},
-            {"completed_nodes": 0, "failed_nodes": 1, "total_nodes": 2},
+            {
+                "completed_nodes": 0,
+                "failed_nodes": 0,
+                "total_nodes": 2,
+                "graph": {
+                    "nodes": [
+                        {"node_id": "0.0", "state": "PENDING"},
+                        {"node_id": "0.1", "state": "PENDING"},
+                    ],
+                    "edges": [{"source": "0.0", "target": "0.1"}],
+                },
+            },
+            {
+                "completed_nodes": 0,
+                "failed_nodes": 1,
+                "total_nodes": 2,
+                "graph": {
+                    "nodes": [
+                        {"node_id": "0.0", "state": "PENDING"},
+                        {"node_id": "0.1", "state": "FAILED"},
+                    ],
+                    "edges": [{"source": "0.0", "target": "0.1"}],
+                },
+            },
+            {
+                "completed_nodes": 1,
+                "failed_nodes": 1,
+                "total_nodes": 2,
+                "graph": {
+                    "nodes": [
+                        {"node_id": "0.0", "state": "SUCCEEDED"},
+                        {"node_id": "0.1", "state": "FAILED"},
+                    ],
+                    "edges": [{"source": "0.0", "target": "0.1"}],
+                },
+            },
         ]
     )
     sleeps: list[float] = []
@@ -1741,7 +1807,152 @@ def test_finish_progress_waits_for_failed_node_evidence_when_pilot_enabled(
 
     executor.finish_progress(failed=True)
 
-    assert sleeps == [0.05]
+    assert sleeps == [0.05, 0.05]
+
+
+def test_failed_snapshot_causal_fence_ignores_unrelated_pending_branch() -> None:
+    assert _failed_snapshot_has_causally_complete_ancestors(
+        {
+            "graph": {
+                "nodes": [
+                    {"node_id": "0.0", "state": "SUCCEEDED"},
+                    {"node_id": "0.1", "state": "FAILED"},
+                    {"node_id": "0.2", "state": "PENDING"},
+                ],
+                "edges": [
+                    {"source": "0.0", "target": "0.1"},
+                    {"source": "0.0", "target": "0.2"},
+                ],
+            }
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {},
+        {"graph": {"nodes": [], "edges": []}},
+        {
+            "graph": {
+                "nodes": [{"node_id": "0.0", "state": {"invalid": True}}],
+                "edges": [],
+            }
+        },
+        {
+            "graph": {
+                "nodes": [
+                    {"node_id": "0.0", "state": "PENDING"},
+                    {"node_id": "0.1", "state": "FAILED"},
+                ],
+                "edges": [{"source": "0.0", "target": "0.1"}],
+            }
+        },
+        {
+            "graph": {
+                "nodes": [{"node_id": "0.0", "state": "FAILED"}],
+                "edges": [{"source": "0.0", "target": "missing"}],
+            }
+        },
+    ],
+)
+def test_failed_snapshot_causal_fence_rejects_incomplete_evidence(
+    snapshot: dict[str, Any],
+) -> None:
+    assert not _failed_snapshot_has_causally_complete_ancestors(snapshot)
+
+
+def test_failed_snapshot_causal_fence_bounds_cycle_walk() -> None:
+    node_count = 128
+    assert not _failed_snapshot_has_causally_complete_ancestors(
+        {
+            "graph": {
+                "nodes": [
+                    {
+                        "node_id": f"0.{index}",
+                        "state": "FAILED" if index == node_count - 1 else "SUCCEEDED",
+                    }
+                    for index in range(node_count)
+                ],
+                "edges": [
+                    {
+                        "source": f"0.{index}",
+                        "target": f"0.{(index + 1) % node_count}",
+                    }
+                    for index in range(node_count)
+                ],
+            }
+        }
+    )
+
+
+def test_finish_progress_causal_fence_fails_closed_at_existing_deadline(
+    monkeypatch,
+    settings,
+    workflow_progress_warning_records,
+) -> None:
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
+        "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 1,
+    }
+    snapshot = {
+        "completed_nodes": 0,
+        "failed_nodes": 1,
+        "total_nodes": 2,
+        "graph": {
+            "nodes": [
+                {"node_id": "0.0", "state": "PENDING"},
+                {"node_id": "0.1", "state": "FAILED"},
+            ],
+            "edges": [{"source": "0.0", "target": "0.1"}],
+        },
+        "ingress": {"rejected": 0, "truncated": 0},
+    }
+    identity = WorkflowRunIdentity(
+        task_execution_pk=8,
+        attempt_number=1,
+        execution_generation=1,
+        run_id="terminal-causal-timeout",
+    )
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = object()
+    executor.workflow_run_identity = identity
+    clock = [0.0]
+    publications: list[dict[str, Any]] = []
+
+    def flush(**kwargs):
+        clock[0] += kwargs["wait_timeout_seconds"]
+        return snapshot
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(executor, "_flush_progress", flush)
+    monkeypatch.setattr(
+        executor,
+        "_publish_terminal_progress",
+        lambda value: publications.append(value) or True,
+    )
+    monkeypatch.setattr("django_ray.workflows.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("django_ray.workflows.time.sleep", sleep)
+
+    executor.finish_progress(failed=True)
+
+    assert clock[0] == pytest.approx(1.0)
+    assert publications == []
+    assert executor.progress_actor is None
+    assert workflow_progress_warning_records == [
+        {
+            "message": "Workflow terminal progress did not complete before the flush deadline",
+            "component": "workflow_progress",
+            "task_execution_pk": 8,
+            "workflow_run_id": "terminal-causal-timeout",
+            "reason": "snapshot_incomplete",
+            "timeout_seconds": 1.0,
+            "failed_workflow": True,
+        }
+    ]
 
 
 def test_finish_progress_preserves_immediate_failure_flush_when_pilot_disabled(

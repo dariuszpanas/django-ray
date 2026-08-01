@@ -715,9 +715,13 @@ The outer Django task is the durability and retry boundary:
   pilot makes one
   best-effort terminal publication from an internally consistent full-reporting actor
   snapshot, revalidates the pinned plan and exact run fence, then stages and atomically
-  promotes topology, detail, and summary. Rejected or truncated ingress, invalid
-  cross-field evidence, admission overflow, preparation truncation, a stale fence, or
-  storage failure leaves schema v3 unpublished and emits a stable bounded diagnostic;
+  promotes topology, detail, and summary. For a failed run, the coordinator keeps
+  polling within the existing terminal flush deadline until every transitive ancestor
+  of each failed node is reported succeeded. This closes cross-sender actor delivery
+  races without inferring a completion event; if the causal fence does not close,
+  schema v3 remains unpublished. Rejected or truncated ingress, invalid cross-field
+  evidence, admission overflow, preparation truncation, a stale fence, or storage
+  failure likewise leaves schema v3 unpublished and emits a stable bounded diagnostic;
   it never changes the application result. The periodic schema-v2 writer remains
   active for rolling compatibility. Terminal-only does not solve or weaken the
   remaining full-reporting boundaries: aggregate producer/mailbox admission and
