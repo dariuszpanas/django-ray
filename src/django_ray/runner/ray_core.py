@@ -6,12 +6,14 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from threading import BoundedSemaphore, Event, Thread
 from typing import TYPE_CHECKING, Any
 
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
 
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
+    from django_ray.runner.cancellation import CancellationOutcome
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,12 @@ class _RayCoreSubmissionHandle(SubmissionHandle):
 # inside hot paths like submit_task or _RayExecutor.__init__ causes OOMs.
 
 _execute_django_task_remote_cached = None
+
+# Ray Client's terminate-task RPC has no caller-visible timeout in Ray 2.56.
+# Keep the worker's database ownership locks bounded while matching the Ray Job
+# control-request budget used by the other execution backend.
+_RAY_CORE_CANCEL_TIMEOUT_SECONDS = 5.0
+_RAY_CORE_CANCEL_SLOT = BoundedSemaphore(value=1)
 
 
 def _ray_id_to_string(ray_id: Any) -> str:
@@ -446,24 +454,103 @@ class RayCoreRunner(BaseRunner):
         return self.cancel_pending(self._pending_tasks[task_pk])
 
     def cancel_pending(self, handle: RayCoreHandle) -> bool:
-        """Cancel exactly one still-current pending handle."""
+        """Cancel one exact pending handle within the bounded control window."""
+        from django_ray.runner.cancellation import CancellationOutcomeStatus
+
+        outcome = self.cancel_pending_with_status(handle)
+        return outcome.status == CancellationOutcomeStatus.REQUESTED
+
+    def cancel_pending_with_status(
+        self,
+        handle: RayCoreHandle,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CancellationOutcome:
+        """Bound cancellation of one immutable ObjectRef and report uncertainty.
+
+        Ray Client can wait indefinitely inside ``ray.cancel``. Run only that
+        exact remote effect in a daemon thread, then retire the matching local
+        handle from the caller thread on every result, including timeout. A
+        late daemon completion cannot mutate tracking or target a replacement.
+        """
         import ray
         from ray.exceptions import RayTaskError
 
+        from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
+
         if self._pending_tasks.get(handle.task_pk) is not handle:
-            return False
+            return CancellationOutcome(CancellationOutcomeStatus.NOT_APPLICABLE)
+
+        timeout = (
+            _RAY_CORE_CANCEL_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else max(float(timeout_seconds), 0.0)
+        )
+        if not _RAY_CORE_CANCEL_SLOT.acquire(blocking=False):
+            if self._pending_tasks.get(handle.task_pk) is handle:
+                self._pending_tasks.pop(handle.task_pk, None)
+            return CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                "Ray Core cancellation capacity is occupied; the exact stop was not attempted",
+            )
+
+        completed = Event()
+        result = [
+            CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                "Ray Core cancellation ended without a known outcome",
+            )
+        ]
+
+        def request_exact_cancellation() -> None:
+            try:
+                # Graceful cancellation raises TaskCancelledError in the task
+                # instead of killing its shared Ray worker process.
+                ray.cancel(handle.object_ref, force=False)
+                result[0] = CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+            except (RuntimeError, RayTaskError):
+                # The task may already have completed or failed.
+                result[0] = CancellationOutcome(
+                    CancellationOutcomeStatus.FAILED,
+                    "Ray Core cancellation was rejected or the task was already terminal",
+                )
+            except Exception as exc:  # pragma: no cover - defensive backend boundary
+                result[0] = CancellationOutcome(
+                    CancellationOutcomeStatus.INDETERMINATE,
+                    f"Ray Core cancellation raised {type(exc).__name__}",
+                )
+            finally:
+                _RAY_CORE_CANCEL_SLOT.release()
+                completed.set()
+
+        request_thread = Thread(
+            target=request_exact_cancellation,
+            name=(
+                f"django-ray-core-cancel-{handle.task_pk}-"
+                f"{handle.attempt_number}-{handle.execution_generation}"
+            ),
+            daemon=True,
+        )
         try:
-            # Use force=False for graceful cancellation
-            # This raises TaskCancelledError in the task instead of killing the worker
-            ray.cancel(handle.object_ref, force=False)
+            request_thread.start()
+        except RuntimeError:
+            _RAY_CORE_CANCEL_SLOT.release()
             if self._pending_tasks.get(handle.task_pk) is handle:
                 self._pending_tasks.pop(handle.task_pk, None)
-            return True
-        except (RuntimeError, RayTaskError):
-            # Task may have already completed or failed
-            if self._pending_tasks.get(handle.task_pk) is handle:
-                self._pending_tasks.pop(handle.task_pk, None)
-            return False
+            return CancellationOutcome(
+                CancellationOutcomeStatus.FAILED,
+                "Ray Core cancellation worker could not start",
+            )
+
+        finished = completed.wait(timeout=timeout)
+        if self._pending_tasks.get(handle.task_pk) is handle:
+            self._pending_tasks.pop(handle.task_pk, None)
+        if not finished:
+            return CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                "Ray Core cancellation timed out; the exact stop may complete later",
+            )
+        return result[0]
 
     def get_pending_handle(
         self,

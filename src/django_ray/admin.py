@@ -14,6 +14,7 @@ from django.contrib.admin import helpers
 from django.contrib.auth import get_permission_codename
 from django.core import signing
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import connection, transaction
 from django.db.models import (
     BooleanField,
     Case,
@@ -2568,13 +2569,35 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
         else:
             return f"{seconds // 3600}h {(seconds % 3600) // 60}m ago"
 
-    @admin.action(description="Mark selected as inactive")
+    @admin.action(
+        description="Mark selected as inactive",
+        permissions=["manage_worker_leases"],
+    )
     def mark_inactive(self, request: HttpRequest, queryset: QuerySet[TaskWorkerLease]) -> None:
         """Mark selected worker leases as inactive."""
-        count = queryset.filter(is_active=True).update(
-            is_active=False,
-            stopped_at=timezone.now(),
-        )
+        active = queryset.filter(is_active=True)
+        with transaction.atomic():
+            if connection.features.has_select_for_update:
+                # Match recovery's global lease lock order so an Admin bulk
+                # action cannot deadlock with a worker adopting the same rows.
+                worker_ids = list(
+                    active.select_for_update()
+                    .order_by("worker_id")
+                    .values_list("worker_id", flat=True)
+                )
+                count = TaskWorkerLease.objects.filter(
+                    worker_id__in=worker_ids,
+                    is_active=True,
+                ).update(
+                    is_active=False,
+                    stopped_at=timezone.now(),
+                )
+            else:
+                # SQLite's write transaction is already database-wide.
+                count = active.update(
+                    is_active=False,
+                    stopped_at=timezone.now(),
+                )
 
         if count > 0:
             self.message_user(
@@ -2587,10 +2610,30 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
                 "No active leases found in selection.",
             )
 
-    @admin.action(description="Delete inactive worker leases")
+    @admin.action(
+        description="Delete inactive worker leases",
+        permissions=["manage_worker_leases"],
+    )
     def delete_inactive(self, request: HttpRequest, queryset: QuerySet[TaskWorkerLease]) -> None:
         """Delete inactive worker leases from selected."""
-        deleted_count, _ = queryset.filter(is_active=False).delete()
+        inactive = queryset.filter(is_active=False)
+        with transaction.atomic():
+            if connection.features.has_select_for_update:
+                # Recovery can lock one inactive source plus the current
+                # worker lease. Lock every deletion target in the same global
+                # order before issuing the bulk delete.
+                worker_ids = list(
+                    inactive.select_for_update()
+                    .order_by("worker_id")
+                    .values_list("worker_id", flat=True)
+                )
+                deleted_count, _ = TaskWorkerLease.objects.filter(
+                    worker_id__in=worker_ids,
+                    is_active=False,
+                ).delete()
+            else:
+                # SQLite's write transaction is already database-wide.
+                deleted_count, _ = inactive.delete()
 
         if deleted_count > 0:
             self.message_user(
@@ -2610,3 +2653,12 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
     def has_change_permission(self, request: HttpRequest, obj: Any = None) -> bool:
         """Disable editing leases - they are managed by workers."""
         return False
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:
+        """Disable unfenced generic deletion; use ``delete_inactive`` instead."""
+        return False
+
+    def has_manage_worker_leases_permission(self, request: HttpRequest) -> bool:
+        """Require the model change permission for controlled lease actions."""
+        codename = get_permission_codename("change", self.opts)
+        return bool(request.user.has_perm(f"{self.opts.app_label}.{codename}"))

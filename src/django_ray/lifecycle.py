@@ -755,6 +755,7 @@ def succeed_task(
     result_data: str | None,
     result_reference: str | None,
     expected_ray_job_id: str | None = None,
+    expected_claimed_by_worker: str | None = None,
     expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
     expected_completion_data: str | None = None,
@@ -764,6 +765,8 @@ def succeed_task(
     filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
     if expected_ray_job_id is not None:
         filters["ray_job_id"] = expected_ray_job_id
+    if expected_claimed_by_worker is not None:
+        filters["claimed_by_worker"] = expected_claimed_by_worker
     if expected_attempt_number is not None:
         filters["attempt_number"] = expected_attempt_number
     if expected_execution_generation is not None:

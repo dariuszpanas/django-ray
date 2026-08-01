@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
+from django.db import IntegrityError, connection
 
 from django_ray.models import RayTaskExecution, TaskWorkerLease
 from django_ray.runner.leasing import (
+    WorkerLeaseIdentity,
     cleanup_expired_leases,
     generate_worker_id,
     get_active_worker_count,
@@ -15,8 +18,18 @@ from django_ray.runner.leasing import (
     get_heartbeat_interval,
     get_lease_duration,
     is_lease_expired,
+    is_worker_id_primary_key_collision,
     release_lease,
 )
+
+
+def _identity(lease: TaskWorkerLease) -> WorkerLeaseIdentity:
+    return WorkerLeaseIdentity(
+        worker_id=str(lease.worker_id),
+        hostname=lease.hostname,
+        pid=lease.pid,
+        started_at=lease.started_at,
+    )
 
 
 def test_model_string_representations() -> None:
@@ -27,13 +40,40 @@ def test_model_string_representations() -> None:
     assert str(lease) == "Worker worker-1... on host (inactive)"
 
 
-def test_release_lease_returns_false_when_database_update_fails(monkeypatch) -> None:
+def test_release_lease_propagates_database_update_failure(monkeypatch) -> None:
     def fail_filter(*args, **kwargs):
         raise RuntimeError("database unavailable")
 
     monkeypatch.setattr(TaskWorkerLease.objects, "filter", fail_filter)
 
-    assert release_lease("worker-failure") is False
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        release_lease(
+            WorkerLeaseIdentity(
+                worker_id="worker-failure",
+                hostname="test-host",
+                pid=12345,
+                started_at=datetime.now(UTC),
+            )
+        )
+
+
+def test_postgresql_worker_id_collision_requires_exact_primary_key(monkeypatch) -> None:
+    class DatabaseCauseError(RuntimeError):
+        pass
+
+    cause = DatabaseCauseError("duplicate key")
+    cause.diag = SimpleNamespace(constraint_name=f"{TaskWorkerLease._meta.db_table}_pkey")
+    error = IntegrityError("duplicate key")
+    error.__cause__ = cause
+
+    monkeypatch.setattr(connection, "vendor", "postgresql")
+    assert is_worker_id_primary_key_collision(error) is True
+
+    cause.diag.constraint_name = "unrelated_unique_constraint"
+    assert is_worker_id_primary_key_collision(error) is False
+
+    monkeypatch.setattr(connection, "vendor", "mysql")
+    assert is_worker_id_primary_key_collision(error) is False
 
 
 class TestWorkerIdGeneration:
@@ -286,14 +326,14 @@ class TestLeaseCleanup:
     def test_release_lease_success(self) -> None:
         """Test releasing a lease by worker ID marks it inactive."""
         worker_id = generate_worker_id()
-        TaskWorkerLease.objects.create(
+        lease = TaskWorkerLease.objects.create(
             worker_id=worker_id,
             hostname="test-host",
             pid=12345,
             queue_name="default",
         )
 
-        result = release_lease(worker_id)
+        result = release_lease(_identity(lease))
 
         assert result is True
         # Lease should still exist but be marked inactive
@@ -303,8 +343,36 @@ class TestLeaseCleanup:
 
     def test_release_lease_not_found(self) -> None:
         """Test releasing a non-existent lease."""
-        result = release_lease("non-existent-worker-id")
+        result = release_lease(
+            WorkerLeaseIdentity(
+                worker_id="non-existent-worker-id",
+                hostname="test-host",
+                pid=12345,
+                started_at=datetime.now(UTC),
+            )
+        )
         assert result is False
+
+    def test_release_lease_does_not_release_replacement_owner(self) -> None:
+        lease = TaskWorkerLease.objects.create(
+            worker_id="reused-worker-id",
+            hostname="original-host",
+            pid=12345,
+            queue_name="default",
+        )
+        original_identity = _identity(lease)
+        lease.delete()
+        replacement = TaskWorkerLease.objects.create(
+            worker_id="reused-worker-id",
+            hostname="replacement-host",
+            pid=54321,
+            queue_name="default",
+        )
+
+        assert release_lease(original_identity) is False
+
+        replacement.refresh_from_db()
+        assert replacement.is_active is True
 
 
 @pytest.mark.django_db

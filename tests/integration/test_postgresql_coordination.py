@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from io import StringIO
-from threading import Barrier, Event
+from threading import Barrier, Event, Lock, get_ident
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from django.db import close_old_connections, connection, transaction
+from django.core.management import CommandError
+from django.db import IntegrityError, close_old_connections, connection, transaction
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
@@ -25,6 +29,7 @@ from django_ray.lifecycle import (
 )
 from django_ray.management.commands.django_ray_purge_inputs import Command as PurgeInputsCommand
 from django_ray.models import (
+    CancellationStatus,
     InputPayloadState,
     RayTaskExecution,
     TaskAttempt,
@@ -33,8 +38,12 @@ from django_ray.models import (
     TaskWorkerLease,
     WorkflowProgressRunStorage,
 )
-from django_ray.runner.cancellation import finalize_cancellation
-from django_ray.runner.leasing import get_active_workers
+from django_ray.runner.cancellation import (
+    CancellationOutcome,
+    CancellationOutcomeStatus,
+    finalize_cancellation,
+)
+from django_ray.runner.leasing import WorkerLeaseIdentity, get_active_workers
 from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.workflow_progress import (
@@ -77,6 +86,94 @@ def _run_concurrently(*operations: Callable[[], object]) -> list[object]:
         return [future.result(timeout=20) for future in futures]
 
 
+def _wait_for_postgresql_lock(backend_pid: int) -> tuple[str | None, str | None]:
+    """Require one recovery backend to block on the winner's transaction lock."""
+    import time
+
+    lock_wait: tuple[str | None, str | None] | None = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT wait_event_type, wait_event
+                FROM pg_stat_activity
+                WHERE pid = %s
+                """,
+                [backend_pid],
+            )
+            lock_wait = cursor.fetchone()
+        if lock_wait is not None and lock_wait[0] == "Lock":
+            break
+        time.sleep(0.01)
+
+    assert lock_wait is not None
+    assert lock_wait[0] == "Lock"
+    return lock_wait
+
+
+def _synchronize_first_predicate_call(
+    predicate: Callable[[RayTaskExecution], bool],
+    barrier: Barrier,
+) -> Callable[[RayTaskExecution], bool]:
+    """Make both recoverers evaluate the same stale snapshot before locking."""
+    seen_threads: set[int] = set()
+    guard = Lock()
+
+    def synchronized(task: RayTaskExecution) -> bool:
+        result = predicate(task)
+        thread_id = get_ident()
+        with guard:
+            first_call = thread_id not in seen_threads
+            seen_threads.add(thread_id)
+        if first_call:
+            barrier.wait(timeout=10)
+        return result
+
+    return synchronized
+
+
+def _run_contended_recovery(
+    recoverers: list[Any],
+    operation: Callable[[Any], object],
+    *,
+    effect_started: Event,
+    release_effect: Event,
+    effect_workers: list[str],
+) -> list[object]:
+    """Hold the winner's effect until the loser demonstrably waits on its lock."""
+    backend_pids: dict[str, int] = {}
+    backend_guard = Lock()
+
+    def invoke(recoverer: Any) -> object:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                backend_pid = int(cursor.fetchone()[0])
+            with backend_guard:
+                backend_pids[recoverer.worker_id] = backend_pid
+            return operation(recoverer)
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(invoke, recoverer) for recoverer in recoverers]
+        try:
+            assert effect_started.wait(timeout=10)
+            assert len(effect_workers) == 1
+            winner = effect_workers[0]
+            loser = next(
+                recoverer.worker_id for recoverer in recoverers if recoverer.worker_id != winner
+            )
+            with backend_guard:
+                loser_pid = backend_pids[loser]
+            _wait_for_postgresql_lock(loser_pid)
+        finally:
+            release_effect.set()
+        return [future.result(timeout=20) for future in futures]
+
+
 def _claim_command(worker_id: str, claimed: list[int]):
     from django_ray.management.commands.django_ray_worker import Command
 
@@ -88,6 +185,7 @@ def _claim_command(worker_id: str, claimed: list[int]):
     command.active_tasks = {}
     command.ray_core_runner = None
     command.process_task = lambda task: claimed.append(task.pk)
+    command._create_lease("default")
     return command
 
 
@@ -138,6 +236,88 @@ def test_expiry_wins_concurrent_claim_at_exact_deadline(
     assert first_claimed == []
     assert second_claimed == []
     assert TaskAttempt.objects.filter(execution=task, state=TaskState.EXPIRED).count() == 1
+
+
+def test_concurrent_worker_lease_collision_allocates_two_exact_owners(monkeypatch) -> None:
+    from django_ray.management.commands.django_ray_worker import Command
+
+    worker_a = Command()
+    worker_a.stdout = StringIO()
+    worker_a._set_worker_id("postgres-shared-candidate")
+    worker_b = Command()
+    worker_b.stdout = StringIO()
+    worker_b._set_worker_id("postgres-shared-candidate")
+    monkeypatch.setattr(
+        "django_ray.management.commands.django_ray_worker.generate_worker_id",
+        lambda: "postgres-regenerated-worker",
+    )
+
+    _run_concurrently(
+        lambda: worker_a._create_lease("default"),
+        lambda: worker_b._create_lease("default"),
+    )
+
+    assert {worker_a.worker_id, worker_b.worker_id} == {
+        "postgres-shared-candidate",
+        "postgres-regenerated-worker",
+    }
+    assert worker_a.lease_identity is not None
+    assert worker_b.lease_identity is not None
+    assert worker_a.lease_identity != worker_b.lease_identity
+    assert (
+        TaskWorkerLease.objects.filter(
+            **worker_a.lease_identity.database_filters(),
+            is_active=True,
+        ).count()
+        == 1
+    )
+    assert (
+        TaskWorkerLease.objects.filter(
+            **worker_b.lease_identity.database_filters(),
+            is_active=True,
+        ).count()
+        == 1
+    )
+    assert (
+        TaskWorkerLease.objects.filter(
+            worker_id__in=("postgres-shared-candidate", "postgres-regenerated-worker")
+        ).count()
+        == 2
+    )
+
+
+def test_unrelated_postgresql_integrity_error_does_not_regenerate_identity(
+    monkeypatch,
+) -> None:
+    from django_ray.management.commands.django_ray_worker import Command
+
+    command = Command()
+    command.stdout = StringIO()
+    command._set_worker_id("postgres-unrelated-constraint")
+    generated: list[str] = []
+    monkeypatch.setattr(
+        "django_ray.management.commands.django_ray_worker.generate_worker_id",
+        lambda: generated.append("unexpected-regeneration") or "unexpected-regeneration",
+    )
+
+    class OtherConstraintViolationError(Exception):
+        pass
+
+    def fail_with_other_constraint(**_kwargs) -> None:
+        cause = OtherConstraintViolationError("unrelated constraint")
+        cause.diag = SimpleNamespace(constraint_name="unrelated_constraint")  # type: ignore[attr-defined]
+        try:
+            raise cause
+        except OtherConstraintViolationError as driver_error:
+            raise IntegrityError("unrelated lease constraint") from driver_error
+
+    monkeypatch.setattr(TaskWorkerLease.objects, "create", fail_with_other_constraint)
+
+    with pytest.raises(CommandError, match="Could not create worker lease"):
+        command._create_lease("default")
+
+    assert generated == []
+    assert command.lease_identity is None
 
 
 def _workflow_identity(
@@ -385,7 +565,11 @@ def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:
         _claim_command("adopter-b", []),
     ]
 
-    assert {str(lease.worker_id) for lease in get_active_workers()} == {"healthy-owner"}
+    assert {str(lease.worker_id) for lease in get_active_workers()} == {
+        "adopter-a",
+        "adopter-b",
+        "healthy-owner",
+    }
     results = _run_concurrently(
         lambda: adopters[0]._adopt_orphaned_ray_job_task(snapshots[0], now=now),
         lambda: adopters[1]._adopt_orphaned_ray_job_task(snapshots[1], now=now),
@@ -397,9 +581,394 @@ def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:
     assert winner in {"adopter-a", "adopter-b"}
     winning_command = adopters[0] if winner == "adopter-a" else adopters[1]
     assert winning_command.active_tasks == {task.pk: "raysubmit_postgres_orphan"}
+    expired_lease = TaskWorkerLease.objects.get(worker_id="expired-owner")
+    assert expired_lease.is_active is False
 
 
-def test_orphan_adoption_invalidates_waiting_stale_lost_transition() -> None:
+def test_admin_bulk_deactivation_locks_leases_in_worker_id_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django.contrib.admin import AdminSite
+    from django.http import HttpRequest
+
+    from django_ray.admin import TaskWorkerLeaseAdmin
+
+    for worker_id in ("postgres-admin-lock-b", "postgres-admin-lock-a"):
+        TaskWorkerLease.objects.create(
+            worker_id=worker_id,
+            hostname=f"{worker_id}-host",
+            pid=1000,
+            queue_name="default",
+            is_active=True,
+        )
+    admin_object = TaskWorkerLeaseAdmin(TaskWorkerLease, AdminSite())
+    monkeypatch.setattr(admin_object, "message_user", lambda *_args, **_kwargs: None)
+    selected = TaskWorkerLease.objects.filter(
+        worker_id__startswith="postgres-admin-lock-"
+    ).order_by("-worker_id")
+
+    with CaptureQueriesContext(connection) as queries:
+        admin_object.mark_inactive(HttpRequest(), selected)
+
+    lock_queries = [
+        query["sql"] for query in queries.captured_queries if "FOR UPDATE" in query["sql"].upper()
+    ]
+    assert len(lock_queries) == 1
+    assert "ORDER BY" in lock_queries[0].upper()
+    assert "worker_id" in lock_queries[0]
+    assert not TaskWorkerLease.objects.filter(
+        worker_id__startswith="postgres-admin-lock-",
+        is_active=True,
+    ).exists()
+
+
+def test_admin_bulk_deletion_locks_inactive_leases_in_worker_id_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django.contrib.admin import AdminSite
+    from django.http import HttpRequest
+
+    from django_ray.admin import TaskWorkerLeaseAdmin
+
+    for worker_id in ("postgres-admin-delete-b", "postgres-admin-delete-a"):
+        TaskWorkerLease.objects.create(
+            worker_id=worker_id,
+            hostname=f"{worker_id}-host",
+            pid=1000,
+            queue_name="default",
+            is_active=False,
+        )
+    admin_object = TaskWorkerLeaseAdmin(TaskWorkerLease, AdminSite())
+    monkeypatch.setattr(admin_object, "message_user", lambda *_args, **_kwargs: None)
+    selected = TaskWorkerLease.objects.filter(
+        worker_id__startswith="postgres-admin-delete-"
+    ).order_by("-worker_id")
+
+    with CaptureQueriesContext(connection) as queries:
+        admin_object.delete_inactive(HttpRequest(), selected)
+
+    lock_queries = [
+        query["sql"] for query in queries.captured_queries if "FOR UPDATE" in query["sql"].upper()
+    ]
+    assert len(lock_queries) == 1
+    assert "ORDER BY" in lock_queries[0].upper()
+    assert "worker_id" in lock_queries[0]
+    assert not TaskWorkerLease.objects.filter(
+        worker_id__startswith="postgres-admin-delete-"
+    ).exists()
+
+
+def test_postgresql_lease_freshness_is_measured_after_waiting_for_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import django_ray.management.commands.django_ray_worker as worker_module
+
+    command = _claim_command("postgres-clock-candidate", [])
+    assert command.lease_identity is not None
+    early = datetime.now(UTC)
+    initial_heartbeat = early - timedelta(seconds=1)
+    TaskWorkerLease.objects.filter(**command.lease_identity.database_filters()).update(
+        last_heartbeat_at=initial_heartbeat
+    )
+    task = _execution(
+        "postgres-post-lock-freshness-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker=command.worker_id,
+        started_at=early,
+        last_heartbeat_at=early,
+    )
+    snapshot = RayTaskExecution.objects.get(pk=task.pk)
+    current_time = early
+
+    class ControlledDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return current_time if tz is not None else current_time.replace(tzinfo=None)
+
+    monkeypatch.setattr(worker_module, "datetime", ControlledDateTime)
+    monkeypatch.setattr(worker_module, "get_lease_duration", lambda: timedelta(seconds=2))
+    lease_locked = Event()
+    release_lease = Event()
+    recovery_started = Event()
+    recovery_backend_pid: list[int] = []
+
+    def hold_candidate_lease() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                TaskWorkerLease.objects.select_for_update().get(
+                    **command.lease_identity.database_filters()
+                )
+                lease_locked.set()
+                if not release_lease.wait(timeout=10):
+                    raise TimeoutError("test did not release candidate lease")
+        finally:
+            close_old_connections()
+
+    def attempt_authoritative_mutation() -> bool:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                recovery_backend_pid.append(int(cursor.fetchone()[0]))
+            recovery_started.set()
+            with command._authoritative_task_owner(
+                snapshot,
+                expected_state=TaskState.RUNNING,
+                allow_takeover=False,
+            ) as owned:
+                if owned is None:
+                    return False
+                owned.execution.error_message = "stale clock admitted mutation"
+                owned.execution.save(update_fields=["error_message"])
+                return True
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_candidate_lease)
+        assert lease_locked.wait(timeout=10)
+        recovery = executor.submit(attempt_authoritative_mutation)
+        assert recovery_started.wait(timeout=10)
+        try:
+            _wait_for_postgresql_lock(recovery_backend_pid[0])
+            current_time = early + timedelta(seconds=3)
+        finally:
+            release_lease.set()
+        holder.result(timeout=20)
+        assert recovery.result(timeout=20) is False
+
+    task.refresh_from_db()
+    lease = TaskWorkerLease.objects.get(**command.lease_identity.database_filters())
+    assert task.error_message is None
+    assert lease.last_heartbeat_at == initial_heartbeat
+    assert command.lease_ownership_lost is True
+
+
+def test_concurrent_timeout_recovery_issues_one_stop_and_one_terminal_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import django_ray.management.commands.django_ray_worker as worker_module
+
+    now = datetime.now(UTC)
+    source_lease = TaskWorkerLease.objects.create(
+        worker_id="postgres-timeout-source",
+        hostname="expired-host",
+        pid=1101,
+        queue_name="default",
+        last_heartbeat_at=now - timedelta(hours=1),
+        is_active=True,
+    )
+    recoverers = [
+        _claim_command("postgres-timeout-recoverer-a", []),
+        _claim_command("postgres-timeout-recoverer-b", []),
+    ]
+    task = _execution(
+        "postgres-concurrent-timeout-recovery-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker=source_lease.worker_id,
+        started_at=now - timedelta(minutes=5),
+        last_heartbeat_at=now - timedelta(minutes=5),
+        timeout_seconds=1,
+        attempt_number=3,
+        execution_generation=7,
+    )
+    cancellation_calls: list[int] = []
+    effect_workers: list[str] = []
+    effect_started = Event()
+    release_effect = Event()
+    snapshot_barrier = Barrier(2)
+    monkeypatch.setattr(
+        worker_module,
+        "is_task_timed_out",
+        _synchronize_first_predicate_call(worker_module.is_task_timed_out, snapshot_barrier),
+    )
+
+    for recoverer in recoverers:
+
+        def request_stop(
+            current: RayTaskExecution,
+            *,
+            worker_id: str = recoverer.worker_id,
+        ) -> CancellationOutcome:
+            cancellation_calls.append(current.pk)
+            effect_workers.append(worker_id)
+            effect_started.set()
+            if not release_effect.wait(timeout=10):
+                raise TimeoutError("test did not release timeout recovery")
+            return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+        monkeypatch.setattr(recoverer, "_request_timeout_cancellation", request_stop)
+
+    results = _run_contended_recovery(
+        recoverers,
+        lambda recoverer: recoverer.detect_stuck_tasks(),
+        effect_started=effect_started,
+        release_effect=release_effect,
+        effect_workers=effect_workers,
+    )
+
+    task.refresh_from_db()
+    source_lease.refresh_from_db()
+    assert sorted(results) == [0, 1]
+    assert cancellation_calls == [task.pk]
+    assert task.state == TaskState.FAILED
+    assert task.claimed_by_worker in {recoverer.worker_id for recoverer in recoverers}
+    assert task.cancellation_status == CancellationStatus.REQUESTED
+    assert task.finished_at is not None
+    assert source_lease.is_active is False
+    assert TaskAttempt.objects.filter(execution=task, attempt_number=3).count() == 1
+
+
+def test_concurrent_lost_recovery_has_one_owner_and_one_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import django_ray.management.commands.django_ray_worker as worker_module
+
+    now = datetime.now(UTC)
+    source_lease = TaskWorkerLease.objects.create(
+        worker_id="postgres-lost-source",
+        hostname="expired-host",
+        pid=1201,
+        queue_name="default",
+        last_heartbeat_at=now - timedelta(hours=1),
+        is_active=True,
+    )
+    recoverers = [
+        _claim_command("postgres-lost-recoverer-a", []),
+        _claim_command("postgres-lost-recoverer-b", []),
+    ]
+    task = _execution(
+        "postgres-concurrent-lost-recovery-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker=source_lease.worker_id,
+        started_at=now - timedelta(minutes=10),
+        last_heartbeat_at=now - timedelta(minutes=10),
+        attempt_number=3,
+        execution_generation=7,
+    )
+    effect_workers: list[str] = []
+    effect_started = Event()
+    release_effect = Event()
+    snapshot_barrier = Barrier(2)
+    monkeypatch.setattr(
+        worker_module,
+        "is_task_stuck",
+        _synchronize_first_predicate_call(worker_module.is_task_stuck, snapshot_barrier),
+    )
+    original_mark_task_lost = worker_module.mark_task_lost
+
+    def hold_mark_task_lost(current: RayTaskExecution) -> bool:
+        effect_workers.append(str(current.claimed_by_worker))
+        effect_started.set()
+        if not release_effect.wait(timeout=10):
+            raise TimeoutError("test did not release LOST recovery")
+        return original_mark_task_lost(current)
+
+    monkeypatch.setattr(worker_module, "mark_task_lost", hold_mark_task_lost)
+
+    results = _run_contended_recovery(
+        recoverers,
+        lambda recoverer: recoverer.detect_stuck_tasks(),
+        effect_started=effect_started,
+        release_effect=release_effect,
+        effect_workers=effect_workers,
+    )
+
+    task.refresh_from_db()
+    source_lease.refresh_from_db()
+    assert sorted(results) == [0, 1]
+    assert task.state == TaskState.LOST
+    assert task.claimed_by_worker in {recoverer.worker_id for recoverer in recoverers}
+    assert task.finished_at is not None
+    assert source_lease.is_active is False
+    assert TaskAttempt.objects.filter(execution=task, attempt_number=3).count() == 1
+
+
+def test_concurrent_cancellation_recovery_issues_one_stop_and_one_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    source_lease = TaskWorkerLease.objects.create(
+        worker_id="postgres-cancellation-source",
+        hostname="expired-host",
+        pid=1301,
+        queue_name="default",
+        last_heartbeat_at=now - timedelta(hours=1),
+        is_active=True,
+    )
+    recoverers = [
+        _claim_command("postgres-cancellation-recoverer-a", []),
+        _claim_command("postgres-cancellation-recoverer-b", []),
+    ]
+    task = _execution(
+        "postgres-concurrent-cancellation-recovery-001",
+        state=TaskState.CANCELLING,
+        claimed_by_worker=source_lease.worker_id,
+        ray_job_id="raysubmit_postgres_cancellation_recovery",
+        ray_address="ray://cluster:10001",
+        started_at=now - timedelta(minutes=5),
+        last_heartbeat_at=now - timedelta(minutes=5),
+        attempt_number=3,
+        execution_generation=7,
+    )
+    cancellation_calls: list[int] = []
+    effect_workers: list[str] = []
+    effect_started = Event()
+    release_effect = Event()
+    authority_barrier = Barrier(2)
+
+    for recoverer in recoverers:
+        original_authority = recoverer._authoritative_task_owner
+
+        @contextmanager
+        def synchronized_authority(
+            *args: object,
+            _original: Callable[..., Any] = original_authority,
+            **kwargs: object,
+        ):
+            authority_barrier.wait(timeout=10)
+            with _original(*args, **kwargs) as owned:
+                yield owned
+
+        def request_stop(
+            current: RayTaskExecution,
+            *,
+            worker_id: str = recoverer.worker_id,
+        ) -> CancellationOutcome:
+            cancellation_calls.append(current.pk)
+            effect_workers.append(worker_id)
+            effect_started.set()
+            if not release_effect.wait(timeout=10):
+                raise TimeoutError("test did not release cancellation recovery")
+            return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+        monkeypatch.setattr(recoverer, "_authoritative_task_owner", synchronized_authority)
+        monkeypatch.setattr(recoverer, "_request_cancellation_for_task", request_stop)
+
+    results = _run_contended_recovery(
+        recoverers,
+        lambda recoverer: recoverer.process_cancellations(),
+        effect_started=effect_started,
+        release_effect=release_effect,
+        effect_workers=effect_workers,
+    )
+
+    task.refresh_from_db()
+    source_lease.refresh_from_db()
+    assert sorted(results) == [0, 1]
+    assert cancellation_calls == [task.pk]
+    assert task.state == TaskState.CANCELLED
+    assert task.claimed_by_worker in {recoverer.worker_id for recoverer in recoverers}
+    assert task.cancellation_status == CancellationStatus.REQUESTED
+    assert task.finished_at is not None
+    assert source_lease.is_active is False
+    assert TaskAttempt.objects.filter(execution=task, attempt_number=3).count() == 1
+
+
+def test_orphan_adoption_invalidates_waiting_stale_lost_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     now = datetime.now(UTC)
     task = _execution(
         "postgres-orphan-adoption-lost-race-001",
@@ -416,17 +985,25 @@ def test_orphan_adoption_invalidates_waiting_stale_lost_transition() -> None:
     adoption_locked = Event()
     release_adoption = Event()
     lost_started = Event()
+    lost_backend_pid: list[int] = []
+    original_authority = adopter._authoritative_task_owner
 
-    def adopt_while_holding_execution_lock() -> bool:
-        close_old_connections()
-        try:
-            with transaction.atomic():
-                current = RayTaskExecution.objects.select_for_update().get(pk=task.pk)
-                adopted = adopter._adopt_orphaned_ray_job_task(current, now=now)
+    @contextmanager
+    def hold_normal_authoritative_locks(*args: object, **kwargs: object):
+        with original_authority(*args, **kwargs) as owned:
+            if owned is not None:
                 adoption_locked.set()
                 if not release_adoption.wait(timeout=10):
                     raise TimeoutError("test did not release orphan adoption")
-                return adopted
+            yield owned
+
+    monkeypatch.setattr(adopter, "_authoritative_task_owner", hold_normal_authoritative_locks)
+
+    def adopt_while_holding_authoritative_locks() -> bool:
+        close_old_connections()
+        try:
+            current = RayTaskExecution.objects.get(pk=task.pk)
+            return adopter._adopt_orphaned_ray_job_task(current, now=now)
         finally:
             close_old_connections()
 
@@ -435,24 +1012,30 @@ def test_orphan_adoption_invalidates_waiting_stale_lost_transition() -> None:
         try:
             if not adoption_locked.wait(timeout=10):
                 raise TimeoutError("test did not acquire orphan adoption lock")
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                lost_backend_pid.append(int(cursor.fetchone()[0]))
             lost_started.set()
             return mark_task_lost(stale_lost_snapshot)
         finally:
             close_old_connections()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        adoption_future = executor.submit(adopt_while_holding_execution_lock)
+        adoption_future = executor.submit(adopt_while_holding_authoritative_locks)
         assert adoption_locked.wait(timeout=10)
         lost_future = executor.submit(mark_stale_snapshot_lost)
         assert lost_started.wait(timeout=10)
-        release_adoption.set()
+        try:
+            _wait_for_postgresql_lock(lost_backend_pid[0])
+        finally:
+            release_adoption.set()
         assert adoption_future.result(timeout=20) is True
         assert lost_future.result(timeout=20) is False
 
     task.refresh_from_db()
     assert task.state == TaskState.RUNNING
     assert task.claimed_by_worker == "replacement-owner"
-    assert task.last_heartbeat_at == now
+    assert task.last_heartbeat_at == stale_lost_snapshot.last_heartbeat_at
     assert task.attempt_number == 2
     assert task.execution_generation == 7
     assert not TaskAttempt.objects.filter(execution=task).exists()
@@ -770,6 +1353,19 @@ def test_stale_unknown_stop_holds_execution_lock_until_outcome_is_durable(
         CancellationOutcomeStatus,
     )
 
+    owner_lease = TaskWorkerLease.objects.create(
+        worker_id="postgres-unknown-worker",
+        hostname="unknown-worker-host",
+        pid=1401,
+        queue_name="default",
+        last_heartbeat_at=datetime.now(UTC),
+    )
+    lease_identity = WorkerLeaseIdentity(
+        worker_id=str(owner_lease.worker_id),
+        hostname=owner_lease.hostname,
+        pid=owner_lease.pid,
+        started_at=owner_lease.started_at,
+    )
     task = _execution(
         "postgres-unknown-stop-retry-race-001",
         state=TaskState.RUNNING,
@@ -817,6 +1413,7 @@ def test_stale_unknown_stop_holds_execution_lock_until_outcome_is_durable(
             command = Command()
             command.stdout = StringIO()
             command.worker_id = "postgres-unknown-worker"
+            command.lease_identity = lease_identity
             command.active_tasks = {task.pk: task.ray_job_id or ""}
             command.active_task_identities = {
                 task.pk: (task.attempt_number, task.execution_generation)

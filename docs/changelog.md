@@ -454,6 +454,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unlimited backlog; retries receive a fresh deadline while pre-submission handoff does
   not. Apply migration `0016_raytaskexecution_queue_expiration` before starting upgraded
   workers.
+- Task-manager workers now acquire their lease row before Ray initialization or task
+  claims. Exact SQLite/PostgreSQL primary-key collisions receive bounded fresh-ID
+  retries with identity-derived logging and polling jitter rebuilt after each retry;
+  retained in-flight task claims also reserve an ID after Admin lease cleanup, and
+  unrelated database failures abort startup. Heartbeats, queue-expiry and claim checks,
+  and shutdown release are fenced by the original host, PID, start time, active state,
+  and lease freshness. Expired, inactive, deleted, or replaced ownership is irrevocably
+  lost. Recovery locks leases in deterministic order before the execution, validates
+  the exact live adopter, and serializes timeout, LOST, cancellation, and Ray Job
+  terminal effects with ownership transfer and attempt archival. Sync and Ray Core
+  terminal writes and monitor heartbeats require the command's captured owner; Ray Job
+  mutations revalidate the complete live lease after read-only status and log RPCs.
+  Public cancellation remains durable best-effort intent rather than exactly-once
+  interruption. Once ownership loss is detected, the worker performs no further queue
+  mutation, completion polling, claims, cancellation, or reconciliation. Benchmark
+  cleanup uses exact acquired lease identities, release database failures remain
+  distinct from fence misses, and signal-driven handoff revalidates the complete live
+  lease before an unsubmitted-task requeue, Ray Core stop, or Ray Job owner release. A
+  handoff database failure cannot skip later lease and Ray cleanup. Ray Core stop waits
+  at most five seconds, records timeout as indeterminate, and retires only the exact
+  tracked ObjectRef so a late control return cannot affect a replacement attempt. A
+  process-wide one-request cap prevents permanently blocked Ray Client cancellation
+  calls from accumulating daemon threads across runner reconnects. A valid exact owner
+  that receives a mismatched Ray Job submission identity quiesces
+  the untracked observed capability before the durable reservation under the
+  lease-to-execution fence and consumes any durable completion before closing the
+  channel; a stale or transferred submitter stops only the untracked observed
+  capability. Supported Admin bulk lease deactivation and inactive deletion share the
+  worker-ID lock order used by recovery; generic lease deletion is disabled so it
+  cannot bypass that fence, and view-only Admin users cannot invoke either controlled
+  action.
 - `django_ray_worker --all-queues` now discovers and deduplicates queues across
   every configured django-ray backend alias while ignoring Celery and other
   backends. Queue selectors and explicit execution-mode flags are mutually

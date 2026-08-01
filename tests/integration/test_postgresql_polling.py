@@ -11,7 +11,7 @@ from django.db import connection
 from django.db.models import Q
 
 from django_ray.management.commands.django_ray_benchmark_polling import Command
-from django_ray.models import RayTaskExecution
+from django_ray.models import RayTaskExecution, TaskWorkerLease
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.postgresql]
 
@@ -66,3 +66,4 @@ def test_production_claim_benchmark_records_repeatable_metrics_and_cleans_up() -
     assert not RayTaskExecution.objects.filter(
         Q(task_id__startswith="poll-latency-") | Q(task_id__startswith="poll-throughput-")
     ).exists()
+    assert not TaskWorkerLease.objects.filter(worker_id__startswith="benchmark-").exists()

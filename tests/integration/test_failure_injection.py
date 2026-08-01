@@ -30,10 +30,12 @@ class TestFailureInjection:
         cmd.sync_mode = False
         cmd.active_tasks = {}
         cmd.ray_core_runner = None
+        cmd._create_lease("default")
         return cmd
 
     def test_ray_disconnect_retries_pending_ray_core_tasks(self, monkeypatch):
         """If Ray disconnects, pending Ray Core tasks should go through retry policy."""
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-fi-disconnect-001",
             callable_path="testproject.tasks.add_numbers",
@@ -42,7 +44,7 @@ class TestFailureInjection:
             args_json="[1, 2]",
             kwargs_json="{}",
             attempt_number=1,
-            claimed_by_worker="failure-worker",
+            claimed_by_worker=cmd.worker_id,
         )
 
         pending = {
@@ -63,7 +65,6 @@ class TestFailureInjection:
             clear_pending_tasks=pending.clear,
         )
 
-        cmd = self._make_command()
         cmd.ray_core_runner = runner
 
         monkeypatch.setattr("ray.is_initialized", lambda: False)
@@ -78,6 +79,7 @@ class TestFailureInjection:
 
     def test_ray_job_stopped_marks_task_cancelled(self, monkeypatch):
         """A STOPPED Ray Job result should become CANCELLED in reconciliation."""
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-fi-stopped-001",
             callable_path="testproject.tasks.add_numbers",
@@ -89,6 +91,7 @@ class TestFailureInjection:
             workflow_run_id="00000000-0000-0000-0000-000000000125",
             ray_job_id="raysubmit_stopped_001",
             ray_address="ray://cluster:10001",
+            claimed_by_worker=cmd.worker_id,
         )
         task.workflow_progress_summary_json = serialize_workflow_progress_summary(
             workflow_progress_summary(task, state="CANCELLED")
@@ -110,7 +113,6 @@ class TestFailureInjection:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        cmd = self._make_command()
         cmd.active_tasks = {task.pk: "raysubmit_stopped_001"}
         cmd.reconcile_tasks()
 
@@ -123,6 +125,7 @@ class TestFailureInjection:
 
     def test_cancellation_race_prefers_cancelled_over_completed_result(self, monkeypatch):
         """If cancellation arrives before poll processing, task should finalize CANCELLED."""
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-fi-cancel-race-001",
             callable_path="testproject.tasks.add_numbers",
@@ -132,7 +135,7 @@ class TestFailureInjection:
             kwargs_json="{}",
             attempt_number=1,
             started_at=datetime.now(UTC) - timedelta(seconds=5),
-            claimed_by_worker="failure-worker",
+            claimed_by_worker=cmd.worker_id,
         )
 
         class FakeRunner:
@@ -171,7 +174,6 @@ class TestFailureInjection:
                     )
                 ]
 
-        cmd = self._make_command()
         cmd.ray_core_runner = FakeRunner()
 
         monkeypatch.setattr("ray.is_initialized", lambda: True)

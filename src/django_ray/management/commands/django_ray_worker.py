@@ -6,13 +6,15 @@ import json
 import random
 import signal
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FrameType
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
-from django.db import transaction
+from django.db import IntegrityError, connection, transaction
 
 from django_ray.conf.settings import get_settings
 from django_ray.lifecycle import (
@@ -35,7 +37,13 @@ from django_ray.runner.cancellation import (
     prepare_remote_cancellation,
     request_remote_cancellation,
 )
-from django_ray.runner.leasing import generate_worker_id, get_heartbeat_interval
+from django_ray.runner.leasing import (
+    WorkerLeaseIdentity,
+    generate_worker_id,
+    get_heartbeat_interval,
+    get_lease_duration,
+    is_worker_id_primary_key_collision,
+)
 from django_ray.runner.polling import AdaptivePollingPolicy
 from django_ray.runner.ray_core import RayCoreRunner
 from django_ray.runner.reconciliation import (
@@ -51,6 +59,20 @@ from django_ray.runtime.runtime_env import (
     runtime_env_for_execution,
 )
 
+_WORKER_ID_ALLOCATION_ATTEMPTS = 3
+
+
+class _WorkerIdReservedByTaskError(Exception):
+    """Signal that a retained in-flight task still owns a worker ID."""
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedTask:
+    """One execution held behind this process's exact live lease fence."""
+
+    execution: RayTaskExecution
+    adopted: bool
+
 
 class Command(BaseCommand):
     """Run a django-ray worker process."""
@@ -60,6 +82,7 @@ class Command(BaseCommand):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.shutdown_requested = False
+        self.lease_ownership_lost = False
         self.worker_id = generate_worker_id()
         self.logger = get_worker_logger(self.worker_id)
         self.active_tasks: dict[int, str] = {}  # task_pk -> ray_job_id (for Ray Job API mode)
@@ -71,17 +94,16 @@ class Command(BaseCommand):
         self.cancellation_interval = 30.0
         self.lease_cleanup_interval = 30.0
         self.lease: TaskWorkerLease | None = None  # Worker lease for coordination
-        self.lease_queue_name: str = "default"  # Queue name for lease recreation
+        self.lease_identity: WorkerLeaseIdentity | None = None
+        self.lease_queue_name: str = "default"  # Queue name retained for exact renewal
         self.last_task_processed = 0.0  # Last time we processed a task
         self.tasks_processed_count = 0  # Total tasks processed
         self.task_monitor_heartbeat_interval = 15.0
         self.last_task_monitor_heartbeat = 0.0
         self.completion_poll_interval = 0.1
-        self.polling_policy = AdaptivePollingPolicy(
-            base_interval_seconds=0.1,
-            max_interval_seconds=0.1,
-            random_value=random.Random(self.worker_id).random,
-        )
+        self.poll_base_interval = 0.1
+        self.poll_max_interval = 0.1
+        self.polling_policy = self._new_polling_policy()
         # A signal requests a graceful handoff.  Keep the signal number so the
         # command-line entrypoint can preserve the conventional 128+N status.
         self.shutdown_signal: int | None = None
@@ -91,6 +113,22 @@ class Command(BaseCommand):
         self.sync_mode = False
         self.local_mode = False
         self.cluster_address: str | None = None
+
+    def _new_polling_policy(self) -> AdaptivePollingPolicy:
+        """Build polling jitter from the current worker identity."""
+        return AdaptivePollingPolicy(
+            base_interval_seconds=self.poll_base_interval,
+            max_interval_seconds=self.poll_max_interval,
+            random_value=random.Random(self.worker_id).random,
+        )
+
+    def _set_worker_id(self, worker_id: str) -> None:
+        """Replace an unacquired candidate and all identity-derived state."""
+        if self.lease_identity is not None:
+            raise RuntimeError("cannot replace an acquired worker lease identity")
+        self.worker_id = worker_id
+        self.logger = get_worker_logger(worker_id)
+        self.polling_policy = self._new_polling_policy()
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add command arguments."""
@@ -153,74 +191,34 @@ class Command(BaseCommand):
         self.local_mode = options.get("local", False)
         self.cluster_address = options.get("cluster")
 
-        # Determine execution mode
+        # Determine execution mode without touching Ray. The database lease is
+        # acquired first so a colliding identity can never initialize a driver
+        # or begin claiming work.
         if self.sync_mode:
             self.execution_mode = "sync"
         elif self.local_mode:
             self.execution_mode = "local"
-            try:
-                self._init_local_ray()
-                # Initialize RayCoreRunner for task submission via @ray.remote
-                self.ray_core_runner = RayCoreRunner()
-            except Exception as e:
-                self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {e}"))
-                self.stdout.write("Will retry connection during operation...")
         elif self.cluster_address:
             self.execution_mode = "cluster"
-            try:
-                self._init_cluster_ray(self.cluster_address)
-                # Initialize RayCoreRunner for task submission via @ray.remote
-                self.ray_core_runner = RayCoreRunner()
-            except Exception as e:
-                self.stdout.write(self.style.WARNING(f"Initial cluster connection failed: {e}"))
-                self.stdout.write("Will retry connection during operation...")
         else:
             default_mode, default_cluster_address = self._get_default_execution_mode(settings)
             self.execution_mode = default_mode
-
-            if self.execution_mode == "local":
-                try:
-                    self._init_local_ray()
-                    self.ray_core_runner = RayCoreRunner()
-                except Exception as e:
-                    self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {e}"))
-                    self.stdout.write("Will retry connection during operation...")
-            elif self.execution_mode == "cluster":
+            if self.execution_mode == "cluster":
                 assert default_cluster_address is not None, (
                     "_get_default_execution_mode() returns an address with cluster mode"
                 )
                 self.cluster_address = default_cluster_address
-                try:
-                    self._init_cluster_ray(self.cluster_address)
-                    self.ray_core_runner = RayCoreRunner()
-                except Exception as e:
-                    self.stdout.write(self.style.WARNING(f"Initial cluster connection failed: {e}"))
-                    self.stdout.write("Will retry connection during operation...")
 
         if concurrency is None:
             concurrency = settings.get("DEFAULT_CONCURRENCY", 10)
         self.task_monitor_heartbeat_interval = float(
             settings.get("TASK_MONITOR_HEARTBEAT_SECONDS", 15)
         )
-        poll_interval = float(settings.get("WORKER_POLL_INTERVAL_SECONDS", 0.1))
-        poll_max_interval = float(settings.get("WORKER_POLL_MAX_INTERVAL_SECONDS", 0.1))
-        self.polling_policy = AdaptivePollingPolicy(
-            base_interval_seconds=poll_interval,
-            max_interval_seconds=poll_max_interval,
-            random_value=random.Random(self.worker_id).random,
-        )
+        self.poll_base_interval = float(settings.get("WORKER_POLL_INTERVAL_SECONDS", 0.1))
+        self.poll_max_interval = float(settings.get("WORKER_POLL_MAX_INTERVAL_SECONDS", 0.1))
+        self.polling_policy = self._new_polling_policy()
 
         self.setup_signal_handlers()
-
-        self._write_worker_output(
-            self.style.SUCCESS(f"Starting django-ray worker {self.worker_id}")
-        )
-        self._write_worker_output(f"  Queues: {', '.join(queues)}")
-        self._write_worker_output(f"  Concurrency: {concurrency}")
-        self._write_worker_output(f"  Mode: {self.execution_mode}")
-        self._write_worker_output(
-            f"  Polling: {poll_interval:g}s base, {poll_max_interval:g}s maximum"
-        )
 
         heartbeat_interval = get_heartbeat_interval().total_seconds()
 
@@ -228,6 +226,16 @@ class Command(BaseCommand):
         self._create_lease(queues[0] if len(queues) == 1 else ",".join(queues))
 
         try:
+            self._write_worker_output(
+                self.style.SUCCESS(f"Starting django-ray worker {self.worker_id}")
+            )
+            self._write_worker_output(f"  Queues: {', '.join(queues)}")
+            self._write_worker_output(f"  Concurrency: {concurrency}")
+            self._write_worker_output(f"  Mode: {self.execution_mode}")
+            self._write_worker_output(
+                f"  Polling: {self.poll_base_interval:g}s base, {self.poll_max_interval:g}s maximum"
+            )
+            self._initialize_ray_execution()
             self.run_loop(
                 queues=queues,
                 concurrency=concurrency,
@@ -248,6 +256,24 @@ class Command(BaseCommand):
             self, "_called_from_command_line", False
         ):
             raise SystemExit(self.shutdown_exit_code)
+
+    def _initialize_ray_execution(self) -> None:
+        """Initialize Ray only after this process owns its database lease."""
+        if self.execution_mode == "local":
+            try:
+                self._init_local_ray()
+                self.ray_core_runner = RayCoreRunner()
+            except Exception as error:
+                self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {error}"))
+                self.stdout.write("Will retry connection during operation...")
+        elif self.execution_mode == "cluster":
+            assert self.cluster_address is not None
+            try:
+                self._init_cluster_ray(self.cluster_address)
+                self.ray_core_runner = RayCoreRunner()
+            except Exception as error:
+                self.stdout.write(self.style.WARNING(f"Initial cluster connection failed: {error}"))
+                self.stdout.write("Will retry connection during operation...")
 
     def _get_default_execution_mode(self, settings: dict[str, Any]) -> tuple[str, str | None]:
         """Resolve default worker mode from settings when no CLI mode flag is set.
@@ -456,10 +482,13 @@ class Command(BaseCommand):
         self.stdout.write(f"  Cluster resources: {resources}")
 
     def _create_lease(self, queue: str) -> None:
-        """Create a worker lease for distributed coordination.
+        """Acquire a new worker lease without adopting an existing row.
 
         The lease tracks active workers and enables detection of
-        crashed workers through heartbeat expiration.
+        crashed workers through heartbeat expiration. A generated ID collision
+        is proven by the conflicting primary-key row and retried with a fresh
+        identity. Other database failures abort startup before Ray or task
+        claims begin.
 
         Args:
             queue: The queue this worker is processing.
@@ -469,28 +498,65 @@ class Command(BaseCommand):
 
         from django.utils import timezone
 
-        # Store queue for potential lease recreation
         self.lease_queue_name = queue
+        if self.lease_identity is not None:
+            if not self._recreate_lease():
+                raise CommandError("Worker lease ownership was lost")
+            return
 
-        try:
-            # Use update_or_create in case this worker_id already exists
-            # (e.g., from a previous run that didn't clean up properly)
-            self.lease, created = TaskWorkerLease.objects.update_or_create(
+        hostname = socket.gethostname()
+        pid = os.getpid()
+        for attempt in range(_WORKER_ID_ALLOCATION_ATTEMPTS):
+            started_at = timezone.now()
+            identity = WorkerLeaseIdentity(
                 worker_id=self.worker_id,
-                defaults={
-                    "hostname": socket.gethostname(),
-                    "pid": os.getpid(),
-                    "queue_name": queue,
-                    "last_heartbeat_at": timezone.now(),
-                    "is_active": True,
-                    "stopped_at": None,
-                },
+                hostname=hostname,
+                pid=pid,
+                started_at=started_at,
             )
-            action = "created" if created else "reactivated"
-            self.stdout.write(self.style.SUCCESS(f"  Lease {action}: {self.worker_id}"))
-        except Exception as e:
-            self.stdout.write(self.style.WARNING(f"  Failed to create lease: {e}"))
-            # Continue without lease - worker will still function
+            try:
+                with transaction.atomic():
+                    lease = TaskWorkerLease.objects.create(
+                        **identity.database_filters(),
+                        queue_name=queue,
+                        last_heartbeat_at=started_at,
+                        is_active=True,
+                        stopped_at=None,
+                    )
+                    # Inactive leases can be deleted through the supported
+                    # Admin action while their orphaned tasks still await
+                    # reconciliation.  A successful row insert therefore is
+                    # not sufficient proof that the ID is unused: retain the
+                    # task-side ownership fence until every in-flight row has
+                    # left a state where workers coordinate by worker ID.
+                    if RayTaskExecution.objects.filter(
+                        claimed_by_worker=self.worker_id,
+                        state__in=(TaskState.RUNNING, TaskState.CANCELLING),
+                    ).exists():
+                        raise _WorkerIdReservedByTaskError
+            except _WorkerIdReservedByTaskError:
+                if attempt + 1 < _WORKER_ID_ALLOCATION_ATTEMPTS:
+                    self._set_worker_id(generate_worker_id())
+                continue
+            except IntegrityError as error:
+                if not is_worker_id_primary_key_collision(error):
+                    raise CommandError("Could not create worker lease") from error
+                if attempt + 1 < _WORKER_ID_ALLOCATION_ATTEMPTS:
+                    self._set_worker_id(generate_worker_id())
+                continue
+            except Exception as error:
+                raise CommandError("Could not create worker lease") from error
+
+            self.lease = lease
+            self.lease_identity = identity
+            return
+
+        # The backend exception includes the conflicting primary-key value on
+        # supported databases. Keep the public startup diagnostic bounded and
+        # avoid retaining that foreign identity in ``--traceback`` output.
+        raise CommandError(
+            "Could not allocate a unique worker lease after bounded retries"
+        ) from None
 
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -543,6 +609,11 @@ class Command(BaseCommand):
                 self.send_heartbeat()
                 next_heartbeat = current_time + heartbeat_interval
 
+            # Lease loss is a hard ownership boundary. Do not poll or mutate
+            # task state once the heartbeat path has failed that fence.
+            if self.shutdown_requested:
+                break
+
             if (
                 current_time >= next_completion_poll
                 and self.execution_mode in ("local", "cluster")
@@ -559,18 +630,30 @@ class Command(BaseCommand):
             if claim_due:
                 activity = bool(self.claim_and_process_tasks(queues, concurrency)) or activity
 
+            # The pre-claim lease lock can discover that this process no longer
+            # owns its identity. Stop before cancellation or reconciliation can
+            # mistake a replacement worker's matching ID for local ownership.
+            if self.shutdown_requested:
+                break
+
             if current_time >= next_cancellation:
                 activity = bool(self.process_cancellations()) or activity
                 next_cancellation = current_time + self.cancellation_interval
+            if self.shutdown_requested:
+                break
 
             if current_time >= next_reconciliation:
                 activity = bool(self.reconcile_tasks()) or activity
                 self.last_reconciliation = current_time
                 next_reconciliation = current_time + self.reconciliation_interval
+            if self.shutdown_requested:
+                break
 
             if current_time >= next_timeout_check:
                 activity = bool(self.detect_stuck_tasks()) or activity
                 next_timeout_check = current_time + self.timeout_check_interval
+            if self.shutdown_requested:
+                break
 
             if current_time >= next_lease_cleanup:
                 activity = bool(self.cleanup_expired_leases()) or activity
@@ -604,34 +687,33 @@ class Command(BaseCommand):
 
     def send_heartbeat(self) -> None:
         """Send worker heartbeat, update lease, and check Ray connection."""
-        from django.utils import timezone
+        identity = self.lease_identity
+        if identity is None:
+            self._request_shutdown_for_lease_loss("worker lease was never acquired")
+            return
 
-        # Update worker lease if we have one, or try to create one if missing
-        if self.lease is not None:
-            try:
-                # Refresh from DB to check if lease still exists
-                self.lease.refresh_from_db()
-
-                # Check if lease was marked inactive (by cleanup or manually)
-                if not self.lease.is_active:
-                    self.stdout.write(
-                        self.style.WARNING("\nLease was marked inactive, reactivating...")
+        try:
+            with transaction.atomic():
+                updated = self._lock_authoritative_leases(
+                    source_worker_id=self.worker_id,
+                    allow_takeover=False,
+                )
+                if updated:
+                    TaskWorkerLease.objects.filter(**identity.database_filters()).update(
+                        queue_name=self.lease_queue_name
                     )
-                    self._recreate_lease()
-                else:
-                    # Normal heartbeat update
-                    self.lease.last_heartbeat_at = timezone.now()
-                    self.lease.save(update_fields=["last_heartbeat_at"])
-            except TaskWorkerLease.DoesNotExist:
-                # Lease was deleted - recreate it
-                self.stdout.write(self.style.WARNING("\nLease was deleted, recreating..."))
-                self._recreate_lease()
-            except Exception as e:
-                # Database error - try to recreate lease on next heartbeat
-                self.stdout.write(self.style.WARNING(f"\nHeartbeat failed: {e}"))
+        except Exception as error:
+            self._request_shutdown_for_lease_loss(f"worker lease heartbeat failed: {error}")
+            return
+
+        if updated:
+            if self.lease is not None:
+                self.lease.queue_name = self.lease_queue_name
         else:
-            # No lease exists - try to create one
-            self._recreate_lease()
+            return
+
+        if self.shutdown_requested:
+            return
 
         # Check Ray connection health for local/cluster modes
         if self.execution_mode in ("local", "cluster"):
@@ -657,52 +739,73 @@ class Command(BaseCommand):
             self.stdout.write(".", ending="")
         self.stdout.flush()
 
-    def _recreate_lease(self) -> None:
-        """Recreate the worker lease after it was deleted or marked inactive."""
-        import os
-        import socket
-
-        from django.utils import timezone
-
-        queue_name = getattr(self, "lease_queue_name", "default")
+    def _recreate_lease(self) -> bool:
+        """Renew only a still-live exact lease identity."""
+        identity = self.lease_identity
+        if identity is None:
+            self._request_shutdown_for_lease_loss("worker lease was never acquired")
+            return False
 
         try:
-            # Use update_or_create to handle race conditions
-            # This will reactivate an inactive lease or create a new one
-            self.lease, created = TaskWorkerLease.objects.update_or_create(
-                worker_id=self.worker_id,
-                defaults={
-                    "hostname": socket.gethostname(),
-                    "pid": os.getpid(),
-                    "queue_name": queue_name,
-                    "last_heartbeat_at": timezone.now(),
-                    "is_active": True,
-                    "stopped_at": None,
-                },
-            )
-            action = "created" if created else "reactivated"
-            self.stdout.write(self.style.SUCCESS(f"  Lease {action}: {self.worker_id}"))
-        except Exception as e:
-            self.stdout.write(self.style.WARNING(f"  Failed to recreate lease: {e}"))
+            with transaction.atomic():
+                updated = self._lock_authoritative_leases(
+                    source_worker_id=self.worker_id,
+                    allow_takeover=False,
+                )
+                if updated:
+                    TaskWorkerLease.objects.filter(**identity.database_filters()).update(
+                        queue_name=self.lease_queue_name
+                    )
+            if not updated:
+                return False
+            if self.lease is not None:
+                self.lease.queue_name = self.lease_queue_name
+            self.stdout.write(self.style.SUCCESS(f"  Lease restored: {self.worker_id}"))
+            return True
+        except Exception as error:
+            self._request_shutdown_for_lease_loss(f"worker lease restoration failed: {error}")
+            return False
 
-    def _update_lease_heartbeat(self) -> None:
+    def _request_shutdown_for_lease_loss(self, reason: str) -> None:
+        """Fail closed when this process cannot prove lease ownership."""
+        if not self.shutdown_requested:
+            self.stdout.write(
+                self.style.ERROR("\nWorker lease ownership lost; shutting down before claims")
+            )
+        self.logger.error(reason)
+        self.lease_ownership_lost = True
+        # These capabilities belong to the expired immutable lease identity.
+        # Retire them immediately so no later reconciliation or shutdown path
+        # can mistake a replacement process with the same worker ID for us.
+        self.active_tasks.clear()
+        self.active_task_identities.clear()
+        self.shutdown_requested = True
+        if self.shutdown_exit_code is None:
+            self.shutdown_exit_code = 1
+
+    def _update_lease_heartbeat(self) -> bool:
         """Update lease heartbeat without full heartbeat logic.
 
         This is called before each task execution to ensure the lease
         doesn't expire during long-running tasks.
         """
-        from django.utils import timezone
-
-        if self.lease is None:
-            return
+        identity = self.lease_identity
+        if identity is None:
+            self._request_shutdown_for_lease_loss("worker lease was never acquired")
+            return False
 
         try:
-            TaskWorkerLease.objects.filter(worker_id=self.worker_id).update(
-                last_heartbeat_at=timezone.now()
-            )
-        except Exception:
-            # Best effort - will be handled by regular heartbeat
-            pass
+            with transaction.atomic():
+                updated = self._lock_authoritative_leases(
+                    source_worker_id=self.worker_id,
+                    allow_takeover=False,
+                )
+        except Exception as error:
+            self._request_shutdown_for_lease_loss(f"worker lease heartbeat failed: {error}")
+            return False
+        if not updated:
+            return False
+        return True
 
     def _mark_task_monitor_heartbeat(
         self,
@@ -710,6 +813,7 @@ class Command(BaseCommand):
         *,
         now: datetime | None = None,
         ray_job_id: str | None = None,
+        expected_worker_id: str | None = None,
         attempt_number: int | None = None,
         execution_generation: int | None = None,
     ) -> None:
@@ -718,6 +822,8 @@ class Command(BaseCommand):
         filters: dict[str, Any] = {"pk": task.pk, "state": TaskState.RUNNING}
         if ray_job_id is not None:
             filters["ray_job_id"] = ray_job_id
+        if expected_worker_id is not None:
+            filters["claimed_by_worker"] = expected_worker_id
         if attempt_number is not None:
             filters["attempt_number"] = attempt_number
         if execution_generation is not None:
@@ -900,6 +1006,7 @@ class Command(BaseCommand):
                 task,
                 error_message="Ray connection lost - task state unknown",
                 exception_type="RayConnectionError",
+                expected_claimed_by_worker=self.worker_id,
                 expected_attempt_number=handle.attempt_number,
                 expected_execution_generation=handle.execution_generation,
             )
@@ -925,28 +1032,43 @@ class Command(BaseCommand):
         """
         if self.shutdown_requested:
             return 0
+        lease_identity = self.lease_identity
+        if lease_identity is None:
+            self._request_shutdown_for_lease_loss("worker lease was never acquired")
+            return 0
 
-        sweep_now = datetime.now(UTC)
-        expired = expire_queued_tasks(queues, now=sweep_now, limit=100)
-        if expired:
-            self.stdout.write(self.style.WARNING(f"  Expired {len(expired)} stale queued task(s)"))
-
-        # Check how many slots are available. Expiry sweeping above deliberately
-        # remains independent from execution capacity.
+        # Check how many slots are available. Queue expiry remains independent
+        # from execution capacity, but both expiry and claiming require the same
+        # exact active-lease fence below.
         ray_core_pending = self.ray_core_runner.pending_count if self.ray_core_runner else 0
         active_count = len(self.active_tasks) + ray_core_pending
         available_slots = concurrency - active_count
-        if available_slots <= 0:
-            return len(expired)
 
         # Claim tasks from any of the specified queues
         from django.db.models import Q
 
-        # Re-read the clock after attempt archival for the bounded expiry batch.
-        # A deadline reached during that work must be excluded from this claim,
-        # even though the next sweep owns its terminal transition.
-        claim_now = datetime.now(UTC)
         with transaction.atomic():
+            if not self._lock_authoritative_leases(
+                source_worker_id=self.worker_id,
+                allow_takeover=False,
+                renew_heartbeat=False,
+            ):
+                return 0
+
+            sweep_now = datetime.now(UTC)
+            expired = expire_queued_tasks(queues, now=sweep_now, limit=100)
+            if expired:
+                self.stdout.write(
+                    self.style.WARNING(f"  Expired {len(expired)} stale queued task(s)")
+                )
+            if available_slots <= 0:
+                return len(expired)
+
+            # Re-read the clock after attempt archival for the bounded expiry
+            # batch. A deadline reached during that work must be excluded from
+            # this claim even though the next sweep owns its transition.
+            claim_now = datetime.now(UTC)
+
             # A single query keeps immediate and delayed/retried work in the same
             # priority order. Queue names only select workload-isolation boundaries.
             tasks = list(
@@ -994,8 +1116,9 @@ class Command(BaseCommand):
 
         # Process each claimed task
         for task in tasks:
-            if self.shutdown_requested and self.execution_mode != "sync":
-                self._handoff_unsubmitted_task(task)
+            if self.shutdown_requested:
+                if not self.lease_ownership_lost:
+                    self._handoff_unsubmitted_task(task)
                 continue
             self.process_task(task)
 
@@ -1003,21 +1126,33 @@ class Command(BaseCommand):
 
     def _handoff_unsubmitted_task(self, task: RayTaskExecution) -> None:
         """Return a just-claimed task to durable reconciliation on shutdown."""
-        updated = RayTaskExecution.objects.filter(
-            pk=task.pk,
-            state=TaskState.RUNNING,
-            claimed_by_worker=self.worker_id,
-            attempt_number=task.attempt_number,
-            execution_generation=task.execution_generation,
-        ).update(
-            state=TaskState.QUEUED,
-            started_at=None,
-            claimed_by_worker=None,
-            last_heartbeat_at=None,
-            ray_job_id=None,
-            ray_address=None,
-        )
-        if updated:
+        handed_off = False
+        with self._authoritative_task_owner(
+            task,
+            expected_state=TaskState.RUNNING,
+            allow_takeover=False,
+            require_completion_data_match=True,
+        ) as owned:
+            if owned is not None:
+                current = owned.execution
+                current.state = TaskState.QUEUED
+                current.started_at = None
+                current.claimed_by_worker = None
+                current.last_heartbeat_at = None
+                current.ray_job_id = None
+                current.ray_address = None
+                current.save(
+                    update_fields=[
+                        "state",
+                        "started_at",
+                        "claimed_by_worker",
+                        "last_heartbeat_at",
+                        "ray_job_id",
+                        "ray_address",
+                    ]
+                )
+                handed_off = True
+        if handed_off:
             self.stdout.write(
                 self.style.NOTICE(f"  Task {task.pk} handed off before remote submission")
             )
@@ -1028,7 +1163,8 @@ class Command(BaseCommand):
 
         # Update heartbeat before task execution to prevent lease expiration
         # during long-running tasks
-        self._update_lease_heartbeat()
+        if not self._update_lease_heartbeat():
+            return
 
         # Track task processing
         self.last_task_processed = time.time()
@@ -1042,7 +1178,7 @@ class Command(BaseCommand):
                 error_message=str(error),
                 exception_type=type(error).__name__,
                 retryable=False,
-                expected_claimed_by_worker=task.claimed_by_worker,
+                expected_claimed_by_worker=self.worker_id,
                 expected_attempt_number=int(task.attempt_number),
                 expected_execution_generation=int(task.execution_generation),
             )
@@ -1067,6 +1203,7 @@ class Command(BaseCommand):
 
         expected_attempt_number = int(task.attempt_number)
         expected_execution_generation = int(task.execution_generation)
+        expected_worker_id = self.worker_id
         try:
             runtime_env = runtime_env_for_execution(task)
             plan_runtime_env_identity = runtime_env_plan_identity(
@@ -1092,6 +1229,7 @@ class Command(BaseCommand):
                 if not RayTaskExecution.objects.filter(
                     pk=task.pk,
                     state=TaskState.RUNNING,
+                    claimed_by_worker=expected_worker_id,
                     attempt_number=expected_attempt_number,
                     execution_generation=expected_execution_generation,
                 ).exists():
@@ -1106,6 +1244,7 @@ class Command(BaseCommand):
                 if not self._store_and_succeed_task(
                     task,
                     result["result"],
+                    expected_claimed_by_worker=expected_worker_id,
                     expected_attempt_number=expected_attempt_number,
                     expected_execution_generation=expected_execution_generation,
                 ):
@@ -1121,6 +1260,7 @@ class Command(BaseCommand):
                     error_traceback=result.get("traceback"),
                     exception_type=result.get("exception_type"),
                     retryable=result.get("retryable"),
+                    expected_claimed_by_worker=expected_worker_id,
                     expected_attempt_number=expected_attempt_number,
                     expected_execution_generation=expected_execution_generation,
                 )
@@ -1131,6 +1271,7 @@ class Command(BaseCommand):
                 error_message=str(e),
                 exception_type=type(e).__name__,
                 retryable=False if isinstance(e, RuntimeEnvSnapshotError) else None,
+                expected_claimed_by_worker=expected_worker_id,
                 expected_attempt_number=expected_attempt_number,
                 expected_execution_generation=expected_execution_generation,
             )
@@ -1193,6 +1334,7 @@ class Command(BaseCommand):
         *,
         prepared_result_reference: str | None = None,
         expected_ray_job_id: str | None = None,
+        expected_claimed_by_worker: str | None = None,
         expected_attempt_number: int | None = None,
         expected_execution_generation: int | None = None,
         expected_completion_data: str | None = None,
@@ -1208,6 +1350,8 @@ class Command(BaseCommand):
         filters: dict[str, Any] = {"pk": task.pk, "state": TaskState.RUNNING}
         if expected_ray_job_id is not None:
             filters["ray_job_id"] = expected_ray_job_id
+        if expected_claimed_by_worker is not None:
+            filters["claimed_by_worker"] = expected_claimed_by_worker
         if expected_attempt_number is not None:
             filters["attempt_number"] = expected_attempt_number
         if expected_execution_generation is not None:
@@ -1232,6 +1376,7 @@ class Command(BaseCommand):
                 result_data=current.result_data,
                 result_reference=current.result_reference,
                 expected_ray_job_id=expected_ray_job_id,
+                expected_claimed_by_worker=expected_claimed_by_worker,
                 expected_attempt_number=expected_attempt_number,
                 expected_execution_generation=expected_execution_generation,
                 expected_completion_data=expected_completion_data,
@@ -1435,10 +1580,10 @@ class Command(BaseCommand):
         *,
         prepared: dict[tuple[str, str], PreparedRemoteCancellation] | None = None,
     ) -> CancellationOutcome:
-        """Stop both capabilities when Ray and the durable reservation disagree."""
+        """Stop both capabilities, quiescing the undiscoverable duplicate first."""
         handles = {
-            (reserved_handle.ray_job_id, reserved_handle.ray_address): reserved_handle,
             (observed_handle.ray_job_id, observed_handle.ray_address): observed_handle,
+            (reserved_handle.ray_job_id, reserved_handle.ray_address): reserved_handle,
         }
         outcomes = [
             self._cancel_untracked_submission(
@@ -1513,6 +1658,13 @@ class Command(BaseCommand):
         )
         if not same_identity:
             return ("replaced", completion_data, "the durable execution identity changed")
+        current_worker_id = current["claimed_by_worker"]
+        if current_worker_id not in (None, expected_worker_id):
+            return (
+                "transferred",
+                completion_data,
+                f"ownership moved to {current_worker_id}",
+            )
         if current["state"] != TaskState.RUNNING:
             return (
                 "terminal",
@@ -1520,13 +1672,88 @@ class Command(BaseCommand):
                 f"the durable execution is now {current['state']}",
             )
 
-        current_worker_id = current["claimed_by_worker"]
         if current_worker_id == expected_worker_id:
             return ("owned", completion_data, None)
         return (
             "transferred",
             completion_data,
             f"ownership moved to {current_worker_id or 'an unclaimed reconciler'}",
+        )
+
+    def _terminalize_mismatched_ray_job_submission(
+        self,
+        current: RayTaskExecution,
+        *,
+        reserved_handle: SubmissionHandle,
+        expected_worker_id: str | None,
+        expected_attempt_number: int,
+        expected_execution_generation: int,
+        error_message: str,
+        exception_type: str,
+        cancellation: CancellationOutcome,
+    ) -> bool:
+        """Close one ambiguous completion channel while its task lock is held."""
+        completion_data = current.completion_data
+        result: Any = None
+        if completion_data is not None:
+            try:
+                result = json.loads(completion_data)
+            except (TypeError, json.JSONDecodeError):
+                result = None
+        valid_result = (
+            result
+            if isinstance(result, dict) and self._is_valid_completion_envelope(result)
+            else None
+        )
+
+        if valid_result is not None and valid_result["success"]:
+            prepared_result_reference = (
+                str(valid_result["result_reference"])
+                if valid_result.get("result_reference")
+                else None
+            )
+            handled = self._store_and_succeed_task(
+                current,
+                valid_result.get("result"),
+                prepared_result_reference=prepared_result_reference,
+                expected_ray_job_id=reserved_handle.ray_job_id,
+                expected_claimed_by_worker=expected_worker_id,
+                expected_attempt_number=expected_attempt_number,
+                expected_execution_generation=expected_execution_generation,
+                expected_completion_data=completion_data,
+                require_completion_data_match=True,
+            )
+            if handled:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"  Task {current.pk} accepted its durable completion only after "
+                        "quiescing both mismatched Ray Jobs"
+                    )
+                )
+            return handled
+
+        mismatch_error = error_message
+        error_traceback: str | None = None
+        if valid_result is not None and not valid_result["success"]:
+            mismatch_error = f"{error_message}; completion reported: {valid_result['error']}"
+            error_traceback = valid_result.get("traceback")
+        elif completion_data is not None:
+            mismatch_error = f"{error_message}; completion envelope was invalid"
+
+        return self._handle_task_failure(
+            current,
+            error_message=mismatch_error,
+            error_traceback=error_traceback,
+            exception_type=exception_type,
+            retryable=False,
+            expected_ray_job_id=reserved_handle.ray_job_id,
+            expected_claimed_by_worker=expected_worker_id,
+            expected_attempt_number=expected_attempt_number,
+            expected_execution_generation=expected_execution_generation,
+            expected_completion_data=completion_data,
+            require_completion_data_match=True,
+            cancellation_status=cancellation.status.value,
+            cancellation_error=cancellation.message,
         )
 
     def _handle_ray_job_confirmation_loss(
@@ -1584,19 +1811,6 @@ class Command(BaseCommand):
         exception_type: str,
     ) -> None:
         """Fence a returned capability mismatch without cancelling an adopter."""
-        owner_filters: dict[str, Any] = {
-            "pk": task.pk,
-            "state": TaskState.RUNNING,
-            "ray_job_id": reserved_handle.ray_job_id,
-            "ray_address": reserved_handle.ray_address,
-            "attempt_number": expected_attempt_number,
-            "execution_generation": expected_execution_generation,
-        }
-        if expected_worker_id is None:
-            owner_filters["claimed_by_worker__isnull"] = True
-        else:
-            owner_filters["claimed_by_worker"] = expected_worker_id
-
         handles = {
             (reserved_handle.ray_job_id, reserved_handle.ray_address): reserved_handle,
             (observed_handle.ray_job_id, observed_handle.ray_address): observed_handle,
@@ -1606,49 +1820,36 @@ class Command(BaseCommand):
             for identity, handle in handles.items()
         }
 
-        # The row lock makes "still owned" and the exact stop/failure one
-        # indivisible decision. A worker whose lease expired cannot cancel the
-        # capability after another worker adopts this same execution identity.
-        with transaction.atomic():
-            current = RayTaskExecution.objects.select_for_update().filter(**owner_filters).first()
-            if current is not None:
-                if current.completion_data is not None:
-                    self._cancel_untracked_submission(
+        # Refresh before locking so a completion published during submission is
+        # captured and terminalized rather than invalidating the stale caller
+        # snapshot. Exact live lease validation plus the execution lock makes
+        # quiescence and closing the completion channel one decision.
+        try:
+            authoritative_snapshot = RayTaskExecution.objects.get(pk=task.pk)
+        except RayTaskExecution.DoesNotExist:
+            authoritative_snapshot = None
+        if expected_worker_id == self.worker_id and authoritative_snapshot is not None:
+            with self._authoritative_task_owner(
+                authoritative_snapshot,
+                expected_state=str(authoritative_snapshot.state),
+                allow_takeover=False,
+                require_completion_data_match=False,
+            ) as owned:
+                current = owned.execution if owned is not None else None
+                if current is None:
+                    pass
+                elif (
+                    str(current.ray_job_id or "") != reserved_handle.ray_job_id
+                    or str(current.ray_address or "") != reserved_handle.ray_address
+                    or current.attempt_number != expected_attempt_number
+                    or current.execution_generation != expected_execution_generation
+                ):
+                    self._cancel_mismatched_submissions(
                         runner,
+                        reserved_handle,
                         observed_handle,
-                        backend_name="mismatched Ray Job",
-                        prepared=prepared_cancellations[
-                            (observed_handle.ray_job_id, observed_handle.ray_address)
-                        ],
+                        prepared=prepared_cancellations,
                     )
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"  Task {task.pk} Ray Job identity mismatch arrived after "
-                            "a durable completion; retaining exact tracking"
-                        )
-                    )
-                    return
-                cancellation = self._cancel_mismatched_submissions(
-                    runner,
-                    reserved_handle,
-                    observed_handle,
-                    prepared=prepared_cancellations,
-                )
-                handled = self._handle_task_failure(
-                    current,
-                    error_message=error_message,
-                    exception_type=exception_type,
-                    retryable=False,
-                    expected_ray_job_id=reserved_handle.ray_job_id,
-                    expected_claimed_by_worker=expected_worker_id,
-                    expected_attempt_number=expected_attempt_number,
-                    expected_execution_generation=expected_execution_generation,
-                    expected_completion_data=None,
-                    require_completion_data_match=True,
-                    cancellation_status=cancellation.status.value,
-                    cancellation_error=cancellation.message,
-                )
-                if handled:
                     task_pk = int(task.pk)
                     transaction.on_commit(
                         lambda: self._retire_active_ray_job_tracking(
@@ -1661,6 +1862,53 @@ class Command(BaseCommand):
                         )
                     )
                     return
+                else:
+                    cancellation = self._cancel_mismatched_submissions(
+                        runner,
+                        reserved_handle,
+                        observed_handle,
+                        prepared=prepared_cancellations,
+                    )
+                    handled = current.state != TaskState.RUNNING
+                    if not handled:
+                        handled = self._terminalize_mismatched_ray_job_submission(
+                            current,
+                            reserved_handle=reserved_handle,
+                            expected_worker_id=expected_worker_id,
+                            expected_attempt_number=expected_attempt_number,
+                            expected_execution_generation=expected_execution_generation,
+                            error_message=error_message,
+                            exception_type=exception_type,
+                            cancellation=cancellation,
+                        )
+                    if handled:
+                        task_pk = int(task.pk)
+                        transaction.on_commit(
+                            lambda: self._retire_active_ray_job_tracking(
+                                task_pk,
+                                ray_job_id=reserved_handle.ray_job_id,
+                                identity=(
+                                    expected_attempt_number,
+                                    expected_execution_generation,
+                                ),
+                            )
+                        )
+                        return
+
+        # An invalid exact lease is a hard task-mutation boundary. The observed
+        # handle is nevertheless absent from durable state, so no live owner
+        # can discover it. Quiesce only that orphan capability; the reserved
+        # durable handle remains exclusively for the replacement owner.
+        if self.shutdown_requested:
+            self._cancel_untracked_submission(
+                runner,
+                observed_handle,
+                backend_name="orphaned mismatched Ray Job",
+                prepared=prepared_cancellations[
+                    (observed_handle.ray_job_id, observed_handle.ray_address)
+                ],
+            )
+            return
 
         disposition, _, inspection_detail = self._inspect_submission_tracking(
             task,
@@ -1669,7 +1917,7 @@ class Command(BaseCommand):
             expected_attempt_number=expected_attempt_number,
             expected_execution_generation=expected_execution_generation,
         )
-        if disposition == "replaced":
+        if disposition in {"replaced", "terminal"}:
             self._cancel_mismatched_submissions(
                 runner,
                 reserved_handle,
@@ -1711,7 +1959,7 @@ class Command(BaseCommand):
 
         from django_ray.runtime.serialization import deserialize_args
 
-        expected_worker_id = task.claimed_by_worker
+        expected_worker_id = self.worker_id
         expected_attempt_number = int(task.attempt_number)
         expected_execution_generation = int(task.execution_generation)
         expected_ray_job_id = task.ray_job_id
@@ -1837,6 +2085,7 @@ class Command(BaseCommand):
                         task,
                         error_message="Ray connection lost",
                         exception_type="RayConnectionError",
+                        expected_claimed_by_worker=self.worker_id,
                         expected_attempt_number=handle.attempt_number,
                         expected_execution_generation=handle.execution_generation,
                     )
@@ -1861,6 +2110,7 @@ class Command(BaseCommand):
                 RayTaskExecution.objects.filter(
                     pk__in=task_ids,
                     state=TaskState.RUNNING,
+                    claimed_by_worker=self.worker_id,
                     attempt_number=attempt_number,
                     execution_generation=execution_generation,
                 ).update(last_heartbeat_at=heartbeat_time)
@@ -1897,6 +2147,7 @@ class Command(BaseCommand):
                     if task.state == TaskState.CANCELLING:
                         cancel_task(
                             task,
+                            expected_worker_id=self.worker_id,
                             expected_attempt_number=attempt_number,
                             expected_execution_generation=execution_generation,
                         )
@@ -1917,6 +2168,7 @@ class Command(BaseCommand):
                     if not self._store_and_succeed_task(
                         task,
                         result.get("result"),
+                        expected_claimed_by_worker=self.worker_id,
                         expected_attempt_number=attempt_number,
                         expected_execution_generation=execution_generation,
                     ):
@@ -1937,6 +2189,7 @@ class Command(BaseCommand):
                         error_traceback=result.get("traceback"),
                         exception_type=result.get("exception_type"),
                         retryable=result.get("retryable"),
+                        expected_claimed_by_worker=self.worker_id,
                         expected_attempt_number=attempt_number,
                         expected_execution_generation=execution_generation,
                     )
@@ -1957,7 +2210,7 @@ class Command(BaseCommand):
         from django_ray.runtime.serialization import deserialize_args
         from django_ray.workflow_plans import WorkflowPlanMismatchError
 
-        expected_worker_id = task.claimed_by_worker
+        expected_worker_id = self.worker_id
         expected_attempt_number = int(task.attempt_number)
         expected_execution_generation = int(task.execution_generation)
         expected_ray_job_id = task.ray_job_id
@@ -2203,29 +2456,183 @@ class Command(BaseCommand):
             submitted_at=task.started_at or datetime.now(UTC),
         )
 
-    def _adopt_orphaned_ray_job_task(self, task: RayTaskExecution, *, now: datetime) -> bool:
-        """Take ownership of an orphaned Ray Job task for continued reconciliation."""
-        filter_kwargs: dict[str, Any] = {
-            "pk": task.pk,
-            "state": TaskState.RUNNING,
-            "ray_job_id": task.ray_job_id,
-            "attempt_number": task.attempt_number,
-            "execution_generation": task.execution_generation,
-        }
-        if task.claimed_by_worker:
-            filter_kwargs["claimed_by_worker"] = task.claimed_by_worker
-        else:
-            filter_kwargs["claimed_by_worker__isnull"] = True
+    def _lock_authoritative_leases(
+        self,
+        *,
+        source_worker_id: str | None,
+        allow_takeover: bool,
+        renew_heartbeat: bool = True,
+    ) -> bool:
+        """Lock involved leases and prove this process still owns its identity.
 
-        updated = RayTaskExecution.objects.filter(**filter_kwargs).update(
-            claimed_by_worker=self.worker_id,
-            last_heartbeat_at=now,
-        )
-        if not updated:
+        The caller must already be inside ``transaction.atomic()`` and must
+        acquire these lease locks before the execution row. PostgreSQL gets
+        deterministic row locks; SQLite gets its database-wide write fence
+        from the exact conditional heartbeat update.
+        """
+        identity = self.lease_identity
+        if identity is None:
+            self._request_shutdown_for_lease_loss("worker lease was never acquired")
             return False
 
-        task.claimed_by_worker = self.worker_id
-        task.last_heartbeat_at = now
+        lease_worker_ids = sorted(
+            worker_id
+            for worker_id in {identity.worker_id, source_worker_id}
+            if worker_id is not None
+        )
+        if connection.features.has_select_for_update:
+            list(
+                TaskWorkerLease.objects.select_for_update()
+                .filter(worker_id__in=lease_worker_ids)
+                .order_by("worker_id")
+            )
+        else:
+            from django.db.models import F
+
+            # SQLite has no row-level ``SELECT FOR UPDATE``. An exact no-op
+            # write obtains its database-wide writer fence before freshness is
+            # measured, without reviving an already-expired lease.
+            TaskWorkerLease.objects.filter(**identity.database_filters()).update(
+                last_heartbeat_at=F("last_heartbeat_at")
+            )
+
+        # Lock acquisition may itself take longer than the lease duration.
+        # Freshness must therefore be measured only after every ordered lease
+        # lock (or SQLite's write fence) is held.
+        validation_time = datetime.now(UTC)
+        cutoff = validation_time - get_lease_duration()
+        lease_filters = {
+            **identity.database_filters(),
+            "is_active": True,
+            "last_heartbeat_at__gte": cutoff,
+        }
+        if renew_heartbeat:
+            owns_live_lease = TaskWorkerLease.objects.filter(**lease_filters).update(
+                last_heartbeat_at=validation_time
+            )
+        else:
+            owns_live_lease = TaskWorkerLease.objects.filter(**lease_filters).exists()
+
+        if not owns_live_lease:
+            self._request_shutdown_for_lease_loss(
+                "worker lease expired, became inactive, or disappeared before task mutation"
+            )
+            return False
+        if renew_heartbeat and self.lease is not None:
+            self.lease.last_heartbeat_at = validation_time
+
+        if source_worker_id is None or source_worker_id == self.worker_id:
+            return True
+        if not allow_takeover:
+            return False
+
+        if TaskWorkerLease.objects.filter(
+            worker_id=source_worker_id,
+            is_active=True,
+            last_heartbeat_at__gte=cutoff,
+        ).exists():
+            return False
+
+        TaskWorkerLease.objects.filter(
+            worker_id=source_worker_id,
+            is_active=True,
+            last_heartbeat_at__lt=cutoff,
+        ).update(
+            is_active=False,
+            stopped_at=validation_time,
+        )
+        # A boundary-value heartbeat or a concurrently recreated row is not
+        # proof that the observed execution owner is stale.
+        return not TaskWorkerLease.objects.filter(
+            worker_id=source_worker_id,
+            is_active=True,
+        ).exists()
+
+    @contextmanager
+    def _authoritative_task_owner(
+        self,
+        snapshot: RayTaskExecution,
+        *,
+        expected_state: str,
+        allow_takeover: bool,
+        require_completion_data_match: bool = False,
+    ) -> Iterator[_OwnedTask | None]:
+        """Yield the exact current execution while lease and task locks are held.
+
+        Callers that perform a remote state-changing effect must do so inside
+        this context. The task lock then serializes that effect with ownership
+        transfer and its corresponding durable terminal transition.
+        """
+        source_worker_id = str(snapshot.claimed_by_worker) if snapshot.claimed_by_worker else None
+
+        with transaction.atomic():
+            if not self._lock_authoritative_leases(
+                source_worker_id=source_worker_id,
+                allow_takeover=allow_takeover,
+            ):
+                yield None
+                return
+
+            if source_worker_id != self.worker_id and not allow_takeover:
+                yield None
+                return
+
+            task_filters: dict[str, Any] = {
+                "pk": snapshot.pk,
+                "state": expected_state,
+                "ray_job_id": snapshot.ray_job_id,
+                "ray_address": snapshot.ray_address,
+                "attempt_number": snapshot.attempt_number,
+                "execution_generation": snapshot.execution_generation,
+                "started_at": snapshot.started_at,
+                "last_heartbeat_at": snapshot.last_heartbeat_at,
+            }
+            if source_worker_id is None:
+                task_filters["claimed_by_worker__isnull"] = True
+            else:
+                task_filters["claimed_by_worker"] = source_worker_id
+            if require_completion_data_match:
+                task_filters["completion_data"] = snapshot.completion_data
+
+            current = RayTaskExecution.objects.select_for_update().filter(**task_filters).first()
+            if current is None:
+                yield None
+                return
+
+            adopted = source_worker_id != self.worker_id
+            if adopted:
+                current.claimed_by_worker = self.worker_id
+                current.save(update_fields=["claimed_by_worker"])
+
+            yield _OwnedTask(execution=current, adopted=adopted)
+
+    def _take_over_task_if_owner_stale(
+        self,
+        task: RayTaskExecution,
+        *,
+        now: datetime,
+    ) -> RayTaskExecution | None:
+        """Validate this lease and atomically fence a stale task owner."""
+        del now  # The lock context captures one authoritative transaction time.
+        current: RayTaskExecution | None = None
+        with self._authoritative_task_owner(
+            task,
+            expected_state=str(task.state),
+            allow_takeover=True,
+            require_completion_data_match=True,
+        ) as owned:
+            if owned is not None:
+                current = owned.execution
+
+        if current is not None:
+            task.__dict__.update(current.__dict__)
+        return current
+
+    def _adopt_orphaned_ray_job_task(self, task: RayTaskExecution, *, now: datetime) -> bool:
+        """Fence a stale owner and adopt its Ray Job for reconciliation."""
+        current = self._take_over_task_if_owner_stale(task, now=now)
+        if current is None or current.state != TaskState.RUNNING:
+            return False
         if task.ray_job_id:
             self.active_tasks[task.pk] = str(task.ray_job_id)
             self.active_task_identities[task.pk] = (
@@ -2265,6 +2672,7 @@ class Command(BaseCommand):
 
         task_identity = (int(task.attempt_number), int(task.execution_generation))
         expected_identity = tracked_identity or task_identity
+        expected_worker_id = self.worker_id
 
         def complete_tracking() -> None:
             completed_tasks.append(task.pk)
@@ -2277,6 +2685,31 @@ class Command(BaseCommand):
         # Active tracking may outlive a retry that reused the same Ray Job ID.
         # Reject that stale identity before making a status RPC.
         if task_identity != expected_identity:
+            self._retire_active_ray_job_tracking(
+                task.pk,
+                ray_job_id=ray_job_id,
+                identity=expected_identity,
+            )
+            return
+
+        # Older or deliberately handed-off rows may be ownerless while this
+        # process still has their exact durable Ray Job capability in memory.
+        # Claim that row before the first reconciliation effect.
+        if task.claimed_by_worker is None and not self._adopt_orphaned_ray_job_task(
+            task,
+            now=datetime.now(UTC),
+        ):
+            self._retire_active_ray_job_tracking(
+                task.pk,
+                ray_job_id=ray_job_id,
+                identity=expected_identity,
+            )
+            return
+
+        # A stale process may retain this Ray Job in memory after another
+        # worker atomically adopts the durable execution. Retire local
+        # tracking before any status, storage, or cancellation side effect.
+        if str(task.claimed_by_worker or "") != expected_worker_id:
             self._retire_active_ray_job_tracking(
                 task.pk,
                 ray_job_id=ray_job_id,
@@ -2310,37 +2743,54 @@ class Command(BaseCommand):
             if not self._is_valid_completion_envelope(result):
                 return False
 
-            if result["success"]:
-                prepared_result_reference = (
-                    str(result["result_reference"]) if result.get("result_reference") else None
-                )
-                if not self._store_and_succeed_task(
-                    task,
-                    result.get("result"),
-                    prepared_result_reference=prepared_result_reference,
-                    expected_ray_job_id=ray_job_id,
-                    expected_attempt_number=expected_attempt_number,
-                    expected_execution_generation=expected_execution_generation,
-                    expected_completion_data=completion_data,
-                    require_completion_data_match=True,
-                ):
+            handled = False
+            current: RayTaskExecution | None = None
+            with self._authoritative_task_owner(
+                task,
+                expected_state=TaskState.RUNNING,
+                allow_takeover=False,
+                require_completion_data_match=True,
+            ) as owned:
+                if owned is None:
                     return True
-                self.stdout.write(self.style.SUCCESS(f"\nTask {task.pk} completed"))
-            else:
-                handled = self._handle_task_failure(
-                    task,
-                    error_message=result["error"],
-                    error_traceback=result.get("traceback"),
-                    exception_type=result.get("exception_type"),
-                    retryable=result.get("retryable"),
-                    expected_ray_job_id=ray_job_id,
-                    expected_attempt_number=expected_attempt_number,
-                    expected_execution_generation=expected_execution_generation,
-                    expected_completion_data=completion_data,
-                    require_completion_data_match=True,
-                )
+                current = owned.execution
+                if result["success"]:
+                    prepared_result_reference = (
+                        str(result["result_reference"]) if result.get("result_reference") else None
+                    )
+                    handled = self._store_and_succeed_task(
+                        current,
+                        result.get("result"),
+                        prepared_result_reference=prepared_result_reference,
+                        expected_ray_job_id=ray_job_id,
+                        expected_claimed_by_worker=expected_worker_id,
+                        expected_attempt_number=expected_attempt_number,
+                        expected_execution_generation=expected_execution_generation,
+                        expected_completion_data=completion_data,
+                        require_completion_data_match=True,
+                    )
+                else:
+                    handled = self._handle_task_failure(
+                        current,
+                        error_message=result["error"],
+                        error_traceback=result.get("traceback"),
+                        exception_type=result.get("exception_type"),
+                        retryable=result.get("retryable"),
+                        expected_ray_job_id=ray_job_id,
+                        expected_claimed_by_worker=expected_worker_id,
+                        expected_attempt_number=expected_attempt_number,
+                        expected_execution_generation=expected_execution_generation,
+                        expected_completion_data=completion_data,
+                        require_completion_data_match=True,
+                    )
                 if handled is False:
                     return True
+
+            assert current is not None
+            task.__dict__.update(current.__dict__)
+            if result["success"]:
+                self.stdout.write(self.style.SUCCESS(f"\nTask {task.pk} completed"))
+            else:
                 self.stdout.write(
                     self.style.WARNING(
                         f"\nTask {task.pk} returned failure envelope, handling via retry policy"
@@ -2366,8 +2816,12 @@ class Command(BaseCommand):
                     "state",
                     "completion_data",
                     "ray_job_id",
+                    "ray_address",
+                    "claimed_by_worker",
                     "attempt_number",
                     "execution_generation",
+                    "started_at",
+                    "last_heartbeat_at",
                 ]
             )
         except RayTaskExecution.DoesNotExist:
@@ -2377,6 +2831,7 @@ class Command(BaseCommand):
         # Never reconcile an old Ray Job against a replacement execution.
         if (
             str(task.ray_job_id or "") != ray_job_id
+            or str(task.claimed_by_worker or "") != expected_worker_id
             or task.attempt_number != expected_attempt_number
             or task.execution_generation != expected_execution_generation
         ):
@@ -2406,11 +2861,28 @@ class Command(BaseCommand):
 
             prepared_cancellation = prepare_remote_cancellation(runner, handle)
 
-            # Hold the execution lock through the bounded stop request so a
-            # manual retry cannot race ahead of its durable outcome.
-            with transaction.atomic():
+            current: RayTaskExecution | None = None
+            cancellation: CancellationOutcome | None = None
+            # Revalidate the exact live worker lease after the status RPC and
+            # hold lease+execution locks through LOST archival and the bounded
+            # stop. A resumed stale process cannot act only because its old ID
+            # remains on the task row.
+            with self._authoritative_task_owner(
+                task,
+                expected_state=TaskState.RUNNING,
+                allow_takeover=False,
+                require_completion_data_match=True,
+            ) as owned:
+                if owned is None:
+                    return False
+                current = owned.execution
+                timeout_recovery_owns_task = expected_completion_data is None and is_task_timed_out(
+                    current
+                )
+                if timeout_recovery_owns_task or not is_task_stuck(current):
+                    return False
                 if not record_lost(
-                    task,
+                    current,
                     error_message=error_message,
                     expected_completion_data=expected_completion_data,
                     expected_attempt_number=expected_attempt_number,
@@ -2422,10 +2894,13 @@ class Command(BaseCommand):
                     handle,
                     prepared=prepared_cancellation,
                 )
-                task.cancellation_status = CancellationStatus(cancellation.status.value)
-                task.cancellation_error = cancellation.message
-                task.save(update_fields=["cancellation_status", "cancellation_error"])
+                current.cancellation_status = CancellationStatus(cancellation.status.value)
+                current.cancellation_error = cancellation.message
+                current.save(update_fields=["cancellation_status", "cancellation_error"])
 
+            assert current is not None
+            assert cancellation is not None
+            task.__dict__.update(current.__dict__)
             complete_tracking()
             self.stdout.write(
                 self.style.ERROR(
@@ -2434,6 +2909,43 @@ class Command(BaseCommand):
                 )
             )
             return True
+
+        def handle_failure_authoritatively(
+            *,
+            error_message: str,
+            exception_type: str,
+            expected_completion_data: str | None,
+            error_traceback: str | None = None,
+        ) -> bool:
+            """Apply one Ray Job failure only behind the exact live lease fence."""
+            current: RayTaskExecution | None = None
+            handled = False
+            with self._authoritative_task_owner(
+                task,
+                expected_state=TaskState.RUNNING,
+                allow_takeover=False,
+                require_completion_data_match=True,
+            ) as owned:
+                if owned is None:
+                    return False
+                current = owned.execution
+                handled = self._handle_task_failure(
+                    current,
+                    error_message=error_message,
+                    error_traceback=error_traceback,
+                    exception_type=exception_type,
+                    expected_ray_job_id=ray_job_id,
+                    expected_claimed_by_worker=expected_worker_id,
+                    expected_attempt_number=expected_attempt_number,
+                    expected_execution_generation=expected_execution_generation,
+                    expected_completion_data=expected_completion_data,
+                    require_completion_data_match=True,
+                )
+
+            if handled:
+                assert current is not None
+                task.__dict__.update(current.__dict__)
+            return handled
 
         completion_data = task.completion_data
 
@@ -2447,19 +2959,25 @@ class Command(BaseCommand):
             JobStatus.PENDING,
             JobStatus.RUNNING,
         ):
-            self._mark_task_monitor_heartbeat(
+            current: RayTaskExecution | None = None
+            with self._authoritative_task_owner(
                 task,
-                now=now,
-                ray_job_id=ray_job_id,
-                attempt_number=expected_attempt_number,
-                execution_generation=expected_execution_generation,
-            )
-            if orphaned and self._adopt_orphaned_ray_job_task(task, now=now):
-                self.stdout.write(
-                    self.style.NOTICE(
-                        f"\nAdopted orphaned Ray job task {task.pk} for continued monitoring"
-                    )
+                expected_state=TaskState.RUNNING,
+                allow_takeover=False,
+                require_completion_data_match=True,
+            ) as owned:
+                if owned is None:
+                    return
+                current = owned.execution
+                self._mark_task_monitor_heartbeat(
+                    current,
+                    now=now,
+                    ray_job_id=ray_job_id,
+                    expected_worker_id=expected_worker_id,
+                    attempt_number=expected_attempt_number,
+                    execution_generation=expected_execution_generation,
                 )
+            task.__dict__.update(current.__dict__)
             return
 
         if completion_data is not None:
@@ -2511,15 +3029,10 @@ class Command(BaseCommand):
                     )
                     return
                 if self._completion_envelope_grace_expired(task, now=now):
-                    handled = self._handle_task_failure(
-                        task,
+                    handled = handle_failure_authoritatively(
                         error_message=f"Ray Job produced a {completion_error} completion envelope",
                         exception_type="RayCompletionMalformed",
-                        expected_ray_job_id=ray_job_id,
-                        expected_attempt_number=expected_attempt_number,
-                        expected_execution_generation=expected_execution_generation,
                         expected_completion_data=completion_data,
-                        require_completion_data_match=True,
                     )
                     if handled is False:
                         return
@@ -2544,15 +3057,10 @@ class Command(BaseCommand):
             # Ray Job logs are diagnostic only. Missing envelopes remain
             # non-terminal until the bounded grace period expires.
             if self._completion_envelope_grace_expired(task, now=now):
-                handled = self._handle_task_failure(
-                    task,
+                handled = handle_failure_authoritatively(
                     error_message="Ray Job completed without a completion envelope",
                     exception_type="RayCompletionUnknown",
-                    expected_ray_job_id=ray_job_id,
-                    expected_attempt_number=expected_attempt_number,
-                    expected_execution_generation=expected_execution_generation,
                     expected_completion_data=completion_data,
-                    require_completion_data_match=True,
                 )
                 if handled is False:
                     return
@@ -2572,16 +3080,11 @@ class Command(BaseCommand):
 
         if job_info.status == JobStatus.FAILED:
             logs = runner.get_logs(handle)
-            handled = self._handle_task_failure(
-                task,
+            handled = handle_failure_authoritatively(
                 error_message=job_info.message or "Ray job failed",
                 error_traceback=logs,
                 exception_type="RayJobFailed",
-                expected_ray_job_id=ray_job_id,
-                expected_attempt_number=expected_attempt_number,
-                expected_execution_generation=expected_execution_generation,
                 expected_completion_data=completion_data,
-                require_completion_data_match=True,
             )
             if handled is False:
                 return
@@ -2590,16 +3093,31 @@ class Command(BaseCommand):
             return
 
         if job_info.status == JobStatus.STOPPED:
-            if not cancel_task(
+            current = None
+            cancelled = False
+            with self._authoritative_task_owner(
                 task,
-                allowed_states=(TaskState.RUNNING,),
-                expected_ray_job_id=ray_job_id,
-                expected_attempt_number=expected_attempt_number,
-                expected_execution_generation=expected_execution_generation,
-                expected_completion_data=completion_data,
+                expected_state=TaskState.RUNNING,
+                allow_takeover=False,
                 require_completion_data_match=True,
-            ):
-                return
+            ) as owned:
+                if owned is None:
+                    return
+                current = owned.execution
+                cancelled = cancel_task(
+                    current,
+                    allowed_states=(TaskState.RUNNING,),
+                    expected_worker_id=expected_worker_id,
+                    expected_ray_job_id=ray_job_id,
+                    expected_attempt_number=expected_attempt_number,
+                    expected_execution_generation=expected_execution_generation,
+                    expected_completion_data=completion_data,
+                    require_completion_data_match=True,
+                )
+                if not cancelled:
+                    return
+            assert current is not None
+            task.__dict__.update(current.__dict__)
             complete_tracking()
             self.stdout.write(self.style.WARNING(f"\nTask {task.pk} was stopped"))
             return
@@ -2624,7 +3142,7 @@ class Command(BaseCommand):
 
     def reconcile_tasks(self) -> int:
         """Reconcile task states with Ray."""
-        if self.sync_mode:
+        if self.sync_mode or self.shutdown_requested:
             return 0
 
         from django_ray.runner.leasing import get_active_workers
@@ -2636,6 +3154,8 @@ class Command(BaseCommand):
         active_task_ids_before = set(self.active_tasks)
 
         for task_pk, ray_job_id in list(self.active_tasks.items()):
+            if self.shutdown_requested:
+                break
             tracked_identity = self.active_task_identities.get(task_pk)
             try:
                 task = RayTaskExecution.objects.get(pk=task_pk)
@@ -2662,6 +3182,9 @@ class Command(BaseCommand):
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"\nError reconciling task {task_pk}: {e}"))
 
+        if self.shutdown_requested:
+            return len(completed_tasks)
+
         active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
         orphaned_tasks = RayTaskExecution.objects.filter(
             state=TaskState.RUNNING,
@@ -2669,6 +3192,8 @@ class Command(BaseCommand):
         ).exclude(pk__in=reconciled_task_ids)
 
         for task in orphaned_tasks:
+            if self.shutdown_requested:
+                break
             task_worker_id = str(task.claimed_by_worker) if task.claimed_by_worker else None
             if task_worker_id == self.worker_id:
                 continue
@@ -2676,6 +3201,13 @@ class Command(BaseCommand):
                 continue
 
             try:
+                if not self._adopt_orphaned_ray_job_task(task, now=datetime.now(UTC)):
+                    continue
+                self.stdout.write(
+                    self.style.NOTICE(
+                        f"\nAdopted orphaned Ray job task {task.pk} for continued monitoring"
+                    )
+                )
                 self._reconcile_ray_job_task(
                     task,
                     runner,
@@ -2698,6 +3230,9 @@ class Command(BaseCommand):
         heartbeats, which indicates the worker processing them may have crashed.
         """
         from django_ray.runner.leasing import get_active_workers
+
+        if self.shutdown_requested:
+            return 0
 
         # Check all running tasks. For tasks owned by active workers, skip recovery
         # and let the owning worker manage its own in-flight work.
@@ -2743,28 +3278,54 @@ class Command(BaseCommand):
 
             # Check for timeout first (applies to all tasks)
             if is_task_timed_out(task):
-                self.stdout.write(
-                    self.style.WARNING(f"\nTask {task.pk} timed out after {task.timeout_seconds}s")
-                )
-                # Request the exact backend stop first, then conditionally
-                # finalize so a concurrent completion cannot be overwritten.
-                cancellation = self._request_timeout_cancellation(task)
-                marked_timed_out = mark_task_timed_out(
+                marked_timed_out = False
+                adopted = False
+                current: RayTaskExecution | None = None
+                # Lease locks precede the execution lock, which remains held
+                # through the bounded exact stop and terminal transition.
+                with self._authoritative_task_owner(
                     task,
-                    cancellation_status=CancellationStatus(cancellation.status.value),
-                    cancellation_error=cancellation.message,
-                    expected_ray_job_id=str(task.ray_job_id) if task.ray_job_id else None,
-                    expected_attempt_number=task.attempt_number,
-                    expected_execution_generation=task.execution_generation,
-                    expected_completion_data=None,
+                    expected_state=TaskState.RUNNING,
+                    allow_takeover=True,
                     require_completion_data_match=True,
-                )
+                ) as owned:
+                    if owned is None:
+                        if self.shutdown_requested:
+                            break
+                        continue
+                    current = owned.execution
+                    if current.completion_data is not None or not is_task_timed_out(current):
+                        continue
+                    adopted = owned.adopted
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"\nTask {current.pk} timed out after {current.timeout_seconds}s"
+                        )
+                    )
+                    cancellation = self._request_timeout_cancellation(current)
+                    marked_timed_out = mark_task_timed_out(
+                        current,
+                        cancellation_status=CancellationStatus(cancellation.status.value),
+                        cancellation_error=cancellation.message,
+                        expected_ray_job_id=(
+                            str(current.ray_job_id) if current.ray_job_id else None
+                        ),
+                        expected_claimed_by_worker=self.worker_id,
+                        expected_attempt_number=current.attempt_number,
+                        expected_execution_generation=current.execution_generation,
+                        expected_completion_data=None,
+                        require_completion_data_match=True,
+                    )
+                if self.shutdown_requested:
+                    break
                 if marked_timed_out:
+                    assert current is not None
+                    task.__dict__.update(current.__dict__)
                     if task.pk in self.active_tasks:
                         del self.active_tasks[task.pk]
                         self.active_task_identities.pop(task.pk, None)
                     timeout_count += 1
-                    if not claimed_by_this_worker:
+                    if adopted:
                         orphan_recovered_count += 1
                 else:
                     self.stdout.write(
@@ -2800,47 +3361,79 @@ class Command(BaseCommand):
 
             # Check if task is stuck using the reconciliation logic
             if is_task_stuck(task):
-                if claimed_by_this_worker:
-                    self.stdout.write(
-                        self.style.WARNING(f"\nTask {task.pk} appears stuck, marking as LOST")
-                    )
-                else:
-                    owner = task_worker_id or "unknown-worker"
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"\nTask {task.pk} from inactive worker {owner} appears stuck, "
-                            "marking as LOST"
-                        )
-                    )
+                recovered_stuck = False
+                adopted = False
+                current = None
+                retried: RayTaskExecution | None = None
+                # Keep ownership transfer, LOST archival, and any retry in one
+                # authoritative transaction so competing workers cannot both
+                # create terminal history for the same execution identity.
+                with self._authoritative_task_owner(
+                    task,
+                    expected_state=TaskState.RUNNING,
+                    allow_takeover=True,
+                    require_completion_data_match=True,
+                ) as owned:
+                    if owned is None:
+                        if self.shutdown_requested:
+                            break
+                        continue
+                    current = owned.execution
+                    if current.completion_data is not None or not is_task_stuck(current):
+                        continue
+                    adopted = owned.adopted
 
-                if not mark_task_lost(task):
-                    continue
-
-                # Check if we should retry the lost task
-                retry_decision = should_retry(task, exception_type="TaskLost")
-                if retry_decision.should_retry:
-                    try:
-                        retried = retry_task(
-                            task.pk,
-                            allowed_states=(TaskState.LOST,),
-                            next_attempt_at=retry_decision.next_attempt_at,
-                            expected_attempt_number=task.attempt_number,
-                            expected_execution_generation=task.execution_generation,
-                        )
-                    except RuntimeEnvSnapshotError as error:
-                        retried = None
-                        self.stdout.write(self.style.ERROR(f"  Automatic retry blocked: {error}"))
-                    if retried is not None:
-                        task = retried
+                    if not adopted:
                         self.stdout.write(
-                            self.style.NOTICE(
-                                f"  Scheduling retry #{task.attempt_number} "
-                                f"at {retry_decision.next_attempt_at}"
+                            self.style.WARNING(
+                                f"\nTask {current.pk} appears stuck, marking as LOST"
+                            )
+                        )
+                    else:
+                        owner = task_worker_id or "unknown-worker"
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"\nTask {current.pk} from inactive worker {owner} "
+                                "appears stuck, marking as LOST"
                             )
                         )
 
+                    if not mark_task_lost(current):
+                        continue
+                    recovered_stuck = True
+
+                    retry_decision = should_retry(current, exception_type="TaskLost")
+                    if retry_decision.should_retry:
+                        try:
+                            retried = retry_task(
+                                current.pk,
+                                allowed_states=(TaskState.LOST,),
+                                next_attempt_at=retry_decision.next_attempt_at,
+                                expected_attempt_number=current.attempt_number,
+                                expected_execution_generation=current.execution_generation,
+                            )
+                        except RuntimeEnvSnapshotError as error:
+                            self.stdout.write(
+                                self.style.ERROR(f"  Automatic retry blocked: {error}")
+                            )
+
+                if self.shutdown_requested:
+                    break
+                if not recovered_stuck:
+                    continue
+                if retried is not None:
+                    task = retried
+                    self.stdout.write(
+                        self.style.NOTICE(
+                            f"  Scheduling retry #{task.attempt_number} "
+                            f"at {retry_decision.next_attempt_at}"
+                        )
+                    )
+                elif current is not None:
+                    task.__dict__.update(current.__dict__)
+
                 stuck_count += 1
-                if not claimed_by_this_worker:
+                if adopted:
                     orphan_recovered_count += 1
 
         if stuck_count > 0:
@@ -2880,37 +3473,11 @@ class Command(BaseCommand):
         self,
         task: RayTaskExecution,
         *,
-        active_worker_ids: set[str],
         now: datetime,
     ) -> bool:
-        """Conditionally take ownership of a cancellation from a dead worker."""
-        owner = str(task.claimed_by_worker) if task.claimed_by_worker else None
-        if owner == self.worker_id:
-            return True
-        if owner and owner in active_worker_ids:
-            return False
-
-        filters: dict[str, object] = {
-            "pk": task.pk,
-            "state": TaskState.CANCELLING,
-            "attempt_number": task.attempt_number,
-            "execution_generation": task.execution_generation,
-        }
-        if owner:
-            filters["claimed_by_worker"] = owner
-        else:
-            filters["claimed_by_worker__isnull"] = True
-
-        updated = RayTaskExecution.objects.filter(**filters).update(
-            claimed_by_worker=self.worker_id,
-            last_heartbeat_at=now,
-        )
-        if not updated:
-            return False
-
-        task.claimed_by_worker = self.worker_id
-        task.last_heartbeat_at = now
-        return True
+        """Fence a stale owner before taking over its cancellation."""
+        current = self._take_over_task_if_owner_stale(task, now=now)
+        return current is not None and current.state == TaskState.CANCELLING
 
     def _request_cancellation_for_task(self, task: RayTaskExecution) -> CancellationOutcome:
         """Best-effort cancellation using the backend recorded on the task."""
@@ -2944,18 +3511,12 @@ class Command(BaseCommand):
         if pending_handle is not None:
             try:
                 assert self.ray_core_runner is not None
-                accepted = self.ray_core_runner.cancel_pending(pending_handle)
+                return self.ray_core_runner.cancel_pending_with_status(pending_handle)
             except Exception as exc:
                 return CancellationOutcome(
                     CancellationOutcomeStatus.INDETERMINATE,
                     f"Could not cancel Ray Core task: {exc}",
                 )
-            if accepted:
-                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
-            return CancellationOutcome(
-                CancellationOutcomeStatus.FAILED,
-                "Ray Core cancellation API rejected the stop request",
-            )
 
         if ray_job_id:
             return CancellationOutcome(
@@ -2967,40 +3528,49 @@ class Command(BaseCommand):
 
     def process_cancellations(self) -> int:
         """Adopt and finalize cancellation requests left by dead workers."""
-        from django_ray.runner.leasing import get_active_workers
-
-        active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
+        if self.shutdown_requested:
+            return 0
         cancelling_tasks = RayTaskExecution.objects.filter(state=TaskState.CANCELLING)
         finalized_count = 0
 
         for task in cancelling_tasks:
-            now = datetime.now(UTC)
-            if not self._claim_orphaned_cancellation(
+            finalized = False
+            current: RayTaskExecution | None = None
+            # The exact live adopter lease and task row remain locked through
+            # the bounded remote stop and terminal archive. A competing worker
+            # can neither repeat the effect nor adopt between those operations.
+            with self._authoritative_task_owner(
                 task,
-                active_worker_ids=active_worker_ids,
-                now=now,
-            ):
-                continue
-
-            self.stdout.write(self.style.WARNING(f"\nFinalizing cancellation for task {task.pk}"))
-            cancellation = self._request_cancellation_for_task(task)
-
-            # Remove from our tracking if present. A stale completion callback
-            # cannot overwrite this row because finalization is conditional on
-            # both CANCELLING state and this worker's ownership.
-            if task.pk in self.active_tasks:
-                del self.active_tasks[task.pk]
-                self.active_task_identities.pop(task.pk, None)
-
-            finalized = finalize_cancellation(
-                task,
-                expected_worker_id=self.worker_id,
-                expected_attempt_number=task.attempt_number,
-                expected_execution_generation=task.execution_generation,
-                cancellation_status=CancellationStatus(cancellation.status.value),
-                cancellation_error=cancellation.message,
-            )
+                expected_state=TaskState.CANCELLING,
+                allow_takeover=True,
+                require_completion_data_match=True,
+            ) as owned:
+                if owned is None:
+                    if self.shutdown_requested:
+                        break
+                    continue
+                current = owned.execution
+                self.stdout.write(
+                    self.style.WARNING(f"\nFinalizing cancellation for task {current.pk}")
+                )
+                cancellation = self._request_cancellation_for_task(current)
+                finalized = finalize_cancellation(
+                    current,
+                    expected_worker_id=self.worker_id,
+                    expected_attempt_number=current.attempt_number,
+                    expected_execution_generation=current.execution_generation,
+                    cancellation_status=CancellationStatus(cancellation.status.value),
+                    cancellation_error=cancellation.message,
+                )
+            if self.shutdown_requested:
+                break
             if finalized:
+                assert current is not None
+                task.__dict__.update(current.__dict__)
+                # A stale completion callback cannot overwrite this row because
+                # finalization was locked and conditional on exact ownership.
+                self.active_tasks.pop(task.pk, None)
+                self.active_task_identities.pop(task.pk, None)
                 finalized_count += 1
                 self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} cancelled"))
 
@@ -3015,15 +3585,18 @@ class Command(BaseCommand):
         Ray Core ObjectRefs belong to this driver; request cancellation and
         persist ``CANCELLING`` so a subsequent worker can finalize the row.
         """
-        if self.execution_mode == "sync":
+        # Once immutable lease ownership is lost, even a matching worker ID is
+        # insufficient authority: a replacement process may already own it.
+        # Leave durable task rows untouched for a live lease holder to recover.
+        if self.execution_mode == "sync" or self.lease_ownership_lost:
             return
-
-        now = datetime.now(UTC)
 
         # Ray Core work cannot be recovered after this driver's Ray connection
         # is closed.  Ask Ray to stop it, then persist the cancellation intent.
         if self.execution_mode in ("local", "cluster") and self.ray_core_runner:
             for pending_handle in self.ray_core_runner.pending_task_handles:
+                if self.lease_ownership_lost:
+                    break
                 try:
                     task = RayTaskExecution.objects.get(pk=pending_handle.task_pk)
                 except RayTaskExecution.DoesNotExist:
@@ -3034,52 +3607,72 @@ class Command(BaseCommand):
                     or task.execution_generation != pending_handle.execution_generation
                 ):
                     continue
-                outcome = CancellationOutcome(CancellationOutcomeStatus.INDETERMINATE)
-                try:
-                    accepted = self.ray_core_runner.cancel_pending(pending_handle)
-                    outcome = CancellationOutcome(
-                        CancellationOutcomeStatus.REQUESTED
-                        if accepted
-                        else CancellationOutcomeStatus.FAILED
+                transitioned = False
+                with self._authoritative_task_owner(
+                    task,
+                    expected_state=TaskState.RUNNING,
+                    allow_takeover=False,
+                    require_completion_data_match=True,
+                ) as owned:
+                    if owned is not None:
+                        current = owned.execution
+                        try:
+                            outcome = self.ray_core_runner.cancel_pending_with_status(
+                                pending_handle
+                            )
+                        except Exception as exc:
+                            outcome = CancellationOutcome(
+                                CancellationOutcomeStatus.INDETERMINATE,
+                                f"Ray Core shutdown cancellation failed: {exc}",
+                            )
+                        current.state = TaskState.CANCELLING
+                        current.cancellation_status = CancellationStatus(outcome.status.value)
+                        current.cancellation_error = outcome.message
+                        current.save(
+                            update_fields=[
+                                "state",
+                                "cancellation_status",
+                                "cancellation_error",
+                            ]
+                        )
+                        transitioned = True
+                if transitioned:
+                    self.stdout.write(
+                        self.style.WARNING(f"  Task {task.pk} marked CANCELLING during shutdown")
                     )
-                except Exception as exc:
-                    outcome = CancellationOutcome(
-                        CancellationOutcomeStatus.INDETERMINATE,
-                        f"Ray Core shutdown cancellation failed: {exc}",
-                    )
-                RayTaskExecution.objects.filter(
-                    pk=task.pk,
-                    state=TaskState.RUNNING,
-                    claimed_by_worker=self.worker_id,
-                    attempt_number=pending_handle.attempt_number,
-                    execution_generation=pending_handle.execution_generation,
-                ).update(
-                    state=TaskState.CANCELLING,
-                    cancellation_status=CancellationStatus(outcome.status.value),
-                    cancellation_error=outcome.message,
-                )
-                self.stdout.write(
-                    self.style.WARNING(f"  Task {task.pk} marked CANCELLING during shutdown")
-                )
 
         # Ray Jobs continue independently of this process.  Drop ownership so
         # another worker can adopt and reconcile their persisted job IDs.
         if self.execution_mode == "ray":
             for task_pk, ray_job_id in list(self.active_tasks.items()):
+                if self.lease_ownership_lost:
+                    break
                 identity = self.active_task_identities.get(task_pk)
-                if identity is None:
-                    updated = 0
-                else:
-                    attempt_number, execution_generation = identity
-                    updated = RayTaskExecution.objects.filter(
-                        pk=task_pk,
-                        state=TaskState.RUNNING,
-                        claimed_by_worker=self.worker_id,
-                        ray_job_id=ray_job_id,
-                        attempt_number=attempt_number,
-                        execution_generation=execution_generation,
-                    ).update(claimed_by_worker=None, last_heartbeat_at=now)
-                if updated:
+                handed_off = False
+                if identity is not None:
+                    try:
+                        task = RayTaskExecution.objects.get(pk=task_pk)
+                    except RayTaskExecution.DoesNotExist:
+                        task = None
+                    if task is not None and (
+                        str(task.ray_job_id or "") == ray_job_id
+                        and (task.attempt_number, task.execution_generation) == identity
+                    ):
+                        with self._authoritative_task_owner(
+                            task,
+                            expected_state=TaskState.RUNNING,
+                            allow_takeover=False,
+                            require_completion_data_match=True,
+                        ) as owned:
+                            if owned is not None:
+                                current = owned.execution
+                                current.claimed_by_worker = None
+                                current.last_heartbeat_at = datetime.now(UTC)
+                                current.save(
+                                    update_fields=["claimed_by_worker", "last_heartbeat_at"]
+                                )
+                                handed_off = True
+                if handed_off:
                     self.stdout.write(
                         self.style.NOTICE(
                             f"  Ray Job task {task_pk} handed off for continued monitoring"
@@ -3090,16 +3683,37 @@ class Command(BaseCommand):
 
     def shutdown(self) -> None:
         """Perform graceful shutdown."""
-        self._prepare_shutdown_handoff()
+        cleanup_failed = False
+        try:
+            self._prepare_shutdown_handoff()
+        except Exception:
+            # A database outage during handoff must not skip the independently
+            # useful lease-release and Ray-disconnect cleanup phases.
+            self.logger.error("worker shutdown handoff failed", exc_info=True)
+            self.stdout.write(
+                self.style.ERROR("  Failed to prepare task handoff; continuing cleanup")
+            )
+            cleanup_failed = True
+            if self.shutdown_exit_code is None:
+                self.shutdown_exit_code = 1
         # Mark worker lease as inactive to signal we're gone
-        if self.lease is not None:
+        if self.lease_identity is not None:
             try:
                 from django_ray.runner.leasing import release_lease
 
-                release_lease(self.worker_id)
-                self.stdout.write("  Lease released (marked inactive)")
-            except Exception as e:
-                self.stdout.write(f"  Failed to release lease: {e}")
+                if release_lease(self.lease_identity):
+                    self.stdout.write("  Lease released (marked inactive)")
+                else:
+                    cleanup_failed = True
+                    if self.shutdown_exit_code is None:
+                        self.shutdown_exit_code = 1
+                    self.stdout.write("  Lease release skipped (ownership fence did not match)")
+            except Exception:
+                cleanup_failed = True
+                if self.shutdown_exit_code is None:
+                    self.shutdown_exit_code = 1
+                self.logger.error("worker lease release failed", exc_info=True)
+                self.stdout.write("  Failed to release lease; see worker logs")
 
         # Disconnect from Ray cluster
         if self.execution_mode in ("local", "cluster"):
@@ -3109,7 +3723,17 @@ class Command(BaseCommand):
                 if ray.is_initialized():
                     ray.shutdown()
                     self.stdout.write("  Ray connection closed")
-            except Exception as e:
-                self.stdout.write(f"  Failed to close Ray connection: {e}")
+            except Exception:
+                cleanup_failed = True
+                if self.shutdown_exit_code is None:
+                    self.shutdown_exit_code = 1
+                self.logger.error("worker Ray disconnect failed", exc_info=True)
+                self.stdout.write("  Failed to close Ray connection; see worker logs")
 
-        self.stdout.write(self.style.SUCCESS(f"\nWorker {self.worker_id} shut down cleanly"))
+        failed_without_signal = self.shutdown_exit_code is not None and self.shutdown_signal is None
+        if cleanup_failed or failed_without_signal:
+            self.stdout.write(
+                self.style.WARNING(f"\nWorker {self.worker_id} shut down with errors")
+            )
+        else:
+            self.stdout.write(self.style.SUCCESS(f"\nWorker {self.worker_id} shut down cleanly"))

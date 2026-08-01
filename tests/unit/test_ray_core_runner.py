@@ -5,13 +5,16 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import threading
 from datetime import UTC, datetime
+from threading import Event
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from django_ray.runner.base import JobStatus, SubmissionHandle
+from django_ray.runner.cancellation import CancellationOutcomeStatus
 from django_ray.runner.ray_core import (
     RayCoreHandle,
     RayCoreRunner,
@@ -276,6 +279,50 @@ class TestRayCoreRunnerRuntime:
         assert runner.pending_task_handles == pending
         assert len(fake.remote_calls) == remote_call_count
 
+    def test_submit_rejects_immutable_runtime_env_snapshot_mismatch(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        digests = iter(("planned", "snapshotted"))
+        monkeypatch.setattr(
+            "django_ray.workflow_plans.runtime_env_plan_identity",
+            lambda *_args, **_kwargs: SimpleNamespace(manifest={"digest": next(digests)}),
+        )
+        from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+        with pytest.raises(
+            WorkflowPlanMismatchError,
+            match="immutable snapshot differs",
+        ):
+            RayCoreRunner().submit(
+                task_execution=_task_execution(12),
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+
+        assert fake.remote_calls == []
+
+    def test_submit_rejects_runtime_env_changed_during_packaging(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        digests = iter(("planned", "planned", "changed"))
+        monkeypatch.setattr(
+            "django_ray.workflow_plans.runtime_env_plan_identity",
+            lambda *_args, **_kwargs: SimpleNamespace(manifest={"digest": next(digests)}),
+        )
+        from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+        with pytest.raises(
+            WorkflowPlanMismatchError,
+            match="local content changed",
+        ):
+            RayCoreRunner().submit(
+                task_execution=_task_execution(13),
+                callable_path="testproject.tasks.echo_task",
+                args=(),
+                kwargs={},
+            )
+
+        assert fake.remote_calls == []
+
     def test_submit_transports_external_input_by_reference(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
         captured: dict[str, object] = {}
@@ -385,6 +432,18 @@ class TestRayCoreRunnerRuntime:
 
         assert _compiled_graph_submission_transport(fake) is None
         assert initialized_checks == []
+
+    def test_submission_transport_fails_closed_when_core_state_is_unavailable(self) -> None:
+        fake = _FakeRay(initialized=False)
+
+        assert _compiled_graph_submission_transport(fake) is None
+
+        def fail_initialized_check() -> bool:
+            raise RuntimeError("Ray Core state unavailable")
+
+        fake.is_initialized = fail_initialized_check
+
+        assert _compiled_graph_submission_transport(fake) is None
 
     def test_submit_registers_remote_module_for_ray_cloudpickle(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
@@ -615,6 +674,10 @@ class TestRayCoreRunnerRuntime:
         runner = RayCoreRunner()
         assert runner._resolve_task_pk("ray_core:not-an-int") is None
 
+    @pytest.mark.parametrize("handle_id", ["ray_core:1", "raysubmit_job"])
+    def test_legacy_handle_ids_are_not_canonical(self, handle_id: str) -> None:
+        assert RayCoreRunner._is_canonical_handle_id(handle_id) is False
+
     def test_reconstructed_legacy_status_is_unknown_when_pending_missing(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
         runner = RayCoreRunner()
@@ -685,6 +748,17 @@ class TestRayCoreRunnerRuntime:
 
         assert runner.cancel(_make_handle("ray_core:777")) is False
 
+    def test_cancel_returns_false_when_resolved_task_is_no_longer_pending(
+        self,
+        monkeypatch,
+    ) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        monkeypatch.setattr(runner, "_resolve_task_pk", lambda _handle_id: 777)
+
+        assert runner.cancel(_make_handle("02000000:disappeared")) is False
+        assert fake.cancelled == []
+
     def test_cancel_handles_ray_exception_and_clears_pending(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         fake.cancel_error = RuntimeError("already done")
@@ -705,6 +779,58 @@ class TestRayCoreRunnerRuntime:
 
         assert ok is False
         assert 5 not in runner._pending_tasks
+
+    def test_cancel_pending_thread_start_failure_retires_exact_handle_and_releases_slot(
+        self,
+        monkeypatch,
+    ) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        failed_runner = RayCoreRunner()
+        failed = RayCoreHandle(
+            task_pk=51,
+            object_ref=_FakeObjectRef("thread-start-failure"),
+            submitted_at=datetime.now(UTC),
+            task_name="failed-start",
+            attempt_number=2,
+            execution_generation=4,
+        )
+        failed_runner._pending_tasks[failed.task_pk] = failed
+
+        class StartFailingThread:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("thread unavailable")
+
+        with monkeypatch.context() as start_patch:
+            start_patch.setattr("django_ray.runner.ray_core.Thread", StartFailingThread)
+            failed_outcome = failed_runner.cancel_pending_with_status(failed)
+
+        assert failed_outcome.status == CancellationOutcomeStatus.FAILED
+        assert failed_outcome.message == "Ray Core cancellation worker could not start"
+        assert failed.task_pk not in failed_runner._pending_tasks
+        assert fake.cancelled == []
+
+        subsequent_runner = RayCoreRunner()
+        subsequent = RayCoreHandle(
+            task_pk=52,
+            object_ref=_FakeObjectRef("after-thread-start-failure"),
+            submitted_at=datetime.now(UTC),
+            task_name="subsequent",
+            attempt_number=1,
+            execution_generation=1,
+        )
+        subsequent_runner._pending_tasks[subsequent.task_pk] = subsequent
+
+        subsequent_outcome = subsequent_runner.cancel_pending_with_status(
+            subsequent,
+            timeout_seconds=0.1,
+        )
+
+        assert subsequent_outcome.status == CancellationOutcomeStatus.REQUESTED
+        assert fake.cancelled == [(subsequent.object_ref, False)]
+        assert subsequent.task_pk not in subsequent_runner._pending_tasks
 
     def test_cancel_pending_rejects_replaced_handle(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
@@ -779,6 +905,150 @@ class TestRayCoreRunnerRuntime:
         assert runner.cancel_pending(stale) is True
         assert fake.cancelled == [(stale.object_ref, False)]
         assert runner._pending_tasks[6] is replacement
+
+    def test_cancel_pending_timeout_is_indeterminate_and_late_completion_is_exact(
+        self,
+        monkeypatch,
+    ) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        stale = RayCoreHandle(
+            task_pk=7,
+            object_ref=_FakeObjectRef("stale-hanging-cancel"),
+            submitted_at=datetime.now(UTC),
+            task_name="stale",
+            attempt_number=2,
+            execution_generation=8,
+        )
+        replacement = RayCoreHandle(
+            task_pk=7,
+            object_ref=_FakeObjectRef("replacement-after-timeout"),
+            submitted_at=datetime.now(UTC),
+            task_name="replacement",
+            attempt_number=3,
+            execution_generation=9,
+        )
+        cancel_started = Event()
+        release_cancel = Event()
+
+        def hanging_cancel(ref: _FakeObjectRef, force: bool = False) -> None:
+            fake.cancelled.append((ref, force))
+            cancel_started.set()
+            release_cancel.wait()
+
+        fake.cancel = hanging_cancel  # type: ignore[method-assign]
+        runner._pending_tasks[stale.task_pk] = stale
+        request_thread: threading.Thread | None = None
+        try:
+            outcome = runner.cancel_pending_with_status(stale, timeout_seconds=0.01)
+
+            assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+            assert outcome.message == (
+                "Ray Core cancellation timed out; the exact stop may complete later"
+            )
+            assert cancel_started.wait(timeout=1)
+            assert stale.task_pk not in runner._pending_tasks
+            request_thread = next(
+                thread
+                for thread in threading.enumerate()
+                if thread.name == "django-ray-core-cancel-7-2-8"
+            )
+            assert request_thread.is_alive()
+            runner._pending_tasks[replacement.task_pk] = replacement
+        finally:
+            release_cancel.set()
+            if request_thread is not None:
+                request_thread.join(timeout=1)
+
+        assert request_thread is not None
+        assert request_thread.is_alive() is False
+        assert fake.cancelled == [(stale.object_ref, False)]
+        assert runner._pending_tasks[replacement.task_pk] is replacement
+
+    def test_process_wide_cancel_slot_rejects_a_second_hung_request(
+        self,
+        monkeypatch,
+    ) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        first_runner = RayCoreRunner()
+        second_runner = RayCoreRunner()
+        third_runner = RayCoreRunner()
+        first = RayCoreHandle(
+            task_pk=8,
+            object_ref=_FakeObjectRef("first-hung-cancel"),
+            submitted_at=datetime.now(UTC),
+            task_name="first",
+            attempt_number=1,
+            execution_generation=1,
+        )
+        second = RayCoreHandle(
+            task_pk=9,
+            object_ref=_FakeObjectRef("second-saturated-cancel"),
+            submitted_at=datetime.now(UTC),
+            task_name="second",
+            attempt_number=1,
+            execution_generation=1,
+        )
+        third = RayCoreHandle(
+            task_pk=10,
+            object_ref=_FakeObjectRef("third-after-release"),
+            submitted_at=datetime.now(UTC),
+            task_name="third",
+            attempt_number=1,
+            execution_generation=1,
+        )
+        first_started = Event()
+        release_first = Event()
+
+        def cancel_one_at_a_time(ref: _FakeObjectRef, force: bool = False) -> None:
+            fake.cancelled.append((ref, force))
+            if ref is first.object_ref:
+                first_started.set()
+                release_first.wait()
+
+        fake.cancel = cancel_one_at_a_time  # type: ignore[method-assign]
+        first_runner._pending_tasks[first.task_pk] = first
+        second_runner._pending_tasks[second.task_pk] = second
+        third_runner._pending_tasks[third.task_pk] = third
+        first_thread: threading.Thread | None = None
+        try:
+            first_outcome = first_runner.cancel_pending_with_status(first, timeout_seconds=0.01)
+            assert first_outcome.status == CancellationOutcomeStatus.INDETERMINATE
+            assert first_started.wait(timeout=1)
+            first_thread = next(
+                thread
+                for thread in threading.enumerate()
+                if thread.name == "django-ray-core-cancel-8-1-1"
+            )
+            assert first_thread.is_alive()
+
+            second_outcome = second_runner.cancel_pending_with_status(
+                second,
+                timeout_seconds=0.01,
+            )
+
+            assert second_outcome.status == CancellationOutcomeStatus.INDETERMINATE
+            assert second_outcome.message == (
+                "Ray Core cancellation capacity is occupied; the exact stop was not attempted"
+            )
+            assert second.task_pk not in second_runner._pending_tasks
+            assert fake.cancelled == [(first.object_ref, False)]
+        finally:
+            release_first.set()
+            if first_thread is not None:
+                first_thread.join(timeout=1)
+
+        assert first_thread is not None
+        assert first_thread.is_alive() is False
+
+        third_outcome = third_runner.cancel_pending_with_status(third, timeout_seconds=0.1)
+
+        assert third_outcome.status == CancellationOutcomeStatus.REQUESTED
+        assert fake.cancelled == [
+            (first.object_ref, False),
+            (third.object_ref, False),
+        ]
+        assert third.task_pk not in third_runner._pending_tasks
 
     def test_get_logs_returns_none(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)

@@ -20,7 +20,8 @@ from django.db import close_old_connections, connection
 from django.db.migrations.recorder import MigrationRecorder
 
 from django_ray.management.commands.django_ray_worker import Command as WorkerCommand
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.runner.leasing import WorkerLeaseIdentity, get_heartbeat_interval
 from django_ray.runner.polling import AdaptivePollingPolicy
 
 
@@ -129,6 +130,7 @@ class _WorkerGroup:
     ready: threading.Barrier
     threads: list[threading.Thread]
     metrics: _ThreadMetrics
+    lease_identities: list[WorkerLeaseIdentity | None]
 
 
 class Command(BaseCommand):
@@ -439,13 +441,21 @@ class Command(BaseCommand):
             self._assert_claim_integrity(
                 task_prefix=task_prefix,
                 claimed_task_ids=claimed_task_ids,
+                worker_ids={
+                    identity.worker_id
+                    for identity in group.lease_identities
+                    if identity is not None
+                },
                 expected_count=task_count,
                 phase=f"{policy_name} latency",
             )
             return idle_metrics, claim_latencies, max(1e-9, idle_ended - idle_started)
         finally:
             self._stop_workers(group, max_interval=max_interval)
-            RayTaskExecution.objects.filter(task_id__startswith=task_prefix).delete()
+            self._cleanup_phase_rows(
+                task_prefix=task_prefix,
+                lease_identities=group.lease_identities,
+            )
 
     def _run_throughput_phase(
         self,
@@ -502,13 +512,21 @@ class Command(BaseCommand):
             self._assert_claim_integrity(
                 task_prefix=task_prefix,
                 claimed_task_ids=claimed_task_ids,
+                worker_ids={
+                    identity.worker_id
+                    for identity in group.lease_identities
+                    if identity is not None
+                },
                 expected_count=task_count,
                 phase=f"{policy_name} throughput",
             )
             return task_count / max(1e-9, max(claimed_at) - started_at)
         finally:
             self._stop_workers(group, max_interval=max_interval)
-            RayTaskExecution.objects.filter(task_id__startswith=task_prefix).delete()
+            self._cleanup_phase_rows(
+                task_prefix=task_prefix,
+                lease_identities=group.lease_identities,
+            )
 
     def _start_workers(
         self,
@@ -532,18 +550,24 @@ class Command(BaseCommand):
             errors=[],
             lock=threading.Lock(),
         )
+        worker_id_prefix = f"benchmark-{queue_name}-"
+        lease_identities: list[WorkerLeaseIdentity | None] = [None] * workers
 
         def poll(worker_index: int) -> None:
             close_old_connections()
             try:
                 command = WorkerCommand()
                 command.stdout = StringIO()
-                command.worker_id = f"benchmark-{phase}-{worker_index}"
+                command._set_worker_id(f"{worker_id_prefix}{worker_index}")
                 command.execution_mode = "local"
                 command.shutdown_requested = False
                 command.active_tasks = {}
                 command.ray_core_runner = None
                 command.process_task = on_claim  # type: ignore[method-assign]
+                command._create_lease(queue_name)
+                if command.lease_identity is None:
+                    raise RuntimeError("benchmark worker did not acquire a lease identity")
+                lease_identities[worker_index] = command.lease_identity
                 policy = AdaptivePollingPolicy(
                     base_interval_seconds=base_interval,
                     max_interval_seconds=max_interval,
@@ -563,11 +587,27 @@ class Command(BaseCommand):
 
                 with connection.execute_wrapper(observe):
                     ready.wait(timeout=barrier_timeout)
+                    next_claim_at = time.monotonic()
+                    next_lease_heartbeat_at = next_claim_at
                     while not stop.is_set():
-                        activity = bool(
-                            command.claim_and_process_tasks([queue_name], concurrency=1)
+                        now = time.monotonic()
+                        if now >= next_lease_heartbeat_at:
+                            if not command._update_lease_heartbeat():
+                                raise RuntimeError("benchmark worker lease ownership was lost")
+                            next_lease_heartbeat_at = now + get_heartbeat_interval().total_seconds()
+                        if now >= next_claim_at:
+                            activity = bool(
+                                command.claim_and_process_tasks([queue_name], concurrency=1)
+                            )
+                            if command.shutdown_requested:
+                                raise RuntimeError("benchmark worker lease ownership was lost")
+                            next_claim_at = now + policy.next_delay(activity=activity)
+                        stop.wait(
+                            max(
+                                0.0,
+                                min(next_claim_at, next_lease_heartbeat_at) - time.monotonic(),
+                            )
                         )
-                        stop.wait(policy.next_delay(activity=activity))
             except threading.BrokenBarrierError:
                 if not stop.is_set():
                     with metrics.lock:
@@ -604,8 +644,15 @@ class Command(BaseCommand):
             deadline = time.monotonic() + barrier_timeout
             for thread in started_threads:
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            self._delete_exact_leases(lease_identities)
             raise CommandError(f"could not start benchmark workers: {exc}") from exc
-        return _WorkerGroup(stop=stop, ready=ready, threads=threads, metrics=metrics)
+        return _WorkerGroup(
+            stop=stop,
+            ready=ready,
+            threads=threads,
+            metrics=metrics,
+            lease_identities=lease_identities,
+        )
 
     @staticmethod
     def _release_workers(group: _WorkerGroup, *, barrier_timeout: float) -> None:
@@ -639,6 +686,25 @@ class Command(BaseCommand):
             raise CommandError(f"benchmark workers did not stop cleanly: {', '.join(alive)}")
 
     @staticmethod
+    def _cleanup_phase_rows(
+        *,
+        task_prefix: str,
+        lease_identities: list[WorkerLeaseIdentity | None],
+    ) -> None:
+        """Delete only this completed benchmark phase's tasks and leases."""
+        RayTaskExecution.objects.filter(task_id__startswith=task_prefix).delete()
+        Command._delete_exact_leases(lease_identities)
+
+    @staticmethod
+    def _delete_exact_leases(
+        lease_identities: list[WorkerLeaseIdentity | None],
+    ) -> None:
+        """Delete only lease rows acquired by this benchmark phase."""
+        for identity in lease_identities:
+            if identity is not None:
+                TaskWorkerLease.objects.filter(**identity.database_filters()).delete()
+
+    @staticmethod
     def _create_execution(*, task_id: str, queue_name: str) -> None:
         RayTaskExecution.objects.create(
             task_id=task_id,
@@ -654,6 +720,7 @@ class Command(BaseCommand):
         *,
         task_prefix: str,
         claimed_task_ids: list[str],
+        worker_ids: set[str],
         expected_count: int,
         phase: str,
     ) -> None:
@@ -661,7 +728,7 @@ class Command(BaseCommand):
         rows = RayTaskExecution.objects.filter(task_id__startswith=task_prefix)
         row_count = rows.count()
         running_count = rows.filter(state=TaskState.RUNNING).count()
-        owned_count = rows.filter(claimed_by_worker__startswith="benchmark-").count()
+        owned_count = rows.filter(claimed_by_worker__in=worker_ids).count()
         if (
             len(claimed_task_ids) != expected_count
             or len(unique_claims) != expected_count

@@ -4350,6 +4350,61 @@ class TestTaskWorkerLeaseAdmin:
 
         assert admin_obj.has_add_permission(request) is False
         assert admin_obj.has_change_permission(request) is False
+        assert admin_obj.has_delete_permission(request) is False
+
+    def test_only_authorized_fenced_worker_lease_actions_are_exposed(
+        self,
+        monkeypatch,
+    ) -> None:
+        admin_obj = _lease_admin()
+        path = "/admin/django_ray/taskworkerlease/"
+        superuser_request = RequestFactory().get(path)
+        superuser_request.user = SimpleNamespace(has_perm=lambda permission, obj=None: True)
+
+        actions = admin_obj.get_actions(superuser_request)
+
+        assert set(actions) == {"mark_inactive", "delete_inactive"}
+        assert "delete_selected" not in actions
+
+        active = TaskWorkerLease.objects.create(
+            worker_id="view-only-action-target",
+            hostname="view-only-host",
+            pid=6666,
+            queue_name="default",
+            is_active=True,
+        )
+        view_permission = f"{admin_obj.opts.app_label}.view_{admin_obj.opts.model_name}"
+        view_only_user = SimpleNamespace(
+            has_perm=lambda permission, obj=None: permission == view_permission
+        )
+        view_request = RequestFactory().post(
+            path,
+            {
+                "action": "mark_inactive",
+                "index": "0",
+                "select_across": "0",
+                "_selected_action": str(active.pk),
+            },
+        )
+        view_request.user = view_only_user
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, message, *args, **kwargs: messages.append(str(message)),
+        )
+
+        assert admin_obj.get_actions(view_request) == {}
+        assert (
+            admin_obj.response_action(
+                view_request,
+                TaskWorkerLease.objects.all(),
+            )
+            is None
+        )
+        active.refresh_from_db()
+        assert active.is_active is True
+        assert messages == ["No action selected."]
 
     def test_lease_displays_actions_and_filter_variants(self, monkeypatch) -> None:
         admin_obj = _lease_admin()
