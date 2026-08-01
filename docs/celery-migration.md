@@ -124,6 +124,18 @@ DJANGO_RAY = {
 }
 ```
 
+Start a django-ray task manager with the explicit `ray-batch` queue, or let the worker
+collect the declared queues from every django-ray alias:
+
+```bash
+python manage.py django_ray_worker --all-queues --local
+```
+
+`--all-queues` ignores the Celery `default` alias and other non-django-ray backends. It
+therefore cannot consume Celery broker messages or accidentally treat their queue names
+as django-ray routes. The queue selector and execution-mode flags are each mutually
+exclusive, so contradictory deployment arguments fail during command parsing.
+
 The local Redis URLs are placeholders; retain the deployment's reviewed broker,
 result-backend, TLS, and credential configuration rather than copying development
 endpoints into production.

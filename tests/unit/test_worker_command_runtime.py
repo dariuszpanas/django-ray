@@ -14,10 +14,15 @@ from django.conf import settings as django_settings
 from django.core.management import CommandError
 from django.core.management.base import CommandParser
 
+from django_ray.backends import RayTaskBackend
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.runner.polling import AdaptivePollingPolicy
 from django_ray.runner.ray_core import RayCoreHandle
+
+
+class CustomRayTaskBackend(RayTaskBackend):
+    """Importable subclass used to prove alias discovery is type-aware."""
 
 
 class CapturingStdout:
@@ -78,24 +83,162 @@ class TestWorkerCommandRuntime:
         assert args.local is False
         assert args.cluster is None
 
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            ["--queue", "a", "--queues", "b"],
+            ["--queue", "a", "--all-queues"],
+            ["--queues", "a", "--all-queues"],
+            ["--sync", "--local"],
+            ["--sync", "--cluster", "ray://cluster:10001"],
+            ["--local", "--cluster", "ray://cluster:10001"],
+        ],
+    )
+    def test_add_arguments_rejects_conflicting_selectors(self, arguments: list[str]) -> None:
+        cmd = _make_command()
+        parser = CommandParser(prog="manage.py django_ray_worker", missing_args_message="")
+        cmd.add_arguments(parser)
+
+        with pytest.raises(CommandError, match="not allowed with argument"):
+            parser.parse_args(arguments)
+
     def test_parse_queues_supports_all_variants(self, monkeypatch) -> None:
         cmd = _make_command()
 
         monkeypatch.setattr(
             django_settings,
             "TASKS",
-            {"default": {"QUEUES": ["default", "high-priority", "low-priority"]}},
+            {
+                "default": {
+                    "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
+                    "QUEUES": ["celery-default"],
+                },
+                "ray": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["ray-batch", "shared"],
+                },
+                "ray-secondary": {
+                    "BACKEND": ("tests.unit.test_worker_command_runtime.CustomRayTaskBackend"),
+                    "QUEUES": ["shared", "ray-gpu"],
+                    "OPTIONS": {"RAY_ADDRESS": "ray://analytics:10001"},
+                },
+                "ray-defaulted": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                },
+            },
             raising=False,
         )
         assert cmd._parse_queues({"all_queues": True}) == [
+            "ray-batch",
+            "shared",
+            "ray-gpu",
             "default",
-            "high-priority",
-            "low-priority",
         ]
         assert cmd._parse_queues({"queues": ["a", "b"]}) == ["a", "b"]
         assert cmd._parse_queues({"queue": "a, b, ,c"}) == ["a", "b", "c"]
         assert cmd._parse_queues({"queue": "single"}) == ["single"]
         assert cmd._parse_queues({}) == ["default"]
+
+    @pytest.mark.parametrize(
+        ("tasks_config", "message"),
+        [
+            (
+                {
+                    "default": {
+                        "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
+                        "QUEUES": ["default"],
+                    }
+                },
+                "no TASKS backend using RayTaskBackend",
+            ),
+            (
+                {
+                    "ray": {
+                        "BACKEND": "django_ray.backends.RayTaskBackend",
+                        "QUEUES": [],
+                    }
+                },
+                "has no enumerable QUEUES",
+            ),
+            (
+                {
+                    "ray": {
+                        "BACKEND": "django_ray.backends.RayTaskBackend",
+                        "QUEUES": "default",
+                    }
+                },
+                "QUEUES must be a collection",
+            ),
+            (
+                {
+                    "ray": {
+                        "BACKEND": "django_ray.backends.RayTaskBackend",
+                        "QUEUES": ["default", " "],
+                    }
+                },
+                "QUEUES must contain non-empty strings",
+            ),
+            (
+                {
+                    "ray": {
+                        "BACKEND": "django_ray.backends.RayTaskBackend",
+                        "QUEUES": {"default", 1},
+                    }
+                },
+                "QUEUES must contain non-empty strings",
+            ),
+        ],
+    )
+    def test_parse_all_queues_fails_closed(
+        self,
+        monkeypatch,
+        tasks_config: dict[str, object],
+        message: str,
+    ) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(django_settings, "TASKS", tasks_config, raising=False)
+
+        with pytest.raises(CommandError, match=message):
+            cmd._parse_queues({"all_queues": True})
+
+    @pytest.mark.parametrize(
+        ("mode_options", "runner"),
+        [
+            ({"local": True}, "ray_job"),
+            ({"cluster": "ray://worker-cluster:10001"}, "ray_job"),
+            ({}, "ray_core"),
+        ],
+    )
+    def test_parse_all_queues_rejects_mixed_targets_in_ray_core_mode(
+        self,
+        monkeypatch,
+        mode_options: dict[str, object],
+        runner: str,
+    ) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": runner, "RAY_ADDRESS": "auto"},
+        )
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "default": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["default"],
+                },
+                "analytics": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["analytics"],
+                    "OPTIONS": {"RAY_ADDRESS": "ray://analytics:10001"},
+                },
+            },
+            raising=False,
+        )
+
+        with pytest.raises(CommandError, match="different RAY_ADDRESS values"):
+            cmd._parse_queues({"all_queues": True, **mode_options})
 
     def test_init_local_ray_clears_env_and_initializes(self, monkeypatch) -> None:
         cmd = _make_command()
