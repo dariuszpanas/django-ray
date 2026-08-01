@@ -43,6 +43,12 @@ from django_ray.models import (
 )
 from django_ray.redaction import REDACTED, redact_text
 from django_ray.runtime.context import WorkflowRunIdentity
+from django_ray.workflow_output_previews import (
+    WorkflowOutputPreviewError,
+    _validate_workflow_output_preview,
+    read_workflow_output_preview,
+    validate_workflow_output_preview,
+)
 from django_ray.workflow_progress_limits import (
     WORKFLOW_PROGRESS_COMBINED_MAX_DECODED_BYTES,
     WORKFLOW_PROGRESS_COMBINED_MAX_ENCODED_BYTES,
@@ -118,7 +124,8 @@ _INVOCATION_IDENTITY_KEYS = frozenset(
         "invocation_id",
     }
 )
-_DETAIL_KEYS = frozenset(
+WORKFLOW_PROGRESS_NODE_DETAIL_SCHEMA_VERSION = 2
+_DETAIL_KEYS_V1 = frozenset(
     {
         "schema_version",
         "node_id",
@@ -133,7 +140,9 @@ _DETAIL_KEYS = frozenset(
         "recent_events",
     }
 )
-_STORED_DETAIL_KEYS = _DETAIL_KEYS | {"truncated"}
+_DETAIL_KEYS_V2 = _DETAIL_KEYS_V1 | {"output_preview"}
+_STORED_DETAIL_KEYS_V1 = _DETAIL_KEYS_V1 | {"truncated"}
+_STORED_DETAIL_KEYS_V2 = _DETAIL_KEYS_V2 | {"truncated"}
 _PROGRESS_KEYS = frozenset({"current", "total", "percent", "message", "metrics", "updated_at"})
 _EXECUTION_KEYS = frozenset(
     {
@@ -1407,21 +1416,42 @@ def _prepare_workflow_progress_node_detail(
     *,
     identity: WorkflowRunIdentity,
     allow_stored_truncation: bool,
+    enforce_current_preview_redaction: bool = True,
 ) -> PreparedWorkflowProgressNodeDetail:
     """Normalize a producer record or revalidate its durable truncation evidence."""
     _validate_run_identity(identity)
+    if not isinstance(value, Mapping):
+        raise WorkflowProgressStorageError("node detail must be a mapping")
     stored_truncated: bool | None = None
     if allow_stored_truncation:
-        durable_detail = _exact_mapping(value, _STORED_DETAIL_KEYS, "stored node detail")
+        durable_keys = frozenset(value)
+        expected_keys = (
+            _STORED_DETAIL_KEYS_V1
+            if durable_keys == _STORED_DETAIL_KEYS_V1
+            else _STORED_DETAIL_KEYS_V2
+        )
+        durable_detail = _exact_mapping(value, expected_keys, "stored node detail")
         stored_truncated = durable_detail["truncated"]
         if not isinstance(stored_truncated, bool):
             raise WorkflowProgressStorageError(
                 "stored node detail truncation evidence must be a boolean"
             )
-        detail = {key: durable_detail[key] for key in _DETAIL_KEYS}
+        detail_keys = (
+            _DETAIL_KEYS_V1 if expected_keys == _STORED_DETAIL_KEYS_V1 else _DETAIL_KEYS_V2
+        )
+        detail = {key: durable_detail[key] for key in detail_keys}
     else:
-        detail = _exact_mapping(value, _DETAIL_KEYS, "node detail")
-    if type(detail["schema_version"]) is not int or detail["schema_version"] != 1:
+        detail_keys = frozenset(value)
+        expected_keys = _DETAIL_KEYS_V1 if detail_keys == _DETAIL_KEYS_V1 else _DETAIL_KEYS_V2
+        detail = _exact_mapping(value, expected_keys, "node detail")
+    detail_schema_version = detail["schema_version"]
+    if type(detail_schema_version) is not int or (
+        (set(detail) == _DETAIL_KEYS_V1 and detail_schema_version != 1)
+        or (
+            set(detail) == _DETAIL_KEYS_V2
+            and detail_schema_version != WORKFLOW_PROGRESS_NODE_DETAIL_SCHEMA_VERSION
+        )
+    ):
         raise WorkflowProgressStorageError("node detail schema_version is unsupported")
     node_id = _bounded_identity_text(
         detail["node_id"],
@@ -1500,6 +1530,19 @@ def _prepare_workflow_progress_node_detail(
 
     fanout = _normalize_fanout(detail["fanout"])
 
+    output_preview: dict[str, Any] | None = None
+    if detail_schema_version == WORKFLOW_PROGRESS_NODE_DETAIL_SCHEMA_VERSION:
+        try:
+            if enforce_current_preview_redaction:
+                output_preview = validate_workflow_output_preview(detail["output_preview"])
+            else:
+                output_preview = _validate_workflow_output_preview(
+                    detail["output_preview"],
+                    enforce_current_redaction=False,
+                )
+        except WorkflowOutputPreviewError as error:
+            raise WorkflowProgressStorageError("node output preview is invalid") from error
+
     error, error_truncated = _bounded_redacted_text(
         detail["error"],
         "node error",
@@ -1532,10 +1575,12 @@ def _prepare_workflow_progress_node_detail(
         "node_id": node_id,
         "progress": progress,
         "recent_events": events,
-        "schema_version": WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION,
+        "schema_version": detail_schema_version,
         "started_at": _timestamp(detail["started_at"], "node started_at", nullable=True),
         "state": state,
     }
+    if output_preview is not None:
+        normalized["output_preview"] = output_preview
     started_at = normalized["started_at"]
     finished_at = normalized["finished_at"]
     if state == "PENDING" and any(value is not None for value in (started_at, finished_at, error)):
@@ -1578,6 +1623,14 @@ def _prepare_workflow_progress_node_detail(
         )
     ):
         raise WorkflowProgressStorageError("successful fanout node must be fully drained")
+    if output_preview is not None:
+        availability = output_preview["availability"]
+        if state in {"SUCCEEDED", "FAILED"} and availability == "PENDING":
+            raise WorkflowProgressStorageError("terminal node output preview cannot remain pending")
+        if state != "SUCCEEDED" and availability in {"AVAILABLE", "REDACTED"}:
+            raise WorkflowProgressStorageError(
+                "non-successful node cannot contain an output preview value"
+            )
     normalized_truncated = truncated or error_truncated
     if stored_truncated is not None:
         if normalized_truncated and not stored_truncated:
@@ -1601,7 +1654,10 @@ def prepare_workflow_progress_node_detail(
     return _prepare_workflow_progress_node_detail(
         value,
         identity=identity,
-        allow_stored_truncation=(isinstance(value, Mapping) and set(value) == _STORED_DETAIL_KEYS),
+        allow_stored_truncation=(
+            isinstance(value, Mapping)
+            and frozenset(value) in {_STORED_DETAIL_KEYS_V1, _STORED_DETAIL_KEYS_V2}
+        ),
     )
 
 
@@ -1625,7 +1681,11 @@ def prepare_workflow_progress_detail(
     seen: set[str] = set()
     node_kinds = dict(topology.node_kinds)
     for value in records:
-        detail_value = _exact_mapping(value, _DETAIL_KEYS, "node detail")
+        if not isinstance(value, Mapping):
+            raise WorkflowProgressStorageError("node detail must be a mapping")
+        detail_keys = frozenset(value)
+        expected_keys = _DETAIL_KEYS_V1 if detail_keys == _DETAIL_KEYS_V1 else _DETAIL_KEYS_V2
+        detail_value = _exact_mapping(value, expected_keys, "node detail")
         supplied_node_id = _bounded_identity_text(
             detail_value["node_id"],
             "node detail node_id",
@@ -2993,6 +3053,7 @@ def _verify_stored_node_detail_row(
             value,
             identity=identity,
             allow_stored_truncation=True,
+            enforce_current_preview_redaction=False,
         )
     except WorkflowProgressStorageError as error:
         raise WorkflowProgressStorageIntegrityError(
@@ -3031,6 +3092,13 @@ def verify_workflow_progress_node_detail_record(
     value = _decode_canonical_payload(payload, "stored workflow node detail")
     if not isinstance(value, dict):
         raise WorkflowProgressStorageIntegrityError("stored workflow node detail must be an object")
+    if value.get("schema_version") == WORKFLOW_PROGRESS_NODE_DETAIL_SCHEMA_VERSION:
+        try:
+            value["output_preview"] = read_workflow_output_preview(value["output_preview"])
+        except (KeyError, WorkflowOutputPreviewError) as error:
+            raise WorkflowProgressStorageIntegrityError(
+                "stored workflow node output preview failed read validation"
+            ) from error
     return value
 
 
@@ -4430,6 +4498,7 @@ __all__ = [
     "WORKFLOW_PROGRESS_DETAIL_MAX_ENCODED_BYTES",
     "WORKFLOW_PROGRESS_DETAIL_MAX_ITEMS",
     "WORKFLOW_PROGRESS_LIMITS_PROFILE",
+    "WORKFLOW_PROGRESS_NODE_DETAIL_SCHEMA_VERSION",
     "WORKFLOW_PROGRESS_RECORD_MAX_ENCODED_BYTES",
     "WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION",
     "WORKFLOW_PROGRESS_TOPOLOGY_EDGE_MAX_ITEMS",

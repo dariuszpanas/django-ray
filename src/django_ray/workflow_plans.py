@@ -1630,27 +1630,19 @@ class _PlanBuilder:
         signature: Any,
         node_id: str,
     ) -> dict[str, Any]:
-        callable_identity = self.callable_identities.get(signature.callable_path)
-        if callable_identity is None:
-            callable_identity = _callable_code_identity(
-                signature.callable_path,
-                module_cache=self.module_identities,
+        callable_ref, callable_identity = self._register_callable(signature.callable_path)
+        output_preview: dict[str, Any] | None = None
+        if signature.output_preview_path is not None:
+            preview_ref, _ = self._register_callable(signature.output_preview_path)
+            from django_ray.workflow_output_previews import (
+                WORKFLOW_OUTPUT_PREVIEW_LIMITS_PROFILE,
             )
-            self.callable_identities[signature.callable_path] = callable_identity
-            callable_ref = f"callable:{len(self.callable_entries)}"
-            self.callable_references[signature.callable_path] = callable_ref
-            self.callable_entries.append(
-                {
-                    "id": callable_ref,
-                    "import_path": signature.callable_path,
-                    "kind": callable_identity["kind"],
-                    "code_identity": callable_identity,
-                }
-            )
-        else:
-            callable_ref = self.callable_references[signature.callable_path]
-        if not callable_identity["stable"]:
-            self.unresolved_code_paths.append(f"callables.{callable_ref}.code_identity")
+
+            output_preview = {
+                "mode": "author_projection",
+                "callable": {"ref": preview_ref},
+                "limits_profile": WORKFLOW_OUTPUT_PREVIEW_LIMITS_PROFILE,
+            }
         ray_options, unresolved_options = _normalize_ray_options(
             signature.ray_options,
             node_id=node_id,
@@ -1684,6 +1676,8 @@ class _PlanBuilder:
             "ray_options": ray_options,
             "environment": plan_runtime_metadata,
         }
+        if output_preview is not None:
+            contract["output_preview"] = output_preview
         self.environment_by_node[node_id] = dict(plan_runtime_metadata)
         if not runtime_identity.reusable:
             self.unresolved_env_paths.extend(
@@ -1709,6 +1703,30 @@ class _PlanBuilder:
             runtime_env_trust_identity=_freeze_json(self.trust_identity),
         )
         return contract
+
+    def _register_callable(self, callable_path: str) -> tuple[str, dict[str, Any]]:
+        callable_identity = self.callable_identities.get(callable_path)
+        if callable_identity is None:
+            callable_identity = _callable_code_identity(
+                callable_path,
+                module_cache=self.module_identities,
+            )
+            self.callable_identities[callable_path] = callable_identity
+            callable_ref = f"callable:{len(self.callable_entries)}"
+            self.callable_references[callable_path] = callable_ref
+            self.callable_entries.append(
+                {
+                    "id": callable_ref,
+                    "import_path": callable_path,
+                    "kind": callable_identity["kind"],
+                    "code_identity": callable_identity,
+                }
+            )
+        else:
+            callable_ref = self.callable_references[callable_path]
+        if not callable_identity["stable"]:
+            self.unresolved_code_paths.append(f"callables.{callable_ref}.code_identity")
+        return callable_ref, callable_identity
 
     def _add_step(
         self,

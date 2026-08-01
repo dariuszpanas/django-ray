@@ -879,6 +879,15 @@ body.django-ray-execution-change nav > .breadcrumbs {
 }
 
 #django-ray-live-observability
+  .django-ray-workflow-graph__node-output[data-has-preview="true"]
+  .django-ray-workflow-graph__node-output-value {
+  color: inherit;
+  font-family: var(--font-family-monospace, ui-monospace, monospace);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+}
+
+#django-ray-live-observability
   .django-ray-workflow-graph__node-message[data-failure="true"] {
   background: var(--django-ray-live-status-error-bg);
   color: var(--django-ray-live-status-error-fg);

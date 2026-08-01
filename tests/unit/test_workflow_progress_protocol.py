@@ -111,6 +111,14 @@ def _payloads() -> dict[WorkflowProgressEventKind, dict[str, Any]]:
             "node_id": "map-a",
             "submitted": 4,
         },
+        WorkflowProgressEventKind.OUTPUT_PREVIEW: {
+            "node_id": "node-a",
+            "output_preview": {
+                "schema_version": 1,
+                "availability": "AVAILABLE",
+                "value": {"rows": 5},
+            },
+        },
         WorkflowProgressEventKind.COMPLETED: {
             "label": "increment",
             "node_id": "node-a",
@@ -204,6 +212,38 @@ def test_decode_rejects_each_complete_run_fence_mismatch(
         decode_workflow_progress_event(wire, expected_run_identity=expected)
 
     assert raised.value.reason == "fence_mismatch"
+
+
+def test_output_preview_event_is_fenced_by_attempt_generation_and_run() -> None:
+    wire = _prepare(WorkflowProgressEventKind.OUTPUT_PREVIEW)
+    expected = _run_identity()
+    expected["attempt_number"] += 1
+
+    with pytest.raises(WorkflowProgressProtocolError) as raised:
+        decode_workflow_progress_event(wire, expected_run_identity=expected)
+
+    assert raised.value.reason == "fence_mismatch"
+
+
+@pytest.mark.parametrize(
+    "output_preview",
+    [
+        {"schema_version": 1, "availability": "AVAILABLE", "value": b"ray-handle"},
+        {
+            "schema_version": 1,
+            "availability": "AVAILABLE",
+            "value": {"api_token": "unredacted"},
+        },
+        {"schema_version": 1, "availability": "FAILED", "value": {"leak": True}},
+        {"schema_version": 1, "availability": "UNKNOWN", "value": None},
+    ],
+)
+def test_output_preview_event_rejects_untrusted_values(output_preview: dict[str, Any]) -> None:
+    with pytest.raises(WorkflowProgressProtocolError):
+        _prepare(
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {"node_id": "node-a", "output_preview": output_preview},
+        )
 
 
 class _RemoteMethod:

@@ -33,6 +33,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workflow steps can opt into a strict operator-facing output projection with
+  `step(...).with_output_preview(projector)`. Full-reporting Ray leaves validate,
+  redact, and fence a small exact-JSON value before terminal schema-v3 node detail is
+  published; the Admin labels it as a preview in the card's single **Output** row. Raw
+  results are never inspected by default, preview failures cannot change task success,
+  actor-free and local policies do not run projectors, and stored node-detail schema v1
+  remains readable. The private Admin graph envelope advances to schema version 2 for
+  the new exact node field. The preview is explicitly diagnostic rather than a result,
+  checkpoint, retry input, selective-resume marker, or external-effect receipt.
+  Stored previews are authenticated before current redaction policy is applied; a
+  newly sensitive current or archived value becomes one `REDACTED` marker without
+  rewriting durable bytes or degrading the whole graph. The real showcase now proves
+  exact validation and reservation map projections, a non-fatal projector failure,
+  and `UNAVAILABLE` output on the failed reservation leaf. Process-control exceptions
+  continue to propagate across every diagnostic seam.
 - Full-reporting workflow leaf invocations now keep at most one outstanding
   application-progress acknowledgement and one canonical latest-value replacement.
   Slow acknowledgements coalesce replaceable progress locally, leaf exit makes at most

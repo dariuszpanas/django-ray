@@ -81,6 +81,22 @@ def _detail(node_id: str, **overrides: Any) -> dict[str, Any]:
     return value
 
 
+def _detail_v2(
+    node_id: str,
+    *,
+    output_preview: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    value = _detail(node_id, **overrides)
+    value["schema_version"] = 2
+    value["output_preview"] = output_preview or {
+        "schema_version": 1,
+        "availability": "NOT_REQUESTED",
+        "value": None,
+    }
+    return value
+
+
 def _event(index: int, *, prefix: str = "event", minute: int = 0) -> dict[str, Any]:
     return {
         "event": "STATE_CHANGE",
@@ -500,6 +516,135 @@ def test_node_detail_requires_protocol_v1_input(schema_version: Any) -> None:
 
     with pytest.raises(storage.WorkflowProgressStorageError, match="schema_version"):
         storage.prepare_workflow_progress_node_detail(value, identity=_identity())
+
+
+def test_node_detail_v2_persists_a_bounded_available_output_preview() -> None:
+    record = storage.prepare_workflow_progress_node_detail(
+        _detail_v2(
+            "node-a",
+            state="SUCCEEDED",
+            output_preview={
+                "schema_version": 1,
+                "availability": "AVAILABLE",
+                "value": {"item_count": 3, "status": "ready"},
+            },
+        ),
+        identity=_identity(),
+    )
+
+    assert _decoded_detail(record)["output_preview"] == {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"item_count": 3, "status": "ready"},
+    }
+    assert _decoded_detail(record)["schema_version"] == 2
+    assert (
+        storage.prepare_workflow_progress_node_detail(
+            _decoded_detail(record),
+            identity=_identity(),
+        )
+        == record
+    )
+
+
+def test_node_detail_v1_round_trip_remains_byte_and_digest_stable() -> None:
+    legacy = storage.prepare_workflow_progress_node_detail(
+        _detail("node-a", state="SUCCEEDED"),
+        identity=_identity(),
+    )
+    reread = storage.prepare_workflow_progress_node_detail(
+        _decoded_detail(legacy),
+        identity=_identity(),
+    )
+
+    assert legacy == reread
+    assert legacy.payload == reread.payload
+    assert legacy.digest == reread.digest
+    assert _decoded_detail(legacy)["schema_version"] == 1
+    assert "output_preview" not in _decoded_detail(legacy)
+
+
+@pytest.mark.parametrize(
+    "output_preview",
+    [
+        pytest.param(
+            {
+                "schema_version": 1,
+                "availability": "AVAILABLE",
+                "value": {"api_key": "unredacted"},
+            },
+            id="unredacted",
+        ),
+        pytest.param(
+            {
+                "schema_version": 1,
+                "availability": "AVAILABLE",
+                "value": b"not-json",
+            },
+            id="unsupported-type",
+        ),
+        pytest.param(
+            {
+                "schema_version": 1,
+                "availability": "AVAILABLE",
+                "value": "x" * 257,
+            },
+            id="oversized-string",
+        ),
+        pytest.param(
+            {
+                "schema_version": 1,
+                "availability": "PENDING",
+                "value": {"unexpected": True},
+            },
+            id="value-with-unavailable-status",
+        ),
+    ],
+)
+def test_node_detail_v2_rejects_invalid_output_previews(
+    output_preview: dict[str, Any],
+) -> None:
+    with pytest.raises(storage.WorkflowProgressStorageError, match="output preview"):
+        storage.prepare_workflow_progress_node_detail(
+            _detail_v2("node-a", state="SUCCEEDED", output_preview=output_preview),
+            identity=_identity(),
+        )
+
+
+@pytest.mark.parametrize("state", ["PENDING", "RUNNING", "FAILED"])
+def test_node_detail_v2_never_attaches_preview_value_to_non_success(
+    state: str,
+) -> None:
+    with pytest.raises(storage.WorkflowProgressStorageError, match="non-successful"):
+        storage.prepare_workflow_progress_node_detail(
+            _detail_v2(
+                "node-a",
+                state=state,
+                output_preview={
+                    "schema_version": 1,
+                    "availability": "AVAILABLE",
+                    "value": {"status": "must not persist"},
+                },
+            ),
+            identity=_identity(),
+        )
+
+
+@pytest.mark.parametrize("state", ["SUCCEEDED", "FAILED"])
+def test_node_detail_v2_rejects_pending_preview_on_terminal_node(state: str) -> None:
+    with pytest.raises(storage.WorkflowProgressStorageError, match="cannot remain pending"):
+        storage.prepare_workflow_progress_node_detail(
+            _detail_v2(
+                "node-a",
+                state=state,
+                output_preview={
+                    "schema_version": 1,
+                    "availability": "PENDING",
+                    "value": None,
+                },
+            ),
+            identity=_identity(),
+        )
 
 
 def test_normalized_node_detail_is_codec_idempotent() -> None:

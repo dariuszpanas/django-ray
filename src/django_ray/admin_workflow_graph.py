@@ -8,6 +8,12 @@ from typing import Any, NoReturn
 from uuid import UUID
 
 from django_ray.redaction import redact_text
+from django_ray.workflow_output_previews import (
+    WorkflowOutputPreviewAvailability,
+    WorkflowOutputPreviewError,
+    unavailable_workflow_output_preview,
+    validate_workflow_output_preview,
+)
 from django_ray.workflow_progress_limits import (
     WORKFLOW_PROGRESS_LABEL_MAX_BYTES,
     WORKFLOW_PROGRESS_MESSAGE_MAX_BYTES,
@@ -20,7 +26,7 @@ from django_ray.workflow_progress_summary import (
 )
 
 ADMIN_WORKFLOW_GRAPH_SCHEMA = "django-ray.admin-workflow-graph"
-ADMIN_WORKFLOW_GRAPH_SCHEMA_VERSION = 1
+ADMIN_WORKFLOW_GRAPH_SCHEMA_VERSION = 2
 ADMIN_WORKFLOW_GRAPH_MAX_NODES = 100
 ADMIN_WORKFLOW_GRAPH_MAX_EDGES = 256
 ADMIN_WORKFLOW_GRAPH_MAX_DETAILS = 100
@@ -41,7 +47,7 @@ _EXPECTED_TOPOLOGY_NODE_FIELDS = frozenset(
     }
 )
 _EXPECTED_TOPOLOGY_EDGE_FIELDS = frozenset({"source", "target"})
-_EXPECTED_DETAIL_FIELDS = frozenset(
+_EXPECTED_DETAIL_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "node_id",
@@ -57,6 +63,7 @@ _EXPECTED_DETAIL_FIELDS = frozenset(
         "truncated",
     }
 )
+_EXPECTED_DETAIL_FIELDS_V2 = _EXPECTED_DETAIL_FIELDS_V1 | {"output_preview"}
 _EXPECTED_PROGRESS_FIELDS = frozenset(
     {"current", "total", "percent", "message", "metrics", "updated_at"}
 )
@@ -446,7 +453,8 @@ def _project_nodes(
     detail_by_id: dict[str, dict[str, Any]] = {}
     state_by_id: dict[str, str] = {}
     for item in detail_items:
-        if set(item) != _EXPECTED_DETAIL_FIELDS:
+        item_fields = frozenset(item)
+        if item_fields not in {_EXPECTED_DETAIL_FIELDS_V1, _EXPECTED_DETAIL_FIELDS_V2}:
             _corrupt()
         node_id = _node_id(item.get("node_id"))
         state = item.get("state")
@@ -482,6 +490,26 @@ def _project_nodes(
     projected: dict[str, dict[str, Any]] = {}
     for node_id, topology in topology_by_id.items():
         detail = detail_by_id[node_id]
+        detail_schema_version = detail["schema_version"]
+        if (
+            type(detail_schema_version) is int
+            and detail_schema_version == 1
+            and frozenset(detail) == _EXPECTED_DETAIL_FIELDS_V1
+        ):
+            output_preview = unavailable_workflow_output_preview(
+                WorkflowOutputPreviewAvailability.UNAVAILABLE
+            )
+        elif (
+            type(detail_schema_version) is int
+            and detail_schema_version == 2
+            and frozenset(detail) == _EXPECTED_DETAIL_FIELDS_V2
+        ):
+            try:
+                output_preview = validate_workflow_output_preview(detail["output_preview"])
+            except WorkflowOutputPreviewError:
+                _corrupt()
+        else:
+            _corrupt()
         progress = detail.get("progress")
         if progress is not None and (
             not isinstance(progress, dict) or set(progress) != _EXPECTED_PROGRESS_FIELDS
@@ -522,6 +550,7 @@ def _project_nodes(
             "message": message,
             "error": error,
             "failure_path": False,
+            "output_preview": output_preview,
         }
         if kind == "map":
             node["fanout"] = _safe_fanout(fanout)

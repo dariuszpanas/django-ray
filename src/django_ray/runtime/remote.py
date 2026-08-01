@@ -44,6 +44,7 @@ _PRODUCER_TERMINAL_HANDOFFS = (
     "failed",
     "actor_unavailable",
 )
+_PENDING_PREVIEW_TERMINAL_RESERVE_BYTES = len("UNAVAILABLE") - len("PENDING")
 
 
 def _wall_time_ns() -> int:
@@ -126,6 +127,7 @@ def execute_workflow_step_remote(
     progress_actor: Any | None,
     node_id: str,
     *input_args: Any,
+    output_preview_path: str | None = None,
     workflow_run_identity: dict[str, Any] | None = None,
     workflow_progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
 ) -> Any:
@@ -197,6 +199,39 @@ def execute_workflow_step_remote(
         )
         logger.exception("Workflow step failed")
         raise
+    if output_preview_path is not None:
+        from django_ray.workflow_output_previews import (
+            WorkflowOutputPreviewAvailability,
+            project_workflow_output_preview,
+            unavailable_workflow_output_preview,
+        )
+
+        try:
+            projector = import_callable(output_preview_path)
+        except Exception:
+            output_preview = unavailable_workflow_output_preview(
+                WorkflowOutputPreviewAvailability.FAILED
+            )
+        else:
+            output_preview = project_workflow_output_preview(projector, result)
+        _send_step_progress_event(
+            progress_actor,
+            workflow_run_identity,
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {
+                "node_id": node_id,
+                "output_preview": output_preview,
+            },
+            limits=workflow_progress_limits,
+        )
+        if output_preview["availability"] not in {"AVAILABLE", "REDACTED"}:
+            try:
+                logger.warning(
+                    "Workflow output preview unavailable",
+                    extra={"output_preview_availability": output_preview["availability"]},
+                )
+            except Exception:
+                pass
     _send_step_progress_event(
         progress_actor,
         workflow_run_identity,
@@ -294,6 +329,7 @@ class _WorkflowProgressCollector:
         self._node_payload_bytes = 0
         self._edge_payload_bytes = 0
         self._event_payload_bytes = 0
+        self._pending_output_preview_count = 0
         self._plan_size = canonical_workflow_progress_retained_size(self.plan_summary)
         self._retained_bytes = workflow_progress_retained_state_size(
             plan_bytes=self._plan_size,
@@ -553,6 +589,11 @@ class _WorkflowProgressCollector:
         return True
 
     def _placeholder(self, node_id: str, label: str | None = None) -> dict[str, Any]:
+        from django_ray.workflow_output_previews import (
+            WorkflowOutputPreviewAvailability,
+            unavailable_workflow_output_preview,
+        )
+
         return {
             "node_id": node_id,
             "kind": "task",
@@ -567,6 +608,9 @@ class _WorkflowProgressCollector:
             "started_at": None,
             "finished_at": None,
             "error": None,
+            "output_preview": unavailable_workflow_output_preview(
+                WorkflowOutputPreviewAvailability.NOT_REQUESTED
+            ),
         }
 
     def _candidate_node(self, node_id: str, label: str | None = None) -> dict[str, Any]:
@@ -626,8 +670,14 @@ class _WorkflowProgressCollector:
                 del candidate_event_sizes[:excess]
 
         node_payload_bytes = self._node_payload_bytes
+        pending_output_preview_count = self._pending_output_preview_count
         for node_id, size in node_sizes.items():
             node_payload_bytes += size - self._node_sizes.get(node_id, 0)
+            previous = self.nodes.get(node_id)
+            if previous is not None and previous["output_preview"]["availability"] == "PENDING":
+                pending_output_preview_count -= 1
+            if node_updates[node_id]["output_preview"]["availability"] == "PENDING":
+                pending_output_preview_count += 1
         edge_payload_bytes = self._edge_payload_bytes + sum(edge_sizes.values())
         retained_bytes = workflow_progress_retained_state_size(
             plan_bytes=self._plan_size,
@@ -638,7 +688,10 @@ class _WorkflowProgressCollector:
             event_bytes=event_payload_bytes,
             event_count=len(candidate_events),
         )
-        if retained_bytes > self._retained_bytes_limit:
+        terminal_retained_bytes = (
+            retained_bytes + pending_output_preview_count * _PENDING_PREVIEW_TERMINAL_RESERVE_BYTES
+        )
+        if terminal_retained_bytes > self._retained_bytes_limit:
             return "retained_bytes_limit"
 
         for node_id, node in node_updates.items():
@@ -652,6 +705,7 @@ class _WorkflowProgressCollector:
         self._edge_payload_bytes = edge_payload_bytes
         self._event_payload_bytes = event_payload_bytes
         self._retained_bytes = retained_bytes
+        self._pending_output_preview_count = pending_output_preview_count
         return None
 
     def _node_event_candidate(
@@ -766,6 +820,28 @@ class _WorkflowProgressCollector:
                 recent_event = self._recent_event(node, "PROGRESS", occurred_at)
             else:
                 node["fanout"] = fanout
+        elif event.kind is WorkflowProgressEventKind.OUTPUT_PREVIEW:
+            current_availability = node["output_preview"]["availability"]
+            next_preview = copy.deepcopy(payload["output_preview"])
+            next_availability = next_preview["availability"]
+            final_availabilities = {
+                "AVAILABLE",
+                "REDACTED",
+                "TOO_LARGE",
+                "UNSUPPORTED",
+                "FAILED",
+                "UNAVAILABLE",
+                "OMITTED_BY_POLICY",
+            }
+            if node["state"] != "FAILED" and current_availability not in final_availabilities:
+                if next_availability in final_availabilities:
+                    node["output_preview"] = next_preview
+                elif (
+                    next_availability == "PENDING"
+                    and current_availability == "NOT_REQUESTED"
+                    and node["state"] != "SUCCEEDED"
+                ):
+                    node["output_preview"] = next_preview
         elif event.kind is WorkflowProgressEventKind.COMPLETED:
             node["label"] = label
             if not terminal:
@@ -791,9 +867,17 @@ class _WorkflowProgressCollector:
         elif event.kind is WorkflowProgressEventKind.FAILED:
             node["label"] = label
             if not terminal:
+                from django_ray.workflow_output_previews import (
+                    WorkflowOutputPreviewAvailability,
+                    unavailable_workflow_output_preview,
+                )
+
                 node["state"] = "FAILED"
                 node["finished_at"] = occurred_at
                 node["error"] = payload["error"]
+                node["output_preview"] = unavailable_workflow_output_preview(
+                    WorkflowOutputPreviewAvailability.UNAVAILABLE
+                )
                 recent_event = self._recent_event(node, "FAILED", occurred_at)
         return {node_id: node}, recent_event
 
@@ -883,9 +967,19 @@ class _WorkflowProgressCollector:
         dependencies: dict[str, list[str]] = {node_id: [] for node_id in self.nodes}
         for source, target in self.edges:
             dependencies.setdefault(target, []).append(source)
+        workflow_terminal = bool(failed or (total and terminal == total))
         nodes = []
         for node_id in sorted(self.nodes):
             node = copy.deepcopy(self.nodes[node_id])
+            if workflow_terminal and node["output_preview"]["availability"] == "PENDING":
+                from django_ray.workflow_output_previews import (
+                    WorkflowOutputPreviewAvailability,
+                    unavailable_workflow_output_preview,
+                )
+
+                node["output_preview"] = unavailable_workflow_output_preview(
+                    WorkflowOutputPreviewAvailability.UNAVAILABLE
+                )
             node["dependencies"] = sorted(dependencies.get(node_id, []))
             nodes.append(node)
         edges = [{"source": source, "target": target} for source, target in sorted(self.edges)]
@@ -918,7 +1012,12 @@ class _WorkflowProgressCollector:
                 "truncated": self._truncated,
                 "accepted_by_kind": dict(self._accepted_by_kind),
                 "rejected_by_reason": dict(self._rejected_by_reason),
-                "retained_bytes": self._retained_bytes,
+                "retained_bytes": self._retained_bytes
+                + (
+                    self._pending_output_preview_count * _PENDING_PREVIEW_TERMINAL_RESERVE_BYTES
+                    if workflow_terminal
+                    else 0
+                ),
                 "retained_nodes": len(self.nodes),
                 "retained_edges": len(self.edges),
                 "cost": cost,

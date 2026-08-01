@@ -285,7 +285,7 @@ function validPayload(overrides = {}) {
 }
 
 function validGraphPayload(overrides = {}) {
-  const nodes = overrides.nodes ?? [
+  const rawNodes = overrides.nodes ?? [
     {
       id: "prepare",
       label: "Prepare input",
@@ -294,6 +294,11 @@ function validGraphPayload(overrides = {}) {
       message: "Input is ready.",
       error: null,
       failure_path: false,
+      output_preview: {
+        schema_version: 1,
+        availability: "AVAILABLE",
+        value: { batch: "ready", item_count: 8 },
+      },
     },
     {
       id: "fanout",
@@ -320,13 +325,21 @@ function validGraphPayload(overrides = {}) {
       failure_path: false,
     },
   ];
+  const nodes = rawNodes.map((node) => ({
+    output_preview: {
+      schema_version: 1,
+      availability: "NOT_REQUESTED",
+      value: null,
+    },
+    ...node,
+  }));
   const edges = overrides.edges ?? [
     { source: "prepare", target: "fanout" },
     { source: "fanout", target: "finish" },
   ];
   return {
     schema: "django-ray.admin-workflow-graph",
-    schema_version: 1,
+    schema_version: 2,
     status: "AVAILABLE",
     message: "Bounded workflow graph loaded.",
     complete: true,
@@ -340,9 +353,9 @@ function validGraphPayload(overrides = {}) {
       details: 100,
       response_bytes: 131072,
     },
+    ...overrides,
     nodes,
     edges,
-    ...overrides,
   };
 }
 
@@ -1564,9 +1577,9 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
     ["Node ID: prepare", "Node ID: fanout", "Node ID: finish"],
   );
   assert.deepEqual(nodeLinks.map(graphNodeOutput), [
-    "Output: Completed \u2014 value not retained in workflow diagnostics",
-    "Output: Pending \u2014 node is still running",
-    "Output: Pending \u2014 node has not started",
+    'Output: Preview \u2014 {"batch":"ready","item_count":8}',
+    "Output: Not requested \u2014 value not retained in workflow diagnostics",
+    "Output: Not requested \u2014 value not retained in workflow diagnostics",
   ]);
   assert.ok(nodeLinks.every((link) => link.tagName === "A"));
   assert.deepEqual(
@@ -1585,6 +1598,19 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
   assert.match(app.details.textContent, /\u25b6Running/);
   assert.match(app.details.textContent, /\u25cbPending/);
   assert.match(app.details.textContent, /6 of 8 items completed/);
+  const outputs = elementsByClass(app, "django-ray-workflow-graph__node-output");
+  assert.equal(outputs.length, 3);
+  assert.deepEqual(
+    outputs.map((output) => [
+      output.dataset.availability,
+      output.dataset.hasPreview ?? "",
+    ]),
+    [
+      ["AVAILABLE", "true"],
+      ["NOT_REQUESTED", ""],
+      ["NOT_REQUESTED", ""],
+    ],
+  );
 
   const connectors = elementsByClass(
     app,
@@ -1621,6 +1647,50 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
   await app.toggleGraph(false);
   await app.toggleGraph(true);
   assert.equal(app.fetchCalls.length, 2);
+});
+
+test("canonical backend previews survive browser number normalization", async () => {
+  const value = {
+    numbers: Array(16).fill(0.000001),
+    a: "x".repeat(200),
+    b: "y".repeat(142),
+  };
+  const browserBytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  assert.ok(browserBytes > 512);
+  assert.ok(browserBytes <= 512 + 3 * 32);
+  const app = loadDiagnostics({
+    fetchResponses: [
+      response(200, validPayload()),
+      response(
+        200,
+        validGraphPayload({
+          nodes: [
+            {
+              id: "normalized-preview",
+              label: "Normalized preview",
+              kind: "task",
+              state: "SUCCEEDED",
+              message: null,
+              error: null,
+              failure_path: false,
+              output_preview: {
+                schema_version: 1,
+                availability: "AVAILABLE",
+                value,
+              },
+            },
+          ],
+          edges: [],
+        }),
+      ),
+    ],
+  });
+
+  await app.toggle(true);
+  await app.toggleGraph(true);
+
+  assert.equal(graphContent(app).hidden, false);
+  assert.match(graphNodeOutput(graphNodeLinks(app)[0]), /0\.000001/);
 });
 
 test("parallel roots and a multi-parent join keep an explicit incoming path", async () => {
@@ -1863,6 +1933,11 @@ test("failed paths and malicious graph text stay visible as plain text", async (
       message: null,
       error: null,
       failure_path: true,
+      output_preview: {
+        schema_version: 1,
+        availability: "AVAILABLE",
+        value: { status: "</code><script>steal-preview()</script>" },
+      },
     },
     {
       id: maliciousId,
@@ -1872,6 +1947,11 @@ test("failed paths and malicious graph text stay visible as plain text", async (
       message: maliciousMessage,
       error: maliciousError,
       failure_path: true,
+      output_preview: {
+        schema_version: 1,
+        availability: "UNAVAILABLE",
+        value: null,
+      },
     },
   ];
   const app = loadDiagnostics({
@@ -1896,7 +1976,10 @@ test("failed paths and malicious graph text stay visible as plain text", async (
   assert.match(app.details.textContent, /Upstream of failure/);
   assert.match(app.details.textContent, /Failure origin/);
   assert.match(app.details.textContent, /!Failed/);
-  assert.match(app.details.textContent, /Output: Unavailable \u2014 node failed/);
+  assert.match(
+    app.details.textContent,
+    /Output: Preview unavailable \u2014 no retained diagnostic value/,
+  );
   assert.ok(
     graphNodeLinks(app).every(
       (link) => link.dataset.failurePath === "true",
@@ -1905,6 +1988,7 @@ test("failed paths and malicious graph text stay visible as plain text", async (
   assert.equal(app.details.textContent.includes(maliciousLabel), true);
   assert.equal(app.details.textContent.includes(maliciousMessage), true);
   assert.equal(app.details.textContent.includes(maliciousError), true);
+  assert.equal(app.details.textContent.includes("steal-preview()"), true);
   assert.equal(
     findAll(app.details, (element) => element.tagName === "IMG").length,
     0,
@@ -2121,7 +2205,7 @@ test("malformed, cyclic, partial, and unknown graph data fail closed", async (co
     },
     {
       name: "wrong schema version",
-      payload: validGraphPayload({ schema_version: 2 }),
+      payload: validGraphPayload({ schema_version: 1 }),
     },
     {
       name: "unknown graph status",
@@ -2227,6 +2311,86 @@ test("malformed, cyclic, partial, and unknown graph data fail closed", async (co
       payload: validGraphPayload({
         nodes: [
           { ...baseNodes[0], private_runtime_value: "must-not-render" },
+          ...baseNodes.slice(1),
+        ],
+      }),
+    },
+    {
+      name: "unsupported output preview value",
+      payload: validGraphPayload({
+        nodes: [
+          {
+            ...baseNodes[0],
+            output_preview: {
+              schema_version: 1,
+              availability: "UNSUPPORTED",
+              value: { leaked: true },
+            },
+          },
+          ...baseNodes.slice(1),
+        ],
+      }),
+    },
+    {
+      name: "over-deep output preview",
+      payload: validGraphPayload({
+        nodes: [
+          {
+            ...baseNodes[0],
+            output_preview: {
+              schema_version: 1,
+              availability: "AVAILABLE",
+              value: { a: { b: { c: { d: { e: true } } } } },
+            },
+          },
+          ...baseNodes.slice(1),
+        ],
+      }),
+    },
+    {
+      name: "available output preview containing a redaction marker",
+      payload: validGraphPayload({
+        nodes: [
+          {
+            ...baseNodes[0],
+            output_preview: {
+              schema_version: 1,
+              availability: "AVAILABLE",
+              value: { status: "[REDACTED]" },
+            },
+          },
+          ...baseNodes.slice(1),
+        ],
+      }),
+    },
+    {
+      name: "redacted output preview without redaction evidence",
+      payload: validGraphPayload({
+        nodes: [
+          {
+            ...baseNodes[0],
+            output_preview: {
+              schema_version: 1,
+              availability: "REDACTED",
+              value: { status: "safe" },
+            },
+          },
+          ...baseNodes.slice(1),
+        ],
+      }),
+    },
+    {
+      name: "unsafe integer output preview",
+      payload: validGraphPayload({
+        nodes: [
+          {
+            ...baseNodes[0],
+            output_preview: {
+              schema_version: 1,
+              availability: "AVAILABLE",
+              value: Number.MAX_SAFE_INTEGER + 1,
+            },
+          },
           ...baseNodes.slice(1),
         ],
       }),
@@ -2375,6 +2539,61 @@ test("a bounded corrupt response degrades without rendering or retrying", async 
   assert.equal(app.fetchCalls.length, 2);
 });
 
+test("non-value and redacted preview wording is independent of node state", async () => {
+  const presentations = new Map([
+    [
+      "NOT_REQUESTED",
+      "Output: Not requested \u2014 value not retained in workflow diagnostics",
+    ],
+    ["PENDING", "Output: Preview pending \u2014 node has not reported a value"],
+    [
+      "UNAVAILABLE",
+      "Output: Preview unavailable \u2014 no retained diagnostic value",
+    ],
+    [
+      "REDACTED",
+      "Output: Redacted preview \u2014 value withheld by redaction policy",
+    ],
+  ]);
+
+  for (const [availability, expected] of presentations) {
+    for (const state of ["PENDING", "RUNNING", "SUCCEEDED", "FAILED"]) {
+      const app = loadDiagnostics({
+        fetchResponses: [
+          response(200, validPayload()),
+          response(
+            200,
+            validGraphPayload({
+              nodes: [
+                {
+                  id: `${availability.toLowerCase()}-${state.toLowerCase()}`,
+                  label: "Availability presentation",
+                  kind: "task",
+                  state,
+                  message: null,
+                  error: state === "FAILED" ? "bounded failure" : null,
+                  failure_path: state === "FAILED",
+                  output_preview: {
+                    schema_version: 1,
+                    availability,
+                    value: availability === "REDACTED" ? "[REDACTED]" : null,
+                  },
+                },
+              ],
+              edges: [],
+            }),
+          ),
+        ],
+      });
+
+      await app.toggle(true);
+      await app.toggleGraph(true);
+
+      assert.equal(graphNodeOutput(graphNodeLinks(app)[0]), expected);
+    }
+  }
+});
+
 test("graph styles cover neutral light, dark, state, shape, and narrow layouts", () => {
   assert.match(
     graphStyles,
@@ -2436,6 +2655,10 @@ test("graph styles cover neutral light, dark, state, shape, and narrow layouts",
   assert.match(
     graphStyles,
     /django-ray-workflow-graph__node-output-label \{[\s\S]*?font-weight: 700;/,
+  );
+  assert.match(
+    graphStyles,
+    /node-output\[data-has-preview="true"\][\s\S]*?font-family: var\(--font-family-monospace/,
   );
   assert.equal(graphStyles.includes("failure-boundary"), false);
   assert.equal(graphStyles.includes("failure-arrow"), false);

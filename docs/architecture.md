@@ -307,6 +307,11 @@ tables without changing existing task or attempt columns:
   stable node key. Its last-updated revisions are evidence, not a historical snapshot
   filter.
 
+Node-detail schema version 2 may retain one opt-in, strictly bounded and redacted
+author projection of a successful leaf result. The projection is diagnostics only:
+it is never a result reference, checkpoint, retry input, selective-resume marker, or
+external-effect receipt. Schema-version-1 rows remain readable without mutation.
+
 Candidate topology is normalized, redacted, digested, and bounded before persistence.
 Staging does not hold the lifecycle task lock; it checks the exact run at both ends and
 can leave at most one bounded orphan when ownership changes at the final boundary. The

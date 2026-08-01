@@ -23,7 +23,12 @@ from django_ray.admin_workflow_graph import (
     ADMIN_WORKFLOW_GRAPH_MAX_NODES,
     ADMIN_WORKFLOW_GRAPH_MAX_RESPONSE_BYTES,
 )
-from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.models import (
+    RayTaskExecution,
+    TaskAttempt,
+    TaskState,
+    WorkflowProgressNodeDetail,
+)
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.workflow_progress_reads import (
     WorkflowProgressReadError,
@@ -72,6 +77,7 @@ _NODE_FIELDS = {
     "message",
     "error",
     "failure_path",
+    "output_preview",
 }
 
 
@@ -349,6 +355,12 @@ def test_graph_endpoint_projects_one_coherent_first_page_without_raw_payloads(
         "metrics": {"raw-metric-must-not-leak": "sentinel"},
         "updated_at": "2026-07-29T12:00:02Z",
     }
+    detail_by_id["a"]["schema_version"] = 2
+    detail_by_id["a"]["output_preview"] = {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"item_count": 3, "status": "ready"},
+    }
     detail_by_id["b"]["error"] = "password=origin-secret"
     calls = _install_graph_readers(monkeypatch, summary, pages)
     execution = _execution()
@@ -367,7 +379,7 @@ def test_graph_endpoint_projects_one_coherent_first_page_without_raw_payloads(
     assert response["X-Content-Type-Options"] == "nosniff"
     assert set(payload) == _ROOT_FIELDS
     assert payload["schema"] == "django-ray.admin-workflow-graph"
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["status"] == "AVAILABLE"
     assert payload["complete"] is True
     assert payload["counts"] == {"nodes": 4, "edges": 3}
@@ -383,7 +395,13 @@ def test_graph_endpoint_projects_one_coherent_first_page_without_raw_payloads(
     assert set(by_id["a"]) == _NODE_FIELDS
     assert by_id["a"]["label"] == "[REDACTED]"
     assert by_id["a"]["message"] == "[REDACTED]"
+    assert by_id["a"]["output_preview"] == {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"item_count": 3, "status": "ready"},
+    }
     assert by_id["b"]["error"] == "[REDACTED]"
+    assert by_id["b"]["output_preview"]["availability"] == "UNAVAILABLE"
     assert by_id["b"]["fanout"] == {
         "submitted_items": 3,
         "completed_items": 2,
@@ -729,6 +747,7 @@ def test_graph_read_failures_use_fixed_safe_degradations(
         ("unsupported-kind", "CORRUPT", 503),
         ("unsupported-state", "CORRUPT", 503),
         ("malformed-node", "CORRUPT", 503),
+        ("malformed-preview", "CORRUPT", 503),
         ("truncated-record", "TRUNCATED", 200),
         ("next-cursor", "TRUNCATED", 200),
     ],
@@ -765,6 +784,17 @@ def test_graph_validation_never_returns_partial_data(
         pages["node_details"]["items"][0]["state"] = "BLOCKED"
     elif case == "malformed-node":
         pages["topology_nodes"]["items"][0].pop("label")
+    elif case == "malformed-preview":
+        pages["node_details"]["items"][0].update(
+            {
+                "schema_version": 2,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "AVAILABLE",
+                    "value": {"api_key": "must not render"},
+                },
+            }
+        )
     elif case == "truncated-record":
         pages["node_details"]["items"][0]["truncated"] = True
     else:
@@ -807,7 +837,7 @@ def test_graph_response_byte_ceiling_degrades_atomically(
 
 
 @pytest.mark.django_db
-def test_graph_endpoint_reads_real_terminal_schema_v3_storage() -> None:
+def test_graph_endpoint_reads_real_terminal_schema_v3_storage(settings) -> None:
     execution = _execution(
         task_id="graph-real-schema-v3",
         state=TaskState.RUNNING,
@@ -844,6 +874,15 @@ def test_graph_endpoint_reads_real_terminal_schema_v3_storage() -> None:
             started_at="2026-07-29T12:00:00Z",
             finished_at="2026-07-29T12:00:01Z",
         )
+        if node_id == "real-a":
+            detail.update(
+                schema_version=2,
+                output_preview={
+                    "schema_version": 1,
+                    "availability": "AVAILABLE",
+                    "value": {"item_count": 2, "status": "persisted"},
+                },
+            )
         details.append(detail)
     prepared_detail = prepare_workflow_progress_detail(details, topology=topology)
     manifest_id = stage_workflow_progress_topology(topology)
@@ -878,6 +917,28 @@ def test_graph_endpoint_reads_real_terminal_schema_v3_storage() -> None:
     execution.refresh_from_db()
     terminal_summary = execution.workflow_progress_summary_json
     assert terminal_summary is not None
+    stored_preview = WorkflowProgressNodeDetail.objects.get(node_id="real-a")
+    stored_payload = bytes(stored_preview.payload)
+    stored_digest = stored_preview.digest
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "REDACT_PATTERNS": [r"persisted"],
+    }
+    user = get_user_model().objects.create_superuser(username="graph-real-schema-v3")
+    admin_obj = _task_admin()
+    current_request = RequestFactory().get("/admin/workflow/graph/?attempt_number=1")
+    current_request.user = user
+
+    current_response = admin_obj.workflow_graph_view(current_request, str(execution.pk))
+
+    current_payload = _json(current_response)
+    assert current_response.status_code == 200
+    assert current_payload["status"] == "AVAILABLE"
+    assert current_payload["nodes"][0]["output_preview"] == {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": "[REDACTED]",
+    }
     TaskAttempt.objects.create(
         execution=execution,
         attempt_number=1,
@@ -891,10 +952,8 @@ def test_graph_endpoint_reads_real_terminal_schema_v3_storage() -> None:
         workflow_run_id="00000000-0000-0000-0000-000000000220",
         workflow_progress_summary_json=None,
     )
-    user = get_user_model().objects.create_superuser(username="graph-real-schema-v3")
     request = RequestFactory().get("/admin/workflow/graph/?attempt_number=1")
     request.user = user
-    admin_obj = _task_admin()
 
     response = admin_obj.workflow_graph_view(request, str(execution.pk))
 
@@ -904,6 +963,12 @@ def test_graph_endpoint_reads_real_terminal_schema_v3_storage() -> None:
     assert payload["counts"] == {"nodes": 2, "edges": 1}
     assert [node["id"] for node in payload["nodes"]] == ["real-a", "real-b"]
     assert all(node["state"] == "SUCCEEDED" for node in payload["nodes"])
+    assert payload["nodes"][0]["output_preview"] == {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": "[REDACTED]",
+    }
+    assert payload["nodes"][1]["output_preview"]["availability"] == "UNAVAILABLE"
     content = response.content.decode("utf-8")
     assert "real-result-sentinel" not in content
     assert "real-runtime-sentinel" not in content
@@ -922,3 +987,11 @@ def test_graph_endpoint_reads_real_terminal_schema_v3_storage() -> None:
     assert detail_payload["run_identity"]["attempt_number"] == 1
     assert detail_payload["found"] is True
     assert detail_payload["item"]["node_id"] == "real-a"
+    assert detail_payload["item"]["output_preview"] == {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": "[REDACTED]",
+    }
+    stored_preview.refresh_from_db()
+    assert bytes(stored_preview.payload) == stored_payload
+    assert stored_preview.digest == stored_digest

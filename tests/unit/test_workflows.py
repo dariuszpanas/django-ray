@@ -57,6 +57,14 @@ def increment(value: int) -> int:
     return value + 1
 
 
+OUTPUT_PREVIEW_CALLS: list[int] = []
+
+
+def preview_increment(value: int) -> dict[str, int]:
+    OUTPUT_PREVIEW_CALLS.append(value)
+    return {"value": value}
+
+
 def report_and_increment(value: int) -> tuple[bool, int]:
     return report_progress(1, 2), value + 1
 
@@ -583,6 +591,15 @@ def test_local_chain_and_dynamic_map() -> None:
     assert workflow.run(4, use_ray=False) == 18
 
 
+def test_local_execution_does_not_evaluate_output_preview_projector() -> None:
+    OUTPUT_PREVIEW_CALLS.clear()
+
+    result = step(increment).with_output_preview(preview_increment).run(4, use_ray=False)
+
+    assert result == 5
+    assert OUTPUT_PREVIEW_CALLS == []
+
+
 def test_map_step_preserves_leaf_kwargs_named_like_limits() -> None:
     mapped = map_step(echo_limits, max_concurrency=7, max_items=9).with_limits(
         max_concurrency=2,
@@ -1032,6 +1049,18 @@ def test_with_options_copies_signature_metadata() -> None:
 
     assert updated.ray_options == {"num_cpus": 1, "num_gpus": 1}
     assert original.runtime_env == {"env_vars": {"MODE": "inline"}}
+
+
+def test_step_clones_preserve_or_explicitly_disable_output_preview() -> None:
+    original = step(increment).with_output_preview(preview_increment)
+
+    assert original.output_preview_path == "tests.unit.test_workflows.preview_increment"
+    assert original.with_options(num_cpus=1).output_preview_path == original.output_preview_path
+    assert (
+        original.with_runtime_env({"env_vars": {"MODE": "preview"}}).output_preview_path
+        == original.output_preview_path
+    )
+    assert original.with_output_preview(None).output_preview_path is None
 
 
 def test_callable_path_supports_wrappers_and_rejects_invalid_shapes() -> None:
@@ -2379,6 +2408,62 @@ def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> No
     }
 
 
+def test_ray_executor_submits_explicit_output_preview_contract() -> None:
+    remote_calls: list[dict[str, Any]] = []
+
+    class _BadRef:
+        def task_id(self):
+            raise RuntimeError("task id unavailable")
+
+    class _RemoteStep:
+        def options(self, **kwargs):
+            del kwargs
+            return self
+
+        def remote(self, *args, **kwargs):
+            del args
+            remote_calls.append(kwargs)
+            return _BadRef()
+
+    identity = _workflow_identity()
+    actor = _IngestOnlyProgressActor()
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = None
+    executor.task_execution_pk = identity.task_execution_pk
+    executor.workflow_run_identity = identity
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
+    executor.progress_actor = actor
+    executor.remote_step = _RemoteStep()
+
+    executor.submit_step(
+        step(increment).with_output_preview(preview_increment),
+        (),
+        {},
+        "0.0",
+        (),
+    )
+
+    events = _decoded_ingests(actor, identity)
+    assert remote_calls == [
+        {
+            "output_preview_path": "tests.unit.test_workflows.preview_increment",
+            "workflow_run_identity": identity.as_dict(),
+        }
+    ]
+    assert [event.kind for event in events] == [
+        WorkflowProgressEventKind.NODE_REGISTERED,
+        WorkflowProgressEventKind.OUTPUT_PREVIEW,
+    ]
+    assert events[1].payload == {
+        "node_id": "0.0",
+        "output_preview": {
+            "schema_version": 1,
+            "availability": "PENDING",
+            "value": None,
+        },
+    }
+
+
 def test_terminal_only_submit_omits_all_progress_transport_metadata() -> None:
     remote_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
@@ -2403,7 +2488,13 @@ def test_terminal_only_submit_omits_all_progress_transport_metadata() -> None:
     executor.progress_actor = None
     executor.remote_step = _RemoteStep()
 
-    executor.submit_step(step(increment), (), {}, "0.0", ())
+    executor.submit_step(
+        step(increment).with_output_preview(preview_increment),
+        (),
+        {},
+        "0.0",
+        (),
+    )
 
     assert len(remote_calls) == 1
     args, kwargs = remote_calls[0]

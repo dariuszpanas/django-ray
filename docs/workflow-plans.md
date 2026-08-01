@@ -734,6 +734,7 @@ The public API remains source compatible while the plan boundary is introduced:
 | Current expression | Plan-template mapping |
 |---|---|
 | `step(callable, ...)` | One logical call node. The import path, Django bootstrap flag, normalized Ray options, resolved environment identity, and callable kind become plan fields. Bound values become invocation slots unless a future explicit constant API marks a safe canonical literal. |
+| `step(...).with_output_preview(projector)` | Keep `result` as the node's only output while adding and fingerprinting the importable diagnostic projector and its limits profile. Steps without a projector retain their prior plan shape and fingerprint. Changing or disabling a configured projector changes retry identity; its eventual projected value is invocation-scoped progress and never enters the plan. |
 | `chain(a, b, ...)` | Ordered nodes/regions with the preceding result ports connected to the next expression's first input. |
 | `group(a, b, ...)` | Static branches that receive the same input bindings and produce an ordered collect result. |
 | `map_step(x)` | One dynamic-map operator in the plan. Runtime expansion nodes and inventory values are invocation state and do not enter the plan fingerprint. |
