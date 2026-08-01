@@ -96,6 +96,12 @@ WORKFLOW_SHOWCASE_TASK_ID = "a5200000-0000-4000-8000-00000000000a"
 WORKFLOW_SHOWCASE_RUN_ID = "b5200000-0000-4000-8000-00000000000b"
 FAILED_WORKFLOW_SHOWCASE_TASK_ID = "c5200000-0000-4000-8000-00000000000c"
 FAILED_WORKFLOW_SHOWCASE_RUN_ID = "d5200000-0000-4000-8000-00000000000d"
+WORKFLOW_RECOVERY_TASK_ID = "e5200000-0000-4000-8000-00000000000e"
+WORKFLOW_RECOVERY_RUN_IDS = (
+    "f5200000-0000-4000-8000-00000000000f",
+    "06200000-0000-4000-8000-000000000010",
+    "16200000-0000-4000-8000-000000000011",
+)
 TOKEN68 = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/=="
 RUNTIME_ENV_CANARY_TASK_ID = "a5200000-0000-4000-8000-000000000010"
 RUNTIME_ENV_TAMPER_TASK_ID = "b5200000-0000-4000-8000-000000000011"
@@ -1613,6 +1619,7 @@ def test_setup_log_requires_migrations_static_and_runtime_env_markers() -> None:
             "Collecting static files...",
             "Building shared RuntimeEnv source bundle...",
             "RuntimeEnv bundle ready: /runtime-env/django-ray-source.zip (42 bytes)",
+            "Recovery RuntimeEnv bundle ready: /runtime-env/django-ray-recovery.zip (84 bytes)",
             "Django setup complete!",
         )
     )
@@ -1673,6 +1680,7 @@ def test_setup_delete_and_completion_wait_are_timeout_bounded(
             "Collecting static files...",
             "Building shared RuntimeEnv source bundle...",
             "RuntimeEnv bundle ready:",
+            "Recovery RuntimeEnv bundle ready:",
             "Django setup complete!",
         )
     )
@@ -1743,6 +1751,7 @@ def test_setup_identity_rejects_stale_owner_tag_or_image_id(
             "Collecting static files...",
             "Building shared RuntimeEnv source bundle...",
             "RuntimeEnv bundle ready:",
+            "Recovery RuntimeEnv bundle ready:",
             "Django setup complete!",
         )
     )
@@ -2398,15 +2407,24 @@ def test_probe_contract_matches_live_allowlist() -> None:
 
 def test_runtime_archive_probe_requires_generic_ray_and_fixed_bootstrap_member() -> None:
     digest = "d" * 64
+    recovery_digest = "e" * 64
     payload = json.dumps(
         {
             "django_ray": "absent",
             "bytes": 293_956,
             "sha256": digest,
             "required_member": True,
+            "recovery_bytes": 20_000_000,
+            "recovery_sha256": recovery_digest,
+            "recovery_required_members": True,
         }
     )
-    assert parse_runtime_archive_probe(payload) == (293_956, digest)
+    assert parse_runtime_archive_probe(payload) == (
+        293_956,
+        digest,
+        20_000_000,
+        recovery_digest,
+    )
 
     installed = payload.replace('"absent"', '"present"')
     with pytest.raises(ValueError, match="unexpectedly has django_ray"):
@@ -2416,6 +2434,11 @@ def test_runtime_archive_probe_requires_generic_ray_and_fixed_bootstrap_member()
     missing["required_member"] = False
     with pytest.raises(ValueError, match=re.escape(RUNTIME_ENV_REQUIRED_MEMBER)):
         parse_runtime_archive_probe(json.dumps(missing))
+
+    incomplete_recovery = json.loads(payload)
+    incomplete_recovery["recovery_required_members"] = False
+    with pytest.raises(ValueError, match="required package closure"):
+        parse_runtime_archive_probe(json.dumps(incomplete_recovery))
 
 
 def test_durable_task_result_must_be_json_and_equal_value_is_preserved() -> None:
@@ -3072,6 +3095,14 @@ def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
     gate.evidence.source_tree = SOURCE_TREE
     gate.evidence.app_tag = APP_TAG
     gate.evidence.worker_tag = f"django-ray-worker:{TAG}"
+    gate.resources = [
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "django-ray-config"},
+            "data": {},
+        }
+    ]
     monkeypatch.setattr(gate, "_verify_source_identity", lambda: None)
     for key in gate_module.KIND_ENVIRONMENT_KEYS:
         monkeypatch.setenv(key, f"hostile-{key.lower()}")
@@ -3190,6 +3221,7 @@ def test_every_evidence_field_passes_through_the_token_redactor(
         "app_image_id",
         "worker_image_id",
         "setup_bundle_sha256",
+        "recovery_bundle_sha256",
         "ray_restart",
         "ray_cluster_uid",
         "ray_pod_identity_sha256",
@@ -3209,9 +3241,12 @@ def test_every_evidence_field_passes_through_the_token_redactor(
         "workflow_showcase_task_state",
         "workflow_showcase_failure_task_id",
         "workflow_showcase_failure_task_state",
+        "workflow_recovery_task_id",
+        "workflow_recovery_task_state",
     ):
         setattr(evidence, field_name, token)
     evidence.setup_bundle_bytes = cast(Any, token)
+    evidence.recovery_bundle_bytes = cast(Any, token)
     evidence.ray_head_count = cast(Any, token)
     evidence.ray_worker_count = cast(Any, token)
     evidence.web_restart_count = cast(Any, token)
@@ -3284,6 +3319,26 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.workflow_showcase_failure_succeeded_nodes = cast(Any, token)
     evidence.workflow_showcase_failure_path_nodes = cast(Any, token)
     evidence.workflow_showcase_failure_detail_links = cast(Any, token)
+    evidence.workflow_recovery_attempt_number = cast(Any, token)
+    evidence.workflow_recovery_attempt_count = cast(Any, token)
+    evidence.workflow_recovery_distinct_runs = cast(Any, token)
+    evidence.workflow_recovery_early_topology_nodes = cast(Any, token)
+    evidence.workflow_recovery_early_topology_edges = cast(Any, token)
+    evidence.workflow_recovery_early_pending_nodes = cast(Any, token)
+    evidence.workflow_recovery_early_succeeded_nodes = cast(Any, token)
+    evidence.workflow_recovery_early_failed_nodes = cast(Any, token)
+    evidence.workflow_recovery_early_detail_links = cast(Any, token)
+    evidence.workflow_recovery_mid_topology_nodes = cast(Any, token)
+    evidence.workflow_recovery_mid_topology_edges = cast(Any, token)
+    evidence.workflow_recovery_mid_pending_nodes = cast(Any, token)
+    evidence.workflow_recovery_mid_succeeded_nodes = cast(Any, token)
+    evidence.workflow_recovery_mid_failed_nodes = cast(Any, token)
+    evidence.workflow_recovery_mid_detail_links = cast(Any, token)
+    evidence.workflow_recovery_success_topology_nodes = cast(Any, token)
+    evidence.workflow_recovery_success_topology_edges = cast(Any, token)
+    evidence.workflow_recovery_success_succeeded_nodes = cast(Any, token)
+    evidence.workflow_recovery_success_detail_links = cast(Any, token)
+    evidence.workflow_recovery_admin_attempts = cast(Any, token)
     evidence.deployments = cast(dict[str, int], dict.fromkeys(APP_DEPLOYMENTS, token))
     evidence.prometheus_counts = cast(
         dict[str, int], dict.fromkeys(("django-ray", "ray-head", "ray-workers"), token)
@@ -3293,7 +3348,7 @@ def test_every_evidence_field_passes_through_the_token_redactor(
 
     serialized = "\n".join(output)
     assert token not in serialized
-    assert serialized.count("[REDACTED]") >= 75
+    assert serialized.count("[REDACTED]") >= 95
 
 
 def test_secret_token_is_decoded_in_memory_and_registered_for_redaction(
@@ -4910,10 +4965,15 @@ def test_workflow_progress_layer_includes_compatibility_and_showcase_runs(
         "_verify_workflow_showcase_progress",
         lambda: verified.append("showcase"),
     )
+    monkeypatch.setattr(
+        gate,
+        "_verify_workflow_recovery_progress",
+        lambda: verified.append("recovery"),
+    )
 
     gate._verify_workflow_progress()
 
-    assert verified == ["compatibility", "showcase"]
+    assert verified == ["compatibility", "showcase", "recovery"]
 
 
 @pytest.mark.parametrize(
@@ -5005,10 +5065,345 @@ def test_workflow_showcase_gate_rejects_incomplete_or_misleading_graph_evidence(
     assert gate.evidence.workflow_showcase_topology_nodes == 0
 
 
+def _workflow_recovery_gate_responses() -> dict[str, dict[str, Any]]:
+    page_query = lambda attempt: urlencode(  # noqa: E731 - mirrors gate query order
+        {
+            "limit": gate_module.WORKFLOW_SHOWCASE_PAGE_LIMIT,
+            "attempt_number": attempt,
+        }
+    )
+    fingerprint = f"sha256:{'c' * 64}"
+
+    early_states = dict.fromkeys(gate_module.WORKFLOW_RECOVERY_EARLY_NODE_IDS, "PENDING")
+    early_states[gate_module.WORKFLOW_RECOVERY_EARLY_FAILURE_NODE_ID] = "FAILED"
+    mid_states = dict.fromkeys(gate_module.WORKFLOW_RECOVERY_MID_NODE_IDS, "PENDING")
+    mid_states.update(dict.fromkeys(gate_module.WORKFLOW_RECOVERY_MID_SUCCEEDED_NODES, "SUCCEEDED"))
+    mid_states[gate_module.WORKFLOW_RECOVERY_MID_FAILURE_NODE_ID] = "FAILED"
+    success_node_ids = frozenset().union(*gate_module.WORKFLOW_SHOWCASE_NODE_LAYERS)
+    success_states = dict.fromkeys(success_node_ids, "SUCCEEDED")
+    attempts = (
+        (
+            1,
+            "FAILED",
+            early_states,
+            gate_module.WORKFLOW_RECOVERY_EARLY_EDGES,
+            gate_module.WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE,
+        ),
+        (
+            2,
+            "FAILED",
+            mid_states,
+            gate_module.WORKFLOW_RECOVERY_MID_EDGES,
+            gate_module.WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE,
+        ),
+        (3, "SUCCEEDED", success_states, gate_module.WORKFLOW_SHOWCASE_EDGES, None),
+    )
+    responses: dict[str, dict[str, Any]] = {
+        gate_module.WORKFLOW_RECOVERY_ENQUEUE_PATH: {
+            "task_id": WORKFLOW_RECOVERY_TASK_ID,
+            "status": "READY",
+            "args": [],
+            "kwargs": dict(gate_module.WORKFLOW_RECOVERY_ENQUEUE_KWARGS),
+        },
+        f"{gate_module.WORKFLOW_RECOVERY_POLL_PATH}/{WORKFLOW_RECOVERY_TASK_ID}": {
+            "task_id": WORKFLOW_RECOVERY_TASK_ID,
+            "state": "SUCCEEDED",
+            "attempt_number": 3,
+            "runtime_env_profile": "recovery-showcase",
+            "attempts": [
+                {
+                    "attempt_number": 1,
+                    "state": "FAILED",
+                    "error": gate_module.WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE,
+                },
+                {
+                    "attempt_number": 2,
+                    "state": "FAILED",
+                    "error": gate_module.WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE,
+                },
+                {"attempt_number": 3, "state": "SUCCEEDED", "error": None},
+            ],
+            "result": json.loads(json.dumps(gate_module.WORKFLOW_RECOVERY_SUCCESS_RESULT)),
+            "error": None,
+        },
+        ("/api/executions?" + urlencode({"task_id": WORKFLOW_RECOVERY_TASK_ID, "limit": 1})): {
+            "tasks": [
+                {
+                    "task_id": WORKFLOW_RECOVERY_TASK_ID,
+                    "state": "SUCCEEDED",
+                    "callable_path": gate_module.WORKFLOW_RECOVERY_CALLABLE,
+                    "attempt_number": 3,
+                    "execution_generation": 3,
+                    "workflow_run_id": WORKFLOW_RECOVERY_RUN_IDS[2],
+                }
+            ]
+        },
+    }
+
+    for attempt_number, state, node_states, edges, expected_error in attempts:
+        run_identity = {
+            "schema_version": 1,
+            "run_id": WORKFLOW_RECOVERY_RUN_IDS[attempt_number - 1],
+            "attempt_number": attempt_number,
+            "execution_generation": attempt_number,
+        }
+        publication = {
+            "summary_revision": 9,
+            "topology_version": 8,
+            "detail_revision": 7,
+        }
+
+        def envelope(
+            run_identity: dict[str, Any] = run_identity,
+            publication: dict[str, int] = publication,
+        ) -> dict[str, Any]:
+            return {
+                "schema_version": 1,
+                "task_id": WORKFLOW_RECOVERY_TASK_ID,
+                "run_identity": dict(run_identity),
+                "publication": dict(publication),
+                "availability": "AVAILABLE",
+                "complete": True,
+            }
+
+        def page(collection: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+            return {
+                **envelope(),
+                "schema": "django-ray.workflow-progress-page",
+                "collection": collection,
+                "returned_count": len(items),
+                "items": items,
+                "next_cursor": None,
+            }
+
+        node_ids = sorted(node_states)
+        topology_edges = [{"source": source, "target": target} for source, target in sorted(edges)]
+        node_details = [
+            {
+                "node_id": node_id,
+                "state": node_states[node_id],
+                "error": (expected_error if node_states[node_id] == "FAILED" else None),
+            }
+            for node_id in node_ids
+        ]
+        state_counts = {
+            node_state: sum(value == node_state for value in node_states.values())
+            for node_state in ("PENDING", "RUNNING", "SUCCEEDED", "FAILED")
+        }
+        summary = {
+            "schema_version": 3,
+            "run_identity": dict(run_identity),
+            "reporting_policy": "full",
+            "selected_strategy": "dynamic_tasks",
+            "plan_fingerprint": fingerprint,
+            **publication,
+            "state": state,
+            "node_counts": {
+                "declared": None,
+                "discovered": len(node_ids),
+                "retained_topology": len(node_ids),
+                "retained_detail": len(node_ids),
+                "pending": state_counts["PENDING"],
+                "running": state_counts["RUNNING"],
+                "succeeded": state_counts["SUCCEEDED"],
+                "failed": state_counts["FAILED"],
+            },
+            "edge_counts": {
+                "declared": None,
+                "discovered": len(topology_edges),
+                "retained_topology": len(topology_edges),
+            },
+            "detail": {
+                "availability": "AVAILABLE",
+                "complete": True,
+                "truncation_reasons": [],
+            },
+        }
+        attempt_query = urlencode({"attempt_number": attempt_number})
+        summary_path = f"/api/cluster/workflows/{WORKFLOW_RECOVERY_TASK_ID}?{attempt_query}"
+        responses[summary_path] = {
+            **envelope(),
+            "schema": "django-ray.workflow-progress-summary",
+            "source_schema_version": 3,
+            "summary": summary,
+        }
+        query = page_query(attempt_number)
+        root = f"/api/cluster/workflows/{WORKFLOW_RECOVERY_TASK_ID}"
+        responses[f"{root}/topology/nodes?{query}"] = page(
+            "topology_nodes",
+            [{"node_id": node_id, "kind": "step"} for node_id in node_ids],
+        )
+        responses[f"{root}/topology/edges?{query}"] = page(
+            "topology_edges",
+            topology_edges,
+        )
+        responses[f"{root}/nodes?{query}"] = page("node_details", node_details)
+        for detail in node_details:
+            detail_query = urlencode(
+                {
+                    "node_id": detail["node_id"],
+                    "attempt_number": attempt_number,
+                }
+            )
+            responses[f"{root}/node-detail?{detail_query}"] = {
+                **envelope(),
+                "schema": "django-ray.workflow-progress-node",
+                "found": True,
+                "item": dict(detail),
+            }
+    return responses
+
+
+def test_workflow_recovery_gate_requires_two_failures_then_current_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    token = "local-token-that-must-never-be-printed-123456"
+    responses = _workflow_recovery_gate_responses()
+    monkeypatch.setattr(gate, "_secret_token", lambda: token)
+
+    def request(
+        path: str,
+        *,
+        method: str,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        assert method in {"GET", "POST"}
+        assert headers == {"Authorization": f"Bearer {token}"}
+        return 200, json.dumps(responses[path]).encode()
+
+    monkeypatch.setattr(gate, "_http", request)
+
+    gate._verify_workflow_recovery_progress()
+
+    assert len(gate_module.WORKFLOW_RECOVERY_EARLY_NODE_IDS) == 2
+    assert len(gate_module.WORKFLOW_RECOVERY_MID_NODE_IDS) == 15
+    assert len(gate_module.WORKFLOW_RECOVERY_MID_SUCCEEDED_NODES) == 7
+    assert len(gate_module.WORKFLOW_RECOVERY_MID_PENDING_NODES) == 7
+    assert gate.evidence.workflow_recovery_task_id == WORKFLOW_RECOVERY_TASK_ID
+    assert gate.evidence.workflow_recovery_task_state == "SUCCEEDED"
+    assert gate.evidence.workflow_recovery_attempt_number == 3
+    assert gate.evidence.workflow_recovery_attempt_count == 3
+    assert gate.evidence.workflow_recovery_distinct_runs is True
+    assert gate.evidence.workflow_recovery_early_topology_nodes == 2
+    assert gate.evidence.workflow_recovery_early_topology_edges == 1
+    assert gate.evidence.workflow_recovery_early_pending_nodes == 1
+    assert gate.evidence.workflow_recovery_early_succeeded_nodes == 0
+    assert gate.evidence.workflow_recovery_early_failed_nodes == 1
+    assert gate.evidence.workflow_recovery_early_detail_links == 2
+    assert gate.evidence.workflow_recovery_mid_topology_nodes == 15
+    assert gate.evidence.workflow_recovery_mid_topology_edges == len(
+        gate_module.WORKFLOW_RECOVERY_MID_EDGES
+    )
+    assert gate.evidence.workflow_recovery_mid_pending_nodes == 7
+    assert gate.evidence.workflow_recovery_mid_succeeded_nodes == 7
+    assert gate.evidence.workflow_recovery_mid_failed_nodes == 1
+    assert gate.evidence.workflow_recovery_mid_detail_links == 15
+    assert gate.evidence.workflow_recovery_success_topology_nodes == 21
+    assert gate.evidence.workflow_recovery_success_topology_edges == 28
+    assert gate.evidence.workflow_recovery_success_succeeded_nodes == 21
+    assert gate.evidence.workflow_recovery_success_detail_links == 21
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "fourth_attempt",
+        "wrong_result",
+        "stale_current_error",
+        "early_node_succeeded",
+        "mid_prerequisite_pending",
+        "plan_drift",
+        "duplicate_run",
+        "stale_generation",
+        "declared_node_underflow",
+        "declared_edge_underflow",
+    ],
+)
+def test_workflow_recovery_gate_rejects_unfenced_or_misleading_history(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    token = "local-token-that-must-never-be-printed-123456"
+    responses = _workflow_recovery_gate_responses()
+    poll_path = f"{gate_module.WORKFLOW_RECOVERY_POLL_PATH}/{WORKFLOW_RECOVERY_TASK_ID}"
+    early_summary_path = (
+        f"/api/cluster/workflows/{WORKFLOW_RECOVERY_TASK_ID}?{urlencode({'attempt_number': 1})}"
+    )
+    mid_summary_path = (
+        f"/api/cluster/workflows/{WORKFLOW_RECOVERY_TASK_ID}?{urlencode({'attempt_number': 2})}"
+    )
+    page_query = urlencode({"limit": gate_module.WORKFLOW_SHOWCASE_PAGE_LIMIT, "attempt_number": 1})
+    early_details_path = f"/api/cluster/workflows/{WORKFLOW_RECOVERY_TASK_ID}/nodes?{page_query}"
+    mid_page_query = urlencode(
+        {"limit": gate_module.WORKFLOW_SHOWCASE_PAGE_LIMIT, "attempt_number": 2}
+    )
+    mid_details_path = f"/api/cluster/workflows/{WORKFLOW_RECOVERY_TASK_ID}/nodes?{mid_page_query}"
+
+    if failure == "fourth_attempt":
+        responses[poll_path]["attempts"].append(
+            {"attempt_number": 4, "state": "FAILED", "error": "unexpected"}
+        )
+    elif failure == "wrong_result":
+        responses[poll_path]["result"]["recovery"]["attempt_number"] = 2
+    elif failure == "stale_current_error":
+        responses[poll_path]["error"] = gate_module.WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE
+    elif failure == "early_node_succeeded":
+        details = responses[early_details_path]["items"]
+        next(
+            item
+            for item in details
+            if item["node_id"] == gate_module.WORKFLOW_RECOVERY_EARLY_FAILURE_NODE_ID
+        )["state"] = "SUCCEEDED"
+    elif failure == "mid_prerequisite_pending":
+        details = responses[mid_details_path]["items"]
+        next(
+            item
+            for item in details
+            if item["node_id"] in gate_module.WORKFLOW_RECOVERY_MID_SUCCEEDED_NODES
+        )["state"] = "PENDING"
+    elif failure == "plan_drift":
+        responses[mid_summary_path]["summary"]["plan_fingerprint"] = f"sha256:{'d' * 64}"
+    elif failure == "duplicate_run":
+        responses[mid_summary_path]["run_identity"]["run_id"] = WORKFLOW_RECOVERY_RUN_IDS[0]
+        responses[mid_summary_path]["summary"]["run_identity"]["run_id"] = (
+            WORKFLOW_RECOVERY_RUN_IDS[0]
+        )
+    elif failure == "stale_generation":
+        responses[early_summary_path]["run_identity"]["execution_generation"] = 2
+        responses[early_summary_path]["summary"]["run_identity"]["execution_generation"] = 2
+    elif failure == "declared_node_underflow":
+        responses[early_summary_path]["summary"]["node_counts"]["declared"] = 1
+    elif failure == "declared_edge_underflow":
+        responses[early_summary_path]["summary"]["edge_counts"]["declared"] = 0
+
+    monkeypatch.setattr(gate, "_secret_token", lambda: token)
+
+    def request(
+        path: str,
+        *,
+        method: str,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        assert method in {"GET", "POST"}
+        assert headers == {"Authorization": f"Bearer {token}"}
+        return 200, json.dumps(responses[path]).encode()
+
+    monkeypatch.setattr(gate, "_http", request)
+
+    with pytest.raises(ValueError):
+        gate._verify_workflow_recovery_progress()
+
+    assert gate.evidence.workflow_recovery_task_id == ""
+    assert gate.evidence.workflow_recovery_attempt_count == 0
+
+
 def _workflow_admin_smoke_evidence(
     *,
     task_id: str = WORKFLOW_TASK_ID,
     task_state: str = "SUCCEEDED",
+    attempt_number: int = 1,
     topology_nodes: int = 3,
     topology_edges: int = 2,
     pending_nodes: int = 0,
@@ -5023,7 +5418,7 @@ def _workflow_admin_smoke_evidence(
         "admin_workflow": "verified",
         "task_id": task_id,
         "task_state": task_state,
-        "attempt_number": 1,
+        "attempt_number": attempt_number,
         "admin_routes": 6,
         "admin_actions": 3,
         "topology_nodes": topology_nodes,
@@ -5119,6 +5514,29 @@ def _seed_workflow_admin_evidence(gate: LocalKubeRayGate) -> None:
     gate.evidence.workflow_showcase_failure_succeeded_nodes = 15
     gate.evidence.workflow_showcase_failure_path_nodes = 16
     gate.evidence.workflow_showcase_failure_detail_links = 21
+    gate.evidence.workflow_recovery_task_id = WORKFLOW_RECOVERY_TASK_ID
+    gate.evidence.workflow_recovery_task_state = "SUCCEEDED"
+    gate.evidence.workflow_recovery_attempt_number = 3
+    gate.evidence.workflow_recovery_attempt_count = 3
+    gate.evidence.workflow_recovery_distinct_runs = True
+    gate.evidence.workflow_recovery_early_topology_nodes = 2
+    gate.evidence.workflow_recovery_early_topology_edges = 1
+    gate.evidence.workflow_recovery_early_pending_nodes = 1
+    gate.evidence.workflow_recovery_early_succeeded_nodes = 0
+    gate.evidence.workflow_recovery_early_failed_nodes = 1
+    gate.evidence.workflow_recovery_early_detail_links = 2
+    gate.evidence.workflow_recovery_mid_topology_nodes = 15
+    gate.evidence.workflow_recovery_mid_topology_edges = len(
+        gate_module.WORKFLOW_RECOVERY_MID_EDGES
+    )
+    gate.evidence.workflow_recovery_mid_pending_nodes = 7
+    gate.evidence.workflow_recovery_mid_succeeded_nodes = 7
+    gate.evidence.workflow_recovery_mid_failed_nodes = 1
+    gate.evidence.workflow_recovery_mid_detail_links = 15
+    gate.evidence.workflow_recovery_success_topology_nodes = 21
+    gate.evidence.workflow_recovery_success_topology_edges = 28
+    gate.evidence.workflow_recovery_success_succeeded_nodes = 21
+    gate.evidence.workflow_recovery_success_detail_links = 21
 
 
 def test_workflow_admin_gate_executes_same_task_inside_django_web(
@@ -5142,6 +5560,11 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                 )
             )
         else:
+            selected_attempt = (
+                int(args[args.index("--existing-workflow-attempt-number") + 1])
+                if "--existing-workflow-attempt-number" in args
+                else None
+            )
             if task_id == WORKFLOW_TASK_ID:
                 payload = _workflow_admin_smoke_evidence()
             elif task_id == FAILED_WORKFLOW_TASK_ID:
@@ -5161,6 +5584,42 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
             elif task_id == WORKFLOW_SHOWCASE_TASK_ID:
                 payload = _workflow_admin_smoke_evidence(
                     task_id=WORKFLOW_SHOWCASE_TASK_ID,
+                    topology_nodes=21,
+                    topology_edges=28,
+                    succeeded_nodes=21,
+                )
+            elif task_id == WORKFLOW_RECOVERY_TASK_ID and selected_attempt == 1:
+                payload = _workflow_admin_smoke_evidence(
+                    task_id=WORKFLOW_RECOVERY_TASK_ID,
+                    task_state="FAILED",
+                    attempt_number=1,
+                    topology_nodes=2,
+                    topology_edges=1,
+                    pending_nodes=1,
+                    succeeded_nodes=0,
+                    failed_nodes=1,
+                    failure_path_nodes=1,
+                    failure_origins=1,
+                    incoming_failure_edges=0,
+                )
+            elif task_id == WORKFLOW_RECOVERY_TASK_ID and selected_attempt == 2:
+                payload = _workflow_admin_smoke_evidence(
+                    task_id=WORKFLOW_RECOVERY_TASK_ID,
+                    task_state="FAILED",
+                    attempt_number=2,
+                    topology_nodes=15,
+                    topology_edges=len(gate_module.WORKFLOW_RECOVERY_MID_EDGES),
+                    pending_nodes=7,
+                    succeeded_nodes=7,
+                    failed_nodes=1,
+                    failure_path_nodes=8,
+                    failure_origins=1,
+                    incoming_failure_edges=3,
+                )
+            elif task_id == WORKFLOW_RECOVERY_TASK_ID and selected_attempt == 3:
+                payload = _workflow_admin_smoke_evidence(
+                    task_id=WORKFLOW_RECOVERY_TASK_ID,
+                    attempt_number=3,
                     topology_nodes=21,
                     topology_edges=28,
                     succeeded_nodes=21,
@@ -5185,7 +5644,12 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
 
     gate._verify_workflow_admin()
 
-    def expected_call(task_id: str, *, terminal_only: bool = False):
+    def expected_call(
+        task_id: str,
+        *,
+        terminal_only: bool = False,
+        attempt_number: int | None = None,
+    ):
         command = (
             "exec",
             "deployment/django-web",
@@ -5208,6 +5672,12 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                 "--expected-workflow-reporting-policy",
                 "terminal_only",
             )
+        if attempt_number is not None:
+            command = (
+                *command,
+                "--existing-workflow-attempt-number",
+                str(attempt_number),
+            )
         return (
             command,
             {
@@ -5221,6 +5691,9 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
         expected_call(FAILED_WORKFLOW_TASK_ID),
         expected_call(WORKFLOW_SHOWCASE_TASK_ID),
         expected_call(FAILED_WORKFLOW_SHOWCASE_TASK_ID),
+        expected_call(WORKFLOW_RECOVERY_TASK_ID, attempt_number=1),
+        expected_call(WORKFLOW_RECOVERY_TASK_ID, attempt_number=2),
+        expected_call(WORKFLOW_RECOVERY_TASK_ID, attempt_number=3),
         expected_call(TERMINAL_ONLY_WORKFLOW_TASK_ID, terminal_only=True),
         expected_call(TERMINAL_ONLY_FAILED_WORKFLOW_TASK_ID, terminal_only=True),
     ]
@@ -5234,6 +5707,7 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
     assert gate.evidence.workflow_failure_incoming_edges == 1
     assert gate.evidence.workflow_failure_admin_routes == 6
     assert gate.evidence.workflow_failure_current_manifests == 1
+    assert gate.evidence.workflow_recovery_admin_attempts == 3
     assert gate.evidence.workflow_terminal_only_admin_actions == 0
     assert gate.evidence.workflow_terminal_only_graph_advertised is False
     assert gate.evidence.workflow_terminal_only_storage_rows == 0
@@ -5436,6 +5910,8 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.worker_image_id = IMAGE_ID
     gate.evidence.setup_bundle_bytes = 1
     gate.evidence.setup_bundle_sha256 = "f" * 64
+    gate.evidence.recovery_bundle_bytes = 2
+    gate.evidence.recovery_bundle_sha256 = "e" * 64
     gate.evidence.ray_restart = "performed"
     gate.evidence.ray_cluster_uid = "cluster-owner"
     gate.evidence.ray_head_count = 1
@@ -5511,6 +5987,8 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.worker_image_id = IMAGE_ID
     gate.evidence.setup_bundle_bytes = 293_956
     gate.evidence.setup_bundle_sha256 = "f" * 64
+    gate.evidence.recovery_bundle_bytes = 20_000_000
+    gate.evidence.recovery_bundle_sha256 = "e" * 64
     gate.evidence.ray_restart = "performed"
     gate.evidence.ray_cluster_uid = "cluster-owner"
     gate.evidence.ray_pod_identity_sha256 = "8" * 64
@@ -5592,6 +6070,7 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("kubernetes_server") == gate.evidence.kubernetes_server
     assert reconstructed("docker_host") == gate.evidence.docker_host
     assert reconstructed("app_image_id") == IMAGE_ID
+    assert reconstructed("recovery_runtime_env_bytes") == "20000000"
     assert reconstructed("api_execution_delete_rejected") == "True"
     assert reconstructed("api_legacy_workflow_graph_absent") == "True"
     assert reconstructed("runtime_env_encryption_canary") == "True"

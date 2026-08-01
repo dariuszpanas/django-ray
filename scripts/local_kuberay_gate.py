@@ -86,6 +86,16 @@ EXPECTED_PROBE_PATH = "/api/health"
 EXPECTED_PROBE_HOST = "django-ray.localhost"
 RUNTIME_ENV_ARCHIVE = "/runtime-env/django-ray-source.zip"
 RUNTIME_ENV_REQUIRED_MEMBER = "src/django_ray/runtime/remote.py"
+RECOVERY_RUNTIME_ENV_ARCHIVE = "/runtime-env/django-ray-recovery.zip"
+RECOVERY_RUNTIME_ENV_MAX_BYTES = 32 * 1024 * 1024
+RECOVERY_RUNTIME_ENV_REQUIRED_MEMBERS = (
+    "cryptography/__init__.py",
+    "django/__init__.py",
+    "django_ray/runtime/remote.py",
+    "psycopg/__init__.py",
+    "testproject/apps/cluster_tasks/workflows.py",
+    "unfold/__init__.py",
+)
 RUNTIME_ENV_ENCRYPTION_PROBE_PATH = "/api/cluster/runtime-env/probe?profile=thin"
 RUNTIME_ENV_ENCRYPTION_RESULT_PATH = "/api/cluster/runtime-env/{task_id}"
 RUNTIME_ENV_STORAGE_PROBE_MARKER = "django-ray-runtime-env-encryption-canary-v1-7c4e2a91"
@@ -315,6 +325,44 @@ WORKFLOW_SHOWCASE_SUCCESS_RESULT = {
         "notification": "SENT",
     },
 }
+WORKFLOW_RECOVERY_ENQUEUE_PATH = (
+    "/api/cluster/workflow-recovery-showcase?item_count=1&work_seconds=0.01"
+)
+WORKFLOW_RECOVERY_ENQUEUE_KWARGS = {
+    "item_count": 1,
+    "work_seconds": 0.01,
+}
+WORKFLOW_RECOVERY_POLL_PATH = "/api/cluster/workflow-recovery-showcase"
+WORKFLOW_RECOVERY_CALLABLE = (
+    "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"
+)
+WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE = (
+    "Intentional workflow recovery failure at build_order_batch on durable attempt 1"
+)
+WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE = (
+    "Intentional workflow recovery failure at join_order_inputs on durable attempt 2"
+)
+WORKFLOW_RECOVERY_SUCCESS_RESULT = {
+    **WORKFLOW_SHOWCASE_SUCCESS_RESULT,
+    "recovery": {
+        "scenario": "three-attempt-recovery",
+        "attempt_number": 3,
+        "outcome": "SUCCEEDED",
+    },
+}
+WORKFLOW_RECOVERY_EARLY_NODE_IDS = frozenset({"0.0", "0.1.g0.0"})
+WORKFLOW_RECOVERY_EARLY_EDGES = frozenset({("0.0", "0.1.g0.0")})
+WORKFLOW_RECOVERY_EARLY_FAILURE_NODE_ID = "0.0"
+WORKFLOW_RECOVERY_EARLY_PENDING_NODES = frozenset({"0.1.g0.0"})
+WORKFLOW_RECOVERY_MID_NODE_IDS = frozenset().union(*WORKFLOW_SHOWCASE_NODE_LAYERS[:8])
+WORKFLOW_RECOVERY_MID_EDGES = frozenset(
+    (source, target)
+    for source, target in WORKFLOW_SHOWCASE_EDGES
+    if source in WORKFLOW_RECOVERY_MID_NODE_IDS and target in WORKFLOW_RECOVERY_MID_NODE_IDS
+)
+WORKFLOW_RECOVERY_MID_FAILURE_NODE_ID = "0.2"
+WORKFLOW_RECOVERY_MID_SUCCEEDED_NODES = frozenset().union(*WORKFLOW_SHOWCASE_NODE_LAYERS[:3])
+WORKFLOW_RECOVERY_MID_PENDING_NODES = frozenset().union(*WORKFLOW_SHOWCASE_NODE_LAYERS[4:8])
 WORKFLOW_ADMIN_LOOPBACK_URL = "http://127.0.0.1:8000"
 WORKFLOW_PROGRESS_SCHEMA_VERSION = 3
 WORKFLOW_PROGRESS_PAGE_LIMIT = 16
@@ -834,6 +882,8 @@ class GateEvidence:
     worker_image_id: str = ""
     setup_bundle_bytes: int = 0
     setup_bundle_sha256: str = ""
+    recovery_bundle_bytes: int = 0
+    recovery_bundle_sha256: str = ""
     ray_restart: str = ""
     ray_cluster_uid: str = ""
     ray_pod_identity_sha256: str = ""
@@ -926,6 +976,28 @@ class GateEvidence:
     workflow_showcase_failure_succeeded_nodes: int = 0
     workflow_showcase_failure_path_nodes: int = 0
     workflow_showcase_failure_detail_links: int = 0
+    workflow_recovery_task_id: str = ""
+    workflow_recovery_task_state: str = ""
+    workflow_recovery_attempt_number: int = 0
+    workflow_recovery_attempt_count: int = 0
+    workflow_recovery_distinct_runs: bool = False
+    workflow_recovery_early_topology_nodes: int = 0
+    workflow_recovery_early_topology_edges: int = 0
+    workflow_recovery_early_pending_nodes: int = 0
+    workflow_recovery_early_succeeded_nodes: int = 0
+    workflow_recovery_early_failed_nodes: int = 0
+    workflow_recovery_early_detail_links: int = 0
+    workflow_recovery_mid_topology_nodes: int = 0
+    workflow_recovery_mid_topology_edges: int = 0
+    workflow_recovery_mid_pending_nodes: int = 0
+    workflow_recovery_mid_succeeded_nodes: int = 0
+    workflow_recovery_mid_failed_nodes: int = 0
+    workflow_recovery_mid_detail_links: int = 0
+    workflow_recovery_success_topology_nodes: int = 0
+    workflow_recovery_success_topology_edges: int = 0
+    workflow_recovery_success_succeeded_nodes: int = 0
+    workflow_recovery_success_detail_links: int = 0
+    workflow_recovery_admin_attempts: int = 0
     prometheus_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -962,6 +1034,24 @@ class TerminalOnlyWorkflowGateObservation:
     summary_revision: int
     declared_nodes: int
     declared_edges: int
+
+
+@dataclass(frozen=True)
+class WorkflowRecoveryAttemptObservation:
+    """One independently readable attempt in the recovery demonstration."""
+
+    attempt_number: int
+    state: str
+    execution_generation: int
+    run_id: str
+    plan_fingerprint: str
+    topology_nodes: int
+    topology_edges: int
+    pending_nodes: int
+    running_nodes: int
+    succeeded_nodes: int
+    failed_nodes: int
+    detail_links: int
 
 
 def validate_namespace(namespace: str) -> None:
@@ -1881,6 +1971,7 @@ def inspect_setup_log(value: str) -> None:
         "Collecting static files...",
         "Building shared RuntimeEnv source bundle...",
         "RuntimeEnv bundle ready:",
+        "Recovery RuntimeEnv bundle ready:",
         "Django setup complete!",
     )
     missing = [marker for marker in markers if marker not in value]
@@ -2233,8 +2324,8 @@ def inspect_probe_contract(deployment: Mapping[str, Any], config_map: Mapping[st
     return EXPECTED_PROBE_HOST
 
 
-def parse_runtime_archive_probe(value: str) -> tuple[int, str]:
-    """Verify one generic Ray node and its mounted RuntimeEnv archive."""
+def parse_runtime_archive_probe(value: str) -> tuple[int, str, int, str]:
+    """Verify one generic Ray node and both mounted RuntimeEnv archives."""
     payload = _mapping(json.loads(value), field_name="Ray runtime probe")
     if payload.get("django_ray") != "absent":
         raise ValueError("generic Ray interpreter unexpectedly has django_ray installed")
@@ -2246,7 +2337,22 @@ def parse_runtime_archive_probe(value: str) -> tuple[int, str]:
         raise ValueError("RuntimeEnv archive byte size is not positive")
     if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         raise ValueError("RuntimeEnv archive SHA-256 is invalid")
-    return size, digest
+    if payload.get("recovery_required_members") is not True:
+        raise ValueError("Recovery RuntimeEnv archive is missing its required package closure")
+    recovery_size = payload.get("recovery_bytes")
+    recovery_digest = payload.get("recovery_sha256")
+    if (
+        not isinstance(recovery_size, int)
+        or recovery_size <= 0
+        or recovery_size > RECOVERY_RUNTIME_ENV_MAX_BYTES
+    ):
+        raise ValueError("Recovery RuntimeEnv archive byte size is outside its identity limit")
+    if (
+        not isinstance(recovery_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", recovery_digest) is None
+    ):
+        raise ValueError("Recovery RuntimeEnv archive SHA-256 is invalid")
+    return size, digest, recovery_size, recovery_digest
 
 
 def parse_task_result(value: object) -> object:
@@ -2887,7 +2993,6 @@ class LocalKubeRayGate:
             commit=self.evidence.commit,
             source_tree=self.evidence.source_tree,
         )
-
         if self.config.context.startswith("kind-"):
             cluster_name = self.config.kind_cluster_name or self.config.context.removeprefix(
                 "kind-"
@@ -4089,15 +4194,22 @@ class LocalKubeRayGate:
         probe_code = (
             "import hashlib,importlib.util,json,zipfile;"
             f"p={RUNTIME_ENV_ARCHIVE!r};"
+            f"r={RECOVERY_RUNTIME_ENV_ARCHIVE!r};"
             "data=open(p,'rb').read();"
+            "recovery_data=open(r,'rb').read();"
             "z=zipfile.ZipFile(p);"
+            "recovery_zip=zipfile.ZipFile(r);"
             "print(json.dumps({"
             "'django_ray':'absent' if importlib.util.find_spec('django_ray') is None else 'present',"
             "'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),"
-            f"'required_member':{RUNTIME_ENV_REQUIRED_MEMBER!r} in z.namelist()"
+            f"'required_member':{RUNTIME_ENV_REQUIRED_MEMBER!r} in z.namelist(),"
+            "'recovery_bytes':len(recovery_data),"
+            "'recovery_sha256':hashlib.sha256(recovery_data).hexdigest(),"
+            "'recovery_required_members':all(member in recovery_zip.namelist() for member in "
+            f"{RECOVERY_RUNTIME_ENV_REQUIRED_MEMBERS!r})"
             "}))"
         )
-        observed: set[tuple[int, str]] = set()
+        observed: set[tuple[int, str, int, str]] = set()
         _, ray_pods = self._ray_pods(expected_cluster_uid=self._ray_cluster_uid)
         for pod in ray_pods:
             metadata = _metadata(pod)
@@ -4118,9 +4230,11 @@ class LocalKubeRayGate:
             observed.add(parse_runtime_archive_probe(result.stdout))
         if len(observed) != 1:
             raise ValueError(f"Ray nodes observe inconsistent RuntimeEnv archives: {observed}")
-        bundle_bytes, bundle_digest = observed.pop()
+        bundle_bytes, bundle_digest, recovery_bytes, recovery_digest = observed.pop()
         self.evidence.setup_bundle_bytes = bundle_bytes
         self.evidence.setup_bundle_sha256 = bundle_digest
+        self.evidence.recovery_bundle_bytes = recovery_bytes
+        self.evidence.recovery_bundle_sha256 = recovery_digest
 
     def _verify_probes(self) -> None:
         deployment = self._json_command(
@@ -4989,11 +5103,15 @@ class LocalKubeRayGate:
         run_identity: Mapping[str, Any],
         publication: Mapping[str, Any],
         limit: int = WORKFLOW_PROGRESS_PAGE_LIMIT,
+        attempt_number: int | None = None,
     ) -> list[Mapping[str, Any]]:
         """Read one deliberately small complete page from a bounded workflow collection."""
 
         suffix = WORKFLOW_PROGRESS_COLLECTION_PATHS[collection]
-        query = urlencode({"limit": limit})
+        query_values = {"limit": limit}
+        if attempt_number is not None:
+            query_values["attempt_number"] = attempt_number
+        query = urlencode(query_values)
         endpoint = f"/api/cluster/workflows/{task_id}/{suffix}?{query}"
         status, body = self._http(endpoint, method="GET", headers=headers)
         if status != 200:
@@ -5980,14 +6098,371 @@ class LocalKubeRayGate:
         )
         self.evidence.workflow_showcase_failure_detail_links = failed.detail_links
 
+    def _verify_workflow_recovery_attempt(
+        self,
+        *,
+        task_id: str,
+        attempt_number: int,
+        expected_state: str,
+        expected_node_states: Mapping[str, str],
+        expected_edges: frozenset[tuple[str, str]],
+        expected_error: str | None,
+        headers: Mapping[str, str],
+    ) -> WorkflowRecoveryAttemptObservation:
+        """Verify one current or archived recovery attempt through bounded readers."""
+
+        query = urlencode({"attempt_number": attempt_number})
+        summary_endpoint = f"/api/cluster/workflows/{task_id}?{query}"
+        status, body = self._http(summary_endpoint, method="GET", headers=headers)
+        if status != 200:
+            raise ValueError("workflow recovery summary returned a non-success status")
+        summary_envelope = self._json_body(
+            body,
+            endpoint=f"workflow recovery attempt {attempt_number} summary",
+        )
+        run_identity, publication = self._workflow_envelope_contract(
+            summary_envelope,
+            task_id=task_id,
+            endpoint=f"workflow recovery attempt {attempt_number} summary",
+            schema="django-ray.workflow-progress-summary",
+        )
+        summary = _mapping(
+            summary_envelope.get("summary"),
+            field_name=f"workflow recovery attempt {attempt_number} summary payload",
+        )
+        execution_generation = run_identity.get("execution_generation")
+        run_id = run_identity.get("run_id")
+        fingerprint = summary.get("plan_fingerprint")
+        if (
+            summary_envelope.get("source_schema_version") != WORKFLOW_PROGRESS_SCHEMA_VERSION
+            or summary.get("schema_version") != WORKFLOW_PROGRESS_SCHEMA_VERSION
+            or summary.get("run_identity") != run_identity
+            or run_identity.get("attempt_number") != attempt_number
+            or execution_generation != attempt_number
+            or not isinstance(run_id, str)
+            or summary.get("state") != expected_state
+            or summary.get("reporting_policy") != "full"
+            or summary.get("selected_strategy") != "dynamic_tasks"
+            or summary.get("summary_revision") != publication["summary_revision"]
+            or summary.get("topology_version") != publication["topology_version"]
+            or summary.get("detail_revision") != publication["detail_revision"]
+            or not isinstance(fingerprint, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+        ):
+            raise ValueError("workflow recovery attempt did not retain its fenced schema-v3 run")
+        detail = _mapping(
+            summary.get("detail"),
+            field_name=f"workflow recovery attempt {attempt_number} detail",
+        )
+        if detail.get("availability") != "AVAILABLE" or detail.get("complete") is not True:
+            raise ValueError("workflow recovery attempt detail was not complete and AVAILABLE")
+
+        topology_nodes = self._workflow_page(
+            task_id=task_id,
+            collection="topology_nodes",
+            headers=headers,
+            run_identity=run_identity,
+            publication=publication,
+            limit=WORKFLOW_SHOWCASE_PAGE_LIMIT,
+            attempt_number=attempt_number,
+        )
+        topology_edges = self._workflow_page(
+            task_id=task_id,
+            collection="topology_edges",
+            headers=headers,
+            run_identity=run_identity,
+            publication=publication,
+            limit=WORKFLOW_SHOWCASE_PAGE_LIMIT,
+            attempt_number=attempt_number,
+        )
+        node_details = self._workflow_page(
+            task_id=task_id,
+            collection="node_details",
+            headers=headers,
+            run_identity=run_identity,
+            publication=publication,
+            limit=WORKFLOW_SHOWCASE_PAGE_LIMIT,
+            attempt_number=attempt_number,
+        )
+        expected_node_ids = set(expected_node_states)
+        topology_node_ids = self._workflow_node_ids(
+            topology_nodes,
+            collection="workflow recovery topology_nodes",
+        )
+        detail_node_ids = self._workflow_node_ids(
+            node_details,
+            collection="workflow recovery node_details",
+        )
+        if topology_node_ids != expected_node_ids or detail_node_ids != expected_node_ids:
+            raise ValueError("workflow recovery attempt exposed unexpected graph membership")
+        edges: set[tuple[str, str]] = set()
+        for edge in topology_edges:
+            source = edge.get("source")
+            target = edge.get("target")
+            if not isinstance(source, str) or not isinstance(target, str):
+                raise ValueError("workflow recovery attempt exposed an invalid edge")
+            edges.add((source, target))
+        if edges != expected_edges or len(edges) != len(topology_edges):
+            raise ValueError("workflow recovery attempt exposed unexpected dependency edges")
+
+        details_by_node = {
+            cast(str, detail_item["node_id"]): detail_item for detail_item in node_details
+        }
+        states_by_node = {
+            node_id: detail_item.get("state") for node_id, detail_item in details_by_node.items()
+        }
+        if states_by_node != dict(expected_node_states):
+            raise ValueError("workflow recovery attempt exposed unexpected terminal node states")
+        failed_node_ids = {
+            node_id for node_id, state in expected_node_states.items() if state == "FAILED"
+        }
+        if expected_error is None:
+            if failed_node_ids or any(item.get("error") is not None for item in node_details):
+                raise ValueError("successful workflow recovery attempt retained a node failure")
+        elif (
+            len(failed_node_ids) != 1
+            or details_by_node[next(iter(failed_node_ids))].get("error") != expected_error
+            or any(
+                item.get("error") is not None and item["node_id"] not in failed_node_ids
+                for item in node_details
+            )
+        ):
+            raise ValueError("failed workflow recovery attempt retained the wrong fixture error")
+
+        pending_nodes = tuple(expected_node_states.values()).count("PENDING")
+        running_nodes = tuple(expected_node_states.values()).count("RUNNING")
+        succeeded_nodes = tuple(expected_node_states.values()).count("SUCCEEDED")
+        failed_nodes = tuple(expected_node_states.values()).count("FAILED")
+        node_counts = _mapping(
+            summary.get("node_counts"),
+            field_name=f"workflow recovery attempt {attempt_number} node_counts",
+        )
+        edge_counts = _mapping(
+            summary.get("edge_counts"),
+            field_name=f"workflow recovery attempt {attempt_number} edge_counts",
+        )
+        expected_counts = {
+            "discovered": len(expected_node_ids),
+            "retained_topology": len(expected_node_ids),
+            "retained_detail": len(expected_node_ids),
+            "pending": pending_nodes,
+            "running": running_nodes,
+            "succeeded": succeeded_nodes,
+            "failed": failed_nodes,
+        }
+        if any(
+            self._workflow_summary_count(node_counts, field_name) != expected
+            for field_name, expected in expected_counts.items()
+        ):
+            raise ValueError("workflow recovery summary counts did not match node detail")
+        declared_nodes = node_counts.get("declared")
+        if declared_nodes is not None and (
+            type(declared_nodes) is not int or declared_nodes < len(expected_node_ids)
+        ):
+            raise ValueError("workflow recovery declared nodes did not cover its graph")
+        if any(
+            self._workflow_summary_count(edge_counts, field_name) != len(expected_edges)
+            for field_name in ("discovered", "retained_topology")
+        ):
+            raise ValueError("workflow recovery summary counts did not match topology edges")
+        declared_edges = edge_counts.get("declared")
+        if declared_edges is not None and (
+            type(declared_edges) is not int or declared_edges < len(expected_edges)
+        ):
+            raise ValueError("workflow recovery declared edges did not cover its graph")
+        detail_links = self._workflow_indexed_details(
+            task_id=task_id,
+            headers=headers,
+            run_identity=run_identity,
+            publication=publication,
+            node_details=node_details,
+        )
+        if detail_links != len(expected_node_ids):
+            raise ValueError("workflow recovery attempt lacked an indexed detail target")
+        return WorkflowRecoveryAttemptObservation(
+            attempt_number=attempt_number,
+            state=expected_state,
+            execution_generation=cast(int, execution_generation),
+            run_id=run_id,
+            plan_fingerprint=fingerprint,
+            topology_nodes=len(expected_node_ids),
+            topology_edges=len(expected_edges),
+            pending_nodes=pending_nodes,
+            running_nodes=running_nodes,
+            succeeded_nodes=succeeded_nodes,
+            failed_nodes=failed_nodes,
+            detail_links=detail_links,
+        )
+
+    def _verify_workflow_recovery_progress(self) -> None:
+        """Prove two fenced failed attempts followed by one current success."""
+
+        token = self._secret_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        status, body = self._http(
+            WORKFLOW_RECOVERY_ENQUEUE_PATH,
+            method="POST",
+            headers=headers,
+        )
+        if status != 200:
+            raise ValueError("workflow recovery enqueue returned a non-success status")
+        enqueue = self._json_body(body, endpoint="workflow recovery enqueue")
+        if enqueue.get("args") != [] or enqueue.get("kwargs") != WORKFLOW_RECOVERY_ENQUEUE_KWARGS:
+            raise ValueError("workflow recovery enqueue did not retain the exact bounded inputs")
+        task_id = enqueue.get("task_id")
+        try:
+            parsed_task_id = UUID(cast(str, task_id))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("workflow recovery task_id is not a canonical UUID") from error
+        if parsed_task_id.version != 4 or str(parsed_task_id) != task_id:
+            raise ValueError("workflow recovery task_id is not a canonical UUIDv4")
+        task_id = str(parsed_task_id)
+
+        deadline = time.monotonic() + self.config.task_timeout
+        while True:
+            status, body = self._http(
+                f"{WORKFLOW_RECOVERY_POLL_PATH}/{task_id}",
+                method="GET",
+                headers=headers,
+            )
+            if status != 200:
+                raise ValueError("workflow recovery polling returned a non-success status")
+            execution = self._json_body(body, endpoint="workflow recovery polling")
+            state = execution.get("state")
+            if state == "SUCCEEDED":
+                break
+            if state in WORKFLOW_PROGRESS_FAILURE_STATES:
+                raise ValueError("workflow recovery reached a premature terminal state")
+            if not isinstance(state, str) or state not in WORKFLOW_PROGRESS_TASK_STATES:
+                raise ValueError("workflow recovery polling returned an invalid state")
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "workflow recovery did not reach attempt-three success within "
+                    f"{self.config.task_timeout}s (last state: {state})"
+                )
+            time.sleep(2)
+
+        expected_attempts = [
+            {
+                "attempt_number": 1,
+                "state": "FAILED",
+                "error": WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE,
+            },
+            {
+                "attempt_number": 2,
+                "state": "FAILED",
+                "error": WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE,
+            },
+            {"attempt_number": 3, "state": "SUCCEEDED", "error": None},
+        ]
+        if (
+            execution.get("attempt_number") != 3
+            or execution.get("runtime_env_profile") != "recovery-showcase"
+            or execution.get("attempts") != expected_attempts
+            or execution.get("result") != WORKFLOW_RECOVERY_SUCCESS_RESULT
+            or execution.get("error") is not None
+        ):
+            raise ValueError("workflow recovery did not retain exactly two failures and success")
+
+        execution_query = urlencode({"task_id": task_id, "limit": 1})
+        status, body = self._http(
+            f"/api/executions?{execution_query}",
+            method="GET",
+            headers=headers,
+        )
+        if status != 200:
+            raise ValueError("workflow recovery execution read returned a non-success status")
+        execution_list = self._json_body(body, endpoint="workflow recovery execution")
+        task_records = _sequence(
+            execution_list.get("tasks"),
+            field_name="workflow recovery execution tasks",
+        )
+        if len(task_records) != 1:
+            raise ValueError("workflow recovery execution read did not return exactly one row")
+        task_record = _mapping(task_records[0], field_name="workflow recovery execution row")
+        if (
+            task_record.get("task_id") != task_id
+            or task_record.get("state") != "SUCCEEDED"
+            or task_record.get("callable_path") != WORKFLOW_RECOVERY_CALLABLE
+            or task_record.get("attempt_number") != 3
+            or task_record.get("execution_generation") != 3
+        ):
+            raise ValueError("workflow recovery current execution was not attempt-three success")
+
+        early_states = dict.fromkeys(WORKFLOW_RECOVERY_EARLY_NODE_IDS, "PENDING")
+        early_states[WORKFLOW_RECOVERY_EARLY_FAILURE_NODE_ID] = "FAILED"
+        mid_states = dict.fromkeys(WORKFLOW_RECOVERY_MID_NODE_IDS, "PENDING")
+        mid_states.update(dict.fromkeys(WORKFLOW_RECOVERY_MID_SUCCEEDED_NODES, "SUCCEEDED"))
+        mid_states[WORKFLOW_RECOVERY_MID_FAILURE_NODE_ID] = "FAILED"
+        success_node_ids = frozenset().union(*WORKFLOW_SHOWCASE_NODE_LAYERS)
+        success_states = dict.fromkeys(success_node_ids, "SUCCEEDED")
+        early = self._verify_workflow_recovery_attempt(
+            task_id=task_id,
+            attempt_number=1,
+            expected_state="FAILED",
+            expected_node_states=early_states,
+            expected_edges=WORKFLOW_RECOVERY_EARLY_EDGES,
+            expected_error=WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE,
+            headers=headers,
+        )
+        middle = self._verify_workflow_recovery_attempt(
+            task_id=task_id,
+            attempt_number=2,
+            expected_state="FAILED",
+            expected_node_states=mid_states,
+            expected_edges=WORKFLOW_RECOVERY_MID_EDGES,
+            expected_error=WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE,
+            headers=headers,
+        )
+        succeeded = self._verify_workflow_recovery_attempt(
+            task_id=task_id,
+            attempt_number=3,
+            expected_state="SUCCEEDED",
+            expected_node_states=success_states,
+            expected_edges=WORKFLOW_SHOWCASE_EDGES,
+            expected_error=None,
+            headers=headers,
+        )
+        observations = (early, middle, succeeded)
+        if (
+            {observation.execution_generation for observation in observations} != {1, 2, 3}
+            or len({observation.run_id for observation in observations}) != 3
+            or len({observation.plan_fingerprint for observation in observations}) != 1
+            or task_record.get("workflow_run_id") != succeeded.run_id
+        ):
+            raise ValueError("workflow recovery attempts were not distinctly fenced to one plan")
+
+        self.evidence.workflow_recovery_task_id = task_id
+        self.evidence.workflow_recovery_task_state = succeeded.state
+        self.evidence.workflow_recovery_attempt_number = succeeded.attempt_number
+        self.evidence.workflow_recovery_attempt_count = len(observations)
+        self.evidence.workflow_recovery_distinct_runs = True
+        self.evidence.workflow_recovery_early_topology_nodes = early.topology_nodes
+        self.evidence.workflow_recovery_early_topology_edges = early.topology_edges
+        self.evidence.workflow_recovery_early_pending_nodes = early.pending_nodes
+        self.evidence.workflow_recovery_early_succeeded_nodes = early.succeeded_nodes
+        self.evidence.workflow_recovery_early_failed_nodes = early.failed_nodes
+        self.evidence.workflow_recovery_early_detail_links = early.detail_links
+        self.evidence.workflow_recovery_mid_topology_nodes = middle.topology_nodes
+        self.evidence.workflow_recovery_mid_topology_edges = middle.topology_edges
+        self.evidence.workflow_recovery_mid_pending_nodes = middle.pending_nodes
+        self.evidence.workflow_recovery_mid_succeeded_nodes = middle.succeeded_nodes
+        self.evidence.workflow_recovery_mid_failed_nodes = middle.failed_nodes
+        self.evidence.workflow_recovery_mid_detail_links = middle.detail_links
+        self.evidence.workflow_recovery_success_topology_nodes = succeeded.topology_nodes
+        self.evidence.workflow_recovery_success_topology_edges = succeeded.topology_edges
+        self.evidence.workflow_recovery_success_succeeded_nodes = succeeded.succeeded_nodes
+        self.evidence.workflow_recovery_success_detail_links = succeeded.detail_links
+
     def _verify_workflow_progress(self) -> None:
-        """Verify the compatibility workflows and the realistic showcase."""
+        """Verify compatibility, visual showcase, and durable recovery workflows."""
 
         self._verify_complex_workflow_progress()
         self._verify_workflow_showcase_progress()
+        self._verify_workflow_recovery_progress()
 
     def _verify_workflow_admin(self) -> None:
-        """Exercise compatibility and showcase runs through authenticated Admin readers."""
+        """Exercise current and archived workflow runs through authenticated Admin readers."""
 
         expected_fields = {
             "admin_workflow",
@@ -6033,6 +6508,7 @@ class LocalKubeRayGate:
                     "graph_failure_origins": 0,
                     "graph_incoming_failure_edges": 0,
                 },
+                None,
             ),
             (
                 "failed",
@@ -6050,6 +6526,7 @@ class LocalKubeRayGate:
                     "graph_succeeded_nodes": (self.evidence.workflow_failure_succeeded_nodes),
                     "graph_failed_nodes": self.evidence.workflow_failure_failed_nodes,
                 },
+                None,
             ),
             (
                 "showcase-successful",
@@ -6070,6 +6547,7 @@ class LocalKubeRayGate:
                     "graph_failure_origins": 0,
                     "graph_incoming_failure_edges": 0,
                 },
+                None,
             ),
             (
                 "showcase-failed",
@@ -6096,14 +6574,93 @@ class LocalKubeRayGate:
                     "graph_failure_origins": 1,
                     "graph_incoming_failure_edges": 1,
                 },
+                None,
+            ),
+            (
+                "recovery-early-failed",
+                self.evidence.workflow_recovery_task_id,
+                "FAILED",
+                1,
+                {
+                    "topology_nodes": self.evidence.workflow_recovery_early_topology_nodes,
+                    "topology_edges": self.evidence.workflow_recovery_early_topology_edges,
+                    "node_details": self.evidence.workflow_recovery_early_detail_links,
+                    "graph_nodes": self.evidence.workflow_recovery_early_topology_nodes,
+                    "graph_edges": self.evidence.workflow_recovery_early_topology_edges,
+                    "graph_pending_nodes": self.evidence.workflow_recovery_early_pending_nodes,
+                    "graph_running_nodes": 0,
+                    "graph_succeeded_nodes": (
+                        self.evidence.workflow_recovery_early_succeeded_nodes
+                    ),
+                    "graph_failed_nodes": self.evidence.workflow_recovery_early_failed_nodes,
+                    "graph_failure_path_nodes": 1,
+                    "graph_failure_origins": 1,
+                    "graph_incoming_failure_edges": 0,
+                },
+                1,
+            ),
+            (
+                "recovery-mid-failed",
+                self.evidence.workflow_recovery_task_id,
+                "FAILED",
+                2,
+                {
+                    "topology_nodes": self.evidence.workflow_recovery_mid_topology_nodes,
+                    "topology_edges": self.evidence.workflow_recovery_mid_topology_edges,
+                    "node_details": self.evidence.workflow_recovery_mid_detail_links,
+                    "graph_nodes": self.evidence.workflow_recovery_mid_topology_nodes,
+                    "graph_edges": self.evidence.workflow_recovery_mid_topology_edges,
+                    "graph_pending_nodes": self.evidence.workflow_recovery_mid_pending_nodes,
+                    "graph_running_nodes": 0,
+                    "graph_succeeded_nodes": self.evidence.workflow_recovery_mid_succeeded_nodes,
+                    "graph_failed_nodes": self.evidence.workflow_recovery_mid_failed_nodes,
+                    "graph_failure_path_nodes": len(WORKFLOW_RECOVERY_MID_SUCCEEDED_NODES) + 1,
+                    "graph_failure_origins": 1,
+                    "graph_incoming_failure_edges": sum(
+                        target == WORKFLOW_RECOVERY_MID_FAILURE_NODE_ID
+                        for _source, target in WORKFLOW_RECOVERY_MID_EDGES
+                    ),
+                },
+                2,
+            ),
+            (
+                "recovery-successful",
+                self.evidence.workflow_recovery_task_id,
+                self.evidence.workflow_recovery_task_state,
+                self.evidence.workflow_recovery_attempt_number,
+                {
+                    "topology_nodes": self.evidence.workflow_recovery_success_topology_nodes,
+                    "topology_edges": self.evidence.workflow_recovery_success_topology_edges,
+                    "node_details": self.evidence.workflow_recovery_success_detail_links,
+                    "graph_nodes": self.evidence.workflow_recovery_success_topology_nodes,
+                    "graph_edges": self.evidence.workflow_recovery_success_topology_edges,
+                    "graph_pending_nodes": 0,
+                    "graph_running_nodes": 0,
+                    "graph_succeeded_nodes": (
+                        self.evidence.workflow_recovery_success_succeeded_nodes
+                    ),
+                    "graph_failed_nodes": 0,
+                    "graph_failure_path_nodes": 0,
+                    "graph_failure_origins": 0,
+                    "graph_incoming_failure_edges": 0,
+                },
+                3,
             ),
         )
         verified: dict[str, Mapping[str, Any]] = {}
-        for label, task_id, task_state, attempt_number, expected_counts in runs:
+        for (
+            label,
+            task_id,
+            task_state,
+            attempt_number,
+            expected_counts,
+            selected_attempt,
+        ) in runs:
             if (
                 not task_id
                 or task_state not in {"SUCCEEDED", "FAILED"}
-                or attempt_number != 1
+                or type(attempt_number) is not int
+                or attempt_number < 1
                 or any(type(value) is not int or value < 0 for value in expected_counts.values())
                 or any(
                     expected_counts[field_name] < 1
@@ -6116,7 +6673,7 @@ class LocalKubeRayGate:
             ):
                 raise ValueError("workflow API evidence was not ready for admin verification")
 
-            result = self._kubectl(
+            command = (
                 "exec",
                 "deployment/django-web",
                 "-c",
@@ -6131,6 +6688,15 @@ class LocalKubeRayGate:
                 str(self.config.task_timeout),
                 "--existing-workflow-task-id",
                 task_id,
+            )
+            if selected_attempt is not None:
+                command = (
+                    *command,
+                    "--existing-workflow-attempt-number",
+                    str(selected_attempt),
+                )
+            result = self._kubectl(
+                *command,
                 timeout=(self.config.task_timeout + self.config.kubectl_request_timeout + 5),
                 sensitive_output=True,
             )
@@ -6163,12 +6729,14 @@ class LocalKubeRayGate:
                 raise ValueError(
                     "existing workflow admin smoke did not match API and storage evidence"
                 )
-            if label.endswith("failed") and (
-                payload.get("graph_failure_path_nodes", 0) < 1
-                or payload.get("graph_failure_origins") != 1
-                or payload.get("graph_incoming_failure_edges", 0) < 1
-            ):
-                raise ValueError("failed workflow admin graph lacked one incoming failed path")
+            if label.endswith("failed"):
+                minimum_incoming_edges = 0 if label == "recovery-early-failed" else 1
+                if (
+                    payload.get("graph_failure_path_nodes", 0) < 1
+                    or payload.get("graph_failure_origins") != 1
+                    or payload.get("graph_incoming_failure_edges", 0) < minimum_incoming_edges
+                ):
+                    raise ValueError("failed workflow admin graph lacked its expected failed path")
             verified[label] = payload
 
         successful = verified["successful"]
@@ -6188,6 +6756,9 @@ class LocalKubeRayGate:
         self.evidence.workflow_failure_current_manifests = cast(int, failed["current_manifests"])
         self.evidence.workflow_failure_pending_manifests = cast(int, failed["pending_manifests"])
         self.evidence.workflow_failure_unlinked_pages = cast(int, failed["unlinked_pages"])
+        self.evidence.workflow_recovery_admin_attempts = sum(
+            label.startswith("recovery-") for label in verified
+        )
 
         terminal_expected_fields = {
             "admin_workflow",
@@ -6432,6 +7003,8 @@ class LocalKubeRayGate:
             ("setup", "passed"),
             ("runtime_env_bytes", self.evidence.setup_bundle_bytes),
             ("runtime_env_sha256", self.evidence.setup_bundle_sha256),
+            ("recovery_runtime_env_bytes", self.evidence.recovery_bundle_bytes),
+            ("recovery_runtime_env_sha256", self.evidence.recovery_bundle_sha256),
             ("ray_restart", self.evidence.ray_restart),
             ("ray_cluster_uid", self.evidence.ray_cluster_uid),
             ("ray_heads", self.evidence.ray_head_count),
@@ -6719,6 +7292,37 @@ class LocalKubeRayGate:
                 getattr(self.evidence, f"workflow_showcase_{field_name}"),
             )
             for field_name in showcase_evidence_fields
+        )
+        recovery_evidence_fields = (
+            "task_id",
+            "task_state",
+            "attempt_number",
+            "attempt_count",
+            "distinct_runs",
+            "early_topology_nodes",
+            "early_topology_edges",
+            "early_pending_nodes",
+            "early_succeeded_nodes",
+            "early_failed_nodes",
+            "early_detail_links",
+            "mid_topology_nodes",
+            "mid_topology_edges",
+            "mid_pending_nodes",
+            "mid_succeeded_nodes",
+            "mid_failed_nodes",
+            "mid_detail_links",
+            "success_topology_nodes",
+            "success_topology_edges",
+            "success_succeeded_nodes",
+            "success_detail_links",
+            "admin_attempts",
+        )
+        fields.extend(
+            (
+                f"workflow_recovery_{field_name}",
+                getattr(self.evidence, f"workflow_recovery_{field_name}"),
+            )
+            for field_name in recovery_evidence_fields
         )
         fields.extend(
             (f"deployment_{name.replace('-', '_')}_ready", self.evidence.deployments[name])

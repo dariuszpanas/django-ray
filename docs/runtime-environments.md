@@ -123,11 +123,14 @@ DJANGO_RAY = {
 Pin production dependencies and use immutable archive URIs for `working_dir` or
 `py_modules` when reproducibility matters.
 
-- Local mode can content-address and upload a local directory.
+- Local mode and Ray Client task managers can content-address and upload a local
+  directory or archive before per-task submission. The path must be readable by
+  the task-manager process; Ray nodes receive the resulting `gcs://_ray_pkg_...`
+  artifact rather than the task manager's filesystem path.
 - Ray Job submission can upload its job-level local working directory.
-- Ray Client (`ray://...`) cannot turn a task-level local path from the Django pod
-  into a remote RuntimeEnv. Use `https://`, `s3://`, or `gs://`, or a `file://` ZIP
-  on storage mounted at the same path on every Ray node.
+- `https://`, `s3://`, `gs://`, and shared `file://` archives remain useful when
+  another system owns artifact distribution. Opaque URIs are not retry-safe unless
+  their content identity is independently verifiable.
 
 Local `py_modules` directories and files remain available to dynamic Ray tasks, but
 version 1 rejects them for reusable strategies. Their import basename changes Python
@@ -471,6 +474,13 @@ worker containers, plus a stock Python image for its dashboard-import helper.
 The project profile uploads source and installs Python dependencies. The Django
 web and task-manager images remain application-specific.
 
+The deterministic recovery example uses a second deployment-built archive. Its
+source and locked task dependency closure are packaged reproducibly, mounted into
+the Django web/task-manager pods, hashed before enqueue/submission, and uploaded by
+the Ray Client task manager to Ray's content-addressed package store. The generic
+Ray image therefore remains generic while every durable attempt is bound to the
+same archive bytes.
+
 For Ray Client submissions, django-ray serializes only its small outer bootstrap
 executor by value. The generic head can therefore deserialize the submission
 before the task-level RuntimeEnv installs and exposes the full project package.
@@ -500,8 +510,8 @@ separate Ray clusters for mutually untrusted teams or workloads.
 
 ## Test Project
 
-The sample project defines `project`, `thin`, `numpy-2-2`, and `numpy-2-3`
-profiles and exposes:
+The sample project defines `project`, `thin`, `numpy-2-2`, `numpy-2-3`, and
+`recovery-showcase` profiles and exposes:
 
 ```text
 POST /api/cluster/runtime-env/probe?profile=thin
@@ -512,3 +522,11 @@ GET  /api/cluster/runtime-env/{task_id}
 
 The benchmark runs repeated workflow leaves with the same profile and reports
 per-run elapsed time so cold setup and cache reuse are easy to compare.
+`recovery-showcase` is intentionally not selectable through the generic probe
+endpoint. It is reserved for the deterministic three-attempt example and resolves
+to content-hashed local import roots for local/Compose use or the self-contained
+Kubernetes recovery archive. The route verifies that this profile is retry-safe and
+fails closed when the backend, profile, archive, or immutable identity is unavailable;
+it never silently uses `project`. The sample `project` profile remains valid for
+ordinary first-attempt dynamic execution, but its broad package constraints and
+opaque shared archive URI deliberately remain retry-unsafe.

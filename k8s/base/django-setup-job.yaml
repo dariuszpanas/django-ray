@@ -35,21 +35,10 @@ spec:
               python testproject/manage.py collectstatic --noinput
 
               echo "Building shared RuntimeEnv source bundle..."
-              python -c "
-              from pathlib import Path
-              from zipfile import ZIP_DEFLATED, ZipFile
-              base = Path('/app')
-              target = Path('/runtime-env/django-ray-source.zip')
-              target.parent.mkdir(parents=True, exist_ok=True)
-              temporary = target.with_suffix('.zip.tmp')
-              with ZipFile(temporary, 'w', ZIP_DEFLATED) as archive:
-                  for root_name in ('src', 'testproject'):
-                      for path in (base / root_name).rglob('*.py'):
-                          if '__pycache__' not in path.parts:
-                              archive.write(path, path.relative_to(base))
-              temporary.replace(target)
-              print(f'RuntimeEnv bundle ready: {target} ({target.stat().st_size} bytes)')
-              "
+              python -m testproject.runtime_env_bundles \
+                --base /app \
+                --source-target /runtime-env/django-ray-source.zip \
+                --recovery-target /runtime-env/django-ray-recovery.zip
               
               echo "Creating superuser (if not exists)..."
               python testproject/manage.py shell -c "

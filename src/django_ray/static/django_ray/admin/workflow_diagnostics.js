@@ -15,6 +15,16 @@
   if (!statusNode || !contentNode) {
     return;
   }
+  const attemptGraphStack = disclosure.querySelector(
+    "[data-workflow-attempt-graphs]",
+  );
+  const currentGraphMount = disclosure.querySelector(
+    "[data-workflow-current-graph]",
+  );
+  const archivedGraphDisclosures =
+    typeof disclosure.querySelectorAll === "function"
+      ? Array.from(disclosure.querySelectorAll("[data-workflow-attempt-graph]"))
+      : [];
 
   const endpoints = {
     diagnostics: disclosure.dataset.diagnosticsUrl ?? "",
@@ -30,9 +40,21 @@
   const pinnedAttemptLabel = /^[1-9][0-9]*$/.test(pinnedAttemptNumber)
     ? `Attempt ${pinnedAttemptNumber}`
     : "Page-rendered attempt";
+  const currentAttemptState =
+    currentGraphMount?.dataset.currentAttemptState ?? "";
+  const currentAttemptStateLabel = /^[A-Z][A-Z0-9_]{0,31}$/.test(
+    currentAttemptState,
+  )
+    ? currentAttemptState.toLowerCase().replaceAll("_", " ")
+    : "state unavailable";
+  const currentGraphTitleId = /^[1-9][0-9]*$/.test(pinnedAttemptNumber)
+    ? `django-ray-workflow-attempt-${pinnedAttemptNumber}-title`
+    : "django-ray-workflow-current-attempt-title";
   const newerAttemptGuidance =
     "Reload the task page to inspect a newer live attempt.";
   const graphResizeObservers = new WeakMap();
+  let graphMarkerSequence = 0;
+  let graphRenderSequence = 0;
   let requested = false;
 
   const isRecord = (value) =>
@@ -556,19 +578,19 @@
     return { incoming, layers, nodesById, payload };
   };
 
-  const nodeDetailUrl = (nodeId) => {
-    if (!endpoints.nodeDetail) {
+  const nodeDetailUrl = (graphEndpoints, nodeId) => {
+    if (!graphEndpoints.nodeDetail) {
       throw new Error("Node detail endpoint unavailable");
     }
-    const fragmentIndex = endpoints.nodeDetail.indexOf("#");
+    const fragmentIndex = graphEndpoints.nodeDetail.indexOf("#");
     const fragment =
       fragmentIndex === -1
         ? ""
-        : endpoints.nodeDetail.slice(fragmentIndex);
+        : graphEndpoints.nodeDetail.slice(fragmentIndex);
     const withoutFragment =
       fragmentIndex === -1
-        ? endpoints.nodeDetail
-        : endpoints.nodeDetail.slice(0, fragmentIndex);
+        ? graphEndpoints.nodeDetail
+        : graphEndpoints.nodeDetail.slice(0, fragmentIndex);
     const queryIndex = withoutFragment.indexOf("?");
     const path =
       queryIndex === -1
@@ -581,7 +603,7 @@
     return `${path}?${parameters.toString()}${fragment}`;
   };
 
-  const graphFallbackActions = () => {
+  const graphFallbackActions = (graphEndpoints) => {
     const actions = element(
       "nav",
       "django-ray-workflow__actions django-ray-workflow-graph__fallbacks",
@@ -590,19 +612,19 @@
     addAction(
       actions,
       "Topology nodes JSON",
-      endpoints.topologyNodes,
+      graphEndpoints.topologyNodes,
       "topology",
     );
     addAction(
       actions,
       "Topology edges JSON",
-      endpoints.topologyEdges,
+      graphEndpoints.topologyEdges,
       "topology",
     );
     addAction(
       actions,
       "Node details JSON",
-      endpoints.nodeDetails,
+      graphEndpoints.nodeDetails,
       "topology",
     );
     return actions;
@@ -618,7 +640,12 @@
 
     const definitions = document.createElementNS(namespace, "defs");
     const marker = document.createElementNS(namespace, "marker");
-    marker.setAttribute("id", "django-ray-workflow-graph-arrow");
+    graphMarkerSequence += 1;
+    const markerId =
+      graphMarkerSequence === 1
+        ? "django-ray-workflow-graph-arrow"
+        : `django-ray-workflow-graph-arrow-${graphMarkerSequence}`;
+    marker.setAttribute("id", markerId);
     marker.setAttribute("markerHeight", "7");
     marker.setAttribute("markerWidth", "7");
     marker.setAttribute("orient", "auto");
@@ -638,7 +665,7 @@
       path.setAttribute("class", "django-ray-workflow-graph__connector");
       path.dataset.source = edge.source;
       path.dataset.target = edge.target;
-      path.setAttribute("marker-end", "url(#django-ray-workflow-graph-arrow)");
+      path.setAttribute("marker-end", `url(#${markerId})`);
       svg.append(path);
       paths.push({ edge, path });
     }
@@ -732,9 +759,15 @@
     return legend;
   };
 
-  const graphNodeCard = (node, layer, position, descriptionId) => {
+  const graphNodeCard = (
+    node,
+    layer,
+    position,
+    descriptionId,
+    graphEndpoints,
+  ) => {
     const link = element("a", "django-ray-workflow-graph__node");
-    link.href = nodeDetailUrl(node.id);
+    link.href = nodeDetailUrl(graphEndpoints, node.id);
     link.dataset.kind = node.kind;
     link.dataset.layer = String(layer);
     link.dataset.position = String(position);
@@ -850,8 +883,13 @@
     return link;
   };
 
-  const renderGraph = (validated, content) => {
+  const renderGraph = (validated, content, graphEndpoints) => {
     const { incoming, layers, nodesById, payload } = validated;
+    graphRenderSequence += 1;
+    const descriptionPrefix =
+      graphRenderSequence === 1
+        ? "django-ray-workflow-graph-predecessors"
+        : `django-ray-workflow-graph-predecessors-${graphRenderSequence}`;
     const diagram = element("div", "django-ray-workflow-graph__diagram");
     const list = element("ol", "django-ray-workflow-graph__nodes");
     list.setAttribute("aria-label", "Workflow stages in topological order");
@@ -892,7 +930,7 @@
           "div",
           "django-ray-workflow-graph__incoming",
         );
-        const descriptionId = `django-ray-workflow-graph-predecessors-${nodePosition}`;
+        const descriptionId = `${descriptionPrefix}-${nodePosition}`;
         incomingNode.setAttribute("id", descriptionId);
         const sources = incoming.get(node.id);
         if (sources.length === 0) {
@@ -918,6 +956,7 @@
           layerIndex,
           layerPosition,
           descriptionId,
+          graphEndpoints,
         );
         cardsById.set(node.id, card);
         row.append(incomingNode, card);
@@ -939,8 +978,196 @@
     );
   };
 
+  const attachGraphLoader = ({
+    graph,
+    graphContent,
+    graphEndpoints,
+    graphStatus,
+    graphStatusMessage,
+    retryOnTransientFailure,
+    summaryCopyMessage,
+  }) => {
+    let graphRequested = false;
+    let fallbackActions = null;
+    const showFallbacks = () => {
+      if (fallbackActions !== null) {
+        return;
+      }
+      const fallbacks = graphFallbackActions(graphEndpoints);
+      if (fallbacks.children.length > 0) {
+        graphContent.parentNode.append(fallbacks);
+        fallbackActions = fallbacks;
+      }
+    };
+    const removeFallbacks = () => {
+      if (fallbackActions === null) {
+        return;
+      }
+      fallbackActions.remove();
+      fallbackActions = null;
+    };
+    const setGraphStatus = (message, state = "ready") => {
+      graphStatusMessage.textContent = message;
+      graphStatus.dataset.state = state;
+      graphStatus.setAttribute(
+        "aria-busy",
+        state === "loading" ? "true" : "false",
+      );
+    };
+    const setGraphSummary = (message) => {
+      summaryCopyMessage.textContent = message;
+    };
+    const recoverableFailure = (message) => {
+      graphRequested = !retryOnTransientFailure;
+      graphContent.hidden = true;
+      showFallbacks();
+      graph.dataset.hydrationState = "error";
+      if (retryOnTransientFailure) {
+        setGraphSummary("Unavailable; reopen to retry.");
+        setGraphStatus(
+          `${message} Close and reopen this graph to retry, or use the bounded JSON views below.`,
+          "error",
+        );
+      } else {
+        setGraphSummary("Unavailable; cached for this page.");
+        setGraphStatus(
+          `${message} Reload this page to try again, or use the bounded JSON views below.`,
+          "error",
+        );
+      }
+    };
+    const loadGraph = async () => {
+      if (!graphEndpoints.graph) {
+        showFallbacks();
+        graph.dataset.hydrationState = "unavailable";
+        setGraphSummary("Unavailable.");
+        setGraphStatus(
+          "The workflow graph endpoint is unavailable. Use the bounded JSON views below.",
+          "error",
+        );
+        return;
+      }
+      graph.dataset.hydrationState = "loading";
+      setGraphStatus("Loading the bounded workflow graph\u2026", "loading");
+      try {
+        const response = await window.fetch(graphEndpoints.graph, {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        const contentType = response.headers?.get("content-type") ?? "";
+        if (response.redirected || [401, 403].includes(response.status)) {
+          graphContent.hidden = true;
+          showFallbacks();
+          graph.dataset.hydrationState = "unavailable";
+          setGraphSummary("Authentication required.");
+          setGraphStatus(
+            "Workflow graph unavailable; reload after signing in again. The bounded JSON views remain available after authentication.",
+            "error",
+          );
+          return;
+        }
+        if (response.status === 404) {
+          graphContent.hidden = true;
+          showFallbacks();
+          graph.dataset.hydrationState = "unavailable";
+          setGraphSummary("No longer available.");
+          setGraphStatus(
+            "The workflow graph is no longer available for this execution. Use the bounded JSON views below.",
+            "error",
+          );
+          return;
+        }
+        if (!contentType.includes("application/json")) {
+          if (response.ok) {
+            graphContent.hidden = true;
+            showFallbacks();
+            graph.dataset.hydrationState = "unavailable";
+            setGraphSummary("Authentication required.");
+            setGraphStatus(
+              "Workflow graph unavailable; reload after signing in again. No graph data was displayed.",
+              "error",
+            );
+          } else {
+            recoverableFailure("The workflow graph is temporarily unavailable.");
+          }
+          return;
+        }
+
+        const validated = validateGraphPayload(await response.json());
+        const expectedStatusCode =
+          validated.payload.status === "CORRUPT" ? 503 : 200;
+        if (response.status !== expectedStatusCode) {
+          throw new Error("Unexpected workflow graph response");
+        }
+        if (validated.payload.status !== "AVAILABLE") {
+          graphContent.hidden = true;
+          showFallbacks();
+          graph.dataset.hydrationState = "unavailable";
+          setGraphSummary(`${asIdentifier(validated.payload.status)}.`);
+          if (validated.payload.status === "NOT_REPORTED") {
+            if (retryOnTransientFailure) {
+              graphRequested = false;
+              graph.dataset.hydrationState = "idle";
+              setGraphStatus(
+                `${validated.payload.message} Close and reopen this graph after the workflow reaches a terminal state to try again, or use the bounded JSON views below.`,
+                "warning",
+              );
+            } else {
+              setGraphStatus(
+                `${validated.payload.message} This archived response is cached for this page; reload to try again, or use the bounded JSON views below.`,
+                "warning",
+              );
+            }
+            return;
+          }
+          const presentationState = [
+            "UNSUPPORTED",
+            "TRUNCATED",
+            "LIMIT_EXCEEDED",
+          ].includes(validated.payload.status)
+            ? "warning"
+            : "error";
+          setGraphStatus(
+            `${validated.payload.message} Use the bounded JSON views below.`,
+            presentationState,
+          );
+          return;
+        }
+        renderGraph(validated, graphContent, graphEndpoints);
+        removeFallbacks();
+        graph.dataset.hydrationState = "ready";
+        const { edges, nodes } = validated.payload.counts;
+        setGraphSummary(
+          `${nodes} ${nodes === 1 ? "node" : "nodes"}, ${edges} ${
+            edges === 1 ? "connection" : "connections"
+          }.`,
+        );
+        setGraphStatus(
+          `${validated.payload.message} ${nodes} ${
+            nodes === 1 ? "node" : "nodes"
+          } and ${edges} ${edges === 1 ? "connection" : "connections"}.`,
+        );
+      } catch (error) {
+        recoverableFailure("The workflow graph could not be displayed safely.");
+      }
+    };
+    graph.addEventListener("toggle", () => {
+      if (!graph.open || graphRequested) {
+        return;
+      }
+      graphRequested = true;
+      void loadGraph();
+    });
+  };
+
   const graphDisclosure = () => {
     const graph = element("details", "django-ray-workflow-graph");
+    graph.dataset.workflowCurrentGraphPanel = "";
+    graph.dataset.workflowGraphAttempt = pinnedAttemptNumber;
+    graph.dataset.hydrationState = "idle";
+    graph.setAttribute("aria-labelledby", currentGraphTitleId);
     const summary = element(
       "summary",
       "django-ray-workflow-graph__summary",
@@ -953,18 +1180,20 @@
     const summaryCopyMessage = element(
       "span",
       "",
-      "Open to load the bounded graph.",
+      "Current attempt. Open to load its exact bounded graph.",
     );
     summaryCopy.append(
       summaryCopyMessage,
       element("span", "", ` ${newerAttemptGuidance}`),
     );
+    const graphTitle = element(
+      "span",
+      "django-ray-workflow-graph__summary-title",
+      `Execution graph \u2014 ${pinnedAttemptLabel} (current, ${currentAttemptStateLabel})`,
+    );
+    graphTitle.setAttribute("id", currentGraphTitleId);
     summaryText.append(
-      element(
-        "span",
-        "django-ray-workflow-graph__summary-title",
-        `Execution graph \u2014 ${pinnedAttemptLabel}`,
-      ),
+      graphTitle,
       summaryCopy,
     );
     const arrow = element(
@@ -1000,160 +1229,127 @@
     graphContent.hidden = true;
     body.append(graphStatus, graphContent);
     graph.append(summary, body);
-
-    let graphRequested = false;
-    let fallbackActions = null;
-    const showFallbacks = () => {
-      if (fallbackActions !== null) {
-        return;
-      }
-      const fallbacks = graphFallbackActions();
-      if (fallbacks.children.length > 0) {
-        body.append(fallbacks);
-        fallbackActions = fallbacks;
-      }
-    };
-    const removeFallbacks = () => {
-      if (fallbackActions === null) {
-        return;
-      }
-      fallbackActions.remove();
-      fallbackActions = null;
-    };
-    const setGraphStatus = (message, state = "ready") => {
-      graphStatusMessage.textContent = message;
-      graphStatus.dataset.state = state;
-      graphStatus.setAttribute(
-        "aria-busy",
-        state === "loading" ? "true" : "false",
-      );
-    };
-    const setGraphSummary = (message) => {
-      summaryCopyMessage.textContent = message;
-    };
-    const recoverableFailure = (message) => {
-      graphRequested = false;
-      graphContent.hidden = true;
-      showFallbacks();
-      setGraphSummary("Unavailable; reopen to retry.");
-      setGraphStatus(
-        `${message} Close and reopen this graph to retry, or use the bounded JSON views below.`,
-        "error",
-      );
-    };
-    const loadGraph = async () => {
-      if (!endpoints.graph) {
-        showFallbacks();
-        setGraphSummary("Unavailable.");
-        setGraphStatus(
-          "The workflow graph endpoint is unavailable. Use the bounded JSON views below.",
-          "error",
-        );
-        return;
-      }
-      setGraphStatus("Loading the bounded workflow graph\u2026", "loading");
-      try {
-        const response = await window.fetch(endpoints.graph, {
-          method: "GET",
-          credentials: "same-origin",
-          cache: "no-store",
-          headers: { Accept: "application/json" },
-        });
-        const contentType = response.headers?.get("content-type") ?? "";
-        if (response.redirected || [401, 403].includes(response.status)) {
-          graphContent.hidden = true;
-          showFallbacks();
-          setGraphSummary("Authentication required.");
-          setGraphStatus(
-            "Workflow graph unavailable; reload after signing in again. The bounded JSON views remain available after authentication.",
-            "error",
-          );
-          return;
-        }
-        if (response.status === 404) {
-          graphContent.hidden = true;
-          showFallbacks();
-          setGraphSummary("No longer available.");
-          setGraphStatus(
-            "The workflow graph is no longer available for this execution. Use the bounded JSON views below.",
-            "error",
-          );
-          return;
-        }
-        if (!contentType.includes("application/json")) {
-          if (response.ok) {
-            graphContent.hidden = true;
-            showFallbacks();
-            setGraphSummary("Authentication required.");
-            setGraphStatus(
-              "Workflow graph unavailable; reload after signing in again. No graph data was displayed.",
-              "error",
-            );
-          } else {
-            recoverableFailure("The workflow graph is temporarily unavailable.");
-          }
-          return;
-        }
-
-        const validated = validateGraphPayload(await response.json());
-        const expectedStatusCode =
-          validated.payload.status === "CORRUPT" ? 503 : 200;
-        if (response.status !== expectedStatusCode) {
-          throw new Error("Unexpected workflow graph response");
-        }
-        if (validated.payload.status !== "AVAILABLE") {
-          graphContent.hidden = true;
-          showFallbacks();
-          setGraphSummary(`${asIdentifier(validated.payload.status)}.`);
-          if (validated.payload.status === "NOT_REPORTED") {
-            graphRequested = false;
-            setGraphStatus(
-              `${validated.payload.message} Close and reopen this graph after the workflow reaches a terminal state to try again, or use the bounded JSON views below.`,
-              "warning",
-            );
-            return;
-          }
-          const presentationState = [
-            "UNSUPPORTED",
-            "TRUNCATED",
-            "LIMIT_EXCEEDED",
-          ].includes(validated.payload.status)
-            ? "warning"
-            : "error";
-          setGraphStatus(
-            `${validated.payload.message} Use the bounded JSON views below.`,
-            presentationState,
-          );
-          return;
-        }
-        renderGraph(validated, graphContent);
-        removeFallbacks();
-        const { edges, nodes } = validated.payload.counts;
-        setGraphSummary(
-          `${nodes} ${nodes === 1 ? "node" : "nodes"}, ${edges} ${
-            edges === 1 ? "connection" : "connections"
-          }.`,
-        );
-        setGraphStatus(
-          `${validated.payload.message} ${nodes} ${
-            nodes === 1 ? "node" : "nodes"
-          } and ${edges} ${edges === 1 ? "connection" : "connections"}.`,
-        );
-      } catch (error) {
-        recoverableFailure("The workflow graph could not be displayed safely.");
-      }
-    };
-    graph.addEventListener("toggle", () => {
-      if (!graph.open || graphRequested) {
-        return;
-      }
-      graphRequested = true;
-      void loadGraph();
+    attachGraphLoader({
+      graph,
+      graphContent,
+      graphEndpoints: endpoints,
+      graphStatus,
+      graphStatusMessage,
+      retryOnTransientFailure: true,
+      summaryCopyMessage,
     });
     return graph;
   };
 
-  const renderProgress = (progress, reportingPolicy, planStatus) => {
+  const graphEndpointsFromDataset = (graph) => ({
+    graph: graph.dataset.graphUrl ?? "",
+    topologyNodes: graph.dataset.topologyNodesUrl ?? "",
+    topologyEdges: graph.dataset.topologyEdgesUrl ?? "",
+    nodeDetails: graph.dataset.nodeDetailsUrl ?? "",
+    nodeDetail: graph.dataset.nodeDetailUrl ?? "",
+  });
+
+  const endpointIsPinnedToAttempt = (endpoint, attemptNumber) => {
+    if (!endpoint) {
+      return false;
+    }
+    const withoutFragment = endpoint.split("#", 1)[0];
+    const queryIndex = withoutFragment.indexOf("?");
+    if (queryIndex === -1) {
+      return false;
+    }
+    const parameters = new URLSearchParams(
+      withoutFragment.slice(queryIndex + 1),
+    );
+    return (
+      parameters.getAll("attempt_number").length === 1 &&
+      parameters.get("attempt_number") === attemptNumber
+    );
+  };
+
+  const attachArchivedGraphLoader = (graph) => {
+    const attemptNumber = graph.dataset.pinnedAttemptNumber ?? "";
+    const currentAttemptNumber = graph.dataset.currentAttemptNumber ?? "";
+    const graphEndpoints = graphEndpointsFromDataset(graph);
+    const graphStatus = graph.querySelector("[data-workflow-graph-status]");
+    const graphStatusMessage = graph.querySelector(
+      "[data-workflow-graph-status-message]",
+    );
+    const graphContent = graph.querySelector("[data-workflow-graph-content]");
+    const summaryCopyMessage = graph.querySelector(
+      "[data-workflow-graph-summary-message]",
+    );
+    if (
+      !graphStatus ||
+      !graphStatusMessage ||
+      !graphContent ||
+      !summaryCopyMessage
+    ) {
+      graph.dataset.hydrationState = "error";
+      return;
+    }
+    const endpointValues = Object.values(graphEndpoints);
+    const exactAttempt =
+      /^[1-9][0-9]*$/.test(attemptNumber) &&
+      /^[1-9][0-9]*$/.test(currentAttemptNumber) &&
+      graph.dataset.workflowAttemptGraph === attemptNumber &&
+      Number(attemptNumber) < Number(currentAttemptNumber) &&
+      endpointValues.every((endpoint) =>
+        endpointIsPinnedToAttempt(endpoint, attemptNumber),
+      );
+    if (!exactAttempt) {
+      graphContent.hidden = true;
+      graph.dataset.hydrationState = "error";
+      graphStatus.dataset.state = "error";
+      summaryCopyMessage.textContent = "Unavailable.";
+      graphStatusMessage.textContent =
+        "This archived graph could not be initialized safely.";
+      return;
+    }
+    attachGraphLoader({
+      graph,
+      graphContent,
+      graphEndpoints,
+      graphStatus,
+      graphStatusMessage,
+      retryOnTransientFailure: false,
+      summaryCopyMessage,
+    });
+  };
+
+  const renderCurrentGraph = (progress, reportingPolicy, planStatus) => {
+    const terminalOnlyState =
+      typeof progress.state === "string" &&
+      progress.state.startsWith("TERMINAL_ONLY");
+    const terminalOnlyPolicy =
+      reportingPolicy === "terminal_only" ||
+      progress.reporting_policy === "terminal_only";
+    const available =
+      Boolean(currentGraphMount) &&
+      Boolean(endpoints.graph) &&
+      planStatus === "AVAILABLE" &&
+      !terminalOnlyPolicy &&
+      !terminalOnlyState;
+
+    if (currentGraphMount) {
+      currentGraphMount.replaceChildren();
+      currentGraphMount.hidden = !available;
+      if (available) {
+        currentGraphMount.append(graphDisclosure());
+      }
+    }
+    if (attemptGraphStack) {
+      attemptGraphStack.hidden =
+        archivedGraphDisclosures.length === 0 && !available;
+    }
+    return available;
+  };
+
+  const renderProgress = (
+    progress,
+    reportingPolicy,
+    currentGraphRendered,
+  ) => {
     const wrapper = section(
       "Progress and topology",
       progress.state ?? progress.availability,
@@ -1198,22 +1394,13 @@
       addChips(wrapper, progress.truncation_reasons);
     }
 
-    const terminalOnlyState =
-      typeof progress.state === "string" &&
-      progress.state.startsWith("TERMINAL_ONLY");
-    const terminalOnlyPolicy =
-      reportingPolicy === "terminal_only" ||
-      progress.reporting_policy === "terminal_only";
-    if (
-      endpoints.graph &&
-      planStatus === "AVAILABLE" &&
-      !terminalOnlyPolicy &&
-      !terminalOnlyState
-    ) {
-      wrapper.append(graphDisclosure());
+    if (currentGraphRendered) {
       return wrapper;
     }
 
+    const terminalOnlyPolicy =
+      reportingPolicy === "terminal_only" ||
+      progress.reporting_policy === "terminal_only";
     const availableActions =
       !terminalOnlyPolicy && isRecord(progress.actions)
         ? progress.actions
@@ -1264,12 +1451,17 @@
     ) {
       throw new Error("Invalid workflow diagnostics payload");
     }
+    const currentGraphRendered = renderCurrentGraph(
+      payload.progress,
+      payload.plan.reporting_policy,
+      payload.plan.status,
+    );
     contentNode.replaceChildren(
       renderPlan(payload.plan),
       renderProgress(
         payload.progress,
         payload.plan.reporting_policy,
-        payload.plan.status,
+        currentGraphRendered,
       ),
     );
     contentNode.hidden = false;
@@ -1326,6 +1518,8 @@
       setStatus("Workflow diagnostics could not be displayed safely.", "error");
     }
   };
+
+  archivedGraphDisclosures.forEach(attachArchivedGraphLoader);
 
   disclosure.addEventListener("toggle", () => {
     if (!disclosure.open || requested) {

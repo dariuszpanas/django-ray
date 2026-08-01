@@ -109,8 +109,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   claimed first and equal priorities remain FIFO. Queue names provide workload
   isolation and do not imply scheduling precedence.
 - Ray-native callables should be importable module-level functions.
-- Ray Client task-level RuntimeEnv code must use a remote/shared URI, not a Django-pod
-  local directory.
+- Ray Client task managers can hash and upload local RuntimeEnv code paths to Ray's
+  content-addressed package store; the path must be readable in the task-manager pod.
 - RuntimeEnv is dependency isolation inside one trust boundary, not tenant isolation.
 - Durable RuntimeEnv snapshots default to canonical plaintext writes. Readers always
   accept supported plaintext and AES-256-GCM envelope rows, so encrypted rollout is

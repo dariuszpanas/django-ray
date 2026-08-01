@@ -13,6 +13,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.db.models import Count
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
@@ -36,7 +37,11 @@ from django_ray.observability import (
     get_workflow_progress,
 )
 from django_ray.redaction import redact_text, redact_value, safe_json_dumps
-from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError
+from django_ray.runtime.runtime_env import (
+    RuntimeEnvSnapshotError,
+    resolve_runtime_env_profile,
+)
+from django_ray.workflow_plans import WorkflowPlanValidationError, runtime_env_plan_identity
 from django_ray.workflow_progress_reads import (
     WorkflowProgressReadError,
     WorkflowProgressReadErrorCode,
@@ -67,6 +72,7 @@ def _workflow_observability_executions():
 _WORKFLOW_OBSERVABILITY_CALLABLES = frozenset(
     {
         "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
+        "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task",
         "testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark",
         "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task",
     }
@@ -276,6 +282,27 @@ class WorkflowResultSchema(Schema):
     @classmethod
     def redact_workflow_error(cls, value):
         return redact_text(value) if value is not None else None
+
+
+class WorkflowRecoveryAttemptSchema(Schema):
+    """One bounded terminal attempt in the recovery showcase."""
+
+    attempt_number: int
+    state: str
+    error: str | None
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def redact_attempt_error(cls, value):
+        return redact_text(value) if value is not None else None
+
+
+class WorkflowRecoveryResultSchema(WorkflowResultSchema):
+    """Current recovery result plus its three bounded attempt outcomes."""
+
+    attempt_number: int
+    runtime_env_profile: str
+    attempts: list[WorkflowRecoveryAttemptSchema]
 
 
 class WorkflowNodeSchema(Schema):
@@ -1362,6 +1389,112 @@ def get_cluster_workflow_showcase(request, task_id: str):
     }
 
 
+@api.post(
+    "/cluster/workflow-recovery-showcase",
+    response=TaskResultSchema,
+    tags=["Workflows"],
+)
+def cluster_workflow_recovery_showcase(
+    request,
+    item_count: int = 3,
+    work_seconds: float = 0.05,
+):
+    """Enqueue the fixed early-fail, mid-fail, successful recovery sequence."""
+    try:
+        cluster_tasks.validate_order_fulfillment_showcase_inputs(
+            item_count=item_count,
+            work_seconds=work_seconds,
+            failure_stage=None,
+            failure_item=None,
+        )
+    except ValueError as error:
+        raise HttpError(422, str(error)) from error
+    try:
+        recovery_runtime_env = resolve_runtime_env_profile(
+            "recovery-showcase",
+            config=settings.DJANGO_RAY,
+        )
+        recovery_identity = runtime_env_plan_identity(
+            recovery_runtime_env,
+            trust_identity=settings.DJANGO_RAY.get("WORKFLOW_PLAN_TRUST_IDENTITY", {}),
+        )
+        if not recovery_identity.retry_safe:
+            raise ImproperlyConfigured(
+                "recovery-showcase RuntimeEnv has no immutable retry identity"
+            )
+        result = cluster_tasks.order_fulfillment_recovery_showcase_task.using(
+            backend="recovery-showcase"
+        ).enqueue(
+            item_count=item_count,
+            work_seconds=work_seconds,
+        )
+    except (ImproperlyConfigured, InvalidTaskBackend, WorkflowPlanValidationError) as error:
+        raise HttpError(
+            503,
+            "Workflow recovery showcase requires a valid 'recovery-showcase' task backend "
+            "and RuntimeEnv profile.",
+        ) from error
+    return {
+        "task_id": result.id,
+        "status": result.status.value,
+        "enqueued_at": result.enqueued_at,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "args": result.args,
+        "kwargs": result.kwargs,
+    }
+
+
+@api.get(
+    "/cluster/workflow-recovery-showcase/{task_id}",
+    response=WorkflowRecoveryResultSchema,
+    tags=["Workflows"],
+)
+def get_cluster_workflow_recovery_showcase(request, task_id: str):
+    """Return the current result and the complete bounded attempt sequence."""
+    execution = get_object_or_404(
+        _workflow_observability_executions(),
+        task_id=task_id,
+        callable_path=(
+            "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"
+        ),
+    )
+    try:
+        progress = get_workflow_progress_summary(
+            execution,
+            authorize=_authorize_example_workflow,
+            include_legacy=False,
+            infer_current_reporting_policy=False,
+        )
+    except WorkflowProgressReadError:
+        progress = None
+    attempt_rows = execution.attempts.order_by("attempt_number").values(
+        "attempt_number",
+        "state",
+        "error_message",
+    )[:4]
+    return {
+        "task_id": execution.task_id,
+        "state": execution.state,
+        "attempt_number": execution.attempt_number,
+        "runtime_env_profile": execution.runtime_env_profile,
+        "attempts": [
+            {
+                "attempt_number": attempt["attempt_number"],
+                "state": attempt["state"],
+                "error": attempt["error_message"],
+            }
+            for attempt in attempt_rows
+        ],
+        "created_at": execution.created_at,
+        "started_at": execution.started_at,
+        "finished_at": execution.finished_at,
+        "progress": progress,
+        "result": _result_value_for_execution(execution),
+        "error": execution.error_message,
+    }
+
+
 @api.get(
     "/cluster/workflows/{task_id}",
     response={
@@ -1555,6 +1688,7 @@ def get_cluster_workflow_node_detail(
 
 _RUNTIME_ENV_BACKENDS = {
     "project": "default",
+    "recovery-showcase": "recovery-showcase",
     "thin": "thin",
     "numpy-2-2": "numpy-2-2",
     "numpy-2-3": "numpy-2-3",

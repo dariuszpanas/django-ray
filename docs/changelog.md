@@ -106,6 +106,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guarded local KubeRay gate proves a 21-node, 28-edge, 12-layer one-item success and a
   deterministic single reservation failure with useful successful-ancestor context
   and pending descendants.
+- A separate deterministic recovery showcase now preserves one outer task across
+  three exact attempts: an early failure, a mid-workflow failure after successful
+  upstream work, and a complete success. Its polling API returns bounded ordered
+  attempt outcomes. The parent Admin's **Workflow execution** boundary stacks the two
+  failed graphs and current successful graph in chronological order, with each attempt
+  independently collapsible and the current attempt rendered exactly once. Opening an
+  archived panel performs one exact attempt-scoped read, caches either its graph or
+  bounded unavailable state for that page, and never follows the current run. The
+  guarded local KubeRay gate proves distinct run identities with one stable workflow
+  plan. The example makes the current
+  replay-from-entry boundary explicit: progress is
+  diagnostic rather than a checkpoint, leaf outputs are not retained in node detail,
+  and replayed application steps must be idempotent. The route explicitly selects a
+  dedicated `recovery-showcase` RuntimeEnv profile, fails closed if that backend,
+  profile, archive, or immutable identity is unavailable, and the guarded gate proves a
+  bounded content-addressed source-and-dependency bundle on generic Ray images instead
+  of treating the sample project's mutable package profile as retry-safe.
+- Ray Client task managers can now package readable local per-task `working_dir` and
+  `py_modules` paths into Ray's content-addressed package store. This brings the same
+  local-code path behavior to direct and Ray Client task managers while preserving the
+  durable workflow plan's pre-upload content identity.
 - Ray-native workflows can keep the default full node-progress reporting, select
   terminal-only reporting, or disable progress globally and per invocation.
   Terminal-only runs create no progress actor, node/application-progress RPC, legacy

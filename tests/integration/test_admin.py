@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from django.core.exceptions import PermissionDenied
 from django.db import connection
 from django.http import Http404
 from django.test import Client, RequestFactory, override_settings
+from django.test.html import Element, parse_html
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
@@ -110,6 +112,13 @@ def admin_dynamic_workflow_plan() -> EffectiveWorkflowPlan:
 def _stored_plan_fingerprint(serialized: str) -> str:
     digest = hashlib.sha256(PLAN_DOMAIN_SEPARATOR + serialized.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _walk_html(element: Element) -> Iterator[Element]:
+    yield element
+    for child in element.children:
+        if isinstance(child, Element):
+            yield from _walk_html(child)
 
 
 def _plan_selection_json(
@@ -3014,6 +3023,206 @@ class TestTaskAttemptAdmin:
         )
         assert inline.attempt_detail_link.short_description == "Attempt"
 
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_attempt_detail_links_full_progress_to_its_pinned_graph(self, client) -> None:
+        user = get_user_model().objects.create_superuser(username="attempt-graph-admin")
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-graph-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.FAILED,
+            attempt_number=1,
+            execution_generation=1,
+            workflow_run_id="35200000-0000-4000-8000-000000000001",
+        )
+        attempt = TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.FAILED,
+            workflow_progress_summary_json=serialize_workflow_progress_summary(
+                workflow_progress_summary(
+                    execution,
+                    published_detail=True,
+                    state="FAILED",
+                )
+            ),
+        )
+        client.force_login(user)
+        graph_url = (
+            reverse(
+                "admin:django_ray_raytaskexecution_workflow_graph",
+                args=[execution.pk],
+            )
+            + "?attempt_number=1"
+        )
+
+        detail = client.get(
+            reverse(
+                "admin:django_ray_taskattempt_change",
+                args=[attempt.pk],
+            )
+        )
+
+        content = detail.content.decode("utf-8")
+        assert detail.status_code == 200
+        assert "Workflow graph" in content
+        assert f'href="{graph_url}"' in content
+        assert "Open graph for attempt #1" in content
+        assert "workflow_progress_summary_json" not in content
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_parent_renders_exact_collapsed_graphs_for_archived_failed_attempts(
+        self,
+        client,
+    ) -> None:
+        user = get_user_model().objects.create_superuser(username="attempt-inline-graphs-admin")
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-inline-graphs-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.SUCCEEDED,
+            attempt_number=3,
+            execution_generation=3,
+        )
+        TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.FAILED,
+        )
+        TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=2,
+            state=TaskState.FAILED,
+        )
+        TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=3,
+            state=TaskState.SUCCEEDED,
+        )
+        client.force_login(user)
+
+        response = client.get(
+            reverse(
+                "admin:django_ray_raytaskexecution_change",
+                args=[execution.pk],
+            )
+        )
+
+        content = response.content.decode("utf-8")
+        endpoint_names = (
+            "workflow_graph",
+            "workflow_topology_nodes",
+            "workflow_topology_edges",
+            "workflow_node_details",
+            "workflow_node_detail",
+        )
+        endpoint_urls = {
+            name: reverse(
+                f"admin:django_ray_raytaskexecution_{name}",
+                args=[execution.pk],
+            )
+            for name in endpoint_names
+        }
+        assert response.status_code == 200
+        assert "Attempt execution graphs" in content
+        assert content.count("data-workflow-attempt-graph=") == 2
+        document = parse_html(content)
+        workflow_disclosure = next(
+            element
+            for element in _walk_html(document)
+            if dict(element.attributes).get("id") == "django-ray-workflow-diagnostics"
+        )
+        assert workflow_disclosure.name == "details"
+        assert "open" not in dict(workflow_disclosure.attributes)
+        attempt_stack = next(
+            element
+            for element in _walk_html(workflow_disclosure)
+            if "data-workflow-attempt-graphs" in dict(element.attributes)
+        )
+        stack_children = [child for child in attempt_stack.children if isinstance(child, Element)]
+        ordered_attempts = [
+            dict(child.attributes).get("data-workflow-graph-attempt")
+            if child.name == "details"
+            else "current"
+            for child in stack_children
+            if child.name == "details" or "data-workflow-current-graph" in dict(child.attributes)
+        ]
+        assert ordered_attempts == ["1", "2", "current"]
+        current_mount = next(
+            child
+            for child in stack_children
+            if "data-workflow-current-graph" in dict(child.attributes)
+        )
+        current_attributes = dict(current_mount.attributes)
+        assert current_attributes["data-current-attempt-number"] == "3"
+        assert current_attributes["data-current-attempt-state"] == "SUCCEEDED"
+        assert "hidden" in current_attributes
+        for attempt_number in (1, 2):
+            assert f'data-workflow-attempt-graph="{attempt_number}"' in content
+            assert f'data-pinned-attempt-number="{attempt_number}"' in content
+            assert 'data-current-attempt-number="3"' in content
+            for endpoint_url in endpoint_urls.values():
+                assert f'="{endpoint_url}?attempt_number={attempt_number}"' in content
+            panel_start = content.index(f'data-workflow-attempt-graph="{attempt_number}"')
+            opening_tag_start = content.rfind("<details", 0, panel_start)
+            opening_tag = content[opening_tag_start : content.index(">", panel_start)]
+            assert " open" not in opening_tag
+            panel = next(
+                child
+                for child in stack_children
+                if dict(child.attributes).get("data-workflow-attempt-graph") == str(attempt_number)
+            )
+            panel_attributes = dict(panel.attributes)
+            title_id = f"django-ray-workflow-attempt-{attempt_number}-title"
+            assert panel_attributes["aria-labelledby"] == title_id
+            panel_elements = list(_walk_html(panel))
+            assert panel_elements[1].name == "summary"
+            assert any(dict(element.attributes).get("id") == title_id for element in panel_elements)
+        assert 'data-workflow-attempt-graph="3"' not in content
+        assert 'data-workflow-graph-attempt="3"' not in content
+        assert f'data-graph-url="{endpoint_urls["workflow_graph"]}?attempt_number=3"' in content
+        assert "workflow_progress_summary_json" not in content
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_archived_graph_panel_list_fails_closed_at_fixed_bound(
+        self,
+        monkeypatch,
+        client,
+    ) -> None:
+        monkeypatch.setattr(
+            "django_ray.admin.ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS",
+            2,
+        )
+        user = get_user_model().objects.create_superuser(
+            username="attempt-inline-graph-bound-admin"
+        )
+        execution = RayTaskExecution.objects.create(
+            task_id="admin-attempt-inline-graph-bound-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.SUCCEEDED,
+            attempt_number=4,
+        )
+        for attempt_number in range(1, 4):
+            TaskAttempt.objects.create(
+                execution=execution,
+                attempt_number=attempt_number,
+                state=TaskState.FAILED,
+            )
+        client.force_login(user)
+
+        response = client.get(
+            reverse(
+                "admin:django_ray_raytaskexecution_change",
+                args=[execution.pk],
+            )
+        )
+
+        content = response.content.decode("utf-8")
+        assert response.status_code == 200
+        assert content.count("data-workflow-attempt-graph=") == 2
+        assert 'data-workflow-attempt-graph="1"' in content
+        assert 'data-workflow-attempt-graph="2"' in content
+        assert 'data-workflow-attempt-graph="3"' not in content
+        assert "2-panel safety limit" in content
+
     def test_diagnostics_are_redacted_bounded_and_not_raw_model_fields(self, settings) -> None:
         settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
         execution = RayTaskExecution.objects.create(
@@ -3064,6 +3273,7 @@ class TestTaskAttemptAdmin:
         assert admin_obj.error_traceback_display(attempt) == "-"
         assert admin_obj.result_data_display(attempt) == "-"
         assert admin_obj.result_reference_display(attempt) == "-"
+        assert admin_obj.workflow_graph_link(attempt) == "-"
 
     @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
     def test_default_index_hides_attempt_module_but_detail_remains_linked(
@@ -3129,11 +3339,12 @@ class TestTaskAttemptAdmin:
         execution = RayTaskExecution.objects.create(
             task_id="admin-attempt-permissions-001",
             callable_path="testproject.tasks.add_numbers",
+            attempt_number=2,
         )
         attempt = TaskAttempt.objects.create(
             execution=execution,
             attempt_number=1,
-            state=TaskState.SUCCEEDED,
+            state=TaskState.FAILED,
         )
         user = get_user_model().objects.create_user(
             username="attempt-parent-viewer",
@@ -3159,6 +3370,7 @@ class TestTaskAttemptAdmin:
 
         assert parent_only.status_code == 200
         assert detail_url not in parent_only.content.decode("utf-8")
+        assert 'data-workflow-attempt-graph="' not in parent_only.content.decode("utf-8")
 
         user.user_permissions.add(
             Permission.objects.get(
@@ -3169,7 +3381,9 @@ class TestTaskAttemptAdmin:
         with_child = client.get(change_url)
 
         assert with_child.status_code == 200
-        assert detail_url in with_child.content.decode("utf-8")
+        with_child_content = with_child.content.decode("utf-8")
+        assert detail_url in with_child_content
+        assert 'data-workflow-attempt-graph="1"' in with_child_content
 
     @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
     def test_empty_attempt_history_change_form_is_usable(self, client) -> None:

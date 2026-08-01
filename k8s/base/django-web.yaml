@@ -96,9 +96,15 @@ spec:
           volumeMounts:
             - name: static-files
               mountPath: /app/staticfiles
+            - name: runtime-env
+              mountPath: /runtime-env
+              readOnly: true
       volumes:
         - name: static-files
           emptyDir: {}
+        - name: runtime-env
+          persistentVolumeClaim:
+            claimName: runtime-env-pvc
 ---
 apiVersion: v1
 kind: Service

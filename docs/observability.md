@@ -310,12 +310,13 @@ exists. An unverified plan or terminal-only policy exposes neither the graph con
 those detail links. Every route repeats the same authorization and calls the package
 read facade; none is fetched by the polling script.
 
-Within that collapsed section, **Execution graph** is a second, independently lazy
-control. It makes exactly one same-origin GET after it is opened and caches a successful
-response for the current page. A pre-terminal `NOT_REPORTED` response and a transport or
-malformed-response failure remain retryable after the control is closed and reopened.
-Authentication loss, missing objects, and stable terminal degradation do not cause a
-request loop.
+Within that collapsed section, **Attempt execution graphs** keeps every retained run in
+oldest-to-newest order. Each attempt is a second, independently collapsible control. The
+current attempt makes exactly one same-origin GET after it is opened and caches a
+successful response for the current page. A pre-terminal `NOT_REPORTED` response and a
+transport or malformed-response failure remain retryable after the control is closed and
+reopened. Authentication loss, missing objects, and stable terminal degradation do not
+cause a request loop.
 
 The private graph adapter accepts only one complete, terminal, internally coherent
 schema-v3 publication. It performs fixed first-page reads with ceilings of 100 topology
@@ -343,6 +344,16 @@ redacted error preview; it does not load complete tracebacks, results, result
 references, or workflow summaries. Oversized error text is replaced by a fixed link
 prompt next to the attempt-detail link rather than selecting or displaying an
 arbitrary prefix.
+
+Previous failed attempts also receive individual collapsed execution-graph panels in
+that same **Workflow execution** boundary. The panels precede the current attempt in one
+chronological stack, reuse the same private bounded readers, and do not request anything
+while hidden. The first open fetches the exact archived attempt once; its rendered graph
+or fixed unavailable/error state is then cached until the page is reloaded. Every
+endpoint and node-detail link retains the selected attempt number, and the browser
+refuses mixed current/archive endpoint metadata before making a request. The current
+attempt is rendered once at the end of the stack, so a successful recovery remains
+visible without duplicating it in archived history.
 
 Parent access alone does not reveal attempt history. Django renders the inline only
 when the caller can view the execution and has global `view_taskattempt` or

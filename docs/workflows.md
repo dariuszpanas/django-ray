@@ -560,6 +560,15 @@ summary names that page-rendered attempt. If live polling advances the task to a
 attempt, reload the page before opening its graph. The bounded topology and detail JSON
 routes remain available as explicit diagnostic fallbacks.
 
+When a retry succeeds after one or more failed attempts, **Workflow execution** presents
+one chronological attempt-graph stack: previous failures first and the current attempt
+last. Every panel is independently collapsible. Archived panels are independently lazy
+and pinned to their attempt across the graph, topology, and node-detail routes. Each
+archived panel makes at most one request per page, including when the bounded response is
+unavailable or rejected. The current graph appears exactly once. This keeps retry history
+comparable without eagerly loading hidden graphs or mixing a prior run with the current
+attempt.
+
 That graph is a full-reporting detail surface. A terminal-only run instead shows its
 terminal outcome and `OMITTED_BY_POLICY` status explicitly in the live and workflow
 diagnostic panels. The Admin does not render or request an execution graph and does not
@@ -727,7 +736,9 @@ The outer Django task is the durability and retry boundary:
   dependency edges, percent complete, explicit leaf progress, Ray execution IDs,
   runtime environment identity, and recent events.
 - A leaf failure fails the outer task.
-- Retrying the outer task reruns the workflow, including previously completed leaves.
+- Retrying the outer task reruns the workflow from its entry, including previously
+  completed leaves. Workflow progress is diagnostic evidence, not a checkpoint or
+  selective-resume record, and normalized node detail does not retain leaf return values.
 - `TaskAttempt` archives terminal task diagnostics, not workflow graphs. If a run has
   already published a canonical terminal schema-v3 summary, the same bounded value is
   archived with its attempt before retry cleanup. Otherwise, lifecycle reconciliation
@@ -825,6 +836,10 @@ POST /api/cluster/workflow-showcase
 POST /api/cluster/workflow-showcase?item_count=1&work_seconds=0.01
 GET  /api/cluster/workflow-showcase/{task_id}
 
+POST /api/cluster/workflow-recovery-showcase
+POST /api/cluster/workflow-recovery-showcase?item_count=1&work_seconds=0.01
+GET  /api/cluster/workflow-recovery-showcase/{task_id}
+
 GET  /api/cluster/workflows/{task_id}
 GET  /api/cluster/workflows/{task_id}/topology/nodes
 GET  /api/cluster/workflows/{task_id}/topology/edges
@@ -918,6 +933,61 @@ at one user, requires each three-item success and complete 25-node/36-edge publi
 before submitting the next, and never injects the expected failure fixture. The
 150-second graceful-stop window covers bounded enqueue, terminal polling, final detail
 validation, and scheduling margin for the scenario active at the five-minute cutoff.
+
+### Three-attempt recovery showcase
+
+The recovery endpoint demonstrates the outer-task retry boundary with one task ID and
+one fixed, server-owned failure sequence:
+
+```text
+POST /api/cluster/workflow-recovery-showcase?item_count=1&work_seconds=0.01
+GET  /api/cluster/workflow-recovery-showcase/{task_id}
+```
+
+The bundled testproject allows three durable attempts. Attempt 1 fails at
+`build_order_batch`, before the branches can run. Attempt 2 starts again at
+`build_order_batch`, reruns its upstream work, and fails at `join_order_inputs`.
+Attempt 3 starts from the entry again and completes the full workflow. The polling
+response exposes the ordered `FAILED`, `FAILED`, `SUCCEEDED` attempt history and the
+successful outer result, whose `recovery` field identifies attempt 3. Callers cannot
+choose the failure stage through the API, so the example remains deterministic.
+
+The endpoint binds this task to the testproject's `recovery-showcase` task backend
+and returns `runtime_env_profile="recovery-showcase"` while polling. Local and
+Compose runs content-hash the sample's source import roots. Kubernetes builds a
+deterministic archive containing those sources plus the locked Django task runtime;
+the Ray Client task manager uploads it as a content-addressed GCS package before
+submission, so the upstream generic Ray image needs no django-ray installation.
+A missing or invalid backend/profile/archive, or a profile without an immutable
+retry identity, is a configuration error and returns 503; the endpoint never falls
+back to the default `project` profile. This matters because `project` contains
+mutable package constraints and an opaque shared archive URI. Those are valid for a
+first dynamic execution but cannot prove that a later durable attempt sees identical
+bytes.
+
+Inspect each retained attempt through the bounded readers by adding
+`?attempt_number=1`, `?attempt_number=2`, or `?attempt_number=3`, for example:
+
+```text
+GET /api/cluster/workflows/{task_id}?attempt_number=1
+GET /api/cluster/workflows/{task_id}/nodes?attempt_number=2
+```
+
+The Admin attempt history links to each immutable attempt detail. Every archived
+full-reporting attempt exposes an **Open graph for attempt #N** link pinned to that
+run, so operators do not need to construct the query string themselves. A graph
+identifier such as `0.3.g1.1` is the stable node path for that expansion, not a status
+or task result.
+The card's `Output` line reports availability only: pending and running work remains
+pending, failed output is unavailable, and a succeeded value is not retained. Node
+detail likewise reports execution state and bounded diagnostics rather than leaf return
+values. Read the recovery endpoint's outer `result` for the durable workflow output.
+
+This fixture deliberately uses pure, side-effect-free steps. It proves replay and
+attempt fencing, not checkpointed continuation: no successful node from attempt 1 or 2
+is reused by attempt 3. Applications that call external systems must make replayed
+steps idempotent or implement their own durable effect/checkpoint protocol. Selective
+workflow resume remains future work.
 
 Omitting `reporting_policy` preserves the existing full-reporting fixture. Set
 `reporting_policy=terminal_only` to exercise the actor-free summary path with a small

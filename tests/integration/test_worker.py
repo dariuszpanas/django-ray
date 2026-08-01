@@ -390,6 +390,111 @@ class TestWorkerSync:
         assert attempt.state == TaskState.FAILED
         assert attempt.error_message == "Async task requested a retryable failure"
 
+    def test_worker_completes_fixed_workflow_recovery_on_attempt_three(
+        self,
+        monkeypatch,
+        settings,
+    ):
+        """The showcase archives two planned failures before one durable success."""
+        from django_ray.management.commands.django_ray_worker import Command
+        from testproject.apps.cluster_tasks import tasks as cluster_tasks
+        from testproject.apps.cluster_tasks import workflows
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "MAX_TASK_ATTEMPTS": 3,
+            "RETRY_BACKOFF_SECONDS": 0,
+        }
+
+        def run(
+            _item_count: int,
+            _work_seconds: float,
+            recovery_stage: str,
+            *,
+            use_ray: bool,
+        ) -> dict[str, str]:
+            assert use_ray is True
+            if recovery_stage == workflows.WORKFLOW_RECOVERY_EARLY_STAGE:
+                raise workflows.WorkflowRecoveryEarlyFixtureError(
+                    workflows.WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE
+                )
+            if recovery_stage == workflows.WORKFLOW_RECOVERY_MID_STAGE:
+                raise workflows.WorkflowRecoveryMidFixtureError(
+                    workflows.WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE
+                )
+            assert recovery_stage == workflows.WORKFLOW_RECOVERY_SUCCESS_STAGE
+            return {"status": "FULFILLED"}
+
+        monkeypatch.setattr(
+            cluster_tasks,
+            "run_order_fulfillment_recovery_showcase_workflow",
+            run,
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-workflow-recovery-001",
+            callable_path=(
+                "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"
+            ),
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[]",
+            kwargs_json='{"item_count": 1, "work_seconds": 0}',
+        )
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+        task.refresh_from_db()
+        assert (task.state, task.attempt_number, task.execution_generation) == (
+            TaskState.QUEUED,
+            2,
+            1,
+        )
+        assert task.error_message == workflows.WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+        task.refresh_from_db()
+        assert (task.state, task.attempt_number, task.execution_generation) == (
+            TaskState.QUEUED,
+            3,
+            2,
+        )
+        assert task.error_message == workflows.WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE
+
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+        task.refresh_from_db()
+        assert (task.state, task.attempt_number, task.execution_generation) == (
+            TaskState.SUCCEEDED,
+            3,
+            3,
+        )
+        assert task.error_message is None
+        assert json.loads(task.result_data or "null") == {
+            "status": "FULFILLED",
+            "recovery": {
+                "scenario": "three-attempt-recovery",
+                "attempt_number": 3,
+                "outcome": "SUCCEEDED",
+            },
+        }
+        attempts = list(task.attempts.order_by("attempt_number"))
+        assert [attempt.attempt_number for attempt in attempts] == [1, 2, 3]
+        assert [attempt.state for attempt in attempts] == [
+            TaskState.FAILED,
+            TaskState.FAILED,
+            TaskState.SUCCEEDED,
+        ]
+        assert attempts[0].error_message == workflows.WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE
+        assert attempts[1].error_message == workflows.WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE
+        assert attempts[2].error_message is None
+        assert attempts[2].result_data == task.result_data
+
+        assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 0
+        assert task.attempts.count() == 3
+
     def test_worker_denylist_uses_underlying_async_exception(
         self,
         setup_django_env,
