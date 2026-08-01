@@ -346,3 +346,51 @@ class TestCancellationHelpers:
         assert prepared.supported is True
         assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
         assert "Ray address resolution timed out" in (outcome.message or "")
+
+    def test_prepared_cancellation_requires_matching_execution_capability(self) -> None:
+        handle = SubmissionHandle("job", "ray://cluster:10001", datetime.now(UTC))
+
+        class Runner:
+            def prepare_cancellation(self, _handle):
+                return object()
+
+        runner = Runner()
+        prepared = prepare_remote_cancellation(runner, handle)
+        outcome = request_remote_cancellation(runner, handle, prepared=prepared)
+
+        assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+        assert "cannot execute the prepared capability" in (outcome.message or "")
+
+    def test_prepared_cancellation_bounds_execution_failure(self) -> None:
+        handle = SubmissionHandle("job", "ray://cluster:10001", datetime.now(UTC))
+
+        class Runner:
+            def prepare_cancellation(self, _handle):
+                return object()
+
+            def cancel_prepared_with_status(self, _handle, _capability):
+                raise RuntimeError("prepared client disconnected")
+
+        runner = Runner()
+        prepared = prepare_remote_cancellation(runner, handle)
+        outcome = request_remote_cancellation(runner, handle, prepared=prepared)
+
+        assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+        assert "prepared client disconnected" in (outcome.message or "")
+
+    def test_request_cancellation_rejects_unsaved_execution(self) -> None:
+        task = RayTaskExecution(
+            task_id="cancel-unsaved",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json="{}",
+        )
+
+        assert (
+            request_cancellation(
+                task,
+                runner=SimpleNamespace(cancel=lambda _handle: True),
+            )
+            is False
+        )

@@ -14,17 +14,31 @@ from django.db import transaction
 
 from django_ray.lifecycle import record_lost, retry_task
 from django_ray.management.commands.django_ray_worker import Command
-from django_ray.models import CancellationStatus, RayTaskExecution, TaskAttempt, TaskState
+from django_ray.models import (
+    CancellationStatus,
+    RayTaskExecution,
+    TaskAttempt,
+    TaskState,
+    TaskWorkerLease,
+)
 from django_ray.runner import RayJobSubmissionUncertainError
 from django_ray.runner.base import JobInfo, JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import (
     CancellationOutcome,
     CancellationOutcomeStatus,
 )
+from django_ray.runner.leasing import WorkerLeaseIdentity
 from django_ray.runner.ray_core import RayCoreCompletion, RayCoreHandle
 
+_USE_REAL_COMMAND_LEASES = False
 
-def _make_command(worker_id: str = "worker-coverage") -> Command:
+
+def _make_command(
+    worker_id: str = "worker-coverage",
+    *,
+    claim_ownerless_tasks: bool = True,
+) -> Command:
+    """Build a command and, in DB tests, its exact pre-existing worker lease."""
     cmd = Command()
     cmd.stdout = StringIO()
     cmd.style = cmd.style
@@ -34,6 +48,31 @@ def _make_command(worker_id: str = "worker-coverage") -> Command:
     cmd.cluster_address = None
     cmd.active_tasks = {}
     cmd.ray_core_runner = None
+    if _USE_REAL_COMMAND_LEASES:
+        now = datetime.now(UTC)
+        lease, _ = TaskWorkerLease.objects.get_or_create(
+            worker_id=worker_id,
+            defaults={
+                "hostname": "worker-coverage-host",
+                "pid": 12345,
+                "queue_name": "default",
+                "started_at": now,
+                "last_heartbeat_at": now,
+                "is_active": True,
+            },
+        )
+        cmd.lease = lease
+        cmd.lease_identity = WorkerLeaseIdentity(
+            worker_id=str(lease.worker_id),
+            hostname=str(lease.hostname),
+            pid=int(lease.pid),
+            started_at=lease.started_at,
+        )
+        if claim_ownerless_tasks:
+            RayTaskExecution.objects.filter(
+                state__in=(TaskState.RUNNING, TaskState.CANCELLING),
+                claimed_by_worker__isnull=True,
+            ).update(claimed_by_worker=worker_id)
     return cmd
 
 
@@ -98,7 +137,11 @@ class TestWorkerDispatchAndReconnectHelpers:
         cmd = _make_command()
         events: list[str] = []
 
-        monkeypatch.setattr(cmd, "_update_lease_heartbeat", lambda: events.append("heartbeat"))
+        monkeypatch.setattr(
+            cmd,
+            "_update_lease_heartbeat",
+            lambda: events.append("heartbeat") or True,
+        )
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.time.time", lambda: 123.0
         )
@@ -149,17 +192,11 @@ class TestWorkerDispatchAndReconnectHelpers:
         assert captured[0]["expected_attempt_number"] == 1
         assert captured[0]["expected_execution_generation"] == 0
 
-    def test_update_lease_heartbeat_ignores_update_errors(self, monkeypatch) -> None:
+    def test_update_lease_heartbeat_without_identity_fails_closed(self) -> None:
         cmd = _make_command()
-        cmd.lease = cast(Any, object())
 
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.TaskWorkerLease.objects.filter",
-            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("db unavailable")),
-        )
-
-        # Should not raise.
-        cmd._update_lease_heartbeat()
+        assert cmd._update_lease_heartbeat() is False
+        assert cmd.shutdown_requested is True
 
     def test_check_ray_connection_timeout_triggers_reconnect(self, monkeypatch) -> None:
         cmd = _make_command()
@@ -285,6 +322,18 @@ class TestWorkerDispatchAndReconnectHelpers:
 @pytest.mark.django_db
 class TestWorkerReconnectPollReconcile:
     """DB-backed tests for reconnect/poll/reconcile branches."""
+
+    @pytest.fixture(autouse=True)
+    def _use_real_command_leases(self) -> Any:
+        """Make DB-backed command fixtures follow the production lease boundary."""
+        global _USE_REAL_COMMAND_LEASES
+
+        previous = _USE_REAL_COMMAND_LEASES
+        _USE_REAL_COMMAND_LEASES = True
+        try:
+            yield
+        finally:
+            _USE_REAL_COMMAND_LEASES = previous
 
     def test_mark_stale_ray_core_tasks_returns_when_no_pending(self) -> None:
         cmd = _make_command()
@@ -1130,6 +1179,7 @@ class TestWorkerReconnectPollReconcile:
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
             state=TaskState.RUNNING,
+            claimed_by_worker="worker-coverage",
             args_json="[1, 2]",
             kwargs_json="{}",
             attempt_number=2,
@@ -1169,8 +1219,8 @@ class TestWorkerReconnectPollReconcile:
 
         task.refresh_from_db()
         assert cancelled == [
-            reserved_handle.ray_job_id,
             "raysubmit_unexpected",
+            reserved_handle.ray_job_id,
         ]
         assert task.state == TaskState.FAILED
         assert task.attempt_number == 2
@@ -1254,8 +1304,8 @@ class TestWorkerReconnectPollReconcile:
 
         task.refresh_from_db()
         assert cancelled == [
-            reserved_handle.ray_job_id,
             observed_handle.ray_job_id,
+            reserved_handle.ray_job_id,
         ]
         assert events[:3] == [
             f"prepare:{reserved_handle.ray_job_id}",
@@ -1266,6 +1316,93 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.active_tasks[task.pk] == reserved_handle.ray_job_id
         assert cmd.active_task_identities[task.pk] == (2, 7)
         assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    def test_mismatched_completion_quiesces_both_jobs_and_closes_channel(
+        self,
+        django_capture_on_commit_callbacks,
+    ) -> None:
+        from django_ray.runtime.entrypoint import _persist_task_completion
+
+        task = RayTaskExecution.objects.create(
+            task_id="ray-job-submit-mismatch-completion-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            claimed_by_worker="worker-coverage",
+            ray_job_id="raysubmit_mismatch_completion_reserved",
+            ray_address="ray://cluster:10001",
+            attempt_number=2,
+            execution_generation=7,
+        )
+        stale_snapshot = RayTaskExecution.objects.get(pk=task.pk)
+        completion_data = json.dumps({"success": True, "result": 42})
+        RayTaskExecution.objects.filter(pk=task.pk).update(completion_data=completion_data)
+        reserved_handle = _ray_job_handle(
+            task,
+            task.ray_job_id or "",
+            task.ray_address or "",
+        )
+        observed_handle = _ray_job_handle(
+            task,
+            "raysubmit_mismatch_completion_observed",
+            task.ray_address or "",
+        )
+        cancelled: list[str] = []
+
+        class FakeRunner:
+            def prepare_cancellation(self, handle):
+                return handle.ray_job_id
+
+            def cancel_prepared_with_status(self, handle, capability):
+                assert capability == handle.ray_job_id
+                cancelled.append(handle.ray_job_id)
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+        cmd = _make_command(worker_id="worker-coverage")
+        cmd.active_tasks = {task.pk: reserved_handle.ray_job_id}
+        cmd.active_task_identities = {task.pk: (2, 7)}
+
+        with django_capture_on_commit_callbacks(execute=True):
+            cmd._handle_mismatched_ray_job_submission(
+                stale_snapshot,
+                FakeRunner(),
+                reserved_handle,
+                observed_handle,
+                expected_worker_id="worker-coverage",
+                expected_attempt_number=2,
+                expected_execution_generation=7,
+                error_message="Ray returned another identity",
+                exception_type="RayJobSubmissionIdentityMismatch",
+            )
+
+        task.refresh_from_db()
+        assert cancelled == [observed_handle.ray_job_id, reserved_handle.ray_job_id]
+        assert task.state == TaskState.SUCCEEDED
+        assert json.loads(task.result_data or "null") == 42
+        assert task.completion_data == completion_data
+        assert task.pk not in cmd.active_tasks
+        assert task.pk not in cmd.active_task_identities
+        assert (
+            TaskAttempt.objects.filter(
+                execution=task,
+                attempt_number=2,
+                state=TaskState.SUCCEEDED,
+            ).count()
+            == 1
+        )
+
+        _persist_task_completion(
+            task.pk,
+            task.attempt_number,
+            task.execution_generation,
+            json.dumps({"success": True, "result": 99}),
+        )
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.completion_data == completion_data
+        assert json.loads(task.result_data or "null") == 42
 
     @pytest.mark.parametrize(
         ("statuses", "expected"),
@@ -1290,6 +1427,13 @@ class TestWorkerReconnectPollReconcile:
                     CancellationOutcomeStatus.FAILED,
                 ),
                 CancellationOutcomeStatus.INDETERMINATE,
+            ),
+            (
+                (
+                    CancellationOutcomeStatus.FAILED,
+                    CancellationOutcomeStatus.FAILED,
+                ),
+                CancellationOutcomeStatus.FAILED,
             ),
         ],
     )
@@ -1323,9 +1467,150 @@ class TestWorkerReconnectPollReconcile:
 
         assert outcome.status == expected
 
+    def test_untracked_submission_preserves_unexpected_cancellation_error(
+        self,
+        monkeypatch,
+    ) -> None:
+        cmd = _make_command()
+        handle = SubmissionHandle(
+            ray_job_id="raysubmit_untracked",
+            ray_address="ray://cluster:10001",
+            submitted_at=datetime.now(UTC),
+        )
+
+        def raise_unexpected(*_args, **_kwargs):
+            raise RuntimeError("control channel broke")
+
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.request_remote_cancellation",
+            raise_unexpected,
+        )
+
+        outcome = cmd._cancel_untracked_submission(
+            object(),
+            handle,
+            backend_name="test Ray Job",
+        )
+
+        assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+        assert outcome.message == (
+            "Cancellation request raised RuntimeError: control channel broke"
+        )
+        assert "cancellation INDETERMINATE" in cmd.stdout.getvalue()
+
+    @pytest.mark.parametrize(
+        ("suffix", "completion_data", "expected_error", "expected_traceback"),
+        [
+            (
+                "failure",
+                json.dumps(
+                    {
+                        "success": False,
+                        "result": None,
+                        "error": "task failed",
+                        "traceback": "remote traceback",
+                        "exception_type": "builtins.ValueError",
+                    }
+                ),
+                "completion reported: task failed",
+                "remote traceback",
+            ),
+            (
+                "invalid",
+                "{not-json",
+                "completion envelope was invalid",
+                None,
+            ),
+        ],
+    )
+    def test_mismatched_submission_terminalizes_non_success_completion(
+        self,
+        suffix,
+        completion_data,
+        expected_error,
+        expected_traceback,
+    ) -> None:
+        cmd = _make_command()
+        task = RayTaskExecution.objects.create(
+            task_id=f"ray-job-mismatch-{suffix}-completion-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            claimed_by_worker=cmd.worker_id,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id=f"raysubmit_mismatch_{suffix}_reserved",
+            ray_address="ray://cluster:10001",
+            attempt_number=2,
+            execution_generation=7,
+            completion_data=completion_data,
+        )
+        reserved_handle = _ray_job_handle(
+            task,
+            task.ray_job_id or "",
+            task.ray_address or "",
+        )
+
+        handled = cmd._terminalize_mismatched_ray_job_submission(
+            task,
+            reserved_handle=reserved_handle,
+            expected_worker_id=cmd.worker_id,
+            expected_attempt_number=2,
+            expected_execution_generation=7,
+            error_message="Ray returned another identity",
+            exception_type="RayJobSubmissionIdentityMismatch",
+            cancellation=CancellationOutcome(
+                CancellationOutcomeStatus.INDETERMINATE,
+                "stop outcome unknown",
+            ),
+        )
+
+        assert handled is True
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert expected_error in (task.error_message or "")
+        assert task.error_traceback == expected_traceback
+        assert task.cancellation_status == CancellationStatus.INDETERMINATE
+        assert task.cancellation_error == "stop outcome unknown"
+
+    def test_mismatched_submission_stops_observed_before_durable_job_on_abort(
+        self,
+    ) -> None:
+        cmd = _make_command()
+        reserved_handle = SubmissionHandle(
+            ray_job_id="raysubmit_reserved",
+            ray_address="ray://cluster:10001",
+            submitted_at=datetime.now(UTC),
+        )
+        observed_handle = SubmissionHandle(
+            ray_job_id="raysubmit_observed",
+            ray_address="ray://cluster:10001",
+            submitted_at=datetime.now(UTC),
+        )
+        cancelled: list[str] = []
+
+        class AbruptWorkerExit(BaseException):
+            pass
+
+        class Runner:
+            def cancel_with_status(self, handle):
+                cancelled.append(handle.ray_job_id)
+                raise AbruptWorkerExit
+
+        with pytest.raises(AbruptWorkerExit):
+            cmd._cancel_mismatched_submissions(
+                Runner(),
+                reserved_handle,
+                observed_handle,
+            )
+
+        assert cancelled == [observed_handle.ray_job_id]
+
+    @pytest.mark.parametrize("transferred_state", [TaskState.RUNNING, TaskState.CANCELLING])
     def test_returned_ray_job_identity_mismatch_does_not_stop_adopted_reservation(
         self,
         monkeypatch,
+        transferred_state: str,
     ) -> None:
         task = RayTaskExecution.objects.create(
             task_id="ray-job-submit-mismatch-adopted-001",
@@ -1352,7 +1637,8 @@ class TestWorkerReconnectPollReconcile:
 
             def submit(self, **_kwargs):
                 RayTaskExecution.objects.filter(pk=task.pk).update(
-                    claimed_by_worker="replacement-worker"
+                    claimed_by_worker="replacement-worker",
+                    state=transferred_state,
                 )
                 raise RayJobSubmissionUncertainError(
                     reserved_handle.ray_job_id,
@@ -1374,7 +1660,7 @@ class TestWorkerReconnectPollReconcile:
 
         task.refresh_from_db()
         assert cancelled == ["raysubmit_unexpected_adopted"]
-        assert task.state == TaskState.RUNNING
+        assert task.state == transferred_state
         assert task.claimed_by_worker == "replacement-worker"
         assert task.ray_job_id == reserved_handle.ray_job_id
         assert task.pk not in cmd.active_tasks
@@ -2121,6 +2407,7 @@ class TestWorkerReconnectPollReconcile:
         claimed: list[RayTaskExecution] = []
         monkeypatch.setattr(cmd, "process_task", lambda current_task: claimed.append(current_task))
 
+        cmd._create_lease("default")
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
@@ -2144,6 +2431,7 @@ class TestWorkerReconnectPollReconcile:
         cmd.execution_mode = "ray"
         monkeypatch.setattr(cmd, "process_task", lambda _task: None)
 
+        cmd._create_lease("default")
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
@@ -2164,6 +2452,7 @@ class TestWorkerReconnectPollReconcile:
         cmd.execution_mode = "ray"
         monkeypatch.setattr(cmd, "process_task", lambda _task: None)
 
+        cmd._create_lease("default")
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
@@ -2188,6 +2477,7 @@ class TestWorkerReconnectPollReconcile:
         cmd.execution_mode = "ray"
         monkeypatch.setattr(cmd, "process_task", lambda _task: None)
 
+        cmd._create_lease("default")
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
@@ -2222,6 +2512,113 @@ class TestWorkerReconnectPollReconcile:
         assert task.state == TaskState.QUEUED
         assert task.attempt_number == 2
         assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_owner_transfer_during_status_rpc_blocks_terminal_effects(
+        self,
+        monkeypatch,
+    ) -> None:
+        cmd = _make_command()
+        cmd._create_lease("default")
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-owner-transfer-during-status-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            claimed_by_worker="worker-coverage",
+            ray_job_id="raysubmit_owner_transfer_during_status_001",
+            attempt_number=2,
+            execution_generation=7,
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: str(task.ray_job_id)}
+        cmd.active_task_identities = {task.pk: (2, 7)}
+        completion_data = json.dumps({"success": True, "result": 3})
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                RayTaskExecution.objects.filter(pk=task.pk).update(
+                    claimed_by_worker="replacement-worker",
+                    completion_data=completion_data,
+                )
+                return JobInfo(
+                    job_id=str(task.ray_job_id),
+                    status=JobStatus.STOPPED,
+                )
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "the previous owner must not store the adopter's result"
+            ),
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.cancel_task",
+            lambda *_args, **_kwargs: pytest.fail(
+                "the previous owner must not finalize the adopter's task"
+            ),
+        )
+
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.claimed_by_worker == "replacement-worker"
+        assert task.completion_data == completion_data
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_stopped_status_after_owner_transfer_does_not_cancel_task(
+        self,
+        monkeypatch,
+    ) -> None:
+        cmd = _make_command()
+        cmd._create_lease("default")
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-stopped-owner-transfer-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            claimed_by_worker="worker-coverage",
+            ray_job_id="raysubmit_stopped_owner_transfer_001",
+            attempt_number=2,
+            execution_generation=7,
+        )
+        cmd.active_tasks = {task.pk: str(task.ray_job_id)}
+        cmd.active_task_identities = {task.pk: (2, 7)}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                RayTaskExecution.objects.filter(pk=task.pk).update(
+                    claimed_by_worker="replacement-worker"
+                )
+                return JobInfo(
+                    job_id=str(task.ray_job_id),
+                    status=JobStatus.STOPPED,
+                )
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.cancel_task",
+            lambda *_args, **_kwargs: pytest.fail(
+                "the previous owner must not finalize a stopped replacement task"
+            ),
+        )
+
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.claimed_by_worker == "replacement-worker"
+        assert task.completion_data is None
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        assert task.pk not in cmd.active_tasks
+        assert task.pk not in cmd.active_task_identities
 
     def test_reconcile_tasks_malformed_completion_envelope_remains_active(
         self, monkeypatch
@@ -2424,6 +2821,7 @@ class TestWorkerReconnectPollReconcile:
                 "exception_type": "ValueError",
                 "retryable": None,
                 "expected_ray_job_id": "raysubmit_failure_envelope_001",
+                "expected_claimed_by_worker": "worker-coverage",
                 "expected_attempt_number": 1,
                 "expected_execution_generation": 0,
                 "expected_completion_data": task.completion_data,
@@ -2645,6 +3043,7 @@ class TestWorkerReconnectPollReconcile:
             task_id="reconcile-cancellation-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
+            claimed_by_worker="worker-coverage",
             ray_job_id="raysubmit_cancellation_race_001",
             args_json="[]",
             kwargs_json="{}",
@@ -2675,6 +3074,7 @@ class TestWorkerReconnectPollReconcile:
             task_id="reconcile-deleted-during-rpc-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
+            claimed_by_worker="worker-coverage",
             ray_job_id="raysubmit_deleted_during_rpc_001",
             args_json="[]",
             kwargs_json="{}",
@@ -3120,7 +3520,7 @@ class TestWorkerReconnectPollReconcile:
             args_json="[]",
             kwargs_json="{}",
         )
-        cmd = _make_command(worker_id="adopting-worker")
+        cmd = _make_command(worker_id="adopting-worker", claim_ownerless_tasks=False)
         monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         class FakeRunner:

@@ -216,6 +216,69 @@ Worker coordination record used to detect dead/inactive workers.
 | `started_at`, `last_heartbeat_at`, `stopped_at` | Lease timing |
 | `is_active` | Active/inactive lease state |
 
+The generated UUID is only a candidate; the lease primary key and retained in-flight
+task claims are the allocation authority. Startup inserts a new row before initializing
+Ray or printing the worker identity, then proves that no `RUNNING` or `CANCELLING` row
+still names that ID. This second fence matters after the supported Admin cleanup has
+deleted an inactive lease whose orphaned work still awaits reconciliation. SQLite and
+PostgreSQL primary-key violations, or an in-flight owner reservation, are retried with
+a fresh candidate a bounded number of times. Any other integrity or database error
+fails startup closed. Existing active or inactive rows are never adopted during initial
+allocation.
+
+After acquisition, heartbeats, queue expiry, task claims, and graceful release use the
+immutable `(worker_id, hostname, pid, started_at)` snapshot. Renewal also requires the
+exact row to remain active and inside its lease duration. Expired, inactive, deleted,
+or replaced ownership is irrevocably lost; the old process cannot reactivate or
+recreate it. The worker holds that live-row fence across each bounded expiry and claim
+transaction, including a write fence on SQLite where row locking is unavailable.
+
+Recovery transactions lock every involved lease in worker-ID order before the durable
+execution. They prove the adopter's complete immutable identity is active and fresh,
+reject a live source owner, mark a stale source inactive, and transfer task ownership.
+Timeout, LOST, and cancellation recovery keep those locks through the corresponding
+archive and any bounded state-changing remote stop, so competing workers cannot issue
+the same recovery effect for one execution identity. Lease cleanup follows the same
+order and skips recovery rows that are already locked on databases that support it.
+The supported Admin bulk deactivation and inactive-lease deletion actions also lock
+their selected rows in worker-ID order before mutation. Generic Admin deletion is
+disabled so it cannot bypass the inactive-only guard or the lock protocol. Both
+controlled actions require the model's change permission; view-only operators cannot
+deactivate or delete leases.
+
+Sync and Ray Core terminal writes use the command's captured worker ID rather than a
+freshly loaded task owner, while Ray Core monitor heartbeats include that owner too.
+Ray Job adoption occurs before reconciliation, and every result-storage, failure,
+stop, and monitor-heartbeat mutation revalidates the exact live adopter lease after
+its read-only status or log RPC. If a previous process resumes, its expired heartbeat
+fails closed and stale in-memory tracking is retired without touching the adopted
+task. This protects coordination from accidental identifier collisions and stale
+owner resumption. Public cancellation remains durable best-effort intent: neither the
+lease protocol nor a remote cancellation response is an exactly-once guarantee.
+Ray Core cancellation waits at most five seconds for graceful `ray.cancel` and
+then records an indeterminate outcome while retiring only the exact tracked
+`ObjectRef`. The cancellation RPC may still finish in its daemon thread, but that
+late return cannot remove or target a replacement attempt. This bounds the worker's
+lease and execution locks without claiming that the remote task has stopped. One
+process-wide cancellation slot prevents a wedged Ray Client from accumulating daemon
+threads across runner reconnects; later exact handles are retired with an indeterminate
+outcome until the in-flight RPC returns.
+Application administrators and database writers remain trusted not to forge
+worker-managed state.
+
+Graceful handoff is an ownership mutation, not an exception to the protocol. Before
+requeueing a claimed-but-unsubmitted task, cancelling a Ray Core handle, or releasing
+a Ray Job for another monitor, shutdown revalidates the complete live lease and holds
+the lease-to-execution lock order through the effect and durable update. A process
+whose lease expired while paused or before a signal arrived leaves task rows untouched
+for a live owner to recover.
+
+Shutdown handoff, lease release, and Ray disconnection are attempted independently, so
+a handoff or release database failure retains a failure exit while later cleanup still
+runs. A release database error remains distinguishable from an ownership-fence miss.
+Drain old task managers before deploying this protocol: older code can still overwrite
+an existing lease row and therefore must not run in a mixed-version worker fleet.
+
 ### `TaskInputPayload`
 
 Registry and cleanup tombstone for content-addressed external inputs. It records the
@@ -272,7 +335,13 @@ reports `PENDING` or `RUNNING` follows the same exact-stop, no-auto-retry path; 
 a terminal Ray state can enter normal failure/retry handling. A submitter that outlives
 its worker lease distinguishes a same-identity ownership handoff from
 an execution replacement: it drops only its local tracker after handoff and never
-stops the adopted job. Ray Job success, failure, stop, missing-envelope, and timeout
+stops the adopted job. If Ray returns a submission identity different from the durable
+reservation, a valid exact owner stops both capabilities while holding the
+lease-to-execution fence, always stopping the undiscoverable observed job before the
+durable reservation, and consumes any already-published durable completion before
+closing the channel. A process that lost or transferred its lease stops only the
+untracked observed capability, preserving the reserved job for its replacement owner.
+Ray Job success, failure, stop, missing-envelope, and timeout
 decisions also revalidate the exact observed completion envelope under the task row
 lock, so a concurrently published completion remains available to reconciliation.
 The address-pinned Ray Job client applies a five-second HTTP request timeout to its

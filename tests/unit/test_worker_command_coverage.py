@@ -12,7 +12,8 @@ import pytest
 
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
-from django_ray.runner.cancellation import CancellationOutcomeStatus
+from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
+from django_ray.runner.leasing import WorkerLeaseIdentity
 from django_ray.runner.ray_core import RayCoreCompletion, RayCoreHandle
 
 
@@ -42,6 +43,17 @@ def _make_command(worker_id: str = "worker-coverage") -> Command:
     cmd.sync_mode = False
     cmd.ray_core_runner = None
     return cmd
+
+
+def _set_lease_identity(cmd: Command) -> WorkerLeaseIdentity:
+    identity = WorkerLeaseIdentity(
+        worker_id=cmd.worker_id,
+        hostname="coverage-host",
+        pid=12345,
+        started_at=datetime.now(UTC),
+    )
+    cmd.lease_identity = identity
+    return identity
 
 
 def _pending_handle(task: RayTaskExecution) -> RayCoreHandle:
@@ -185,29 +197,42 @@ class TestWorkerCommandCoverage:
         assert initialized_addresses == ["ray://cluster:10001"]
         assert isinstance(cmd.ray_core_runner, FakeRayCoreRunner)
 
-    def test_heartbeat_checks_ray_health_in_local_mode(self, monkeypatch) -> None:
+    def test_heartbeat_skips_ray_health_after_lease_loss(self, monkeypatch) -> None:
         cmd = _make_command()
+        _set_lease_identity(cmd)
         cmd.execution_mode = "local"
         events: list[str] = []
-        monkeypatch.setattr(cmd, "_recreate_lease", lambda: events.append("lease"))
+        monkeypatch.setattr(
+            TaskWorkerLease.objects,
+            "filter",
+            lambda **_filters: SimpleNamespace(update=lambda **_updates: 0),
+        )
+        monkeypatch.setattr(
+            cmd,
+            "_recreate_lease",
+            lambda: events.append("lease") or True,
+        )
         monkeypatch.setattr(cmd, "_check_ray_connection", lambda: events.append("ray"))
 
         cmd.send_heartbeat()
 
-        assert events == ["lease", "ray"]
+        assert events == []
+        assert cmd.shutdown_requested is True
 
     @pytest.mark.django_db
-    def test_recreate_lease_reports_creation_and_reactivation(self) -> None:
+    def test_recreate_lease_refuses_inactive_identity(self) -> None:
         cmd = _make_command()
 
-        cmd._recreate_lease()
-        TaskWorkerLease.objects.filter(worker_id=cmd.worker_id).update(is_active=False)
-        cmd._recreate_lease()
+        cmd._create_lease("default")
+        assert cmd.lease_identity is not None
+        TaskWorkerLease.objects.filter(**cmd.lease_identity.database_filters()).update(
+            is_active=False
+        )
+        assert cmd._recreate_lease() is False
 
         lease = TaskWorkerLease.objects.get(worker_id=cmd.worker_id)
-        assert lease.is_active is True
-        assert "Lease created" in cmd.stdout.getvalue()
-        assert "Lease reactivated" in cmd.stdout.getvalue()
+        assert lease.is_active is False
+        assert "Worker lease ownership lost" in cmd.stdout.getvalue()
 
     def test_ray_cluster_resource_check_returns_none_after_timeout(self, monkeypatch) -> None:
         class HungThread:
@@ -238,6 +263,7 @@ class TestWorkerCommandCoverage:
     @pytest.mark.django_db
     def test_claiming_stops_when_all_concurrency_slots_are_full(self) -> None:
         cmd = _make_command()
+        cmd._create_lease("default")
         cmd.active_tasks = {1: "raysubmit_active"}
 
         cmd.claim_and_process_tasks(["default"], concurrency=1)
@@ -304,6 +330,8 @@ class TestWorkerCommandCoverage:
 
     @pytest.mark.django_db
     def test_handoff_unsubmitted_task_returns_claimed_task_to_queue(self) -> None:
+        cmd = _make_command()
+        cmd._create_lease("default")
         deadline = datetime.now(UTC) + timedelta(hours=1)
         task = RayTaskExecution.objects.create(
             task_id="coverage-handoff-001",
@@ -319,7 +347,6 @@ class TestWorkerCommandCoverage:
             queue_timeout_seconds=3600,
             queue_deadline_at=deadline,
         )
-        cmd = _make_command()
 
         cmd._handoff_unsubmitted_task(task)
 
@@ -380,7 +407,7 @@ class TestWorkerCommandCoverage:
             def get_pending_handle(self, *_args: Any, **_kwargs: Any) -> object:
                 return self.pending_handle
 
-            def cancel_pending(self, _handle: object) -> bool:
+            def cancel_pending_with_status(self, _handle: object) -> CancellationOutcome:
                 raise RuntimeError("driver disconnected")
 
         cmd.ray_core_runner = cast(Any, FailingRayCoreRunner())
@@ -480,8 +507,9 @@ class TestWorkerCommandCoverage:
         cmd = _make_command()
         cmd.execution_mode = "local"
         cmd.lease = cast(Any, object())
+        _set_lease_identity(cmd)
 
-        def fail_release_lease(_worker_id: str) -> None:
+        def fail_release_lease(_identity: WorkerLeaseIdentity) -> None:
             raise RuntimeError("database offline")
 
         def fail_ray_shutdown() -> None:
@@ -497,8 +525,11 @@ class TestWorkerCommandCoverage:
         cmd.shutdown()
 
         output = cmd.stdout.getvalue()
-        assert "Failed to release lease: database offline" in output
-        assert "Failed to close Ray connection: driver disconnected" in output
+        assert "Failed to release lease; see worker logs" in output
+        assert "database offline" not in output
+        assert "Failed to close Ray connection; see worker logs" in output
+        assert "driver disconnected" not in output
+        assert cmd.shutdown_exit_code == 1
 
     @pytest.mark.django_db
     def test_shutdown_signal_after_claim_hands_task_off_before_submission(
@@ -514,6 +545,7 @@ class TestWorkerCommandCoverage:
         )
         cmd = _make_command()
         cmd.execution_mode = "local"
+        cmd._create_lease("default")
         processed: list[int] = []
         original_save = RayTaskExecution.save
 
@@ -538,6 +570,7 @@ class TestWorkerCommandCoverage:
             task_id="coverage-sync-stale-success-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
+            claimed_by_worker="worker-coverage",
             args_json="[1, 2]",
             kwargs_json="{}",
             attempt_number=1,
@@ -594,6 +627,7 @@ class TestWorkerCommandCoverage:
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
             state=TaskState.RUNNING,
+            claimed_by_worker="worker-coverage",
             args_json="[1, 2]",
             kwargs_json="{}",
         )
@@ -638,12 +672,14 @@ class TestWorkerCommandCoverage:
 
     @pytest.mark.django_db
     def test_reconciliation_skips_healthy_owners_and_logs_orphan_errors(self, monkeypatch) -> None:
+        cmd = _make_command()
+        cmd._create_lease("default")
         own_task = RayTaskExecution.objects.create(
             task_id="coverage-reconcile-own-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
             state=TaskState.RUNNING,
-            claimed_by_worker="worker-coverage",
+            claimed_by_worker=cmd.worker_id,
             args_json="[1, 2]",
             kwargs_json="{}",
             ray_job_id="raysubmit_own",
@@ -668,7 +704,6 @@ class TestWorkerCommandCoverage:
             kwargs_json="{}",
             ray_job_id="raysubmit_orphan",
         )
-        cmd = _make_command()
 
         class FakeRayJobRunner:
             pass
@@ -769,6 +804,8 @@ class TestWorkerCommandCoverage:
 
     @pytest.mark.django_db
     def test_orphan_cancellation_claim_does_not_overwrite_a_concurrent_owner(self) -> None:
+        cmd = _make_command()
+        cmd._create_lease("default")
         task = RayTaskExecution.objects.create(
             task_id="coverage-cancellation-race-001",
             callable_path="testproject.tasks.add_numbers",
@@ -779,11 +816,9 @@ class TestWorkerCommandCoverage:
             kwargs_json="{}",
         )
         RayTaskExecution.objects.filter(pk=task.pk).update(claimed_by_worker="new-worker")
-        cmd = _make_command()
 
         claimed = cmd._claim_orphaned_cancellation(
             task,
-            active_worker_ids=set(),
             now=datetime.now(UTC),
         )
 
@@ -798,8 +833,8 @@ class TestWorkerCommandCoverage:
             def get_pending_handle(self, *_args: Any, **_kwargs: Any) -> object:
                 return self.pending_handle
 
-            def cancel_pending(self, _handle: object) -> bool:
-                return True
+            def cancel_pending_with_status(self, _handle: object) -> CancellationOutcome:
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
 
         cmd = _make_command()
         cmd.ray_core_runner = cast(Any, RayCoreRunner())
@@ -815,6 +850,37 @@ class TestWorkerCommandCoverage:
         outcome = cmd._request_cancellation_for_task(task)
 
         assert outcome.status == CancellationOutcomeStatus.REQUESTED
+
+    def test_ray_core_cancellation_preserves_bounded_indeterminate_outcome(self) -> None:
+        class RayCoreRunner:
+            pending_handle = object()
+
+            def get_pending_handle(self, *_args: Any, **_kwargs: Any) -> object:
+                return self.pending_handle
+
+            def cancel_pending_with_status(self, _handle: object) -> CancellationOutcome:
+                return CancellationOutcome(
+                    CancellationOutcomeStatus.INDETERMINATE,
+                    "Ray Core cancellation timed out; the exact stop may complete later",
+                )
+
+        cmd = _make_command()
+        cmd.ray_core_runner = cast(Any, RayCoreRunner())
+        task = SimpleNamespace(
+            pk=1,
+            ray_job_id="",
+            ray_address="",
+            started_at=None,
+            attempt_number=1,
+            execution_generation=0,
+        )
+
+        outcome = cmd._request_cancellation_for_task(task)
+
+        assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+        assert outcome.message == (
+            "Ray Core cancellation timed out; the exact stop may complete later"
+        )
 
     def test_ray_core_cancellation_does_not_target_mismatched_handle(self) -> None:
         class RayCoreRunner:
@@ -849,6 +915,9 @@ class TestWorkerCommandCoverage:
 
     @pytest.mark.django_db
     def test_shutdown_handoff_records_ray_core_cancellation_client_failure(self) -> None:
+        cmd = _make_command()
+        cmd.execution_mode = "local"
+        cmd._create_lease("default")
         task = RayTaskExecution.objects.create(
             task_id="coverage-shutdown-cancel-error-001",
             callable_path="testproject.tasks.add_numbers",
@@ -863,11 +932,9 @@ class TestWorkerCommandCoverage:
             pending_task_ids = (task.pk,)
             pending_task_handles = (_pending_handle(task),)
 
-            def cancel_pending(self, _handle: object) -> bool:
+            def cancel_pending_with_status(self, _handle: object) -> CancellationOutcome:
                 raise RuntimeError("driver disconnected")
 
-        cmd = _make_command()
-        cmd.execution_mode = "local"
         cmd.ray_core_runner = cast(Any, FailingRayCoreRunner())
 
         cmd._prepare_shutdown_handoff()
@@ -876,3 +943,37 @@ class TestWorkerCommandCoverage:
         assert task.state == TaskState.CANCELLING
         assert task.cancellation_status == "INDETERMINATE"
         assert "driver disconnected" in (task.cancellation_error or "")
+
+    @pytest.mark.django_db
+    def test_shutdown_handoff_persists_bounded_ray_core_timeout(self) -> None:
+        cmd = _make_command()
+        cmd.execution_mode = "local"
+        cmd._create_lease("default")
+        task = RayTaskExecution.objects.create(
+            task_id="coverage-shutdown-cancel-timeout-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            claimed_by_worker="worker-coverage",
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        timeout_message = "Ray Core cancellation timed out; the exact stop may complete later"
+
+        class TimedOutRayCoreRunner:
+            pending_task_handles = (_pending_handle(task),)
+
+            def cancel_pending_with_status(self, _handle: object) -> CancellationOutcome:
+                return CancellationOutcome(
+                    CancellationOutcomeStatus.INDETERMINATE,
+                    timeout_message,
+                )
+
+        cmd.ray_core_runner = cast(Any, TimedOutRayCoreRunner())
+
+        cmd._prepare_shutdown_handoff()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLING
+        assert task.cancellation_status == CancellationOutcomeStatus.INDETERMINATE
+        assert task.cancellation_error == timeout_message

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from django_ray.lifecycle import QUEUE_EXPIRED_ERROR
+from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import (
     CancellationStatus,
     RayTaskExecution,
@@ -19,6 +20,7 @@ from django_ray.models import (
     TaskWorkerLease,
 )
 from django_ray.runner.base import SubmissionHandle
+from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
 from django_ray.runner.ray_core import RayCoreHandle
 from django_ray.runtime.runtime_env import normalize_runtime_env, runtime_env_for_storage
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
@@ -35,6 +37,11 @@ def setup_django_env(monkeypatch: pytest.MonkeyPatch) -> None:
     root_path = str(project_root)
     monkeypatch.syspath_prepend(src_path)
     monkeypatch.syspath_prepend(root_path)
+
+
+def _acquire_test_lease(command: Command, queue: str = "default") -> None:
+    """Mirror the production startup precondition for direct command tests."""
+    command._create_lease(queue)
 
 
 @pytest.mark.django_db
@@ -64,6 +71,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process the task
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
 
         # Verify task was processed
@@ -108,6 +116,7 @@ class TestWorkerSync:
         cmd.worker_id = "saturated-worker"
         cmd.active_tasks = {999: "already-running"}
 
+        _acquire_test_lease(cmd)
         assert cmd.claim_and_process_tasks(["default"], concurrency=1) == 1
 
         task.refresh_from_db()
@@ -133,7 +142,13 @@ class TestWorkerSync:
             queue_timeout_seconds=60,
             queue_deadline_at=deadline,
         )
-        observed_times = iter((deadline - timedelta(microseconds=1), deadline))
+        observed_times = iter(
+            (
+                deadline - timedelta(microseconds=2),
+                deadline - timedelta(microseconds=1),
+                deadline,
+            )
+        )
 
         class AdvancingDateTime(datetime):
             @classmethod
@@ -155,6 +170,7 @@ class TestWorkerSync:
         processed: list[int] = []
         monkeypatch.setattr(cmd, "process_task", lambda execution: processed.append(execution.pk))
 
+        _acquire_test_lease(cmd)
         assert cmd.claim_and_process_tasks(["default"], concurrency=1) == 0
 
         task.refresh_from_db()
@@ -201,6 +217,7 @@ class TestWorkerSync:
         processed: list[int] = []
         monkeypatch.setattr(cmd, "process_task", lambda task: processed.append(task.pk))
 
+        _acquire_test_lease(cmd)
         assert cmd.claim_and_process_tasks(["default"], concurrency=1) == 101
 
         assert processed == [eligible.pk]
@@ -254,6 +271,7 @@ class TestWorkerSync:
         cmd.worker_id = "encrypted-sync-worker"
         cmd.active_tasks = {}
 
+        _acquire_test_lease(cmd)
         assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
 
         task.refresh_from_db()
@@ -336,6 +354,7 @@ class TestWorkerSync:
         monkeypatch.setattr(cmd, "submit_task_to_ray_core", unexpected_dispatch)
         monkeypatch.setattr(cmd, "submit_task_to_ray", unexpected_dispatch)
 
+        _acquire_test_lease(cmd)
         assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
 
         task.refresh_from_db()
@@ -382,6 +401,7 @@ class TestWorkerSync:
         monkeypatch.setattr(cmd, "submit_task_to_ray_core", unexpected_dispatch)
         monkeypatch.setattr(cmd, "submit_task_to_ray", unexpected_dispatch)
 
+        _acquire_test_lease(cmd)
         assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
 
         task.refresh_from_db()
@@ -457,6 +477,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
         monkeypatch.setattr(cmd, "process_task", lambda _task: None)
 
+        _acquire_test_lease(cmd)
         assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
 
         task.refresh_from_db()
@@ -483,6 +504,7 @@ class TestWorkerSync:
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
 
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
@@ -520,6 +542,7 @@ class TestWorkerSync:
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
 
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
@@ -585,6 +608,7 @@ class TestWorkerSync:
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
 
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
         task.refresh_from_db()
         assert (task.state, task.attempt_number, task.execution_generation) == (
@@ -662,6 +686,7 @@ class TestWorkerSync:
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
 
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
@@ -702,6 +727,7 @@ class TestWorkerSync:
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
 
         task.refresh_from_db()
@@ -716,6 +742,12 @@ class TestWorkerSync:
         """A successful retry must not expose the previous attempt's diagnostics."""
         from django_ray.management.commands.django_ray_worker import Command
 
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+        _acquire_test_lease(cmd)
         task = RayTaskExecution.objects.create(
             task_id="test-worker-success-after-failure-001",
             callable_path="testproject.tasks.add_numbers",
@@ -725,12 +757,8 @@ class TestWorkerSync:
             kwargs_json="{}",
             error_message="transient failure",
             error_traceback="RuntimeError: transient failure",
+            claimed_by_worker=cmd.worker_id,
         )
-        cmd = Command()
-        cmd.stdout = StringIO()
-        cmd.execution_mode = "sync"
-        cmd.worker_id = "test-worker"
-        cmd.active_tasks = {}
 
         cmd.execute_task_sync(task)
 
@@ -763,6 +791,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process the task
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
 
         # Verify task failed permanently (no more retries)
@@ -795,6 +824,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process the task
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
 
         # Verify task is queued for retry
@@ -809,6 +839,18 @@ class TestWorkerSync:
         """Test that the worker detects and fails timed-out tasks."""
         from datetime import datetime, timedelta
 
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.style = cmd.style
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker"
+        cmd.active_tasks = {}
+        cmd.local_ray_tasks = {}
+        cmd.last_reconciliation = 0
+        _acquire_test_lease(cmd)
+
         # Create a task that started 10 seconds ago with 5 second timeout
         started_at = datetime.now(UTC) - timedelta(seconds=10)
         task = RayTaskExecution.objects.create(
@@ -822,17 +864,6 @@ class TestWorkerSync:
             started_at=started_at,
             claimed_by_worker="test-worker",
         )
-
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
-        cmd.stdout = StringIO()
-        cmd.style = cmd.style
-        cmd.execution_mode = "sync"
-        cmd.worker_id = "test-worker"
-        cmd.active_tasks = {}
-        cmd.local_ray_tasks = {}
-        cmd.last_reconciliation = 0
 
         # Run stuck task detection (which also checks timeouts)
         cmd.detect_stuck_tasks()
@@ -872,6 +903,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process only "other" queue
+        _acquire_test_lease(cmd, "other")
         cmd.claim_and_process_tasks(queues=["other"], concurrency=10)
 
         # Verify only the "other" task was processed
@@ -909,6 +941,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process with concurrency of 2
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=2)
 
         # Count processed tasks
@@ -940,6 +973,7 @@ class TestWorkerSync:
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
 
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=10)
 
         task.refresh_from_db()
@@ -989,6 +1023,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process both "default" and "high-priority" queues, but not "other"
+        _acquire_test_lease(cmd, "default,high-priority")
         cmd.claim_and_process_tasks(queues=["default", "high-priority"], concurrency=10)
 
         # Verify tasks from both queues were processed
@@ -1041,6 +1076,7 @@ class TestWorkerSync:
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
 
+        _acquire_test_lease(cmd, "default,high-priority,low-priority")
         cmd.claim_and_process_tasks(
             queues=["default", "high-priority", "low-priority"], concurrency=1
         )
@@ -1059,6 +1095,7 @@ class TestWorkerSync:
         second_worker.execution_mode = "sync"
         second_worker.worker_id = "test-worker-2"
         second_worker.active_tasks = {}
+        _acquire_test_lease(second_worker, "default,high-priority,low-priority")
         second_worker.claim_and_process_tasks(
             queues=["default", "high-priority", "low-priority"], concurrency=1
         )
@@ -1108,6 +1145,7 @@ class TestWorkerSync:
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
+        _acquire_test_lease(cmd, "urgent,batch")
         cmd.claim_and_process_tasks(queues=["urgent", "batch"], concurrency=1)
 
         older.refresh_from_db()
@@ -1156,6 +1194,7 @@ class TestWorkerSync:
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
+        _acquire_test_lease(cmd)
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         immediate.refresh_from_db()
@@ -1218,6 +1257,7 @@ class TestWorkerRayJobRouting:
         cmd.worker_id = "routing-worker"
         cmd.active_tasks = {}
 
+        _acquire_test_lease(cmd)
         assert cmd.claim_and_process_tasks(queues=["default"], concurrency=2) == 2
 
         execution_a.refresh_from_db()
@@ -1246,10 +1286,12 @@ class TestWorkerRayJobFailureHandling:
         cmd.worker_id = "test-worker"
         cmd.sync_mode = False
         cmd.active_tasks = {}
+        _acquire_test_lease(cmd)
         return cmd
 
     def test_submit_task_to_ray_retries_on_submission_error(self, monkeypatch):
         """Submission errors should go through retry policy."""
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-ray-submit-retry-001",
             callable_path="testproject.tasks.add_numbers",
@@ -1259,6 +1301,7 @@ class TestWorkerRayJobFailureHandling:
             kwargs_json="{}",
             attempt_number=1,
             ray_target_address="ray://retry-target:10001",
+            claimed_by_worker=cmd.worker_id,
         )
 
         reserved_handle = SubmissionHandle(
@@ -1276,7 +1319,6 @@ class TestWorkerRayJobFailureHandling:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FailingRunner)
 
-        cmd = self._make_command()
         cmd.submit_task_to_ray(task)
 
         task.refresh_from_db()
@@ -1293,6 +1335,7 @@ class TestWorkerRayJobFailureHandling:
         """A changed pinned plan is permanent for the existing task identity."""
         from django_ray.workflow_plans import WorkflowPlanMismatchError
 
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-ray-submit-plan-mismatch-001",
             callable_path="testproject.tasks.add_numbers",
@@ -1301,6 +1344,7 @@ class TestWorkerRayJobFailureHandling:
             args_json="[1, 2]",
             kwargs_json="{}",
             attempt_number=1,
+            claimed_by_worker=cmd.worker_id,
         )
 
         reserved_handle = SubmissionHandle(
@@ -1318,7 +1362,6 @@ class TestWorkerRayJobFailureHandling:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FailingRunner)
 
-        cmd = self._make_command()
         cmd.submit_task_to_ray(task)
 
         task.refresh_from_db()
@@ -1328,6 +1371,7 @@ class TestWorkerRayJobFailureHandling:
 
     def test_reconcile_failed_job_retries_when_attempts_remain(self, monkeypatch):
         """Ray FAILED status should trigger retry path."""
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-ray-reconcile-retry-001",
             callable_path="testproject.tasks.add_numbers",
@@ -1338,6 +1382,7 @@ class TestWorkerRayJobFailureHandling:
             attempt_number=1,
             ray_job_id="raysubmit_retry_001",
             ray_address="ray://cluster:10001",
+            claimed_by_worker=cmd.worker_id,
         )
 
         class FakeRunner:
@@ -1353,7 +1398,6 @@ class TestWorkerRayJobFailureHandling:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        cmd = self._make_command()
         cmd.active_tasks = {task.pk: "raysubmit_retry_001"}
         cmd.reconcile_tasks()
 
@@ -1367,6 +1411,7 @@ class TestWorkerRayJobFailureHandling:
 
     def test_reconcile_succeeded_job_with_failure_payload_retries(self, monkeypatch):
         """A SUCCEEDED Ray job with success=false payload should use retry logic."""
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-ray-reconcile-retry-002",
             callable_path="testproject.tasks.failing_task",
@@ -1377,6 +1422,7 @@ class TestWorkerRayJobFailureHandling:
             attempt_number=1,
             ray_job_id="raysubmit_retry_002",
             ray_address="ray://cluster:10001",
+            claimed_by_worker=cmd.worker_id,
             completion_data=(
                 '{"success": false, "result": null, "error": "task failed", '
                 '"traceback": "tb", "exception_type": "builtins.ValueError"}'
@@ -1398,7 +1444,6 @@ class TestWorkerRayJobFailureHandling:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        cmd = self._make_command()
         cmd.active_tasks = {task.pk: "raysubmit_retry_002"}
         cmd.reconcile_tasks()
 
@@ -1412,6 +1457,7 @@ class TestWorkerRayJobFailureHandling:
 
     def test_reconcile_failed_job_marks_failed_at_max_attempts(self, monkeypatch):
         """Ray FAILED status should become terminal when max attempts is reached."""
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-ray-reconcile-failed-001",
             callable_path="testproject.tasks.failing_task",
@@ -1422,6 +1468,7 @@ class TestWorkerRayJobFailureHandling:
             attempt_number=3,  # MAX_TASK_ATTEMPTS in test settings
             ray_job_id="raysubmit_failed_001",
             ray_address="ray://cluster:10001",
+            claimed_by_worker=cmd.worker_id,
         )
 
         class FakeRunner:
@@ -1437,7 +1484,6 @@ class TestWorkerRayJobFailureHandling:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        cmd = self._make_command()
         cmd.active_tasks = {task.pk: "raysubmit_failed_001"}
         cmd.reconcile_tasks()
 
@@ -1465,6 +1511,7 @@ class TestWorkerOrphanRecovery:
         cmd.worker_id = worker_id
         cmd.active_tasks = {}
         cmd.ray_core_runner = None
+        _acquire_test_lease(cmd)
         return cmd
 
     def test_recovers_stuck_task_from_expired_worker_lease(self):
@@ -1681,6 +1728,7 @@ class TestWorkerOrphanRecovery:
         """A timed-out Ray Job is stopped before the timeout is persisted."""
         from datetime import datetime, timedelta
 
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-timeout-ray-job-success-001",
             callable_path="testproject.tasks.slow_task",
@@ -1690,7 +1738,7 @@ class TestWorkerOrphanRecovery:
             kwargs_json='{"seconds": 60}',
             timeout_seconds=5,
             started_at=datetime.now(UTC) - timedelta(seconds=10),
-            claimed_by_worker="recovery-worker",
+            claimed_by_worker=cmd.worker_id,
             ray_job_id="raysubmit_timeout_success_001",
             ray_address="ray://cluster:10001",
         )
@@ -1703,7 +1751,7 @@ class TestWorkerOrphanRecovery:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        self._make_command().detect_stuck_tasks()
+        cmd.detect_stuck_tasks()
 
         task.refresh_from_db()
         assert stop_calls == ["raysubmit_timeout_success_001"]
@@ -1714,6 +1762,7 @@ class TestWorkerOrphanRecovery:
         """A rejected stop request remains visible on the timed-out task."""
         from datetime import datetime, timedelta
 
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-timeout-ray-job-failure-001",
             callable_path="testproject.tasks.slow_task",
@@ -1723,7 +1772,7 @@ class TestWorkerOrphanRecovery:
             kwargs_json='{"seconds": 60}',
             timeout_seconds=5,
             started_at=datetime.now(UTC) - timedelta(seconds=10),
-            claimed_by_worker="recovery-worker",
+            claimed_by_worker=cmd.worker_id,
             ray_job_id="raysubmit_timeout_failure_001",
         )
 
@@ -1733,7 +1782,7 @@ class TestWorkerOrphanRecovery:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        self._make_command().detect_stuck_tasks()
+        cmd.detect_stuck_tasks()
 
         task.refresh_from_db()
         assert task.state == TaskState.FAILED
@@ -1745,6 +1794,7 @@ class TestWorkerOrphanRecovery:
         """A completion winning during stop is not replaced by timeout failure."""
         from datetime import datetime, timedelta
 
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-timeout-ray-job-race-001",
             callable_path="testproject.tasks.slow_task",
@@ -1754,7 +1804,7 @@ class TestWorkerOrphanRecovery:
             kwargs_json='{"seconds": 60}',
             timeout_seconds=5,
             started_at=datetime.now(UTC) - timedelta(seconds=10),
-            claimed_by_worker="recovery-worker",
+            claimed_by_worker=cmd.worker_id,
             ray_job_id="raysubmit_timeout_race_001",
         )
 
@@ -1769,7 +1819,7 @@ class TestWorkerOrphanRecovery:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        self._make_command().detect_stuck_tasks()
+        cmd.detect_stuck_tasks()
 
         task.refresh_from_db()
         assert task.state == TaskState.SUCCEEDED
@@ -1777,6 +1827,7 @@ class TestWorkerOrphanRecovery:
 
     def test_timeout_does_not_overwrite_running_completion_publication(self, monkeypatch):
         """Entrypoint publication fences timeout even before terminal consumption."""
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-timeout-ray-job-completion-publication-race-001",
             callable_path="testproject.tasks.slow_task",
@@ -1786,7 +1837,7 @@ class TestWorkerOrphanRecovery:
             kwargs_json='{"seconds": 60}',
             timeout_seconds=5,
             started_at=datetime.now(UTC) - timedelta(seconds=10),
-            claimed_by_worker="recovery-worker",
+            claimed_by_worker=cmd.worker_id,
             ray_job_id="raysubmit_timeout_completion_publication_race_001",
         )
         completion_data = '{"success": true, "result": 42}'
@@ -1798,7 +1849,7 @@ class TestWorkerOrphanRecovery:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        self._make_command().detect_stuck_tasks()
+        cmd.detect_stuck_tasks()
 
         task.refresh_from_db()
         assert task.state == TaskState.RUNNING
@@ -1809,6 +1860,7 @@ class TestWorkerOrphanRecovery:
     def test_timeout_skips_completion_published_before_detection(self, monkeypatch):
         """A preexisting terminal envelope belongs to reconciliation, not timeout."""
         completion_data = '{"success": true, "result": 42}'
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-timeout-ray-job-preexisting-completion-001",
             callable_path="testproject.tasks.slow_task",
@@ -1818,7 +1870,7 @@ class TestWorkerOrphanRecovery:
             kwargs_json='{"seconds": 60}',
             timeout_seconds=5,
             started_at=datetime.now(UTC) - timedelta(seconds=10),
-            claimed_by_worker="recovery-worker",
+            claimed_by_worker=cmd.worker_id,
             ray_job_id="raysubmit_timeout_preexisting_completion_001",
             completion_data=completion_data,
         )
@@ -1829,7 +1881,7 @@ class TestWorkerOrphanRecovery:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", UnexpectedRunner)
 
-        self._make_command().detect_stuck_tasks()
+        cmd.detect_stuck_tasks()
 
         task.refresh_from_db()
         assert task.state == TaskState.RUNNING
@@ -1841,6 +1893,7 @@ class TestWorkerOrphanRecovery:
         """Ray Core timeout handling must not call the Ray Job API."""
         from datetime import datetime, timedelta
 
+        cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-timeout-ray-core-001",
             callable_path="testproject.tasks.slow_task",
@@ -1850,7 +1903,7 @@ class TestWorkerOrphanRecovery:
             kwargs_json='{"seconds": 60}',
             timeout_seconds=5,
             started_at=datetime.now(UTC) - timedelta(seconds=10),
-            claimed_by_worker="recovery-worker",
+            claimed_by_worker=cmd.worker_id,
             ray_job_id="02000000:01000000",
         )
         cancelled: list[str] = []
@@ -1877,11 +1930,10 @@ class TestWorkerOrphanRecovery:
             def get_pending_handle(self, *_args, **_kwargs):
                 return self.pending_handle
 
-            def cancel_pending(self, handle):
+            def cancel_pending_with_status(self, handle):
                 cancelled.append(f"ray_core:{handle.task_pk}")
-                return True
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
 
-        cmd = self._make_command()
         cmd.ray_core_runner = FakeCoreRunner()
         cmd.active_tasks = {task.pk: "02000000:01000000"}
 
@@ -1909,6 +1961,7 @@ class TestWorkerResultStorage:
         cmd.worker_id = "result-worker"
         cmd.active_tasks = {}
         cmd.sync_mode = False
+        _acquire_test_lease(cmd)
         return cmd
 
     def test_sync_mode_stores_oversized_result_as_reference(self, monkeypatch):

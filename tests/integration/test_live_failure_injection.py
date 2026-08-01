@@ -96,12 +96,13 @@ def _make_live_command(worker_id: str = "live-failure-worker") -> Command:
     cmd = Command()
     cmd.stdout = StringIO()
     cmd.style = cmd.style
-    cmd.worker_id = worker_id
+    cmd._set_worker_id(worker_id)
     cmd.execution_mode = "local" if LIVE_RAY_ADDRESS == "auto" else "cluster"
     cmd.cluster_address = None if LIVE_RAY_ADDRESS == "auto" else LIVE_RAY_ADDRESS
     cmd.sync_mode = False
     cmd.active_tasks = {}
     cmd.ray_core_runner = RayCoreRunner()
+    cmd._create_lease("default")
     return cmd
 
 
@@ -178,6 +179,7 @@ class TestLiveFailureInjection:
 
     def test_disconnect_retries_pending_ray_core_task(self, live_ray_cluster):
         """Client disconnect should trigger retry path for tracked pending tasks."""
+        cmd = _make_live_command()
         task = RayTaskExecution.objects.create(
             task_id="live-fi-disconnect-001",
             callable_path="time.sleep",
@@ -186,10 +188,9 @@ class TestLiveFailureInjection:
             args_json="[30]",
             kwargs_json="{}",
             attempt_number=1,
-            claimed_by_worker="live-failure-worker",
+            claimed_by_worker=cmd.worker_id,
         )
 
-        cmd = _make_live_command()
         object_ref = _submit_live_sleep_task(live_ray_cluster, sleep_seconds=30)
         cmd.ray_core_runner._pending_tasks[task.pk] = RayCoreHandle(
             task_pk=task.pk,
@@ -212,6 +213,7 @@ class TestLiveFailureInjection:
 
     def test_cancellation_finalizes_live_pending_task(self, live_ray_cluster):
         """Cancelling a live pending Ray Core task should finalize CANCELLED state."""
+        cmd = _make_live_command()
         task = RayTaskExecution.objects.create(
             task_id="live-fi-cancel-001",
             callable_path="time.sleep",
@@ -221,10 +223,9 @@ class TestLiveFailureInjection:
             kwargs_json="{}",
             attempt_number=1,
             started_at=datetime.now(UTC),
-            claimed_by_worker="live-failure-worker",
+            claimed_by_worker=cmd.worker_id,
         )
 
-        cmd = _make_live_command()
         object_ref = _submit_live_sleep_task(live_ray_cluster, sleep_seconds=30)
         cmd.ray_core_runner._pending_tasks[task.pk] = RayCoreHandle(
             task_pk=task.pk,

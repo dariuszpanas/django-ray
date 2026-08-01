@@ -6,6 +6,7 @@ import json
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from io import StringIO
 from types import SimpleNamespace
 from typing import cast
@@ -24,6 +25,16 @@ from django_ray.management.commands.django_ray_benchmark_polling import (
     _ThreadMetrics,
     _WorkerGroup,
 )
+from django_ray.runner.leasing import WorkerLeaseIdentity
+
+
+def _lease_identity(worker_id: str) -> WorkerLeaseIdentity:
+    return WorkerLeaseIdentity(
+        worker_id=worker_id,
+        hostname="benchmark-host",
+        pid=123,
+        started_at=datetime.now(UTC),
+    )
 
 
 def _options(**overrides: object) -> dict[str, object]:
@@ -76,6 +87,7 @@ def _group(
             errors=[],
             lock=threading.Lock(),
         ),
+        lease_identities=[_lease_identity("benchmark-test-0")],
     )
 
 
@@ -301,9 +313,10 @@ def test_idle_latency_phase_snapshots_idle_sql_and_claims_spaced_tasks(monkeypat
         on_claim(SimpleNamespace(task_id=task_id))
 
     monkeypatch.setattr(command, "_create_execution", create)
-    fake_queryset = SimpleNamespace(delete=lambda: deleted.append(True))
     monkeypatch.setattr(
-        benchmark.RayTaskExecution.objects, "filter", lambda **_kwargs: fake_queryset
+        command,
+        "_cleanup_phase_rows",
+        lambda **_kwargs: deleted.append(True),
     )
 
     idle_metrics, latencies, idle_elapsed = command._run_idle_and_latency_phase(
@@ -341,7 +354,7 @@ def test_idle_latency_phase_reports_worker_error_and_timeout(monkeypatch) -> Non
     monkeypatch.setattr(command, "_release_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_stop_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_assert_claim_integrity", lambda **_kwargs: None)
-    monkeypatch.setattr(benchmark.RayTaskExecution.objects, "filter", lambda **_kwargs: Mock())
+    monkeypatch.setattr(command, "_cleanup_phase_rows", lambda **_kwargs: None)
 
     with pytest.raises(CommandError, match="worker failed"):
         command._run_idle_and_latency_phase(
@@ -372,7 +385,7 @@ def test_idle_latency_phase_reports_claim_timeout(monkeypatch) -> None:
     monkeypatch.setattr(command, "_release_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_stop_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_create_execution", lambda **_kwargs: None)
-    monkeypatch.setattr(benchmark.RayTaskExecution.objects, "filter", lambda **_kwargs: Mock())
+    monkeypatch.setattr(command, "_cleanup_phase_rows", lambda **_kwargs: None)
     monkeypatch.setattr(threading.Event, "wait", lambda _self, _timeout=None: False)
 
     with pytest.raises(CommandError, match="latency phase claimed 0/1"):
@@ -410,9 +423,10 @@ def test_throughput_phase_measures_preloaded_burst(monkeypatch) -> None:
     monkeypatch.setattr(command, "_release_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_stop_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_assert_claim_integrity", lambda **_kwargs: None)
-    fake_queryset = SimpleNamespace(delete=lambda: deleted.append(True))
     monkeypatch.setattr(
-        benchmark.RayTaskExecution.objects, "filter", lambda **_kwargs: fake_queryset
+        command,
+        "_cleanup_phase_rows",
+        lambda **_kwargs: deleted.append(True),
     )
 
     throughput = command._run_throughput_phase(
@@ -439,7 +453,7 @@ def test_throughput_phase_reports_timeout(monkeypatch) -> None:
     monkeypatch.setattr(command, "_release_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_stop_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_assert_claim_integrity", lambda **_kwargs: None)
-    monkeypatch.setattr(benchmark.RayTaskExecution.objects, "filter", lambda **_kwargs: Mock())
+    monkeypatch.setattr(command, "_cleanup_phase_rows", lambda **_kwargs: None)
     monkeypatch.setattr(threading.Event, "wait", lambda _self, _timeout=None: False)
 
     with pytest.raises(CommandError, match="throughput phase claimed 0/1"):
@@ -468,10 +482,23 @@ def test_start_workers_runs_production_claim_under_sql_wrapper(monkeypatch) -> N
             yield
 
     fake_connection = FakeConnection()
+    heartbeat_calls: list[bool] = []
 
     class FakeWorker:
         def __init__(self) -> None:
             self.process_task = None
+            self.lease_identity = None
+
+        def _set_worker_id(self, worker_id: str) -> None:
+            assert worker_id == "benchmark-queue-0"
+
+        def _create_lease(self, queue_name: str) -> None:
+            assert queue_name == "queue"
+            self.lease_identity = _lease_identity("regenerated-benchmark-worker")
+
+        def _update_lease_heartbeat(self) -> bool:
+            heartbeat_calls.append(True)
+            return True
 
         def claim_and_process_tasks(self, _queues, concurrency):
             assert concurrency == 1
@@ -508,6 +535,59 @@ def test_start_workers_runs_production_claim_under_sql_wrapper(monkeypatch) -> N
     command._stop_workers(group, max_interval=0.05)
     assert group.metrics.sql_query_times_by_worker[0]
     assert group.metrics.claim_query_times_by_worker[0]
+    assert group.lease_identities[0] is not None
+    assert group.lease_identities[0].worker_id == "regenerated-benchmark-worker"
+    assert heartbeat_calls
+
+
+def test_benchmark_worker_fails_closed_before_claim_after_lease_loss(monkeypatch) -> None:
+    command = Command()
+
+    class FakeConnection:
+        @contextmanager
+        def execute_wrapper(self, _observer):
+            yield
+
+    class LeaseLostWorker:
+        def __init__(self) -> None:
+            self.lease_identity = None
+
+        def _set_worker_id(self, _worker_id: str) -> None:
+            return
+
+        def _create_lease(self, _queue_name: str) -> None:
+            self.lease_identity = _lease_identity("benchmark-lost-worker")
+
+        def _update_lease_heartbeat(self) -> bool:
+            self.shutdown_requested = True
+            return False
+
+        def claim_and_process_tasks(self, _queues, _concurrency):
+            pytest.fail("a benchmark worker with a lost lease must not claim")
+
+    monkeypatch.setattr(benchmark, "connection", FakeConnection())
+    monkeypatch.setattr(benchmark, "WorkerCommand", LeaseLostWorker)
+    monkeypatch.setattr(benchmark, "close_old_connections", lambda: None)
+
+    group = command._start_workers(
+        phase="latency",
+        policy_name="adaptive",
+        workers=1,
+        queue_name="queue",
+        on_claim=lambda _task: None,
+        base_interval=0.01,
+        max_interval=0.05,
+        jitter_ratio=0.2,
+        barrier_timeout=1.0,
+        seed=53,
+    )
+    command._release_workers(group, barrier_timeout=1.0)
+    group.threads[0].join(timeout=1.0)
+
+    assert group.metrics.errors == [
+        "worker 0: RuntimeError: benchmark worker lease ownership was lost"
+    ]
+    command._stop_workers(group, max_interval=0.05)
 
 
 def test_start_workers_reports_constructor_and_thread_start_failures(monkeypatch) -> None:
@@ -537,6 +617,7 @@ def test_start_workers_reports_constructor_and_thread_start_failures(monkeypatch
         command._raise_worker_error(group, "adaptive")
     command._stop_workers(group, max_interval=0.05)
 
+    monkeypatch.setattr(benchmark.TaskWorkerLease.objects, "filter", Mock())
     monkeypatch.setattr(threading.Thread, "start", Mock(side_effect=RuntimeError("no thread")))
     with pytest.raises(CommandError, match="could not start benchmark workers"):
         command._start_workers(
@@ -569,6 +650,15 @@ def test_worker_startup_barrier_and_abort_errors_are_contained(monkeypatch) -> N
 
     monkeypatch.setattr(benchmark.threading, "Barrier", BrokenBarrier)
     monkeypatch.setattr(benchmark, "close_old_connections", lambda: None)
+    monkeypatch.setattr(
+        benchmark.WorkerCommand,
+        "_create_lease",
+        lambda worker, _queue: setattr(
+            worker,
+            "lease_identity",
+            _lease_identity(worker.worker_id),
+        ),
+    )
     group = command._start_workers(
         phase="latency",
         policy_name="adaptive",
@@ -631,6 +721,7 @@ def test_partial_thread_start_failure_joins_started_threads(monkeypatch) -> None
             joined.append(self.name)
 
     monkeypatch.setattr(benchmark.threading, "Thread", FakeThread)
+    monkeypatch.setattr(benchmark.TaskWorkerLease.objects, "filter", Mock())
 
     with pytest.raises(CommandError, match="second thread failed"):
         command._start_workers(
@@ -676,6 +767,59 @@ def test_create_execution_uses_realistic_payload(monkeypatch) -> None:
     )
 
 
+@pytest.mark.django_db
+def test_cleanup_deletes_only_exact_acquired_lease_identity() -> None:
+    acquired = benchmark.TaskWorkerLease.objects.create(
+        worker_id="regenerated-benchmark-worker",
+        hostname="acquired-host",
+        pid=123,
+        queue_name="benchmark-queue",
+    )
+    acquired_identity = WorkerLeaseIdentity(
+        worker_id=str(acquired.worker_id),
+        hostname=acquired.hostname,
+        pid=acquired.pid,
+        started_at=acquired.started_at,
+    )
+    foreign_prefix = benchmark.TaskWorkerLease.objects.create(
+        worker_id="benchmark-queue-foreign",
+        hostname="foreign-host",
+        pid=456,
+        queue_name="benchmark-queue",
+    )
+    benchmark.RayTaskExecution.objects.create(
+        task_id="poll-cleanup-owned-001",
+        callable_path="django_ray.benchmarks.polling_probe",
+        queue_name="benchmark-queue",
+        state=benchmark.TaskState.QUEUED,
+        args_json="[]",
+        kwargs_json="{}",
+    )
+
+    Command._cleanup_phase_rows(
+        task_prefix="poll-cleanup-owned-",
+        lease_identities=[acquired_identity],
+    )
+
+    assert not benchmark.RayTaskExecution.objects.filter(task_id="poll-cleanup-owned-001").exists()
+    assert not benchmark.TaskWorkerLease.objects.filter(
+        **acquired_identity.database_filters()
+    ).exists()
+    assert benchmark.TaskWorkerLease.objects.filter(pk=foreign_prefix.pk).exists()
+
+    replacement = benchmark.TaskWorkerLease.objects.create(
+        worker_id=acquired_identity.worker_id,
+        hostname="replacement-host",
+        pid=999,
+        queue_name="benchmark-queue",
+    )
+    Command._delete_exact_leases([acquired_identity])
+
+    replacement.refresh_from_db()
+    assert replacement.hostname == "replacement-host"
+    assert replacement.is_active is True
+
+
 def test_claim_integrity_reports_exact_counts(monkeypatch) -> None:
     rows = Mock()
     rows.count.return_value = 2
@@ -689,6 +833,7 @@ def test_claim_integrity_reports_exact_counts(monkeypatch) -> None:
         Command._assert_claim_integrity(
             task_prefix="poll-",
             claimed_task_ids=["duplicate", "duplicate"],
+            worker_ids={"benchmark-worker"},
             expected_count=2,
             phase="fixed latency",
         )
