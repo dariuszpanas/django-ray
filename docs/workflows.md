@@ -16,9 +16,14 @@ execution strategies while preserving this public API.
 
 ## Requirements
 
-Ray Core is the lowest-latency production path. Ray Job mode also supports workflows:
-its isolated driver connects back to Ray lazily before submitting leaves. Local
-execution is available for sync workers and unit tests.
+Cluster Ray Core is the lowest-latency remote path for bounded workflows while the
+task-manager Ray Client connection remains part of the workload lifetime. A disconnect
+beyond Ray's reconnect grace period terminates its in-flight work; an outer retry
+replays the workflow rather than resuming completed leaves. Ray Job mode also supports
+workflows and is the safer starting point for long or coarse work that must continue
+independently of the submitting connection: its isolated driver connects back to Ray
+lazily before submitting leaves. Local execution is available for sync workers and
+unit tests. See [worker execution modes](worker-modes.md#cluster-ray-core).
 
 ```python
 DJANGO_RAY = {
@@ -820,9 +825,11 @@ The outer Django task is the durability and retry boundary:
   dependency edges, percent complete, explicit leaf progress, Ray execution IDs,
   runtime environment identity, and recent events.
 - A leaf failure fails the outer task.
-- Retrying the outer task reruns the workflow from its entry, including previously
-  completed leaves. Workflow progress is diagnostic evidence, not a checkpoint or
-  selective-resume record, and normalized node detail does not retain leaf return values.
+- Retrying the outer task reruns the workflow from its entry node, including previously
+  completed leaves. Workflow progress, successful nodes, and output previews are
+  diagnostic evidence, not checkpoints, reusable results, selective-resume records, or
+  authorization to skip an external side effect. Normalized node detail does not retain
+  leaf return values.
 - `TaskAttempt` archives terminal task diagnostics, not workflow graphs. If a run has
   already published a canonical terminal schema-v3 summary, the same bounded value is
   archived with its attempt before retry cleanup. Otherwise, lifecycle reconciliation
@@ -899,9 +906,18 @@ An identified context whose attempt or execution generation is stale is differen
 plan claim fails closed before local application code, progress actors, or Ray leaves
 can run.
 
-Use idempotent steps when retries can repeat external side effects. Durable stage
-checkpoints remain a planned extension. Progress is observational rather than a
-recovery log: after a cluster loss, the outer task retry remains the recovery boundary.
+Use pure or idempotent steps when retries can repeat external side effects. An external
+operation should receive a stable application idempotency key and return a durable
+receipt; a database-only record cannot atomically cover a remote side effect. Split a
+side-effecting stage into a separate Django task when it needs an independent durable
+retry, result, cancellation, or audit boundary.
+
+Durable selective stage resume remains a planned extension. It requires verified
+intermediate outputs and side-effect receipts bound to the plan, inputs, code,
+RuntimeEnv, and retry identity. Progress and future node-output previews are
+observational rather than recovery logs: after a cluster loss, the outer task retry
+remains the recovery boundary. Never infer that an external effect is safe to skip or
+repeat solely from the node color or terminal state.
 
 ## Test Project Examples
 

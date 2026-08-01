@@ -56,7 +56,10 @@ DJANGO_RAY = {
 
 `TASKS` tells Django where to enqueue work. `DJANGO_RAY` configures the worker that
 claims it. For a remote cluster, use a Ray Client address such as
-`ray://ray-head.example:10001`.
+`ray://ray-head.example:10001` only for bounded, low-latency work whose lifetime
+includes the task manager's client connection. See the
+[worker execution modes](worker-modes.md#cluster-ray-core) before choosing it for
+production work.
 
 Apply the database migrations:
 
@@ -116,6 +119,41 @@ if current.status == TaskResultStatus.SUCCESSFUL:
 `TaskResult` does not poll in the background. Call the backend's `get_result()` again
 when a UI, API, or management command needs the current state.
 
+## Before Production
+
+> **Before production:** make these decisions explicitly.
+>
+> - Execution is not exactly once. Queued work can expire or be cancelled before
+>   application code runs, while work that starts may repeat after lost completion
+>   evidence. Make externally visible side effects idempotent. See
+>   [Retry and Error Handling](retry.md#make-side-effects-idempotent).
+> - A Ray-native workflow retry starts again at its entry node; successful internal
+>   leaves are not durable checkpoints. Keep leaves pure or idempotent, and use separate
+>   durable tasks for side-effecting stages that need independent recovery. See
+>   [Workflow retries](retry.md#workflow-retries).
+> - When work depends on a database transaction, enqueue it with
+>   `transaction.on_commit()`. See
+>   [Enqueue after a database commit](tasks.md#enqueue-after-a-database-commit).
+> - `run_after` is the earliest eligibility time for one submission, not an exact start
+>   time or a periodic scheduler.
+> - Use PostgreSQL for production. SQLite is only supported for local walkthroughs and
+>   tests.
+> - Every queue selected by a producer must have a matching running task manager. See
+>   [Working with Queues](queues.md#run-queue-specific-workers).
+> - Queued work expires after 24 hours by default, measured from its eligibility time.
+>   Choose each backend's queue-wait budget deliberately; use an unlimited queue only
+>   with idempotent tasks, backlog alerts, and a drain or discard policy. See
+>   [Queue expiration](tasks.md#queue-expiration).
+> - Cluster Ray Core uses Ray Client. Losing its task-manager connection beyond Ray's
+>   reconnect grace period terminates in-flight Ray work; an outer django-ray retry is
+>   a replay, not a resume. Prefer Ray Job mode for long or coarse execution that must
+>   continue independently of that connection. See
+>   [Cluster Ray Core](worker-modes.md#cluster-ray-core).
+>
+> Review [Defining Tasks](tasks.md), [Retry and Error Handling](retry.md), and the
+> workflow [durability semantics](workflows.md#durability-semantics) before moving a
+> side-effecting workload into production.
+
 ## A Real Django Task
 
 Tasks may use the ORM normally. This example uses only Django APIs and assumes the
@@ -159,6 +197,8 @@ failed = RayTaskExecution.objects.filter(state=TaskState.FAILED)
 ## Next Steps
 
 - [Tasks](tasks.md) for arguments, results, and error behavior
+- [Migrating from Celery](celery-migration.md) for workload classification,
+  coexistence, and safe drain
 - [Performance](performance.md) for task granularity and mode selection
 - [Ray-Native Workflows](workflows.md) for chain, group, and fan-out
 - [Runtime Environments](runtime-environments.md) for per-task dependencies

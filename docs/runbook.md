@@ -95,10 +95,11 @@ global groups sparingly or supply an object-permission backend for tenant-scoped
 
 ## Safety Model
 
-Treat production tasks as at-least-once by default. `django-ray` can retry after app exceptions,
-lost worker ownership, Ray connection loss, and unknown completion state. That protects throughput
-and recovery, but it cannot prove that a crashed or disconnected attempt made no external side
-effects before disappearing.
+Treat started production work as replayable, not exactly once. Queued work can expire or
+be cancelled before application code begins. `django-ray` can retry started work after
+application exceptions, lost worker ownership, Ray connection loss, and unknown
+completion state. That protects throughput and recovery, but it cannot prove that a
+crashed or disconnected attempt made no external side effects before disappearing.
 
 Before enabling automatic retries on side-effecting callables, confirm the task has an idempotency
 key or operation table that makes duplicate execution harmless. For payments, emails, webhooks, or

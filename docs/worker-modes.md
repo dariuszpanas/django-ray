@@ -9,7 +9,7 @@ execution mode determines how that work reaches Ray.
 |---|---|---|---|
 | Sync | `--sync` | Tests and debugging | Lowest |
 | Local Ray Core | `--local` | Development and one-machine execution | Low after Ray starts |
-| Cluster Ray Core | `--cluster=ray://host:10001` | Low-latency production workflows | Low |
+| Cluster Ray Core | `--cluster=ray://host:10001` | Bounded low-latency workflows with a connection-owned lifetime | Low |
 | Ray Job | no mode flag with `RUNNER="ray_job"` | Isolated, coarse jobs | Highest |
 
 If `RUNNER="ray_core"` and no mode flag is supplied, `RAY_ADDRESS="auto"` selects
@@ -59,8 +59,24 @@ python manage.py django_ray_worker \
 
 The task manager submits functions through Ray Client. Worker processes are reused,
 workflow leaves exchange object references directly, and there is no separate Ray Job
-driver per durable task. This is normally the best production mode for short tasks,
-high throughput, and multi-stage workflows.
+driver per durable task. This is the lowest-overhead remote mode for bounded short
+tasks, high throughput, and multi-stage workflows when the task-manager connection is
+operated as part of the workload lifetime.
+
+Ray Client is not an independent job lifecycle. An unexpected disconnect receives a
+30-second reconnect grace period by default; Ray's
+`RAY_CLIENT_RECONNECT_GRACE_PERIOD` environment variable can change it. If the task
+manager cannot reconnect, Ray drops that client's references and documents the result
+as terminating its in-flight workload. django-ray retains the outer database row and
+can reconcile or retry it, but retry starts a new attempt: it does not resume completed
+leaves, prove an external side effect did not happen, or roll anything back. Keep the
+task-manager connection stable, bound the work, and make effects idempotent. Ray's own
+[Ray Client guidance](https://docs.ray.io/en/latest/cluster/running-applications/job-submission/ray-client.html)
+recommends Ray Jobs for long-running work and documents architectural limitations for
+Train and Tune over Ray Client. django-ray has not validated Train, Tune, RLlib, or
+other component-owned lifecycles on this transport. Keep them off Ray Client unless
+their own integration evidence establishes the complete lifecycle; use an
+application-owned Ray Job or the component's normal operator instead.
 
 ## Ray Job
 
@@ -73,8 +89,11 @@ Job Submission API and gets an isolated driver process. Ray-native workflows are
 supported: the driver connects back to its Ray cluster when it starts submitting
 leaves.
 
-Choose Ray Job when driver isolation, independent logs, or coarse job lifecycle is
-more valuable than startup latency. Avoid it for thousands of tiny tasks.
+Choose Ray Job when driver isolation, independent logs, a long or coarse job lifecycle,
+or execution independent of the submitting task-manager connection is more valuable
+than startup latency. An accepted Ray Job still does not survive every driver or
+cluster failure; its application checkpoints and outer retry contract remain explicit.
+Avoid it for thousands of tiny tasks.
 
 Coroutine tasks use the same encoded entrypoint and completion envelope as synchronous
 tasks. The isolated driver owns the per-task loop, and a Ray Job stop request terminates
@@ -126,8 +145,8 @@ For dependent stages and UI-visible graphs, prefer
 |---|---|
 | deterministic tests or stepping through Python | Sync |
 | development on one machine | Local Ray Core |
-| low-latency task and workflow submission | Cluster Ray Core |
-| process isolation for long, coarse jobs | Ray Job |
+| bounded low-latency work while the task-manager connection remains stable | Cluster Ray Core |
+| long/coarse work or a driver independent of the task-manager connection | Ray Job |
 
 Ray Core is the performance default. Ray Job is deliberately more expensive: choose it
 because isolation is worth the cost, not merely because it is the configuration

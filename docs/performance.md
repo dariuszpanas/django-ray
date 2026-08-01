@@ -17,13 +17,19 @@ Most performance decisions come down to choosing the correct durability boundary
 | Independent expensive items with one final result | `parallel_map()` inside one Django task | Small API and one durable boundary |
 | Multiple dependent fan-out/fan-in stages | `chain()`, `group()`, and `map_step()` | Ray-native dependencies plus graph/progress metadata |
 | Every item needs an independent retry, schedule, cancellation, or audit row | Separate Django tasks | Durability is worth the database traffic |
-| Short, high-throughput cluster work | Ray Core cluster mode | Reuses workers and avoids a driver per task |
-| Long job requiring driver isolation | Ray Job mode | Isolation is worth higher startup cost |
+| Short, high-throughput cluster work whose task manager stays connected | Ray Core cluster mode | Reuses workers and avoids a driver per task |
+| Long or coarse job requiring driver or submitter-lifetime isolation | Ray Job mode | Isolation is worth higher startup cost |
 | Different Python packages on one trusted cluster | Stable RuntimeEnv profiles | Avoids rebuilding the Ray image for every application version |
 | Large dependencies used by nearly every task | Base Ray image | Avoids node-local RuntimeEnv installation |
 
 Queues organize durable tasks; they do not replace Ray scheduling. RuntimeEnv packages
 code; it does not provide tenant security.
+
+Cluster Ray Core uses Ray Client, so the task-manager connection is part of the
+workload lifetime. A prolonged disconnect can terminate in-flight Ray work even though
+the outer Django task remains durable and may later be retried. Prefer Ray Job when
+execution must continue independently of that submitting connection, and keep external
+effects idempotent in either mode.
 
 ## Pick Useful Task Granularity
 

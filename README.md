@@ -23,15 +23,24 @@ Django projects often need background task execution. While Celery has been the 
 - **Horizontal scaling**: Scale from a single machine to thousands of nodes without changing your code
 - **Resource-aware scheduling**: Request specific CPU, GPU, or memory for tasks
 - **Actor model support**: Maintain stateful workers when needed
-- **Rich ecosystem**: Access to Ray's ML libraries, data processing, and more
+- **Ray ecosystem compatibility**: Integrate Ray Data, Train, Tune, RLlib, or Serve in
+  application-owned code where appropriate; django-ray 0.4 provides durable tasks and workflows,
+  not first-class adapters for those components
 
 Despite Ray's capabilities, there was no straightforward way to use it with Django's built-in Tasks framework. django-ray bridges this gap, letting you leverage Ray's distributed computing power while keeping Django's familiar patterns and database-backed reliability.
+
+Moving an existing workload? Use
+[Migrating from Celery](https://django-ray.readthedocs.io/en/latest/celery-migration/) to classify
+semantic gaps, run both backends during adoption, and prove the old queue is drained.
 
 ## Overview
 
 django-ray bridges Django's built-in Tasks framework with Ray's distributed computing capabilities, providing:
 
-- **Database-backed reliability**: Task state is tracked in your Django database, ensuring no tasks are lost
+- **Durable visibility and recovery**: Task state remains in your Django database so workers and
+  operators can reconcile lost or stuck execution; queued work can expire or be cancelled before
+  it starts, while work that does start may be replayed after uncertain completion, so side effects
+  must be idempotent
 - **Multiple execution modes**: Sync, local Ray, Ray cluster, or Ray Job API
 - **Coroutine tasks**: Await Django async task functions consistently in every mode
 - **Automatic retries**: Failed tasks are retried with exponential backoff
@@ -91,7 +100,7 @@ TASKS = {
 }
 
 DJANGO_RAY = {
-    "RAY_ADDRESS": "auto",  # Use "ray://host:port" for a remote cluster
+    "RAY_ADDRESS": "auto",  # Use "ray://host:port" for bounded remote Ray Core work
     "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 10,
     "MAX_TASK_ATTEMPTS": 3,
@@ -104,18 +113,53 @@ DJANGO_RAY = {
 python manage.py migrate django_ray
 ```
 
-4. Start the worker:
+4. Define a task in `myapp/tasks.py`:
+
+```python
+from django.tasks import task
+
+
+@task(queue_name="default")
+def add_numbers(left: int, right: int) -> int:
+    return left + right
+```
+
+5. In a separate terminal, start the worker:
 
 ```bash
 # Local Ray (recommended for development)
 python manage.py django_ray_worker --queue=default --local
 
-# Connect to Ray cluster
+# Connect through Ray Client for bounded, low-latency work
 python manage.py django_ray_worker --queue=default --cluster=ray://localhost:10001
 
 # Sync mode (no Ray, for testing)
 python manage.py django_ray_worker --queue=default --sync
 ```
+
+6. Enqueue the task from `python manage.py shell`:
+
+```python
+from myapp.tasks import add_numbers
+
+enqueued = add_numbers.enqueue(20, 22)
+print(enqueued.id)
+```
+
+After the worker reports completion, refresh the durable result in the same shell:
+
+```python
+from django.tasks import TaskResultStatus, task_backends
+
+current = task_backends["default"].get_result(enqueued.id)
+if current.status == TaskResultStatus.SUCCESSFUL:
+    print(current.return_value)  # 42
+```
+
+The object returned by `enqueue()` is a snapshot; call `get_result()` again when you need current
+state. Continue with
+[Getting Started](https://django-ray.readthedocs.io/en/latest/getting-started/) for the complete
+walkthrough and its before-production checklist.
 
 ## Worker Execution Modes
 
@@ -123,8 +167,16 @@ python manage.py django_ray_worker --queue=default --sync
 |------|------|-------------|
 | **sync** | `--sync` | Direct execution, no Ray (testing) |
 | **local** | `--local` | Local Ray cluster, tasks via `@ray.remote` |
-| **cluster** | `--cluster=<addr>` | Remote Ray cluster, tasks via `@ray.remote` |
+| **cluster** | `--cluster=<addr>` | Bounded low-latency work through Ray Client |
 | **ray-job** | *(default)* | Ray Job Submission API (process isolation) |
+
+Cluster mode is tied to the task manager's Ray Client connection. If that connection
+is lost beyond Ray's reconnect grace period, Ray terminates its in-flight workload;
+django-ray can reconcile and retry the outer task, but it does not resume completed
+workflow leaves or roll back side effects. Use idempotent work and prefer Ray Job mode
+for long or coarse execution that must continue independently of the submitting
+connection. See Ray's
+[Ray Client lifetime guidance](https://docs.ray.io/en/latest/cluster/running-applications/job-submission/ray-client.html).
 
 ## Configuration
 
@@ -141,15 +193,15 @@ python manage.py django_ray_worker --queue=default --sync
 | `DEFAULT_RUNTIME_ENV_PROFILE` | `None` | Default named environment |
 | `MAX_INLINE_INPUT_SIZE_BYTES` | `None` | Opt-in durable input spillover threshold |
 
-See [Ray-Native Workflows](docs/workflows.md) for low-latency `chain`, `group`,
+See [Ray-Native Workflows](https://django-ray.readthedocs.io/en/latest/workflows/) for low-latency `chain`, `group`,
 and `map_step` execution.
-See [Runtime Environments](docs/runtime-environments.md) for per-task profiles,
+See [Runtime Environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/) for per-task profiles,
 workflow overrides, and generic KubeRay images.
-See [Performance](docs/performance.md) for choosing durable task boundaries,
+See [Performance](https://django-ray.readthedocs.io/en/latest/performance/) for choosing durable task boundaries,
 execution modes, and useful fan-out granularity.
-See [Durable Input Storage](docs/reference/input-storage.md) for oversized JSON
+See [Durable Input Storage](https://django-ray.readthedocs.io/en/latest/reference/input-storage/) for oversized JSON
 arguments, storage backends, rollout, and retention.
-See [Defining Tasks](docs/tasks.md#coroutine-tasks) for async task and ORM safety
+See [Defining Tasks](https://django-ray.readthedocs.io/en/latest/tasks/#coroutine-tasks) for async task and ORM safety
 guidance.
 
 ## Development Setup
@@ -275,7 +327,7 @@ docker compose --profile smoke run --rm --no-deps smoke
 ```
 
 PowerShell, authenticated request, result-refresh, admin, and cleanup commands are in the
-[bundled testproject quickstart](testproject/README.md). The local Compose topology and its generated
+[bundled testproject quickstart](https://github.com/dariuszpanas/django-ray/blob/main/testproject/README.md). The local Compose topology and its generated
 credentials are not production hardening.
 
 ## Kubernetes Deployment
@@ -300,7 +352,7 @@ make k8s-deploy-tls
 ```
 
 
-See [k8s/README.md](k8s/README.md) for detailed deployment documentation.
+See [k8s/README.md](https://github.com/dariuszpanas/django-ray/blob/main/k8s/README.md) for detailed deployment documentation.
 
 ## Project Structure
 
@@ -339,7 +391,8 @@ Published docs are served with Zensical at:
 
 - https://django-ray.readthedocs.io/en/latest/
 
-Agents and documentation tools can start with [`llms.txt`](llms.txt). The published
+Agents and documentation tools can start with
+[`llms.txt`](https://django-ray.readthedocs.io/en/latest/llms.txt). The published
 documentation also serves `/llms.txt`.
 
 Read the Docs builds are configured in `.readthedocs.yaml`. The build installs `uv`, runs the
@@ -354,6 +407,8 @@ Source docs remain in the [`docs/`](https://github.com/dariuszpanas/django-ray/t
 - [Tasks](https://github.com/dariuszpanas/django-ray/blob/main/docs/tasks.md) - Defining and enqueueing tasks
 - [Queues](https://github.com/dariuszpanas/django-ray/blob/main/docs/queues.md) - Working with task queues
 - [Retry & Error Handling](https://github.com/dariuszpanas/django-ray/blob/main/docs/retry.md) - Configuring retries
+- [Migrating from Celery](https://github.com/dariuszpanas/django-ray/blob/main/docs/celery-migration.md) -
+  Classifying workloads, running both backends, and draining Celery safely
 
 ### Deployment
 
@@ -369,8 +424,9 @@ Source docs remain in the [`docs/`](https://github.com/dariuszpanas/django-ray/t
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for branch, commit, pull request, staging, and validation
-conventions. Automated contributors must also follow [`AGENTS.md`](AGENTS.md).
+See [`CONTRIBUTING.md`](https://github.com/dariuszpanas/django-ray/blob/main/CONTRIBUTING.md) for
+branch, commit, pull request, staging, and validation conventions. Automated contributors must also
+follow [`AGENTS.md`](https://github.com/dariuszpanas/django-ray/blob/main/AGENTS.md).
 
 ## Security
 

@@ -131,6 +131,32 @@ enqueued = send_email.using(queue_name="email").enqueue(
 The `email` queue must appear in the selected backend's `TASKS[alias]["QUEUES"]`
 configuration and a worker must consume it.
 
+### Enqueue after a database commit
+
+If a task depends on a row changed in the current transaction, enqueue it from
+`transaction.on_commit()`. Otherwise a fast worker can try to read the row before the
+transaction that produced it is visible:
+
+```python
+from functools import partial
+
+from django.db import transaction
+
+from myapp.tasks import send_email
+
+
+def enqueue_email_after_commit(to: str, subject: str, body: str) -> None:
+    transaction.on_commit(partial(send_email.enqueue, to=to, subject=subject, body=body))
+```
+
+The callback runs only after a successful commit, so it cannot provide a task result to
+code still inside the transaction. Pass stable identifiers rather than model instances.
+
+For a one-off deferred submission, provide an aware timestamp through
+`.using(run_after=...)`. `run_after` is the earliest time that submission is eligible to
+be claimed; it is not an exact start time, expiry, or periodic schedule. Use a separate
+scheduler to enqueue recurring work.
+
 ## Priority
 
 Django priorities are whole numbers from `-100` through `100`. Larger values run
@@ -228,8 +254,11 @@ still use bounded client timeouts and cancellation-safe cleanup.
 ## Queue expiration
 
 django-ray snapshots a 24-hour queued-wait budget by default. The budget begins at the
-later of enqueue/requeue time and `run_after`; at the exact absolute deadline the worker
-records terminal `EXPIRED` without submitting to Ray or automatically retrying. Configure
+later of enqueue/requeue time and `run_after`. At the deadline, the row becomes
+ineligible for a task claim. A live matching task manager records terminal `EXPIRED`
+during a subsequent bounded sweep, without submitting to Ray or automatically retrying.
+If the stack is offline, a due row can remain visibly `QUEUED` past its deadline, but it
+will not execute when the worker restarts; the sweep records it as `EXPIRED`. Configure
 one backend alias with `OPTIONS["QUEUE_TIMEOUT_SECONDS"]` as an integer from `1` through
 `2147483647`, or set it explicitly to `None` for intentionally durable work. Unlimited
 queues require idempotent tasks, backlog alerts, and an operator drain or discard policy.
