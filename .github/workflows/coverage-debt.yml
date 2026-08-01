@@ -41,6 +41,11 @@ jobs:
       - name: Add coverage-debt job summary
         if: always()
         run: |
+          if [ -f artifacts/coverage-debt/coverage-phases.md ]; then
+            cat artifacts/coverage-debt/coverage-phases.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Coverage-debt phase diagnostics were not produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -f artifacts/coverage-debt/coverage-debt.md ]; then
             cat artifacts/coverage-debt/coverage-debt.md >> "$GITHUB_STEP_SUMMARY"
           else
@@ -56,6 +61,11 @@ jobs:
             artifacts/coverage-debt/coverage.py.json
             artifacts/coverage-debt/coverage-debt.json
             artifacts/coverage-debt/coverage-debt.md
+            artifacts/coverage-debt/coverage-phases.json
+            artifacts/coverage-debt/coverage-phases.md
+            artifacts/coverage-debt/coverage-default-resources.log
+            artifacts/coverage-debt/coverage-local-ray.log
+            artifacts/coverage-debt/local-ray-timing.json
           if-no-files-found: warn
           retention-days: 30
 

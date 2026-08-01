@@ -204,13 +204,33 @@ tracker from a local checkout with:
 uv run make coverage-debt
 ```
 
-The target runs the normal `not live_cluster` suite, including tests marked `real_ray`, and reads the
-central coverage settings in `pyproject.toml`. It writes these ignored artifacts under
-`artifacts/coverage-debt/`:
+The target first runs the default-resource selection (`not real_ray and not live_cluster and not
+postgresql`) and then runs the manifest-owned `local-ray` lane serially with skips forbidden. The
+default-off `compiled_graph_opt_in` probe stays outside required hosted coverage. The local-Ray
+phase appends to the default-resource coverage data before the target applies the central global,
+worker, and Ray Job floors from `pyproject.toml`.
+
+Both subprocess trees are bounded: the default-resource phase has a 20-minute ceiling and the
+local-Ray phase has a 15-minute ceiling inside the unchanged 45-minute workflow limit. Override
+`COVERAGE_DEBT_DEFAULT_TIMEOUT_SECONDS` or `COVERAGE_DEBT_LOCAL_RAY_TIMEOUT_SECONDS` only for a
+focused investigation, and record the reason. Each phase retains at most 256 KiB of output, so a
+failure or timeout still leaves useful diagnostics rather than consuming the complete workflow.
+The runner continuously drains a bounded in-memory tail and counts discarded bytes; it never
+spools the phase's full output to disk. A passing local-Ray process without fresh, valid
+skip-forbidden timing evidence is a failed phase rather than a reportable success.
+Each launcher is retained in a POSIX process group or kill-on-close Windows Job. Descendants get a
+two-second orderly shutdown grace after the launcher exits; any survivor is terminated and fails
+the phase instead of keeping an inherited output pipe or hosted runner alive.
+The target writes these ignored artifacts under `artifacts/coverage-debt/`:
 
 - `coverage.py.json`: Coverage.py's source evidence;
 - `coverage-debt.json`: exact covered, missed, and statement totals plus every uncovered range;
-- `coverage-debt.md`: the same measurements and ranges in reviewable Markdown.
+- `coverage-debt.md`: the same measurements and ranges in reviewable Markdown;
+- `coverage-phases.json` and `coverage-phases.md`: phase selection, append mode, deadline, outcome,
+  and diagnostic locations, even when final report rendering cannot run;
+- `coverage-default-resources.log` and `coverage-local-ray.log`: capped phase-output tails;
+- `local-ray-timing.json`: source-fenced manifest evidence proving the exact selected cases,
+  successful outcomes, and the local-Ray lane's skip-forbidden contract.
 
 Files are sorted by missed lines. Every range receives the explicit per-file classification in
 `.github/coverage-debt-classifications.json`; narrow range overrides identify platform-owned paths.
@@ -235,8 +255,9 @@ is independently reviewable; the reporting workflow never creates issues or pull
 
 `.github/workflows/coverage-debt.yml` runs on Ubuntu and Python 3.12 on the first day of each month.
 Scheduled runs use the current default branch; manual dispatch is available after substantial
-runtime, workflow, or release changes. It uploads all three artifacts, appends the Markdown report to
-the job summary, and updates one bot-owned comment on the issue containing
+runtime, workflow, or release changes. It uploads reports plus bounded phase diagnostics, appends
+the phase summary and completed Markdown report to the job summary, and updates one bot-owned
+comment on the issue containing
 `<!-- django-ray:coverage-debt-tracker -->`. The updater scans all issues and fails before writing if
 the tracker marker or latest-report comment is duplicated. Its first run seeds current, previous, and
 high-water measurements; later runs move current to previous and retain the exact best ratio.
