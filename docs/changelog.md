@@ -63,6 +63,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact validation and reservation map projections, a non-fatal projector failure,
   and `UNAVAILABLE` output on the failed reservation leaf. Process-control exceptions
   continue to propagate across every diagnostic seam.
+- A bundled, application-owned Ray Data batch-job golden path now demonstrates one
+  coarse Ray Job from a server-rooted immutable JSON Lines input through a deterministic
+  bounded `map_batches()` transform to attempt-scoped Parquet output and a create-only
+  artifact manifest. Deployment identity plus the durable task UUID isolate databases
+  that share storage; output byte/file limits run before Parquet parsing and the exact
+  content identity is revalidated afterward. Same-attempt replay is immutable, later
+  retries use new namespaces, and missing, changed, linked, sidecar, or partial output
+  fails closed. The manifest is explicitly `artifact_complete`, not durable task
+  success: application adoption additionally requires the matching execution row to be
+  `SUCCEEDED`, which rejects the tested post-manifest failure window. The sample now has
+  a dedicated backend/queue enforced through default-off Ray Job worker affinity,
+  explicit `udf_modifying_row_count=False`, and a real management-worker probe on Ray
+  2.56 across supported-minimum and newest Python. The probe now injects a
+  post-manifest failure, observes django-ray archive and resubmit the durable task as a
+  second distinct Ray Job, rejects the first orphan, and adopts only the successful
+  fenced artifact. Retained Job metadata proves both successful outer transports while
+  archived Django attempts remain the application-level failure/success authority.
+  Documentation records the trusted-storage, immutable-input,
+  permissions, process-atomic publication, and non-power-loss-durable boundaries rather
+  than claiming database/filesystem atomicity, checkpoint/resume, or exactly-once.
 - Full-reporting workflow leaf invocations now keep at most one outstanding
   application-progress acknowledgement and one canonical latest-value replacement.
   Slow acknowledgements coalesce replaceable progress locally, leaf exit makes at most

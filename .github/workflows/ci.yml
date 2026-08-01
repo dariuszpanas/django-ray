@@ -640,6 +640,40 @@ jobs:
           uv run --no-sync --python ${{ matrix.python-version }}
           pytest -m "not live_cluster and not real_ray" -q
 
+  ray-data-golden-path:
+    if: github.event_name != 'pull_request_target'
+    name: Ray Data (${{ matrix.profile }}, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: supported-min-python
+            python-version: "3.12"
+            ray-version: "2.56.0"
+          - profile: newest-python
+            python-version: "3.14"
+            ray-version: "2.56.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Run the real Ray Data boundary
+        run: >-
+          uv run --isolated --no-project --python ${{ matrix.python-version }}
+          --with-editable ".[sample]"
+          --with "ray[data]==${{ matrix.ray-version }}"
+          python scripts/ray_data_golden_path_probe.py
+
   build:
     if: github.event_name != 'pull_request_target'
     name: Build Package
@@ -656,6 +690,7 @@ jobs:
         testproject,
         docker-compose-smoke,
         dependency-compatibility,
+        ray-data-golden-path,
       ]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -702,6 +737,7 @@ jobs:
       - testproject
       - docker-compose-smoke
       - dependency-compatibility
+      - ray-data-golden-path
       - build
     runs-on: ubuntu-latest
     steps:
@@ -731,6 +767,7 @@ jobs:
               "lint",
               "live-cluster",
               "postgresql-coordination",
+              "ray-data-golden-path",
               "test",
               "testproject",
               "typecheck",

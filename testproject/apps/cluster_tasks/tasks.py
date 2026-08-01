@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import hashlib
 import time
+from pathlib import Path
 from typing import Any, Literal
 
+from django.conf import settings
 from django.tasks import task
 
 from django_ray.runtime.context import get_current_task_context
@@ -38,6 +40,7 @@ from django_ray.runtime.distributed import (
     parallel_map,
     parallel_starmap,
 )
+from testproject.apps.cluster_tasks.ray_data_job import run_ray_data_batch_job
 from testproject.apps.cluster_tasks.workflows import (
     COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE,
     WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE,
@@ -58,6 +61,15 @@ from testproject.apps.cluster_tasks.workflows import (
     validate_order_fulfillment_showcase_inputs,
     workflow_showcase_fixture_error_message,
 )
+
+RAY_DATA_AFTER_MANIFEST_FAILURE_FIXTURE = "after-manifest-attempt-1"
+RAY_DATA_AFTER_MANIFEST_FAILURE_MESSAGE = (
+    "Ray Data golden-path fixture failed after publishing the first-attempt manifest"
+)
+
+
+class RayDataGoldenPathFixtureError(RuntimeError):
+    """Deterministic post-manifest failure used only by the routed real-Ray probe."""
 
 
 def validate_complex_workflow_failure_controls(
@@ -309,6 +321,58 @@ def runtime_env_benchmark(
         package=package,
         use_ray=True,
     )
+
+
+def _configured_ray_data_root_uri(setting_name: str) -> str:
+    configured = Path(str(getattr(settings, setting_name)))
+    if not configured.is_absolute():
+        raise RuntimeError(f"{setting_name} must be an absolute server-controlled path")
+    return configured.absolute().as_uri()
+
+
+@task(backend="ray-data", queue_name="ray-data")
+def ray_data_batch_score(
+    input_uri: str,
+    input_sha256: str,
+    run_key: str,
+    application_revision: str,
+    model_revision: str,
+    scale: float = 2.0,
+    bias: float = 1.0,
+    failure_fixture: Literal["after-manifest-attempt-1"] | None = None,
+) -> dict[str, Any]:
+    """Run the application-owned Ray Data recipe from one outer Ray Job."""
+    if failure_fixture not in {None, RAY_DATA_AFTER_MANIFEST_FAILURE_FIXTURE}:
+        raise ValueError("failure_fixture is not a supported Ray Data probe fixture")
+    context = get_current_task_context()
+    if context is None or not context.ray_job_driver:
+        raise RuntimeError("ray_data_batch_score requires the outer Ray Job driver")
+    if (
+        context.task_id is None
+        or context.attempt_number is None
+        or context.execution_generation is None
+    ):
+        raise RuntimeError("ray_data_batch_score requires a durable fenced attempt")
+
+    result = run_ray_data_batch_job(
+        input_uri=input_uri,
+        input_sha256=input_sha256,
+        input_root_uri=_configured_ray_data_root_uri("RAY_DATA_INPUT_ROOT"),
+        output_root_uri=_configured_ray_data_root_uri("RAY_DATA_OUTPUT_ROOT"),
+        deployment_key=settings.RAY_DATA_DEPLOYMENT_KEY,
+        run_key=run_key,
+        task_id=context.task_id,
+        application_revision=application_revision,
+        model_revision=model_revision,
+        task_execution_pk=context.task_pk,
+        execution_generation=context.execution_generation,
+        attempt_number=context.attempt_number,
+        scale=scale,
+        bias=bias,
+    )
+    if failure_fixture == RAY_DATA_AFTER_MANIFEST_FAILURE_FIXTURE and context.attempt_number == 1:
+        raise RayDataGoldenPathFixtureError(RAY_DATA_AFTER_MANIFEST_FAILURE_MESSAGE)
+    return result
 
 
 @task(queue_name="default")

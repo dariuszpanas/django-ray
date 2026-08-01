@@ -94,7 +94,11 @@ def pytest_configure(config: object) -> None:
             SECRET_KEY="django-ray-tests-only-cursor-signing-key",
             DJANGO_RAY={
                 "RAY_ADDRESS": "ray://localhost:10001",
+                "RUNTIME_ENV_PROFILES": {"ray-data": {}},
             },
+            RAY_DATA_INPUT_ROOT=str(PROJECT_ROOT / "ray-data-input"),
+            RAY_DATA_OUTPUT_ROOT=str(PROJECT_ROOT / "ray-data-artifacts"),
+            RAY_DATA_DEPLOYMENT_KEY="testproject-tests",
             # Django 6 Tasks configuration
             TASKS={
                 "default": {
@@ -108,6 +112,15 @@ def pytest_configure(config: object) -> None:
                     ],
                     "OPTIONS": {
                         "RAY_ADDRESS": "auto",
+                    },
+                },
+                "ray-data": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["ray-data"],
+                    "OPTIONS": {
+                        "RAY_ADDRESS": "auto",
+                        "RUNTIME_ENV_PROFILE": "ray-data",
+                        "RAY_JOB_ONLY": True,
                     },
                 },
             },

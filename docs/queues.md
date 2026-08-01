@@ -64,8 +64,18 @@ backend aliases. This makes it safe for a staged multi-backend migration where
 `default` is not django-ray. It fails instead of guessing when no django-ray queues can
 be enumerated; use `--queue` or `--queues` for an intentionally open-ended backend.
 Ray Job mode can preserve a different durable target for each task. Ray Core modes bind
-one process to one cluster, so `--all-queues` rejects aliases with different effective
-`RAY_ADDRESS` values; run an explicitly selected queue set for each cluster instead.
+one process to one cluster, so `--all-queues` rejects compatible aliases with different
+effective `RAY_ADDRESS` values; run an explicitly selected queue set for each cluster
+instead.
+
+For a queue whose task requires an outer Ray Job driver, declare its backend alias with
+`OPTIONS["RAY_JOB_ONLY"] = True`. Ray Core and synchronous `--all-queues` workers report
+and skip that queue before checking their remaining cluster targets. Explicitly naming
+the restricted queue with `--queue` or `--queues` is rejected, and the same check runs
+again immediately before claiming durable rows. The default is `False`; if aliases
+overlap, one restricted declaration wins for that queue. See
+[Backend runner affinity](configuration.md#backend-runner-affinity) for configuration
+and rolling-deployment order.
 
 In production, separate deployments can run the same image with different queue and
 concurrency arguments. This is usually more predictable than one worker consuming

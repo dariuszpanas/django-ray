@@ -172,6 +172,7 @@ def execute_task(
     serialized_args: str,
     serialized_kwargs: str,
     task_execution_pk: int | None = None,
+    task_id: str | None = None,
     attempt_number: int | None = None,
     execution_generation: int | None = None,
     runtime_env_profile: str | None = None,
@@ -188,6 +189,7 @@ def execute_task(
         serialized_kwargs: JSON-serialized keyword arguments.
         task_execution_pk: Durable task execution primary key, when running via
             the Ray Job API.
+        task_id: Durable Django task identifier, when running through a task manager.
         attempt_number: Current retry attempt, used to prevent stale writes.
         execution_generation: Monotonic execution token, used to isolate manual retries.
         input_reference: Durable combined-input reference for external payloads.
@@ -221,6 +223,7 @@ def execute_task(
 
             execution_context = durable_task_execution(
                 task_execution_pk,
+                task_id=task_id,
                 attempt_number=attempt_number,
                 execution_generation=execution_generation,
                 runtime_env_profile=runtime_env_profile,
@@ -276,6 +279,7 @@ def execute_task_from_payload(payload_b64: str) -> str:
             - serialized_args
             - serialized_kwargs
             - task_execution_pk (optional)
+            - task_id (optional)
             - attempt_number (optional)
             - execution_generation (optional)
 
@@ -299,6 +303,7 @@ def execute_task_from_payload(payload_b64: str) -> str:
             serialized_args=payload.get("serialized_args", "null"),
             serialized_kwargs=payload.get("serialized_kwargs", "null"),
             task_execution_pk=payload.get("task_execution_pk"),
+            task_id=payload.get("task_id"),
             attempt_number=payload.get("attempt_number"),
             execution_generation=payload.get("execution_generation"),
             runtime_env_profile=payload.get("runtime_env_profile"),

@@ -54,6 +54,49 @@ Ray Core workers choose one cluster when the process starts, through `--local`,
 separate queues and task-manager processes when Ray Core workloads must target
 different clusters.
 
+### Backend runner affinity
+
+Backend aliases are compatible with every worker mode by default. Set
+`OPTIONS["RAY_JOB_ONLY"] = True` when every queue declared by an alias requires the
+outer Ray Job driver and must never be claimed by Ray Core or synchronous workers:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+    },
+    "batch-jobs": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["ray-data"],
+        "OPTIONS": {
+            "RAY_ADDRESS": "auto",
+            "RAY_JOB_ONLY": True,
+        },
+    },
+}
+```
+
+The option is an explicit, boolean, default-off queue-affinity policy. A worker with
+no execution-mode flag uses Ray Job mode by default and may claim `ray-data`. Ray Core
+and synchronous workers reject an explicitly selected Ray-Job-only queue at startup
+and again at the durable claim boundary. Their `--all-queues` expansion reports and
+skips those queues; it fails if nothing compatible remains. An undeclared queue keeps
+the existing open-ended behavior. If multiple aliases declare the same queue, one
+`RAY_JOB_ONLY=True` declaration restricts that queue for every worker.
+
+Explicit/default queue selection imports only aliases that opt in with
+`RAY_JOB_ONLY=True`, so an unrelated unavailable task backend without this option does
+not break a django-ray worker. An opted-in alias must resolve to `RayTaskBackend` or a
+subclass before it can reserve queues; an unavailable opted-in backend fails closed.
+The same-named option on a confirmed non-django-ray backend has no django-ray effect.
+
+For a rolling deployment, first pause producers for the queue (or prove it empty), then
+drain and stop every old Ray Core or synchronous worker that could select it. Upgrade
+worker code, start the dedicated Ray Job worker, enable the backend option, and only
+then resume producers. An older worker does not understand the affinity option and can
+still claim the queue; do not overlap it with newly protected work.
+
 ## All Settings
 
 ### Ray Connection

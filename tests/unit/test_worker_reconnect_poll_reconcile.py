@@ -175,10 +175,15 @@ class TestWorkerDispatchAndReconnectHelpers:
         )
         cmd = _make_command()
         captured: list[dict[str, Any]] = []
+        entrypoint_calls: list[dict[str, Any]] = []
+
+        def fail_entrypoint(**kwargs: Any) -> str:
+            entrypoint_calls.append(kwargs)
+            raise RuntimeError("entrypoint crashed")
 
         monkeypatch.setattr(
             "django_ray.runtime.entrypoint.execute_task",
-            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("entrypoint crashed")),
+            fail_entrypoint,
         )
         monkeypatch.setattr(
             cmd,
@@ -188,11 +193,56 @@ class TestWorkerDispatchAndReconnectHelpers:
 
         cmd.execute_task_sync(task)
 
+        assert entrypoint_calls[0]["task_id"] is None
         assert captured
         assert captured[0]["error_message"] == "entrypoint crashed"
         assert captured[0]["exception_type"] == "RuntimeError"
         assert captured[0]["expected_attempt_number"] == 1
         assert captured[0]["expected_execution_generation"] == 0
+
+    def test_execute_task_sync_forwards_durable_task_id_and_failure_fences(
+        self, monkeypatch
+    ) -> None:
+        durable_task_id = "4aec29e7-cc95-4848-8f03-7b050ec8adea"
+        task = SimpleNamespace(
+            pk=8,
+            task_id=durable_task_id,
+            callable_path="testproject.tasks.add_numbers",
+            args_json="[1,2]",
+            kwargs_json="{}",
+            attempt_number=3,
+            execution_generation=7,
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+        )
+        cmd = _make_command(worker_id="worker-sync-fence")
+        captured: list[dict[str, Any]] = []
+        entrypoint_calls: list[dict[str, Any]] = []
+
+        def fail_entrypoint(**kwargs: Any) -> str:
+            entrypoint_calls.append(kwargs)
+            raise RuntimeError("entrypoint crashed")
+
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            fail_entrypoint,
+        )
+        monkeypatch.setattr(
+            cmd,
+            "_handle_task_failure",
+            lambda _task, **kwargs: captured.append(kwargs),
+        )
+
+        cmd.execute_task_sync(task)
+
+        assert entrypoint_calls[0]["task_id"] == durable_task_id
+        assert captured
+        assert captured[0]["error_message"] == "entrypoint crashed"
+        assert captured[0]["exception_type"] == "RuntimeError"
+        assert captured[0]["expected_claimed_by_worker"] == "worker-sync-fence"
+        assert captured[0]["expected_attempt_number"] == 3
+        assert captured[0]["expected_execution_generation"] == 7
 
     def test_update_lease_heartbeat_without_identity_fails_closed(self) -> None:
         cmd = _make_command()

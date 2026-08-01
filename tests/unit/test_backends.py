@@ -542,6 +542,34 @@ class TestRayTaskBackend:
 
         assert execution.timeout_seconds == 45
 
+    def test_backend_defaults_ray_job_queue_affinity_off(self) -> None:
+        assert _make_backend().ray_job_only is False
+
+    def test_backend_accepts_explicit_ray_job_queue_affinity(self) -> None:
+        backend = RayTaskBackend(
+            "jobs",
+            {
+                "QUEUES": ["batch"],
+                "OPTIONS": {"RAY_ADDRESS": "auto", "RAY_JOB_ONLY": True},
+            },
+        )
+
+        assert backend.ray_job_only is True
+
+    @pytest.mark.parametrize("ray_job_only", [None, 0, 1, "true", [], {}])
+    def test_backend_rejects_non_boolean_ray_job_queue_affinity(self, ray_job_only: object) -> None:
+        with pytest.raises(ImproperlyConfigured, match="RAY_JOB_ONLY"):
+            RayTaskBackend(
+                "jobs",
+                {
+                    "QUEUES": ["batch"],
+                    "OPTIONS": {
+                        "RAY_ADDRESS": "auto",
+                        "RAY_JOB_ONLY": ray_job_only,
+                    },
+                },
+            )
+
     @pytest.mark.parametrize("timeout_seconds", [0, -1, True, False, 1.5, "30"])
     def test_backend_rejects_invalid_timeout(self, timeout_seconds: object) -> None:
         with pytest.raises(ImproperlyConfigured, match="TIMEOUT_SECONDS"):

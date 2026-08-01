@@ -22,6 +22,7 @@ nav = [
     { "Migrating from Celery" = "celery-migration.md" },
     { "Compiled Graph Compatibility" = "compiled-graph-compatibility.md" },
     { "Tasks" = "tasks.md" },
+    { "Ray Data Batch Jobs" = "ray-data.md" },
     { "Ray-Native Workflows" = "workflows.md" },
     { "Runtime Environments" = "runtime-environments.md" },
     { "Queues" = "queues.md" },

@@ -1,12 +1,14 @@
 # Development overlay with all queue workers
 # Optimized for easy local testing with all example apps
 #
-# This overlay creates workers for all configured queues:
+# This overlay creates Ray Core workers for the ordinary configured queues:
 #   - default: General purpose tasks
 #   - high-priority: Urgent tasks processed first
 #   - low-priority: Background/batch tasks
 #   - sync: For testing (runs in sync mode)
 #   - ml: Machine learning pipeline tasks
+# The Ray Data recipe has a separate Ray-Job-only queue and requires a shared
+# storage deployment decision before its management worker is enabled.
 #
 # Evaluation-only local overlay. Do not apply it to a production cluster.
 # Usage:

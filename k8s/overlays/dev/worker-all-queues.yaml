@@ -1,5 +1,6 @@
-# Worker that processes ALL queues
-# Useful for development when you want a single worker handling everything
+# Ray Core worker for the ordinary sample queues. The ray-data queue is
+# intentionally excluded because it must be claimed by a Ray Job mode worker
+# after shared immutable-input/artifact storage is mounted.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -37,7 +38,12 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ['python', 'testproject/manage.py', 'django_ray_worker']
           args:
-            - '--all-queues'
+            - '--queues'
+            - 'default'
+            - 'high-priority'
+            - 'low-priority'
+            - 'sync'
+            - 'ml'
             - '--cluster'
             - 'ray://ray-head-svc:10001'
             - '--concurrency'
