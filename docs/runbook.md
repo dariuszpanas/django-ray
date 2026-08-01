@@ -66,15 +66,17 @@ Expected behavior:
   retries an expired attempt; `django_ray_tasks_expired` is only the current-state gauge.
 - incident signal: stale leases rise while claim latency and queue depth increase.
 
-## Failure Diagnostics In Admin
+## Pattern-Unredacted Failure Diagnostics In Admin
 
 Start on the ordinary execution or archived-attempt detail. It is safe to use for broad
 operator access because arguments, results, errors, and tracebacks are redacted and
 bounded. If redaction removes the evidence needed to diagnose a failure, ask a user who
 has both the ordinary object-view permission and
-`django_ray.view_sensitive_task_data` to open **View unredacted task data**.
+`django_ray.view_sensitive_task_data` to open **Sensitive data**. Here,
+"unredacted" means that configured name-pattern redaction is bypassed; it does not mean
+raw bytes or an unbounded response.
 
-The unredacted page is a deliberate incident-data boundary:
+The pattern-unredacted page is a deliberate incident-data boundary:
 
 1. Confirm that the task belongs to the tenant or operational scope being investigated.
 2. Open only the exact execution or archived attempt involved. Attempt pages reuse the

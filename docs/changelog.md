@@ -33,14 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Django Admin execution and archived-attempt details now offer a separate **View
-  unredacted task data** page to superusers or operators who hold both ordinary object
+- Django Admin execution and archived-attempt details now offer a separate **Sensitive
+  data** action to superusers or operators who hold both ordinary object
   view and the new `django_ray.view_sensitive_task_data` permission. The default page
-  remains redacted. The GET-only response exposes only exact task inputs and the
-  selected execution/attempt outcome (including execution cancellation errors),
-  autoescapes HTML, disables caching, rejects
-  per-field values above 64 KiB in SQL, and never includes RuntimeEnv, completion,
-  workflow-progress, or log payloads. Stock Django Admin and Unfold are both covered.
+  remains redacted. The GET-only response exposes only pattern-unredacted, terminal-inert
+  projections of the authorized stored task inputs and selected execution/attempt outcome
+  (including execution cancellation errors), autoescapes HTML, disables caching, rejects
+  per-field values above 64 KiB in SQL, enforces a 4 MiB rendered-response ceiling, and
+  never includes RuntimeEnv, completion, workflow-progress, or log payloads. Stock Django
+  Admin and Unfold are both covered, with explicit action affordances, readable
+  light- and dark-theme diagnostic cards, and a matching standalone response-limit
+  fallback that omits Admin branding and stored diagnostic payloads.
 - Workflow steps can opt into a strict operator-facing output projection with
   `step(...).with_output_preview(projector)`. Full-reporting Ray leaves validate,
   redact, and fence a small exact-JSON value before terminal schema-v3 node detail is
@@ -515,6 +518,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespaces, or GCS bucket/prefix namespaces, preventing input retention from
   deleting a still-referenced result. Execution Admin reference fields now use the
   same bounded redaction as attempt diagnostics.
+- Ray status, log, traceback, lost-task, and cancellation diagnostics now preserve raw
+  redaction evidence in protected task and attempt fields while every ordinary
+  package-owned Admin, API, graph, structured-log, observability, and Django
+  `TaskResult.errors` / `TaskError.traceback` projection removes bounded terminal
+  controls before redaction and display limits. Privileged task-data views keep
+  printable text pattern-unredacted but still render controls inert.
+  Traceback and graph failure text retains escaped line
+  separation with safe wrapping, while control-split secret markers still fail closed
+  under redaction. The bounded parser remains linear for unterminated control strings;
+  CAN/SUB cancellation retains subsequent visible text across every 7-bit and C1
+  control-string form. Structured mapping keys and logging placeholders follow the same
+  normalization and fail-closed redaction boundary, normalized key collisions cannot
+  replace redactions or enter workflow-progress storage, disabled log levels remain
+  lazy, and UNKNOWN Ray Job console details are normalized and redacted. Unsafe Unicode
+  format/bidi controls are inert while emoji shaping and private-use glyphs remain
+  printable; matching still ignores default-ignorable characters. A startup-validated
+  bounded pattern program evaluates every accepted pattern consistently across terminal
+  representations, applies an aggregate 250,000-unit matcher ceiling plus structured
+  item/text limits, and fails closed rather than enumerating terminal interpretations.
+  Its bounded character and transition caches keep repeated diagnostics fast, while
+  high-entropy input stops deterministically. Pattern iterables stop at their count cap;
+  rejected sources are neither echoed nor retained through exception chaining. A frozen
+  Unicode 16.0 safety table keeps projection stable across supported Python versions.
+  Oversized low-level text fails closed before projection.
+  Unsupported zero-width, backreference, lookaround, flag-changing, or otherwise
+  non-regular configured expressions now fail startup by entry index without echoing the
+  source; documented consuming expressions retain case-insensitive search semantics.
+  Logging arguments and adapter/call-time fields share aggregate traversal budgets,
+  non-string mapping keys expose type only, and traceback-controlled text can select only
+  an import-free built-in exception class for Django `TaskError`. Workflow output
+  previews distinguish harmless terminal
+  normalization from policy redaction/truncation, opaque node identities are rejected
+  rather than rewritten, and entrypoint persistence failures use the same redacting
+  structured logger.
 - `django_ray_worker --all-queues` now discovers and deduplicates queues across
   every configured django-ray backend alias while ignoring Celery and other
   backends. Queue selectors and explicit execution-mode flags are mutually

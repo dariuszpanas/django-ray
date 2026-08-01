@@ -462,10 +462,12 @@
       "paths": [
         "tests/integration/test_api.py",
         "tests/integration/test_admin.py",
+        "tests/integration/test_admin_sensitive_diagnostics.py",
         "tests/javascript/landing_auth.test.mjs",
+        "tests/javascript/sensitive_task_data_theme.test.mjs",
         "tests/javascript/workflow_diagnostics.test.mjs"
       ],
-      "reason": "Two collected pytest cases launch nested Node suites for dashboard authentication and lazy admin diagnostics; browser behavior overlaps surrounding HTTP adapter tests.",
+      "reason": "Three collected pytest cases launch nested Node suites for dashboard authentication, privileged diagnostic theme selection, and lazy admin diagnostics; browser behavior overlaps surrounding HTTP adapter tests.",
       "review": "Keep browser behavior distinct while avoiding repeated endpoint assertions; share only proven harness pieces."
     },
     {

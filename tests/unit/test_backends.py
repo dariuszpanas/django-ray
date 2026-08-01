@@ -655,8 +655,8 @@ class TestRayTaskBackend:
             state=TaskState.FAILED,
             args_json="not-json",
             kwargs_json="not-json",
-            error_message="boom",
-            error_traceback="Traceback...\nValueError: boom",
+            error_message="\x1b[31mboom\x1b[39m",
+            error_traceback="\x1b[36mTraceback...\x1b[39m\r\nValueError: boom",
             claimed_by_worker="worker-a",
             started_at=datetime.now(UTC) - timedelta(seconds=2),
         )
@@ -667,6 +667,71 @@ class TestRayTaskBackend:
         assert result.kwargs == {}
         assert result.worker_ids == ["worker-a"]
         assert result.errors[0].exception_class_path == "builtins.ValueError"
+        assert result.errors[0].traceback == "Traceback...\nValueError: boom"
+
+    def test_get_result_redacts_legacy_oversized_diagnostics_before_projecting(
+        self,
+        monkeypatch,
+    ) -> None:
+        import django_ray.redaction as redaction
+
+        monkeypatch.setattr(redaction, "_REDACTION_TEXT_MAX_CHARS", 128)
+        execution = RayTaskExecution.objects.create(
+            task_id="backend-oversized-diagnostic-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.FAILED,
+            error_message="\x1b[31m" + ("message" * 40) + "\x1b[0m",
+            error_traceback=(
+                "\x1b[36mTraceback\x1b[0m\n" + ("frame-data" * 40) + "\nValueError: retained tail"
+            ),
+        )
+
+        result = _make_backend().get_result(execution.task_id)
+
+        assert result.errors[0].exception_class_path == "builtins.Exception"
+        assert result.errors[0].traceback == "[REDACTED]"
+
+    def test_get_result_redacts_sensitive_failure_diagnostics(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="backend-sensitive-diagnostic-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.FAILED,
+            error_message="password=hunter2",
+            error_traceback="Traceback...\nValueError: password=hunter2",
+        )
+
+        result = _make_backend().get_result(execution.task_id)
+
+        assert result.errors[0].exception_class_path == "builtins.Exception"
+        assert result.errors[0].traceback == "[REDACTED]"
+
+    @pytest.mark.parametrize(
+        "tail",
+        (
+            "field: malformed diagnostic",
+            "os.path: attacker-controlled dotted path",
+            "NotAnException: ordinary text",
+        ),
+    )
+    def test_get_result_never_imports_an_exception_path_inferred_from_diagnostics(
+        self,
+        tail: str,
+    ) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id=f"backend-untrusted-exception-path-{abs(hash(tail))}",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.FAILED,
+            error_message="task failed",
+            error_traceback=f"Traceback...\n{tail}",
+        )
+
+        result = _make_backend().get_result(execution.task_id)
+
+        assert result.errors[0].exception_class_path == "builtins.Exception"
+        assert result.errors[0].exception_class is Exception
 
     def test_get_result_does_not_expose_stale_errors_for_success(self) -> None:
         execution = RayTaskExecution.objects.create(

@@ -1066,6 +1066,18 @@ def validate_namespace(namespace: str) -> None:
         )
 
 
+def validate_terminal_diagnostic_text(value: object, *, field_name: str) -> str:
+    """Require one presented diagnostic to contain only inert text controls."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} must be non-empty text")
+    if any(
+        character not in {"\n", "\t"} and (ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F)
+        for character in value
+    ):
+        raise ValueError(f"{field_name} retained terminal control characters")
+    return value
+
+
 def validate_local_context(*, current: str, expected: str, server_url: str) -> None:
     """Fail closed unless both context name and API endpoint identify a local cluster."""
     if current != expected:
@@ -5406,12 +5418,15 @@ class LocalKubeRayGate:
                         raise ValueError(
                             "workflow result did not match the requested deterministic workload"
                         )
-                elif (
-                    execution.get("result") is not None or execution.get("error") != expected_error
-                ):
-                    raise ValueError(
-                        f"failed {workflow_label} did not retain its normalized fixture error"
+                else:
+                    presented_error = validate_terminal_diagnostic_text(
+                        execution.get("error"),
+                        field_name=f"{workflow_label} polling error",
                     )
+                    if execution.get("result") is not None or presented_error != expected_error:
+                        raise ValueError(
+                            f"failed {workflow_label} did not retain its normalized fixture error"
+                        )
                 break
             if time.monotonic() >= deadline:
                 raise ValueError(
@@ -5446,6 +5461,15 @@ class LocalKubeRayGate:
             or task_record.get("attempt_number") != 1
         ):
             raise ValueError(f"{workflow_label} did not remain on its first durable attempt")
+        if expected_state == "FAILED":
+            persisted_error = validate_terminal_diagnostic_text(
+                task_record.get("error_message"),
+                field_name=f"{workflow_label} execution error",
+            )
+            if persisted_error != expected_error:
+                raise ValueError(
+                    f"failed {workflow_label} execution row changed its normalized error"
+                )
 
         summary_endpoint = f"/api/cluster/workflows/{task_id}"
         status, body = self._http(summary_endpoint, method="GET", headers=headers)

@@ -254,6 +254,32 @@ def test_invalid_value_never_enters_the_slot_or_crosses_actor() -> None:
     assert session.finish()["offered"] == 0
 
 
+def test_metric_keys_are_normalized_before_crossing_the_producer_boundary() -> None:
+    actor = _Actor()
+    session = WorkflowProgressProducerSession(actor, _RUN_IDENTITY, "leaf")
+
+    assert session.offer(1, 2, metrics={"\x1b[32mrows\x1b[0m": 12})
+
+    event = _decoded(actor)[0]
+    assert event.payload["metrics"] == {"rows": 12}
+    assert b"\x1b" not in actor.ingest.calls[0]
+
+
+def test_producer_rejects_colliding_normalized_metric_keys_before_submission() -> None:
+    actor = _Actor()
+    session = WorkflowProgressProducerSession(actor, _RUN_IDENTITY, "leaf")
+
+    with pytest.raises(ValueError, match="duplicate normalized"):
+        session.offer(
+            1,
+            2,
+            metrics={"rows": 12, "\x1b[32mrows\x1b[0m": 13},
+        )
+
+    assert actor.ingest.calls == []
+    assert session.finish()["offered"] == 0
+
+
 def test_counter_saturation_is_explicit_and_finish_is_idempotent() -> None:
     actor = _Actor()
     limits = replace(WORKFLOW_PROGRESS_LIMITS_V1, identity_max_integer=3)

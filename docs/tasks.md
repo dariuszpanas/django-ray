@@ -315,6 +315,17 @@ matching snapshot from the task definition:
 current = send_email.get_result(enqueued.id)
 ```
 
+Successful `TaskResult.return_value`, arguments, and keyword arguments are application
+data returned to the Python caller. Failed results expose one ordinary operational
+projection through `TaskResult.errors`: terminal controls are made inert and configured
+sensitive markers are redacted. Only an unqualified built-in `BaseException` name in the
+normalized traceback tail is retained as the `TaskError` class; diagnostic text is never
+treated as a dotted import path. Unknown, custom, matching, or over-limit diagnostics use
+`builtins.Exception`. `TaskResult` has no request user or task-ownership context and
+therefore cannot grant privileged diagnostic access. Authorized incident responders can
+use the separate [pattern-unredacted Admin view](reference/settings.md#unredacted-task-diagnostics),
+which still applies terminal normalization and hard response bounds.
+
 For operations, graph progress, attempts, and Ray identifiers, query
 `RayTaskExecution` or use the observability helpers described in
 [API and UI integration](reference/api.md).

@@ -22,6 +22,7 @@ from django_ray.models import (
     TaskState,
     TaskWorkerLease,
 )
+from django_ray.redaction import normalize_terminal_text
 from django_ray.runner import RayJobSubmissionUncertainError
 from django_ray.runner.base import JobInfo, JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import (
@@ -3432,7 +3433,25 @@ class TestWorkerReconnectPollReconcile:
         assert task.pk in cmd.active_tasks
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
-    def test_reconcile_reports_unknown_job_status(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        ("message", "expected", "absent"),
+        [
+            (
+                "\x1b[33mstatus unavailable\x1b[39m\rnext line",
+                "status unavailable\nnext line",
+                "\x1b",
+            ),
+            ("access_token=secret-value", "[REDACTED]", "secret-value"),
+        ],
+        ids=("terminal-formatting", "sensitive-detail"),
+    )
+    def test_reconcile_reports_unknown_job_status(
+        self,
+        monkeypatch,
+        message: str,
+        expected: str,
+        absent: str,
+    ) -> None:
         task = RayTaskExecution.objects.create(
             task_id="reconcile-unknown-status-001",
             callable_path="testproject.tasks.add_numbers",
@@ -3449,7 +3468,7 @@ class TestWorkerReconnectPollReconcile:
                 return JobInfo(
                     job_id=task.ray_job_id or "",
                     status=JobStatus.UNKNOWN,
-                    message="status unavailable",
+                    message=message,
                 )
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
@@ -3459,6 +3478,8 @@ class TestWorkerReconnectPollReconcile:
         assert task.state == TaskState.RUNNING
         assert task.pk in cmd.active_tasks
         assert "status is unknown" in cmd.stdout.getvalue()
+        assert expected in cmd.stdout.getvalue()
+        assert absent not in cmd.stdout.getvalue()
 
     def test_reconcile_stale_unknown_job_stops_exact_id_without_automatic_retry(
         self, monkeypatch
@@ -3489,9 +3510,12 @@ class TestWorkerReconnectPollReconcile:
                     message="status unavailable",
                 )
 
-            def cancel(self, handle):
+            def cancel_with_status(self, handle):
                 cancelled.append(handle.ray_job_id)
-                return True
+                return CancellationOutcome(
+                    CancellationOutcomeStatus.REQUESTED,
+                    "\x1b[33mexact stop confirmed\x1b[39m\rremote accepted",
+                )
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
         monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
@@ -3504,6 +3528,10 @@ class TestWorkerReconnectPollReconcile:
         assert task.attempt_number == 2
         assert task.execution_generation == 7
         assert task.cancellation_status == CancellationStatus.REQUESTED
+        assert task.cancellation_error == ("\x1b[33mexact stop confirmed\x1b[39m\rremote accepted")
+        assert normalize_terminal_text(task.cancellation_error) == (
+            "exact stop confirmed\nremote accepted"
+        )
         assert task.pk not in cmd.active_tasks
         assert "automatic retry was suppressed" in cmd.stdout.getvalue()
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -346,23 +345,29 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
         raise ImproperlyConfigured(f"django-ray: {storage_configuration_error}")
 
     redact_patterns = config.get("REDACT_PATTERNS")
-    if redact_patterns is not None:
-        if isinstance(redact_patterns, str):
-            redact_patterns = (redact_patterns,)
-        elif not isinstance(redact_patterns, Sequence) or isinstance(
-            redact_patterns, bytes | bytearray
-        ):
-            raise ImproperlyConfigured(
-                "django-ray: REDACT_PATTERNS must be a string or a sequence of regex strings"
-            )
-        for pattern in redact_patterns:
-            if not isinstance(pattern, str) or not pattern:
-                raise ImproperlyConfigured(
-                    "django-ray: REDACT_PATTERNS entries must be non-empty strings"
-                )
-            try:
-                re.compile(pattern)
-            except re.error as error:
-                raise ImproperlyConfigured(
-                    f"django-ray: REDACT_PATTERNS contains invalid regex {pattern!r}: {error}"
-                ) from error
+    if redact_patterns is None:
+        configured_redact_patterns: Sequence[str] | str = ()
+    elif isinstance(redact_patterns, str):
+        configured_redact_patterns = redact_patterns
+    elif not isinstance(redact_patterns, Sequence) or isinstance(
+        redact_patterns, bytes | bytearray
+    ):
+        raise ImproperlyConfigured(
+            "django-ray: REDACT_PATTERNS must be a string or a sequence of pattern strings"
+        )
+    else:
+        configured_redact_patterns = redact_patterns
+
+    from django_ray.redaction import DEFAULT_REDACT_PATTERNS
+    from django_ray.redaction_patterns import RedactionPatternError, compile_redaction_patterns
+
+    redaction_error: str | None = None
+    try:
+        compile_redaction_patterns(
+            configured_redact_patterns,
+            builtin_patterns=DEFAULT_REDACT_PATTERNS,
+        )
+    except RedactionPatternError as error:
+        redaction_error = str(error)
+    if redaction_error is not None:
+        raise ImproperlyConfigured(f"django-ray: REDACT_PATTERNS {redaction_error}")

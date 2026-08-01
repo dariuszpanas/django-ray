@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import io
 import json
 import re
@@ -682,21 +683,37 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
             )
 
 
+@pytest.mark.django_db
 def test_failed_archived_attempt_requires_exact_collapsed_parent_graph_panel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+
+    parent = RayTaskExecution.objects.create(
+        task_id=WORKFLOW_TASK_ID,
+        callable_path="testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task",
+        state=TaskState.SUCCEEDED,
+        attempt_number=3,
+    )
+    attempt = TaskAttempt.objects.create(
+        execution=parent,
+        attempt_number=1,
+        state=TaskState.FAILED,
+        error_message="Intentional recovery failure",
+        error_traceback="RuntimeError: Intentional recovery failure",
+    )
     execution = SimpleNamespace(
-        pk=42,
+        pk=parent.pk,
         task_id=WORKFLOW_TASK_ID,
         attempt_number=1,
         current_attempt_number=3,
         execution_generation=1,
         workflow_run_id="35200000-0000-4000-8000-000000000003",
         state="FAILED",
-        attempt_pk=91,
+        attempt_pk=attempt.pk,
     )
     change_html, _responses = _admin_workflow_responses(execution)
-    root = "/admin/django_ray/raytaskexecution/42/workflow"
+    root = f"/admin/django_ray/raytaskexecution/{parent.pk}/workflow"
     change_html += (
         '<details data-workflow-attempt-graph="1" data-hydration-state="idle" '
         'data-pinned-attempt-number="1" data-current-attempt-number="3" '
@@ -716,10 +733,10 @@ def test_failed_archived_attempt_requires_exact_collapsed_parent_graph_panel(
         path: str,
         **_kwargs: object,
     ) -> str:
-        if path == "/admin/django_ray/taskattempt/91/change/":
+        if path == f"/admin/django_ray/taskattempt/{attempt.pk}/change/":
             return (
                 '<div>Workflow graph</div><a href="/admin/django_ray/'
-                'raytaskexecution/42/workflow/graph/?attempt_number=1">'
+                f'raytaskexecution/{parent.pk}/workflow/graph/?attempt_number=1">'
                 "Open graph for attempt #1</a>"
             )
         return change_html
@@ -1026,6 +1043,218 @@ def test_failed_admin_graph_retains_incoming_failure_path_and_sibling_context() 
         "graph_unavailable_previews": 0,
         "graph_preview_contract": "not-applicable",
     }
+
+
+@pytest.mark.django_db
+def test_failed_workflow_admin_smoke_proves_persisted_and_presented_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+
+    traceback = (
+        "ray::django_ray:task()\n"
+        'File "/app/task.py", line 1\n'
+        "ModuleNotFoundError: No module named 'django_ray'"
+    )
+    execution = RayTaskExecution.objects.create(
+        task_id="docker-smoke-failed-diagnostics-001",
+        callable_path="testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
+        state=TaskState.FAILED,
+        attempt_number=1,
+        error_message="Intentional complex workflow fixture failure",
+        error_traceback=traceback,
+    )
+    attempt = TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=1,
+        state=TaskState.FAILED,
+        error_message=execution.error_message,
+        error_traceback=traceback,
+    )
+    change_html, responses = _admin_workflow_responses(execution)
+    root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
+    query = f"?attempt_number=1&limit={docker_smoke._WORKFLOW_PAGE_LIMIT}"
+    graph, topology_nodes, topology_edges, node_details = _failed_admin_graph_fixture()
+    for collection, items in (
+        ("topology/nodes", topology_nodes),
+        ("topology/edges", topology_edges),
+        ("nodes", node_details),
+    ):
+        response = responses[f"{root}/workflow/{collection}/{query}"]
+        response["items"] = items
+        response["returned_count"] = len(items)
+    responses[f"{root}/workflow/graph/?attempt_number=1"] = graph
+    diagnostic_markup = (
+        '<link href="/static/django_ray/admin/diagnostics.css" rel="stylesheet">'
+        f'<span class="django-ray-diagnostic">{html.escape(traceback)}</span>'
+    )
+    change_html += diagnostic_markup
+    attempt_html = (
+        '<div>Workflow graph</div><a href="'
+        f'{root}/workflow/graph/?attempt_number=1">Open graph for attempt #1</a>'
+        f"{diagnostic_markup}"
+    )
+
+    @contextmanager
+    def admin_headers():
+        yield {"Cookie": "sessionid=private-admin-session"}
+
+    def request_text(
+        _base_url: str,
+        path: str,
+        **_kwargs: object,
+    ) -> str:
+        if path == "/static/django_ray/admin/diagnostics.css":
+            return "white-space: pre-wrap; overflow-wrap: anywhere;"
+        if path == f"/admin/django_ray/taskattempt/{attempt.pk}/change/":
+            return attempt_html
+        assert path == f"{root}/change/"
+        return change_html
+
+    monkeypatch.setattr(docker_smoke, "_disposable_admin_headers", admin_headers)
+    monkeypatch.setattr(docker_smoke, "_request_text", request_text)
+    monkeypatch.setattr(
+        docker_smoke,
+        "_request_admin_json",
+        lambda _base_url, path, **_kwargs: responses[path],
+    )
+    monkeypatch.setattr(
+        docker_smoke,
+        "_verify_existing_workflow_storage_contract",
+        lambda **_kwargs: {
+            "current_manifests": 1,
+            "pending_manifests": 0,
+            "unlinked_pages": 0,
+        },
+    )
+
+    evidence = docker_smoke._verify_existing_workflow_admin_contract(
+        base_url="http://127.0.0.1:8000",
+        deadline=100.0,
+        execution=execution,
+    )
+
+    assert evidence["task_state"] == TaskState.FAILED
+    assert evidence["graph_failed_nodes"] == 2
+
+
+@pytest.mark.django_db
+def test_archived_failed_workflow_smoke_proves_attempt_diagnostic_presentation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+
+    traceback = (
+        "ray::django_ray:order_fulfillment_recovery_showcase_task()\n"
+        'File "/app/src/django_ray/runtime/remote.py", line 81\n'
+        "ModuleNotFoundError: No module named 'django_ray'"
+    )
+    parent = RayTaskExecution.objects.create(
+        task_id=WORKFLOW_TASK_ID,
+        callable_path="testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task",
+        state=TaskState.SUCCEEDED,
+        attempt_number=3,
+    )
+    attempt = TaskAttempt.objects.create(
+        execution=parent,
+        attempt_number=1,
+        state=TaskState.FAILED,
+        error_message="Intentional recovery failure",
+        error_traceback=traceback,
+    )
+    selected = SimpleNamespace(
+        pk=parent.pk,
+        task_id=parent.task_id,
+        state=TaskState.FAILED,
+        attempt_number=1,
+        current_attempt_number=3,
+        execution_generation=1,
+        workflow_run_id="35200000-0000-4000-8000-000000000001",
+        attempt_pk=attempt.pk,
+    )
+    change_html, responses = _admin_workflow_responses(selected)
+    root = f"/admin/django_ray/raytaskexecution/{parent.pk}"
+    archived_panel = (
+        '<details data-workflow-attempt-graph="1" data-hydration-state="idle" '
+        'data-pinned-attempt-number="1" data-current-attempt-number="3" '
+        f'data-graph-url="{root}/workflow/graph/?attempt_number=1" '
+        f'data-topology-nodes-url="{root}/workflow/topology/nodes/?attempt_number=1" '
+        f'data-topology-edges-url="{root}/workflow/topology/edges/?attempt_number=1" '
+        f'data-node-details-url="{root}/workflow/nodes/?attempt_number=1" '
+        f'data-node-detail-url="{root}/workflow/node/?attempt_number=1"></details>'
+    )
+    change_html = change_html.replace(
+        "<div data-workflow-current-graph",
+        f"{archived_panel}<div data-workflow-current-graph",
+        1,
+    )
+    change_html = (
+        '<link href="/static/django_ray/admin/diagnostics.css" rel="stylesheet">' + change_html
+    )
+    diagnostic_markup = (
+        '<link href="/static/django_ray/admin/diagnostics.css" rel="stylesheet">'
+        f'<span class="django-ray-diagnostic">{html.escape(traceback)}</span>'
+    )
+    attempt_html = (
+        f'<div>Workflow graph</div><a href="{root}/workflow/graph/?attempt_number=1">'
+        "Open graph for attempt #1</a>"
+        f"{diagnostic_markup}"
+    )
+    graph, topology_nodes, topology_edges, node_details = _failed_admin_graph_fixture()
+    query = f"?attempt_number=1&limit={docker_smoke._WORKFLOW_PAGE_LIMIT}"
+    for collection, items in (
+        ("topology/nodes", topology_nodes),
+        ("topology/edges", topology_edges),
+        ("nodes", node_details),
+    ):
+        response = responses[f"{root}/workflow/{collection}/{query}"]
+        response["items"] = items
+        response["returned_count"] = len(items)
+    responses[f"{root}/workflow/graph/?attempt_number=1"] = graph
+
+    @contextmanager
+    def admin_headers():
+        yield {"Cookie": "sessionid=private-admin-session"}
+
+    def request_text(
+        _base_url: str,
+        path: str,
+        **_kwargs: object,
+    ) -> str:
+        if path == "/static/django_ray/admin/diagnostics.css":
+            return "white-space: pre-wrap; overflow-wrap: anywhere;"
+        if path == f"/admin/django_ray/taskattempt/{attempt.pk}/change/":
+            return attempt_html
+        assert path == f"{root}/change/"
+        return change_html
+
+    monkeypatch.setattr(docker_smoke, "_disposable_admin_headers", admin_headers)
+    monkeypatch.setattr(docker_smoke, "_request_text", request_text)
+    monkeypatch.setattr(
+        docker_smoke,
+        "_request_admin_json",
+        lambda _base_url, path, **_kwargs: responses[path],
+    )
+    monkeypatch.setattr(
+        docker_smoke,
+        "_verify_existing_workflow_storage_contract",
+        lambda **_kwargs: {
+            "current_manifests": 1,
+            "pending_manifests": 0,
+            "unlinked_pages": 0,
+        },
+    )
+
+    evidence = docker_smoke._verify_existing_workflow_admin_contract(
+        base_url="http://127.0.0.1:8000",
+        deadline=100.0,
+        execution=selected,
+        change_attempt_number=1,
+    )
+
+    assert evidence["task_state"] == TaskState.FAILED
+    assert evidence["attempt_number"] == 1
+    assert evidence["graph_failed_nodes"] == 2
 
 
 def test_failed_admin_graph_accepts_unfinished_downstream_nodes() -> None:

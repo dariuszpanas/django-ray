@@ -227,7 +227,10 @@ def _graph_case(
     kinds: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     selected_states = states or ["SUCCEEDED", "SUCCEEDED", "SUCCEEDED"]
-    node_ids = [chr(ord("a") + index) for index in range(len(selected_states))]
+    node_ids = [
+        chr(ord("a") + index) if index < 26 else f"node-{index:03d}"
+        for index in range(len(selected_states))
+    ]
     selected_edges = edges if edges is not None else list(zip(node_ids, node_ids[1:], strict=False))
     selected_kinds = kinds or {}
     topology = [
@@ -362,6 +365,7 @@ def test_graph_endpoint_projects_one_coherent_first_page_without_raw_payloads(
         "value": {"item_count": 3, "status": "ready"},
     }
     detail_by_id["b"]["error"] = "password=origin-secret"
+    detail_by_id["c"]["error"] = "\x1b[31mbounded failure for c\x1b[39m\rnext line"
     calls = _install_graph_readers(monkeypatch, summary, pages)
     execution = _execution()
     user = get_user_model().objects.create_superuser(username="workflow-graph-admin")
@@ -402,6 +406,8 @@ def test_graph_endpoint_projects_one_coherent_first_page_without_raw_payloads(
     }
     assert by_id["b"]["error"] == "[REDACTED]"
     assert by_id["b"]["output_preview"]["availability"] == "UNAVAILABLE"
+    assert by_id["c"]["error"] == "bounded failure for c\nnext line"
+    assert "\x1b" not in json.dumps(payload)
     assert by_id["b"]["fanout"] == {
         "submitted_items": 3,
         "completed_items": 2,
@@ -748,6 +754,7 @@ def test_graph_read_failures_use_fixed_safe_degradations(
         ("unsupported-state", "CORRUPT", 503),
         ("malformed-node", "CORRUPT", 503),
         ("malformed-preview", "CORRUPT", 503),
+        ("unsafe-node-identity", "CORRUPT", 503),
         ("truncated-record", "TRUNCATED", 200),
         ("next-cursor", "TRUNCATED", 200),
     ],
@@ -795,6 +802,21 @@ def test_graph_validation_never_returns_partial_data(
                 },
             }
         )
+    elif case == "unsafe-node-identity":
+        unsafe_id = "a\x1b[31m"
+        topology_node = next(
+            item for item in pages["topology_nodes"]["items"] if item["node_id"] == "a"
+        )
+        detail_node = next(
+            item for item in pages["node_details"]["items"] if item["node_id"] == "a"
+        )
+        topology_node["node_id"] = unsafe_id
+        detail_node["node_id"] = unsafe_id
+        for edge in pages["topology_edges"]["items"]:
+            if edge["source"] == "a":
+                edge["source"] = unsafe_id
+            if edge["target"] == "a":
+                edge["target"] = unsafe_id
     elif case == "truncated-record":
         pages["node_details"]["items"][0]["truncated"] = True
     else:

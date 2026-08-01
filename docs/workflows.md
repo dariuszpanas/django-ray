@@ -619,7 +619,11 @@ The projector is trusted synchronous application code in the leaf process, so it
 counts toward leaf runtime. Keep it cheap, deterministic, side-effect-free, and
 read-only with respect to the result it receives.
 
-Configured redaction runs after strict normalization and before the event crosses Ray.
+Terminal formatting is removed before configured redaction and before the event crosses
+Ray. Formatting-only changes do not mark an output `REDACTED` or a progress event
+truncated; actual policy redaction and size loss still do. Historical readers normalize
+the stored preview for display while evaluating the current redaction policy against the
+authenticated stored value, so formatting cannot hide a newly sensitive value.
 The graph keeps one **Output** row and labels an available bounded JSON value explicitly
 as a preview, separate from the **Node ID** and execution state. Its fixed envelope
 reports one of `NOT_REQUESTED`, `PENDING`,

@@ -28,6 +28,7 @@ Then use Django's standard task API:
 
 from __future__ import annotations
 
+import builtins
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -49,6 +50,7 @@ from django_ray.input_storage import (
 )
 from django_ray.logging import get_backend_logger
 from django_ray.models import RayTaskExecution, TaskState
+from django_ray.redaction import redact_text
 from django_ray.runtime.runtime_env import (
     resolve_runtime_env_profile,
     runtime_env_for_storage,
@@ -56,6 +58,33 @@ from django_ray.runtime.runtime_env import (
 
 if TYPE_CHECKING:
     from django.tasks.base import Task
+
+
+def _bounded_redacted_task_diagnostic(value: str) -> str:
+    """Return the ordinary, fail-closed TaskResult diagnostic projection."""
+    return redact_text(value)
+
+
+def _builtin_exception_class_path(traceback_text: str | None) -> str:
+    """Infer only an import-free built-in exception class from a traceback tail."""
+    if not traceback_text:
+        return "builtins.Exception"
+    lines = traceback_text.strip().splitlines()
+    if not lines:
+        return "builtins.Exception"
+    candidate, separator, _message = lines[-1].partition(":")
+    name = candidate.strip()
+    if not separator or not name.isidentifier():
+        return "builtins.Exception"
+    exception_type = getattr(builtins, name, None)
+    if (
+        isinstance(exception_type, type)
+        and issubclass(exception_type, BaseException)
+        and exception_type.__module__ == "builtins"
+    ):
+        return f"builtins.{name}"
+    return "builtins.Exception"
+
 
 # Module-level logger
 logger = get_backend_logger()
@@ -329,23 +358,19 @@ class RayTaskBackend(BaseTaskBackend):
             execution.state in (TaskState.FAILED, TaskState.LOST, TaskState.EXPIRED)
             and execution.error_message
         ):
-            # Extract exception class from traceback or use generic Exception
-            exception_class_path = "builtins.Exception"
-            if execution.error_traceback:
-                # Try to extract actual exception class from traceback
-                lines = execution.error_traceback.strip().split("\n")
-                if lines:
-                    last_line = lines[-1]
-                    if ":" in last_line:
-                        exception_class_path = last_line.split(":")[0].strip()
-                        # Handle common exception format like "ValueError: message"
-                        if "." not in exception_class_path:
-                            exception_class_path = f"builtins.{exception_class_path}"
+            error_message = _bounded_redacted_task_diagnostic(execution.error_message)
+            error_traceback = (
+                _bounded_redacted_task_diagnostic(execution.error_traceback)
+                if execution.error_traceback
+                else None
+            )
+            # Never turn traceback-controlled text into a dotted import path.
+            exception_class_path = _builtin_exception_class_path(error_traceback)
 
             errors.append(
                 TaskError(
                     exception_class_path=exception_class_path,
-                    traceback=execution.error_traceback or execution.error_message,
+                    traceback=error_traceback or error_message,
                 )
             )
 

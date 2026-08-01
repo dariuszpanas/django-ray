@@ -19,6 +19,7 @@ from django_ray.lifecycle import (
     succeed_task,
 )
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.redaction import REDACTED, normalize_terminal_text, redact_text
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
     normalize_runtime_env,
@@ -80,6 +81,68 @@ def test_explicit_retry_of_expired_task_gets_fresh_deadline() -> None:
     assert retried.queue_timeout_seconds == 120
     assert retried.queue_deadline_at == not_before + timedelta(seconds=120)
     assert TaskAttempt.objects.get(execution=task, attempt_number=1).state == TaskState.EXPIRED
+
+
+@pytest.mark.django_db
+def test_failure_preserves_raw_redaction_evidence_for_current_and_archived_attempts() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-terminal-diagnostic-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+    )
+
+    raw_error = "pass\x1b[31\x0eword=do-not-expose"
+    raw_traceback = (
+        '\x1b[36mray::task()\x1b[39m\r\nFile "/app/task.py", line 1\nRuntimeError: failed'
+    )
+    raw_cancellation = "\x1b[33mstop not confirmed\x1b[39m\rretry blocked"
+
+    accepted = record_failure(
+        task,
+        error_message=raw_error,
+        error_traceback=raw_traceback,
+        cancellation_status="INDETERMINATE",
+        cancellation_error=raw_cancellation,
+        retry=False,
+    )
+
+    assert accepted
+    task.refresh_from_db()
+    assert task.error_message == raw_error
+    assert normalize_terminal_text(task.error_message) == "passord=do-not-expose"
+    assert redact_text(task.error_message) == REDACTED
+    assert task.error_traceback == raw_traceback
+    assert normalize_terminal_text(task.error_traceback) == (
+        'ray::task()\nFile "/app/task.py", line 1\nRuntimeError: failed'
+    )
+    assert task.cancellation_error == raw_cancellation
+    assert normalize_terminal_text(task.cancellation_error) == "stop not confirmed\nretry blocked"
+    attempt = TaskAttempt.objects.get(execution=task, attempt_number=2)
+    assert attempt.error_message == task.error_message
+    assert attempt.error_traceback == task.error_traceback
+
+
+@pytest.mark.django_db
+def test_cancellation_preserves_raw_diagnostic_for_bounded_readers() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-terminal-cancellation-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.CANCELLING,
+    )
+
+    raw_cancellation = "\x1b[33mRay stop uncertain\x1b[39m\rmanual review"
+    accepted = cancel_task(
+        task,
+        cancellation_status="INDETERMINATE",
+        cancellation_error=raw_cancellation,
+    )
+
+    assert accepted
+    task.refresh_from_db()
+    assert task.state == TaskState.CANCELLED
+    assert task.cancellation_error == raw_cancellation
+    assert normalize_terminal_text(task.cancellation_error) == "Ray stop uncertain\nmanual review"
 
 
 @pytest.mark.django_db

@@ -119,6 +119,9 @@ _DJANGO_RAY_STYLESHEET_RE = re.compile(
 _TASK_LIVE_STYLESHEET_RE = re.compile(
     r"""href=["'](?P<path>/static/django_ray/admin/task_live[^"']*\.css)["']"""
 )
+_DIAGNOSTICS_STYLESHEET_RE = re.compile(
+    r"""href=["'](?P<path>/static/django_ray/admin/diagnostics[^"']*\.css)["']"""
+)
 _TASK_LIVE_SCRIPT_RE = re.compile(
     r"""src=["'](?P<path>/static/django_ray/admin/task_live[^"']*\.js)["']"""
 )
@@ -165,6 +168,29 @@ def _details_fragment_by_id(document: str, element_id: str) -> str | None:
             else:
                 depth += 1
     return None
+
+
+def _assert_inert_terminal_diagnostic(value: object, *, field_name: str) -> str:
+    """Require one presented diagnostic to be normalized inert text."""
+    from django_ray.redaction import normalize_terminal_text
+
+    if not isinstance(value, str) or not value:
+        raise DockerSmokeError(f"{field_name} must be non-empty text")
+    if normalize_terminal_text(value) != value:
+        raise DockerSmokeError(f"{field_name} retained terminal formatting or controls")
+    return value
+
+
+def _normalize_stored_terminal_diagnostic(value: object, *, field_name: str) -> str:
+    """Project protected raw storage through the public terminal boundary."""
+    from django_ray.redaction import normalize_terminal_text
+
+    if not isinstance(value, str) or not value:
+        raise DockerSmokeError(f"{field_name} must be non-empty text")
+    normalized = normalize_terminal_text(value)
+    if not normalized:
+        raise DockerSmokeError(f"{field_name} lost all printable diagnostic text")
+    return normalized
 
 
 def _response_json(response: Any) -> dict[str, Any]:
@@ -1085,6 +1111,45 @@ def _verify_existing_workflow_admin_contract(
 
     task_id = str(execution.task_id)
     root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
+    diagnostic_attempt = None
+    diagnostic_traceback: str | None = None
+    if str(execution.state) == "FAILED":
+        from django_ray.models import TaskAttempt
+
+        try:
+            diagnostic_attempt = TaskAttempt.objects.get(
+                execution_id=execution.pk,
+                attempt_number=execution.attempt_number,
+            )
+        except (TaskAttempt.DoesNotExist, TaskAttempt.MultipleObjectsReturned) as error:
+            raise DockerSmokeError(
+                "failed workflow did not archive exactly one diagnostic attempt"
+            ) from error
+        diagnostic_error = _normalize_stored_terminal_diagnostic(
+            diagnostic_attempt.error_message,
+            field_name="archived workflow error",
+        )
+        diagnostic_traceback = _normalize_stored_terminal_diagnostic(
+            diagnostic_attempt.error_traceback,
+            field_name="archived workflow traceback",
+        )
+        if change_attempt_number is None:
+            current_error = _normalize_stored_terminal_diagnostic(
+                execution.error_message,
+                field_name="current workflow error",
+            )
+            current_traceback = _normalize_stored_terminal_diagnostic(
+                execution.error_traceback,
+                field_name="current workflow traceback",
+            )
+            if diagnostic_error != current_error or diagnostic_traceback != current_traceback:
+                raise DockerSmokeError(
+                    "failed workflow current and archived diagnostics did not match"
+                )
+        elif diagnostic_attempt.pk != getattr(execution, "attempt_pk", None):
+            raise DockerSmokeError(
+                "selected failed workflow attempt did not match its Admin detail identity"
+            )
     diagnostics_path = f"{root}/workflow/diagnostics/"
     graph_path = f"{root}/workflow/graph/"
     node_detail_path = f"{root}/workflow/node/"
@@ -1122,6 +1187,8 @@ def _verify_existing_workflow_admin_contract(
                     "selected workflow attempt did not retain its Admin detail identity"
                 )
             attempt_detail_path = f"/admin/django_ray/taskattempt/{attempt_pk}/change/"
+        elif diagnostic_attempt is not None:
+            attempt_detail_path = f"/admin/django_ray/taskattempt/{diagnostic_attempt.pk}/change/"
         change_html = _request_text(
             base_url,
             change_path,
@@ -1173,7 +1240,7 @@ def _verify_existing_workflow_admin_contract(
             "Workflow graph" not in attempt_detail_html
             or f'href="{graph_read_path}"' not in attempt_detail_html
         ):
-            raise DockerSmokeError("archived workflow attempt did not link to its pinned graph")
+            raise DockerSmokeError("workflow attempt did not link to its pinned graph")
         if change_attempt_number is not None:
             panel_marker = f'data-workflow-attempt-graph="{change_attempt_number}"'
             if str(execution.state) == "FAILED":
@@ -1256,6 +1323,50 @@ def _verify_existing_workflow_admin_contract(
             headers=headers,
             deadline=deadline,
         )
+
+    if diagnostic_attempt is not None:
+        from django_ray.redaction import redact_text
+
+        if attempt_detail_html is None:  # pragma: no cover - guarded assignment above
+            raise DockerSmokeError("failed workflow attempt detail was not read")
+        if diagnostic_traceback is None:  # pragma: no cover - guarded persistence check above
+            raise DockerSmokeError("failed workflow attempt traceback was not read")
+        escaped_preview = html.escape(redact_text(diagnostic_traceback)[:256])
+        parent_must_present_diagnostic = change_attempt_number is None
+        if (
+            _DIAGNOSTICS_STYLESHEET_RE.search(change_html) is None
+            or _DIAGNOSTICS_STYLESHEET_RE.search(attempt_detail_html) is None
+            or "django-ray-diagnostic" not in attempt_detail_html
+            or escaped_preview not in attempt_detail_html
+            or (
+                parent_must_present_diagnostic
+                and (
+                    "django-ray-diagnostic" not in change_html or escaped_preview not in change_html
+                )
+            )
+        ):
+            raise DockerSmokeError(
+                "failed workflow diagnostics were not presented as escaped wrapped text"
+            )
+        _assert_inert_terminal_diagnostic(
+            change_html,
+            field_name="workflow admin diagnostic page",
+        )
+        _assert_inert_terminal_diagnostic(
+            attempt_detail_html,
+            field_name="workflow attempt diagnostic page",
+        )
+        stylesheet_match = _DIAGNOSTICS_STYLESHEET_RE.search(change_html)
+        if stylesheet_match is None:  # pragma: no cover - checked above
+            raise DockerSmokeError("workflow diagnostic stylesheet was not advertised")
+        stylesheet = _request_text(
+            base_url,
+            html.unescape(stylesheet_match.group("path")),
+            expected_content_type="text/css",
+            deadline=deadline,
+        )
+        if "white-space: pre-wrap" not in stylesheet or "overflow-wrap: anywhere" not in stylesheet:
+            raise DockerSmokeError("workflow diagnostic stylesheet lost safe traceback wrapping")
 
     counts = {
         collection: _workflow_admin_page_count(

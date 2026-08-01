@@ -340,7 +340,7 @@ def _measure_sample(
     record_count: int,
     nodes: int,
     change_rate: float,
-) -> dict[str, int | float | None]:
+) -> dict[str, int | float | bool | None]:
     tracemalloc.start()
     started = time.perf_counter()
     payload = _representative_payload(
@@ -365,10 +365,19 @@ def _measure_sample(
     redact_ms = _elapsed_ms(started)
 
     started = time.perf_counter()
-    summary_response = _canonical_bytes(redacted["summary"])
+    if isinstance(redacted, dict):
+        summary = redacted.get("summary", redacted)
+        redacted_records = redacted.get("records")
+    else:
+        summary = redacted
+        redacted_records = None
+    redaction_projection_available = (
+        isinstance(summary, dict) and isinstance(redacted_records, list) and summary is not redacted
+    )
+    summary_response = _canonical_bytes(summary)
     summary_read_ms = _elapsed_ms(started)
-    records = redacted.get("records", [])
-    page = records[:100] if isinstance(records, list) else []
+    records = redacted_records if isinstance(redacted_records, list) else []
+    page = records[:100]
     started = time.perf_counter()
     page_response = _canonical_bytes({"items": page})
     page_read_ms = _elapsed_ms(started)
@@ -403,6 +412,7 @@ def _measure_sample(
         "rss_bytes": _rss_bytes(),
         "representative_records": record_count,
         "modeled_nodes": nodes,
+        "redaction_projection_available": redaction_projection_available,
     }
 
 

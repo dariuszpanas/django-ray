@@ -3,6 +3,7 @@
 
 {% block extrastyle %}
   {{ block.super }}
+  <link rel="stylesheet" href="{% static 'django_ray/admin/diagnostics.css' %}">
   <link rel="stylesheet" href="{% static 'django_ray/admin/sensitive_task_data.css' %}">
 {% endblock %}
 
@@ -15,8 +16,24 @@
   </div>
 {% endblock %}
 
+{% block content_title %}{% endblock %}
+
 {% block content %}
   <div id="content-main" class="django-ray-sensitive-data">
+    <header class="django-ray-sensitive-data__header">
+      <p class="django-ray-sensitive-data__eyebrow">Privileged diagnostics</p>
+      <h1>{{ title }}</h1>
+      <p class="django-ray-sensitive-data__subject">
+        {{ django_ray_sensitive_subject }}
+      </p>
+      <a
+        href="{{ django_ray_sensitive_back_url }}"
+        class="django-ray-admin-action django-ray-admin-action--secondary"
+      >
+        Return to redacted task detail
+      </a>
+    </header>
+
     <section class="module django-ray-sensitive-data__warning" aria-labelledby="sensitive-warning-title">
       <h2 id="sensitive-warning-title">Sensitive, unredacted values</h2>
       <div class="django-ray-sensitive-data__warning-body">
@@ -26,6 +43,10 @@
           your deployment's secret and incident-data policy.
         </p>
         <p>
+          Terminal formatting and control characters are rendered inert for safe
+          browser inspection. Printable diagnostic text remains unredacted.
+        </p>
+        <p>
           Access requires the ordinary object-view permission and
           <code>django_ray.view_sensitive_task_data</code>. This GET-only response is
           not cached. RuntimeEnv, completion envelopes, workflow progress, and logs
@@ -33,13 +54,6 @@
         </p>
       </div>
     </section>
-
-    <p class="django-ray-sensitive-data__subject">{{ django_ray_sensitive_subject }}</p>
-    <p>
-      <a href="{{ django_ray_sensitive_back_url }}" class="button">
-        Return to redacted task detail
-      </a>
-    </p>
 
     {% for section in django_ray_sensitive_sections %}
       <section class="module django-ray-sensitive-data__section" aria-labelledby="sensitive-section-{{ forloop.counter }}">
@@ -53,6 +67,10 @@
                   <pre class="django-ray-sensitive-data__value">{{ field.value }}</pre>
                 {% elif field.status == "empty" %}
                   <p class="django-ray-sensitive-data__placeholder">Empty string</p>
+                {% elif field.status == "normalized_empty" %}
+                  <p class="django-ray-sensitive-data__placeholder">
+                    Stored value contained only terminal formatting or control characters.
+                  </p>
                 {% elif field.status == "null" %}
                   <p class="django-ray-sensitive-data__placeholder">No stored value</p>
                 {% elif field.status == "oversized" %}

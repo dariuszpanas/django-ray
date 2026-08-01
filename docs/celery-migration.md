@@ -565,6 +565,13 @@ updates or block until completion. The enqueue snapshot retains the routed `Task
 `refresh()` calls that task's backend, so it follows a per-submission override while
 that object remains available.
 
+For django-ray, successful return values remain application data, while failed
+`TaskResult.errors` contain terminal-inert, pattern-redacted operational tracebacks.
+This differs from reading protected execution fields directly. Use the separately
+authorized [pattern-unredacted Admin view](reference/settings.md#unredacted-task-diagnostics)
+when an incident responder needs the stored failure evidence; it still normalizes
+terminal controls and enforces field and response bounds.
+
 If only durable application tracking remains, query the alias that originally accepted
 the work:
 

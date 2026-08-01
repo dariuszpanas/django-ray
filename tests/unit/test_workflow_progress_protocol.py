@@ -225,6 +225,26 @@ def test_output_preview_event_is_fenced_by_attempt_generation_and_run() -> None:
     assert raised.value.reason == "fence_mismatch"
 
 
+def test_output_preview_event_normalizes_terminal_formatting_without_redaction() -> None:
+    payload = _payloads()[WorkflowProgressEventKind.OUTPUT_PREVIEW]
+    payload["output_preview"] = {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"status": "\x1b[32mOK\x1b[0m"},
+    }
+
+    event = decode_workflow_progress_event(
+        _prepare(WorkflowProgressEventKind.OUTPUT_PREVIEW, payload)
+    )
+
+    assert event.payload["output_preview"] == {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"status": "OK"},
+    }
+    assert event.truncated is False
+
+
 @pytest.mark.parametrize(
     "output_preview",
     [
@@ -565,6 +585,138 @@ def test_prepare_redacts_secrets_before_the_wire_boundary() -> None:
     assert b"DATABASE_PASSWORD" not in wire
     assert b"Authorization" not in wire
     assert event.truncated is True
+
+
+def test_prepare_normalizes_terminal_formatting_without_marking_truncated() -> None:
+    node_payload = _payloads()[WorkflowProgressEventKind.NODE_REGISTERED]
+    node_payload["label"] = "\x1b[36mincrement\x1b[0m"
+    node_payload["runtime_env"] = {"profile": "\x1b[33mdefault\x1b[0m"}
+    progress_payload = _payloads()[WorkflowProgressEventKind.APPLICATION_PROGRESS]
+    progress_payload["message"] = "\x1b[36mhalfway\x1b[0m"
+    progress_payload["metrics"] = {"status": "\x1b[32mOK\x1b[0m"}
+
+    node = decode_workflow_progress_event(
+        _prepare(WorkflowProgressEventKind.NODE_REGISTERED, node_payload)
+    )
+    progress = decode_workflow_progress_event(
+        _prepare(WorkflowProgressEventKind.APPLICATION_PROGRESS, progress_payload)
+    )
+
+    assert node.payload["label"] == "increment"
+    assert node.payload["runtime_env"] == {"profile": "default"}
+    assert node.truncated is False
+    assert progress.payload["message"] == "halfway"
+    assert progress.payload["metrics"] == {"status": "OK"}
+    assert progress.truncated is False
+
+
+def test_prepare_redacts_a_sensitive_terminal_formatted_metric() -> None:
+    payload = _payloads()[WorkflowProgressEventKind.APPLICATION_PROGRESS]
+    payload["metrics"] = {
+        "status": "pass\x1b[31mword=must-not-cross-the-wire",
+    }
+
+    wire = _prepare(WorkflowProgressEventKind.APPLICATION_PROGRESS, payload)
+    event = decode_workflow_progress_event(wire)
+
+    assert b"must-not-cross-the-wire" not in wire
+    assert event.payload["metrics"] == {"status": "[REDACTED]"}
+    assert event.truncated is True
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [kind for kind, payload in _payloads().items() if "node_id" in payload],
+    ids=lambda kind: kind.value,
+)
+def test_prepare_rejects_node_id_that_terminal_normalization_would_change(
+    kind: WorkflowProgressEventKind,
+) -> None:
+    payload = _payloads()[kind]
+    payload["node_id"] = "node-a\x1b[31m"
+
+    with pytest.raises(WorkflowProgressProtocolError, match="contains unsafe characters"):
+        _prepare(kind, payload)
+
+
+@pytest.mark.parametrize("field", ["source", "target"])
+def test_prepare_rejects_edge_identity_that_terminal_normalization_would_change(
+    field: str,
+) -> None:
+    payload = _payloads()[WorkflowProgressEventKind.EDGES_REGISTERED]
+    payload["edges"][0][field] = f"{payload['edges'][0][field]}\x1b[31m"
+
+    with pytest.raises(WorkflowProgressProtocolError, match="contains unsafe characters"):
+        _prepare(WorkflowProgressEventKind.EDGES_REGISTERED, payload)
+
+
+def test_prepare_persists_only_normalized_mapping_keys() -> None:
+    node_payload = _payloads()[WorkflowProgressEventKind.NODE_REGISTERED]
+    node_payload["runtime_env"] = {"\x1b[31mprofile\x1b[0m": "default"}
+    node_payload["ray_options"] = {
+        "metadata": {"\x9dsafe\x18queue": "ordinary"},
+    }
+    progress_payload = _payloads()[WorkflowProgressEventKind.APPLICATION_PROGRESS]
+    progress_payload["metrics"] = {"\x1b[32mrows\x1b[0m": 5}
+    started_payload = _payloads()[WorkflowProgressEventKind.STARTED]
+    started_payload["execution"]["assigned_resources"] = {
+        "\x1b[33mCPU\x1b[0m": 1.0,
+    }
+
+    node = decode_workflow_progress_event(
+        _prepare(WorkflowProgressEventKind.NODE_REGISTERED, node_payload)
+    )
+    progress = decode_workflow_progress_event(
+        _prepare(WorkflowProgressEventKind.APPLICATION_PROGRESS, progress_payload)
+    )
+    started = decode_workflow_progress_event(
+        _prepare(WorkflowProgressEventKind.STARTED, started_payload)
+    )
+
+    assert node.payload["runtime_env"] == {"profile": "default"}
+    assert node.payload["ray_options"] == {"metadata": {"queue": "ordinary"}}
+    assert progress.payload["metrics"] == {"rows": 5}
+    assert started.payload["execution"]["assigned_resources"] == {"CPU": 1.0}
+    assert node.truncated is False
+    assert progress.truncated is False
+    assert started.truncated is False
+    assert all("\x1b" not in event.payload.__repr__() for event in (node, progress, started))
+
+
+def test_prepare_redacts_a_sensitive_key_split_across_a_csi_final() -> None:
+    payload = _payloads()[WorkflowProgressEventKind.NODE_REGISTERED]
+    payload["runtime_env"] = {
+        "pass\x1b[31\x0eword": "must-not-cross-the-wire",
+    }
+
+    wire = _prepare(WorkflowProgressEventKind.NODE_REGISTERED, payload)
+    event = decode_workflow_progress_event(wire)
+
+    assert b"must-not-cross-the-wire" not in wire
+    assert event.payload["runtime_env"] == {}
+    assert event.truncated is True
+
+
+@pytest.mark.parametrize("location", ("metadata", "metrics", "resources"))
+def test_prepare_rejects_duplicate_normalized_mapping_keys(location: str) -> None:
+    if location == "metadata":
+        kind = WorkflowProgressEventKind.NODE_REGISTERED
+        payload = _payloads()[kind]
+        payload["runtime_env"] = {"profile": "first", "\x1b[31mprofile\x1b[0m": "second"}
+    elif location == "metrics":
+        kind = WorkflowProgressEventKind.APPLICATION_PROGRESS
+        payload = _payloads()[kind]
+        payload["metrics"] = {"rows": 1, "\x1b[31mrows\x1b[0m": 2}
+    else:
+        kind = WorkflowProgressEventKind.STARTED
+        payload = _payloads()[kind]
+        payload["execution"]["assigned_resources"] = {
+            "CPU": 1.0,
+            "\x1b[31mCPU\x1b[0m": 2.0,
+        }
+
+    with pytest.raises(WorkflowProgressProtocolError, match="duplicate normalized"):
+        _prepare(kind, payload)
 
 
 @pytest.mark.parametrize("value", ["{}", bytearray(b"{}"), memoryview(b"{}")])

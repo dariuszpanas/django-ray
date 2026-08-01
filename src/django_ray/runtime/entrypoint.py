@@ -9,7 +9,6 @@ import argparse
 import asyncio
 import base64
 import json
-import logging
 import os
 import sys
 import traceback
@@ -23,9 +22,10 @@ from django.apps import apps
 
 from django_ray.conf.settings import get_settings
 from django_ray.input_storage import InputPayloadValidationError, load_task_input
+from django_ray.logging import get_logger
 from django_ray.redaction import redact_text
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass

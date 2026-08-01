@@ -4,8 +4,12 @@
   {{ block.super }}
   {% if django_ray_sensitive_data_url %}
     <li>
-      <a href="{{ django_ray_sensitive_data_url }}" class="viewsitelink">
-        View unredacted task data
+      <a
+        href="{{ django_ray_sensitive_data_url }}"
+        class="django-ray-admin-action django-ray-admin-action--sensitive"
+        aria-label="View sensitive task data"
+      >
+        Sensitive data
       </a>
     </li>
   {% endif %}

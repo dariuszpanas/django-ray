@@ -207,6 +207,108 @@ def test_topology_exact_shapes_redact_metadata_before_storage() -> None:
     assert WorkflowProgressTruncationReason.RECORD_SIZE_LIMIT.value in (topology.truncation_reasons)
 
 
+def test_storage_persists_only_normalized_metadata_metric_and_resource_keys() -> None:
+    identity = _identity()
+    topology = storage.prepare_workflow_progress_topology(
+        identity,
+        1,
+        [
+            _node(
+                "node-a",
+                runtime_env={"\x1b[31mprofile\x1b[0m": "default"},
+                ray_options={"metadata": {"\x9dsafe\x18queue": "ordinary"}},
+            )
+        ],
+        [],
+    )
+    detail = storage.prepare_workflow_progress_node_detail(
+        _detail(
+            "node-a",
+            state="RUNNING",
+            progress={
+                "current": 1,
+                "total": 2,
+                "percent": 50,
+                "message": None,
+                "metrics": {"\x1b[32mrows\x1b[0m": 12},
+                "updated_at": "2026-07-20T12:00:00Z",
+            },
+            execution={
+                "ray_task_id": None,
+                "ray_job_id": None,
+                "ray_node_id": None,
+                "ray_worker_id": None,
+                "assigned_resources": {"\x1b[33mCPU\x1b[0m": 1.0},
+            },
+        ),
+        identity=identity,
+    )
+
+    node = _page_records(topology, storage.WorkflowProgressTopologyCollection.NODE)[0]
+    decoded = _decoded_detail(detail)
+    assert node["runtime_env"] == {"profile": "default"}
+    assert node["ray_options"] == {"metadata": {"queue": "ordinary"}}
+    assert decoded["progress"]["metrics"] == {"rows": 12}
+    assert decoded["execution"]["assigned_resources"] == {"CPU": 1.0}
+    assert b"\x1b" not in b"".join(page.payload for page in topology.pages)
+    assert b"\x1b" not in detail.payload
+
+
+@pytest.mark.parametrize("location", ("metadata", "metrics", "resources"))
+def test_storage_rejects_duplicate_normalized_mapping_keys(location: str) -> None:
+    identity = _identity()
+
+    with pytest.raises(storage.WorkflowProgressStorageError, match="duplicate normalized"):
+        if location == "metadata":
+            storage.prepare_workflow_progress_topology(
+                identity,
+                1,
+                [
+                    _node(
+                        "node-a",
+                        runtime_env={
+                            "profile": "first",
+                            "\x1b[31mprofile\x1b[0m": "second",
+                        },
+                    )
+                ],
+                [],
+            )
+        elif location == "metrics":
+            storage.prepare_workflow_progress_node_detail(
+                _detail(
+                    "node-a",
+                    state="RUNNING",
+                    progress={
+                        "current": 1,
+                        "total": 2,
+                        "percent": 50,
+                        "message": None,
+                        "metrics": {"rows": 12, "\x1b[32mrows\x1b[0m": 13},
+                        "updated_at": "2026-07-20T12:00:00Z",
+                    },
+                ),
+                identity=identity,
+            )
+        else:
+            storage.prepare_workflow_progress_node_detail(
+                _detail(
+                    "node-a",
+                    execution={
+                        "ray_task_id": None,
+                        "ray_job_id": None,
+                        "ray_node_id": None,
+                        "ray_worker_id": None,
+                        "assigned_resources": {
+                            "CPU": 1.0,
+                            "\x1b[33mCPU\x1b[0m": 2.0,
+                        },
+                    },
+                ),
+                identity=identity,
+            )
+
+
 @pytest.mark.parametrize("shape", ["extra", "missing"])
 def test_topology_requires_exact_node_and_edge_shapes(shape: str) -> None:
     node = _node("node-a")

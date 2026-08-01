@@ -19,6 +19,7 @@ from django_ray.models import (
     TaskState,
     TaskWorkerLease,
 )
+from django_ray.redaction import normalize_terminal_text
 from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
 from django_ray.runner.ray_core import RayCoreHandle
@@ -1476,11 +1477,17 @@ class TestWorkerRayJobFailureHandling:
                 from django_ray.runner.base import JobInfo, JobStatus
 
                 return JobInfo(
-                    job_id=handle.ray_job_id, status=JobStatus.FAILED, message="ray final"
+                    job_id=handle.ray_job_id,
+                    status=JobStatus.FAILED,
+                    message="\x1b[31mray final\x1b[39m",
                 )
 
             def get_logs(self, handle):
-                return "terminal-traceback"
+                return (
+                    "\x1b[36mray::django_ray:task()\x1b[39m\r\n"
+                    'File "/app/src/django_ray/runtime/remote.py", line 81\n'
+                    "ModuleNotFoundError: No module named 'django_ray'"
+                )
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
@@ -1491,8 +1498,20 @@ class TestWorkerRayJobFailureHandling:
         assert task.state == TaskState.FAILED
         assert task.attempt_number == 3
         assert task.finished_at is not None
-        assert task.error_message == "ray final"
-        assert task.error_traceback == "terminal-traceback"
+        assert task.error_message == "\x1b[31mray final\x1b[39m"
+        assert normalize_terminal_text(task.error_message) == "ray final"
+        assert task.error_traceback == (
+            "\x1b[36mray::django_ray:task()\x1b[39m\r\n"
+            'File "/app/src/django_ray/runtime/remote.py", line 81\n'
+            "ModuleNotFoundError: No module named 'django_ray'"
+        )
+        assert normalize_terminal_text(task.error_traceback) == (
+            "ray::django_ray:task()\n"
+            'File "/app/src/django_ray/runtime/remote.py", line 81\n'
+            "ModuleNotFoundError: No module named 'django_ray'"
+        )
+        assert "ray final" in cmd.stdout.getvalue()
+        assert "\x1b" not in cmd.stdout.getvalue()
         assert task.pk not in cmd.active_tasks
 
 

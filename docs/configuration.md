@@ -312,13 +312,33 @@ the bounded diagnostic fields and custom-`AdminSite` contract.
 
 ### Redaction and operational output
 
-`REDACT_PATTERNS` is an optional sequence of regular expressions used for
+`REDACT_PATTERNS` is an optional sequence of bounded pattern expressions used for
 worker logs, structured log fields, Ray State API/log responses, the sample
 operational API, and bounded diagnostic fields in the Django admin task detail
 view. When it is `None`, the built-in patterns cover common names such as
 `password`, `secret`, `token`, `authorization`, `cookie`, and `private_key`.
 A matching mapping key redacts its value; a matching string is replaced with
 `[REDACTED]`.
+
+The expressions use case-insensitive substring-search semantics. They support literals
+and escaped literals, `.`, positive or negated character classes and ranges, capturing
+or noncapturing groups, alternation, `?`, `*`, `+`, bounded/open numeric repetition,
+and `\d`, `\D`, `\s`, `\S`, `\w`, and `\W`. Zero-width anchors or word boundaries,
+lookaround, backreferences, inline flags, named/conditional/atomic groups, possessive
+quantifiers, and any expression which can match empty text are rejected during Django
+startup. Direct `redact_text(..., patterns=...)` and `redact_value(..., patterns=...)`
+arguments use the same validator; they never fall back to raw-only matching.
+
+At most 64 configured entries are accepted. Each source is limited to 256 UTF-8 bytes
+and configured sources to 4,096 bytes in aggregate. The built-ins remain independently
+active; the combined program admits at most 80 expressions and 8,192 source bytes.
+Compilation allows at most 512 states per expression, 2,048 in aggregate, numeric repeat
+bounds through 128, and group depth 32. Evaluation shares a 250,000-unit matcher ceiling
+across every terminal representation and nested member of one root value. One structured
+root also admits at most 4,096 visited items and 65,536 aggregate characters across its
+string keys and values. Exhausting any boundary fails closed to a type-compatible
+`[REDACTED]` projection. Pattern iterables stop at the configured count boundary rather
+than being materialized without limit.
 
 ```python
 DJANGO_RAY = {
@@ -330,6 +350,12 @@ DJANGO_RAY = {
     ],
 }
 ```
+
+After upgrading, run `python manage.py check` with production settings before starting
+workers. An unsupported entry is reported by its configured index without echoing its
+source. Replace anchors and boundaries with the intended consuming marker, expand a
+backreference/lookaround into bounded alternatives, or perform richer classification in
+application code before passing a small marker to the redaction boundary.
 
 Successful task logs contain only result type and serialized size, never the
 complete return value. Ray Job completion envelopes are persisted through the

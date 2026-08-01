@@ -19,7 +19,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
-from django_ray.redaction import REDACTED, redact_text
+from django_ray.redaction import REDACTED, normalize_terminal_text, redact_text
 from django_ray.workflow_output_previews import (
     WorkflowOutputPreviewError,
     validate_workflow_output_preview,
@@ -227,9 +227,19 @@ def _bounded_identity_text(
         raise WorkflowProgressProtocolError(f"{name} cannot be empty")
     if len(encoded) > maximum:
         raise WorkflowProgressProtocolLimitError(f"{name} exceeds {maximum} UTF-8 bytes")
-    if redact_text(value) == REDACTED:
+    normalized = redact_text(value)
+    if normalized == REDACTED:
         raise WorkflowProgressProtocolError(f"{name} resembles sensitive data")
+    if normalized != value:
+        raise WorkflowProgressProtocolError(f"{name} contains unsafe characters")
     return value
+
+
+def _terminal_redaction(value: str) -> tuple[str, bool]:
+    """Return safe text and whether policy redaction changed its inert baseline."""
+    normalized = normalize_terminal_text(value)
+    redacted = redact_text(value)
+    return redacted, redacted != normalized
 
 
 def _bounded_redacted_text(
@@ -244,11 +254,11 @@ def _bounded_redacted_text(
     encoded = _utf8_bytes(value, name)
     if len(encoded) > maximum:
         return _OMITTED_OVERSIZED, True
-    normalized = redact_text(value)
+    normalized, was_redacted = _terminal_redaction(value)
     normalized_bytes = _utf8_bytes(normalized, name)
     if len(normalized_bytes) > maximum:
         return _OMITTED_OVERSIZED, True
-    return normalized, normalized != value
+    return normalized, was_redacted
 
 
 def _bounded_int(
@@ -381,10 +391,10 @@ def _normalize_metadata(
         if len(encoded) > limits.record_max_encoded_bytes:
             budget.consume(len(_OMITTED_OVERSIZED) + 2, name)
             return _OMITTED_OVERSIZED, True
-        normalized = redact_text(value)
+        normalized, was_redacted = _terminal_redaction(value)
         normalized_bytes = _utf8_bytes(normalized, name)
         budget.consume(len(normalized_bytes) + 2, name)
-        return normalized, normalized != value
+        return normalized, was_redacted
     if isinstance(value, Mapping):
         budget.consume(2, name)
         normalized_mapping: dict[str, Any] = {}
@@ -396,17 +406,22 @@ def _normalize_metadata(
             if not key_bytes or len(key_bytes) > limits.record_max_encoded_bytes:
                 raise WorkflowProgressProtocolLimitError(f"{name} contains an oversized key")
             budget.consume(len(key_bytes) + 4, name)
-            if redact_text(key) == REDACTED:
+            normalized_key = redact_text(key)
+            if normalized_key == REDACTED:
                 truncated = True
                 continue
+            if not normalized_key:
+                raise WorkflowProgressProtocolError(f"{name} contains an empty normalized key")
+            if normalized_key in normalized_mapping:
+                raise WorkflowProgressProtocolError(f"{name} contains a duplicate normalized key")
             normalized_item, item_truncated = _normalize_metadata(
                 item,
-                f"{name}.{key}",
+                f"{name}.{normalized_key}",
                 limits=limits,
                 depth=depth + 1,
                 budget=budget,
             )
-            normalized_mapping[key] = normalized_item
+            normalized_mapping[normalized_key] = normalized_item
             truncated = truncated or item_truncated
         return normalized_mapping, truncated
     if isinstance(value, list | tuple):
@@ -528,33 +543,38 @@ def _normalize_metrics(
         key_bytes = _utf8_bytes(key, f"{name} key")
         if not key_bytes or len(key_bytes) > limits.metric_key_max_bytes:
             raise WorkflowProgressProtocolLimitError(f"{name} contains an oversized key")
-        if redact_text(key) == REDACTED:
+        normalized_key = redact_text(key)
+        if normalized_key == REDACTED:
             truncated = True
             continue
+        if not normalized_key:
+            raise WorkflowProgressProtocolError(f"{name} contains an empty normalized key")
+        if normalized_key in normalized:
+            raise WorkflowProgressProtocolError(f"{name} contains a duplicate normalized key")
         item = value[key]
         if item is None or isinstance(item, bool):
-            normalized[key] = item
+            normalized[normalized_key] = item
         elif isinstance(item, int):
             if not -(1 << 63) <= item <= limits.identity_max_integer:
                 raise WorkflowProgressProtocolError(
-                    f"{name}.{key} integer is outside the durable range"
+                    f"{name}.{normalized_key} integer is outside the durable range"
                 )
-            normalized[key] = item
+            normalized[normalized_key] = item
         elif isinstance(item, float):
             if not math.isfinite(item):
-                raise WorkflowProgressProtocolError(f"{name}.{key} must be finite")
-            normalized[key] = item
+                raise WorkflowProgressProtocolError(f"{name}.{normalized_key} must be finite")
+            normalized[normalized_key] = item
         elif isinstance(item, str):
-            encoded = _utf8_bytes(item, f"{name}.{key}")
+            encoded = _utf8_bytes(item, f"{name}.{normalized_key}")
             if len(encoded) > limits.metric_string_max_bytes:
-                normalized[key] = _OMITTED_OVERSIZED
+                normalized[normalized_key] = _OMITTED_OVERSIZED
                 truncated = True
             else:
-                redacted = redact_text(item)
-                normalized[key] = redacted
-                truncated = truncated or redacted != item
+                redacted, was_redacted = _terminal_redaction(item)
+                normalized[normalized_key] = redacted
+                truncated = truncated or was_redacted
         else:
-            raise WorkflowProgressProtocolError(f"{name}.{key} must be a scalar")
+            raise WorkflowProgressProtocolError(f"{name}.{normalized_key} must be a scalar")
     encoded = canonical_workflow_progress_json_bytes(normalized)
     if len(encoded) <= limits.metrics_max_encoded_bytes:
         return normalized, truncated
@@ -574,19 +594,31 @@ def _normalize_execution(
             "started.execution assigned_resources exceeds its item limit"
         )
     assigned: dict[str, float] = {}
-    for key in sorted(assigned_value):
+    assigned_keys = list(assigned_value)
+    if any(not isinstance(key, str) for key in assigned_keys):
+        raise WorkflowProgressProtocolError("started.execution assigned resource keys must be text")
+    for key in sorted(assigned_keys):
         key_bytes = _utf8_bytes(key, "assigned resource key")
         if not key_bytes or len(key_bytes) > limits.metric_key_max_bytes:
             raise WorkflowProgressProtocolLimitError(
                 "started.execution contains an oversized resource key"
             )
-        if redact_text(key) == REDACTED:
+        normalized_key = redact_text(key)
+        if normalized_key == REDACTED:
             raise WorkflowProgressProtocolError(
                 "started.execution contains a sensitive-looking resource key"
             )
-        assigned[key] = _finite_number(
+        if not normalized_key:
+            raise WorkflowProgressProtocolError(
+                "started.execution contains an empty normalized resource key"
+            )
+        if normalized_key in assigned:
+            raise WorkflowProgressProtocolError(
+                "started.execution contains a duplicate normalized resource key"
+            )
+        assigned[normalized_key] = _finite_number(
             assigned_value[key],
-            f"started.execution.assigned_resources.{key}",
+            f"started.execution.assigned_resources.{normalized_key}",
             minimum=0.0,
         )
     if len(canonical_workflow_progress_json_bytes(assigned)) > limits.metrics_max_encoded_bytes:

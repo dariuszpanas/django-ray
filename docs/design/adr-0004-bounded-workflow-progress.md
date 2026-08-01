@@ -148,6 +148,14 @@ and archived readers replace that preview with the existing `REDACTED` marker. T
 stored payload and digest remain unchanged, no historical value crosses the read
 boundary, and unrelated graph nodes remain available.
 
+Some authenticated node-detail rows may predate the complete terminal-text normalizer.
+Readers verify those original canonical bytes and their digest before building a
+detached terminal-inert presentation; they never rewrite the retained row or recompute
+its digest over the presentation. Node, edge, invocation, and storage identities must
+remain byte-for-byte unchanged by normalization, and a normalized mapping-key collision
+makes the affected record corrupt rather than merging values. Current writers still
+follow the publication protocol below and admit only already normalized records.
+
 The preview is observational latest state under the existing run fence. It is not a
 result reference, checkpoint, replay log, selective-resume marker, idempotency receipt,
 or evidence that an external side effect committed. Runtime, retry, cancellation, and

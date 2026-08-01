@@ -104,6 +104,52 @@ def test_configured_redaction_is_applied_before_preview_publication() -> None:
     assert validate_workflow_output_preview(preview) == preview
 
 
+def test_terminal_formatting_is_normalized_without_becoming_redacted() -> None:
+    preview = prepare_workflow_output_preview(
+        {
+            "\x1b[36mstatus\x1b[0m": "\x1b[32mOK\x1b[0m",
+            "results": ["\x1b[33mready\x1b[0m"],
+        }
+    )
+
+    assert preview == {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"status": "OK", "results": ["ready"]},
+    }
+    assert validate_workflow_output_preview(preview) == preview
+
+
+def test_validation_and_historical_reads_use_the_terminal_normalized_baseline() -> None:
+    stored = {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"status": "\x1b[32mOK\x1b[0m"},
+    }
+    expected = {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"status": "OK"},
+    }
+
+    assert validate_workflow_output_preview(stored) == expected
+    assert read_workflow_output_preview(stored) == expected
+
+
+def test_terminal_formatting_cannot_hide_sensitive_preview_text() -> None:
+    preview = prepare_workflow_output_preview(
+        {"message": "pass\x1b[31mword=must-not-cross-the-boundary"}
+    )
+
+    assert preview == {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": {"message": REDACTED},
+    }
+    assert "must-not-cross" not in str(preview)
+    assert validate_workflow_output_preview(preview) == preview
+
+
 def test_literal_redaction_marker_is_never_presented_as_available() -> None:
     preview = prepare_workflow_output_preview(REDACTED)
 
@@ -254,3 +300,29 @@ def test_read_policy_drift_replaces_only_the_historical_value(settings) -> None:
         "order_id": "order-1",
         "region": "newly-sensitive",
     }
+
+
+def test_read_policy_drift_redacts_against_the_raw_terminal_formatted_value(settings) -> None:
+    stored = {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"region": "newly-\x1b[31msensitive"},
+    }
+
+    assert read_workflow_output_preview(stored) == {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"region": "newly-sensitive"},
+    }
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "REDACT_PATTERNS": [r"newly-sensitive"],
+    }
+
+    assert read_workflow_output_preview(stored) == {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": REDACTED,
+    }
+    assert stored["value"] == {"region": "newly-\x1b[31msensitive"}

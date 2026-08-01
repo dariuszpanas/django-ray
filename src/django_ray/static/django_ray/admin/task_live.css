@@ -6,16 +6,22 @@ body.django-ray-execution-change nav > .breadcrumbs {
 }
 
 #django-ray-task-actions {
-  background: var(--body-bg, #fff);
-  border: 1px solid var(--color-base-200, var(--hairline-color, #d9e0ea));
+  --django-ray-task-action-bg: #fff;
+  --django-ray-task-action-border: #d9e0ea;
+  --django-ray-task-action-header-bg: #f8fafc;
+  --django-ray-task-action-text: #0f172a;
+  background: var(--django-ray-task-action-bg);
+  border: 1px solid var(--django-ray-task-action-border);
   border-radius: var(--border-radius, 8px);
+  color: var(--django-ray-task-action-text);
   margin-block: 1.5rem;
   overflow: hidden;
 }
 
 #django-ray-task-actions > h2 {
-  background: var(--darkened-bg, #f8fafc);
-  color: var(--body-fg, #0f172a);
+  background: var(--django-ray-task-action-header-bg);
+  border-bottom: 1px solid var(--django-ray-task-action-border);
+  color: var(--django-ray-task-action-text);
   font-size: 0.875rem;
   font-weight: 700;
   margin: 0;
@@ -53,6 +59,22 @@ body.django-ray-execution-change nav > .breadcrumbs {
 @media (max-width: 40rem) {
   #django-ray-task-actions .django-ray-task-actions__retry {
     width: 100%;
+  }
+}
+
+:is(html.dark, html[data-theme="dark"]) #django-ray-task-actions {
+  --django-ray-task-action-bg: #16171a;
+  --django-ray-task-action-border: #303238;
+  --django-ray-task-action-header-bg: #212226;
+  --django-ray-task-action-text: #e4e4e7;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] #django-ray-task-actions {
+    --django-ray-task-action-bg: #16171a;
+    --django-ray-task-action-border: #303238;
+    --django-ray-task-action-header-bg: #212226;
+    --django-ray-task-action-text: #e4e4e7;
   }
 }
 
@@ -927,6 +949,7 @@ body.django-ray-execution-change nav > .breadcrumbs {
   margin: 0;
   overflow-wrap: anywhere;
   padding: 0.625rem;
+  white-space: pre-wrap;
 }
 
 #django-ray-live-observability
