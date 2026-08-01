@@ -246,6 +246,18 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Ray Dashboard URL used by Django admin deep links.
 RAY_DASHBOARD_URL = os.environ.get("RAY_DASHBOARD_URL", "http://localhost:8265")
 
+_recovery_working_dir = os.environ.get("DJANGO_RAY_RECOVERY_WORKING_DIR", "").strip()
+if _recovery_working_dir:
+    _recovery_runtime_env = {"working_dir": _recovery_working_dir}
+else:
+    # Local and Compose users already have the locked dependencies installed.
+    # Hash and upload only the two import roots so retries still pin exact code.
+    _recovery_runtime_env = {
+        "working_dir": str(BASE_DIR / "src"),
+        "py_modules": [str(BASE_DIR / "testproject")],
+        "excludes": ["__pycache__"],
+    }
+
 # Django 6 Tasks Configuration - Use Ray backend for distributed execution
 TASKS = {
     "default": {
@@ -262,6 +274,14 @@ TASKS = {
         "OPTIONS": {
             "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
             "RUNTIME_ENV_PROFILE": "thin",
+        },
+    },
+    "recovery-showcase": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+        "OPTIONS": {
+            "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
+            "RUNTIME_ENV_PROFILE": "recovery-showcase",
         },
     },
     "numpy-2-2": {
@@ -292,6 +312,11 @@ DJANGO_RAY = {
     "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
     "RAY_STATE_API_ADDRESS": os.environ.get("RAY_STATE_API_ADDRESS"),
     "RUNTIME_ENV_PROFILES": {
+        # The recovery demo uses content-hashed local inputs. The KubeRay sample
+        # points this at a deterministic archive containing the exact source and
+        # locked task dependencies; django-ray uploads it to Ray's
+        # content-addressed package store before each durable attempt.
+        "recovery-showcase": _recovery_runtime_env,
         "project": {
             "working_dir": os.environ.get(
                 "DJANGO_RAY_WORKING_DIR_URI",

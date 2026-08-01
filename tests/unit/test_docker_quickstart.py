@@ -255,6 +255,7 @@ def test_existing_workflow_main_needs_no_api_token_and_prints_scalar_json(
         base_url="http://127.0.0.1:8000",
         timeout=45.0,
         existing_workflow_task_id=WORKFLOW_TASK_ID,
+        existing_workflow_attempt_number=None,
         expected_workflow_reporting_policy="full",
     )
     expected = {
@@ -302,9 +303,82 @@ def test_existing_workflow_main_needs_no_api_token_and_prints_scalar_json(
             "task_id": WORKFLOW_TASK_ID,
             "timeout_seconds": 45.0,
             "expected_reporting_policy": "full",
+            "attempt_number": None,
         }
     ]
     assert json.loads(capsys.readouterr().out) == expected
+
+
+@pytest.mark.django_db
+def test_existing_workflow_smoke_selects_archived_attempt_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+    from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+    from tests.workflow_progress_summary_helpers import workflow_progress_summary
+
+    execution = RayTaskExecution.objects.create(
+        task_id=WORKFLOW_TASK_ID,
+        callable_path="testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task",
+        state=TaskState.SUCCEEDED,
+        attempt_number=3,
+        execution_generation=3,
+        workflow_run_id="35200000-0000-4000-8000-000000000003",
+    )
+    archived_identity = SimpleNamespace(
+        pk=execution.pk,
+        attempt_number=1,
+        execution_generation=1,
+        workflow_run_id="35200000-0000-4000-8000-000000000001",
+    )
+    TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=1,
+        state=TaskState.FAILED,
+        workflow_progress_summary_json=serialize_workflow_progress_summary(
+            workflow_progress_summary(
+                archived_identity,
+                published_detail=True,
+                state="FAILED",
+            )
+        ),
+    )
+    observed: list[dict[str, object]] = []
+    expected = {"admin_workflow": "verified"}
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings")
+    monkeypatch.setattr(docker_smoke, "_verify_database_contract", lambda: None)
+    monkeypatch.setattr(
+        docker_smoke,
+        "_verify_existing_workflow_admin_contract",
+        lambda **kwargs: observed.append(kwargs) or expected,
+    )
+
+    assert (
+        docker_smoke._run_existing_workflow_admin_smoke(
+            base_url="http://127.0.0.1:8000",
+            task_id=WORKFLOW_TASK_ID,
+            timeout_seconds=45.0,
+            attempt_number=1,
+        )
+        == expected
+    )
+
+    assert len(observed) == 1
+    selected = observed[0]["execution"]
+    assert selected.pk == execution.pk
+    assert selected.task_id == execution.task_id
+    assert selected.state == TaskState.FAILED
+    assert selected.attempt_number == 1
+    assert selected.execution_generation == 1
+    assert str(selected.workflow_run_id) == "35200000-0000-4000-8000-000000000001"
+    assert (
+        selected.attempt_pk
+        == TaskAttempt.objects.get(
+            execution=execution,
+            attempt_number=1,
+        ).pk
+    )
+    assert observed[0]["change_attempt_number"] == 1
 
 
 def test_workflow_admin_page_limit_covers_the_showcase_topology() -> None:
@@ -345,16 +419,28 @@ def _admin_workflow_responses(
         "node_details": f"{root}/workflow/nodes/",
     }
     attempt_query = f"?attempt_number={execution.attempt_number}"
+    current_attempt_number = getattr(
+        execution,
+        "current_attempt_number",
+        execution.attempt_number,
+    )
+    current_attempt_query = f"?attempt_number={current_attempt_number}"
     diagnostics_read_path = f"{diagnostics_path}{attempt_query}"
     change_html = "".join(
         (
-            '<section id="django-ray-workflow-diagnostics" ',
-            f'data-diagnostics-url="{diagnostics_read_path}" ',
-            f'data-graph-url="{graph_path}{attempt_query}" ',
-            f'data-topology-nodes-url="{collection_paths["topology_nodes"]}{attempt_query}" ',
-            f'data-topology-edges-url="{collection_paths["topology_edges"]}{attempt_query}" ',
-            f'data-node-details-url="{collection_paths["node_details"]}{attempt_query}" ',
-            f'data-node-detail-url="{node_detail_path}{attempt_query}"></section>',
+            '<details id="django-ray-workflow-diagnostics" ',
+            f'data-diagnostics-url="{diagnostics_path}{current_attempt_query}" ',
+            f'data-graph-url="{graph_path}{current_attempt_query}" ',
+            f'data-topology-nodes-url="{collection_paths["topology_nodes"]}'
+            f'{current_attempt_query}" ',
+            f'data-topology-edges-url="{collection_paths["topology_edges"]}'
+            f'{current_attempt_query}" ',
+            f'data-node-details-url="{collection_paths["node_details"]}{current_attempt_query}" ',
+            f'data-node-detail-url="{node_detail_path}{current_attempt_query}">',
+            '<section data-workflow-attempt-graphs aria-label="Attempt execution graphs">',
+            f'<div data-workflow-current-graph data-current-attempt-number="'
+            f'{current_attempt_number}" hidden></div>',
+            "</section></details>",
         )
     )
     node_ids = ("0.0", "0.1", "0.2")
@@ -377,7 +463,7 @@ def _admin_workflow_responses(
         diagnostics_read_path: {
             "schema": "django-ray.admin-workflow-diagnostics",
             "schema_version": 1,
-            "plan": {"status": "AVAILABLE"},
+            "plan": {"status": "AVAILABLE", "retry_safe": True},
             "progress": {
                 "state": "AVAILABLE",
                 "availability": "AVAILABLE",
@@ -433,8 +519,10 @@ def _admin_workflow_responses(
     return change_html, responses
 
 
+@pytest.mark.parametrize("select_attempt", [False, True])
 def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
     monkeypatch: pytest.MonkeyPatch,
+    select_attempt: bool,
 ) -> None:
     execution = SimpleNamespace(
         pk=42,
@@ -443,6 +531,8 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
         execution_generation=1,
         workflow_run_id="35200000-0000-4000-8000-000000000003",
         state="SUCCEEDED",
+        attempt_pk=91 if select_attempt else None,
+        current_attempt_number=3 if select_attempt else 1,
     )
     change_html, responses = _admin_workflow_responses(execution)
     cookie = "sessionid=private-admin-session"
@@ -468,6 +558,12 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
         assert headers == {"Cookie": cookie}
         assert deadline > 0
         requested_paths.append(path)
+        if path == "/admin/django_ray/taskattempt/91/change/":
+            return (
+                '<div>Workflow graph</div><a href="/admin/django_ray/'
+                'raytaskexecution/42/workflow/graph/?attempt_number=1">'
+                "Open graph for attempt #1</a>"
+            )
         return change_html
 
     def request_json(
@@ -506,17 +602,23 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
         base_url="http://127.0.0.1:8000",
         deadline=100.0,
         execution=execution,
+        change_attempt_number=1 if select_attempt else None,
     )
 
     root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
-    assert requested_paths == [
-        f"{root}/change/",
-        f"{root}/workflow/diagnostics/?attempt_number=1",
-        f"{root}/workflow/topology/nodes/?attempt_number=1&limit=64",
-        f"{root}/workflow/topology/edges/?attempt_number=1&limit=64",
-        f"{root}/workflow/nodes/?attempt_number=1&limit=64",
-        f"{root}/workflow/graph/?attempt_number=1",
-    ]
+    expected_paths = [f"{root}/change/"]
+    if select_attempt:
+        expected_paths.append("/admin/django_ray/taskattempt/91/change/")
+    expected_paths.extend(
+        [
+            f"{root}/workflow/diagnostics/?attempt_number=1",
+            f"{root}/workflow/topology/nodes/?attempt_number=1&limit=64",
+            f"{root}/workflow/topology/edges/?attempt_number=1&limit=64",
+            f"{root}/workflow/nodes/?attempt_number=1&limit=64",
+            f"{root}/workflow/graph/?attempt_number=1",
+        ]
+    )
+    assert requested_paths == expected_paths
     assert storage_calls == [
         {
             "execution": execution,
@@ -555,6 +657,75 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
     assert cleanup_events == ["session-and-user-cleaned"]
     assert cookie not in json.dumps(evidence)
     assert all(type(value) in {int, str} for value in evidence.values())
+    if select_attempt:
+        responses[f"{root}/workflow/diagnostics/?attempt_number=1"]["plan"]["retry_safe"] = False
+        with pytest.raises(
+            docker_smoke.DockerSmokeError,
+            match="did not advertise AVAILABLE readers",
+        ):
+            docker_smoke._verify_existing_workflow_admin_contract(
+                base_url="http://127.0.0.1:8000",
+                deadline=100.0,
+                execution=execution,
+                change_attempt_number=1,
+            )
+
+
+def test_failed_archived_attempt_requires_exact_collapsed_parent_graph_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = SimpleNamespace(
+        pk=42,
+        task_id=WORKFLOW_TASK_ID,
+        attempt_number=1,
+        current_attempt_number=3,
+        execution_generation=1,
+        workflow_run_id="35200000-0000-4000-8000-000000000003",
+        state="FAILED",
+        attempt_pk=91,
+    )
+    change_html, _responses = _admin_workflow_responses(execution)
+    root = "/admin/django_ray/raytaskexecution/42/workflow"
+    change_html += (
+        '<details data-workflow-attempt-graph="1" data-hydration-state="idle" '
+        'data-pinned-attempt-number="1" data-current-attempt-number="3" '
+        f'data-graph-url="{root}/graph/?attempt_number=1" '
+        f'data-topology-nodes-url="{root}/topology/nodes/?attempt_number=1" '
+        f'data-topology-edges-url="{root}/topology/edges/?attempt_number=1" '
+        f'data-node-details-url="{root}/nodes/?attempt_number=1" '
+        f'data-node-detail-url="{root}/node/?attempt_number=1"></details>'
+    )
+
+    @contextmanager
+    def admin_headers():
+        yield {"Cookie": "sessionid=private-admin-session"}
+
+    def request_text(
+        _base_url: str,
+        path: str,
+        **_kwargs: object,
+    ) -> str:
+        if path == "/admin/django_ray/taskattempt/91/change/":
+            return (
+                '<div>Workflow graph</div><a href="/admin/django_ray/'
+                'raytaskexecution/42/workflow/graph/?attempt_number=1">'
+                "Open graph for attempt #1</a>"
+            )
+        return change_html
+
+    monkeypatch.setattr(docker_smoke, "_disposable_admin_headers", admin_headers)
+    monkeypatch.setattr(docker_smoke, "_request_text", request_text)
+
+    with pytest.raises(
+        docker_smoke.DockerSmokeError,
+        match="did not expose its exact inline graph panel",
+    ):
+        docker_smoke._verify_existing_workflow_admin_contract(
+            base_url="http://127.0.0.1:8000",
+            deadline=100.0,
+            execution=execution,
+            change_attempt_number=1,
+        )
 
 
 def test_terminal_only_admin_advertises_no_detail_and_skips_collection_reads(
@@ -894,6 +1065,65 @@ def test_failed_admin_graph_accepts_ancestor_context_without_a_succeeded_sibling
     assert evidence["graph_failure_path_nodes"] == 2
 
 
+def test_failed_admin_graph_accepts_a_failed_root_with_pending_downstream() -> None:
+    node_ids = ["0.0", "0.1"]
+    topology_nodes = [{"node_id": node_id} for node_id in node_ids]
+    topology_edges = [{"source": "0.0", "target": "0.1"}]
+    node_details = [
+        {"node_id": "0.0", "state": "FAILED"},
+        {"node_id": "0.1", "state": "PENDING"},
+    ]
+    graph = {
+        "schema": "django-ray.admin-workflow-graph",
+        "schema_version": 1,
+        "status": "AVAILABLE",
+        "message": "Bounded terminal workflow graph is available.",
+        "complete": True,
+        "counts": {"nodes": 2, "edges": 1},
+        "limits": dict(docker_smoke._WORKFLOW_GRAPH_LIMITS),
+        "nodes": [
+            {
+                "id": "0.0",
+                "label": "Build order batch",
+                "kind": "task",
+                "state": "FAILED",
+                "message": None,
+                "error": "Intentional early recovery failure",
+                "failure_path": True,
+            },
+            {
+                "id": "0.1",
+                "label": "Select inputs",
+                "kind": "task",
+                "state": "PENDING",
+                "message": None,
+                "error": None,
+                "failure_path": False,
+            },
+        ],
+        "edges": list(topology_edges),
+    }
+
+    assert docker_smoke._workflow_admin_graph_evidence(
+        graph,
+        execution_state="FAILED",
+        topology_nodes=topology_nodes,
+        topology_edges=topology_edges,
+        node_details=node_details,
+    ) == {
+        "graph_status": "AVAILABLE",
+        "graph_nodes": 2,
+        "graph_edges": 1,
+        "graph_pending_nodes": 1,
+        "graph_running_nodes": 0,
+        "graph_succeeded_nodes": 0,
+        "graph_failed_nodes": 1,
+        "graph_failure_path_nodes": 1,
+        "graph_failure_origins": 1,
+        "graph_incoming_failure_edges": 0,
+    }
+
+
 @pytest.mark.parametrize(
     "corruption",
     [
@@ -1016,6 +1246,38 @@ def test_existing_workflow_storage_requires_one_clean_current_publication() -> N
 
     assert docker_smoke._verify_existing_workflow_storage_contract(
         execution=execution,
+        topology_nodes=3,
+        topology_edges=2,
+        node_details=3,
+    ) == {
+        "current_manifests": 1,
+        "pending_manifests": 0,
+        "unlinked_pages": 0,
+    }
+
+
+@pytest.mark.django_db
+def test_existing_workflow_storage_can_select_an_archived_run_identity() -> None:
+    execution, _run_storage = _stored_workflow_admin_execution()
+    selected = SimpleNamespace(
+        pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+        workflow_run_id=execution.workflow_run_id,
+    )
+    execution.attempt_number = 3
+    execution.execution_generation = 3
+    execution.workflow_run_id = "35200000-0000-4000-8000-000000000005"
+    execution.save(
+        update_fields=[
+            "attempt_number",
+            "execution_generation",
+            "workflow_run_id",
+        ]
+    )
+
+    assert docker_smoke._verify_existing_workflow_storage_contract(
+        execution=selected,
         topology_nodes=3,
         topology_edges=2,
         node_details=3,

@@ -792,15 +792,29 @@ def test_local_snapshot_preserves_ray_exclusion_and_py_module_semantics(
         assert (Path(snapshotted_py_module) / "__init__.py").is_file()
 
 
-def test_prepare_runtime_env_rejects_local_paths_over_ray_client(
+def test_prepare_runtime_env_uploads_local_archive_over_ray_client(
     monkeypatch,
     tmp_path,
 ) -> None:
-    resolved = normalize_runtime_env({"working_dir": str(tmp_path)})
+    archive = tmp_path / "runtime-env.zip"
+    archive.write_bytes(b"content-addressed fixture")
+    resolved = normalize_runtime_env({"working_dir": str(archive)})
     monkeypatch.setattr("ray.util.client.ray.is_connected", lambda: True)
+    monkeypatch.setattr(
+        "ray._private.runtime_env.working_dir.upload_working_dir_if_needed",
+        lambda spec, **kwargs: {
+            **spec,
+            "working_dir": f"gcs://_ray_pkg_{'a' * 40}.zip",
+        },
+    )
+    monkeypatch.setattr(
+        "ray._private.runtime_env.py_modules.upload_py_modules_if_needed",
+        lambda spec, **kwargs: spec,
+    )
 
-    with pytest.raises(ImproperlyConfigured, match="direct Ray connection"):
-        prepare_runtime_env_for_ray_core(resolved)
+    prepared = prepare_runtime_env_for_ray_core(resolved)
+
+    assert prepared["working_dir"] == f"gcs://_ray_pkg_{'a' * 40}.zip"
 
 
 def test_prepare_runtime_env_wraps_packaging_errors(monkeypatch, tmp_path) -> None:

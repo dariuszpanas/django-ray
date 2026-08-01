@@ -463,23 +463,16 @@ def prepare_runtime_env_for_ray_core(
     """Upload local code paths and return a per-task-compatible RuntimeEnv.
 
     Ray only accepts local ``working_dir`` and ``py_modules`` paths at job
-    initialization. Ray Core task options require URIs, so direct Ray drivers
-    upload local paths to Ray's content-addressed GCS package store first.
+    initialization. Ray Core task options require URIs, so django-ray uploads
+    local paths to Ray's content-addressed GCS package store before submission.
+    Ray's client-mode hooks route that package upload through the active Ray
+    Client connection when the task manager uses a ``ray://`` address.
     """
     spec = deepcopy(runtime_env.spec)
     if not _contains_local_code_path(spec):
         return spec
 
     try:
-        from ray.util.client import ray as ray_client
-
-        if ray_client.is_connected():
-            raise ImproperlyConfigured(
-                "django-ray: Per-task RuntimeEnv local paths require a direct Ray "
-                "connection. Use a GCS/HTTPS/S3 URI or connect the task manager "
-                "to the cluster's GCS address instead of ray:// Ray Client."
-            )
-
         from ray._private.runtime_env.py_modules import upload_py_modules_if_needed
         from ray._private.runtime_env.working_dir import upload_working_dir_if_needed
 

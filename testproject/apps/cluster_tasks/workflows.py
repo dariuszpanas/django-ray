@@ -22,6 +22,22 @@ WORKFLOW_SHOWCASE_FIXTURE_ERROR_MESSAGE = "Intentional workflow showcase reserve
 WORKFLOW_SHOWCASE_MAX_ITEMS = 8
 WORKFLOW_SHOWCASE_MAX_WORK_SECONDS = 1.0
 WORKFLOW_SHOWCASE_FAILURE_STAGE = "reserve_inventory"
+WORKFLOW_RECOVERY_EARLY_STAGE = "build_order_batch"
+WORKFLOW_RECOVERY_MID_STAGE = "join_order_inputs"
+WORKFLOW_RECOVERY_SUCCESS_STAGE = "complete"
+WORKFLOW_RECOVERY_STAGES = frozenset(
+    {
+        WORKFLOW_RECOVERY_EARLY_STAGE,
+        WORKFLOW_RECOVERY_MID_STAGE,
+        WORKFLOW_RECOVERY_SUCCESS_STAGE,
+    }
+)
+WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE = (
+    "Intentional workflow recovery failure at build_order_batch on durable attempt 1"
+)
+WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE = (
+    "Intentional workflow recovery failure at join_order_inputs on durable attempt 2"
+)
 
 
 class ComplexWorkflowFixtureError(RuntimeError):
@@ -30,6 +46,14 @@ class ComplexWorkflowFixtureError(RuntimeError):
 
 class WorkflowShowcaseFixtureError(RuntimeError):
     """Stable testproject-only failure for the order-fulfillment showcase."""
+
+
+class WorkflowRecoveryEarlyFixtureError(RuntimeError):
+    """Stable retryable failure for the recovery showcase's first attempt."""
+
+
+class WorkflowRecoveryMidFixtureError(RuntimeError):
+    """Stable retryable failure for the recovery showcase's second attempt."""
 
 
 def build_cpu_work_items(
@@ -330,6 +354,21 @@ def build_order_batch(
     }
 
 
+def build_recovery_order_batch(
+    item_count: int,
+    work_seconds: float,
+    recovery_stage: str,
+) -> dict[str, Any]:
+    """Build the recovery batch or fail at the deterministic entry boundary."""
+    if recovery_stage not in WORKFLOW_RECOVERY_STAGES:
+        raise ValueError("recovery_stage is not a supported showcase stage")
+    if recovery_stage == WORKFLOW_RECOVERY_EARLY_STAGE:
+        raise WorkflowRecoveryEarlyFixtureError(WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE)
+    batch = build_order_batch(item_count, work_seconds)
+    batch["recovery_stage"] = recovery_stage
+    return batch
+
+
 def select_validation_items(batch: dict[str, Any]) -> list[dict[str, Any]]:
     """Select compact item inputs for the first dynamic fan-out."""
     return [
@@ -410,6 +449,13 @@ def load_inventory_snapshot(batch: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def load_recovery_inventory_snapshot(batch: dict[str, Any]) -> dict[str, Any]:
+    """Carry the fixed recovery stage through the upstream inventory branch."""
+    snapshot = load_inventory_snapshot(batch)
+    snapshot["recovery_stage"] = batch["recovery_stage"]
+    return snapshot
+
+
 def join_order_inputs(parts: list[Any]) -> dict[str, Any]:
     """Join validation, customer, and inventory inputs."""
     validations, customer, inventory = parts
@@ -424,6 +470,15 @@ def join_order_inputs(parts: list[Any]) -> dict[str, Any]:
         "work_seconds": inventory["work_seconds"],
         "failure": inventory["failure"],
     }
+
+
+def join_recovery_order_inputs(parts: list[Any]) -> dict[str, Any]:
+    """Join completed upstream work or fail at the deterministic midpoint."""
+    context = join_order_inputs(parts)
+    inventory = parts[2]
+    if inventory["recovery_stage"] == WORKFLOW_RECOVERY_MID_STAGE:
+        raise WorkflowRecoveryMidFixtureError(WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE)
+    return context
 
 
 def select_reservation_items(context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -684,6 +739,33 @@ order_fulfillment_showcase_workflow = chain(
 )
 
 
+order_fulfillment_recovery_showcase_workflow = chain(
+    _showcase_step(build_recovery_order_batch),
+    group(
+        _validation_showcase_branch,
+        _customer_showcase_branch,
+        _showcase_step(load_recovery_inventory_snapshot),
+    ),
+    _showcase_step(join_recovery_order_inputs),
+    group(
+        _showcase_step(select_reservation_items),
+        _commercial_showcase_branch,
+    ),
+    _showcase_step(attach_commercial_context_to_reservations),
+    map_step(
+        reserve_inventory,
+        ray_options={"num_cpus": 0.1, "max_retries": 0},
+    ),
+    _showcase_step(join_fulfillment_decision),
+    group(
+        _showcase_step(write_primary_order),
+        _showcase_step(write_audit_record),
+        _showcase_step(send_order_notification),
+    ),
+    _showcase_step(finalize_order_fulfillment),
+)
+
+
 def run_order_fulfillment_showcase_workflow(
     item_count: int,
     work_seconds: float,
@@ -698,6 +780,22 @@ def run_order_fulfillment_showcase_workflow(
         work_seconds,
         failure_stage,
         failure_item,
+        use_ray=use_ray,
+    )
+
+
+def run_order_fulfillment_recovery_showcase_workflow(
+    item_count: int,
+    work_seconds: float,
+    recovery_stage: str,
+    *,
+    use_ray: bool | None = None,
+) -> dict[str, Any]:
+    """Run one attempt of the fixed three-attempt recovery demonstration."""
+    return order_fulfillment_recovery_showcase_workflow.with_progress_reporting("full").run(
+        item_count,
+        work_seconds,
+        recovery_stage,
         use_ray=use_ray,
     )
 

@@ -102,6 +102,99 @@
                 hidden
               >
               </div>
+              <section
+                class="django-ray-workflow-attempts"
+                data-workflow-attempt-graphs
+                aria-labelledby="django-ray-workflow-attempts-heading"
+                {% if not django_ray_archived_workflow_attempts %}hidden{% endif %}
+              >
+                <div class="django-ray-workflow-attempts__heading">
+                  <h3 id="django-ray-workflow-attempts-heading">
+                    Attempt execution graphs
+                  </h3>
+                  <p>
+                    Attempts are ordered from oldest to newest. Open any attempt
+                    to load its exact bounded graph.
+                  </p>
+                </div>
+                {% for attempt_number in django_ray_archived_workflow_attempts %}
+                  {% with attempt=attempt_number|urlencode current_attempt=original.attempt_number|urlencode %}
+                    <details
+                      class="django-ray-workflow-graph django-ray-workflow-attempt-graph"
+                      data-workflow-attempt-graph="{{ attempt }}"
+                      data-workflow-graph-attempt="{{ attempt }}"
+                      data-hydration-state="idle"
+                      data-pinned-attempt-number="{{ attempt }}"
+                      data-current-attempt-number="{{ current_attempt }}"
+                      data-graph-url="{{ django_ray_workflow_graph_url }}?attempt_number={{ attempt }}"
+                      data-topology-nodes-url="{{ django_ray_workflow_topology_nodes_url }}?attempt_number={{ attempt }}"
+                      data-topology-edges-url="{{ django_ray_workflow_topology_edges_url }}?attempt_number={{ attempt }}"
+                      data-node-details-url="{{ django_ray_workflow_node_details_url }}?attempt_number={{ attempt }}"
+                      data-node-detail-url="{{ django_ray_workflow_node_detail_url }}?attempt_number={{ attempt }}"
+                      aria-labelledby="django-ray-workflow-attempt-{{ attempt }}-title"
+                    >
+                      <summary class="django-ray-workflow-graph__summary">
+                        <span>
+                          <span
+                            class="django-ray-workflow-graph__summary-title"
+                            id="django-ray-workflow-attempt-{{ attempt }}-title"
+                          >
+                            Execution graph &mdash; Attempt {{ attempt }} (failed)
+                          </span>
+                          <span class="django-ray-workflow-graph__summary-copy">
+                            <span data-workflow-graph-summary-message>
+                              Archived failure. Open to load this exact attempt.
+                            </span>
+                            Pinned to attempt {{ attempt }}.
+                          </span>
+                        </span>
+                        <span
+                          class="django-ray-workflow-graph__summary-arrow"
+                          aria-hidden="true"
+                        >
+                          &#9656;
+                        </span>
+                      </summary>
+                      <div class="django-ray-workflow-graph__body">
+                        <p
+                          class="django-ray-workflow-graph__status"
+                          data-workflow-graph-status
+                          role="status"
+                          aria-live="polite"
+                          aria-atomic="true"
+                        >
+                          <span>Attempt {{ attempt }}. </span>
+                          <span data-workflow-graph-status-message>
+                            Open this panel to load its bounded archived graph.
+                          </span>
+                          <span> This panel never follows a newer run.</span>
+                        </p>
+                        <div
+                          class="django-ray-workflow-graph__content"
+                          data-workflow-graph-content
+                          hidden
+                        >
+                        </div>
+                      </div>
+                    </details>
+                  {% endwith %}
+                {% endfor %}
+                {% if django_ray_archived_workflow_attempts_truncated %}
+                  <p class="django-ray-workflow-attempts__notice" role="status">
+                    Additional failed attempts were not rendered because the Admin
+                    reached its fixed
+                    {{ django_ray_archived_workflow_attempts_limit }}-panel safety limit.
+                  </p>
+                {% endif %}
+                <div
+                  class="django-ray-workflow-attempts__current"
+                  data-workflow-current-graph
+                  data-current-attempt-number="{{ workflow_attempt }}"
+                  data-current-attempt-state="{{ original.state }}"
+                  hidden
+                >
+                </div>
+              </section>
             </div>
           </details>
         {% endwith %}

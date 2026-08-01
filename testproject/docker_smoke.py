@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any, cast
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -89,10 +90,33 @@ _WORKFLOW_DIAGNOSTICS_SCRIPT_RE = re.compile(
 _DJANGO_RAY_ICON_RE = re.compile(
     r"""(?:href|src)=["'](?P<path>/static/testproject/django-ray[^"']*\.svg)["']"""
 )
+_DETAILS_TAG_RE = re.compile(r"<(?P<closing>/?)details\b[^>]*>", re.IGNORECASE)
 
 
 class DockerSmokeError(RuntimeError):
     """Report a bounded quickstart contract failure without exposing credentials."""
+
+
+def _details_fragment_by_id(document: str, element_id: str) -> str | None:
+    marker = re.search(
+        r"""\bid=(?P<quote>["'])""" + re.escape(element_id) + r"""(?P=quote)""",
+        document,
+    )
+    if marker is None:
+        return None
+    opening_start = document.lower().rfind("<details", 0, marker.start())
+    if opening_start < 0:
+        return None
+    depth = 0
+    for tag in _DETAILS_TAG_RE.finditer(document, opening_start):
+        if tag.start() == opening_start or depth > 0:
+            if tag.group("closing"):
+                depth -= 1
+                if depth == 0:
+                    return document[opening_start : tag.end()]
+            else:
+                depth += 1
+    return None
 
 
 def _response_json(response: Any) -> dict[str, Any]:
@@ -778,15 +802,15 @@ def _workflow_admin_graph_evidence(
         if failed or observed_failure_path or len(succeeded) != len(graph_by_id):
             raise DockerSmokeError("successful admin workflow graph was not fully succeeded")
     elif execution_state == "FAILED":
-        if (
-            len(origins) != 1
-            or not (succeeded & observed_failure_path)
-            or not observed_failure_path
-            or incoming_failure_edges < 1
+        if len(origins) != 1 or not observed_failure_path:
+            raise DockerSmokeError("failed admin workflow graph lacked one failed origin")
+        origin = next(iter(origins))
+        has_upstream_context = bool(predecessors[origin])
+        if has_upstream_context != bool(incoming_failure_edges) or (
+            has_upstream_context and not (succeeded & observed_failure_path)
         ):
             raise DockerSmokeError(
-                "failed admin workflow graph lacked one incoming failed path "
-                "and successful ancestor context"
+                "failed admin workflow graph did not match its available ancestor context"
             )
     else:
         raise DockerSmokeError("admin workflow graph execution was not terminal")
@@ -861,7 +885,7 @@ def _verify_existing_workflow_storage_contract(
     try:
         with transaction.atomic():
             run_storage = WorkflowProgressRunStorage.objects.select_for_update().get(
-                execution=execution,
+                execution_id=execution.pk,
                 attempt_number=execution.attempt_number,
                 execution_generation=execution.execution_generation,
                 run_id=execution.workflow_run_id,
@@ -915,6 +939,7 @@ def _verify_existing_workflow_admin_contract(
     base_url: str,
     deadline: float,
     execution: Any,
+    change_attempt_number: int | None = None,
 ) -> dict[str, str | int]:
     """Exercise every advertised admin workflow reader for one existing run."""
 
@@ -934,29 +959,118 @@ def _verify_existing_workflow_admin_contract(
     collection_read_paths = {
         collection: f"{path}?{attempt_query}" for collection, path in collection_paths.items()
     }
+    current_attempt_number = getattr(
+        execution,
+        "current_attempt_number",
+        execution.attempt_number,
+    )
+    if type(current_attempt_number) is not int or current_attempt_number < 1:
+        raise DockerSmokeError("workflow parent did not retain its current attempt identity")
+    current_attempt_query = f"attempt_number={current_attempt_number}"
+    current_collection_read_paths = {
+        collection: f"{path}?{current_attempt_query}"
+        for collection, path in collection_paths.items()
+    }
 
     with _disposable_admin_headers() as headers:
+        change_path = f"{root}/change/"
+        attempt_detail_path: str | None = None
+        if change_attempt_number is not None:
+            attempt_pk = getattr(execution, "attempt_pk", None)
+            if type(attempt_pk) is not int or attempt_pk < 1:
+                raise DockerSmokeError(
+                    "selected workflow attempt did not retain its Admin detail identity"
+                )
+            attempt_detail_path = f"/admin/django_ray/taskattempt/{attempt_pk}/change/"
         change_html = _request_text(
             base_url,
-            f"{root}/change/",
+            change_path,
             headers=headers,
             deadline=deadline,
         )
+        attempt_detail_html = (
+            _request_text(
+                base_url,
+                attempt_detail_path,
+                headers=headers,
+                deadline=deadline,
+            )
+            if attempt_detail_path is not None
+            else None
+        )
         expected_attributes = {
-            "data-diagnostics-url": diagnostics_read_path,
-            "data-graph-url": graph_read_path,
-            "data-topology-nodes-url": collection_read_paths["topology_nodes"],
-            "data-topology-edges-url": collection_read_paths["topology_edges"],
-            "data-node-details-url": collection_read_paths["node_details"],
-            "data-node-detail-url": f"{node_detail_path}?{attempt_query}",
+            "data-diagnostics-url": f"{diagnostics_path}?{current_attempt_query}",
+            "data-graph-url": f"{graph_path}?{current_attempt_query}",
+            "data-topology-nodes-url": current_collection_read_paths["topology_nodes"],
+            "data-topology-edges-url": current_collection_read_paths["topology_edges"],
+            "data-node-details-url": current_collection_read_paths["node_details"],
+            "data-node-detail-url": f"{node_detail_path}?{current_attempt_query}",
         }
-        if "django-ray-workflow-diagnostics" not in change_html or any(
-            f'{attribute}="{path}"' not in change_html
+        workflow_html = _details_fragment_by_id(
+            change_html,
+            "django-ray-workflow-diagnostics",
+        )
+        stack_marker = "data-workflow-attempt-graphs"
+        current_mount_marker = "data-workflow-current-graph"
+        if workflow_html is None or any(
+            f'{attribute}="{path}"' not in workflow_html
             for attribute, path in expected_attributes.items()
         ):
             raise DockerSmokeError(
                 "existing workflow admin change page did not advertise its bounded readers"
             )
+        stack_position = workflow_html.find(stack_marker)
+        current_mount_position = workflow_html.find(current_mount_marker)
+        if (
+            stack_position < 0
+            or current_mount_position < stack_position
+            or f'data-current-attempt-number="{current_attempt_number}"' not in workflow_html
+        ):
+            raise DockerSmokeError(
+                "workflow attempt graphs were not contained in one ordered execution boundary"
+            )
+        if attempt_detail_html is not None and (
+            "Workflow graph" not in attempt_detail_html
+            or f'href="{graph_read_path}"' not in attempt_detail_html
+        ):
+            raise DockerSmokeError("archived workflow attempt did not link to its pinned graph")
+        if change_attempt_number is not None:
+            panel_marker = f'data-workflow-attempt-graph="{change_attempt_number}"'
+            if str(execution.state) == "FAILED":
+                archived_attributes = {
+                    "data-hydration-state": "idle",
+                    "data-pinned-attempt-number": str(change_attempt_number),
+                    "data-current-attempt-number": str(current_attempt_number),
+                    "data-graph-url": graph_read_path,
+                    "data-topology-nodes-url": collection_read_paths["topology_nodes"],
+                    "data-topology-edges-url": collection_read_paths["topology_edges"],
+                    "data-node-details-url": collection_read_paths["node_details"],
+                    "data-node-detail-url": f"{node_detail_path}?{attempt_query}",
+                }
+                panel_position = workflow_html.find(panel_marker)
+                if panel_position < 0 or any(
+                    f'{attribute}="{value}"' not in workflow_html
+                    for attribute, value in archived_attributes.items()
+                ):
+                    raise DockerSmokeError(
+                        "archived failed attempt did not expose its exact inline graph panel"
+                    )
+                opening_start = workflow_html.rfind("<details", 0, panel_position)
+                opening_end = workflow_html.find(">", panel_position)
+                if (
+                    opening_start < 0
+                    or opening_end < 0
+                    or " open" in workflow_html[opening_start:opening_end]
+                    or panel_position < stack_position
+                    or panel_position > current_mount_position
+                ):
+                    raise DockerSmokeError(
+                        "archived failed attempt graph panel was not collapsed before the current attempt"
+                    )
+            elif panel_marker in workflow_html:
+                raise DockerSmokeError(
+                    "current successful attempt was duplicated as an archived graph panel"
+                )
 
         diagnostics = _request_admin_json(
             base_url,
@@ -976,6 +1090,7 @@ def _verify_existing_workflow_admin_contract(
             or diagnostics.get("schema_version") != 1
             or not isinstance(plan, dict)
             or plan.get("status") != "AVAILABLE"
+            or (change_attempt_number is not None and plan.get("retry_safe") is not True)
             or not isinstance(progress, dict)
             or progress.get("state") != "AVAILABLE"
             or progress.get("availability") != "AVAILABLE"
@@ -1328,6 +1443,7 @@ def _run_existing_workflow_admin_smoke(
     task_id: str,
     timeout_seconds: float,
     expected_reporting_policy: str = "full",
+    attempt_number: int | None = None,
 ) -> dict[str, bool | int | str]:
     """Verify one already-terminal workflow through loopback admin and PostgreSQL."""
 
@@ -1349,14 +1465,67 @@ def _run_existing_workflow_admin_smoke(
         raise DockerSmokeError(
             "existing workflow task ID did not resolve to exactly one execution"
         ) from error
+    selected_execution = execution
+    if attempt_number is not None:
+        from django_ray.models import TaskAttempt
+        from django_ray.workflow_progress_summary import (
+            WorkflowProgressSummaryError,
+            deserialize_workflow_progress_summary,
+        )
+
+        try:
+            attempt = TaskAttempt.objects.get(
+                execution=execution,
+                attempt_number=attempt_number,
+            )
+            if not isinstance(attempt.workflow_progress_summary_json, str):
+                raise DockerSmokeError(
+                    "selected workflow attempt did not retain a bounded progress summary"
+                )
+            summary = deserialize_workflow_progress_summary(attempt.workflow_progress_summary_json)
+        except (
+            TaskAttempt.DoesNotExist,
+            TaskAttempt.MultipleObjectsReturned,
+            WorkflowProgressSummaryError,
+        ) as error:
+            raise DockerSmokeError(
+                "selected workflow attempt was not uniquely and validly archived"
+            ) from error
+        identity = summary["run_identity"]
+        if (
+            attempt_number < 1
+            or attempt.attempt_number != attempt_number
+            or summary["state"] != attempt.state
+            or identity["task_execution_pk"] != execution.pk
+            or identity["attempt_number"] != attempt_number
+        ):
+            raise DockerSmokeError(
+                "selected workflow attempt summary did not match its archived outcome"
+            )
+        selected_execution = SimpleNamespace(
+            pk=execution.pk,
+            task_id=execution.task_id,
+            state=attempt.state,
+            attempt_number=attempt_number,
+            current_attempt_number=execution.attempt_number,
+            execution_generation=identity["execution_generation"],
+            workflow_run_id=identity["run_id"],
+            attempt_pk=attempt.pk,
+        )
+
     deadline = time.monotonic() + timeout_seconds
     if expected_reporting_policy == "full":
         return _verify_existing_workflow_admin_contract(
             base_url=base_url,
             deadline=deadline,
-            execution=execution,
+            execution=selected_execution,
+            change_attempt_number=attempt_number,
         )
     if expected_reporting_policy == "terminal_only":
+        if attempt_number is not None:
+            raise DockerSmokeError(
+                "explicit attempt selection is supported only for full workflow detail"
+            )
         return _verify_existing_terminal_only_admin_contract(
             base_url=base_url,
             deadline=deadline,
@@ -1502,6 +1671,11 @@ def _parser() -> argparse.ArgumentParser:
         default="full",
         help="Expected policy for --existing-workflow-task-id (default: full)",
     )
+    parser.add_argument(
+        "--existing-workflow-attempt-number",
+        type=int,
+        help="Select one archived full-reporting attempt for the existing workflow",
+    )
     return parser
 
 
@@ -1509,12 +1683,19 @@ def main() -> int:
     args = _parser().parse_args()
     if args.timeout <= 0:
         raise DockerSmokeError("--timeout must be positive")
+    if args.existing_workflow_attempt_number is not None and (
+        args.existing_workflow_task_id is None or args.existing_workflow_attempt_number < 1
+    ):
+        raise DockerSmokeError(
+            "--existing-workflow-attempt-number requires an existing workflow and must be positive"
+        )
     if args.existing_workflow_task_id is not None:
         result = _run_existing_workflow_admin_smoke(
             base_url=args.base_url,
             task_id=args.existing_workflow_task_id,
             timeout_seconds=args.timeout,
             expected_reporting_policy=args.expected_workflow_reporting_policy,
+            attempt_number=args.existing_workflow_attempt_number,
         )
     else:
         token = os.environ.get("DJANGO_API_TOKEN")

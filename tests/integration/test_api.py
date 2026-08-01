@@ -619,6 +619,130 @@ class TestEnqueueAPI:
         assert execution.attempt_number == 1
         assert RayTaskExecution.objects.count() == 1
 
+    def test_enqueue_workflow_recovery_showcase_keeps_failure_plan_internal(
+        self,
+        client,
+        settings,
+    ):
+        recovery_runtime_env = {
+            "working_dir": f"gcs://_ray_pkg_{'a' * 40}.zip",
+        }
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "RUNTIME_ENV_PROFILES": {"recovery-showcase": recovery_runtime_env},
+        }
+        settings.TASKS = {
+            **settings.TASKS,
+            "recovery-showcase": {
+                "BACKEND": "django_ray.backends.RayTaskBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {
+                    "RAY_ADDRESS": "auto",
+                    "RUNTIME_ENV_PROFILE": "recovery-showcase",
+                },
+            },
+        }
+        response = client.post(
+            "/api/cluster/workflow-recovery-showcase?item_count=1&work_seconds=0.01"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["kwargs"] == {"item_count": 1, "work_seconds": 0.01}
+        execution = RayTaskExecution.objects.get(task_id=data["task_id"])
+        assert execution.callable_path == (
+            "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"
+        )
+        assert json.loads(execution.kwargs_json) == data["kwargs"]
+        assert execution.attempt_number == 1
+        assert execution.runtime_env_profile == "recovery-showcase"
+        assert json.loads(execution.runtime_env_json) == recovery_runtime_env
+        assert RayTaskExecution.objects.count() == 1
+
+    def test_enqueue_workflow_recovery_showcase_fails_closed_without_recovery_backend(
+        self,
+        client,
+        settings,
+    ):
+        settings.TASKS = {
+            name: backend for name, backend in settings.TASKS.items() if name != "recovery-showcase"
+        }
+
+        response = client.post(
+            "/api/cluster/workflow-recovery-showcase?item_count=1&work_seconds=0.01"
+        )
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": (
+                "Workflow recovery showcase requires a valid 'recovery-showcase' task "
+                "backend and RuntimeEnv profile."
+            )
+        }
+        assert RayTaskExecution.objects.count() == 0
+
+    def test_enqueue_workflow_recovery_showcase_fails_closed_without_recovery_profile(
+        self,
+        client,
+        settings,
+    ):
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "RUNTIME_ENV_PROFILES": {},
+        }
+        settings.TASKS = {
+            **settings.TASKS,
+            "recovery-showcase": {
+                "BACKEND": "django_ray.backends.RayTaskBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {
+                    "RAY_ADDRESS": "auto",
+                    "RUNTIME_ENV_PROFILE": "recovery-showcase",
+                },
+            },
+        }
+
+        response = client.post(
+            "/api/cluster/workflow-recovery-showcase?item_count=1&work_seconds=0.01"
+        )
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": (
+                "Workflow recovery showcase requires a valid 'recovery-showcase' task "
+                "backend and RuntimeEnv profile."
+            )
+        }
+        assert RayTaskExecution.objects.count() == 0
+
+    def test_enqueue_workflow_recovery_showcase_rejects_retry_unsafe_profile(
+        self,
+        client,
+        settings,
+    ):
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "RUNTIME_ENV_PROFILES": {
+                "recovery-showcase": {
+                    "working_dir": "https://example.invalid/mutable-code.zip",
+                    "pip": ["django>=6.0"],
+                }
+            },
+        }
+
+        response = client.post(
+            "/api/cluster/workflow-recovery-showcase?item_count=1&work_seconds=0.01"
+        )
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": (
+                "Workflow recovery showcase requires a valid 'recovery-showcase' task "
+                "backend and RuntimeEnv profile."
+            )
+        }
+        assert RayTaskExecution.objects.count() == 0
+
     @pytest.mark.parametrize(
         "query",
         [
@@ -766,6 +890,90 @@ class TestTasksAPI:
         assert data["progress"]["schema"] == "django-ray.workflow-progress-summary"
         assert data["progress"]["availability"] == "NOT_REPORTED"
         assert data["progress"]["complete"] is False
+
+    def test_get_workflow_recovery_showcase_marks_attempt_three_current(self, client):
+        result = {
+            "status": "FULFILLED",
+            "recovery": {
+                "scenario": "three-attempt-recovery",
+                "attempt_number": 3,
+                "outcome": "SUCCEEDED",
+            },
+        }
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-recovery-showcase-result-001",
+            callable_path=(
+                "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"
+            ),
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            attempt_number=3,
+            execution_generation=3,
+            runtime_env_profile="recovery-showcase",
+            result_data=json.dumps(result),
+        )
+        TaskAttempt.objects.bulk_create(
+            [
+                TaskAttempt(
+                    execution=execution,
+                    attempt_number=1,
+                    state=TaskState.FAILED,
+                    error_message=(
+                        "Intentional workflow recovery failure at build_order_batch "
+                        "on durable attempt 1"
+                    ),
+                ),
+                TaskAttempt(
+                    execution=execution,
+                    attempt_number=2,
+                    state=TaskState.FAILED,
+                    error_message=(
+                        "Intentional workflow recovery failure at join_order_inputs "
+                        "on durable attempt 2"
+                    ),
+                ),
+                TaskAttempt(
+                    execution=execution,
+                    attempt_number=3,
+                    state=TaskState.SUCCEEDED,
+                    result_data=json.dumps(result),
+                ),
+            ]
+        )
+
+        response = client.get(f"/api/cluster/workflow-recovery-showcase/{execution.task_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == TaskState.SUCCEEDED
+        assert data["attempt_number"] == 3
+        assert data["runtime_env_profile"] == "recovery-showcase"
+        assert data["result"] == result
+        assert data["error"] is None
+        assert data["attempts"] == [
+            {
+                "attempt_number": 1,
+                "state": TaskState.FAILED,
+                "error": (
+                    "Intentional workflow recovery failure at build_order_batch "
+                    "on durable attempt 1"
+                ),
+            },
+            {
+                "attempt_number": 2,
+                "state": TaskState.FAILED,
+                "error": (
+                    "Intentional workflow recovery failure at join_order_inputs "
+                    "on durable attempt 2"
+                ),
+            },
+            {
+                "attempt_number": 3,
+                "state": TaskState.SUCCEEDED,
+                "error": None,
+            },
+        ]
+        assert data["progress"]["availability"] == "NOT_REPORTED"
 
     def test_get_runtime_env_result_includes_environment_identity(self, client):
         execution = RayTaskExecution.objects.create(

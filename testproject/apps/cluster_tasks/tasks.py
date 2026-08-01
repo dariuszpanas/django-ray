@@ -28,6 +28,8 @@ from typing import Any, Literal
 
 from django.tasks import task
 
+from django_ray.runtime.context import get_current_task_context
+
 # Import distributed computing utilities
 from django_ray.runtime.distributed import (
     get_num_workers,
@@ -38,11 +40,19 @@ from django_ray.runtime.distributed import (
 )
 from testproject.apps.cluster_tasks.workflows import (
     COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE,
+    WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE,
+    WORKFLOW_RECOVERY_EARLY_STAGE,
+    WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE,
+    WORKFLOW_RECOVERY_MID_STAGE,
+    WORKFLOW_RECOVERY_SUCCESS_STAGE,
     ComplexWorkflowFixtureError,
+    WorkflowRecoveryEarlyFixtureError,
+    WorkflowRecoveryMidFixtureError,
     WorkflowShowcaseFixtureError,
     inspect_runtime_environment,
     run_complex_branch_workflow,
     run_cpu_fanout_workflow,
+    run_order_fulfillment_recovery_showcase_workflow,
     run_order_fulfillment_showcase_workflow,
     run_runtime_env_cache_benchmark,
     validate_order_fulfillment_showcase_inputs,
@@ -97,6 +107,36 @@ def _workflow_showcase_fixture_cause(
         return None
     cause = getattr(error, "cause", None)
     if isinstance(error, RayTaskError) and type(cause) is WorkflowShowcaseFixtureError:
+        return cause
+    return None
+
+
+def workflow_recovery_stage_for_attempt(attempt_number: int) -> str:
+    """Map one durable attempt to the fixed recovery-showcase stage."""
+    if isinstance(attempt_number, bool) or not isinstance(attempt_number, int):
+        raise ValueError("attempt_number must be an integer")
+    if attempt_number < 1:
+        raise ValueError("attempt_number must be positive")
+    if attempt_number == 1:
+        return WORKFLOW_RECOVERY_EARLY_STAGE
+    if attempt_number == 2:
+        return WORKFLOW_RECOVERY_MID_STAGE
+    return WORKFLOW_RECOVERY_SUCCESS_STAGE
+
+
+def _workflow_recovery_fixture_cause(
+    error: Exception,
+    expected_type: type[RuntimeError],
+) -> RuntimeError | None:
+    """Return only the exact local or Ray-wrapped planned recovery error."""
+    if type(error) is expected_type:
+        return error
+    try:
+        from ray.exceptions import RayTaskError
+    except ImportError:  # pragma: no cover - Ray is a package dependency
+        return None
+    cause = getattr(error, "cause", None)
+    if isinstance(error, RayTaskError) and type(cause) is expected_type:
         return cause
     return None
 
@@ -198,6 +238,54 @@ def order_fulfillment_showcase_task(
         if str(fixture_cause) != expected_message:
             raise fixture_cause from None
         raise WorkflowShowcaseFixtureError(str(fixture_cause)) from None
+
+
+@task(queue_name="default")
+def order_fulfillment_recovery_showcase_task(
+    item_count: int = 3,
+    work_seconds: float = 0.05,
+) -> dict[str, Any]:
+    """Demonstrate early failure, mid-graph failure, then durable success."""
+    validate_order_fulfillment_showcase_inputs(
+        item_count=item_count,
+        work_seconds=work_seconds,
+        failure_stage=None,
+        failure_item=None,
+    )
+    task_context = get_current_task_context()
+    if task_context is None or task_context.attempt_number is None:
+        raise RuntimeError("workflow recovery showcase requires a durable attempt identity")
+    attempt_number = int(task_context.attempt_number)
+    recovery_stage = workflow_recovery_stage_for_attempt(attempt_number)
+    failure_contract: dict[int, tuple[type[RuntimeError], str]] = {
+        1: (WorkflowRecoveryEarlyFixtureError, WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE),
+        2: (WorkflowRecoveryMidFixtureError, WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE),
+    }
+    try:
+        result = run_order_fulfillment_recovery_showcase_workflow(
+            item_count,
+            work_seconds,
+            recovery_stage,
+            use_ray=True,
+        )
+    except Exception as error:
+        expected = failure_contract.get(attempt_number)
+        if expected is None:
+            raise
+        expected_type, expected_message = expected
+        fixture_cause = _workflow_recovery_fixture_cause(error, expected_type)
+        if fixture_cause is None:
+            raise
+        if str(fixture_cause) != expected_message:
+            raise fixture_cause from None
+        raise expected_type(expected_message) from None
+
+    result["recovery"] = {
+        "scenario": "three-attempt-recovery",
+        "attempt_number": attempt_number,
+        "outcome": "SUCCEEDED",
+    }
+    return result
 
 
 @task(queue_name="default")

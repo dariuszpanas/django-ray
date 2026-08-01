@@ -9,7 +9,17 @@ from django.apps import apps
 from django.contrib import admin
 from django.contrib.auth import get_permission_codename
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import Case, F, Func, IntegerField, QuerySet, TextField, Value, When
+from django.db.models import (
+    BooleanField,
+    Case,
+    F,
+    Func,
+    IntegerField,
+    QuerySet,
+    TextField,
+    Value,
+    When,
+)
 from django.db.models.functions import Substr
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.urls import path, reverse
@@ -71,6 +81,8 @@ ADMIN_ATTEMPT_INLINE_MAX_CHARS = 512
 ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES = 16 * 1024
 ADMIN_WORKFLOW_PLAN_DOWNLOAD_MAX_BYTES = 128 * 1024
 ADMIN_WORKFLOW_PLAN_SELECTION_DOWNLOAD_MAX_BYTES = 32 * 1024
+ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS = 100
+_FULL_WORKFLOW_ATTEMPT_MARKER = '"reporting_policy":"full"'
 _WORKFLOW_PROGRESS_MESSAGES = {
     "NOT_REPORTED": "No workflow progress snapshot has been reported.",
     "REQUESTED_NOT_REPORTED": (
@@ -612,6 +624,49 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         if obj is not None and _task_attempt_admin_mode() in {"inline", "both"}:
             configured_inlines.append(TaskAttemptInline)
         return configured_inlines
+
+    def render_change_form(
+        self,
+        request: HttpRequest,
+        context: dict[str, Any],
+        add: bool = False,
+        change: bool = False,
+        form_url: str = "",
+        obj: RayTaskExecution | None = None,
+    ) -> HttpResponse:
+        """Expose bounded failed-attempt identities already authorized for the inline."""
+        archived_attempts: list[int] = []
+        archived_attempts_truncated = False
+        if obj is not None:
+            for inline_formset in context.get("inline_admin_formsets", ()):
+                if not isinstance(inline_formset.opts, TaskAttemptInline):
+                    continue
+                for inline_form in inline_formset:
+                    attempt = inline_form.original
+                    if (
+                        not isinstance(attempt, TaskAttempt)
+                        or attempt.state != TaskState.FAILED
+                        or attempt.attempt_number >= obj.attempt_number
+                    ):
+                        continue
+                    if len(archived_attempts) >= ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS:
+                        archived_attempts_truncated = True
+                        break
+                    archived_attempts.append(attempt.attempt_number)
+                break
+        context["django_ray_archived_workflow_attempts"] = tuple(archived_attempts)
+        context["django_ray_archived_workflow_attempts_truncated"] = archived_attempts_truncated
+        context["django_ray_archived_workflow_attempts_limit"] = (
+            ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS
+        )
+        return super().render_change_form(
+            request,
+            context,
+            add=add,
+            change=change,
+            form_url=form_url,
+            obj=obj,
+        )
 
     def has_view_permission(
         self,
@@ -1971,6 +2026,7 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
     list_filter = ["state"]
     fields = [
         "execution_link",
+        "workflow_graph_link",
         "attempt_number",
         "state",
         "started_at",
@@ -1998,6 +2054,17 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
                 "state",
                 "started_at",
                 "finished_at",
+            )
+        else:
+            queryset = queryset.annotate(
+                admin_has_workflow_graph=Case(
+                    When(
+                        workflow_progress_summary_json__contains=(_FULL_WORKFLOW_ATTEMPT_MARKER),
+                        then=Value(True),
+                    ),
+                    default=Value(False),
+                    output_field=BooleanField(),
+                )
             )
         return queryset
 
@@ -2053,6 +2120,28 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
             current_app=self.admin_site.name,
         )
         return format_html('<a href="{}">{}</a>', url, obj.execution_id)
+
+    @admin.display(description="Workflow graph")
+    def workflow_graph_link(self, obj: TaskAttempt) -> str:
+        """Link a full-reporting archive to the parent graph pinned to this attempt."""
+        has_graph = getattr(obj, "admin_has_workflow_graph", None)
+        if has_graph is None:
+            summary = obj.__dict__.get("workflow_progress_summary_json")
+            has_graph = isinstance(summary, str) and _FULL_WORKFLOW_ATTEMPT_MARKER in summary
+        if not has_graph:
+            return "-"
+        opts = RayTaskExecution._meta
+        url = reverse(
+            f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_workflow_graph",
+            args=[quote(str(obj.execution_id))],
+            current_app=self.admin_site.name,
+        )
+        return format_html(
+            '<a href="{}?attempt_number={}">Open graph for attempt #{}</a>',
+            url,
+            obj.attempt_number,
+            obj.attempt_number,
+        )
 
     @admin.display(description="Error")
     def error_message_display(self, obj: TaskAttempt) -> str:

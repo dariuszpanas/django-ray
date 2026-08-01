@@ -32,7 +32,7 @@ spec:
           command: ['sh', '-c', 'until nc -z ray-head-svc 10001; do echo waiting for ray-head; sleep 2; done;']
         - name: wait-for-runtime-env
           image: busybox:1.36
-          command: ['sh', '-c', 'until test -f /runtime-env/django-ray-source.zip; do echo waiting for runtime env bundle; sleep 2; done;']
+          command: ['sh', '-c', 'until test -f /runtime-env/django-ray-source.zip && test -f /runtime-env/django-ray-recovery.zip; do echo waiting for runtime env bundles; sleep 2; done;']
           volumeMounts:
             - name: runtime-env
               mountPath: /runtime-env
@@ -61,6 +61,10 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          volumeMounts:
+            - name: runtime-env
+              mountPath: /runtime-env
+              readOnly: true
           readinessProbe:
             exec:
               command:

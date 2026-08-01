@@ -5,7 +5,7 @@ GitHub Actions matrix. It exercises the Docker Desktop or Kind deployment bounda
 disposable CI clusters cannot reproduce: locally built images, Kustomize, the setup Job, the shared
 RuntimeEnv archive, generic Ray nodes, application task managers, protected HTTP APIs, kubelet
 probes, encrypted durable RuntimeEnv storage, full and terminal-only schema-v3 workflow progress,
-authenticated admin presentation, and live Prometheus discovery.
+multi-attempt recovery, authenticated admin presentation, and live Prometheus discovery.
 
 Run it only against the dedicated local `django-ray` namespace. The command fails before its first
 Docker build or Kubernetes mutation unless the checkout is clean, the active context is the named
@@ -32,7 +32,7 @@ run the gate and choose the cold Ray restart.
 | `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
 | RuntimeEnv snapshot storage, encryption settings or dependencies, storage/retry validation, the fixed deployment canary, or KubeRay encryption selectors | Required | `required` | Proves a cold generic Ray generation receives the decrypted marker while the database retains only the authenticated envelope, and proves corrupt or unknown-key rows fail before Ray. |
 | Ray Client submission, reconnect, cancellation, retry, task context, result persistence, or cross-component task lifecycle | Required | `required` | Exercises a fresh Ray session plus fresh task managers and a durable result. |
-| Workflow execution, progress capture/publication, schema-v3 bounded readers, failure diagnostics, or the admin graph fed by workflow progress | Required | `required` | Proves a cold Ray generation can execute the same tiny nested workflow with default-full and explicit terminal-only reporting in both success and deterministic first-attempt failure modes. Full reporting must expose complete bounded detail; terminal-only must expose exactly one summary and no detail storage or actions. |
+| Workflow execution, progress capture/publication, schema-v3 bounded readers, failure diagnostics, retry identity, or the admin graph fed by workflow progress | Required | `required` | Proves a cold Ray generation can execute the same tiny nested workflow with default-full and explicit terminal-only reporting in both success and deterministic first-attempt failure modes, then preserve one recovery showcase across early-failed, mid-failed, and successful attempts. Full reporting must expose complete bounded detail; terminal-only must expose exactly one summary and no detail storage or actions. |
 | KubeRay `RayCluster`, Ray services, Ray pod volumes/environment, or Ray metrics configuration | Required | `required` | The tested Ray pods must be cold replacements of the prior pods. |
 | Kubernetes application resources, setup Job, web/worker Deployments, probes, Secrets/ConfigMaps, RBAC, services, ingress, Prometheus, or Grafana | Required | `required` when Ray resources or the RuntimeEnv mount changed; otherwise `skip` | Proves rendered resources, rollouts, probes, authentication, and scrape ownership together. |
 | Worker command, queue selection, application image, polling, or database-backed execution behavior | Required | `required` for cluster-mode submission changes; otherwise `skip` | Proves all task-manager Deployments reconnect and consume a real task. |
@@ -237,18 +237,35 @@ The gate performs these bounded layers:
     materialized plan and remain consistent across the equivalent success and failure fixtures,
     while discovered, retained, and node-state counts remain zero. Topology and detail revisions
     are null, and all three bounded collection readers return empty omitted-by-policy envelopes.
-13. Enters the exact converged `django-web` container through a sensitive-output-suppressed command
+13. Enqueues one fixed full-reporting order-fulfillment recovery showcase. The same durable task ID
+    must archive exactly three outcomes in order: attempt 1 fails at the workflow entry, attempt 2
+    replays from the entry and fails at the mid-workflow join after seven upstream nodes succeed,
+    and attempt 3 replays the complete workflow and succeeds. The gate requires distinct run IDs,
+    generations 1 through 3, one stable plan fingerprint, exact fixture errors, no fourth attempt,
+    and a current result that identifies successful attempt 3 without a stale error. The temporary
+    setup job must build the bounded deterministic recovery archive, the Django endpoint must verify
+    and report the explicit `recovery-showcase` profile, and the Ray Client task manager must upload
+    those exact content-hashed bytes before the generic Ray pods execute them. Archived Admin
+    diagnostics must report the plan as retry-safe. It reads each
+    attempt explicitly through the schema-v3 summary, topology, and node-detail APIs. The one-item
+    fixture must retain 2 nodes and 1 edge on the early failure, 15 nodes and 20 edges on the middle
+    failure, and the complete 21-node, 28-edge graph on success.
+14. Enters the exact converged `django-web` container through a sensitive-output-suppressed command
     path and creates a disposable authenticated admin session. For the default-full runs it verifies
     the change view, diagnostics, all three bounded readers, and the sanitized graph route. The
     successful graph must be fully succeeded. The failed graph must retain one failure origin, at
     least one incoming edge and its ancestor path, and at least one successful node outside that path
     as sibling context. Both graphs must match the bounded pages, remain within their fixed allowlist
     and byte cap, and have exactly one current manifest with no pending manifest or unlinked page.
+    It then selects all three archived recovery attempts through the Admin readers. The early root
+    failure must have one failed origin and no fabricated incoming edge, the middle failure must
+    retain its successful ancestor path, and the final attempt must be fully succeeded. All three
+    must match the API counts and their exact run-scoped storage identity.
     For both terminal-only runs it instead proves null legacy progress, an identical archived attempt
     summary, no run storage, manifest, page, link, or node-detail row, zero advertised admin actions,
     and a bounded `UNAVAILABLE` graph response. The disposable sessions and users are removed before
     each child smoke returns scalar evidence.
-14. Reuses the checked-in Prometheus checker through the same proxy-disabled, redirect-rejecting
+15. Reuses the checked-in Prometheus checker through the same proxy-disabled, redirect-rejecting
     local HTTP opener. It requires exactly one `django-ray`, one `ray-head`, and one target for every
     converged Ray worker, plus the absence of the removed `django-ray-worker` pool. The exact
     RayCluster UID/topology is rechecked before and after Prometheus and again before evidence.
@@ -295,7 +312,7 @@ The runtime block records:
 - commit at run time, stable source tree, context, namespace, private kubeconfig digest, local API
   server, and pinned Docker endpoint;
 - both unique tags and local image IDs;
-- RuntimeEnv byte size and SHA-256;
+- byte sizes and SHA-256 identities for the source and recovery RuntimeEnv archives;
 - whether Ray was cold-restarted, the pinned RayCluster UID, converged head/worker counts, and the
   retained Ray pod UID/container/image identity-set SHA-256;
 - ready replica counts for all application Deployments;
@@ -311,6 +328,11 @@ The runtime block records:
   count, schema-v3 availability, pending/running/succeeded/failed node counts, authenticated
   sanitized graph route, single failure origin, incoming failure edge, ancestor-path and successful
   sibling context, and clean current publication storage;
+- the recovery showcase's exact `FAILED`, `FAILED`, `SUCCEEDED` attempt sequence, three distinct
+  fenced run identities and consecutive generations, explicit `recovery-showcase` profile,
+  bounded content-addressed recovery archive, execution on generic Ray images, stable retry-safe
+  plan fingerprint, early/middle/final topology and state counts, current attempt-3 result, and all
+  three archived Admin projections;
 - the explicit terminal-only success and deterministic failure, each on attempt 1 with one
   revision-1 schema-v3 summary, omitted detail, declared counts matching its persisted materialized
   plan, null legacy progress and detail revisions, zero retained detail rows, and no advertised
@@ -329,8 +351,9 @@ After a full pass, retain a concise semantic summary in the material commit and 
   message-only amend, without copying the tree hash into history; and
 - the behavior and preservation outcomes relevant to the change, such as application readiness,
   authenticated API status, smoke-task state and result, first-attempt schema-v3 workflow success
-  and deterministic failure, authenticated sanitized admin graph and incoming failure path, probes,
-  Prometheus targets, preserved Ray topology, Secret, PostgreSQL data, or PVCs.
+  and deterministic failure, the three-attempt replay-to-success recovery sequence, authenticated
+  sanitized Admin graphs for current and archived attempts, probes, Prometheus targets, preserved
+  Ray topology, Secret, PostgreSQL data, or PVCs.
 
 For example, portable commit validation can say:
 
@@ -343,7 +366,9 @@ For example, portable commit validation can say:
   workflow passed in both default-full success and deterministic
   first-attempt failure modes, terminal-only success and failure each
   retained one omitted-detail summary with no legacy or normalized
-  detail storage, encrypted RuntimeEnv storage delivered
+  detail storage, the recovery showcase replayed from entry across two
+  fenced failed attempts and completed on its third attempt with all
+  three archived Admin graphs verified, encrypted RuntimeEnv storage delivered
   its marker through cold Ray while retaining only a canonical envelope,
   corrupt and unknown-key rows failed before Ray without a retry mutation,
   the full application Secret remained unchanged, and the

@@ -147,6 +147,10 @@ class FakeElement {
     return findAll(this, (element) => matches(element, selector))[0] ?? null;
   }
 
+  querySelectorAll(selector) {
+    return findAll(this, (element) => matches(element, selector));
+  }
+
   replaceChildren(...children) {
     this.children = [];
     this._textContent = "";
@@ -353,10 +357,63 @@ function degradedGraphPayload(status, message) {
   });
 }
 
+function archivedGraphDisclosure(
+  attemptNumber,
+  { currentAttemptNumber = 3, dataset = {} } = {},
+) {
+  const attempt = String(attemptNumber);
+  const details = new FakeElement("details");
+  details.className =
+    "django-ray-workflow-graph django-ray-workflow-attempt-graph";
+  details.dataset = {
+    workflowAttemptGraph: attempt,
+    workflowGraphAttempt: attempt,
+    hydrationState: "idle",
+    pinnedAttemptNumber: attempt,
+    currentAttemptNumber: String(currentAttemptNumber),
+    graphUrl: `/admin/execution/1/workflow/graph/?attempt_number=${attempt}`,
+    topologyNodesUrl: `/admin/execution/1/workflow/topology/nodes/?attempt_number=${attempt}`,
+    topologyEdgesUrl: `/admin/execution/1/workflow/topology/edges/?attempt_number=${attempt}`,
+    nodeDetailsUrl: `/admin/execution/1/workflow/nodes/?attempt_number=${attempt}`,
+    nodeDetailUrl: `/admin/execution/1/workflow/node/?attempt_number=${attempt}`,
+    ...dataset,
+  };
+  const titleId = `django-ray-workflow-attempt-${attempt}-title`;
+  details.setAttribute("aria-labelledby", titleId);
+  const summary = new FakeElement("summary");
+  const title = new FakeElement("span");
+  title.className = "django-ray-workflow-graph__summary-title";
+  title.setAttribute("id", titleId);
+  title.textContent = `Execution graph \u2014 Attempt ${attempt} (failed)`;
+  const summaryMessage = new FakeElement("span");
+  summaryMessage.dataset.workflowGraphSummaryMessage = "";
+  summaryMessage.textContent =
+    "Archived failure. Open to load this exact attempt.";
+  summary.append(title, summaryMessage);
+  const body = new FakeElement("div");
+  const status = new FakeElement("p");
+  status.className = "django-ray-workflow-graph__status";
+  status.dataset.workflowGraphStatus = "";
+  const statusMessage = new FakeElement("span");
+  statusMessage.dataset.workflowGraphStatusMessage = "";
+  statusMessage.textContent =
+    "Open this panel to load its bounded archived graph.";
+  status.append(statusMessage);
+  const content = new FakeElement("div");
+  content.className = "django-ray-workflow-graph__content";
+  content.dataset.workflowGraphContent = "";
+  content.hidden = true;
+  body.append(status, content);
+  details.append(summary, body);
+  return details;
+}
+
 function loadDiagnostics({
   fetchResponses = [],
   clipboardFailure = null,
   dataset = {},
+  archivedAttempts = [],
+  currentAttemptState = "RUNNING",
 } = {}) {
   const details = new FakeElement("details");
   details.dataset = {
@@ -377,7 +434,28 @@ function loadDiagnostics({
   const content = new FakeElement("div");
   content.dataset.workflowDiagnosticsContent = "";
   content.hidden = true;
-  details.append(status, content);
+  const archivedGraphs = archivedAttempts.map((configuration) =>
+    typeof configuration === "number"
+      ? archivedGraphDisclosure(configuration)
+      : archivedGraphDisclosure(configuration.attemptNumber, configuration),
+  );
+  const attemptGraphStack = new FakeElement("section");
+  attemptGraphStack.dataset.workflowAttemptGraphs = "";
+  attemptGraphStack.hidden = archivedGraphs.length === 0;
+  const attemptGraphHeading = new FakeElement("div");
+  attemptGraphHeading.textContent = "Attempt execution graphs";
+  const currentGraphMount = new FakeElement("div");
+  currentGraphMount.dataset.workflowCurrentGraph = "";
+  currentGraphMount.dataset.currentAttemptNumber =
+    details.dataset.pinnedAttemptNumber;
+  currentGraphMount.dataset.currentAttemptState = currentAttemptState;
+  currentGraphMount.hidden = true;
+  attemptGraphStack.append(
+    attemptGraphHeading,
+    ...archivedGraphs,
+    currentGraphMount,
+  );
+  details.append(status, content, attemptGraphStack);
 
   const fetchCalls = [];
   const queuedResponses = [...fetchResponses];
@@ -441,7 +519,10 @@ function loadDiagnostics({
     content,
     copied,
     details,
+    archivedGraphs,
+    attemptGraphStack,
     fetchCalls,
+    currentGraphMount,
     queuedResponses,
     status,
     async toggle(open) {
@@ -451,12 +532,20 @@ function loadDiagnostics({
     },
     async toggleGraph(open) {
       const graph = findAll(
-        content,
+        currentGraphMount,
         (candidate) =>
           candidate.tagName === "DETAILS" &&
           candidate.className === "django-ray-workflow-graph",
       )[0];
       assert.ok(graph, "expected the nested workflow graph disclosure");
+      graph.open = open;
+      await graph.dispatch("toggle");
+      await settle();
+      return graph;
+    },
+    async toggleArchivedGraph(index, open) {
+      const graph = archivedGraphs[index];
+      assert.ok(graph, `expected archived graph disclosure ${index}`);
       graph.open = open;
       await graph.dispatch("toggle");
       await settle();
@@ -504,7 +593,7 @@ async function settle() {
 }
 
 function links(app) {
-  return findAll(app.content, (element) => element.tagName === "A");
+  return findAll(app.details ?? app.content, (element) => element.tagName === "A");
 }
 
 function linkLabels(app) {
@@ -512,8 +601,9 @@ function linkLabels(app) {
 }
 
 function elementsByClass(app, className) {
+  const root = app.details ?? app.content;
   return findAll(
-    app.content,
+    root,
     (element) =>
       element.className.split(" ").filter(Boolean).includes(className),
   );
@@ -1138,6 +1228,249 @@ test("clipboard failures are announced without exposing the fingerprint", async 
   assert.equal(copyButton.disabled, false);
 });
 
+test("archived attempt graphs are independently lazy, exact, and cached", async () => {
+  const app = loadDiagnostics({
+    archivedAttempts: [1, 2],
+    fetchResponses: [
+      response(200, validGraphPayload()),
+      response(200, validGraphPayload()),
+    ],
+  });
+
+  assert.equal(app.fetchCalls.length, 0);
+  assert.deepEqual(
+    app.archivedGraphs.map((graph) => graph.open),
+    [false, false],
+  );
+  assert.deepEqual(
+    app.archivedGraphs.map((graph) => graph.dataset.hydrationState),
+    ["idle", "idle"],
+  );
+
+  const first = await app.toggleArchivedGraph(0, true);
+  assert.equal(app.fetchCalls.length, 1);
+  assert.equal(
+    app.fetchCalls[0].url,
+    "/admin/execution/1/workflow/graph/?attempt_number=1",
+  );
+  assert.equal(first.dataset.hydrationState, "ready");
+  assert.ok(
+    graphNodeLinks({ content: first }).every((link) =>
+      link.href.includes("attempt_number=1&node_id="),
+    ),
+  );
+  assert.equal(app.archivedGraphs[1].dataset.hydrationState, "idle");
+
+  const second = await app.toggleArchivedGraph(1, true);
+  assert.equal(app.fetchCalls.length, 2);
+  assert.equal(
+    app.fetchCalls[1].url,
+    "/admin/execution/1/workflow/graph/?attempt_number=2",
+  );
+  assert.equal(second.dataset.hydrationState, "ready");
+  assert.ok(
+    graphNodeLinks({ content: second }).every((link) =>
+      link.href.includes("attempt_number=2&node_id="),
+    ),
+  );
+  const descriptionIds = app.archivedGraphs.flatMap((graph) =>
+    graphNodeLinks({ content: graph }).map((link) =>
+      link.attributes.get("aria-describedby"),
+    ),
+  );
+  assert.equal(new Set(descriptionIds).size, descriptionIds.length);
+  const markerEnds = app.archivedGraphs.flatMap((graph) =>
+    elementsByClass(
+      { content: graph },
+      "django-ray-workflow-graph__connector",
+    ).map((connector) => connector.attributes.get("marker-end")),
+  );
+  assert.deepEqual(new Set(markerEnds), new Set([
+    "url(#django-ray-workflow-graph-arrow)",
+    "url(#django-ray-workflow-graph-arrow-2)",
+  ]));
+
+  await app.toggleArchivedGraph(0, false);
+  await app.toggleArchivedGraph(0, true);
+  await app.toggleArchivedGraph(1, false);
+  await app.toggleArchivedGraph(1, true);
+  assert.equal(app.fetchCalls.length, 2);
+});
+
+test("failed and current attempts share one ordered accessible graph stack", async () => {
+  const app = loadDiagnostics({
+    archivedAttempts: [1, 2],
+    currentAttemptState: "SUCCEEDED",
+    dataset: {
+      pinnedAttemptNumber: "3",
+      graphUrl: "/admin/execution/1/workflow/graph/?attempt_number=3",
+      topologyNodesUrl:
+        "/admin/execution/1/workflow/topology/nodes/?attempt_number=3",
+      topologyEdgesUrl:
+        "/admin/execution/1/workflow/topology/edges/?attempt_number=3",
+      nodeDetailsUrl: "/admin/execution/1/workflow/nodes/?attempt_number=3",
+      nodeDetailUrl: "/admin/execution/1/workflow/node/?attempt_number=3",
+    },
+    fetchResponses: [
+      response(200, validPayload()),
+      response(200, validGraphPayload()),
+      response(200, validGraphPayload()),
+      response(200, validGraphPayload()),
+    ],
+  });
+
+  assert.equal(app.attemptGraphStack.parentNode, app.details);
+  assert.equal(app.attemptGraphStack.hidden, false);
+  assert.equal(app.currentGraphMount.hidden, true);
+  assert.deepEqual(
+    app.archivedGraphs.map((graph) => graph.open),
+    [false, false],
+  );
+  assert.equal(app.fetchCalls.length, 0);
+
+  await app.toggle(true);
+
+  const orderedPanels = findAll(
+    app.attemptGraphStack,
+    (element) =>
+      element.tagName === "DETAILS" &&
+      element.className.split(" ").includes("django-ray-workflow-graph"),
+  );
+  assert.equal(app.currentGraphMount.hidden, false);
+  assert.equal(orderedPanels.length, 3);
+  assert.deepEqual(
+    orderedPanels.map((panel) => panel.dataset.workflowGraphAttempt),
+    ["1", "2", "3"],
+  );
+  assert.deepEqual(
+    orderedPanels.map(
+      (panel) =>
+        findAll(
+          panel,
+          (element) =>
+            element.className === "django-ray-workflow-graph__summary-title",
+        )[0].textContent,
+    ),
+    [
+      "Execution graph \u2014 Attempt 1 (failed)",
+      "Execution graph \u2014 Attempt 2 (failed)",
+      "Execution graph \u2014 Attempt 3 (current, succeeded)",
+    ],
+  );
+  assert.ok(orderedPanels.every((panel) => panel.open === false));
+  assert.ok(
+    orderedPanels.every((panel) => panel.children[0].tagName === "SUMMARY"),
+  );
+  const titleIds = orderedPanels.map((panel) =>
+    findAll(
+      panel,
+      (element) =>
+        element.className === "django-ray-workflow-graph__summary-title",
+    )[0].attributes.get("id"),
+  );
+  assert.equal(new Set(titleIds).size, 3);
+  assert.deepEqual(
+    orderedPanels.map((panel) => panel.attributes.get("aria-labelledby")),
+    titleIds,
+  );
+
+  await app.toggleArchivedGraph(0, true);
+  await app.toggleArchivedGraph(1, true);
+  await app.toggleGraph(true);
+  assert.deepEqual(
+    app.fetchCalls.map((call) => call.url),
+    [
+      "/admin/execution/1/workflow/diagnostics/",
+      "/admin/execution/1/workflow/graph/?attempt_number=1",
+      "/admin/execution/1/workflow/graph/?attempt_number=2",
+      "/admin/execution/1/workflow/graph/?attempt_number=3",
+    ],
+  );
+  assert.ok(
+    graphNodeLinks({ content: orderedPanels[2] }).every((link) =>
+      link.href.includes("attempt_number=3&node_id="),
+    ),
+  );
+  const descriptionIds = orderedPanels.flatMap((panel) =>
+    graphNodeLinks({ content: panel }).map((link) =>
+      link.attributes.get("aria-describedby"),
+    ),
+  );
+  assert.equal(new Set(descriptionIds).size, descriptionIds.length);
+  const markerEnds = orderedPanels.flatMap((panel) =>
+    elementsByClass(
+      { content: panel },
+      "django-ray-workflow-graph__connector",
+    ).map((connector) => connector.attributes.get("marker-end")),
+  );
+  assert.deepEqual(
+    new Set(markerEnds),
+    new Set([
+      "url(#django-ray-workflow-graph-arrow)",
+      "url(#django-ray-workflow-graph-arrow-2)",
+      "url(#django-ray-workflow-graph-arrow-3)",
+    ]),
+  );
+
+  await app.toggleArchivedGraph(0, false);
+  assert.equal(orderedPanels[0].open, false);
+  assert.equal(orderedPanels[1].open, true);
+  assert.equal(orderedPanels[2].open, true);
+  await app.toggleArchivedGraph(0, true);
+  await app.toggleGraph(false);
+  await app.toggleGraph(true);
+  await app.toggle(false);
+  await app.toggle(true);
+  assert.equal(app.fetchCalls.length, 4);
+  assert.equal(
+    findAll(
+      app.currentGraphMount,
+      (element) => element.dataset.workflowCurrentGraphPanel === "",
+    ).length,
+    1,
+  );
+});
+
+test("an archived graph caches bounded failure without leaking response data", async () => {
+  const secret = "archived-graph-private-secret";
+  const app = loadDiagnostics({
+    archivedAttempts: [1],
+    fetchResponses: [
+      response(200, validGraphPayload({ private_runtime_value: secret })),
+    ],
+  });
+
+  const graph = await app.toggleArchivedGraph(0, true);
+  assert.equal(app.fetchCalls.length, 1);
+  assert.equal(graph.dataset.hydrationState, "error");
+  assert.equal(graphNodeLinks({ content: graph }).length, 0);
+  assert.equal(graph.textContent.includes(secret), false);
+  assert.match(graph.textContent, /Reload this page to try again/);
+
+  await app.toggleArchivedGraph(0, false);
+  await app.toggleArchivedGraph(0, true);
+  assert.equal(app.fetchCalls.length, 1);
+});
+
+test("an archived graph rejects mixed attempt endpoints before fetching", async () => {
+  const app = loadDiagnostics({
+    archivedAttempts: [
+      {
+        attemptNumber: 1,
+        dataset: {
+          graphUrl: "/admin/execution/1/workflow/graph/?attempt_number=2",
+        },
+      },
+    ],
+  });
+
+  const graph = app.archivedGraphs[0];
+  assert.equal(graph.dataset.hydrationState, "error");
+  assert.match(graph.textContent, /could not be initialized safely/);
+  await app.toggleArchivedGraph(0, true);
+  assert.equal(app.fetchCalls.length, 0);
+});
+
 test("the nested graph is lazy, cached, topological, and keyboard navigable", async () => {
   const app = loadDiagnostics({
     dataset: {
@@ -1178,7 +1511,7 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
       app,
       "django-ray-workflow-graph__summary-title",
     )[0].textContent,
-    "Execution graph \u2014 Attempt 2",
+    "Execution graph \u2014 Attempt 2 (current, running)",
   );
   assert.equal(
     elementsByClass(app, "django-ray-workflow-graph")[0].open,
@@ -1244,14 +1577,14 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
       "/admin/execution/1/workflow/node/?attempt_number=2&node_id=finish#bounded-detail",
     ],
   );
-  assert.match(app.content.textContent, /Incoming from Prepare input/);
-  assert.match(app.content.textContent, /Incoming from Process items/);
-  assert.match(app.content.textContent, /\u25a1 Task/);
-  assert.match(app.content.textContent, /\u25c7 Aggregate map/);
-  assert.match(app.content.textContent, /\u2713Succeeded/);
-  assert.match(app.content.textContent, /\u25b6Running/);
-  assert.match(app.content.textContent, /\u25cbPending/);
-  assert.match(app.content.textContent, /6 of 8 items completed/);
+  assert.match(app.details.textContent, /Incoming from Prepare input/);
+  assert.match(app.details.textContent, /Incoming from Process items/);
+  assert.match(app.details.textContent, /\u25a1 Task/);
+  assert.match(app.details.textContent, /\u25c7 Aggregate map/);
+  assert.match(app.details.textContent, /\u2713Succeeded/);
+  assert.match(app.details.textContent, /\u25b6Running/);
+  assert.match(app.details.textContent, /\u25cbPending/);
+  assert.match(app.details.textContent, /6 of 8 items completed/);
 
   const connectors = elementsByClass(
     app,
@@ -1490,7 +1823,7 @@ test("repeated split and join nodes render in deterministic longest-path stages"
     ),
   );
   assert.match(
-    app.content.textContent,
+    app.details.textContent,
     /Incoming from Load customer history \(history\), Validate order items \(validate\), Read inventory snapshot \(inventory\)/,
   );
 
@@ -1558,26 +1891,26 @@ test("failed paths and malicious graph text stay visible as plain text", async (
   await app.toggleGraph(true);
 
   assert.equal(graphContent(app).hidden, false);
-  assert.match(app.content.textContent, /Workflow entry/);
-  assert.match(app.content.textContent, /Incoming from entry/);
-  assert.match(app.content.textContent, /Upstream of failure/);
-  assert.match(app.content.textContent, /Failure origin/);
-  assert.match(app.content.textContent, /!Failed/);
-  assert.match(app.content.textContent, /Output: Unavailable \u2014 node failed/);
+  assert.match(app.details.textContent, /Workflow entry/);
+  assert.match(app.details.textContent, /Incoming from entry/);
+  assert.match(app.details.textContent, /Upstream of failure/);
+  assert.match(app.details.textContent, /Failure origin/);
+  assert.match(app.details.textContent, /!Failed/);
+  assert.match(app.details.textContent, /Output: Unavailable \u2014 node failed/);
   assert.ok(
     graphNodeLinks(app).every(
       (link) => link.dataset.failurePath === "true",
     ),
   );
-  assert.equal(app.content.textContent.includes(maliciousLabel), true);
-  assert.equal(app.content.textContent.includes(maliciousMessage), true);
-  assert.equal(app.content.textContent.includes(maliciousError), true);
+  assert.equal(app.details.textContent.includes(maliciousLabel), true);
+  assert.equal(app.details.textContent.includes(maliciousMessage), true);
+  assert.equal(app.details.textContent.includes(maliciousError), true);
   assert.equal(
-    findAll(app.content, (element) => element.tagName === "IMG").length,
+    findAll(app.details, (element) => element.tagName === "IMG").length,
     0,
   );
   assert.equal(
-    findAll(app.content, (element) => element.tagName === "SCRIPT").length,
+    findAll(app.details, (element) => element.tagName === "SCRIPT").length,
     0,
   );
   assert.equal(
@@ -1929,7 +2262,7 @@ test("malformed, cyclic, partial, and unknown graph data fail closed", async (co
         /could not be displayed safely/,
       );
       assert.equal(
-        app.content.textContent.includes("private_runtime_value"),
+        app.details.textContent.includes("private_runtime_value"),
         false,
       );
       assert.deepEqual(linkLabels(app).slice(-3), [

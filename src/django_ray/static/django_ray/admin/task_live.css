@@ -451,6 +451,31 @@
   opacity: 0.65;
 }
 
+#django-ray-live-observability .django-ray-workflow-attempts {
+  border-top: 1px solid var(--django-ray-live-border-strong);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+#django-ray-live-observability .django-ray-workflow-attempts[hidden],
+#django-ray-live-observability .django-ray-workflow-attempts__current[hidden] {
+  display: none;
+}
+
+#django-ray-live-observability .django-ray-workflow-attempts__heading h3 {
+  color: var(--django-ray-live-heading);
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+#django-ray-live-observability .django-ray-workflow-attempts__heading p,
+#django-ray-live-observability .django-ray-workflow-attempts__notice {
+  color: var(--django-ray-live-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin: 0.35rem 0 0;
+}
+
 #django-ray-live-observability .django-ray-workflow-graph {
   background: var(--django-ray-live-surface-bg);
   border: 1px solid var(--django-ray-live-border-strong);
