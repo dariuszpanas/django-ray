@@ -383,6 +383,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `django_ray_worker --all-queues` now discovers and deduplicates queues across
+  every configured django-ray backend alias while ignoring Celery and other
+  backends. Queue selectors and explicit execution-mode flags are mutually
+  exclusive, so mixed-backend deployments cannot silently omit Ray work or
+  accept contradictory worker arguments. Ray Core mode also rejects
+  `--all-queues` across incompatible per-alias cluster targets.
 - Local environment bootstrap now selects the available Python 3.12 patch release instead of
   requiring an unavailable historical patch, so `uv` and `make` commands work in fresh development
   containers and continue receiving compatible Python patch updates.

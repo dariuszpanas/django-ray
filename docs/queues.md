@@ -54,9 +54,18 @@ python manage.py django_ray_worker --queue=email --local --concurrency=10
 # Several queues
 python manage.py django_ray_worker --queue=urgent,default --local --concurrency=20
 
-# Every queue configured on the default backend
+# Every queue configured on any django-ray backend alias
 python manage.py django_ray_worker --all-queues --local
 ```
+
+`--all-queues` inspects every configured `RayTaskBackend` (including subclasses),
+deduplicates their declared queue names, and ignores Celery, Immediate, and other
+backend aliases. This makes it safe for a staged multi-backend migration where
+`default` is not django-ray. It fails instead of guessing when no django-ray queues can
+be enumerated; use `--queue` or `--queues` for an intentionally open-ended backend.
+Ray Job mode can preserve a different durable target for each task. Ray Core modes bind
+one process to one cluster, so `--all-queues` rejects aliases with different effective
+`RAY_ADDRESS` values; run an explicitly selected queue set for each cluster instead.
 
 In production, separate deployments can run the same image with different queue and
 concurrency arguments. This is usually more predictable than one worker consuming

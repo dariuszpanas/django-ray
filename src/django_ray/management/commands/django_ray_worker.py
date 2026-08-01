@@ -6,7 +6,7 @@ import json
 import random
 import signal
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from types import FrameType
 from typing import Any
@@ -93,23 +93,24 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Add command arguments."""
-        parser.add_argument(
+        queue_selection = parser.add_mutually_exclusive_group()
+        queue_selection.add_argument(
             "--queue",
             type=str,
             default=None,
             help="Queue name to process (default: default). Use comma-separated for multiple queues.",
         )
-        parser.add_argument(
+        queue_selection.add_argument(
             "--queues",
             type=str,
             nargs="+",
             default=None,
             help="Queue names to process (space-separated). Alternative to --queue.",
         )
-        parser.add_argument(
+        queue_selection.add_argument(
             "--all-queues",
             action="store_true",
-            help="Process tasks from all configured queues.",
+            help="Process tasks from all queues configured on django-ray backends.",
         )
         parser.add_argument(
             "--concurrency",
@@ -117,17 +118,18 @@ class Command(BaseCommand):
             default=None,
             help="Maximum concurrent tasks (default: from settings)",
         )
-        parser.add_argument(
+        execution_mode = parser.add_mutually_exclusive_group()
+        execution_mode.add_argument(
             "--sync",
             action="store_true",
             help="Run tasks synchronously (without Ray, for testing)",
         )
-        parser.add_argument(
+        execution_mode.add_argument(
             "--local",
             action="store_true",
             help="Run with local Ray instance (starts Ray automatically)",
         )
-        parser.add_argument(
+        execution_mode.add_argument(
             "--cluster",
             type=str,
             default=None,
@@ -269,7 +271,7 @@ class Command(BaseCommand):
         - --queue default (single queue)
         - --queue default,high-priority,low-priority (comma-separated)
         - --queues default high-priority low-priority (space-separated)
-        - --all-queues (all configured queues from TASKS setting)
+        - --all-queues (all queues configured on RayTaskBackend aliases)
 
         Args:
             options: Command options dictionary.
@@ -278,16 +280,100 @@ class Command(BaseCommand):
             List of queue names to process.
         """
         from django.conf import settings as django_settings
+        from django.tasks import DEFAULT_TASK_QUEUE_NAME
+        from django.utils.module_loading import import_string
+
+        from django_ray.backends import RayTaskBackend
 
         # Check for --all-queues flag first
         if options.get("all_queues"):
             tasks_config = getattr(django_settings, "TASKS", {})
-            default_backend = tasks_config.get("default", {})
-            configured_queues = default_backend.get("QUEUES", ["default"])
-            self.stdout.write(
-                self.style.NOTICE(f"Processing all configured queues: {configured_queues}")
+            if not isinstance(tasks_config, Mapping):
+                raise CommandError("TASKS must be a mapping to resolve --all-queues")
+
+            configured_queues: list[str] = []
+            seen_queues: set[str] = set()
+            ray_backend_aliases: list[str] = []
+            ray_backend_targets: dict[str, str] = {}
+            worker_settings = get_settings()
+            process_wide_ray_core = bool(
+                options.get("local")
+                or options.get("cluster")
+                or (
+                    not options.get("sync")
+                    and worker_settings.get("RUNNER", "ray_job") == "ray_core"
+                )
             )
-            return list(configured_queues)
+            for alias, backend_config in tasks_config.items():
+                if not isinstance(alias, str) or not isinstance(backend_config, Mapping):
+                    raise CommandError("TASKS aliases must map names to backend settings")
+                backend_path = backend_config.get("BACKEND")
+                if not isinstance(backend_path, str):
+                    raise CommandError(f"TASKS backend {alias!r} must define BACKEND")
+                try:
+                    backend_class = import_string(backend_path)
+                except ImportError as error:
+                    raise CommandError(
+                        f"Cannot import TASKS backend {alias!r} while resolving --all-queues"
+                    ) from error
+                if not isinstance(backend_class, type):
+                    raise CommandError(f"TASKS backend {alias!r} does not resolve to a class")
+                if not issubclass(backend_class, RayTaskBackend):
+                    continue
+
+                ray_backend_aliases.append(alias)
+                if process_wide_ray_core:
+                    backend_options = backend_config.get("OPTIONS", {})
+                    if not isinstance(backend_options, Mapping):
+                        raise CommandError(f"TASKS backend {alias!r} OPTIONS must be a mapping")
+                    ray_target = backend_options.get("RAY_ADDRESS", worker_settings["RAY_ADDRESS"])
+                    if not isinstance(ray_target, str) or not ray_target.strip():
+                        raise CommandError(
+                            f"TASKS backend {alias!r} RAY_ADDRESS must be a non-empty string"
+                        )
+                    ray_backend_targets[alias] = ray_target
+
+                raw_queues = backend_config.get("QUEUES", [DEFAULT_TASK_QUEUE_NAME])
+                if isinstance(raw_queues, (str, bytes)) or not isinstance(
+                    raw_queues, Sequence | set | frozenset
+                ):
+                    raise CommandError(
+                        f"TASKS backend {alias!r} QUEUES must be a collection of queue names"
+                    )
+                if not raw_queues:
+                    raise CommandError(
+                        f"TASKS backend {alias!r} has no enumerable QUEUES; "
+                        "use --queue or --queues explicitly"
+                    )
+                queue_values = list(raw_queues)
+                for queue_name in queue_values:
+                    if not isinstance(queue_name, str) or not queue_name.strip():
+                        raise CommandError(
+                            f"TASKS backend {alias!r} QUEUES must contain non-empty strings"
+                        )
+                if isinstance(raw_queues, set | frozenset):
+                    queue_values.sort()
+                for queue_name in queue_values:
+                    if queue_name not in seen_queues:
+                        configured_queues.append(queue_name)
+                        seen_queues.add(queue_name)
+
+            if not ray_backend_aliases:
+                raise CommandError("--all-queues found no TASKS backend using RayTaskBackend")
+            if len(set(ray_backend_targets.values())) > 1:
+                aliases = ", ".join(ray_backend_targets)
+                raise CommandError(
+                    "--all-queues cannot combine django-ray backends with different "
+                    f"RAY_ADDRESS values in Ray Core mode ({aliases}); use --queue or "
+                    "--queues for one compatible target, or use Ray Job mode"
+                )
+            self.stdout.write(
+                self.style.NOTICE(
+                    "Processing all configured django-ray queues "
+                    f"from {ray_backend_aliases}: {configured_queues}"
+                )
+            )
+            return configured_queues
 
         # Check for --queues (space-separated list)
         if options.get("queues"):

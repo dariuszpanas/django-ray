@@ -202,7 +202,7 @@ uv run make createsuperuser  # Create admin user
 uv run make worker           # Ray Job API mode
 uv run make worker-local     # Local Ray (recommended)
 uv run make worker-sync      # Sync mode (no Ray)
-uv run make worker-all       # All queues, local Ray
+uv run make worker-all       # All django-ray backend queues, local Ray
 uv run make worker-cluster   # Connect to cluster
 ```
 
@@ -253,7 +253,7 @@ uv run python testproject/manage.py django_ray_worker --queue=default
 # Multiple queues
 uv run python testproject/manage.py django_ray_worker --queue=default,high-priority,low-priority
 
-# All configured queues
+# All queues configured on django-ray backend aliases
 uv run python testproject/manage.py django_ray_worker --all-queues
 ```
 

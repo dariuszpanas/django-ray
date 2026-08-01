@@ -17,7 +17,14 @@ python manage.py django_ray_worker [options]
 | `--queue=QUEUE` | Queue name to process (default: `default`) |
 | `--queue=Q1,Q2` | Multiple queues (comma-separated) |
 | `--queues Q1 Q2` | Multiple queues (space-separated alternative to `--queue`) |
-| `--all-queues` | Process all configured queues |
+| `--all-queues` | Process the declared queues from every configured django-ray backend alias |
+
+The three queue-selection forms are mutually exclusive. `--all-queues` includes
+`RayTaskBackend` subclasses, deduplicates queue names, and ignores queues owned only by
+Celery or another backend. It fails when no django-ray queues can be enumerated instead
+of silently using another backend's `default` queue. In Ray Core mode, it also rejects
+aliases with different effective `RAY_ADDRESS` values because one process cannot honor
+multiple cluster targets; Ray Job mode preserves the target stored on each task.
 
 #### Execution Mode
 
@@ -27,6 +34,10 @@ python manage.py django_ray_worker [options]
 | `--local` | Use local Ray cluster |
 | `--cluster=ADDRESS` | Connect to Ray cluster at ADDRESS |
 | *(none)* | Use default from `DJANGO_RAY.RUNNER` (`ray_job` by default) |
+
+The explicit execution-mode flags are mutually exclusive. Omit all three to derive the
+mode from `DJANGO_RAY`; contradictory flags are rejected instead of using an implicit
+precedence order.
 
 #### Concurrency
 
