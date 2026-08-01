@@ -97,7 +97,6 @@ class RayTaskExecution(models.Model):
     # Task identification
     task_id = models.CharField(
         max_length=255,
-        db_index=True,
         help_text="ID from Django Tasks",
     )
     callable_path = models.CharField(
@@ -317,10 +316,14 @@ class RayTaskExecution(models.Model):
             ),
         ]
         constraints = [
+            models.UniqueConstraint(
+                fields=["task_id"],
+                name="ray_task_id_unique",
+            ),
             models.CheckConstraint(
                 condition=models.Q(priority__gte=-100, priority__lte=100),
                 name="ray_task_priority_valid_range",
-            )
+            ),
         ]
         verbose_name = "Ray Task Execution"
         verbose_name_plural = "Ray Task Executions"

@@ -163,7 +163,7 @@ def _assert_priority_migration_round_trip() -> None:
         ) == ["priority-migration-older", "priority-migration-newer"]
     finally:
         MigrationExecutor(connection).migrate(
-            [("django_ray", "0014_raytaskexecution_ray_target_address")]
+            [("django_ray", "0015_raytaskexecution_task_id_unique")]
         )
 
 

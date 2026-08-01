@@ -173,7 +173,7 @@ Primary execution record for one task attempt chain.
 | Field | Notes |
 |---|---|
 | `id` | `BigAutoField` primary key |
-| `task_id` | Django task identifier |
+| `task_id` | Globally unique Django task-result identifier; UUIDv4 candidates are committed under a database uniqueness constraint with bounded collision retry |
 | `callable_path` | Dotted import path for callable |
 | `queue_name` | Queue used for claim/execution |
 | `priority` | Django priority from `-100` to `100`; larger values are claimed sooner |
@@ -440,7 +440,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0014_raytaskexecution_ray_target_address` before starting upgraded workers:
+`0015_raytaskexecution_task_id_unique` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -488,6 +488,23 @@ on backend-specific Ray Job routing, and drain tasks that contain only the new t
 before reversing `0014`; the reverse migration drops that routing column. Ray Core
 workers still select one cluster at process startup and do not dynamically route by
 backend alias.
+
+Migration `0015` makes the public Django task-result ID globally unique. Its preflight
+refuses to choose an owner or alter rows when a legacy database already contains a
+duplicate identity; the bounded diagnostic identifies row groups by primary key rather
+than rendering stored IDs. Resolve every duplicate explicitly while producers and task
+managers remain stopped, rerun the migration, and only then start upgraded code. New
+enqueue paths let the database arbitrate UUIDv4 candidates and retry only a proven
+collision. Reversing `0015` removes the constraint and therefore removes this integrity
+guarantee.
+
+Treat `0015` as a maintenance-window migration on a large execution table. The
+duplicate preflight and unique-index build inspect existing task IDs and may consume
+temporary storage or block writes according to the database backend. Measure the
+migration against a production-sized staging copy, confirm free database capacity and
+backup/recovery procedures, and keep every enqueue producer and task manager stopped
+until the constraint is present. This release deliberately prefers one portable,
+fail-closed migration over claiming an unproven zero-downtime index rollout.
 
 RuntimeEnv encryption has no schema migration. Its rollout is nevertheless
 reader-first: deploy the dual plaintext/encrypted reader everywhere while writes remain

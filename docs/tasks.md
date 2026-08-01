@@ -110,6 +110,14 @@ enqueued = send_email.enqueue(
 task_id = enqueued.id
 ```
 
+django-ray allocates this result ID as a UUIDv4 and commits it under a global database
+uniqueness constraint. If a generated candidate already exists, enqueue recomputes
+task-ID-bound storage metadata and retries a small bounded number of times before
+failing without creating a claimable task. This collision handling prevents ambiguous
+lookups; it is not application idempotency or enqueue deduplication. Every successful
+call to `enqueue()` still creates a distinct task, so use a separate business operation
+key when repeated submissions must collapse into one external effect.
+
 Select another configured queue at enqueue time:
 
 ```python

@@ -7,13 +7,16 @@ import json
 import logging
 import sys
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, transaction
 from django.tasks.exceptions import InvalidTask, TaskResultDoesNotExist
 
-from django_ray.backends import RayTaskBackend
+from django_ray.backends import RayTaskBackend, TaskResultIdAllocationError
+from django_ray.input_storage import prepare_task_input
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.result_storage import ResultStorageError
 from django_ray.runtime.runtime_env import (
@@ -142,6 +145,188 @@ class TestRayTaskBackend:
         assert observed_task_ids == [result.id]
         assert execution.runtime_env_json == observed[0].serialized
         assert execution.runtime_env_hash == observed[0].digest
+
+    def test_enqueue_recovers_from_a_task_id_collision_and_rebinds_encryption(
+        self,
+        caplog,
+        monkeypatch,
+        settings,
+    ) -> None:
+        from testproject.tasks import add_numbers
+
+        collided_id = "00000000-0000-4000-8000-000000000001"
+        replacement_id = "00000000-0000-4000-8000-000000000002"
+        RayTaskExecution.objects.create(
+            task_id=collided_id,
+            callable_path="testproject.tasks.add_numbers",
+        )
+        candidates = iter((UUID(collided_id), UUID(replacement_id)))
+        monkeypatch.setattr("django_ray.backends.uuid.uuid4", lambda: next(candidates))
+
+        marker = "collision-rebound-runtime-env-secret-99f1"
+        key = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+        settings.DJANGO_RAY = {
+            "RAY_ADDRESS": "auto",
+            "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"backend-key": key},
+            "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "backend-key",
+        }
+        backend = RayTaskBackend(
+            "encrypted",
+            {
+                "QUEUES": ["default"],
+                "OPTIONS": {
+                    "RAY_ADDRESS": "auto",
+                    "RAY_RUNTIME_ENV": {"env_vars": {"API_TOKEN": marker}},
+                },
+            },
+        )
+
+        observed_task_ids: list[str] = []
+
+        def record_storage(runtime_env, *, task_id):
+            observed_task_ids.append(task_id)
+            return runtime_env_for_storage(runtime_env, task_id=task_id)
+
+        prepared_inputs = 0
+        original_prepare = prepare_task_input
+
+        def record_prepare(*args, **kwargs):
+            nonlocal prepared_inputs
+            prepared_inputs += 1
+            return original_prepare(*args, **kwargs)
+
+        monkeypatch.setattr("django_ray.backends.runtime_env_for_storage", record_storage)
+        monkeypatch.setattr("django_ray.backends.prepare_task_input", record_prepare)
+
+        with caplog.at_level(logging.WARNING, logger="django_ray.backend"):
+            result = backend.enqueue(add_numbers, args=(2, 3), kwargs={})
+
+        execution = RayTaskExecution.objects.get(task_id=replacement_id)
+        assert result.id == replacement_id
+        assert RayTaskExecution.objects.filter(task_id=collided_id).count() == 1
+        assert observed_task_ids == [collided_id, replacement_id]
+        assert prepared_inputs == 1
+        assert runtime_env_for_execution(execution).spec == {"env_vars": {"API_TOKEN": marker}}
+        assert "retrying allocation" in caplog.text
+        assert collided_id not in caplog.text
+        assert marker not in caplog.text
+
+    def test_enqueue_fails_closed_after_bounded_task_id_collisions(
+        self,
+        caplog,
+        monkeypatch,
+    ) -> None:
+        from testproject.tasks import add_numbers
+
+        collided_id = "00000000-0000-4000-8000-000000000003"
+        RayTaskExecution.objects.create(
+            task_id=collided_id,
+            callable_path="testproject.tasks.add_numbers",
+        )
+        candidate = UUID(collided_id)
+        candidate_calls = 0
+
+        def repeat_candidate():
+            nonlocal candidate_calls
+            candidate_calls += 1
+            return candidate
+
+        monkeypatch.setattr("django_ray.backends.uuid.uuid4", repeat_candidate)
+
+        with (
+            caplog.at_level(logging.WARNING, logger="django_ray.backend"),
+            pytest.raises(TaskResultIdAllocationError, match="after 3 attempts"),
+        ):
+            _make_backend().enqueue(add_numbers, args=(2, 3), kwargs={})
+
+        assert candidate_calls == 3
+        assert RayTaskExecution.objects.filter(task_id=collided_id).count() == 1
+        assert RayTaskExecution.objects.count() == 1
+        assert collided_id not in caplog.text
+
+    def test_enqueue_does_not_retry_an_unrelated_integrity_error(self, monkeypatch) -> None:
+        candidate_id = "00000000-0000-4000-8000-000000000004"
+        candidate_calls = 0
+
+        def candidate():
+            nonlocal candidate_calls
+            candidate_calls += 1
+            return UUID(candidate_id)
+
+        monkeypatch.setattr("django_ray.backends.uuid.uuid4", candidate)
+        invalid_task = SimpleNamespace(
+            module_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            priority=101,
+            run_after=None,
+        )
+
+        with pytest.raises(IntegrityError):
+            _make_backend().enqueue(invalid_task, args=(2, 3), kwargs={})
+
+        assert candidate_calls == 1
+        assert not RayTaskExecution.objects.exists()
+
+    def test_enqueue_does_not_mask_an_unrelated_error_when_task_id_also_exists(
+        self,
+        monkeypatch,
+    ) -> None:
+        candidate_id = "00000000-0000-4000-8000-000000000005"
+        RayTaskExecution.objects.create(
+            task_id=candidate_id,
+            callable_path="testproject.tasks.add_numbers",
+        )
+        candidate_calls = 0
+
+        def candidate():
+            nonlocal candidate_calls
+            candidate_calls += 1
+            return UUID(candidate_id)
+
+        monkeypatch.setattr("django_ray.backends.uuid.uuid4", candidate)
+        invalid_task = SimpleNamespace(
+            module_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            priority=101,
+            run_after=None,
+        )
+
+        with pytest.raises(IntegrityError, match="ray_task_priority_valid_range"):
+            _make_backend().enqueue(invalid_task, args=(2, 3), kwargs={})
+
+        assert candidate_calls == 1
+        assert RayTaskExecution.objects.filter(task_id=candidate_id).count() == 1
+
+    def test_enqueue_does_not_classify_input_registration_failure_as_a_collision(
+        self,
+        monkeypatch,
+    ) -> None:
+        from testproject.tasks import add_numbers
+
+        candidate_id = "00000000-0000-4000-8000-000000000006"
+        RayTaskExecution.objects.create(
+            task_id=candidate_id,
+            callable_path="testproject.tasks.add_numbers",
+        )
+        candidate_calls = 0
+
+        def candidate():
+            nonlocal candidate_calls
+            candidate_calls += 1
+            return UUID(candidate_id)
+
+        monkeypatch.setattr("django_ray.backends.uuid.uuid4", candidate)
+        monkeypatch.setattr(
+            "django_ray.backends.register_task_input",
+            lambda _prepared: (_ for _ in ()).throw(IntegrityError("input registry failed")),
+        )
+
+        with pytest.raises(IntegrityError, match="input registry failed"):
+            _make_backend().enqueue(add_numbers, args=(2, 3), kwargs={})
+
+        assert candidate_calls == 1
+        assert RayTaskExecution.objects.filter(task_id=candidate_id).count() == 1
 
     def test_runtime_env_storage_failure_creates_no_execution(self, monkeypatch) -> None:
         from testproject.tasks import add_numbers

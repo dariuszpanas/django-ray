@@ -54,5 +54,5 @@ def test_existing_progress_gains_nullable_run_identity_and_reverses() -> None:
         assert reverted.progress_data == legacy_progress
     finally:
         MigrationExecutor(connection).migrate(
-            [("django_ray", "0014_raytaskexecution_ray_target_address")]
+            [("django_ray", "0015_raytaskexecution_task_id_unique")]
         )
