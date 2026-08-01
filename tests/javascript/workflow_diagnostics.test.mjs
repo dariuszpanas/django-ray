@@ -540,6 +540,14 @@ function graphNodeId(link) {
     link,
     (element) =>
       element.className === "django-ray-workflow-graph__node-id",
+  )[0].textContent.replace(/^Node ID: /, "");
+}
+
+function graphNodeOutput(link) {
+  return findAll(
+    link,
+    (element) =>
+      element.className === "django-ray-workflow-graph__node-output",
   )[0].textContent;
 }
 
@@ -1220,8 +1228,13 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
         "django-ray-workflow-graph__node-id",
       )[0].textContent,
     ),
-    ["prepare", "fanout", "finish"],
+    ["Node ID: prepare", "Node ID: fanout", "Node ID: finish"],
   );
+  assert.deepEqual(nodeLinks.map(graphNodeOutput), [
+    "Output: Completed \u2014 value not retained in workflow diagnostics",
+    "Output: Pending \u2014 node is still running",
+    "Output: Pending \u2014 node has not started",
+  ]);
   assert.ok(nodeLinks.every((link) => link.tagName === "A"));
   assert.deepEqual(
     nodeLinks.map((link) => link.href),
@@ -1547,8 +1560,10 @@ test("failed paths and malicious graph text stay visible as plain text", async (
   assert.equal(graphContent(app).hidden, false);
   assert.match(app.content.textContent, /Workflow entry/);
   assert.match(app.content.textContent, /Incoming from entry/);
-  assert.match(app.content.textContent, /Failure path/);
+  assert.match(app.content.textContent, /Upstream of failure/);
+  assert.match(app.content.textContent, /Failure origin/);
   assert.match(app.content.textContent, /!Failed/);
+  assert.match(app.content.textContent, /Output: Unavailable \u2014 node failed/);
   assert.ok(
     graphNodeLinks(app).every(
       (link) => link.dataset.failurePath === "true",
@@ -1572,11 +1587,20 @@ test("failed paths and malicious graph text stay visible as plain text", async (
   assert.equal(diagnosticsScript.includes("innerHTML"), false);
 });
 
-test("failure emphasis follows the authoritative incoming path only", async () => {
+test("danger emphasis is confined to the originating failed node", async () => {
   const nodes = [
     {
       id: "entry",
       label: "Build order",
+      kind: "task",
+      state: "SUCCEEDED",
+      message: null,
+      error: null,
+      failure_path: true,
+    },
+    {
+      id: "validation",
+      label: "Validate order",
       kind: "task",
       state: "SUCCEEDED",
       message: null,
@@ -1619,7 +1643,8 @@ test("failure emphasis follows the authoritative incoming path only", async () =
         validGraphPayload({
           nodes,
           edges: [
-            { source: "entry", target: "reservation" },
+            { source: "entry", target: "validation" },
+            { source: "validation", target: "reservation" },
             { source: "reservation", target: "decision" },
             { source: "decision", target: "final" },
           ],
@@ -1633,20 +1658,28 @@ test("failure emphasis follows the authoritative incoming path only", async () =
 
   assert.deepEqual(
     graphNodeLinks(app).map((node) => node.dataset.failurePath ?? ""),
-    ["true", "true", "", ""],
+    ["true", "true", "true", "", ""],
+  );
+  assert.deepEqual(
+    graphNodeLinks(app).map((node) => node.dataset.failureOrigin ?? ""),
+    ["", "", "true", "", ""],
   );
   const connectors = elementsByClass(
     app,
     "django-ray-workflow-graph__connector",
   );
-  assert.deepEqual(
-    connectors.map((connector) => connector.dataset.failurePath ?? ""),
-    ["true", "", ""],
+  assert.ok(
+    connectors.every(
+      (connector) =>
+        connector.dataset.failurePath === undefined &&
+        connector.dataset.failureBoundary === undefined,
+    ),
   );
   assert.deepEqual(
     connectors.map((connector) => connector.attributes.get("marker-end")),
     [
-      "url(#django-ray-workflow-graph-failure-arrow)",
+      "url(#django-ray-workflow-graph-arrow)",
+      "url(#django-ray-workflow-graph-arrow)",
       "url(#django-ray-workflow-graph-arrow)",
       "url(#django-ray-workflow-graph-arrow)",
     ],
@@ -2057,27 +2090,29 @@ test("graph styles cover neutral light, dark, state, shape, and narrow layouts",
   );
   assert.match(
     graphStyles,
-    /\.django-ray-workflow-graph__connector\[data-failure-path="true"\]/,
+    /node\[data-failure-origin="true"\] \{\s+border-left-color: var\(--django-ray-live-danger-border\);\s+box-shadow:/,
   );
   assert.match(
     graphStyles,
-    /connector\[data-failure-path="true"\] \{\s+stroke: var\(--django-ray-live-danger-connector\);/,
+    /node\[data-failure-origin="true"\]\s+\.django-ray-workflow-graph__state\[data-state="FAILED"\]/,
   );
   assert.match(
     graphStyles,
-    /connector-arrow\[data-failure-path="true"\] \{\s+fill: var\(--django-ray-live-danger-connector\);/,
+    /django-ray-workflow-graph__node-output \{[\s\S]*?grid-column: 1 \/ -1;/,
   );
+  assert.match(
+    graphStyles,
+    /django-ray-workflow-graph__node-output-label \{[\s\S]*?font-weight: 700;/,
+  );
+  assert.equal(graphStyles.includes("failure-boundary"), false);
+  assert.equal(graphStyles.includes("failure-arrow"), false);
+  assert.equal(graphStyles.includes("danger-connector"), false);
   assert.ok(
     contrastAgainstWhite(cssHexToken("--django-ray-live-danger-fg")) >= 3,
   );
   assert.ok(
     contrastAgainstWhite(cssHexToken("--django-ray-live-action-fg")) >= 4.5,
   );
-  const defaultFailureConnector = cssHexToken(
-    "--django-ray-live-danger-connector",
-  );
-  assert.ok(contrastRatio(defaultFailureConnector, "#ffffff") >= 3);
-  assert.ok(contrastRatio(defaultFailureConnector, "#16171a") >= 3);
   const defaultFocusIndicator = cssHexToken(
     "--django-ray-live-accent-strong",
   );
