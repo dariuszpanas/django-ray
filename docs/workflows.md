@@ -547,15 +547,18 @@ unknown endpoints, count or publication mismatches, cursors, truncation, and ove
 runs without rendering a partial graph.
 
 Graph nodes are semantic links in dependency order, while the connecting artwork is
-decorative. Labels, states, bounded progress messages, map fan-out counts, and bounded
-failure text are the complete display allowlist. Callable paths, arguments, results,
-RuntimeEnv data, Ray identifiers, raw metrics and events, and workflow-plan payloads are
-never returned by the graph endpoint. A failed run marks each failure origin and its
-incoming ancestor path without using color alone. Node links are pinned to the same
-retained task attempt as the graph, and the graph summary names that page-rendered
-attempt. If live polling advances the task to a newer attempt, reload the page before
-opening its graph. The bounded topology and detail JSON routes remain available as
-explicit diagnostic fallbacks.
+decorative and never carries outcome color. Each card labels its structural path as
+`Node ID` and presents `Output` availability from the node state: pending and running
+nodes remain pending, failed nodes are unavailable, and succeeded nodes state that their
+value is not retained in workflow diagnostics. Labels, states, bounded progress messages,
+map fan-out counts, and bounded failure text are the complete data display allowlist.
+Callable paths, arguments, internal result values, RuntimeEnv data, Ray identifiers, raw
+metrics and events, and workflow-plan payloads are never returned by the graph endpoint.
+A failed run marks each failure origin and its incoming ancestor path without using color
+alone. Node links are pinned to the same retained task attempt as the graph, and the graph
+summary names that page-rendered attempt. If live polling advances the task to a newer
+attempt, reload the page before opening its graph. The bounded topology and detail JSON
+routes remain available as explicit diagnostic fallbacks.
 
 That graph is a full-reporting detail surface. A terminal-only run instead shows its
 terminal outcome and `OMITTED_BY_POLICY` status explicitly in the live and workflow

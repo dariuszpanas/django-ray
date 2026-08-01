@@ -60,6 +60,12 @@
     SUCCEEDED: { symbol: "\u2713", text: "Succeeded" },
     FAILED: { symbol: "!", text: "Failed" },
   };
+  const graphOutputPresentation = {
+    PENDING: "Pending \u2014 node has not started",
+    RUNNING: "Pending \u2014 node is still running",
+    SUCCEEDED: "Completed \u2014 value not retained in workflow diagnostics",
+    FAILED: "Unavailable \u2014 node failed",
+  };
   const graphKindPresentation = {
     task: { symbol: "\u25a1", text: "Task" },
     map: { symbol: "\u25c7", text: "Aggregate map" },
@@ -602,7 +608,7 @@
     return actions;
   };
 
-  const graphConnectorOverlay = (payload, nodesById) => {
+  const graphConnectorOverlay = (payload) => {
     const namespace = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(namespace, "svg");
     svg.setAttribute("class", "django-ray-workflow-graph__connectors");
@@ -611,27 +617,19 @@
     svg.setAttribute("preserveAspectRatio", "none");
 
     const definitions = document.createElementNS(namespace, "defs");
-    for (const [id, failurePath] of [
-      ["django-ray-workflow-graph-arrow", false],
-      ["django-ray-workflow-graph-failure-arrow", true],
-    ]) {
-      const marker = document.createElementNS(namespace, "marker");
-      marker.setAttribute("id", id);
-      marker.setAttribute("markerHeight", "7");
-      marker.setAttribute("markerWidth", "7");
-      marker.setAttribute("orient", "auto");
-      marker.setAttribute("refX", "6");
-      marker.setAttribute("refY", "3.5");
-      marker.setAttribute("viewBox", "0 0 7 7");
-      const arrow = document.createElementNS(namespace, "path");
-      arrow.setAttribute("class", "django-ray-workflow-graph__connector-arrow");
-      arrow.setAttribute("d", "M0 0L7 3.5L0 7Z");
-      if (failurePath) {
-        arrow.dataset.failurePath = "true";
-      }
-      marker.append(arrow);
-      definitions.append(marker);
-    }
+    const marker = document.createElementNS(namespace, "marker");
+    marker.setAttribute("id", "django-ray-workflow-graph-arrow");
+    marker.setAttribute("markerHeight", "7");
+    marker.setAttribute("markerWidth", "7");
+    marker.setAttribute("orient", "auto");
+    marker.setAttribute("refX", "6");
+    marker.setAttribute("refY", "3.5");
+    marker.setAttribute("viewBox", "0 0 7 7");
+    const arrow = document.createElementNS(namespace, "path");
+    arrow.setAttribute("class", "django-ray-workflow-graph__connector-arrow");
+    arrow.setAttribute("d", "M0 0L7 3.5L0 7Z");
+    marker.append(arrow);
+    definitions.append(marker);
     svg.append(definitions);
 
     const paths = [];
@@ -640,18 +638,7 @@
       path.setAttribute("class", "django-ray-workflow-graph__connector");
       path.dataset.source = edge.source;
       path.dataset.target = edge.target;
-      const failurePath =
-        nodesById.get(edge.source).failure_path &&
-        nodesById.get(edge.target).failure_path;
-      if (failurePath) {
-        path.dataset.failurePath = "true";
-      }
-      path.setAttribute(
-        "marker-end",
-        failurePath
-          ? "url(#django-ray-workflow-graph-failure-arrow)"
-          : "url(#django-ray-workflow-graph-arrow)",
-      );
+      path.setAttribute("marker-end", "url(#django-ray-workflow-graph-arrow)");
       svg.append(path);
       paths.push({ edge, path });
     }
@@ -756,6 +743,9 @@
     if (node.failure_path) {
       link.dataset.failurePath = "true";
     }
+    if (node.state === "FAILED" && node.failure_path) {
+      link.dataset.failureOrigin = "true";
+    }
 
     const identity = element("span", "");
     identity.append(
@@ -764,7 +754,11 @@
         "django-ray-workflow-graph__node-title",
         node.label || node.id,
       ),
-      element("span", "django-ray-workflow-graph__node-id", node.id),
+      element(
+        "span",
+        "django-ray-workflow-graph__node-id",
+        `Node ID: ${node.id}`,
+      ),
     );
 
     const statePresentation = graphStatePresentation[node.state];
@@ -786,7 +780,13 @@
     kind.append(kindSymbol, element("span", "", ` ${kindPresentation.text}`));
     metadata.append(kind);
     if (node.failure_path) {
-      metadata.append(element("span", "", "Failure path"));
+      metadata.append(
+        element(
+          "span",
+          "",
+          node.state === "FAILED" ? "Failure origin" : "Upstream of failure",
+        ),
+      );
     }
     if (node.kind === "map") {
       metadata.append(
@@ -810,6 +810,24 @@
       );
     }
     link.append(metadata);
+
+    const output = element(
+      "span",
+      "django-ray-workflow-graph__node-output",
+    );
+    output.append(
+      element(
+        "span",
+        "django-ray-workflow-graph__node-output-label",
+        "Output: ",
+      ),
+      element(
+        "span",
+        "django-ray-workflow-graph__node-output-value",
+        graphOutputPresentation[node.state],
+      ),
+    );
+    link.append(output);
 
     if (node.message !== null) {
       link.append(
@@ -909,7 +927,7 @@
       stage.append(stageHeader, stageNodes);
       list.append(stage);
     });
-    const connectors = graphConnectorOverlay(payload, nodesById);
+    const connectors = graphConnectorOverlay(payload);
     diagram.append(connectors.svg, list);
     content.replaceChildren(graphLegend(), diagram);
     content.hidden = false;

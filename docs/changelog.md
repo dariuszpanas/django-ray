@@ -389,6 +389,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exclusive, so mixed-backend deployments cannot silently omit Ray work or
   accept contradictory worker arguments. Ray Core mode also rejects
   `--all-queues` across incompatible per-alias cluster targets.
+- Workflow execution graphs now keep every dependency connector neutral when a
+  downstream node fails. Danger emphasis is limited to the originating failed
+  node, so successful ancestors, dependency-propagated failures, and unrelated
+  paths no longer turn the graph red.
+- Graph cards now label structural paths as `Node ID` and show an explicit
+  state-derived `Output` availability value. Pending, running, failed, and
+  completed-without-retained-value states are unambiguous without exposing or
+  fabricating internal node results.
 - Local environment bootstrap now selects the available Python 3.12 patch release instead of
   requiring an unavailable historical patch, so `uv` and `make` commands work in fresh development
   containers and continue receiving compatible Python patch updates.
