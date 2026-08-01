@@ -111,6 +111,14 @@ def workflow_target(value: int, increment: int = 0) -> int:
     return value + increment
 
 
+def preview_workflow_target(value: int) -> dict[str, object]:
+    return {"result": value, "status": "ready"}
+
+
+def failing_workflow_preview(_value: object) -> object:
+    raise RuntimeError("preview failed")
+
+
 def test_task_bootstrap_unpickles_before_django_ray_is_importable() -> None:
     import ray.cloudpickle as cloudpickle
 
@@ -405,6 +413,196 @@ def test_execute_workflow_step_ignores_progress_reporting_failures() -> None:
     )
 
     assert result == 5
+
+
+def test_execute_workflow_step_reports_explicit_output_preview(monkeypatch) -> None:
+    actor = _ProgressActor()
+    run_identity = dict(_WORKFLOW_RUN_IDENTITY)
+    monkeypatch.setattr(remote_module, "_ray_execution_metadata", dict)
+
+    result = execute_workflow_step_remote(
+        "tests.unit.test_remote.workflow_target",
+        False,
+        (),
+        {"increment": 2},
+        {},
+        9,
+        actor,
+        "0.0",
+        3,
+        output_preview_path="tests.unit.test_remote.preview_workflow_target",
+        workflow_run_identity=run_identity,
+    )
+
+    assert result == 5
+    events = [
+        decode_workflow_progress_event(
+            call[0],
+            expected_run_identity=run_identity,
+        )
+        for call in actor.ingest.calls
+    ]
+    assert [event.kind for event in events] == [
+        WorkflowProgressEventKind.STARTED,
+        WorkflowProgressEventKind.OUTPUT_PREVIEW,
+        WorkflowProgressEventKind.COMPLETED,
+    ]
+    assert events[1].payload == {
+        "node_id": "0.0",
+        "output_preview": {
+            "schema_version": 1,
+            "availability": "AVAILABLE",
+            "value": {"result": 5, "status": "ready"},
+        },
+    }
+
+
+def test_output_preview_failure_cannot_replace_workflow_success(monkeypatch) -> None:
+    actor = _ProgressActor()
+    run_identity = dict(_WORKFLOW_RUN_IDENTITY)
+    monkeypatch.setattr(remote_module, "_ray_execution_metadata", dict)
+
+    class _Logger:
+        def info(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def exception(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def warning(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("diagnostic logging failed")
+
+    monkeypatch.setattr("django_ray.logging.get_logger", lambda *_args, **_kwargs: _Logger())
+
+    result = execute_workflow_step_remote(
+        "tests.unit.test_remote.workflow_target",
+        False,
+        (),
+        {},
+        {},
+        9,
+        actor,
+        "0.0",
+        3,
+        output_preview_path="tests.unit.test_remote.failing_workflow_preview",
+        workflow_run_identity=run_identity,
+    )
+
+    assert result == 3
+    events = [
+        decode_workflow_progress_event(
+            call[0],
+            expected_run_identity=run_identity,
+        )
+        for call in actor.ingest.calls
+    ]
+    assert [event.kind for event in events] == [
+        WorkflowProgressEventKind.STARTED,
+        WorkflowProgressEventKind.OUTPUT_PREVIEW,
+        WorkflowProgressEventKind.COMPLETED,
+    ]
+    assert events[1].payload["output_preview"] == {
+        "schema_version": 1,
+        "availability": "FAILED",
+        "value": None,
+    }
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, KeyboardInterrupt])
+def test_output_preview_import_obeys_exception_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    actor = _ProgressActor()
+    run_identity = dict(_WORKFLOW_RUN_IDENTITY)
+    monkeypatch.setattr(remote_module, "_ray_execution_metadata", dict)
+    from django_ray.runtime import import_utils
+
+    original_import = import_utils.import_callable
+
+    def import_with_preview_failure(path: str):
+        if path == "tests.unit.test_remote.preview-workflow-import-failure":
+            raise failure_type("preview import boundary")
+        return original_import(path)
+
+    monkeypatch.setattr(import_utils, "import_callable", import_with_preview_failure)
+
+    if failure_type is KeyboardInterrupt:
+        with pytest.raises(KeyboardInterrupt, match="preview import boundary"):
+            execute_workflow_step_remote(
+                "tests.unit.test_remote.workflow_target",
+                False,
+                (),
+                {},
+                {},
+                9,
+                actor,
+                "0.0",
+                3,
+                output_preview_path=("tests.unit.test_remote.preview-workflow-import-failure"),
+                workflow_run_identity=run_identity,
+            )
+        return
+
+    assert (
+        execute_workflow_step_remote(
+            "tests.unit.test_remote.workflow_target",
+            False,
+            (),
+            {},
+            {},
+            9,
+            actor,
+            "0.0",
+            3,
+            output_preview_path="tests.unit.test_remote.preview-workflow-import-failure",
+            workflow_run_identity=run_identity,
+        )
+        == 3
+    )
+    events = [
+        decode_workflow_progress_event(call[0], expected_run_identity=run_identity)
+        for call in actor.ingest.calls
+    ]
+    assert events[1].payload["output_preview"] == {
+        "schema_version": 1,
+        "availability": "FAILED",
+        "value": None,
+    }
+
+
+def test_output_preview_logging_interrupt_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = _ProgressActor()
+    monkeypatch.setattr(remote_module, "_ray_execution_metadata", dict)
+
+    class _Logger:
+        def info(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def exception(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def warning(self, *_args: object, **_kwargs: object) -> None:
+            raise KeyboardInterrupt("diagnostic logging cancelled")
+
+    monkeypatch.setattr("django_ray.logging.get_logger", lambda *_args, **_kwargs: _Logger())
+
+    with pytest.raises(KeyboardInterrupt, match="diagnostic logging cancelled"):
+        execute_workflow_step_remote(
+            "tests.unit.test_remote.workflow_target",
+            False,
+            (),
+            {},
+            {},
+            9,
+            actor,
+            "0.0",
+            3,
+            output_preview_path="tests.unit.test_remote.failing_workflow_preview",
+            workflow_run_identity=dict(_WORKFLOW_RUN_IDENTITY),
+        )
 
 
 @pytest.mark.parametrize(
@@ -979,6 +1177,305 @@ def test_progress_actor_tolerates_out_of_order_node_placeholders() -> None:
         "PROGRESS",
         "COMPLETED",
     ]
+
+
+def test_progress_actor_retains_first_terminal_output_preview() -> None:
+    actor = _progress_actor()
+    node_id = "previewed"
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {
+                "node_id": node_id,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "PENDING",
+                    "value": None,
+                },
+            },
+        )
+    )
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {
+                "node_id": node_id,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "AVAILABLE",
+                    "value": {"items": 3, "status": "ready"},
+                },
+            },
+        )
+    )
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {
+                "node_id": node_id,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "AVAILABLE",
+                    "value": {"status": "late replacement"},
+                },
+            },
+        )
+    )
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.COMPLETED,
+            {"node_id": node_id, "label": "Previewed"},
+        )
+    )
+
+    [node] = actor.snapshot()["graph"]["nodes"]
+    assert node["state"] == "SUCCEEDED"
+    assert node["output_preview"] == {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"items": 3, "status": "ready"},
+    }
+
+
+def test_progress_actor_never_attaches_a_preview_value_to_failed_node() -> None:
+    actor = _progress_actor()
+    node_id = "failed-preview"
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {
+                "node_id": node_id,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "AVAILABLE",
+                    "value": {"status": "computed before failure"},
+                },
+            },
+        )
+    )
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.FAILED,
+            {
+                "node_id": node_id,
+                "label": "Failed preview",
+                "error": "application failure",
+            },
+        )
+    )
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {
+                "node_id": node_id,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "AVAILABLE",
+                    "value": {"must_not": "be retained"},
+                },
+            },
+        )
+    )
+
+    [node] = actor.snapshot()["graph"]["nodes"]
+    assert node["state"] == "FAILED"
+    assert node["output_preview"] == {
+        "schema_version": 1,
+        "availability": "UNAVAILABLE",
+        "value": None,
+    }
+    assert "must_not" not in json.dumps(node)
+
+
+def test_progress_actor_terminalizes_pending_previews_without_byte_drift() -> None:
+    actor = _progress_actor()
+    pending_node_id = "blocked-preview"
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {
+                "node_id": pending_node_id,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "PENDING",
+                    "value": None,
+                },
+            },
+        )
+    )
+    pending_retained_bytes = actor.snapshot()["ingress"]["retained_bytes"]
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.FAILED,
+            {
+                "node_id": "failed-upstream",
+                "label": "Failed upstream",
+                "error": "application failure",
+            },
+        )
+    )
+
+    snapshot = actor.snapshot()
+    nodes_by_id = {node["node_id"]: node for node in snapshot["graph"]["nodes"]}
+    assert nodes_by_id[pending_node_id]["output_preview"] == {
+        "schema_version": 1,
+        "availability": "UNAVAILABLE",
+        "value": None,
+    }
+    retained_state = {
+        "edges": snapshot["graph"]["edges"],
+        "nodes": [dict(node, dependencies=[]) for node in snapshot["graph"]["nodes"]],
+        "plan": snapshot["plan"],
+        "recent_events": snapshot["recent_events"],
+    }
+    assert snapshot["ingress"]["retained_bytes"] == len(
+        json.dumps(
+            retained_state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+    assert snapshot["ingress"]["retained_bytes"] > pending_retained_bytes
+
+    from django_ray.runtime.context import WorkflowRunIdentity
+    from django_ray.workflow_progress_publication import (
+        prepare_terminal_workflow_progress_publication,
+    )
+
+    prepared = prepare_terminal_workflow_progress_publication(
+        WorkflowRunIdentity(
+            task_execution_pk=int(_WORKFLOW_RUN_IDENTITY["task_execution_pk"]),
+            attempt_number=int(_WORKFLOW_RUN_IDENTITY["attempt_number"]),
+            execution_generation=int(_WORKFLOW_RUN_IDENTITY["execution_generation"]),
+            run_id=str(_WORKFLOW_RUN_IDENTITY["run_id"]),
+        ),
+        snapshot,
+        plan_fingerprint=str(_WORKFLOW_PLAN["fingerprint"]),
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+    assert len(prepared.detail.records) == 2
+    assert prepared.summary["node_counts"]["failed"] == 1
+
+
+def test_progress_actor_reserves_and_releases_terminal_pending_preview_bytes() -> None:
+    baseline = _progress_actor()
+    pending_event = _progress_wire(
+        WorkflowProgressEventKind.OUTPUT_PREVIEW,
+        {
+            "node_id": "bounded-preview",
+            "output_preview": {
+                "schema_version": 1,
+                "availability": "PENDING",
+                "value": None,
+            },
+        },
+    )
+    assert baseline.ingest(pending_event)
+    pending_retained_bytes = baseline.snapshot()["ingress"]["retained_bytes"]
+    rejecting_limits = replace(
+        WORKFLOW_PROGRESS_LIMITS_V1,
+        combined_max_decoded_bytes=pending_retained_bytes + 3,
+    )
+    rejecting_actor = _progress_actor(limits=rejecting_limits)
+
+    assert (
+        rejecting_actor.ingest(
+            _progress_wire(
+                WorkflowProgressEventKind.OUTPUT_PREVIEW,
+                {
+                    "node_id": "bounded-preview",
+                    "output_preview": {
+                        "schema_version": 1,
+                        "availability": "PENDING",
+                        "value": None,
+                    },
+                },
+                limits=rejecting_limits,
+            )
+        )
+        is False
+    )
+    snapshot = rejecting_actor.snapshot()
+    assert snapshot["graph"]["nodes"] == []
+    assert snapshot["ingress"]["rejected_by_reason"]["retained_bytes_limit"] == 1
+
+    admitting_limits = replace(
+        WORKFLOW_PROGRESS_LIMITS_V1,
+        combined_max_decoded_bytes=pending_retained_bytes + 4,
+    )
+    actor = _progress_actor(limits=admitting_limits)
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {
+                "node_id": "bounded-preview",
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "PENDING",
+                    "value": None,
+                },
+            },
+            limits=admitting_limits,
+        )
+    )
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            {
+                "node_id": "bounded-preview",
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "TOO_LARGE",
+                    "value": None,
+                },
+            },
+            limits=admitting_limits,
+        )
+    )
+
+    snapshot = actor.snapshot()
+    assert snapshot["graph"]["nodes"][0]["output_preview"]["availability"] == "TOO_LARGE"
+    assert snapshot["ingress"]["retained_bytes"] == pending_retained_bytes + (
+        len("TOO_LARGE") - len("PENDING")
+    )
+    assert snapshot["ingress"]["retained_bytes"] <= admitting_limits.combined_max_decoded_bytes
+
+
+def test_progress_actor_fences_output_preview_before_mutation() -> None:
+    actor = _progress_actor()
+    baseline = actor.snapshot()
+    wrong_identity = {
+        **_WORKFLOW_RUN_IDENTITY,
+        "attempt_number": int(_WORKFLOW_RUN_IDENTITY["attempt_number"]) + 1,
+    }
+
+    assert (
+        actor.ingest(
+            _progress_wire(
+                WorkflowProgressEventKind.OUTPUT_PREVIEW,
+                {
+                    "node_id": "wrong-attempt",
+                    "output_preview": {
+                        "schema_version": 1,
+                        "availability": "AVAILABLE",
+                        "value": {"marker": "must not cross the fence"},
+                    },
+                },
+                run_identity=wrong_identity,
+            )
+        )
+        is False
+    )
+
+    snapshot = actor.snapshot()
+    assert snapshot["graph"] == baseline["graph"]
+    assert snapshot["revision"] == baseline["revision"]
+    assert snapshot["ingress"]["rejected_by_reason"]["fence_mismatch"] == 1
+    assert "must not cross the fence" not in json.dumps(snapshot)
 
 
 def test_progress_actor_rejects_before_mutation_and_exposes_no_legacy_rpc() -> None:

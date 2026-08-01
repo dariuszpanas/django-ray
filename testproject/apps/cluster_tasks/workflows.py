@@ -678,20 +678,101 @@ def finalize_order_fulfillment(sinks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _showcase_step(callable_obj: Callable[..., Any]) -> Step:
+def preview_order_fulfillment_output(value: Any) -> dict[str, Any]:
+    """Project one small business summary for the admin workflow graph.
+
+    This diagnostic projection is deliberately not a checkpoint, a task
+    result, or evidence that any simulated sink committed an external effect.
+    """
+    if type(value) is list:
+        return {"collection_size": len(value)}
+    if type(value) is not dict:
+        return {"value_type": type(value).__name__}
+
+    preview = {
+        key: value[key]
+        for key in (
+            "order_id",
+            "customer_id",
+            "status",
+            "decision",
+            "sink",
+            "item_count",
+            "reserved_units",
+            "currency",
+            "total_cents",
+            "risk",
+            "recommendation",
+            "tier",
+            "completed_orders",
+        )
+        if key in value and type(value[key]) in {str, int, float, bool, type(None)}
+    }
+    if type(value.get("items")) is list:
+        preview.setdefault("item_count", len(value["items"]))
+    if type(value.get("validated_item_ids")) is list:
+        preview["validated_item_count"] = len(value["validated_item_ids"])
+    if type(value.get("sinks")) is dict:
+        preview["sink_count"] = len(value["sinks"])
+    return preview or {"mapping_size": len(value)}
+
+
+def preview_order_item_validation(value: Any) -> dict[str, Any]:
+    """Expose only the stable item identity and validation decision."""
+    if (
+        type(value) is not dict
+        or type(value.get("item_id")) is not int
+        or type(value.get("valid")) is not bool
+    ):
+        raise ValueError("showcase validation preview received an unexpected result")
+    return {"item_id": value["item_id"], "valid": value["valid"]}
+
+
+def preview_inventory_reservation(value: Any) -> dict[str, Any]:
+    """Expose only the stable item identity and reserved unit count."""
+    if (
+        type(value) is not dict
+        or type(value.get("item_id")) is not int
+        or type(value.get("reserved_units")) is not int
+    ):
+        raise ValueError("showcase reservation preview received an unexpected result")
+    return {
+        "item_id": value["item_id"],
+        "reserved_units": value["reserved_units"],
+    }
+
+
+def preview_showcase_diagnostic_failure(_value: Any) -> dict[str, Any]:
+    """Demonstrate that a projector failure cannot replace task success."""
+    raise RuntimeError("intentional showcase output-preview failure")
+
+
+def _showcase_step(
+    callable_obj: Callable[..., Any],
+    *,
+    projector: Callable[[Any], Any] = preview_order_fulfillment_output,
+) -> Step:
     """Create one lightweight business-labelled showcase step."""
-    return step(callable_obj, ray_options={"num_cpus": 0.1})
+    return step(callable_obj, ray_options={"num_cpus": 0.1}).with_output_preview(projector)
 
 
 _validation_showcase_branch = chain(
     _showcase_step(select_validation_items),
-    map_step(validate_order_item, ray_options={"num_cpus": 0.1}),
+    map_step(
+        _showcase_step(
+            validate_order_item,
+            projector=preview_order_item_validation,
+        )
+    ),
 )
 
 _customer_showcase_branch = chain(
     group(
         _showcase_step(load_customer_profile),
-        _showcase_step(load_customer_history),
+        _showcase_step(
+            load_customer_history,
+            projector=preview_showcase_diagnostic_failure,
+        ),
     ),
     _showcase_step(join_customer_context),
 )
@@ -726,8 +807,10 @@ order_fulfillment_showcase_workflow = chain(
     ),
     _showcase_step(attach_commercial_context_to_reservations),
     map_step(
-        reserve_inventory,
-        ray_options={"num_cpus": 0.1, "max_retries": 0},
+        _showcase_step(
+            reserve_inventory,
+            projector=preview_inventory_reservation,
+        ).with_options(max_retries=0)
     ),
     _showcase_step(join_fulfillment_decision),
     group(

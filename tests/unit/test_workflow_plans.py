@@ -66,6 +66,14 @@ def double(value: int) -> int:
     return value * 2
 
 
+def preview_increment(value: int) -> dict[str, int]:
+    return {"value": value}
+
+
+def preview_increment_compact(value: int) -> int:
+    return value
+
+
 callable_alias = increment
 SIDE_EFFECTS: list[int] = []
 
@@ -309,6 +317,32 @@ def test_invocation_and_bound_values_do_not_change_topology_identity() -> None:
 )
 def test_callable_resource_topology_and_admission_changes_invalidate(first, second) -> None:
     assert _materialize(first, 1).plan.fingerprint != _materialize(second, 1).plan.fingerprint
+
+
+def test_output_preview_contract_is_explicit_and_fingerprinted() -> None:
+    baseline = _materialize(step(increment), 1).plan
+    previewed = _materialize(
+        step(increment).with_output_preview(preview_increment),
+        1,
+    ).plan
+    compact = _materialize(
+        step(increment).with_output_preview(preview_increment_compact),
+        1,
+    ).plan
+
+    assert baseline.fingerprint != previewed.fingerprint
+    assert previewed.fingerprint != compact.fingerprint
+    assert "output_preview" not in baseline.manifest["nodes"][0]
+    assert previewed.manifest["nodes"][0]["output_preview"] == {
+        "mode": "author_projection",
+        "callable": {"ref": "callable:1"},
+        "limits_profile": "v1",
+    }
+    assert previewed.manifest["nodes"][0]["outputs"] == ("result",)
+    assert [entry["import_path"] for entry in previewed.manifest["callables"]] == [
+        "tests.unit.test_workflow_plans.increment",
+        "tests.unit.test_workflow_plans.preview_increment",
+    ]
 
 
 def test_result_retention_bounds_match_map_execution_behavior() -> None:

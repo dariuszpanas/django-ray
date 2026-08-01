@@ -4784,6 +4784,24 @@ def _workflow_showcase_gate_responses() -> dict[str, dict[str, Any]]:
             }
             for node_id in node_ids
         ]
+        details_by_node = {detail["node_id"]: detail for detail in node_details}
+        details_by_node[gate_module.WORKFLOW_SHOWCASE_VALIDATION_NODE_ID]["output_preview"] = {
+            "schema_version": 1,
+            "availability": "AVAILABLE",
+            "value": {"item_id": 0, "valid": True},
+        }
+        details_by_node[gate_module.WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID][
+            "output_preview"
+        ] = {
+            "schema_version": 1,
+            "availability": "FAILED",
+            "value": None,
+        }
+        details_by_node[gate_module.WORKFLOW_SHOWCASE_FAILURE_NODE_ID]["output_preview"] = {
+            "schema_version": 1,
+            "availability": "AVAILABLE" if state == "SUCCEEDED" else "UNAVAILABLE",
+            "value": ({"item_id": 0, "reserved_units": 1} if state == "SUCCEEDED" else None),
+        }
         state_counts = {
             node_state: sum(value == node_state for value in node_states.values())
             for node_state in ("PENDING", "RUNNING", "SUCCEEDED", "FAILED")
@@ -5419,6 +5437,10 @@ def _workflow_admin_smoke_evidence(
     failure_path_nodes: int = 0,
     failure_origins: int = 0,
     incoming_failure_edges: int = 0,
+    available_previews: int = 0,
+    failed_previews: int = 0,
+    unavailable_previews: int = 0,
+    preview_contract: str = "not-applicable",
 ) -> dict[str, str | int]:
     return {
         "admin_workflow": "verified",
@@ -5440,6 +5462,10 @@ def _workflow_admin_smoke_evidence(
         "graph_failure_path_nodes": failure_path_nodes,
         "graph_failure_origins": failure_origins,
         "graph_incoming_failure_edges": incoming_failure_edges,
+        "graph_available_previews": available_previews,
+        "graph_failed_previews": failed_previews,
+        "graph_unavailable_previews": unavailable_previews,
+        "graph_preview_contract": preview_contract,
         "current_manifests": 1,
         "pending_manifests": 0,
         "unlinked_pages": 0,
@@ -5593,6 +5619,9 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                     topology_nodes=21,
                     topology_edges=28,
                     succeeded_nodes=21,
+                    available_previews=20,
+                    failed_previews=1,
+                    preview_contract="showcase-succeeded-verified",
                 )
             elif task_id == WORKFLOW_RECOVERY_TASK_ID and selected_attempt == 1:
                 payload = _workflow_admin_smoke_evidence(
@@ -5607,6 +5636,9 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                     failure_path_nodes=1,
                     failure_origins=1,
                     incoming_failure_edges=0,
+                    available_previews=0,
+                    failed_previews=0,
+                    unavailable_previews=2,
                 )
             elif task_id == WORKFLOW_RECOVERY_TASK_ID and selected_attempt == 2:
                 payload = _workflow_admin_smoke_evidence(
@@ -5621,6 +5653,9 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                     failure_path_nodes=8,
                     failure_origins=1,
                     incoming_failure_edges=3,
+                    available_previews=6,
+                    failed_previews=1,
+                    unavailable_previews=8,
                 )
             elif task_id == WORKFLOW_RECOVERY_TASK_ID and selected_attempt == 3:
                 payload = _workflow_admin_smoke_evidence(
@@ -5629,6 +5664,9 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                     topology_nodes=21,
                     topology_edges=28,
                     succeeded_nodes=21,
+                    available_previews=19,
+                    failed_previews=1,
+                    unavailable_previews=0,
                 )
             else:
                 payload = _workflow_admin_smoke_evidence(
@@ -5643,6 +5681,10 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                     failure_path_nodes=16,
                     failure_origins=1,
                     incoming_failure_edges=1,
+                    available_previews=14,
+                    failed_previews=1,
+                    unavailable_previews=6,
+                    preview_contract="showcase-failed-verified",
                 )
         return CommandResult(json.dumps(payload), "", 0)
 
@@ -5728,6 +5770,7 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
         ("graph_pending_nodes", 4),
         ("graph_succeeded_nodes", 14),
         ("graph_failure_path_nodes", 15),
+        ("graph_unavailable_previews", 5),
     ],
 )
 def test_workflow_admin_gate_rejects_inexact_showcase_failure_projection(
@@ -5762,6 +5805,9 @@ def test_workflow_admin_gate_rejects_inexact_showcase_failure_projection(
                 topology_nodes=21,
                 topology_edges=28,
                 succeeded_nodes=21,
+                available_previews=20,
+                failed_previews=1,
+                preview_contract="showcase-succeeded-verified",
             )
         else:
             payload = _workflow_admin_smoke_evidence(
@@ -5775,6 +5821,10 @@ def test_workflow_admin_gate_rejects_inexact_showcase_failure_projection(
                 failure_path_nodes=16,
                 failure_origins=1,
                 incoming_failure_edges=1,
+                available_previews=14,
+                failed_previews=1,
+                unavailable_previews=6,
+                preview_contract="showcase-failed-verified",
             )
             payload[field_name] = value
         return CommandResult(json.dumps(payload), "", 0)

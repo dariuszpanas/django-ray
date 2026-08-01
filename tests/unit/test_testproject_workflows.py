@@ -226,6 +226,48 @@ def test_order_fulfillment_showcase_returns_one_compact_deterministic_result(
     }
 
 
+def test_order_fulfillment_showcase_projects_a_clear_commercial_output() -> None:
+    preview = workflows.preview_order_fulfillment_output(
+        {
+            "order_id": "showcase-order-0001",
+            "currency": "USD",
+            "total_cents": 4_400,
+            "risk": "LOW",
+            "risk_score": 0,
+            "recommendation": "PRIORITY_FULFILLMENT",
+        }
+    )
+
+    assert preview == {
+        "order_id": "showcase-order-0001",
+        "currency": "USD",
+        "total_cents": 4_400,
+        "risk": "LOW",
+        "recommendation": "PRIORITY_FULFILLMENT",
+    }
+    assert "risk_score" not in preview
+
+
+def test_order_fulfillment_showcase_map_previews_are_exact_and_bounded() -> None:
+    assert workflows.preview_order_item_validation(
+        {"item_id": 2, "valid": True, "sku": "must-not-cross"}
+    ) == {"item_id": 2, "valid": True}
+    assert workflows.preview_inventory_reservation(
+        {
+            "item_id": 2,
+            "reserved_units": 3,
+            "commercial": {"must_not_cross": True},
+        }
+    ) == {"item_id": 2, "reserved_units": 3}
+
+    with pytest.raises(ValueError, match="validation preview"):
+        workflows.preview_order_item_validation({"item_id": "2", "valid": True})
+    with pytest.raises(ValueError, match="reservation preview"):
+        workflows.preview_inventory_reservation({"item_id": 2})
+    with pytest.raises(RuntimeError, match="intentional showcase"):
+        workflows.preview_showcase_diagnostic_failure({"completed_orders": 12})
+
+
 def test_order_fulfillment_showcase_failure_reaches_selected_leaf_locally() -> None:
     with pytest.raises(
         workflows.WorkflowShowcaseFixtureError,
@@ -334,10 +376,13 @@ def test_order_fulfillment_showcase_materializes_stable_business_callables() -> 
         callable_entry["import_path"].rsplit(".", 1)[-1] for callable_entry in manifest["callables"]
     ] == [
         "build_order_batch",
+        "preview_order_fulfillment_output",
         "select_validation_items",
         "validate_order_item",
+        "preview_order_item_validation",
         "load_customer_profile",
         "load_customer_history",
+        "preview_showcase_diagnostic_failure",
         "join_customer_context",
         "load_inventory_snapshot",
         "join_order_inputs",
@@ -349,12 +394,36 @@ def test_order_fulfillment_showcase_materializes_stable_business_callables() -> 
         "join_commercial_context",
         "attach_commercial_context_to_reservations",
         "reserve_inventory",
+        "preview_inventory_reservation",
         "join_fulfillment_decision",
         "write_primary_order",
         "write_audit_record",
         "send_order_notification",
         "finalize_order_fulfillment",
     ]
+    preview_by_node = {
+        node["id"]: node["output_preview"] for node in manifest["nodes"] if "output_preview" in node
+    }
+    assert set(preview_by_node) == {node["id"] for node in manifest["nodes"] if "callable" in node}
+    assert preview_by_node["0.1.g0.1.m*"] == {
+        "mode": "author_projection",
+        "callable": {"ref": "callable:4"},
+        "limits_profile": "v1",
+    }
+    assert preview_by_node["0.1.g1.0.g1"] == {
+        "mode": "author_projection",
+        "callable": {"ref": "callable:7"},
+        "limits_profile": "v1",
+    }
+    assert preview_by_node["0.5.m*"] == {
+        "mode": "author_projection",
+        "callable": {"ref": "callable:19"},
+        "limits_profile": "v1",
+    }
+    assert all(
+        contract["mode"] == "author_projection" and contract["limits_profile"] == "v1"
+        for contract in preview_by_node.values()
+    )
     reserve_template = next(node for node in manifest["nodes"] if node["id"] == "0.5.m*")
     assert reserve_template["ray_options"] == {
         "max_retries": 0,

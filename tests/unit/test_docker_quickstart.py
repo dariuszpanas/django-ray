@@ -492,7 +492,7 @@ def _admin_workflow_responses(
         ),
         f"{graph_path}{attempt_query}": {
             "schema": "django-ray.admin-workflow-graph",
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "AVAILABLE",
             "message": "Bounded terminal workflow graph is available.",
             "complete": True,
@@ -507,6 +507,11 @@ def _admin_workflow_responses(
                     "message": None,
                     "error": None,
                     "failure_path": False,
+                    "output_preview": {
+                        "schema_version": 1,
+                        "availability": "AVAILABLE" if index == 0 else "NOT_REQUESTED",
+                        "value": {"status": "safe projection"} if index == 0 else None,
+                    },
                 }
                 for index, node_id in enumerate(node_ids)
             ],
@@ -533,6 +538,7 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
         state="SUCCEEDED",
         attempt_pk=91 if select_attempt else None,
         current_attempt_number=3 if select_attempt else 1,
+        callable_path="testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
     )
     change_html, responses = _admin_workflow_responses(execution)
     cookie = "sessionid=private-admin-session"
@@ -650,6 +656,10 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
         "graph_failure_path_nodes": 0,
         "graph_failure_origins": 0,
         "graph_incoming_failure_edges": 0,
+        "graph_available_previews": 1,
+        "graph_failed_previews": 0,
+        "graph_unavailable_previews": 0,
+        "graph_preview_contract": "not-applicable",
         "current_manifests": 1,
         "pending_manifests": 0,
         "unlinked_pages": 0,
@@ -768,7 +778,7 @@ def test_terminal_only_admin_advertises_no_detail_and_skips_collection_reads(
         },
         graph_path: {
             "schema": "django-ray.admin-workflow-graph",
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "UNAVAILABLE",
             "message": "Workflow execution detail was omitted by policy.",
             "complete": False,
@@ -849,7 +859,7 @@ def test_terminal_only_admin_advertises_no_detail_and_skips_collection_reads(
 def test_terminal_only_degraded_graph_rejects_extra_private_fields() -> None:
     payload = {
         "schema": "django-ray.admin-workflow-graph",
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "UNAVAILABLE",
         "message": "Workflow execution detail was omitted by policy.",
         "complete": False,
@@ -957,7 +967,7 @@ def _failed_admin_graph_fixture() -> tuple[
     node_details = [{"node_id": node_id, "state": state} for node_id, state in states.items()]
     graph = {
         "schema": "django-ray.admin-workflow-graph",
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "AVAILABLE",
         "message": "Bounded terminal workflow graph is available.",
         "complete": True,
@@ -976,6 +986,11 @@ def _failed_admin_graph_fixture() -> tuple[
                     else None
                 ),
                 "failure_path": node_id in {"0.0", "0.1"},
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "NOT_REQUESTED",
+                    "value": None,
+                },
             }
             for index, node_id in enumerate(node_ids)
         ],
@@ -990,6 +1005,7 @@ def test_failed_admin_graph_retains_incoming_failure_path_and_sibling_context() 
     assert docker_smoke._workflow_admin_graph_evidence(
         graph,
         execution_state="FAILED",
+        callable_path="tests.workflow.generic",
         topology_nodes=topology_nodes,
         topology_edges=topology_edges,
         node_details=node_details,
@@ -1004,6 +1020,10 @@ def test_failed_admin_graph_retains_incoming_failure_path_and_sibling_context() 
         "graph_failure_path_nodes": 2,
         "graph_failure_origins": 1,
         "graph_incoming_failure_edges": 1,
+        "graph_available_previews": 0,
+        "graph_failed_previews": 0,
+        "graph_unavailable_previews": 0,
+        "graph_preview_contract": "not-applicable",
     }
 
 
@@ -1022,6 +1042,11 @@ def test_failed_admin_graph_accepts_unfinished_downstream_nodes() -> None:
                 "message": None,
                 "error": None,
                 "failure_path": False,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "NOT_REQUESTED",
+                    "value": None,
+                },
             }
         )
     extra_edges = [
@@ -1035,6 +1060,7 @@ def test_failed_admin_graph_accepts_unfinished_downstream_nodes() -> None:
     evidence = docker_smoke._workflow_admin_graph_evidence(
         graph,
         execution_state="FAILED",
+        callable_path="tests.workflow.generic",
         topology_nodes=topology_nodes,
         topology_edges=topology_edges,
         node_details=node_details,
@@ -1046,6 +1072,87 @@ def test_failed_admin_graph_accepts_unfinished_downstream_nodes() -> None:
     assert evidence["graph_failed_nodes"] == 2
 
 
+@pytest.mark.parametrize("execution_state", ["SUCCEEDED", "FAILED"])
+def test_showcase_admin_graph_requires_exact_safe_preview_contract(
+    execution_state: str,
+) -> None:
+    node_ids = (
+        docker_smoke._WORKFLOW_SHOWCASE_VALIDATION_NODE_ID,
+        docker_smoke._WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID,
+        docker_smoke._WORKFLOW_SHOWCASE_RESERVATION_NODE_ID,
+    )
+    reservation_state = "SUCCEEDED" if execution_state == "SUCCEEDED" else "FAILED"
+    states = {
+        node_ids[0]: "SUCCEEDED",
+        node_ids[1]: "SUCCEEDED",
+        node_ids[2]: reservation_state,
+    }
+    previews = {
+        node_ids[0]: {
+            "schema_version": 1,
+            "availability": "AVAILABLE",
+            "value": {"item_id": 0, "valid": True},
+        },
+        node_ids[1]: {
+            "schema_version": 1,
+            "availability": "FAILED",
+            "value": None,
+        },
+        node_ids[2]: {
+            "schema_version": 1,
+            "availability": "AVAILABLE" if execution_state == "SUCCEEDED" else "UNAVAILABLE",
+            "value": (
+                {"item_id": 0, "reserved_units": 1} if execution_state == "SUCCEEDED" else None
+            ),
+        },
+    }
+    edges = [
+        {"source": node_ids[0], "target": node_ids[1]},
+        {"source": node_ids[1], "target": node_ids[2]},
+    ]
+    graph = {
+        "schema": "django-ray.admin-workflow-graph",
+        "schema_version": 2,
+        "status": "AVAILABLE",
+        "message": "Bounded terminal workflow graph is available.",
+        "complete": True,
+        "counts": {"nodes": 3, "edges": 2},
+        "limits": dict(docker_smoke._WORKFLOW_GRAPH_LIMITS),
+        "nodes": [
+            {
+                "id": node_id,
+                "label": f"Step {index}",
+                "kind": "task",
+                "state": states[node_id],
+                "message": None,
+                "error": (
+                    "Intentional reservation failure" if states[node_id] == "FAILED" else None
+                ),
+                "failure_path": execution_state == "FAILED",
+                "output_preview": previews[node_id],
+            }
+            for index, node_id in enumerate(node_ids)
+        ],
+        "edges": edges,
+    }
+    topology_nodes = [{"node_id": node_id} for node_id in node_ids]
+    node_details = [{"node_id": node_id, "state": states[node_id]} for node_id in node_ids]
+
+    evidence = docker_smoke._workflow_admin_graph_evidence(
+        graph,
+        execution_state=execution_state,
+        callable_path=docker_smoke._WORKFLOW_SHOWCASE_CALLABLE,
+        topology_nodes=topology_nodes,
+        topology_edges=edges,
+        node_details=node_details,
+    )
+
+    assert evidence["graph_preview_contract"] == (f"showcase-{execution_state.lower()}-verified")
+    assert evidence["graph_available_previews"] == (2 if execution_state == "SUCCEEDED" else 1)
+    assert evidence["graph_failed_previews"] == 1
+    assert evidence["graph_unavailable_previews"] == (0 if execution_state == "SUCCEEDED" else 1)
+
+
 def test_failed_admin_graph_accepts_ancestor_context_without_a_succeeded_sibling() -> None:
     graph, topology_nodes, topology_edges, node_details = _failed_admin_graph_fixture()
     graph["nodes"][3]["state"] = "PENDING"
@@ -1055,6 +1162,7 @@ def test_failed_admin_graph_accepts_ancestor_context_without_a_succeeded_sibling
     evidence = docker_smoke._workflow_admin_graph_evidence(
         graph,
         execution_state="FAILED",
+        callable_path="tests.workflow.generic",
         topology_nodes=topology_nodes,
         topology_edges=topology_edges,
         node_details=node_details,
@@ -1075,7 +1183,7 @@ def test_failed_admin_graph_accepts_a_failed_root_with_pending_downstream() -> N
     ]
     graph = {
         "schema": "django-ray.admin-workflow-graph",
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "AVAILABLE",
         "message": "Bounded terminal workflow graph is available.",
         "complete": True,
@@ -1090,6 +1198,11 @@ def test_failed_admin_graph_accepts_a_failed_root_with_pending_downstream() -> N
                 "message": None,
                 "error": "Intentional early recovery failure",
                 "failure_path": True,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "UNAVAILABLE",
+                    "value": None,
+                },
             },
             {
                 "id": "0.1",
@@ -1099,6 +1212,11 @@ def test_failed_admin_graph_accepts_a_failed_root_with_pending_downstream() -> N
                 "message": None,
                 "error": None,
                 "failure_path": False,
+                "output_preview": {
+                    "schema_version": 1,
+                    "availability": "UNAVAILABLE",
+                    "value": None,
+                },
             },
         ],
         "edges": list(topology_edges),
@@ -1107,6 +1225,7 @@ def test_failed_admin_graph_accepts_a_failed_root_with_pending_downstream() -> N
     assert docker_smoke._workflow_admin_graph_evidence(
         graph,
         execution_state="FAILED",
+        callable_path="tests.workflow.generic",
         topology_nodes=topology_nodes,
         topology_edges=topology_edges,
         node_details=node_details,
@@ -1121,6 +1240,10 @@ def test_failed_admin_graph_accepts_a_failed_root_with_pending_downstream() -> N
         "graph_failure_path_nodes": 1,
         "graph_failure_origins": 1,
         "graph_incoming_failure_edges": 0,
+        "graph_available_previews": 0,
+        "graph_failed_previews": 0,
+        "graph_unavailable_previews": 2,
+        "graph_preview_contract": "not-applicable",
     }
 
 
@@ -1128,6 +1251,7 @@ def test_failed_admin_graph_accepts_a_failed_root_with_pending_downstream() -> N
     "corruption",
     [
         "private_field",
+        "malformed_preview",
         "wrong_failure_path",
         "no_successful_ancestor",
         "no_incoming_origin",
@@ -1139,6 +1263,8 @@ def test_failed_admin_graph_rejects_private_or_inconsistent_failure_evidence(
     graph, topology_nodes, topology_edges, node_details = _failed_admin_graph_fixture()
     if corruption == "private_field":
         graph["nodes"][0]["runtime_env"] = {"env_vars": {"SECRET": "forbidden"}}
+    elif corruption == "malformed_preview":
+        graph["nodes"][0]["output_preview"]["value"] = {"unexpected": True}
     elif corruption == "wrong_failure_path":
         graph["nodes"][0]["failure_path"] = False
     elif corruption == "no_successful_ancestor":
@@ -1161,6 +1287,7 @@ def test_failed_admin_graph_rejects_private_or_inconsistent_failure_evidence(
         docker_smoke._workflow_admin_graph_evidence(
             graph,
             execution_state="FAILED",
+            callable_path="tests.workflow.generic",
             topology_nodes=topology_nodes,
             topology_edges=topology_edges,
             node_details=node_details,

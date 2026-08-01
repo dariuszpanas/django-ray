@@ -89,6 +89,7 @@ _EXPECTED_INGRESS_KINDS = frozenset(
         "application_progress",
         "map_registered",
         "map_progress",
+        "output_preview",
         "producer_report",
     }
 )

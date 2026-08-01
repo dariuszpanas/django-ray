@@ -52,6 +52,7 @@ def _accepted_by_kind() -> dict[str, int]:
         "started": 1,
         "application_progress": 1,
         "map_progress": 1,
+        "output_preview": 1,
         "completed": 2,
         "failed": 0,
     }
@@ -246,6 +247,11 @@ def _snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
                     "started_at": 1_785_365_101.0,
                     "finished_at": 1_785_365_103.0,
                     "error": None,
+                    "output_preview": {
+                        "schema_version": 1,
+                        "availability": "AVAILABLE",
+                        "value": {"item_count": 2, "status": "prepared"},
+                    },
                 },
                 {
                     "node_id": "0.1",
@@ -268,6 +274,11 @@ def _snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
                     "started_at": 1_785_365_101.5,
                     "finished_at": 1_785_365_103.5,
                     "error": None,
+                    "output_preview": {
+                        "schema_version": 1,
+                        "availability": "NOT_REQUESTED",
+                        "value": None,
+                    },
                     "fanout": fanout,
                 },
             ],
@@ -368,6 +379,17 @@ def _failed_snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
     return snapshot
 
 
+def _legacy_snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
+    snapshot = _snapshot(identity)
+    for node in snapshot["graph"]["nodes"]:
+        node.pop("output_preview")
+    snapshot["ingress"]["accepted_by_kind"].pop("output_preview")
+    snapshot["ingress"]["accepted"] = sum(snapshot["ingress"]["accepted_by_kind"].values())
+    snapshot["revision"] = snapshot["ingress"]["accepted"] - 1
+    _refresh_retained_bytes(snapshot)
+    return snapshot
+
+
 def _execution() -> tuple[RayTaskExecution, WorkflowRunIdentity]:
     selection = PlanEligibility(("dynamic_tasks",), (), 0).select(
         "dynamic_tasks",
@@ -414,7 +436,14 @@ def test_terminal_adapter_splits_topology_detail_and_groups_events() -> None:
     assert prepared.topology.edges == (("0.0", "0.1"),)
     details = {record.node_id: json.loads(record.payload) for record in prepared.detail.records}
     assert details["0.0"]["execution"]["ray_task_id"] == "task-1"
+    assert details["0.0"]["schema_version"] == 2
+    assert details["0.0"]["output_preview"] == {
+        "schema_version": 1,
+        "availability": "AVAILABLE",
+        "value": {"item_count": 2, "status": "prepared"},
+    }
     assert details["0.1"]["execution"] is None
+    assert details["0.1"]["output_preview"]["availability"] == "NOT_REQUESTED"
     assert details["0.1"]["fanout"]["completed_items"] == 2
     assert [event["event"] for event in details["0.0"]["recent_events"]] == [
         "STARTED",
@@ -437,6 +466,23 @@ def test_terminal_adapter_splits_topology_detail_and_groups_events() -> None:
     assert prepared.summary["plan_fingerprint"] == FINGERPRINT
     assert prepared.summary["limits_profile"] == "schema-v3-pilot-v1"
     assert prepared.summary["summary_revision"] == 1
+
+
+def test_terminal_adapter_preserves_historical_nodes_as_v1_records() -> None:
+    identity = _identity()
+
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        _legacy_snapshot(identity),
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+
+    details = [json.loads(record.payload) for record in prepared.detail.records]
+    assert all(detail["schema_version"] == 1 for detail in details)
+    assert all("output_preview" not in detail for detail in details)
 
 
 def test_terminal_adapter_accepts_historical_ingress_without_cost() -> None:
@@ -1098,7 +1144,15 @@ def test_terminal_adapter_applies_active_counter_and_wire_limits_to_cost() -> No
             id="received-wire-exceeds-per-call-bound",
         ),
         pytest.param(
-            lambda ingress: ingress["cost"]["ingest"].update({"handler_wall_ns_total": 161}),
+            lambda ingress: ingress["cost"]["ingest"].update(
+                {
+                    "handler_wall_ns_total": (
+                        ingress["cost"]["ingest"]["calls_received"]
+                        * ingress["cost"]["ingest"]["handler_wall_ns_max"]
+                        + 1
+                    )
+                }
+            ),
             id="handler-total-exceeds-call-count-times-maximum",
         ),
         pytest.param(

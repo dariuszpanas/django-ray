@@ -29,6 +29,7 @@ from django_ray.workflow_progress_limits import (
     workflow_progress_retained_state_size,
 )
 from django_ray.workflow_progress_storage import (
+    WORKFLOW_PROGRESS_NODE_DETAIL_SCHEMA_VERSION,
     PreparedWorkflowProgressDetail,
     PreparedWorkflowProgressTopology,
     WorkflowProgressStorageError,
@@ -80,7 +81,7 @@ _PLAN_KEYS = frozenset(
         "node_count",
     }
 )
-_NODE_KEYS = frozenset(
+_NODE_KEYS_V1 = frozenset(
     {
         "node_id",
         "kind",
@@ -203,7 +204,7 @@ _INGRESS_PRODUCER_TERMINAL_HANDOFF_KEYS = frozenset(
         "actor_unavailable",
     }
 )
-_ACCEPTED_EVENT_KINDS = frozenset(
+_HISTORICAL_ACCEPTED_EVENT_KINDS = frozenset(
     {
         "initialized",
         "node_registered",
@@ -218,7 +219,16 @@ _ACCEPTED_EVENT_KINDS = frozenset(
         "producer_report",
     }
 )
-_HISTORICAL_ACCEPTED_EVENT_KINDS = _ACCEPTED_EVENT_KINDS - {"producer_report"}
+_NODE_KEYS_V2 = _NODE_KEYS_V1 | {"output_preview"}
+_ACCEPTED_EVENT_KINDS = _HISTORICAL_ACCEPTED_EVENT_KINDS | {"output_preview"}
+_ACCEPTED_EVENT_KIND_SHAPES = frozenset(
+    {
+        _ACCEPTED_EVENT_KINDS,
+        _ACCEPTED_EVENT_KINDS - {"producer_report"},
+        _HISTORICAL_ACCEPTED_EVENT_KINDS,
+        _HISTORICAL_ACCEPTED_EVENT_KINDS - {"producer_report"},
+    }
+)
 _REJECTED_EVENT_REASONS = frozenset(
     {
         "protocol_error",
@@ -432,10 +442,7 @@ def _event_kind_counters(
     if not isinstance(value, Mapping):
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     keys = frozenset(value)
-    if keys not in {
-        _ACCEPTED_EVENT_KINDS,
-        _HISTORICAL_ACCEPTED_EVENT_KINDS,
-    }:
+    if keys not in _ACCEPTED_EVENT_KIND_SHAPES:
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     counters = {
         name: _counter(
@@ -446,6 +453,7 @@ def _event_kind_counters(
         if name in value
     }
     counters.setdefault("producer_report", 0)
+    counters.setdefault("output_preview", 0)
     return counters
 
 
@@ -814,7 +822,8 @@ def _normalize_graph(
         if not isinstance(value, Mapping):
             raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
         kind = value.get("kind")
-        expected_keys = _NODE_KEYS | ({"fanout"} if kind == "map" else set())
+        node_keys = _NODE_KEYS_V2 if "output_preview" in value else _NODE_KEYS_V1
+        expected_keys = node_keys | ({"fanout"} if kind == "map" else set())
         node = _exact_mapping(value, frozenset(expected_keys))
         node_id = node["node_id"]
         if not isinstance(node_id, str) or node_id in node_values:
@@ -880,21 +889,26 @@ def _normalize_graph(
             or sorted(dependencies) != sorted(inbound.get(node_id, []))
         ):
             raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
-        detail.append(
-            {
-                "schema_version": WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION,
-                "node_id": node_id,
-                "invocation_identity": None,
-                "state": node["state"],
-                "progress": node["progress"],
-                "execution": _normalize_execution(node["execution"]),
-                "fanout": node.get("fanout") if node["kind"] == "map" else None,
-                "started_at": node["started_at"],
-                "finished_at": node["finished_at"],
-                "error": node["error"],
-                "recent_events": events_by_node.get(node_id, []),
-            }
-        )
+        detail_record = {
+            "schema_version": (
+                WORKFLOW_PROGRESS_NODE_DETAIL_SCHEMA_VERSION
+                if "output_preview" in node
+                else WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION
+            ),
+            "node_id": node_id,
+            "invocation_identity": None,
+            "state": node["state"],
+            "progress": node["progress"],
+            "execution": _normalize_execution(node["execution"]),
+            "fanout": node.get("fanout") if node["kind"] == "map" else None,
+            "started_at": node["started_at"],
+            "finished_at": node["finished_at"],
+            "error": node["error"],
+            "recent_events": events_by_node.get(node_id, []),
+        }
+        if "output_preview" in node:
+            detail_record["output_preview"] = node["output_preview"]
+        detail.append(detail_record)
     return topology_nodes, topology_edges, detail
 
 

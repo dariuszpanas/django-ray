@@ -92,6 +92,27 @@
     task: { symbol: "\u25a1", text: "Task" },
     map: { symbol: "\u25c7", text: "Aggregate map" },
   };
+  const graphOutputPreviewAvailabilities = new Set([
+    "NOT_REQUESTED",
+    "PENDING",
+    "AVAILABLE",
+    "REDACTED",
+    "TOO_LARGE",
+    "UNSUPPORTED",
+    "FAILED",
+    "UNAVAILABLE",
+    "OMITTED_BY_POLICY",
+  ]);
+  const graphOutputPreviewPresentation = {
+    NOT_REQUESTED:
+      "Not requested \u2014 value not retained in workflow diagnostics",
+    PENDING: "Preview pending \u2014 node has not reported a value",
+    TOO_LARGE: "Preview omitted \u2014 projection too large",
+    UNSUPPORTED: "Preview omitted \u2014 unsupported projection",
+    FAILED: "Preview unavailable \u2014 projection failed",
+    UNAVAILABLE: "Preview unavailable \u2014 no retained diagnostic value",
+    OMITTED_BY_POLICY: "Preview omitted \u2014 reporting policy",
+  };
   const graphLimits = {
     nodes: 100,
     edges: 256,
@@ -103,6 +124,148 @@
     nodeIdBytes: 256,
     nodeLabelBytes: 512,
     nodeDetailBytes: 2048,
+    // JSON.parse discards the producer's canonical number spelling. In the
+    // browser, JSON.stringify may expand a Python `1e-06` token to `0.000001`
+    // by three bytes. The protocol permits at most 32 aggregate items, so this
+    // remains a strict upper bound for revalidating a canonical 512-byte value.
+    outputPreviewBrowserBytes: 512 + 3 * 32,
+  };
+
+  const validateGraphOutputPreviewValue = (
+    value,
+    depth = 0,
+    budget = { items: 0, decodedBytes: 0 },
+  ) => {
+    if (depth > 4) {
+      return false;
+    }
+    budget.items += 1;
+    if (budget.items > 32) {
+      return false;
+    }
+    if (value === null) {
+      budget.decodedBytes += 4;
+    } else if (typeof value === "boolean") {
+      budget.decodedBytes += 1;
+    } else if (typeof value === "number") {
+      if (
+        !Number.isFinite(value) ||
+        (Number.isInteger(value) && !Number.isSafeInteger(value))
+      ) {
+        return false;
+      }
+      budget.decodedBytes += 8;
+    } else if (typeof value === "string") {
+      const size = new TextEncoder().encode(value).byteLength;
+      if (size > 256) {
+        return false;
+      }
+      budget.decodedBytes += 16 + size;
+    } else if (Array.isArray(value)) {
+      if (value.length > 16) {
+        return false;
+      }
+      budget.decodedBytes += 16;
+      if (
+        !value.every((item) =>
+          validateGraphOutputPreviewValue(item, depth + 1, budget),
+        )
+      ) {
+        return false;
+      }
+    } else if (isRecord(value)) {
+      const entries = Object.entries(value);
+      if (entries.length > 15) {
+        return false;
+      }
+      budget.decodedBytes += 24;
+      for (const [key, item] of entries) {
+        const keyBytes = new TextEncoder().encode(key).byteLength;
+        if (keyBytes === 0 || keyBytes > 64) {
+          return false;
+        }
+        budget.items += 1;
+        budget.decodedBytes += 8 + keyBytes;
+        if (
+          budget.items > 32 ||
+          !validateGraphOutputPreviewValue(item, depth + 1, budget)
+        ) {
+          return false;
+        }
+      }
+    } else {
+      return false;
+    }
+    return budget.decodedBytes <= 2048;
+  };
+
+  const graphOutputPreviewContainsRedaction = (value) => {
+    if (value === "[REDACTED]") {
+      return true;
+    }
+    if (Array.isArray(value)) {
+      return value.some(graphOutputPreviewContainsRedaction);
+    }
+    if (isRecord(value)) {
+      return Object.values(value).some(graphOutputPreviewContainsRedaction);
+    }
+    return false;
+  };
+
+  const validateGraphOutputPreview = (preview) => {
+    if (
+      !hasExactKeys(preview, ["schema_version", "availability", "value"]) ||
+      preview.schema_version !== 1 ||
+      !graphOutputPreviewAvailabilities.has(preview.availability)
+    ) {
+      return false;
+    }
+    const hasValue = ["AVAILABLE", "REDACTED"].includes(
+      preview.availability,
+    );
+    if (!hasValue) {
+      return preview.value === null;
+    }
+    if (
+      !validateGraphOutputPreviewValue(preview.value) ||
+      new TextEncoder().encode(JSON.stringify(preview.value)).byteLength >
+        graphTextLimits.outputPreviewBrowserBytes
+    ) {
+      return false;
+    }
+    const containsRedaction = graphOutputPreviewContainsRedaction(
+      preview.value,
+    );
+    return preview.availability === "REDACTED"
+      ? containsRedaction
+      : !containsRedaction;
+  };
+
+  const graphNodeOutputPresentation = (node) => {
+    const preview = node.output_preview;
+    if (
+      preview.availability === "REDACTED" &&
+      preview.value === "[REDACTED]"
+    ) {
+      return {
+        hasPreview: false,
+        text: "Redacted preview \u2014 value withheld by redaction policy",
+      };
+    }
+    if (["AVAILABLE", "REDACTED"].includes(preview.availability)) {
+      const qualifier =
+        preview.availability === "REDACTED" ? "Redacted preview" : "Preview";
+      return {
+        hasPreview: true,
+        text: `${qualifier} \u2014 ${JSON.stringify(preview.value)}`,
+      };
+    }
+    return {
+      hasPreview: false,
+      text:
+        graphOutputPreviewPresentation[preview.availability] ??
+        graphOutputPresentation[node.state],
+    };
   };
 
   const hasExactKeys = (value, expectedKeys) => {
@@ -403,6 +566,7 @@
       "message",
       "error",
       "failure_path",
+      "output_preview",
     ];
     const expectedKeys =
       isRecord(node) && node.kind === "map"
@@ -423,6 +587,7 @@
         nullable: true,
       }) ||
       typeof node.failure_path !== "boolean" ||
+      !validateGraphOutputPreview(node.output_preview) ||
       (node.state === "FAILED") !== (node.error !== null)
     ) {
       throw new Error("Invalid workflow graph node");
@@ -463,7 +628,7 @@
         "edges",
       ]) ||
       payload.schema !== "django-ray.admin-workflow-graph" ||
-      payload.schema_version !== 1 ||
+      payload.schema_version !== 2 ||
       !graphStatuses.has(payload.status) ||
       !isBoundedText(
         payload.message,
@@ -844,10 +1009,15 @@
     }
     link.append(metadata);
 
+    const outputPresentation = graphNodeOutputPresentation(node);
     const output = element(
       "span",
       "django-ray-workflow-graph__node-output",
     );
+    output.dataset.availability = node.output_preview.availability;
+    if (outputPresentation.hasPreview) {
+      output.dataset.hasPreview = "true";
+    }
     output.append(
       element(
         "span",
@@ -855,9 +1025,9 @@
         "Output: ",
       ),
       element(
-        "span",
+        outputPresentation.hasPreview ? "code" : "span",
         "django-ray-workflow-graph__node-output-value",
-        graphOutputPresentation[node.state],
+        outputPresentation.text,
       ),
     );
     link.append(output);

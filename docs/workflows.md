@@ -548,17 +548,22 @@ runs without rendering a partial graph.
 
 Graph nodes are semantic links in dependency order, while the connecting artwork is
 decorative and never carries outcome color. Each card labels its structural path as
-`Node ID` and presents `Output` availability from the node state: pending and running
-nodes remain pending, failed nodes are unavailable, and succeeded nodes state that their
-value is not retained in workflow diagnostics. Labels, states, bounded progress messages,
-map fan-out counts, and bounded failure text are the complete data display allowlist.
-Callable paths, arguments, internal result values, RuntimeEnv data, Ray identifiers, raw
-metrics and events, and workflow-plan payloads are never returned by the graph endpoint.
-A failed run marks each failure origin and its incoming ancestor path without using color
-alone. Node links are pinned to the same retained task attempt as the graph, and the graph
-summary names that page-rendered attempt. If live polling advances the task to a newer
-attempt, reload the page before opening its graph. The bounded topology and detail JSON
-routes remain available as explicit diagnostic fallbacks.
+`Node ID`, presents execution state separately, and has one independent `Output` row. A
+node without an opted-in projector says that no preview was requested even while its
+execution state is pending or running. A submitted opted-in node reports preview
+`PENDING` until it publishes a terminal availability, and a failed application node is
+`UNAVAILABLE`. When a preview is available, that same row labels the bounded JSON value
+as a preview so it cannot be mistaken for the node identifier, execution state, or
+complete task result. Labels, states, bounded progress messages, map fan-out counts,
+bounded failure text, and the output-preview envelope described below are the complete
+display allowlist. Callable paths, arguments, internal raw results, RuntimeEnv data, Ray
+identifiers, raw metrics and events, and workflow-plan payloads are never returned by the
+graph endpoint. A failed run marks each failure origin and its incoming ancestor path
+without using color alone. Node links are pinned to the same retained task attempt as
+the graph, and the graph summary names that page-rendered attempt. If live polling
+advances the task to a newer attempt, reload the page before opening its graph. The
+bounded topology and detail JSON routes remain available as explicit diagnostic
+fallbacks.
 
 When a retry succeeds after one or more failed attempts, **Workflow execution** presents
 one chronological attempt-graph stack: previous failures first and the current attempt
@@ -573,6 +578,77 @@ That graph is a full-reporting detail surface. A terminal-only run instead shows
 terminal outcome and `OMITTED_BY_POLICY` status explicitly in the live and workflow
 diagnostic panels. The Admin does not render or request an execution graph and does not
 offer topology or node-detail links for that summary.
+
+### Opt-in node output previews
+
+An importable workflow leaf may explicitly project its successful result into one
+small operator-facing JSON value:
+
+```python
+from typing import Any
+
+from django_ray.workflows import step
+
+
+def fulfill_order(order_id: str) -> dict[str, Any]: ...
+
+
+def preview_fulfillment(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "order_id": result["order_id"],
+        "item_count": len(result["items"]),
+        "status": result["status"],
+    }
+
+
+fulfillment = step(fulfill_order).with_output_preview(preview_fulfillment)
+```
+
+The projector must be a module-level importable callable. In full-reporting Ray
+execution it runs beside the leaf only after the application callable succeeds. Its
+return value may contain only exact JSON scalars, lists, and string-keyed objects. The
+preview profile permits at most four nested levels, 32 aggregate items, 16 list items,
+15 object entries, 64 UTF-8 bytes per key, 256 UTF-8 bytes per string, 512 canonical
+JSON bytes, and 2 KiB of decoded value budget. Integer and integer-valued numbers must
+fit the interoperable JSON safe range, and floating-point values must be finite. Byte
+strings, tuples, sets, custom objects, callables, coroutines, Ray object references,
+and actor handles are unsupported. django-ray never calls `repr()` or traverses an
+unprojected task result.
+
+The projector is trusted synchronous application code in the leaf process, so its work
+counts toward leaf runtime. Keep it cheap, deterministic, side-effect-free, and
+read-only with respect to the result it receives.
+
+Configured redaction runs after strict normalization and before the event crosses Ray.
+The graph keeps one **Output** row and labels an available bounded JSON value explicitly
+as a preview, separate from the **Node ID** and execution state. Its fixed envelope
+reports one of `NOT_REQUESTED`, `PENDING`,
+`AVAILABLE`, `REDACTED`, `TOO_LARGE`, `UNSUPPORTED`, `FAILED`, `UNAVAILABLE`, or
+`OMITTED_BY_POLICY`; only `AVAILABLE` and `REDACTED` carry a value. A projector import,
+execution, validation, reporting, or logging `Exception` cannot replace the successful
+workflow result. Process-control exceptions such as `KeyboardInterrupt` and `SystemExit`
+are not swallowed at preparation, projection, import, or logging seams. Failed
+application leaves never receive a successful preview value.
+
+This field is diagnostic only. It is not the complete task result, a checkpoint,
+retry input, selective-resume marker, idempotency receipt, or proof that an external
+effect committed. No executor or lifecycle path reads it to decide recovery or replay.
+Keep credentials, model artifacts, documents, large datasets, and effect receipts out
+of previews even when they would fit the limit; redaction is defense in depth, not an
+authorization or encryption boundary.
+
+The projector and limits profile are part of the effective-plan fingerprint, while the
+workflow's declared output remains only `result`. Events and durable detail are fenced
+by task, attempt, execution generation, and run ID, so a stale attempt cannot replace a
+current preview. Node-detail schema version 2 adds the preview envelope; stored version
+1 detail remains readable and is shown as `UNAVAILABLE` without rewriting its bytes or
+digest. Readers authenticate and validate stored schema-version-2 bytes before applying
+the current `REDACT_PATTERNS`. If a newer policy matches any historical preview value,
+both current- and archived-attempt readers return the existing `REDACTED` marker for
+that preview only. They do not reveal the old value, rewrite its payload or digest, or
+degrade the rest of the graph to `CORRUPT`. Terminal-only and disabled policies create
+no node-detail graph and do not run the projector. Local execution also leaves
+projection disabled so local workflow semantics stay identical to the callable result.
 
 ## Local Execution
 
@@ -894,10 +970,15 @@ GET  /api/cluster/workflow-showcase/{task_id}
 ```
 
 Open that execution in the Admin to inspect the graph as longest-path layers. Every
-card links to the bounded indexed node-detail reader for the same displayed attempt. The
-endpoint always selects full reporting; it deliberately has no reporting-policy knob.
-Use the existing complex-workflow fixture when comparing full, terminal-only, and
-disabled policy behavior.
+card links to the bounded indexed node-detail reader for the same displayed attempt.
+The validation map exposes exactly `item_id` and `valid`; the reservation map exposes
+exactly `item_id` and `reserved_units`, while retaining `max_retries=0`. Customer-history
+node `0.1.g1.0.g1` deliberately uses a failing projector so the real run proves a
+successful application node remains successful while its **Output** row says the
+preview failed. Other configured leaves label their bounded business summaries as
+previews. The endpoint always selects full reporting; it deliberately has no
+reporting-policy knob. Use the existing complex-workflow fixture when comparing full,
+terminal-only, and disabled policy behavior.
 
 The graph renderer is package-owned and extends stock Django Admin with scoped
 fallback styles; Unfold remains an optional testproject-only shell rather than a
@@ -910,8 +991,9 @@ POST /api/cluster/workflow-showcase?item_count=1&work_seconds=0.01
 ```
 
 That run must publish exactly 21 runtime nodes, 28 dependency edges, 12 derived
-longest-path layers, 21 usable detail targets, and one durable attempt. The matching
-failure fixture is:
+longest-path layers, 21 usable detail targets, and one durable attempt. The gate checks
+the exact two map-leaf preview values and the deliberate projector-failure status rather
+than accepting arbitrary serialized results. The matching failure fixture is:
 
 ```text
 POST /api/cluster/workflow-showcase?item_count=1&work_seconds=0.01&failure_stage=reserve_inventory&failure_item=0
@@ -921,7 +1003,10 @@ It fails only reservation leaf `0.5.m0`. The fulfillment decision, three sinks, 
 finalizer remain pending. Commercial analysis joins reservation preparation first, so
 its price, risk, recommendation, and join nodes are structurally guaranteed to have
 succeeded before the selected reservation fails. This makes the Admin failure path
-useful without fabricating independent durable retries for Ray-native leaves.
+useful without fabricating independent durable retries for Ray-native leaves. The gate
+also requires the failed reservation's preview to be `UNAVAILABLE`, while the validation
+preview and successful customer-history task retain their exact safe and diagnostic-only
+statuses.
 
 To keep that successful visual workload moving slowly through a local dashboard, name
 its opt-in Locust class explicitly:
@@ -1013,6 +1098,7 @@ execution graph for either fixture.
 | API | Behavior |
 |---|---|
 | `step(callable, *args, django=False, ray_options=None, runtime_env=None, **kwargs)` | Bind an importable callable as one workflow step |
+| `step(...).with_output_preview(projector)` | Opt into one bounded, redacted diagnostic projection of a successful full-reporting Ray leaf result |
 | `chain(*signatures)` | Run signatures sequentially |
 | `group(*signatures)` | Fan out the same input and gather ordered results |
 | `map_step(callable_or_signature, ...)` | Fan out over the preceding iterable; callable keyword arguments remain leaf arguments |

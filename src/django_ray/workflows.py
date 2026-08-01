@@ -831,6 +831,22 @@ class _RayExecutor(_Executor):
                 node_id=node_id,
                 dependencies=dependencies,
             )
+            if signature.output_preview_path is not None:
+                from django_ray.workflow_output_previews import (
+                    WorkflowOutputPreviewAvailability,
+                    unavailable_workflow_output_preview,
+                )
+
+                self._send_progress_event(
+                    progress_actor,
+                    WorkflowProgressEventKind.OUTPUT_PREVIEW,
+                    {
+                        "node_id": node_id,
+                        "output_preview": unavailable_workflow_output_preview(
+                            WorkflowOutputPreviewAvailability.PENDING
+                        ),
+                    },
+                )
         options = {
             "name": f"django_ray.workflow:{label}",
             **(
@@ -857,6 +873,8 @@ class _RayExecutor(_Executor):
             and self.workflow_progress_limits != WORKFLOW_PROGRESS_LIMITS_V1
         ):
             remote_progress_kwargs["workflow_progress_limits"] = self.workflow_progress_limits
+        if progress_actor is not None and signature.output_preview_path is not None:
+            remote_progress_kwargs["output_preview_path"] = signature.output_preview_path
         object_ref = self.remote_step.options(**options).remote(
             signature.callable_path,
             signature.bootstrap_django,
@@ -1823,6 +1841,7 @@ class Step(WorkflowSignature):
     bootstrap_django: bool = False
     ray_options: Mapping[str, Any] = field(default_factory=dict)
     runtime_env: str | Mapping[str, Any] | None = None
+    output_preview_path: str | None = None
 
     def __post_init__(self) -> None:
         # Bound values are invocation data, not plan metadata. Freeze only the
@@ -1832,6 +1851,12 @@ class Step(WorkflowSignature):
         object.__setattr__(self, "ray_options", _freeze_definition_value(self.ray_options))
         if isinstance(self.runtime_env, Mapping):
             object.__setattr__(self, "runtime_env", _freeze_definition_value(self.runtime_env))
+        if self.output_preview_path is not None:
+            object.__setattr__(
+                self,
+                "output_preview_path",
+                _callable_path(self.output_preview_path),
+            )
 
     def _submit(
         self,
@@ -1863,6 +1888,7 @@ class Step(WorkflowSignature):
             bootstrap_django=self.bootstrap_django,
             ray_options={**_thaw_definition_value(self.ray_options), **ray_options},
             runtime_env=_clone_runtime_env(self.runtime_env),
+            output_preview_path=self.output_preview_path,
         )
 
     def with_runtime_env(self, runtime_env: str | dict[str, Any] | None) -> Step:
@@ -1874,6 +1900,20 @@ class Step(WorkflowSignature):
             bootstrap_django=self.bootstrap_django,
             ray_options=dict(self.ray_options),
             runtime_env=_clone_runtime_env(runtime_env),
+            output_preview_path=self.output_preview_path,
+        )
+
+    def with_output_preview(self, projector: Callable[[Any], Any] | str | None) -> Step:
+        """Return a copy with one explicit author-owned diagnostic projection."""
+        output_preview_path = None if projector is None else _callable_path(projector)
+        return Step(
+            callable_path=self.callable_path,
+            bound_args=self.bound_args,
+            bound_kwargs=dict(self.bound_kwargs),
+            bootstrap_django=self.bootstrap_django,
+            ray_options=dict(self.ray_options),
+            runtime_env=_clone_runtime_env(self.runtime_env),
+            output_preview_path=output_preview_path,
         )
 
 

@@ -43,7 +43,29 @@ _WORKFLOW_GRAPH_ROOT_FIELDS = frozenset(
     }
 )
 _WORKFLOW_GRAPH_NODE_FIELDS = frozenset(
-    {"id", "label", "kind", "state", "message", "error", "failure_path"}
+    {
+        "id",
+        "label",
+        "kind",
+        "state",
+        "message",
+        "error",
+        "failure_path",
+        "output_preview",
+    }
+)
+_WORKFLOW_GRAPH_OUTPUT_PREVIEW_AVAILABILITIES = frozenset(
+    {
+        "NOT_REQUESTED",
+        "PENDING",
+        "AVAILABLE",
+        "REDACTED",
+        "TOO_LARGE",
+        "UNSUPPORTED",
+        "FAILED",
+        "UNAVAILABLE",
+        "OMITTED_BY_POLICY",
+    }
 )
 _WORKFLOW_GRAPH_FANOUT_FIELDS = frozenset(
     {
@@ -69,6 +91,22 @@ _WORKFLOW_GRAPH_FORBIDDEN_FIELDS = frozenset(
         "started_at",
         "finished_at",
         "raw",
+    }
+)
+_WORKFLOW_SHOWCASE_CALLABLE = "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task"
+_WORKFLOW_SHOWCASE_VALIDATION_NODE_ID = "0.1.g0.1.m0"
+_WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID = "0.1.g1.0.g1"
+_WORKFLOW_SHOWCASE_RESERVATION_NODE_ID = "0.5.m0"
+_WORKFLOW_SHOWCASE_PRIVATE_PREVIEW_FIELDS = frozenset(
+    {
+        "_fail_workflow_showcase_fixture",
+        "available_units",
+        "commercial",
+        "customer",
+        "failure",
+        "items",
+        "sku",
+        "work_seconds",
     }
 )
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -642,16 +680,46 @@ def _workflow_graph_contains_forbidden_field(value: Any) -> bool:
     if isinstance(value, dict):
         if set(value) & _WORKFLOW_GRAPH_FORBIDDEN_FIELDS:
             return True
-        return any(_workflow_graph_contains_forbidden_field(item) for item in value.values())
+        return any(
+            _workflow_graph_contains_forbidden_field(item)
+            for key, item in value.items()
+            if key != "output_preview"
+        )
     if isinstance(value, list):
         return any(_workflow_graph_contains_forbidden_field(item) for item in value)
     return False
+
+
+def _workflow_graph_output_preview_is_valid(value: Any) -> bool:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "availability", "value"}
+        or type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+        or type(value["availability"]) is not str
+        or value["availability"] not in _WORKFLOW_GRAPH_OUTPUT_PREVIEW_AVAILABILITIES
+    ):
+        return False
+    if value["availability"] not in {"AVAILABLE", "REDACTED"}:
+        return value["value"] is None
+    try:
+        encoded = json.dumps(
+            value["value"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, UnicodeEncodeError, ValueError):
+        return False
+    return len(encoded) <= 512
 
 
 def _workflow_admin_graph_evidence(
     payload: dict[str, Any],
     *,
     execution_state: str,
+    callable_path: str,
     topology_nodes: list[dict[str, Any]],
     topology_edges: list[dict[str, Any]],
     node_details: list[dict[str, Any]],
@@ -666,7 +734,7 @@ def _workflow_admin_graph_evidence(
     if (
         set(payload) != _WORKFLOW_GRAPH_ROOT_FIELDS
         or payload.get("schema") != "django-ray.admin-workflow-graph"
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") != 2
         or payload.get("status") != "AVAILABLE"
         or payload.get("complete") is not True
         or not isinstance(message, str)
@@ -719,6 +787,7 @@ def _workflow_admin_graph_evidence(
             or not (item.get("message") is None or isinstance(item.get("message"), str))
             or not (item.get("error") is None or isinstance(item.get("error"), str))
             or type(item.get("failure_path")) is not bool
+            or not _workflow_graph_output_preview_is_valid(item.get("output_preview"))
         ):
             raise DockerSmokeError("admin workflow graph node failed its allowlist")
         if kind == "map":
@@ -815,6 +884,62 @@ def _workflow_admin_graph_evidence(
     else:
         raise DockerSmokeError("admin workflow graph execution was not terminal")
 
+    preview_counts = {
+        availability: sum(
+            item["output_preview"]["availability"] == availability for item in graph_by_id.values()
+        )
+        for availability in ("AVAILABLE", "FAILED", "UNAVAILABLE")
+    }
+    for item in graph_by_id.values():
+        preview_value = item["output_preview"]["value"]
+        if preview_value is not None and (
+            _workflow_graph_contains_forbidden_field(preview_value)
+            or (
+                isinstance(preview_value, dict)
+                and set(preview_value) & _WORKFLOW_SHOWCASE_PRIVATE_PREVIEW_FIELDS
+            )
+        ):
+            raise DockerSmokeError(
+                "admin workflow output preview exposed a private or raw result field"
+            )
+
+    preview_contract = "not-applicable"
+    if callable_path == _WORKFLOW_SHOWCASE_CALLABLE:
+        expected_validation = {
+            "schema_version": 1,
+            "availability": "AVAILABLE",
+            "value": {"item_id": 0, "valid": True},
+        }
+        expected_projector_failure = {
+            "schema_version": 1,
+            "availability": "FAILED",
+            "value": None,
+        }
+        expected_reservation = {
+            "schema_version": 1,
+            "availability": "AVAILABLE" if execution_state == "SUCCEEDED" else "UNAVAILABLE",
+            "value": (
+                {"item_id": 0, "reserved_units": 1} if execution_state == "SUCCEEDED" else None
+            ),
+        }
+        if (
+            graph_by_id.get(_WORKFLOW_SHOWCASE_VALIDATION_NODE_ID, {}).get("output_preview")
+            != expected_validation
+            or graph_by_id.get(_WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID, {}).get("state")
+            != "SUCCEEDED"
+            or graph_by_id.get(_WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID, {}).get(
+                "output_preview"
+            )
+            != expected_projector_failure
+            or graph_by_id.get(_WORKFLOW_SHOWCASE_RESERVATION_NODE_ID, {}).get("output_preview")
+            != expected_reservation
+        ):
+            raise DockerSmokeError(
+                "showcase output previews did not retain the exact safe map, "
+                "projector-failure, and application-failure contract"
+            )
+        preview_contract = f"showcase-{execution_state.lower()}-verified"
+
     return {
         "graph_status": "AVAILABLE",
         "graph_nodes": len(graph_by_id),
@@ -826,6 +951,10 @@ def _workflow_admin_graph_evidence(
         "graph_failure_path_nodes": len(observed_failure_path),
         "graph_failure_origins": len(origins),
         "graph_incoming_failure_edges": incoming_failure_edges,
+        "graph_available_previews": preview_counts["AVAILABLE"],
+        "graph_failed_previews": preview_counts["FAILED"],
+        "graph_unavailable_previews": preview_counts["UNAVAILABLE"],
+        "graph_preview_contract": preview_contract,
     }
 
 
@@ -844,7 +973,7 @@ def _workflow_admin_degraded_graph_evidence(
     if (
         set(payload) != _WORKFLOW_GRAPH_ROOT_FIELDS
         or payload.get("schema") != "django-ray.admin-workflow-graph"
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") != 2
         or payload.get("status") != expected_status
         or payload.get("complete") is not False
         or not isinstance(message, str)
@@ -1128,6 +1257,7 @@ def _verify_existing_workflow_admin_contract(
     graph_evidence = _workflow_admin_graph_evidence(
         graph,
         execution_state=str(execution.state),
+        callable_path=str(getattr(execution, "callable_path", "")),
         topology_nodes=pages["topology_nodes"]["items"],
         topology_edges=pages["topology_edges"]["items"],
         node_details=pages["node_details"]["items"],

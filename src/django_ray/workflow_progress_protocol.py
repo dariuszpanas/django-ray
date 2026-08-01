@@ -20,6 +20,10 @@ from typing import Any, Literal
 from uuid import UUID
 
 from django_ray.redaction import REDACTED, redact_text
+from django_ray.workflow_output_previews import (
+    WorkflowOutputPreviewError,
+    validate_workflow_output_preview,
+)
 from django_ray.workflow_progress_limits import (
     WORKFLOW_PROGRESS_LIMITS_PROFILE,
     WORKFLOW_PROGRESS_LIMITS_V1,
@@ -120,6 +124,7 @@ class WorkflowProgressEventKind(StrEnum):
     STARTED = "started"
     APPLICATION_PROGRESS = "application_progress"
     MAP_PROGRESS = "map_progress"
+    OUTPUT_PREVIEW = "output_preview"
     COMPLETED = "completed"
     FAILED = "failed"
     PRODUCER_REPORT = "producer_report"
@@ -960,6 +965,22 @@ def _normalize_payload(
                 maximum=limits.node_id_max_bytes,
             ),
             "submitted": submitted,
+        }
+    elif kind is WorkflowProgressEventKind.OUTPUT_PREVIEW:
+        payload = _payload_mapping(value, frozenset({"node_id", "output_preview"}), kind)
+        try:
+            output_preview = validate_workflow_output_preview(payload["output_preview"])
+        except WorkflowOutputPreviewError as error:
+            raise WorkflowProgressProtocolError(
+                "output_preview contains an invalid bounded projection"
+            ) from error
+        normalized = {
+            "node_id": _bounded_identity_text(
+                payload["node_id"],
+                "output_preview.node_id",
+                maximum=limits.node_id_max_bytes,
+            ),
+            "output_preview": output_preview,
         }
     elif kind is WorkflowProgressEventKind.COMPLETED:
         payload = _payload_mapping(value, frozenset({"label", "node_id"}), kind)

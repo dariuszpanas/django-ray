@@ -292,6 +292,8 @@ WORKFLOW_SHOWCASE_EDGES = frozenset(
     }
 )
 WORKFLOW_SHOWCASE_FAILURE_NODE_ID = "0.5.m0"
+WORKFLOW_SHOWCASE_VALIDATION_NODE_ID = "0.1.g0.1.m0"
+WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID = "0.1.g1.0.g1"
 WORKFLOW_SHOWCASE_FAILURE_DESCENDANTS = frozenset(
     {
         "0.6",
@@ -5322,6 +5324,7 @@ class LocalKubeRayGate:
         expected_pending_descendants: frozenset[str] = frozenset(),
         required_succeeded_nodes: frozenset[str] = frozenset(),
         require_indexed_details: bool = False,
+        expected_output_previews: Mapping[str, tuple[str, Mapping[str, Any]]] | None = None,
         page_limit: int = WORKFLOW_PROGRESS_PAGE_LIMIT,
     ) -> WorkflowGateObservation:
         """Verify one terminal workflow through every required bounded API reader."""
@@ -5599,6 +5602,23 @@ class LocalKubeRayGate:
             pending_descendants = len(expected_pending_descendants)
 
         detail_links = 0
+        if expected_output_previews is not None:
+            details_by_node = {
+                cast(str, detail_item["node_id"]): detail_item for detail_item in node_details
+            }
+            for node_id, (expected_node_state, expected_preview) in sorted(
+                expected_output_previews.items()
+            ):
+                detail_item = details_by_node.get(node_id)
+                if (
+                    detail_item is None
+                    or detail_item.get("state") != expected_node_state
+                    or detail_item.get("output_preview") != expected_preview
+                ):
+                    raise ValueError(
+                        "workflow output preview did not match its exact safe value, "
+                        "projector-failure, or application-failure contract"
+                    )
         if require_indexed_details:
             detail_links = self._workflow_indexed_details(
                 task_id=task_id,
@@ -6056,6 +6076,32 @@ class LocalKubeRayGate:
             enqueue_path=WORKFLOW_SHOWCASE_ENQUEUE_PATH,
             expected_enqueue_kwargs=WORKFLOW_SHOWCASE_ENQUEUE_KWARGS,
             expected_state="SUCCEEDED",
+            expected_output_previews={
+                WORKFLOW_SHOWCASE_VALIDATION_NODE_ID: (
+                    "SUCCEEDED",
+                    {
+                        "schema_version": 1,
+                        "availability": "AVAILABLE",
+                        "value": {"item_id": 0, "valid": True},
+                    },
+                ),
+                WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID: (
+                    "SUCCEEDED",
+                    {
+                        "schema_version": 1,
+                        "availability": "FAILED",
+                        "value": None,
+                    },
+                ),
+                WORKFLOW_SHOWCASE_FAILURE_NODE_ID: (
+                    "SUCCEEDED",
+                    {
+                        "schema_version": 1,
+                        "availability": "AVAILABLE",
+                        "value": {"item_id": 0, "reserved_units": 1},
+                    },
+                ),
+            },
             **showcase_contract,
         )
         failed = self._verify_workflow_run(
@@ -6066,6 +6112,32 @@ class LocalKubeRayGate:
             failure_node_id=WORKFLOW_SHOWCASE_FAILURE_NODE_ID,
             expected_pending_descendants=WORKFLOW_SHOWCASE_FAILURE_DESCENDANTS,
             required_succeeded_nodes=WORKFLOW_SHOWCASE_FAILURE_SUCCEEDED_NODES,
+            expected_output_previews={
+                WORKFLOW_SHOWCASE_VALIDATION_NODE_ID: (
+                    "SUCCEEDED",
+                    {
+                        "schema_version": 1,
+                        "availability": "AVAILABLE",
+                        "value": {"item_id": 0, "valid": True},
+                    },
+                ),
+                WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID: (
+                    "SUCCEEDED",
+                    {
+                        "schema_version": 1,
+                        "availability": "FAILED",
+                        "value": None,
+                    },
+                ),
+                WORKFLOW_SHOWCASE_FAILURE_NODE_ID: (
+                    "FAILED",
+                    {
+                        "schema_version": 1,
+                        "availability": "UNAVAILABLE",
+                        "value": None,
+                    },
+                ),
+            },
             **showcase_contract,
         )
         if (
@@ -6486,6 +6558,10 @@ class LocalKubeRayGate:
             "graph_failure_path_nodes",
             "graph_failure_origins",
             "graph_incoming_failure_edges",
+            "graph_available_previews",
+            "graph_failed_previews",
+            "graph_unavailable_previews",
+            "graph_preview_contract",
             "current_manifests",
             "pending_manifests",
             "unlinked_pages",
@@ -6548,6 +6624,9 @@ class LocalKubeRayGate:
                     "graph_failure_path_nodes": 0,
                     "graph_failure_origins": 0,
                     "graph_incoming_failure_edges": 0,
+                    "graph_available_previews": 20,
+                    "graph_failed_previews": 1,
+                    "graph_unavailable_previews": 0,
                 },
                 None,
             ),
@@ -6575,6 +6654,12 @@ class LocalKubeRayGate:
                     ),
                     "graph_failure_origins": 1,
                     "graph_incoming_failure_edges": 1,
+                    "graph_available_previews": 14,
+                    "graph_failed_previews": 1,
+                    "graph_unavailable_previews": (
+                        self.evidence.workflow_showcase_failure_pending_descendants
+                        + self.evidence.workflow_showcase_failure_failed_nodes
+                    ),
                 },
                 None,
             ),
@@ -6598,6 +6683,12 @@ class LocalKubeRayGate:
                     "graph_failure_path_nodes": 1,
                     "graph_failure_origins": 1,
                     "graph_incoming_failure_edges": 0,
+                    "graph_available_previews": 0,
+                    "graph_failed_previews": 0,
+                    "graph_unavailable_previews": (
+                        self.evidence.workflow_recovery_early_pending_nodes
+                        + self.evidence.workflow_recovery_early_failed_nodes
+                    ),
                 },
                 1,
             ),
@@ -6622,6 +6713,14 @@ class LocalKubeRayGate:
                         target == WORKFLOW_RECOVERY_MID_FAILURE_NODE_ID
                         for _source, target in WORKFLOW_RECOVERY_MID_EDGES
                     ),
+                    "graph_available_previews": (
+                        self.evidence.workflow_recovery_mid_succeeded_nodes - 1
+                    ),
+                    "graph_failed_previews": 1,
+                    "graph_unavailable_previews": (
+                        self.evidence.workflow_recovery_mid_pending_nodes
+                        + self.evidence.workflow_recovery_mid_failed_nodes
+                    ),
                 },
                 2,
             ),
@@ -6645,6 +6744,11 @@ class LocalKubeRayGate:
                     "graph_failure_path_nodes": 0,
                     "graph_failure_origins": 0,
                     "graph_incoming_failure_edges": 0,
+                    "graph_available_previews": (
+                        self.evidence.workflow_recovery_success_succeeded_nodes - 2
+                    ),
+                    "graph_failed_previews": 1,
+                    "graph_unavailable_previews": 0,
                 },
                 3,
             ),
@@ -6709,7 +6813,13 @@ class LocalKubeRayGate:
             if set(payload) != expected_fields or any(
                 type(payload.get(field_name)) is not int
                 for field_name in expected_fields
-                - {"admin_workflow", "task_id", "task_state", "graph_status"}
+                - {
+                    "admin_workflow",
+                    "task_id",
+                    "task_state",
+                    "graph_status",
+                    "graph_preview_contract",
+                }
             ):
                 raise ValueError("existing workflow admin smoke returned non-scalar evidence")
             if (
@@ -6720,6 +6830,12 @@ class LocalKubeRayGate:
                 or payload.get("graph_status") != "AVAILABLE"
                 or payload.get("admin_routes") != 6
                 or payload.get("admin_actions") != 3
+                or payload.get("graph_preview_contract")
+                != (
+                    f"showcase-{task_state.lower()}-verified"
+                    if label.startswith("showcase-")
+                    else "not-applicable"
+                )
                 or any(
                     payload.get(field_name) != value
                     for field_name, value in expected_counts.items()

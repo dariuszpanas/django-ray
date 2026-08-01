@@ -134,6 +134,32 @@ immutable pages for topology that normally publishes once. A node-detail row is 
 recovery log or an independently durable task. The outer `RayTaskExecution` remains
 the durability and retry boundary.
 
+Node-detail record schema version 2 adds one opt-in output-preview envelope. A leaf
+author must select an importable projector; the collector never serializes, represents,
+or traverses the arbitrary leaf result by default. The projected exact-JSON value is
+strictly normalized, bounded, and redacted before publication. Stored schema-version-1
+records remain byte- and digest-stable and readers project their missing preview as
+`UNAVAILABLE`.
+
+Stored schema-version-2 values are likewise authenticated and structurally validated
+before the current redaction policy is applied to the detached read projection. If a
+new `REDACT_PATTERNS` expression would redact any part of a historical value, current
+and archived readers replace that preview with the existing `REDACTED` marker. The
+stored payload and digest remain unchanged, no historical value crosses the read
+boundary, and unrelated graph nodes remain available.
+
+The preview is observational latest state under the existing run fence. It is not a
+result reference, checkpoint, replay log, selective-resume marker, idempotency receipt,
+or evidence that an external side effect committed. Runtime, retry, cancellation, and
+recovery code must never consume it as control-plane state. A future per-node resume
+contract therefore requires a separate durability decision; it cannot reinterpret
+these records.
+
+Ordinary projector, import, preparation, and diagnostic logging exceptions remain
+isolated from successful application work. `KeyboardInterrupt`, `SystemExit`, and other
+process-control `BaseException` subclasses propagate so observability cannot suppress
+worker shutdown or cancellation control flow.
+
 ## Publication protocol
 
 Detail mutations are staged before the summary pointer is advanced. One accepted
@@ -264,6 +290,11 @@ V1 also applies these value-shape limits before a record enters durable storage:
 | Application progress message or classified error text | 2 KiB UTF-8 bytes |
 | Recent event records retained in current detail | 32 |
 | One recent event record | 1 KiB encoded |
+| Output-preview nesting | 4 levels |
+| Output-preview aggregate items | 32 |
+| Output-preview list items / object entries | 16 / 15 |
+| Output-preview key / string | 64 / 256 UTF-8 bytes |
+| Canonical / decoded output-preview value | 512 bytes / 2 KiB |
 
 Unsupported nested values, non-finite numbers, unknown record fields, and values that
 cannot be made safe within these limits are rejected or replaced by an explicit

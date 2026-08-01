@@ -583,7 +583,17 @@ class SQLitePreparationWorkspace:
                 self.observed_detail_count,
                 self.config.max_detail_items,
             )
-            detail_value = storage._exact_mapping(value, storage._DETAIL_KEYS, "node detail")
+            detail_keys = frozenset(value)
+            expected_detail_keys = (
+                storage._DETAIL_KEYS_V1
+                if detail_keys == storage._DETAIL_KEYS_V1
+                else storage._DETAIL_KEYS_V2
+            )
+            detail_value = storage._exact_mapping(
+                value,
+                expected_detail_keys,
+                "node detail",
+            )
             node_id = storage._bounded_identity_text(
                 detail_value["node_id"],
                 "node detail node_id",
