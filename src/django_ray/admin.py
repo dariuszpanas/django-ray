@@ -1,13 +1,18 @@
 """Django admin configuration for django-ray."""
 
+import hashlib
 import json
+import re
+import secrets
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, cast
 
 from django.apps import apps
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.contrib.admin import helpers
 from django.contrib.auth import get_permission_codename
+from django.core import signing
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import (
     BooleanField,
@@ -22,6 +27,7 @@ from django.db.models import (
 )
 from django.db.models.functions import Substr
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseNotAllowed, JsonResponse
+from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.formats import date_format
@@ -83,6 +89,12 @@ ADMIN_WORKFLOW_PLAN_DOWNLOAD_MAX_BYTES = 128 * 1024
 ADMIN_WORKFLOW_PLAN_SELECTION_DOWNLOAD_MAX_BYTES = 32 * 1024
 ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS = 100
 _FULL_WORKFLOW_ATTEMPT_MARKER = '"reporting_policy":"full"'
+ADMIN_RETRY_CONFIRMATION_MAX_TASKS = 100
+ADMIN_RETRY_CONFIRMATION_MAX_AGE_SECONDS = 15 * 60
+_ADMIN_RETRY_CONFIRMATION_SALT = "django_ray.admin.retry-confirmation.v1"
+_ADMIN_RETRY_CONFIRMATION_MAX_TOKEN_CHARS = 512
+_ADMIN_RETRY_CONFIRMATION_SESSION_KEY = "django_ray_admin_retry_confirmation_nonce_v1"
+_ADMIN_RETRY_CONFIRMATION_SESSION_NONCE = re.compile(r"[A-Za-z0-9_-]{43}")
 _WORKFLOW_PROGRESS_MESSAGES = {
     "NOT_REPORTED": "No workflow progress snapshot has been reported.",
     "REQUESTED_NOT_REPORTED": (
@@ -116,6 +128,152 @@ _WORKFLOW_PROGRESS_MESSAGES = {
     "MISSING": "The workflow summary references retained detail that is missing.",
     "CORRUPT": "Workflow progress failed validation.",
 }
+
+
+def _admin_retry_snapshot(
+    queryset: QuerySet[RayTaskExecution],
+) -> list[dict[str, Any]]:
+    rows = queryset.order_by("pk").values_list(
+        "pk",
+        "state",
+        "attempt_number",
+        "execution_generation",
+        "workflow_run_id",
+        "workflow_plan_fingerprint",
+    )[: ADMIN_RETRY_CONFIRMATION_MAX_TASKS + 1]
+    return [
+        {
+            "pk": str(pk),
+            "state": str(state),
+            "attempt_number": int(attempt_number),
+            "execution_generation": int(execution_generation),
+            "workflow_run_id": str(workflow_run_id) if workflow_run_id is not None else None,
+            "workflow_plan_fingerprint": (
+                str(workflow_plan_fingerprint) if workflow_plan_fingerprint is not None else None
+            ),
+            "known_workflow": bool(workflow_run_id or workflow_plan_fingerprint),
+        }
+        for (
+            pk,
+            state,
+            attempt_number,
+            execution_generation,
+            workflow_run_id,
+            workflow_plan_fingerprint,
+        ) in rows
+    ]
+
+
+def _admin_retry_snapshot_digest(snapshot: list[dict[str, Any]]) -> str:
+    canonical = json.dumps(
+        snapshot,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _admin_retry_actor_fingerprint(request: HttpRequest) -> str:
+    user = request.user
+    actor_id = getattr(user, "pk", None)
+    model_meta = getattr(user, "_meta", None)
+    model_label = getattr(model_meta, "label_lower", None)
+    if (
+        not getattr(user, "is_authenticated", False)
+        or actor_id is None
+        or not isinstance(model_label, str)
+        or not model_label
+    ):
+        raise PermissionDenied
+    canonical = json.dumps(
+        [model_label, str(actor_id)],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _admin_retry_session_fingerprint(
+    request: HttpRequest,
+    *,
+    create: bool,
+) -> str | None:
+    session = getattr(request, "session", None)
+    if session is None:
+        return None
+    nonce = session.get(_ADMIN_RETRY_CONFIRMATION_SESSION_KEY)
+    if nonce is None and create:
+        nonce = secrets.token_urlsafe(32)
+        session[_ADMIN_RETRY_CONFIRMATION_SESSION_KEY] = nonce
+    if (
+        not isinstance(nonce, str)
+        or _ADMIN_RETRY_CONFIRMATION_SESSION_NONCE.fullmatch(nonce) is None
+    ):
+        return None
+    return hashlib.sha256(nonce.encode("ascii")).hexdigest()
+
+
+def _admin_retry_confirmation_token(
+    snapshot: list[dict[str, Any]],
+    *,
+    actor_fingerprint: str,
+    session_fingerprint: str,
+) -> str:
+    return signing.dumps(
+        {
+            "version": 1,
+            "actor": actor_fingerprint,
+            "session": session_fingerprint,
+            "count": len(snapshot),
+            "digest": _admin_retry_snapshot_digest(snapshot),
+        },
+        salt=_ADMIN_RETRY_CONFIRMATION_SALT,
+        compress=False,
+    )
+
+
+def _admin_retry_confirmation_matches(
+    token: str,
+    snapshot: list[dict[str, Any]],
+    *,
+    actor_fingerprint: str,
+    session_fingerprint: str,
+) -> bool:
+    if not token or len(token) > _ADMIN_RETRY_CONFIRMATION_MAX_TOKEN_CHARS:
+        return False
+    try:
+        payload = signing.loads(
+            token,
+            salt=_ADMIN_RETRY_CONFIRMATION_SALT,
+            max_age=ADMIN_RETRY_CONFIRMATION_MAX_AGE_SECONDS,
+        )
+    except signing.BadSignature:
+        return False
+    if not isinstance(payload, dict) or set(payload) != {
+        "version",
+        "actor",
+        "session",
+        "count",
+        "digest",
+    }:
+        return False
+    actor = payload.get("actor")
+    session = payload.get("session")
+    digest = payload.get("digest")
+    if (
+        payload.get("version") != 1
+        or payload.get("count") != len(snapshot)
+        or not isinstance(actor, str)
+        or not isinstance(session, str)
+        or not isinstance(digest, str)
+    ):
+        return False
+    return (
+        secrets.compare_digest(actor, actor_fingerprint)
+        and secrets.compare_digest(session, session_fingerprint)
+        and secrets.compare_digest(digest, _admin_retry_snapshot_digest(snapshot))
+    )
 
 
 class _AdminOctetLength(Func):
@@ -442,6 +600,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     """Admin for RayTaskExecution model."""
 
     change_form_template = "admin/django_ray/raytaskexecution/change_form.html"
+    retry_confirmation_template = "admin/django_ray/raytaskexecution/retry_confirmation.html"
     observability_fields = (
         "pk",
         "task_id",
@@ -1963,9 +2122,15 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             job_id[:8],
         )
 
-    @admin.action(description="Retry selected tasks")
-    def retry_tasks(self, request: HttpRequest, queryset: QuerySet[RayTaskExecution]) -> None:
-        """Retry failed, lost, or expired tasks by resetting them to QUEUED state."""
+    @admin.action(description="Retry selected tasks...")
+    def retry_tasks(
+        self,
+        request: HttpRequest,
+        queryset: QuerySet[RayTaskExecution],
+    ) -> HttpResponse | None:
+        """Confirm, fence, and retry failed, lost, or expired executions."""
+        if not self.has_change_permission(request):
+            raise PermissionDenied
         retryable_states = [TaskState.FAILED, TaskState.LOST, TaskState.EXPIRED]
         tasks_to_retry = queryset.filter(state__in=retryable_states)
         if not tasks_to_retry.exists():
@@ -1975,23 +2140,112 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             )
             return
 
+        snapshot = _admin_retry_snapshot(tasks_to_retry)
+        if not snapshot:
+            self.message_user(
+                request,
+                "No failed, lost, or expired tasks found in selection.",
+            )
+            return None
+        if len(snapshot) > ADMIN_RETRY_CONFIRMATION_MAX_TASKS:
+            self.message_user(
+                request,
+                (
+                    "Retry at most "
+                    f"{ADMIN_RETRY_CONFIRMATION_MAX_TASKS} failed, lost, or expired tasks "
+                    "at once. No tasks were queued."
+                ),
+                level=messages.ERROR,
+            )
+            return None
+
+        confirmation_token = request.POST.get("retry_confirmation_token", "")
+        confirmed = request.POST.get("post") == "yes"
+        actor_fingerprint = _admin_retry_actor_fingerprint(request)
+        session_fingerprint = _admin_retry_session_fingerprint(
+            request,
+            create=not confirmed,
+        )
+        if not confirmed:
+            if session_fingerprint is None:
+                raise PermissionDenied
+            selected_count = queryset.count()
+            retryable_count = len(snapshot)
+            changelist_url = reverse(
+                f"{self.admin_site.name}:{self.opts.app_label}_{self.opts.model_name}_changelist"
+            )
+            changelist_query = request.GET.urlencode()
+            if changelist_query:
+                changelist_url = f"{changelist_url}?{changelist_query}"
+            context = {
+                **self.admin_site.each_context(request),
+                "title": "Confirm full task retry",
+                "opts": self.model._meta,
+                "media": self.media,
+                "action_checkbox_name": helpers.ACTION_CHECKBOX_NAME,
+                "selected_ids": [row["pk"] for row in snapshot],
+                "selected_count": selected_count,
+                "retryable_count": retryable_count,
+                "non_retryable_count": max(selected_count - retryable_count, 0),
+                "known_workflow_count": sum(int(row["known_workflow"]) for row in snapshot),
+                "confirmation_token": _admin_retry_confirmation_token(
+                    snapshot,
+                    actor_fingerprint=actor_fingerprint,
+                    session_fingerprint=session_fingerprint,
+                ),
+                "confirmation_max_age_minutes": (ADMIN_RETRY_CONFIRMATION_MAX_AGE_SECONDS // 60),
+                "changelist_url": changelist_url,
+            }
+            return TemplateResponse(
+                request,
+                self.retry_confirmation_template,
+                context,
+            )
+
+        if (
+            not confirmation_token
+            or session_fingerprint is None
+            or not _admin_retry_confirmation_matches(
+                confirmation_token,
+                snapshot,
+                actor_fingerprint=actor_fingerprint,
+                session_fingerprint=session_fingerprint,
+            )
+        ):
+            self.message_user(
+                request,
+                (
+                    "Retry confirmation expired or the selected tasks changed. "
+                    "Review their current state and confirm again. No tasks were queued."
+                ),
+                level=messages.ERROR,
+            )
+            return None
+
         count = 0
         blocked = 0
-        for task in tasks_to_retry.only("pk", "attempt_number", "execution_generation"):
-            if task.pk is None:  # pragma: no cover - querysets contain persisted rows
-                continue
+        changed = 0
+        for row in snapshot:
             try:
                 retried = retry_task(
-                    task.pk,
-                    expected_attempt_number=task.attempt_number,
-                    expected_execution_generation=task.execution_generation,
+                    row["pk"],
+                    allowed_states=(row["state"],),
+                    expected_attempt_number=row["attempt_number"],
+                    expected_execution_generation=row["execution_generation"],
+                    expected_workflow_identity=(
+                        row["workflow_run_id"],
+                        row["workflow_plan_fingerprint"],
+                    ),
                 )
             except RuntimeEnvSnapshotError:
                 blocked += 1
                 continue
             count += int(retried is not None)
+            changed += int(retried is None)
 
         message = f"Queued {count} task(s) for retry."
+        if changed:
+            message += f" Skipped {changed} task(s) because they changed after confirmation."
         if blocked:
             message += (
                 f" Skipped {blocked} task(s) because their persisted RuntimeEnv "

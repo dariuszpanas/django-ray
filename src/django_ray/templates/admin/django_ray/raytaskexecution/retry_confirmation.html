@@ -1,0 +1,208 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <style>
+    .django-ray-retry-card {
+      border: 1px solid var(--border-color, #d1d5db);
+      border-radius: 8px;
+      max-width: 64rem;
+      overflow: hidden;
+    }
+
+    .django-ray-retry-card__warning,
+    .django-ray-retry-card__body,
+    .django-ray-retry-card__actions {
+      padding: 1rem;
+    }
+
+    .django-ray-retry-card__warning {
+      background: rgb(220 38 38 / 10%);
+      border-left: 4px solid #dc2626;
+    }
+
+    .django-ray-retry-card__warning strong {
+      display: block;
+      font-size: 1rem;
+      margin-bottom: .25rem;
+    }
+
+    .django-ray-retry-card__body > :first-child,
+    .django-ray-retry-card__warning > :first-child {
+      margin-top: 0;
+    }
+
+    .django-ray-retry-card__body > :last-child,
+    .django-ray-retry-card__warning > :last-child {
+      margin-bottom: 0;
+    }
+
+    .django-ray-retry-card__metrics {
+      display: grid;
+      gap: .75rem;
+      grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+      margin: 1rem 0;
+    }
+
+    .django-ray-retry-card__metric {
+      background: rgb(127 127 127 / 8%);
+      border: 1px solid var(--border-color, #d1d5db);
+      border-radius: 6px;
+      padding: .75rem;
+    }
+
+    .django-ray-retry-card__metric dt {
+      font-size: .8125rem;
+      line-height: 1.35;
+    }
+
+    .django-ray-retry-card__metric dd {
+      font-size: 1.5rem;
+      font-weight: 700;
+      line-height: 1;
+      margin: .5rem 0 0;
+    }
+
+    .django-ray-retry-card__actions {
+      align-items: center;
+      border-top: 1px solid var(--border-color, #d1d5db);
+      display: flex;
+      flex-wrap: wrap;
+      gap: .75rem;
+    }
+
+    .django-ray-retry-card__confirm,
+    .django-ray-retry-card__cancel {
+      border-radius: 6px;
+      box-sizing: border-box;
+      display: inline-flex;
+      font-weight: 600;
+      justify-content: center;
+      line-height: 1.25;
+      padding: .625rem 1rem;
+      text-decoration: none;
+    }
+
+    .django-ray-retry-card__confirm {
+      background: #dc2626;
+      border: 1px solid #dc2626;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    .django-ray-retry-card__confirm:hover {
+      background: #b91c1c;
+      border-color: #b91c1c;
+    }
+
+    .django-ray-retry-card__cancel {
+      border: 1px solid var(--border-color, #d1d5db);
+      color: inherit;
+    }
+
+    .django-ray-retry-card__confirm:focus-visible,
+    .django-ray-retry-card__cancel:focus-visible {
+      outline: 3px solid var(--primary, #0ea5e9);
+      outline-offset: 2px;
+    }
+
+    @media (max-width: 40rem) {
+      .django-ray-retry-card__confirm,
+      .django-ray-retry-card__cancel {
+        width: 100%;
+      }
+    }
+  </style>
+{% endblock %}
+
+{% block bodyclass %}{{ block.super }} app-{{ opts.app_label }} model-{{ opts.model_name }} retry-confirmation{% endblock %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo;
+    <a href="{% url 'admin:app_list' app_label=opts.app_label %}">
+      {{ opts.app_config.verbose_name }}
+    </a>
+    &rsaquo;
+    <a href="{% url opts|admin_urlname:'changelist' %}">
+      {{ opts.verbose_name_plural|capfirst }}
+    </a>
+    &rsaquo; {% translate "Confirm full task retry" %}
+  </div>
+{% endblock %}
+
+{% block content %}
+  <section
+    aria-labelledby="django-ray-retry-confirmation-heading"
+    class="django-ray-retry-card"
+  >
+    <div class="django-ray-retry-card__warning" role="alert">
+      <p>
+        <strong>{% translate "Retry can repeat external effects." %}</strong>
+        {% translate "Each eligible execution will receive a new attempt and its callable will run again." %}
+      </p>
+    </div>
+
+    <div class="django-ray-retry-card__body">
+      <h1 id="django-ray-retry-confirmation-heading">
+        {% translate "Confirm full task retry" %}
+      </h1>
+
+      <p>
+        {% translate "Ray-native workflows restart at their entry node. Successful nodes and output previews are diagnostics, not durable checkpoints, so this action does not resume at the failed node." %}
+      </p>
+      <p>
+        {% translate "Continue only after verifying application idempotency keys, external receipts or reconciliation, and remote quiescence when an earlier outcome is uncertain. Repeated work can send duplicate email, webhooks, payments, inventory requests, or other mutations." %}
+      </p>
+
+      <dl class="django-ray-retry-card__metrics">
+        <div class="django-ray-retry-card__metric">
+          <dt>{% translate "Selected rows" %}</dt>
+          <dd>{{ selected_count }}</dd>
+        </div>
+        <div class="django-ray-retry-card__metric">
+          <dt>{% translate "Eligible failed, lost, or expired tasks" %}</dt>
+          <dd>{{ retryable_count }}</dd>
+        </div>
+        <div class="django-ray-retry-card__metric">
+          <dt>{% translate "Known Ray-native workflows among eligible tasks" %}</dt>
+          <dd>{{ known_workflow_count }}</dd>
+        </div>
+        <div class="django-ray-retry-card__metric">
+          <dt>{% translate "Non-retryable selected rows that will be skipped" %}</dt>
+          <dd>{{ non_retryable_count }}</dd>
+        </div>
+      </dl>
+
+      <p>
+        {% blocktranslate %}This confirmation is bound to your current Admin session, expires after {{ confirmation_max_age_minutes }} minutes, and fails closed if a selected task changes state, attempt, execution generation, or workflow identity.{% endblocktranslate %}
+      </p>
+    </div>
+
+    <form method="post" class="django-ray-retry-card__actions">
+      {% csrf_token %}
+      {% for selected_id in selected_ids %}
+        <input
+          type="hidden"
+          name="{{ action_checkbox_name }}"
+          value="{{ selected_id }}"
+        >
+      {% endfor %}
+      <input type="hidden" name="action" value="retry_tasks">
+      <input type="hidden" name="post" value="yes">
+      <input
+        type="hidden"
+        name="retry_confirmation_token"
+        value="{{ confirmation_token }}"
+      >
+      <button type="submit" class="django-ray-retry-card__confirm">
+        {% translate "Confirm full retry" %}
+      </button>
+      <a href="{{ changelist_url }}" class="django-ray-retry-card__cancel cancel-link">
+        {% translate "Cancel" %}
+      </a>
+    </form>
+  </section>
+{% endblock %}

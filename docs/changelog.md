@@ -332,6 +332,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Admin task retry now requires an explicit signed confirmation before any selected
+  row is mutated. The page warns that workflows replay from their entry node and can
+  repeat external effects, distinguishes diagnostic progress/output from checkpoints,
+  shows only bounded counts, expires after 15 minutes, is bound to the operator's
+  current Admin session and exact state/attempt/generation/workflow identity, and caps
+  one confirmation at 100 eligible rows. Stale, replayed-after-transition, or tampered
+  confirmations fail closed without queueing work.
 - The direct local KubeRay exploratory profile now keeps one default/priority
   task manager and two fixed Ray workers while retaining dedicated sync and ML
   consumers, monitoring, encrypted RuntimeEnv coverage, and the complete

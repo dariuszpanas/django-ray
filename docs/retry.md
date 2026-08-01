@@ -89,6 +89,24 @@ row-locked transition service, so a racing retry request is rejected rather than
 applied twice. Success, permanent failure, timeout, LOST recovery, queue expiry, cancellation, and
 Ray Job `STOPPED` reconciliation use that same terminal archival boundary.
 
+The Admin bulk action adds a separate operator confirmation before calling that
+service. It shows bounded selected, eligible, skipped, and known-workflow counts but
+never renders arguments, results, RuntimeEnv values, errors, or tracebacks. The signed
+confirmation is bound to the operator's current Admin session, expires after 15
+minutes, and covers each row's state, attempt, execution generation, and exact workflow
+run/plan identity. A changed selection fails closed, and at most 100 failed, lost, or
+expired rows can be confirmed together. The row-locked transition rechecks the confirmed state
+as well as the attempt and generation, closing the validation-to-lock race. The warning
+is intentional: retry creates a new attempt and may repeat external effects.
+
+Confirmation signatures use Django's `SECRET_KEY` and honor
+`SECRET_KEY_FALLBACKS`. During key rotation, retain the previous key as a fallback for
+at least the 15-minute confirmation window or expect open confirmations to fail closed.
+The confirmation is an Admin-only browser ceremony, not an API token or a package
+protocol. An application that exposes retry through an API must perform object/tenant
+authorization and implement its own operator confirmation, idempotency, and audit
+policy; never accept or forward the Admin confirmation token.
+
 Application APIs should call `django_ray.lifecycle.retry_task()` with the attempt number
 and execution generation observed during object authorization. Manual retry archives the
 terminal attempt, increments both values, and clears only attempt-local data.
@@ -176,6 +194,12 @@ Use:
 
 Workflow progress is for observation, not recovery. See
 [Ray-Native Workflows](workflows.md#durability-semantics).
+The 0.4 Admin retry confirmation therefore states that a workflow starts again at its
+entry node. Successful nodes and output previews are not checkpoints, and django-ray
+does not yet provide resume-from-failed-node behavior. Treat uncertain external
+outcomes as reconciliation work before confirming a full retry. Durable selective
+resume requires a separate checkpoint and effect-receipt protocol; it cannot be
+inferred safely from the progress graph.
 
 ## Lost and Stuck Work
 
