@@ -83,6 +83,23 @@ class _OwnedTask:
     adopted: bool
 
 
+@dataclass(frozen=True)
+class _RayBackendQueueConfiguration:
+    """Validated queue ownership needed before a worker may claim work."""
+
+    aliases: tuple[str, ...]
+    queues: tuple[str, ...]
+    queues_by_alias: Mapping[str, tuple[str, ...]]
+    ray_targets_by_alias: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class _RayJobQueueAffinity:
+    """Raw opt-in queue reservations that do not import unrelated backends."""
+
+    aliases_by_queue: Mapping[str, tuple[str, ...]]
+
+
 class Command(BaseCommand):
     """Run a django-ray worker process."""
 
@@ -122,6 +139,8 @@ class Command(BaseCommand):
         self.sync_mode = False
         self.local_mode = False
         self.cluster_address: str | None = None
+        self._ray_backend_queue_configuration: _RayBackendQueueConfiguration | None = None
+        self._ray_job_queue_affinity: _RayJobQueueAffinity | None = None
 
     def _new_polling_policy(self) -> AdaptivePollingPolicy:
         """Build polling jitter from the current worker identity."""
@@ -304,6 +323,242 @@ class Command(BaseCommand):
         # ray_job default
         return "ray", None
 
+    @staticmethod
+    def _requested_worker_family(options: Mapping[str, Any]) -> str:
+        """Return the process-wide runner family selected by CLI flags/settings."""
+        if options.get("sync"):
+            return "sync"
+        if options.get("local") or options.get("cluster"):
+            return "ray_core"
+        if get_settings().get("RUNNER", "ray_job") == "ray_core":
+            return "ray_core"
+        return "ray_job"
+
+    def _active_worker_family(self) -> str:
+        if self.execution_mode == "ray":
+            return "ray_job"
+        if self.execution_mode == "sync":
+            return "sync"
+        return "ray_core"
+
+    def _load_ray_backend_queue_configuration(
+        self,
+    ) -> _RayBackendQueueConfiguration:
+        """Resolve Ray backend queues and fail closed on ambiguous affinity policy."""
+        if self._ray_backend_queue_configuration is not None:
+            return self._ray_backend_queue_configuration
+
+        from django.conf import settings as django_settings
+        from django.tasks import DEFAULT_TASK_QUEUE_NAME
+        from django.utils.module_loading import import_string
+
+        from django_ray.backends import RayTaskBackend
+
+        tasks_config = getattr(django_settings, "TASKS", {})
+        if not isinstance(tasks_config, Mapping):
+            raise CommandError("TASKS must be a mapping to resolve django-ray queue affinity")
+
+        aliases: list[str] = []
+        configured_queues: list[str] = []
+        seen_queues: set[str] = set()
+        queues_by_alias: dict[str, tuple[str, ...]] = {}
+        ray_targets_by_alias: dict[str, str] = {}
+        worker_settings = get_settings()
+
+        for alias, backend_config in tasks_config.items():
+            if not isinstance(alias, str) or not isinstance(backend_config, Mapping):
+                raise CommandError("TASKS aliases must map names to backend settings")
+            backend_path = backend_config.get("BACKEND")
+            if not isinstance(backend_path, str):
+                raise CommandError(f"TASKS backend {alias!r} must define BACKEND")
+            try:
+                backend_class = import_string(backend_path)
+            except ImportError:
+                raise CommandError(
+                    f"Cannot import TASKS backend {alias!r} while resolving queue affinity"
+                ) from None
+            if not isinstance(backend_class, type):
+                raise CommandError(f"TASKS backend {alias!r} does not resolve to a class")
+            if not issubclass(backend_class, RayTaskBackend):
+                continue
+
+            options = backend_config.get("OPTIONS", {})
+            if not isinstance(options, Mapping):
+                raise CommandError(f"TASKS backend {alias!r} OPTIONS must be a mapping")
+            ray_job_only = options.get("RAY_JOB_ONLY", False)
+            if type(ray_job_only) is not bool:
+                raise CommandError(
+                    f"TASKS backend {alias!r} OPTIONS['RAY_JOB_ONLY'] must be a boolean"
+                )
+            ray_target = options.get("RAY_ADDRESS", worker_settings.get("RAY_ADDRESS", "auto"))
+            if not isinstance(ray_target, str) or not ray_target.strip():
+                raise CommandError(
+                    f"TASKS backend {alias!r} RAY_ADDRESS must be a non-empty string"
+                )
+
+            raw_queues = backend_config.get("QUEUES", [DEFAULT_TASK_QUEUE_NAME])
+            if isinstance(raw_queues, (str, bytes)) or not isinstance(
+                raw_queues, Sequence | set | frozenset
+            ):
+                raise CommandError(
+                    f"TASKS backend {alias!r} QUEUES must be a collection of queue names"
+                )
+            queue_values = list(raw_queues)
+            for queue_name in queue_values:
+                if not isinstance(queue_name, str) or not queue_name.strip():
+                    raise CommandError(
+                        f"TASKS backend {alias!r} QUEUES must contain non-empty strings"
+                    )
+            if isinstance(raw_queues, set | frozenset):
+                queue_values.sort()
+
+            aliases.append(alias)
+            queues_by_alias[alias] = tuple(queue_values)
+            ray_targets_by_alias[alias] = ray_target
+            for queue_name in queue_values:
+                if queue_name not in seen_queues:
+                    configured_queues.append(queue_name)
+                    seen_queues.add(queue_name)
+
+        configuration = _RayBackendQueueConfiguration(
+            aliases=tuple(aliases),
+            queues=tuple(configured_queues),
+            queues_by_alias=queues_by_alias,
+            ray_targets_by_alias=ray_targets_by_alias,
+        )
+        self._ray_backend_queue_configuration = configuration
+        return configuration
+
+    def _load_ray_job_queue_affinity(self) -> _RayJobQueueAffinity:
+        """Read only aliases that explicitly opt queues into Ray Job ownership.
+
+        Explicit queue selection historically did not import every configured task
+        backend. Keep that compatibility for mixed-backend projects while validating
+        every opted-in backend before applying its fail-closed reservation.
+        """
+        if self._ray_job_queue_affinity is not None:
+            return self._ray_job_queue_affinity
+
+        from django.conf import settings as django_settings
+        from django.tasks import DEFAULT_TASK_QUEUE_NAME
+        from django.utils.module_loading import import_string
+
+        from django_ray.backends import RayTaskBackend
+
+        tasks_config = getattr(django_settings, "TASKS", {})
+        if not isinstance(tasks_config, Mapping):
+            raise CommandError("TASKS must be a mapping to resolve django-ray queue affinity")
+
+        restricted_aliases: dict[str, list[str]] = {}
+        for alias, backend_config in tasks_config.items():
+            if not isinstance(backend_config, Mapping):
+                continue
+            options = backend_config.get("OPTIONS")
+            if not isinstance(options, Mapping) or "RAY_JOB_ONLY" not in options:
+                continue
+            ray_job_only = options["RAY_JOB_ONLY"]
+            if type(ray_job_only) is not bool:
+                raise CommandError(
+                    f"TASKS backend {alias!r} OPTIONS['RAY_JOB_ONLY'] must be a boolean"
+                )
+            if not ray_job_only:
+                continue
+            if not isinstance(alias, str):
+                raise CommandError("RAY_JOB_ONLY TASKS aliases must be strings")
+            backend_path = backend_config.get("BACKEND")
+            if not isinstance(backend_path, str):
+                raise CommandError(f"RAY_JOB_ONLY TASKS backend {alias!r} must define BACKEND")
+            try:
+                backend_class = import_string(backend_path)
+            except ImportError:
+                raise CommandError(
+                    f"Cannot import TASKS backend {alias!r} while validating RAY_JOB_ONLY"
+                ) from None
+            if not isinstance(backend_class, type):
+                raise CommandError(
+                    f"RAY_JOB_ONLY TASKS backend {alias!r} does not resolve to a class"
+                )
+            if not issubclass(backend_class, RayTaskBackend):
+                continue
+
+            raw_queues = backend_config.get("QUEUES", [DEFAULT_TASK_QUEUE_NAME])
+            if isinstance(raw_queues, (str, bytes)) or not isinstance(
+                raw_queues, Sequence | set | frozenset
+            ):
+                raise CommandError(
+                    f"RAY_JOB_ONLY TASKS backend {alias!r} QUEUES must be a collection "
+                    "of queue names"
+                )
+            queue_values = list(raw_queues)
+            if not queue_values:
+                raise CommandError(
+                    f"RAY_JOB_ONLY TASKS backend {alias!r} must declare at least one queue"
+                )
+            for queue_name in queue_values:
+                if not isinstance(queue_name, str) or not queue_name.strip():
+                    raise CommandError(
+                        f"RAY_JOB_ONLY TASKS backend {alias!r} QUEUES must contain "
+                        "non-empty strings"
+                    )
+                restricted_aliases.setdefault(queue_name, []).append(alias)
+
+        affinity = _RayJobQueueAffinity(
+            aliases_by_queue={
+                queue: tuple(aliases) for queue, aliases in restricted_aliases.items()
+            }
+        )
+        self._ray_job_queue_affinity = affinity
+        return affinity
+
+    def _enforce_queue_affinity(
+        self,
+        queues: Sequence[str],
+        *,
+        worker_family: str,
+        allow_filter: bool,
+    ) -> list[str]:
+        """Keep Ray Job-only queues away from Ray Core and synchronous workers."""
+        selected = list(queues)
+        if not selected or any(
+            not isinstance(queue, str) or not queue.strip() for queue in selected
+        ):
+            raise CommandError("Queue selection must contain at least one non-empty queue name")
+        affinity = self._load_ray_job_queue_affinity()
+        if worker_family == "ray_job":
+            return selected
+
+        blocked = [queue for queue in selected if queue in affinity.aliases_by_queue]
+        if not blocked:
+            return selected
+
+        owner_aliases = sorted(
+            {alias for queue in blocked for alias in affinity.aliases_by_queue[queue]}
+        )
+        mode_label = "Ray Core" if worker_family == "ray_core" else "synchronous"
+        blocked_text = ", ".join(blocked)
+        owners_text = ", ".join(owner_aliases)
+        if allow_filter:
+            allowed = [queue for queue in selected if queue not in blocked]
+            self.stdout.write(
+                self.style.NOTICE(
+                    f"Skipping Ray Job-only queue(s) [{blocked_text}] declared by "
+                    f"TASKS backend alias(es) [{owners_text}] for this {mode_label} worker"
+                )
+            )
+            if allowed:
+                return allowed
+            raise CommandError(
+                f"--all-queues found no queues compatible with this {mode_label} worker; "
+                "start a Ray Job worker or configure at least one unrestricted queue"
+            )
+
+        raise CommandError(
+            f"This {mode_label} worker cannot claim Ray Job-only queue(s) [{blocked_text}]. "
+            f"TASKS backend alias(es) [{owners_text}] declare "
+            "OPTIONS['RAY_JOB_ONLY']=True; start a Ray Job worker without "
+            "--sync, --local, or --cluster, or select compatible queues"
+        )
+
     def _parse_queues(self, options: dict[str, Any]) -> list[str]:
         """Parse queue arguments from command options.
 
@@ -319,87 +574,31 @@ class Command(BaseCommand):
         Returns:
             List of queue names to process.
         """
-        from django.conf import settings as django_settings
-        from django.tasks import DEFAULT_TASK_QUEUE_NAME
-        from django.utils.module_loading import import_string
-
-        from django_ray.backends import RayTaskBackend
-
         # Check for --all-queues flag first
         if options.get("all_queues"):
-            tasks_config = getattr(django_settings, "TASKS", {})
-            if not isinstance(tasks_config, Mapping):
-                raise CommandError("TASKS must be a mapping to resolve --all-queues")
-
-            configured_queues: list[str] = []
-            seen_queues: set[str] = set()
-            ray_backend_aliases: list[str] = []
-            ray_backend_targets: dict[str, str] = {}
-            worker_settings = get_settings()
-            process_wide_ray_core = bool(
-                options.get("local")
-                or options.get("cluster")
-                or (
-                    not options.get("sync")
-                    and worker_settings.get("RUNNER", "ray_job") == "ray_core"
-                )
-            )
-            for alias, backend_config in tasks_config.items():
-                if not isinstance(alias, str) or not isinstance(backend_config, Mapping):
-                    raise CommandError("TASKS aliases must map names to backend settings")
-                backend_path = backend_config.get("BACKEND")
-                if not isinstance(backend_path, str):
-                    raise CommandError(f"TASKS backend {alias!r} must define BACKEND")
-                try:
-                    backend_class = import_string(backend_path)
-                except ImportError:
-                    raise CommandError(
-                        f"Cannot import TASKS backend {alias!r} while resolving --all-queues"
-                    ) from None
-                if not isinstance(backend_class, type):
-                    raise CommandError(f"TASKS backend {alias!r} does not resolve to a class")
-                if not issubclass(backend_class, RayTaskBackend):
-                    continue
-
-                ray_backend_aliases.append(alias)
-                if process_wide_ray_core:
-                    backend_options = backend_config.get("OPTIONS", {})
-                    if not isinstance(backend_options, Mapping):
-                        raise CommandError(f"TASKS backend {alias!r} OPTIONS must be a mapping")
-                    ray_target = backend_options.get("RAY_ADDRESS", worker_settings["RAY_ADDRESS"])
-                    if not isinstance(ray_target, str) or not ray_target.strip():
-                        raise CommandError(
-                            f"TASKS backend {alias!r} RAY_ADDRESS must be a non-empty string"
-                        )
-                    ray_backend_targets[alias] = ray_target
-
-                raw_queues = backend_config.get("QUEUES", [DEFAULT_TASK_QUEUE_NAME])
-                if isinstance(raw_queues, (str, bytes)) or not isinstance(
-                    raw_queues, Sequence | set | frozenset
-                ):
-                    raise CommandError(
-                        f"TASKS backend {alias!r} QUEUES must be a collection of queue names"
-                    )
-                if not raw_queues:
+            configuration = self._load_ray_backend_queue_configuration()
+            if not configuration.aliases:
+                raise CommandError("--all-queues found no TASKS backend using RayTaskBackend")
+            for alias in configuration.aliases:
+                if not configuration.queues_by_alias[alias]:
                     raise CommandError(
                         f"TASKS backend {alias!r} has no enumerable QUEUES; "
                         "use --queue or --queues explicitly"
                     )
-                queue_values = list(raw_queues)
-                for queue_name in queue_values:
-                    if not isinstance(queue_name, str) or not queue_name.strip():
-                        raise CommandError(
-                            f"TASKS backend {alias!r} QUEUES must contain non-empty strings"
-                        )
-                if isinstance(raw_queues, set | frozenset):
-                    queue_values.sort()
-                for queue_name in queue_values:
-                    if queue_name not in seen_queues:
-                        configured_queues.append(queue_name)
-                        seen_queues.add(queue_name)
 
-            if not ray_backend_aliases:
-                raise CommandError("--all-queues found no TASKS backend using RayTaskBackend")
+            worker_family = self._requested_worker_family(options)
+            configured_queues = self._enforce_queue_affinity(
+                configuration.queues,
+                worker_family=worker_family,
+                allow_filter=True,
+            )
+            eligible = set(configured_queues)
+            ray_backend_targets = {
+                alias: configuration.ray_targets_by_alias[alias]
+                for alias in configuration.aliases
+                if worker_family == "ray_core"
+                and eligible.intersection(configuration.queues_by_alias[alias])
+            }
             if len(set(ray_backend_targets.values())) > 1:
                 aliases = ", ".join(ray_backend_targets)
                 raise CommandError(
@@ -410,24 +609,39 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.NOTICE(
                     "Processing all configured django-ray queues "
-                    f"from {ray_backend_aliases}: {configured_queues}"
+                    f"from {list(configuration.aliases)}: {configured_queues}"
                 )
             )
             return configured_queues
 
         # Check for --queues (space-separated list)
-        if options.get("queues"):
-            return options["queues"]
+        if options.get("queues") is not None:
+            selected = options["queues"]
+            return self._enforce_queue_affinity(
+                selected,
+                worker_family=self._requested_worker_family(options),
+                allow_filter=False,
+            )
 
         # Check for --queue (single or comma-separated)
         queue_arg = options.get("queue")
-        if queue_arg:
+        if queue_arg is not None:
             if "," in queue_arg:
-                return [q.strip() for q in queue_arg.split(",") if q.strip()]
-            return [queue_arg]
+                selected = [q.strip() for q in queue_arg.split(",") if q.strip()]
+            else:
+                selected = [queue_arg]
+            return self._enforce_queue_affinity(
+                selected,
+                worker_family=self._requested_worker_family(options),
+                allow_filter=False,
+            )
 
         # Default to "default" queue
-        return ["default"]
+        return self._enforce_queue_affinity(
+            ["default"],
+            worker_family=self._requested_worker_family(options),
+            allow_filter=False,
+        )
 
     def _init_local_ray(self) -> None:
         """Initialize a local Ray instance."""
@@ -1081,9 +1295,17 @@ class Command(BaseCommand):
             self._request_shutdown_for_lease_loss("worker lease was never acquired")
             return 0
 
-        # Check how many slots are available. Queue expiry remains independent
-        # from execution capacity, but both expiry and claiming require the same
-        # exact active-lease fence below.
+        # Keep this guard at the durable claim boundary as well as CLI parsing.
+        # Direct command-method users and future queue-selection paths must not be
+        # able to hand a Ray Job-only workload to a process-wide Ray Core runner.
+        queues = self._enforce_queue_affinity(
+            queues,
+            worker_family=self._active_worker_family(),
+            allow_filter=False,
+        )
+
+        # Queue expiry remains independent from execution capacity, but both
+        # expiry and claiming require the same exact active-lease fence below.
         ray_core_pending = self.ray_core_runner.pending_count if self.ray_core_runner else 0
         active_count = len(self.active_tasks) + ray_core_pending
         available_slots = concurrency - active_count
@@ -1251,6 +1473,7 @@ class Command(BaseCommand):
         expected_attempt_number = int(task.attempt_number)
         expected_execution_generation = int(task.execution_generation)
         expected_worker_id = self.worker_id
+        durable_task_id = getattr(task, "task_id", None)
         try:
             runtime_env = runtime_env_for_execution(task)
             plan_runtime_env_identity = runtime_env_plan_identity(
@@ -1262,6 +1485,7 @@ class Command(BaseCommand):
                 serialized_args=task.args_json,
                 serialized_kwargs=task.kwargs_json,
                 task_execution_pk=task.pk,
+                task_id=str(durable_task_id) if durable_task_id is not None else None,
                 attempt_number=expected_attempt_number,
                 execution_generation=expected_execution_generation,
                 runtime_env_profile=runtime_env.profile,

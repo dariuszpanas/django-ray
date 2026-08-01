@@ -248,6 +248,7 @@ class RayJobRunner(BaseRunner):
                 payload: dict[str, Any] = {
                     "callable_path": callable_path,
                     "task_execution_pk": task_execution.pk,
+                    "task_id": str(task_execution.task_id),
                     "attempt_number": task_execution.attempt_number,
                     "execution_generation": task_execution.execution_generation,
                     "runtime_env_profile": runtime_env.profile,

@@ -242,6 +242,7 @@ class TestRayJobRunnerSubmit:
         assert json.loads(payload["serialized_args"]) == ["it's broken"]
         assert json.loads(payload["serialized_kwargs"]) == {"publisher": "O'Reilly"}
         assert payload["task_execution_pk"] == 123
+        assert payload["task_id"] == "django-task-123"
         assert payload["attempt_number"] == 2
         assert payload["execution_generation"] == 11
         assert payload["runtime_env_profile"] is None

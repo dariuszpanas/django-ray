@@ -144,6 +144,7 @@ class RayTaskBackend(BaseTaskBackend):
         - RAY_RUNTIME_ENV: Runtime environment for Ray workers
         - TIMEOUT_SECONDS: Optional positive per-task execution timeout
         - QUEUE_TIMEOUT_SECONDS: Positive queued-wait budget or None for unlimited
+        - RAY_JOB_ONLY: Restrict declared queues to Ray Job workers (default False)
     """
 
     # Backend capabilities
@@ -197,6 +198,11 @@ class RayTaskBackend(BaseTaskBackend):
             raise ImproperlyConfigured(
                 "django-ray: TASKS backend OPTIONS['QUEUE_TIMEOUT_SECONDS'] must be None "
                 f"or an integer between 1 and {QUEUE_TIMEOUT_SECONDS_MAX}"
+            )
+        self.ray_job_only = options.get("RAY_JOB_ONLY", False)
+        if type(self.ray_job_only) is not bool:
+            raise ImproperlyConfigured(
+                "django-ray: TASKS backend OPTIONS['RAY_JOB_ONLY'] must be a boolean"
             )
 
     def enqueue(

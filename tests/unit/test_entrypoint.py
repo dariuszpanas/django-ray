@@ -25,6 +25,7 @@ class TestEntrypointPayload:
             "callable_path": "myapp.tasks.run",
             "serialized_args": '["arg"]',
             "serialized_kwargs": '{"key":"value"}',
+            "task_id": "00000000-0000-4000-8000-000000000123",
         }
         payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
 
@@ -150,6 +151,7 @@ class TestEntrypointPayload:
             assert context is not None
             return {
                 "task_pk": context.task_pk,
+                "task_id": context.task_id,
                 "attempt_number": context.attempt_number,
                 "execution_generation": context.execution_generation,
                 "runtime_env_profile": context.runtime_env_profile,
@@ -174,6 +176,7 @@ class TestEntrypointPayload:
             "[]",
             "{}",
             task_execution_pk=42,
+            task_id="00000000-0000-4000-8000-000000000042",
             attempt_number=3,
             execution_generation=7,
             runtime_env_profile="thin",
@@ -184,6 +187,7 @@ class TestEntrypointPayload:
         assert result["success"] is True, result
         assert result["result"] == {
             "task_pk": 42,
+            "task_id": "00000000-0000-4000-8000-000000000042",
             "attempt_number": 3,
             "execution_generation": 7,
             "runtime_env_profile": "thin",

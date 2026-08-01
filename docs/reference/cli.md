@@ -25,6 +25,10 @@ Celery or another backend. It fails when no django-ray queues can be enumerated 
 of silently using another backend's `default` queue. In Ray Core mode, it also rejects
 aliases with different effective `RAY_ADDRESS` values because one process cannot honor
 multiple cluster targets; Ray Job mode preserves the target stored on each task.
+Ray Core and synchronous workers report and skip queues declared through a django-ray
+backend with `OPTIONS["RAY_JOB_ONLY"] = True`. Explicit `--queue` or `--queues`
+selection of one of those queues fails at startup, and the claim boundary repeats the
+check for programmatic command use. Ray Job mode accepts them.
 
 #### Execution Mode
 

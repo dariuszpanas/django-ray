@@ -10,6 +10,22 @@ from django.templatetags.static import static
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# The optional Ray Data recipe only accepts inputs and publishes artifacts beneath
+# server-controlled absolute roots. Deployments that use shared storage must give
+# each deployment a distinct key and mount the same paths in Ray Job drivers/workers.
+RAY_DATA_INPUT_ROOT = os.environ.get(
+    "DJANGO_RAY_DATA_INPUT_ROOT",
+    str(BASE_DIR / "ray-data-input"),
+)
+RAY_DATA_OUTPUT_ROOT = os.environ.get(
+    "DJANGO_RAY_DATA_OUTPUT_ROOT",
+    str(BASE_DIR / "ray-data-artifacts"),
+)
+RAY_DATA_DEPLOYMENT_KEY = os.environ.get(
+    "DJANGO_RAY_DATA_DEPLOYMENT_KEY",
+    "testproject-local",
+)
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     """Parse a boolean environment variable without treating typos as truthy."""
@@ -276,6 +292,15 @@ TASKS = {
             "RUNTIME_ENV_PROFILE": "thin",
         },
     },
+    "ray-data": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["ray-data"],
+        "OPTIONS": {
+            "RAY_ADDRESS": os.environ.get("RAY_ADDRESS", "auto"),
+            "RUNTIME_ENV_PROFILE": "ray-data",
+            "RAY_JOB_ONLY": True,
+        },
+    },
     "recovery-showcase": {
         "BACKEND": "django_ray.backends.RayTaskBackend",
         "QUEUES": ["default"],
@@ -322,7 +347,14 @@ DJANGO_RAY = {
                 "DJANGO_RAY_WORKING_DIR_URI",
                 str(BASE_DIR),
             ),
-            "excludes": [".git", ".venv", "__pycache__", "staticfiles"],
+            "excludes": [
+                ".git",
+                ".venv",
+                "__pycache__",
+                "staticfiles",
+                "ray-data-input",
+                "ray-data-artifacts",
+            ],
             "pip": [
                 "cryptography>=42.0.8",
                 "django>=6.0",
@@ -343,6 +375,18 @@ DJANGO_RAY = {
             "extends": "project",
             "runtime_env": {
                 "env_vars": {"DJANGO_RAY_RUNTIME_ENV": "thin"},
+            },
+        },
+        "ray-data": {
+            "extends": "project",
+            "runtime_env": {
+                "pip": ["ray[data]==2.56.0"],
+                "env_vars": {
+                    "DJANGO_RAY_RUNTIME_ENV": "ray-data",
+                    "DJANGO_RAY_DATA_INPUT_ROOT": RAY_DATA_INPUT_ROOT,
+                    "DJANGO_RAY_DATA_OUTPUT_ROOT": RAY_DATA_OUTPUT_ROOT,
+                    "DJANGO_RAY_DATA_DEPLOYMENT_KEY": RAY_DATA_DEPLOYMENT_KEY,
+                },
             },
         },
         "numpy-2-2": {

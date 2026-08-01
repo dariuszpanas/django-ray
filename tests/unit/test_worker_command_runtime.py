@@ -153,6 +153,22 @@ class TestWorkerCommandRuntime:
         assert cmd._parse_queues({}) == ["default"]
 
     @pytest.mark.parametrize(
+        "selection",
+        [
+            {"queue": ", ,"},
+            {"queues": []},
+            {"queues": ["default", ""]},
+        ],
+    )
+    def test_parse_queues_rejects_empty_explicit_selection(
+        self, selection: dict[str, object]
+    ) -> None:
+        cmd = _make_command()
+
+        with pytest.raises(CommandError, match="at least one non-empty queue"):
+            cmd._parse_queues(selection)
+
+    @pytest.mark.parametrize(
         ("tasks_config", "message"),
         [
             (
@@ -252,6 +268,259 @@ class TestWorkerCommandRuntime:
 
         with pytest.raises(CommandError, match="different RAY_ADDRESS values"):
             cmd._parse_queues({"all_queues": True, **mode_options})
+
+    def test_parse_all_queues_skips_ray_job_only_queues_before_target_check(
+        self, monkeypatch
+    ) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": "ray_job", "RAY_ADDRESS": "auto"},
+        )
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "default": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["default"],
+                },
+                "jobs": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["ray-data"],
+                    "OPTIONS": {
+                        "RAY_ADDRESS": "ray://jobs:10001",
+                        "RAY_JOB_ONLY": True,
+                    },
+                },
+            },
+            raising=False,
+        )
+
+        assert cmd._parse_queues({"all_queues": True, "local": True}) == ["default"]
+        assert "Skipping Ray Job-only queue(s) [ray-data]" in "".join(cmd.stdout.messages)
+
+    def test_parse_all_queues_fails_when_every_queue_requires_ray_job(self, monkeypatch) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": "ray_job", "RAY_ADDRESS": "auto"},
+        )
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "jobs": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["ray-data"],
+                    "OPTIONS": {"RAY_JOB_ONLY": True},
+                }
+            },
+            raising=False,
+        )
+
+        with pytest.raises(CommandError, match="no queues compatible with this Ray Core"):
+            cmd._parse_queues({"all_queues": True, "local": True})
+
+    @pytest.mark.parametrize(
+        ("mode_options", "runner", "mode_label"),
+        [
+            ({"local": True}, "ray_job", "Ray Core"),
+            ({"cluster": "ray://worker:10001"}, "ray_job", "Ray Core"),
+            ({"sync": True}, "ray_job", "synchronous"),
+            ({}, "ray_core", "Ray Core"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "selection",
+        [
+            {"queue": "ray-data"},
+            {"queue": "default,ray-data"},
+            {"queues": ["default", "ray-data"]},
+        ],
+    )
+    def test_explicit_queue_selection_rejects_ray_job_only_queue(
+        self,
+        monkeypatch,
+        mode_options: dict[str, object],
+        runner: str,
+        mode_label: str,
+        selection: dict[str, object],
+    ) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": runner, "RAY_ADDRESS": "auto"},
+        )
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "jobs": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["ray-data"],
+                    "OPTIONS": {"RAY_JOB_ONLY": True},
+                }
+            },
+            raising=False,
+        )
+
+        with pytest.raises(CommandError, match=rf"{mode_label} worker cannot claim"):
+            cmd._parse_queues({**selection, **mode_options})
+
+    def test_ray_job_worker_accepts_ray_job_only_queue(self, monkeypatch) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": "ray_job", "RAY_ADDRESS": "auto"},
+        )
+
+        assert cmd._parse_queues({"queue": "ray-data"}) == ["ray-data"]
+
+    def test_restricted_alias_wins_when_queue_is_shared(self, monkeypatch) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": "ray_job", "RAY_ADDRESS": "auto"},
+        )
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "general": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["shared"],
+                },
+                "jobs": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["shared"],
+                    "OPTIONS": {"RAY_JOB_ONLY": True},
+                },
+            },
+            raising=False,
+        )
+
+        with pytest.raises(CommandError, match=r"Ray Job-only queue\(s\) \[shared\]"):
+            cmd._parse_queues({"queue": "shared", "local": True})
+
+    def test_unconfigured_explicit_queue_remains_compatible_with_ray_core(
+        self, monkeypatch
+    ) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": "ray_job", "RAY_ADDRESS": "auto"},
+        )
+
+        assert cmd._parse_queues({"queue": "open-ended", "local": True}) == ["open-ended"]
+
+    def test_explicit_queue_does_not_import_unrelated_backend(self, monkeypatch) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": "ray_job", "RAY_ADDRESS": "auto"},
+        )
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "default": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["default"],
+                },
+                "unavailable": {
+                    "BACKEND": "missing_package.backends.UnavailableBackend",
+                    "QUEUES": ["other"],
+                },
+            },
+            raising=False,
+        )
+
+        assert cmd._parse_queues({"queue": "default", "local": True}) == ["default"]
+
+    def test_unavailable_ray_job_only_backend_fails_closed(self, monkeypatch) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": "ray_job", "RAY_ADDRESS": "auto"},
+        )
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "reserved": {
+                    "BACKEND": "missing_package.backends.UnavailableBackend",
+                    "QUEUES": ["ray-data"],
+                    "OPTIONS": {"RAY_JOB_ONLY": True},
+                }
+            },
+            raising=False,
+        )
+
+        with pytest.raises(CommandError, match="while validating RAY_JOB_ONLY"):
+            cmd._parse_queues({"queue": "ray-data", "local": True})
+
+    def test_non_ray_backend_ray_job_only_option_does_not_reserve_queue(self, monkeypatch) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "immediate": {
+                    "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
+                    "QUEUES": ["shared-option-name"],
+                    "OPTIONS": {"RAY_JOB_ONLY": True},
+                }
+            },
+            raising=False,
+        )
+
+        assert cmd._parse_queues({"queue": "shared-option-name", "local": True}) == [
+            "shared-option-name"
+        ]
+
+    def test_raw_ray_job_only_reservation_rejects_empty_queue_set(self, monkeypatch) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "reserved": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": [],
+                    "OPTIONS": {"RAY_JOB_ONLY": True},
+                }
+            },
+            raising=False,
+        )
+
+        with pytest.raises(CommandError, match="must declare at least one queue"):
+            cmd._parse_queues({"queue": "ray-data", "local": True})
+
+    @pytest.mark.parametrize("mode_options", [{}, {"local": True}])
+    def test_parse_queues_rejects_invalid_ray_job_only_policy(
+        self, monkeypatch, mode_options: dict[str, object]
+    ) -> None:
+        cmd = _make_command()
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {"RUNNER": "ray_job", "RAY_ADDRESS": "auto"},
+        )
+        monkeypatch.setattr(
+            django_settings,
+            "TASKS",
+            {
+                "jobs": {
+                    "BACKEND": "django_ray.backends.RayTaskBackend",
+                    "QUEUES": ["ray-data"],
+                    "OPTIONS": {"RAY_JOB_ONLY": "true"},
+                }
+            },
+            raising=False,
+        )
+
+        with pytest.raises(CommandError, match="RAY_JOB_ONLY.*boolean"):
+            cmd._parse_queues({"queue": "ray-data", **mode_options})
 
     def test_init_local_ray_clears_env_and_initializes(self, monkeypatch) -> None:
         cmd = _make_command()
@@ -1307,6 +1576,27 @@ class TestWorkerCommandRuntimeDb:
         assert processed == []
         assert task.state == TaskState.QUEUED
         assert task.claimed_by_worker is None
+
+    def test_claim_boundary_rejects_programmatic_ray_job_only_bypass(self) -> None:
+        cmd = _make_command(worker_id="wrong-runner-worker")
+        cmd.execution_mode = "local"
+        cmd._create_lease("ray-data")
+        task = RayTaskExecution.objects.create(
+            task_id="ray-job-only-claim-001",
+            callable_path="testproject.apps.cluster_tasks.tasks.ray_data_batch_score",
+            queue_name="ray-data",
+            state=TaskState.QUEUED,
+            args_json="[]",
+            kwargs_json="{}",
+        )
+
+        with pytest.raises(CommandError, match="cannot claim Ray Job-only"):
+            cmd.claim_and_process_tasks(["ray-data"], concurrency=1)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.QUEUED
+        assert task.claimed_by_worker is None
+        assert task.execution_generation == 0
 
     def test_sync_active_task_is_allowed_to_finish_after_signal(self) -> None:
         cmd = _make_command(worker_id="sync-shutdown-worker")
