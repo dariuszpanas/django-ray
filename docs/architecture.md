@@ -452,9 +452,11 @@ Notes:
 
 ## Delivery Semantics
 
-`django-ray` provides at-least-once execution semantics for retryable work. A task can be
-executed more than once when a worker, Ray worker, Ray head, network connection, or process dies
-after user code has performed side effects but before `django-ray` records the successful result.
+`django-ray` does not provide exactly-once execution. Queued work can expire or be
+cancelled before application code begins. Retryable work that does begin can execute
+more than once when a worker, Ray worker, Ray head, network connection, or process dies
+after user code has performed side effects but before `django-ray` records the
+successful result.
 
 For side-effecting tasks, use an application-level idempotency key such as the Django task id, an
 order id, or another operation id guarded by a unique constraint in the system being changed. Keep

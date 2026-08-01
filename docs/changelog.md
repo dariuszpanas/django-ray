@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade from 0.3.1
+
+Before starting 0.4.0 task managers:
+
+- Pause producers so no new rows are added, and preserve queued rows for the `0016`
+  policy review instead of submitting them merely to complete the upgrade. Quiesce new
+  claims while already claimed Ray Jobs and active workflows finish and reconcile, or
+  stop the old managers and verify remote quiescence before retrying uncertain work.
+  Then stop every old task manager and workflow coordinator. Do not start 0.4.0
+  processes yet.
+- Back up the database. With writers stopped, run migration `0015`'s duplicate-ID
+  preflight on a production-sized staging copy and budget for the unique-index build.
+  Preview the queued backlog before crossing migration `0016`; decide whether existing
+  queued work should receive the 24-hour default deadline or the deliberate
+  `DJANGO_RAY_EXISTING_QUEUED_UNLIMITED=1` opt-out.
+- Upgrade task managers, the Ray head, and every Ray worker together to Ray 2.56.0 or a
+  newer compatible release. Keep task managers and the cluster on the same Ray version
+  and Python minor version; do not operate a mixed Ray minor-version cluster. See
+  [Compatibility and Version Policy](compatibility.md#supported-versions).
+- Deploy 0.4.0 code to every producer, web/admin/retry process, task manager, and Ray
+  Job or RuntimeEnv execution environment while those processes remain stopped. Apply
+  django-ray migrations `0007` through `0018` with
+  `python manage.py migrate django_ray`, using the chosen `0016` backlog policy. Start
+  only the 0.4.0 fleet after every enqueue writer and task manager is upgraded; do not
+  run old and new writers, task managers, or workflow coordinators together.
+- Keep input spillover disabled until old Ray Job drivers are drained, and follow each
+  feature's reader-first activation guide before enabling input spillover or schema-v3
+  detail writes.
+- For RuntimeEnv encryption, deploy dual-read code and distribute the retained keys to
+  Django producers, task managers, retry APIs, and admin readers while writes remain
+  plaintext. Do not give database-encryption keys to generic Ray nodes. Enable encrypted
+  writes only after every required Django reader is ready.
+- Keep schema-v3 workflow detail publication default-off. The schema-v2 coordinator
+  remains the supported live writer; the stricter schema-v3 path is still an opt-in
+  pilot.
+- Drain pre-`0014` managers before relying on backend-alias Ray Job targets. Drain all
+  targeted tasks before reversing migration `0014` or rolling back to code that does
+  not preserve the immutable target.
+- Before a code rollback, stop new workflow coordinators and drain active workflows.
+  Retain migration `0018` during that rollback; reverse it only in a separate
+  stopped-writer maintenance window because reversal drops allocation metadata.
+
+See [Queue expiration](tasks.md#queue-expiration),
+[Durable Input Storage](reference/input-storage.md#rolling-upgrade),
+[Runtime Environment encryption](runtime-environments.md#roll-out-encrypted-writes),
+and the detailed [migration notes](#migration) before enabling their opt-in writers.
+
 ### Development scope
 
 - Supported execution remains synchronous, dynamic Ray Core, and Ray Job. The current
@@ -399,6 +446,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control also uses a high-contrast border, halo, and shadow on hover so its clickability
   remains apparent in stock Django Admin and Unfold, including dark and reduced-motion
   presentations.
+- The README and Getting Started guide now carry a newcomer through task definition,
+  enqueue, durable result refresh, and a first-production checklist. Reliability and
+  Ray ecosystem claims now state their supported boundaries, Celery migration is
+  surfaced at the decision point, and the 0.3.1 upgrade sequence appears before the
+  detailed unreleased history. Workflow retry guidance now states explicitly that 0.4
+  replays from the entry node and directs side-effecting stages to idempotency receipts,
+  an application outbox/reconciliation record, or separate durable task boundaries.
+  Execution-mode guidance now states that cluster Ray Core is owned by the task
+  manager's Ray Client connection and directs long or coarse connection-independent
+  work to Ray Jobs.
 - The direct local KubeRay exploratory profile now keeps one default/priority
   task manager and two fixed Ray workers while retaining dedicated sync and ML
   consumers, monitoring, encrypted RuntimeEnv coverage, and the complete

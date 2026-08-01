@@ -1,8 +1,9 @@
 # Retry and Error Handling
 
-django-ray provides at-least-once execution. A task can complete its side effect, lose
-its result before Django records success, and then run again. Task code must therefore
-be idempotent.
+django-ray does not provide exactly-once execution. Queued work can expire or be
+cancelled before application code runs. Once execution begins, a task can complete its
+side effect, lose its result before Django records success, and then run again. Task
+code must therefore be idempotent.
 
 ## Configure Retries
 
@@ -218,16 +219,26 @@ atomically cover a remote side effect.
 
 The outer Django task is the retry boundary for a Ray-native workflow. Internal leaves
 do not have independent durable retry rows. Retrying the outer task may repeat leaves
-that succeeded in the previous attempt.
+that succeeded in the previous attempt. django-ray 0.4 does not resume at the failed
+node, and a node's progress state is not proof that its external side effect and output
+were durably checkpointed.
 
 Use:
 
 - idempotent leaves for external changes;
-- explicit application checkpoints for expensive completed stages;
-- separate Django tasks when each child truly requires its own retry lifecycle;
+- a stable operation key plus the external system's idempotency receipt where one is
+  available;
+- an application-owned transaction/outbox or reconciliation record when a local write
+  coordinates an external request;
+- separate Django tasks when a side-effecting or expensive stage needs its own durable
+  retry, result, cancellation, and audit boundary;
 - Ray `max_retries` options only when a leaf-level retry is safe.
 
-Workflow progress is for observation, not recovery. See
+An application checkpoint can help task code avoid repeated pure computation, but it
+does not make django-ray skip the corresponding workflow node and cannot close the
+crash window between an accepted external request and receipt persistence. Treat an
+unknown external outcome as reconciliation work rather than automatically replaying or
+skipping it. Workflow progress is for observation, not recovery. See
 [Ray-Native Workflows](workflows.md#durability-semantics).
 The 0.4 Admin retry confirmation therefore states that a workflow starts again at its
 entry node. Successful nodes and output previews are not checkpoints, and django-ray

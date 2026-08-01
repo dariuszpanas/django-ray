@@ -22,6 +22,32 @@ PRIVATE_VULNERABILITY_REPORT_URL = (
 SECURITY_POLICY_URL = "https://github.com/dariuszpanas/django-ray/security/policy"
 
 
+def _markdown_heading_anchors(content: str) -> set[str]:
+    anchors: set[str] = set()
+    for heading in re.findall(r"^#{1,6}\s+(.+?)\s*$", content, re.MULTILINE):
+        plain = heading.replace("`", "").lower()
+        anchor = re.sub(r"[^\w\s-]", "", plain)
+        anchors.add(re.sub(r"[\s-]+", "-", anchor).strip("-"))
+    return anchors
+
+
+def _assert_markdown_link(source: Path, destination: str) -> None:
+    content = source.read_text(encoding="utf-8")
+    destinations = set(re.findall(r"\[[^\]]+\]\(([^)]+)\)", content))
+    assert destination in destinations
+
+
+def _assert_local_markdown_link(source: Path, destination: str) -> None:
+    _assert_markdown_link(source, destination)
+
+    relative, separator, fragment = destination.partition("#")
+    target = (source.parent / relative).resolve() if relative else source.resolve()
+    assert target.is_relative_to(ROOT.resolve())
+    assert target.is_file()
+    if separator:
+        assert fragment in _markdown_heading_anchors(target.read_text(encoding="utf-8"))
+
+
 def test_repository_llms_guide_matches_published_copy() -> None:
     assert (ROOT / "llms.txt").read_bytes() == (DOCS / "llms.txt").read_bytes()
 
@@ -130,6 +156,223 @@ def test_docs_use_one_rich_homepage_source() -> None:
     assert "## What is django-ray?" in homepage_text
     assert "assets/images/testproject-landing.png" in homepage_text
     assert "# Documentation source" not in homepage_text
+
+
+def test_safe_first_production_path_is_discoverable_and_explicit() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    getting_started = (DOCS / "getting-started.md").read_text(encoding="utf-8")
+    tasks = (DOCS / "tasks.md").read_text(encoding="utf-8")
+    retry = (DOCS / "retry.md").read_text(encoding="utf-8")
+    workflows = (DOCS / "workflows.md").read_text(encoding="utf-8")
+    worker_modes = (DOCS / "worker-modes.md").read_text(encoding="utf-8")
+    performance = (DOCS / "performance.md").read_text(encoding="utf-8")
+    architecture = (DOCS / "architecture.md").read_text(encoding="utf-8")
+    celery_migration = (DOCS / "celery-migration.md").read_text(encoding="utf-8")
+    runbook = (DOCS / "runbook.md").read_text(encoding="utf-8")
+    changelog = (DOCS / "changelog.md").read_text(encoding="utf-8")
+
+    quick_start = readme.split("## Quick Start", maxsplit=1)[1].split(
+        "## Worker Execution Modes", maxsplit=1
+    )[0]
+    assert '@task(queue_name="default")' in quick_start
+    assert "add_numbers.enqueue(20, 22)" in quick_start
+    assert 'task_backends["default"].get_result(enqueued.id)' in quick_start
+    _assert_markdown_link(
+        ROOT / "README.md",
+        "https://django-ray.readthedocs.io/en/latest/getting-started/",
+    )
+    _assert_markdown_link(
+        ROOT / "README.md",
+        "https://django-ray.readthedocs.io/en/latest/celery-migration/",
+    )
+    readme_destinations = re.findall(r"\[[^\]]+\]\(([^)]+)\)", readme)
+    assert readme_destinations
+    assert all(target.startswith(("https://", "http://")) for target in readme_destinations)
+    assert "not first-class adapters" in readme
+    assert "ensuring no tasks are lost" not in readme
+    assert "delivery is at least once" not in readme
+    assert "In a separate terminal, start the worker" in quick_start
+    assert quick_start.index("After the worker reports completion") < quick_start.index(
+        'task_backends["default"].get_result(enqueued.id)'
+    )
+    python_sources = re.findall(r"```python\n(.*?)\n```", quick_start, re.DOTALL)
+    assert python_sources
+    for source in python_sources:
+        ast.parse(source)
+
+    production = getting_started.split("## Before Production", maxsplit=1)[1].split(
+        "## A Real Django Task", maxsplit=1
+    )[0]
+    normalized_production = re.sub(
+        r"\s+",
+        " ",
+        re.sub(r"^>\s?", "", production, flags=re.MULTILINE),
+    )
+    for required_boundary in (
+        "Execution is not exactly once",
+        "expire or be cancelled before application code runs",
+        "work that starts may repeat after lost completion evidence",
+        "workflow retry starts again at its entry node",
+        "transaction.on_commit()",
+        "earliest eligibility time for one submission",
+        "Use PostgreSQL for production",
+        "Every queue selected by a producer",
+        "Queued work expires after 24 hours by default",
+        "use an unlimited queue only with idempotent tasks",
+        "Cluster Ray Core uses Ray Client",
+        "outer django-ray retry is a replay, not a resume",
+    ):
+        assert required_boundary in normalized_production
+    assert "Execution is at least once" not in normalized_production
+    _assert_local_markdown_link(
+        DOCS / "getting-started.md", "retry.md#make-side-effects-idempotent"
+    )
+    _assert_local_markdown_link(
+        DOCS / "getting-started.md", "tasks.md#enqueue-after-a-database-commit"
+    )
+    _assert_local_markdown_link(DOCS / "getting-started.md", "retry.md#workflow-retries")
+    _assert_local_markdown_link(DOCS / "getting-started.md", "worker-modes.md#cluster-ray-core")
+    _assert_local_markdown_link(DOCS / "getting-started.md", "workflows.md#durability-semantics")
+    _assert_local_markdown_link(DOCS / "getting-started.md", "queues.md#run-queue-specific-workers")
+    _assert_local_markdown_link(DOCS / "getting-started.md", "tasks.md#queue-expiration")
+    assert "partial(send_email.enqueue, to=to, subject=subject, body=body)" in tasks
+    normalized_queue_expiration = re.sub(
+        r"\s+",
+        " ",
+        tasks.split("## Queue expiration", maxsplit=1)[1].split(
+            "## Reading Current Status", maxsplit=1
+        )[0],
+    )
+    for required_expiration_boundary in (
+        "row becomes ineligible for a task claim",
+        "during a subsequent bounded sweep",
+        "remain visibly `QUEUED` past its deadline",
+        "will not execute when the worker restarts",
+    ):
+        assert required_expiration_boundary in normalized_queue_expiration
+    transaction_section = tasks.split("### Enqueue after a database commit", maxsplit=1)[1].split(
+        "## Priority", maxsplit=1
+    )[0]
+    transaction_sources = re.findall(r"```python\n(.*?)\n```", transaction_section, re.DOTALL)
+    assert len(transaction_sources) == 1
+    ast.parse(transaction_sources[0])
+
+    normalized_retry = re.sub(r"\s+", " ", retry)
+    assert "does not provide exactly-once execution" in normalized_retry
+    assert "Queued work can expire or be cancelled before application code runs" in normalized_retry
+    assert "provides at-least-once execution" not in normalized_retry
+    normalized_architecture = re.sub(r"\s+", " ", architecture)
+    normalized_celery_migration = re.sub(r"\s+", " ", celery_migration)
+    normalized_runbook = re.sub(r"\s+", " ", runbook)
+    for current_contract in (
+        normalized_architecture,
+        normalized_celery_migration,
+        normalized_runbook,
+    ):
+        assert "Queued work can expire or be cancelled before application code" in current_contract
+    assert "does not provide exactly-once execution" in normalized_architecture
+    assert (
+        "work that starts may be replayed after uncertain completion" in normalized_celery_migration
+    )
+    assert "Treat started production work as replayable, not exactly once" in normalized_runbook
+
+    workflow_retry = retry.split("## Workflow Retries", maxsplit=1)[1].split(
+        "## Lost and Stuck Work", maxsplit=1
+    )[0]
+    normalized_workflow_retry = re.sub(r"\s+", " ", workflow_retry)
+    for required_boundary in (
+        "does not resume at the failed node",
+        "progress state is not proof",
+        "external system's idempotency receipt",
+        "transaction/outbox or reconciliation record",
+        "unknown external outcome as reconciliation work",
+    ):
+        assert required_boundary in normalized_workflow_retry
+    durability = workflows.split("## Durability Semantics", maxsplit=1)[1].split(
+        "## Test Project Examples", maxsplit=1
+    )[0]
+    normalized_durability = re.sub(r"\s+", " ", durability)
+    for required_boundary in (
+        "reruns the workflow from its entry node",
+        "diagnostic evidence",
+        "Durable selective stage resume remains a planned extension",
+        "Never infer that an external effect is safe to skip or repeat",
+    ):
+        assert required_boundary in normalized_durability
+
+    normalized_worker_modes = re.sub(r"\s+", " ", worker_modes)
+    for required_client_boundary in (
+        "Ray Client is not an independent job lifecycle",
+        "30-second reconnect grace period by default",
+        "RAY_CLIENT_RECONNECT_GRACE_PERIOD",
+        "terminating its in-flight workload",
+        "retry starts a new attempt",
+        "recommends Ray Jobs for long-running work",
+        "Train, Tune, RLlib, or other component-owned lifecycles",
+        "Keep them off Ray Client",
+        "driver independent of the task-manager connection",
+    ):
+        assert required_client_boundary in normalized_worker_modes
+    _assert_markdown_link(
+        DOCS / "worker-modes.md",
+        "https://docs.ray.io/en/latest/cluster/running-applications/job-submission/ray-client.html",
+    )
+    assert "Cluster mode is tied to the task manager's Ray Client connection" in readme
+    assert "disconnect beyond Ray's reconnect grace period" in re.sub(r"\s+", " ", workflows)
+    normalized_performance = re.sub(r"\s+", " ", performance)
+    assert "task-manager connection is part of the workload lifetime" in normalized_performance
+    assert "Prefer Ray Job" in normalized_performance
+
+    assert changelog.index("### Upgrade from 0.3.1") < changelog.index("### Development scope")
+    upgrade = changelog.split("### Upgrade from 0.3.1", maxsplit=1)[1].split(
+        "### Development scope", maxsplit=1
+    )[0]
+    normalized_upgrade = re.sub(r"\s+", " ", upgrade)
+    for required_upgrade_step in (
+        "migrations `0007` through `0018`",
+        "Then stop every old task manager and workflow coordinator",
+        "preserve queued rows for the `0016` policy review",
+        "instead of submitting them merely to complete the upgrade",
+        "Quiesce new claims while already claimed Ray Jobs and active workflows finish",
+        "run migration `0015`'s duplicate-ID preflight",
+        "Preview the queued backlog before crossing migration `0016`",
+        "24-hour default deadline or the deliberate `DJANGO_RAY_EXISTING_QUEUED_UNLIMITED=1` opt-out",
+        "Ray 2.56.0 or a newer compatible release",
+        "Start only the 0.4.0 fleet after every enqueue writer and task manager is upgraded",
+        "do not run old and new writers, task managers, or workflow coordinators together",
+        "before enabling input spillover",
+        "schema-v3 workflow detail publication default-off",
+        "Drain pre-`0014` managers",
+        "Retain migration `0018` during that rollback",
+    ):
+        assert required_upgrade_step in normalized_upgrade
+    pause_index = normalized_upgrade.index("Pause producers")
+    migration_preflight_index = normalized_upgrade.index(
+        "run migration `0015`'s duplicate-ID preflight"
+    )
+    queue_policy_index = normalized_upgrade.index(
+        "Preview the queued backlog before crossing migration `0016`"
+    )
+    ray_upgrade_index = normalized_upgrade.index("Upgrade task managers, the Ray head")
+    migration_apply_index = normalized_upgrade.index(
+        "Apply django-ray migrations `0007` through `0018`"
+    )
+    fleet_start_index = normalized_upgrade.index("Start only the 0.4.0 fleet")
+    assert (
+        pause_index
+        < migration_preflight_index
+        < queue_policy_index
+        < ray_upgrade_index
+        < migration_apply_index
+        < fleet_start_index
+    )
+    _assert_local_markdown_link(DOCS / "changelog.md", "reference/input-storage.md#rolling-upgrade")
+    _assert_local_markdown_link(
+        DOCS / "changelog.md",
+        "runtime-environments.md#roll-out-encrypted-writes",
+    )
+    _assert_local_markdown_link(DOCS / "changelog.md", "tasks.md#queue-expiration")
+    _assert_local_markdown_link(DOCS / "changelog.md", "compatibility.md#supported-versions")
 
 
 def test_settings_reference_tracks_every_package_default() -> None:
