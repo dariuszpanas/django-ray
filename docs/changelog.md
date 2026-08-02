@@ -485,6 +485,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker-ID lock order used by recovery; generic lease deletion is disabled so it
   cannot bypass that fence, and view-only Admin users cannot invoke either controlled
   action.
+- External result retrieval now fails closed unless a reference has the exact canonical
+  scheme, authority, digest-derived path/key, query, and byte count for the configured
+  filesystem, S3, or GCS namespace. A configuration-bound migration reader retains the
+  raw object-key encoding emitted by v0.2/v0.3. Provider/stat sizes and bounded raw reads
+  are byte-count and SHA-256 verified before UTF-8 decode; concurrent filesystem writers
+  atomically install complete objects, including on volumes without hard-link support,
+  without replacing corrupt content. S3 and GCS writes are also create-only, collision
+  reuse requires an integrity-verified read, GCS reads pin the checked generation, and
+  cleanup deletes only the verified S3 ETag or GCS generation. Startup validates active
+  and retained namespaces, while bounded errors omit references, payloads,
+  credentials, and backend exception chains. Task-input references now share that
+  exact pre-client grammar, keep malformed query tokens out of durable tracebacks,
+  and dispatch historical reads and cleanup to configured retained schemes. Startup
+  also rejects identical input/result filesystem roots, S3 endpoint/bucket/prefix
+  namespaces, or GCS bucket/prefix namespaces, preventing input retention from
+  deleting a still-referenced result. Execution Admin reference fields now use the
+  same bounded redaction as attempt diagnostics.
 - `django_ray_worker --all-queues` now discovers and deduplicates queues across
   every configured django-ray backend alias while ignoring Celery and other
   backends. Queue selectors and explicit execution-mode flags are mutually

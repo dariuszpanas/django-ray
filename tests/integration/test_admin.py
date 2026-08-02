@@ -327,22 +327,48 @@ class TestRayTaskExecutionAdmin:
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.FAILED,
             args_json='[{"password":"admin-secret"}]',
+            input_reference="password=input-reference-secret",
             result_data='{"password":"result-secret"}',
+            result_reference="password=result-reference-secret",
             error_message="password=error-secret",
         )
 
         rendered = " ".join(
             (
                 admin_obj.args_json_display(task),
+                admin_obj.input_reference_display(task),
                 admin_obj.result_data_display(task),
+                admin_obj.result_reference_display(task),
                 admin_obj.error_message_display(task),
             )
         )
 
         assert "admin-secret" not in rendered
+        assert "input-reference-secret" not in rendered
         assert "result-secret" not in rendered
+        assert "result-reference-secret" not in rendered
         assert "error-secret" not in rendered
         assert "[REDACTED]" in rendered
+        assert "input_reference" not in admin_obj.readonly_fields
+        assert "result_reference" not in admin_obj.readonly_fields
+        fieldset_fields = {
+            field for _, options in admin_obj.fieldsets for field in options.get("fields", ())
+        }
+        assert "input_reference" not in fieldset_fields
+        assert "result_reference" not in fieldset_fields
+        assert {"input_reference_display", "result_reference_display"} <= fieldset_fields
+
+    def test_execution_references_are_bounded(self) -> None:
+        admin_obj = _task_admin()
+        task = RayTaskExecution(
+            input_reference="i" * (ADMIN_DIAGNOSTIC_MAX_CHARS + 100),
+            result_reference="r" * (ADMIN_DIAGNOSTIC_MAX_CHARS + 100),
+        )
+
+        assert admin_obj.input_reference_display(task).endswith("... [truncated]")
+        assert admin_obj.result_reference_display(task).endswith("... [truncated]")
+        assert len(admin_obj.input_reference_display(task)) <= ADMIN_DIAGNOSTIC_MAX_CHARS
+        assert len(admin_obj.result_reference_display(task)) <= ADMIN_DIAGNOSTIC_MAX_CHARS
 
     def test_runtime_env_snapshot_is_not_presented_in_admin(self) -> None:
         admin_obj = _task_admin()

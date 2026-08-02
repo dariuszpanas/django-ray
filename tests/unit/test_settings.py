@@ -448,6 +448,183 @@ class TestValidateSettings:
         )
 
     @pytest.mark.parametrize(
+        "prefix",
+        ["/results", "results/", "results//private", "../results", "results\\private"],
+        ids=(
+            "leading-slash",
+            "trailing-slash",
+            "empty-segment",
+            "parent-segment",
+            "backslash",
+        ),
+    )
+    def test_validate_result_storage_rejects_noncanonical_active_namespace(
+        self,
+        prefix: str,
+    ) -> None:
+        with pytest.raises(ImproperlyConfigured, match="RESULT_STORAGE_S3_PREFIX"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "RESULT_STORAGE_BACKEND": "s3",
+                    "RESULT_STORAGE_S3_BUCKET": "results",
+                    "RESULT_STORAGE_S3_PREFIX": prefix,
+                }
+            )
+
+    def test_validate_storage_rejects_reference_namespace_that_cannot_fit(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="RESULT_STORAGE_S3_PREFIX"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "RESULT_STORAGE_BACKEND": "s3",
+                    "RESULT_STORAGE_S3_BUCKET": "results",
+                    "RESULT_STORAGE_S3_PREFIX": "é" * 80,
+                }
+            )
+
+    def test_validate_storage_checks_retained_inactive_reader_namespaces(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="RESULT_STORAGE_S3_PREFIX"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "RESULT_STORAGE_BACKEND": "digest",
+                    "RESULT_STORAGE_S3_BUCKET": "historical-results",
+                    "RESULT_STORAGE_S3_PREFIX": "../historical",
+                }
+            )
+
+        with pytest.raises(ImproperlyConfigured, match="RESULT_STORAGE_GCS_BUCKET"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "RESULT_STORAGE_BACKEND": "digest",
+                    "RESULT_STORAGE_GCS_PREFIX": "historical/results",
+                }
+            )
+
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "RESULT_STORAGE_BACKEND": "digest",
+                "RESULT_STORAGE_S3_BUCKET": "historical-results",
+                "RESULT_STORAGE_S3_PREFIX": "tenant alpha/résults+100%",
+            }
+        )
+
+    @pytest.mark.parametrize(
+        ("storage_settings", "message"),
+        [
+            (
+                {
+                    "RESULT_STORAGE_BACKEND": "filesystem",
+                    "RESULT_STORAGE_FILESYSTEM_PATH": "shared/../shared",
+                    "INPUT_STORAGE_BACKEND": "filesystem",
+                    "INPUT_STORAGE_FILESYSTEM_PATH": "shared",
+                },
+                "INPUT_STORAGE_FILESYSTEM_PATH",
+            ),
+            (
+                {
+                    "RESULT_STORAGE_BACKEND": "digest",
+                    "RESULT_STORAGE_S3_BUCKET": "shared",
+                    "RESULT_STORAGE_S3_PREFIX": "artifacts",
+                    "RESULT_STORAGE_S3_ENDPOINT_URL": "https://storage.example.test/",
+                    "INPUT_STORAGE_BACKEND": "s3",
+                    "INPUT_STORAGE_S3_BUCKET": "shared",
+                    "INPUT_STORAGE_S3_PREFIX": "artifacts",
+                    "INPUT_STORAGE_S3_ENDPOINT_URL": "https://storage.example.test",
+                },
+                "INPUT_STORAGE_S3_PREFIX",
+            ),
+            (
+                {
+                    "RESULT_STORAGE_BACKEND": "gcs",
+                    "RESULT_STORAGE_GCS_BUCKET": "shared",
+                    "RESULT_STORAGE_GCS_PREFIX": "artifacts",
+                    "INPUT_STORAGE_BACKEND": "gcs",
+                    "INPUT_STORAGE_GCS_BUCKET": "shared",
+                    "INPUT_STORAGE_GCS_PREFIX": "artifacts",
+                },
+                "INPUT_STORAGE_GCS_PREFIX",
+            ),
+        ],
+    )
+    def test_validate_storage_rejects_input_result_namespace_reuse(
+        self,
+        storage_settings: dict[str, object],
+        message: str,
+    ) -> None:
+        with pytest.raises(ImproperlyConfigured, match=message):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    **storage_settings,
+                }
+            )
+
+    def test_validate_storage_allows_disjoint_prefixes_in_one_bucket(self) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "RESULT_STORAGE_BACKEND": "s3",
+                "RESULT_STORAGE_S3_BUCKET": "shared",
+                "RESULT_STORAGE_S3_PREFIX": "results",
+                "INPUT_STORAGE_BACKEND": "s3",
+                "INPUT_STORAGE_S3_BUCKET": "shared",
+                "INPUT_STORAGE_S3_PREFIX": "inputs",
+            }
+        )
+
+    def test_validate_storage_allows_same_s3_keys_on_distinct_endpoints(self) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "RESULT_STORAGE_BACKEND": "s3",
+                "RESULT_STORAGE_S3_BUCKET": "shared",
+                "RESULT_STORAGE_S3_PREFIX": "artifacts",
+                "RESULT_STORAGE_S3_ENDPOINT_URL": "https://results.example.test/",
+                "INPUT_STORAGE_BACKEND": "s3",
+                "INPUT_STORAGE_S3_BUCKET": "shared",
+                "INPUT_STORAGE_S3_PREFIX": "artifacts",
+                "INPUT_STORAGE_S3_ENDPOINT_URL": "https://inputs.example.test",
+            }
+        )
+
+    def test_validate_storage_transport_options_alone_do_not_declare_namespace(self) -> None:
+        validate_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "RESULT_STORAGE_BACKEND": "digest",
+                "RESULT_STORAGE_S3_REGION": "us-west-2",
+                "RESULT_STORAGE_S3_ENDPOINT_URL": "https://s3.example.test",
+                "INPUT_STORAGE_S3_REGION": "us-west-2",
+                "INPUT_STORAGE_S3_ENDPOINT_URL": "https://s3.example.test",
+            }
+        )
+
+    def test_validate_storage_checks_input_namespace_before_task_execution(self) -> None:
+        with pytest.raises(ImproperlyConfigured, match="INPUT_STORAGE_S3_PREFIX"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "INPUT_STORAGE_BACKEND": "s3",
+                    "INPUT_STORAGE_S3_BUCKET": "inputs",
+                    "INPUT_STORAGE_S3_PREFIX": "/inputs",
+                }
+            )
+
+        with pytest.raises(ImproperlyConfigured, match="INPUT_STORAGE_GCS_PREFIX"):
+            validate_settings(
+                {
+                    "RAY_ADDRESS": "ray://localhost:10001",
+                    "INPUT_STORAGE_BACKEND": "gcs",
+                    "INPUT_STORAGE_GCS_BUCKET": "inputs",
+                    "INPUT_STORAGE_GCS_PREFIX": "é" * 80,
+                }
+            )
+
+    @pytest.mark.parametrize(
         ("overrides", "message"),
         [
             ({"MAX_INLINE_INPUT_SIZE_BYTES": 100}, "MAX_INLINE_INPUT_SIZE_BYTES"),

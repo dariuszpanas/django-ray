@@ -240,6 +240,15 @@ digest-only storage is not valid for inputs. See
 [Durable Input Storage](reference/input-storage.md) for rollout, retention, and backend
 requirements.
 
+Input references use the same exact canonical grammar and configuration-bound object authority as
+results, and validation completes before storage-client or credential-provider initialization.
+New writes use `INPUT_STORAGE_BACKEND`; reads and cleanup can continue dispatching to a configured
+retained namespace with a different scheme. Same-scheme bucket/prefix and filesystem-root changes
+require the migration sequence in the input-storage reference. Input and result storage must use
+different filesystem roots or different object-store namespaces because input retention is allowed
+to delete objects; identical configured namespaces fail startup validation. An S3-compatible
+endpoint is part of that namespace identity, while the signing region is not.
+
 ### Results
 
 | Setting | Type | Default | Description |
@@ -265,6 +274,16 @@ When `RESULT_STORAGE_BACKEND` is:
 `filesystem`, `s3`, and `gcs` references when the reading process has the same
 storage configuration and credentials available. `digest` references remain
 metadata-only and do not restore the original return value.
+
+External references are authorized against the current filesystem root or object-store
+bucket and prefix, then verified against their exact UTF-8 byte count and SHA-256 digest
+before use. Bucket, prefix, or filesystem-root changes therefore require the rotation
+procedure in [Result Storage](reference/result-storage.md#configuration-rotation-and-legacy-references);
+namespace-mismatched references fail closed. Startup validates active writers and any
+configured inactive namespaces retained for historical reads. Prefixes must be canonical
+and capable of producing references that fit the database field. The only non-canonical
+read compatibility is the encoding-only S3/GCS format produced by django-ray 0.2 and 0.3;
+see the migration procedure in the linked reference.
 
 Optional install extras:
 

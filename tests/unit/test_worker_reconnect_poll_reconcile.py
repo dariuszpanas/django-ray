@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from io import StringIO
 from types import SimpleNamespace
 from typing import Any, cast
+from urllib.parse import quote
 
 import pytest
 from django.db import transaction
@@ -1573,6 +1574,67 @@ class TestWorkerReconnectPollReconcile:
         assert task.cancellation_status == CancellationStatus.INDETERMINATE
         assert task.cancellation_error == "stop outcome unknown"
 
+    def test_mismatched_submission_canonicalizes_legacy_success_reference(
+        self,
+        monkeypatch,
+    ) -> None:
+        digest = "a" * 64
+        prefix = "tenant alpha/résults+100%"
+        key = f"{prefix}/{digest[:2]}/{digest[2:4]}/{digest}.json"
+        legacy_reference = f"s3://historical-results/{key}?bytes=256"
+        canonical_reference = f"s3://historical-results/{quote(key, safe='/-._~')}?bytes=256"
+        cmd = _make_command()
+        task = RayTaskExecution.objects.create(
+            task_id="ray-job-mismatch-legacy-success-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            claimed_by_worker=cmd.worker_id,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_mismatch_legacy_reserved",
+            ray_address="ray://cluster:10001",
+            attempt_number=2,
+            execution_generation=7,
+            completion_data=json.dumps(
+                {
+                    "success": True,
+                    "result": None,
+                    "result_reference": legacy_reference,
+                }
+            ),
+        )
+        reserved_handle = _ray_job_handle(
+            task,
+            task.ray_job_id or "",
+            task.ray_address or "",
+        )
+        monkeypatch.setattr(
+            "django_ray.result_storage.get_settings",
+            lambda: {
+                "RESULT_STORAGE_BACKEND": "gcs",
+                "RESULT_STORAGE_S3_BUCKET": "historical-results",
+                "RESULT_STORAGE_S3_PREFIX": prefix,
+            },
+        )
+
+        handled = cmd._terminalize_mismatched_ray_job_submission(
+            task,
+            reserved_handle=reserved_handle,
+            expected_worker_id=cmd.worker_id,
+            expected_attempt_number=2,
+            expected_execution_generation=7,
+            error_message="Ray returned another identity",
+            exception_type="RayJobSubmissionIdentityMismatch",
+            cancellation=CancellationOutcome(CancellationOutcomeStatus.NOT_APPLICABLE),
+        )
+
+        assert handled is True
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data is None
+        assert task.result_reference == canonical_reference
+
     def test_mismatched_submission_stops_observed_before_durable_job_on_abort(
         self,
     ) -> None:
@@ -2118,6 +2180,59 @@ class TestWorkerReconnectPollReconcile:
         )
         assert task.error_message is None
         assert task.error_traceback is None
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_canonicalizes_authorized_legacy_result_reference(self, monkeypatch) -> None:
+        digest = "a" * 64
+        prefix = "tenant alpha/résults+100%"
+        key = f"{prefix}/{digest[:2]}/{digest[2:4]}/{digest}.json"
+        legacy_reference = f"s3://historical-results/{key}?bytes=256"
+        canonical_reference = f"s3://historical-results/{quote(key, safe='/-._~')}?bytes=256"
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-legacy-result-reference-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_legacy_result_reference_001",
+            completion_data=json.dumps(
+                {
+                    "success": True,
+                    "result": None,
+                    "result_reference": legacy_reference,
+                }
+            ),
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        monkeypatch.setattr(
+            "django_ray.result_storage.get_settings",
+            lambda: {
+                "RESULT_STORAGE_BACKEND": "gcs",
+                "RESULT_STORAGE_S3_BUCKET": "historical-results",
+                "RESULT_STORAGE_S3_PREFIX": prefix,
+            },
+        )
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                pytest.fail("the durable completion envelope should be consumed before Ray RPC")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            "django_ray.result_storage.S3ResultStorage.__init__",
+            lambda *_args, **_kwargs: pytest.fail(
+                "completion validation must not initialize an SDK"
+            ),
+        )
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data is None
+        assert task.result_reference == canonical_reference
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_consumes_completion_while_ray_still_reports_running(

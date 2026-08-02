@@ -328,6 +328,23 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
             "django-ray: INPUT_STORAGE_GCS_BUCKET is required when INPUT_STORAGE_BACKEND='gcs'"
         )
 
+    # Storage references are durable protocol data. Validate both the active
+    # writer and any retained reader namespaces during startup so an invalid
+    # writer cannot silently fall back to digest-only references and historical
+    # objects do not fail only after a task needs them.
+    from django_ray.result_storage import (
+        ResultStorageError,
+        validate_storage_configuration,
+    )
+
+    storage_configuration_error: str | None = None
+    try:
+        validate_storage_configuration(config)
+    except ResultStorageError as error:
+        storage_configuration_error = str(error)
+    if storage_configuration_error is not None:
+        raise ImproperlyConfigured(f"django-ray: {storage_configuration_error}")
+
     redact_patterns = config.get("REDACT_PATTERNS")
     if redact_patterns is not None:
         if isinstance(redact_patterns, str):

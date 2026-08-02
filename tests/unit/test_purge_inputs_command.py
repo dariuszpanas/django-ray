@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from datetime import timedelta
 from io import StringIO
@@ -18,6 +19,10 @@ from django_ray.models import InputPayloadState, RayTaskExecution, TaskInputPayl
 
 def _reference(suffix: str) -> str:
     return f"inputfs://sha256/{suffix * 64}?bytes=128"
+
+
+def _fingerprint(reference: str) -> str:
+    return hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16]
 
 
 def _payload(reference: str, *, age_days: int = 60) -> TaskInputPayload:
@@ -77,7 +82,8 @@ def test_purge_inputs_is_dry_run_by_default() -> None:
     assert payload.state == InputPayloadState.ACTIVE
     assert payload.purged_at is None
     assert execution.input_reference == reference
-    assert f"Would purge input payload {reference}" in stdout.getvalue()
+    assert f"reference_sha256={_fingerprint(reference)}" in stdout.getvalue()
+    assert reference not in stdout.getvalue()
     assert "1 eligible, 0 purged, 0 failed" in stdout.getvalue()
 
 
@@ -112,6 +118,8 @@ def test_delete_tombstones_registry_and_retains_execution_reference(
     assert first.input_reference == reference
     assert second.input_reference == reference
     assert third.input_reference == reference
+    assert f"reference_sha256={_fingerprint(reference)}" in stdout.getvalue()
+    assert reference not in stdout.getvalue()
     assert "1 eligible, 1 purged, 0 failed" in stdout.getvalue()
 
 
@@ -183,8 +191,10 @@ def test_delete_failure_is_recorded_and_reported(monkeypatch: pytest.MonkeyPatch
     payload.refresh_from_db()
     assert payload.state == InputPayloadState.ACTIVE
     assert payload.purged_at is None
-    assert payload.cleanup_error == "OSError: storage unavailable"
-    assert f"Failed to purge input payload {reference}" in stderr.getvalue()
+    assert payload.cleanup_error == "OSError"
+    assert f"reference_sha256={_fingerprint(reference)}" in stderr.getvalue()
+    assert reference not in stderr.getvalue()
+    assert "storage unavailable" not in stderr.getvalue()
 
 
 @pytest.mark.django_db
@@ -208,6 +218,13 @@ def test_recent_and_already_purged_registry_entries_are_not_candidates() -> None
 def test_negative_retention_is_rejected() -> None:
     with pytest.raises(CommandError, match="zero or greater"):
         call_command("django_ray_purge_inputs", retention_days=-1)
+
+
+def test_cleanup_error_class_name_is_bounded_and_safe() -> None:
+    unsafe_error = type("Credential\nLeak", (Exception,), {})()
+
+    assert Command._format_cleanup_error(unsafe_error) == "Exception"
+    assert Command._format_cleanup_error(OSError("private path")) == "OSError"
 
 
 @pytest.mark.django_db

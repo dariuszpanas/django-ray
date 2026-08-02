@@ -686,9 +686,9 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         "last_heartbeat_at",
         "args_json_display",
         "kwargs_json_display",
-        "input_reference",
+        "input_reference_display",
         "result_data_display",
-        "result_reference",
+        "result_reference_display",
         "completion_data_display",
         "cancellation_status",
         "cancellation_error",
@@ -720,7 +720,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         (
             "Arguments",
             {
-                "fields": ("args_json_display", "kwargs_json_display", "input_reference"),
+                "fields": (
+                    "args_json_display",
+                    "kwargs_json_display",
+                    "input_reference_display",
+                ),
                 "classes": ("collapse",),
             },
         ),
@@ -729,7 +733,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             {
                 "fields": (
                     "result_data_display",
-                    "result_reference",
+                    "result_reference_display",
                     "completion_data_display",
                     "cancellation_status",
                     "cancellation_error",
@@ -1966,9 +1970,17 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     def kwargs_json_display(self, obj: RayTaskExecution) -> str:
         return self._redacted_json(obj.kwargs_json)
 
+    @admin.display(description="Input reference")
+    def input_reference_display(self, obj: RayTaskExecution) -> str:
+        return _bounded_redacted_text(obj.input_reference)
+
     @admin.display(description="Result")
     def result_data_display(self, obj: RayTaskExecution) -> str:
         return self._redacted_json(obj.result_data)
+
+    @admin.display(description="Result reference")
+    def result_reference_display(self, obj: RayTaskExecution) -> str:
+        return _bounded_redacted_text(obj.result_reference)
 
     @admin.display(description="Progress")
     def progress_data_display(self, obj: RayTaskExecution) -> str:
