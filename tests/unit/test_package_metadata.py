@@ -58,13 +58,19 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
         / "django_ray"
         / "raytaskexecution"
         / "change_form.html",
+        package_root / "templates" / "admin" / "django_ray" / "taskattempt" / "change_form.html",
+        package_root / "templates" / "admin" / "django_ray" / "sensitive_task_data.html",
+        package_root / "templates" / "admin" / "django_ray" / "sensitive_task_data_limit.html",
         package_root / "static" / "django_ray" / "admin" / "task_live.css",
         package_root / "static" / "django_ray" / "admin" / "task_live.js",
         package_root / "static" / "django_ray" / "admin" / "workflow_diagnostics.js",
+        package_root / "static" / "django_ray" / "admin" / "sensitive_task_data.css",
     ]
     assert all(asset.is_file() and asset.is_relative_to(package_root) for asset in expected_assets)
 
-    stylesheet = expected_assets[1].read_text(encoding="utf-8")
+    stylesheet = (package_root / "static" / "django_ray" / "admin" / "task_live.css").read_text(
+        encoding="utf-8"
+    )
     assert "#django-ray-live-observability" in stylesheet
     assert "grid-template-columns" in stylesheet
     assert ":focus-visible" in stylesheet
@@ -137,7 +143,9 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
     assert auto_dark_variables == explicit_dark_variables
     assert 'data-state="EXPIRED"' in stylesheet
 
-    script = expected_assets[2].read_text(encoding="utf-8")
+    script = (package_root / "static" / "django_ray" / "admin" / "task_live.js").read_text(
+        encoding="utf-8"
+    )
     assert "setTimeout(refresh, 3000)" in script
     assert "document.hidden" in script
     assert 'credentials: "same-origin"' in script
@@ -146,7 +154,9 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
     assert "innerHTML" not in script
     assert all(state in script for state in ("SUCCEEDED", "FAILED", "CANCELLED", "LOST", "EXPIRED"))
 
-    diagnostics_script = expected_assets[3].read_text(encoding="utf-8")
+    diagnostics_script = (
+        package_root / "static" / "django_ray" / "admin" / "workflow_diagnostics.js"
+    ).read_text(encoding="utf-8")
     assert "django-ray-workflow-diagnostics" in diagnostics_script
     assert 'credentials: "same-origin"' in diagnostics_script
     assert 'cache: "no-store"' in diagnostics_script

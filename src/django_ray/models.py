@@ -316,6 +316,12 @@ class RayTaskExecution(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        permissions = [
+            (
+                "view_sensitive_task_data",
+                "Can view unredacted task data",
+            )
+        ]
         indexes = [
             models.Index(
                 fields=["state", "queue_name", "run_after"],

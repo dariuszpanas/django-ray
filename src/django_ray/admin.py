@@ -92,6 +92,8 @@ DjangoRayTabularInline = cast(Any, _ConfiguredTabularInline)
 RAY_DASHBOARD_URL = "http://localhost:8265"
 ADMIN_DIAGNOSTIC_MAX_CHARS = 4096
 ADMIN_ATTEMPT_INLINE_MAX_CHARS = 512
+ADMIN_SENSITIVE_DIAGNOSTIC_FIELD_MAX_BYTES = 64 * 1024
+ADMIN_SENSITIVE_DIAGNOSTIC_RESPONSE_MAX_BYTES = 4 * 1024 * 1024
 ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES = 16 * 1024
 ADMIN_WORKFLOW_PLAN_DOWNLOAD_MAX_BYTES = 128 * 1024
 ADMIN_WORKFLOW_PLAN_SELECTION_DOWNLOAD_MAX_BYTES = 32 * 1024
@@ -108,6 +110,38 @@ _ADMIN_RETRY_CONFIRMATION_SALT = "django_ray.admin.retry-confirmation.v1"
 _ADMIN_RETRY_CONFIRMATION_MAX_TOKEN_CHARS = 512
 _ADMIN_RETRY_CONFIRMATION_SESSION_KEY = "django_ray_admin_retry_confirmation_nonce_v1"
 _ADMIN_RETRY_CONFIRMATION_SESSION_NONCE = re.compile(r"[A-Za-z0-9_-]{43}")
+_ADMIN_SENSITIVE_PERMISSION = "django_ray.view_sensitive_task_data"
+_ADMIN_SENSITIVE_RESPONSE_OVERHEAD_BYTES = 64 * 1024
+_ADMIN_SENSITIVE_HTML_EXPANSION_FACTOR = 6
+_ADMIN_SENSITIVE_EXECUTION_SECTIONS = (
+    (
+        "Task input",
+        (
+            ("Arguments", "args_json"),
+            ("Keyword arguments", "kwargs_json"),
+            ("Input reference", "input_reference"),
+        ),
+    ),
+    (
+        "Task outcome",
+        (
+            ("Result", "result_data"),
+            ("Result reference", "result_reference"),
+            ("Cancellation error", "cancellation_error"),
+            ("Error", "error_message"),
+            ("Traceback", "error_traceback"),
+        ),
+    ),
+)
+_ADMIN_SENSITIVE_ATTEMPT_OUTCOME_SECTION = (
+    "Attempt outcome",
+    (
+        ("Result", "result_data"),
+        ("Result reference", "result_reference"),
+        ("Error", "error_message"),
+        ("Traceback", "error_traceback"),
+    ),
+)
 _WORKFLOW_PROGRESS_MESSAGES = {
     "NOT_REPORTED": "No workflow progress snapshot has been reported.",
     "REQUESTED_NOT_REPORTED": (
@@ -468,6 +502,169 @@ def _bounded_redacted_json(value: str | None) -> str:
     )
 
 
+def _sensitive_annotation_name(field_name: str, suffix: str) -> str:
+    return f"admin_sensitive_{field_name}_{suffix}"
+
+
+def _bounded_sensitive_object(
+    queryset: QuerySet[Any],
+    *,
+    pk: Any,
+    field_names: tuple[str, ...],
+    identity_fields: tuple[str, ...],
+) -> tuple[Any, dict[str, Any]]:
+    """Fetch allowlisted text only when the database proves it is within bounds."""
+    lengths = {
+        _sensitive_annotation_name(field_name, "bytes"): _AdminOctetLength(F(field_name))
+        for field_name in field_names
+    }
+    queryset = queryset.annotate(**lengths)
+    values = {
+        _sensitive_annotation_name(field_name, "value"): Case(
+            When(
+                **{
+                    f"{_sensitive_annotation_name(field_name, 'bytes')}__lte": (
+                        ADMIN_SENSITIVE_DIAGNOSTIC_FIELD_MAX_BYTES
+                    )
+                },
+                then=F(field_name),
+            ),
+            default=Value(None),
+            output_field=TextField(),
+        )
+        for field_name in field_names
+    }
+    fresh = queryset.annotate(**values).only(*identity_fields).get(pk=pk)
+    row: dict[str, Any] = {}
+    for field_name in field_names:
+        bytes_name = _sensitive_annotation_name(field_name, "bytes")
+        value_name = _sensitive_annotation_name(field_name, "value")
+        byte_length = getattr(fresh, bytes_name)
+        value = getattr(fresh, value_name)
+        row[bytes_name] = byte_length
+        row[value_name] = value
+        if byte_length is None:
+            if value is not None:
+                raise ValueError("Sensitive diagnostic storage failed validation")
+            continue
+        if type(byte_length) is not int or byte_length < 0:
+            raise ValueError("Sensitive diagnostic storage failed validation")
+        if byte_length > ADMIN_SENSITIVE_DIAGNOSTIC_FIELD_MAX_BYTES:
+            if value is not None:
+                raise ValueError("Sensitive diagnostic storage failed validation")
+            continue
+        if not isinstance(value, str):
+            raise ValueError("Sensitive diagnostic storage failed validation")
+        try:
+            decoded_bytes = len(value.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise ValueError("Sensitive diagnostic storage failed validation") from error
+        if decoded_bytes != byte_length:
+            raise ValueError("Sensitive diagnostic storage failed validation")
+    return fresh, row
+
+
+def _sensitive_sections(
+    row: dict[str, Any],
+    section_specs: tuple[tuple[str, tuple[tuple[str, str], ...]], ...],
+) -> list[dict[str, Any]]:
+    """Build an autoescaped presentation without exceeding the response budget."""
+    raw_budget = max(
+        0,
+        (ADMIN_SENSITIVE_DIAGNOSTIC_RESPONSE_MAX_BYTES - _ADMIN_SENSITIVE_RESPONSE_OVERHEAD_BYTES)
+        // _ADMIN_SENSITIVE_HTML_EXPANSION_FACTOR,
+    )
+    sections: list[dict[str, Any]] = []
+    for heading, field_specs in section_specs:
+        fields: list[dict[str, Any]] = []
+        for label, field_name in field_specs:
+            byte_length = row[_sensitive_annotation_name(field_name, "bytes")]
+            value = row[_sensitive_annotation_name(field_name, "value")]
+            if byte_length is None:
+                status = "null"
+            elif byte_length > ADMIN_SENSITIVE_DIAGNOSTIC_FIELD_MAX_BYTES:
+                status = "oversized"
+            elif byte_length == 0:
+                status = "empty"
+            elif byte_length > raw_budget:
+                status = "response_limit"
+                value = None
+            else:
+                status = "value"
+                raw_budget -= byte_length
+            fields.append(
+                {
+                    "name": field_name,
+                    "label": label,
+                    "status": status,
+                    "value": value,
+                    "byte_length": byte_length,
+                }
+            )
+        sections.append({"heading": heading, "fields": fields})
+    return sections
+
+
+def _has_sensitive_task_data_permission(
+    request: HttpRequest,
+    execution: RayTaskExecution,
+) -> bool:
+    """Honor global and object-specific grants for the owning execution."""
+    return request.user.has_perm(_ADMIN_SENSITIVE_PERMISSION) or request.user.has_perm(
+        _ADMIN_SENSITIVE_PERMISSION,
+        execution,
+    )
+
+
+def _sensitive_diagnostics_response(
+    request: HttpRequest,
+    *,
+    admin_site: admin.AdminSite,
+    opts: Any,
+    title: str,
+    subject: str,
+    back_url: str,
+    sections: list[dict[str, Any]],
+) -> HttpResponse:
+    context = {
+        **admin_site.each_context(request),
+        "title": title,
+        "opts": opts,
+        "django_ray_sensitive_subject": subject,
+        "django_ray_sensitive_back_url": back_url,
+        "django_ray_sensitive_sections": sections,
+        "django_ray_sensitive_field_limit_bytes": (ADMIN_SENSITIVE_DIAGNOSTIC_FIELD_MAX_BYTES),
+    }
+    response = TemplateResponse(
+        request,
+        "admin/django_ray/sensitive_task_data.html",
+        context,
+    )
+    response.render()
+    if len(response.content) > ADMIN_SENSITIVE_DIAGNOSTIC_RESPONSE_MAX_BYTES:
+        response = TemplateResponse(
+            request,
+            "admin/django_ray/sensitive_task_data_limit.html",
+            {
+                "title": "Sensitive diagnostics response limit reached",
+                "django_ray_sensitive_subject": subject,
+                "django_ray_sensitive_back_url": back_url,
+                "django_ray_sensitive_response_limit_bytes": (
+                    ADMIN_SENSITIVE_DIAGNOSTIC_RESPONSE_MAX_BYTES
+                ),
+            },
+            status=413,
+        )
+        response.render()
+    if len(response.content) > ADMIN_SENSITIVE_DIAGNOSTIC_RESPONSE_MAX_BYTES:
+        response = HttpResponse(
+            "Sensitive diagnostics response exceeds its fixed safety limit.",
+            status=413,
+            content_type="text/plain; charset=utf-8",
+        )
+    return _secure_admin_response(response)
+
+
 def _compact_admin_datetime(value: datetime | None) -> str:
     """Render a sortable timestamp compactly while preserving its full value."""
     if value is None:
@@ -703,7 +900,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         "result_reference_display",
         "completion_data_display",
         "cancellation_status",
-        "cancellation_error",
+        "cancellation_error_display",
         "error_message_display",
         "error_traceback_display",
     ]
@@ -748,7 +945,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                     "result_reference_display",
                     "completion_data_display",
                     "cancellation_status",
-                    "cancellation_error",
+                    "cancellation_error_display",
                     "error_message_display",
                     "error_traceback_display",
                 ),
@@ -791,7 +988,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[RayTaskExecution]:
         """Keep complete workflow payloads out of routine Admin reads."""
-        return (
+        queryset = (
             super()
             .get_queryset(request)
             .defer(
@@ -802,6 +999,24 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 "workflow_progress_summary_json",
             )
         )
+        resolver_match = request.resolver_match
+        if (
+            resolver_match is not None
+            and resolver_match.url_name
+            == f"{self.opts.app_label}_{self.opts.model_name}_changelist"
+        ):
+            queryset = queryset.defer(
+                "args_json",
+                "kwargs_json",
+                "input_reference",
+                "result_data",
+                "result_reference",
+                "completion_data",
+                "cancellation_error",
+                "error_message",
+                "error_traceback",
+            )
+        return queryset
 
     def get_inlines(
         self,
@@ -849,6 +1064,18 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS
         )
         context["django_ray_retry_available"] = False
+        context["django_ray_sensitive_data_url"] = None
+        if (
+            obj is not None
+            and self.has_view_permission(request, obj)
+            and _has_sensitive_task_data_permission(request, obj)
+        ):
+            opts = self.model._meta
+            context["django_ray_sensitive_data_url"] = reverse(
+                f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_sensitive_data",
+                args=[quote(str(obj.pk))],
+                current_app=self.admin_site.name,
+            )
         if (
             obj is not None
             and self.has_change_permission(request)
@@ -944,6 +1171,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         """Add the authenticated durable-summary endpoint used by the change form."""
         opts = self.model._meta
         custom_urls = [
+            path(
+                "<path:object_id>/sensitive-data/",
+                self.admin_site.admin_view(self.sensitive_data_view),
+                name=f"{opts.app_label}_{opts.model_name}_sensitive_data",
+            ),
             path(
                 "<path:object_id>/retry/",
                 self.admin_site.admin_view(self.retry_view),
@@ -1062,6 +1294,63 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             ),
         }
         return super().change_view(request, object_id, form_url, context)
+
+    def sensitive_data_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
+        """Render a bounded, permission-gated view of stored task diagnostics."""
+        if request.method != "GET":
+            return HttpResponseNotAllowed(["GET"])
+        try:
+            execution_id = self.model._meta.pk.to_python(unquote(object_id))
+            execution = (
+                self.get_queryset(request)
+                .only("pk", "task_id", "callable_path", "state")
+                .get(pk=execution_id)
+            )
+        except (RayTaskExecution.DoesNotExist, ValidationError, ValueError) as error:
+            raise Http404("Ray task execution was not found") from error
+        if not self.has_view_permission(request, execution):
+            raise PermissionDenied
+        if not _has_sensitive_task_data_permission(request, execution):
+            raise PermissionDenied
+
+        field_names = tuple(
+            field_name
+            for _, field_specs in _ADMIN_SENSITIVE_EXECUTION_SECTIONS
+            for _, field_name in field_specs
+        )
+        database = str(getattr(execution._state, "db", None) or "default")
+        try:
+            fresh, row = _bounded_sensitive_object(
+                self.get_queryset(request).using(database),
+                pk=execution.pk,
+                field_names=field_names,
+                identity_fields=("pk", "task_id", "callable_path", "state"),
+            )
+        except RayTaskExecution.DoesNotExist as error:
+            raise Http404("Ray task execution was not found") from error
+        if fresh.pk != execution.pk or fresh.task_id != execution.task_id:
+            raise Http404("Ray task execution was not found")
+        if not self.has_view_permission(request, fresh):
+            raise PermissionDenied
+        if not _has_sensitive_task_data_permission(request, fresh):
+            raise PermissionDenied
+        execution = fresh
+        back_url = reverse(
+            f"{self.admin_site.name}:{self.opts.app_label}_{self.opts.model_name}_change",
+            args=[quote(str(execution.pk))],
+            current_app=self.admin_site.name,
+        )
+        return _sensitive_diagnostics_response(
+            request,
+            admin_site=self.admin_site,
+            opts=self.opts,
+            title="Unredacted task data",
+            subject=(
+                f"Execution {execution.task_id} — {execution.callable_path} ({execution.state})"
+            ),
+            back_url=back_url,
+            sections=_sensitive_sections(row, _ADMIN_SENSITIVE_EXECUTION_SECTIONS),
+        )
 
     def retry_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
         """Open and complete the fenced retry confirmation from one detail page."""
@@ -2077,11 +2366,15 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
 
     @admin.display(description="Error")
     def error_message_display(self, obj: RayTaskExecution) -> str:
-        return redact_text(obj.error_message) if obj.error_message else "-"
+        return _bounded_redacted_text(obj.error_message)
+
+    @admin.display(description="Cancellation error")
+    def cancellation_error_display(self, obj: RayTaskExecution) -> str:
+        return _bounded_redacted_text(obj.cancellation_error)
 
     @admin.display(description="Traceback")
     def error_traceback_display(self, obj: RayTaskExecution) -> str:
-        return redact_text(obj.error_traceback) if obj.error_traceback else "-"
+        return _bounded_redacted_text(obj.error_traceback)
 
     @admin.display(description="Ray Job ID")
     def ray_job_id_display(self, obj: RayTaskExecution) -> str:
@@ -2394,6 +2687,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
 class TaskAttemptAdmin(DjangoRayModelAdmin):
     """Read-only historical attempt diagnostics."""
 
+    change_form_template = "admin/django_ray/taskattempt/change_form.html"
     list_display = [
         "execution_link",
         "attempt_number",
@@ -2417,6 +2711,145 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
         "created_at",
     ]
     readonly_fields = fields
+
+    def render_change_form(
+        self,
+        request: HttpRequest,
+        context: dict[str, Any],
+        add: bool = False,
+        change: bool = False,
+        form_url: str = "",
+        obj: TaskAttempt | None = None,
+    ) -> HttpResponse:
+        """Offer the explicit sensitive-data view only to authorized readers."""
+        context["django_ray_sensitive_data_url"] = None
+        if obj is not None and self.has_view_permission(request, obj):
+            database = str(getattr(obj._state, "db", None) or "default")
+            try:
+                execution = (
+                    RayTaskExecution.objects.using(database).only("pk").get(pk=obj.execution_id)
+                )
+            except RayTaskExecution.DoesNotExist:
+                execution = None
+            if execution is not None and _has_sensitive_task_data_permission(
+                request,
+                execution,
+            ):
+                opts = self.model._meta
+                context["django_ray_sensitive_data_url"] = reverse(
+                    f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_sensitive_data",
+                    args=[quote(str(obj.pk))],
+                    current_app=self.admin_site.name,
+                )
+        return super().render_change_form(
+            request,
+            context,
+            add=add,
+            change=change,
+            form_url=form_url,
+            obj=obj,
+        )
+
+    def get_urls(self) -> list[Any]:
+        opts = self.model._meta
+        custom_urls = [
+            path(
+                "<path:object_id>/sensitive-data/",
+                self.admin_site.admin_view(self.sensitive_data_view),
+                name=f"{opts.app_label}_{opts.model_name}_sensitive_data",
+            )
+        ]
+        return custom_urls + super().get_urls()
+
+    def sensitive_data_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
+        """Render exact inputs plus the selected archived attempt's outcome."""
+        if request.method != "GET":
+            return HttpResponseNotAllowed(["GET"])
+        try:
+            attempt_id = self.model._meta.pk.to_python(unquote(object_id))
+            attempt = (
+                self.get_queryset(request)
+                .only("pk", "execution_id", "attempt_number", "state")
+                .get(pk=attempt_id)
+            )
+        except (TaskAttempt.DoesNotExist, ValidationError, ValueError) as error:
+            raise Http404("Task attempt was not found") from error
+        if not self.has_view_permission(request, attempt):
+            raise PermissionDenied
+        database = str(getattr(attempt._state, "db", None) or "default")
+        try:
+            execution = (
+                RayTaskExecution.objects.using(database)
+                .only(
+                    "pk",
+                    "task_id",
+                    "callable_path",
+                )
+                .get(pk=attempt.execution_id)
+            )
+        except RayTaskExecution.DoesNotExist as error:
+            raise Http404("Owning Ray task execution was not found") from error
+        if not _has_sensitive_task_data_permission(request, execution):
+            raise PermissionDenied
+
+        input_specs = (_ADMIN_SENSITIVE_EXECUTION_SECTIONS[0],)
+        input_fields = tuple(field_name for _, field_name in input_specs[0][1])
+        outcome_specs = (_ADMIN_SENSITIVE_ATTEMPT_OUTCOME_SECTION,)
+        outcome_fields = tuple(field_name for _, field_name in outcome_specs[0][1])
+        try:
+            fresh_execution, input_row = _bounded_sensitive_object(
+                RayTaskExecution.objects.using(database),
+                pk=execution.pk,
+                field_names=input_fields,
+                identity_fields=("pk", "task_id", "callable_path"),
+            )
+            fresh_attempt, outcome_row = _bounded_sensitive_object(
+                self.get_queryset(request).using(database),
+                pk=attempt.pk,
+                field_names=outcome_fields,
+                identity_fields=(
+                    "pk",
+                    "execution_id",
+                    "attempt_number",
+                    "state",
+                ),
+            )
+        except (RayTaskExecution.DoesNotExist, TaskAttempt.DoesNotExist) as error:
+            raise Http404("Task attempt was not found") from error
+        if (
+            fresh_execution.pk != execution.pk
+            or fresh_execution.task_id != execution.task_id
+            or fresh_attempt.pk != attempt.pk
+            or fresh_attempt.execution_id != fresh_execution.pk
+            or fresh_attempt.execution_id != attempt.execution_id
+            or fresh_attempt.attempt_number != attempt.attempt_number
+        ):
+            raise Http404("Task attempt was not found")
+        if not _has_sensitive_task_data_permission(request, fresh_execution):
+            raise PermissionDenied
+        if not self.has_view_permission(request, fresh_attempt):
+            raise PermissionDenied
+        execution = fresh_execution
+        attempt = fresh_attempt
+        row = {**input_row, **outcome_row}
+        sections = _sensitive_sections(row, input_specs + outcome_specs)
+        back_url = reverse(
+            f"{self.admin_site.name}:{self.opts.app_label}_{self.opts.model_name}_change",
+            args=[quote(str(attempt.pk))],
+            current_app=self.admin_site.name,
+        )
+        return _sensitive_diagnostics_response(
+            request,
+            admin_site=self.admin_site,
+            opts=self.opts,
+            title="Unredacted attempt data",
+            subject=(
+                f"Execution {execution.task_id} — {execution.callable_path}; "
+                f"attempt {attempt.attempt_number} ({attempt.state})"
+            ),
+            back_url=back_url,
+            sections=sections,
+        )
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[TaskAttempt]:
         """Bound routine list reads while retaining detail diagnostics."""

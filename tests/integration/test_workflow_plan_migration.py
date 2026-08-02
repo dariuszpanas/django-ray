@@ -59,5 +59,5 @@ def test_existing_and_rolling_writer_rows_gain_nullable_plan_fields() -> None:
         }
     finally:
         MigrationExecutor(connection).migrate(
-            [("django_ray", "0016_raytaskexecution_queue_expiration")]
+            [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
         )

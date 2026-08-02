@@ -1,0 +1,76 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'django_ray/admin/sensitive_task_data.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo;
+    <a href="{{ django_ray_sensitive_back_url }}">Redacted task detail</a>
+    &rsaquo; Unredacted task data
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main" class="django-ray-sensitive-data">
+    <section class="module django-ray-sensitive-data__warning" aria-labelledby="sensitive-warning-title">
+      <h2 id="sensitive-warning-title">Sensitive, unredacted values</h2>
+      <div class="django-ray-sensitive-data__warning-body">
+        <p>
+          These stored values bypass django-ray's display redaction and may contain
+          credentials, personal data, or external-system payloads. Handle them under
+          your deployment's secret and incident-data policy.
+        </p>
+        <p>
+          Access requires the ordinary object-view permission and
+          <code>django_ray.view_sensitive_task_data</code>. This GET-only response is
+          not cached. RuntimeEnv, completion envelopes, workflow progress, and logs
+          are never included here.
+        </p>
+      </div>
+    </section>
+
+    <p class="django-ray-sensitive-data__subject">{{ django_ray_sensitive_subject }}</p>
+    <p>
+      <a href="{{ django_ray_sensitive_back_url }}" class="button">
+        Return to redacted task detail
+      </a>
+    </p>
+
+    {% for section in django_ray_sensitive_sections %}
+      <section class="module django-ray-sensitive-data__section" aria-labelledby="sensitive-section-{{ forloop.counter }}">
+        <h2 id="sensitive-section-{{ forloop.counter }}">{{ section.heading }}</h2>
+        <dl class="django-ray-sensitive-data__fields">
+          {% for field in section.fields %}
+            <div class="django-ray-sensitive-data__field field-{{ field.name }}">
+              <dt>{{ field.label }}</dt>
+              <dd>
+                {% if field.status == "value" %}
+                  <pre class="django-ray-sensitive-data__value">{{ field.value }}</pre>
+                {% elif field.status == "empty" %}
+                  <p class="django-ray-sensitive-data__placeholder">Empty string</p>
+                {% elif field.status == "null" %}
+                  <p class="django-ray-sensitive-data__placeholder">No stored value</p>
+                {% elif field.status == "oversized" %}
+                  <p class="django-ray-sensitive-data__placeholder">
+                    Not shown: the stored value is {{ field.byte_length }} bytes and
+                    exceeds the {{ django_ray_sensitive_field_limit_bytes }}-byte
+                    per-field display limit.
+                  </p>
+                {% else %}
+                  <p class="django-ray-sensitive-data__placeholder">
+                    Not shown: the bounded response limit was reached.
+                  </p>
+                {% endif %}
+              </dd>
+            </div>
+          {% endfor %}
+        </dl>
+      </section>
+    {% endfor %}
+  </div>
+{% endblock %}
