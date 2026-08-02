@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -249,6 +250,61 @@ def test_inventory_reexports_the_extracted_taxonomy_contract() -> None:
     assert inventory_module.load_manifest is taxonomy_module.load_manifest
 
 
+def test_nodeid_normalization_preserves_the_parameter_suffix_exactly() -> None:
+    nodeid = r"tests\unit\test_example.py::test_path[results\\private]"
+
+    normalized = taxonomy_module.normalize_nodeid(nodeid)
+
+    assert normalized == r"tests/unit/test_example.py::test_path[results\\private]"
+    assert normalized.partition("::")[2] == nodeid.partition("::")[2]
+
+
+def test_identity_set_mismatch_reports_bounded_exact_differences() -> None:
+    selected = {f"tests/test_sample.py::test_value[{index}-{'x' * 200}]" for index in range(5)}
+    completed = {"tests/test_sample.py::test_value[unexpected]"}
+
+    mismatch = inventory_module._identity_set_mismatch("final outcomes", selected, completed)
+
+    assert mismatch is not None
+    assert "missing=5" in mismatch
+    assert "+3 more" in mismatch
+    assert "unexpected=1" in mismatch
+    assert "x" * 161 not in mismatch
+    assert len(mismatch) <= 512
+    assert inventory_module._identity_set_mismatch("final outcomes", selected, selected) is None
+
+
+def test_collection_build_and_validator_reject_duplicate_normalized_nodeids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    duplicate = _item("test_duplicate")
+    manifest = load_manifest(MANIFEST_PATH)
+
+    with pytest.raises(InventoryError, match="duplicate normalized node IDs"):
+        build_inventory(ROOT, MANIFEST_PATH, manifest, [duplicate, duplicate])
+    with pytest.raises(InventoryError, match="duplicate normalized node IDs"):
+        inventory_module._validate_timing_detail_records(
+            {},
+            {},
+            [duplicate, duplicate],
+        )
+
+    def _pytest_main(
+        _arguments: list[str],
+        *,
+        plugins: list[object],
+    ) -> pytest.ExitCode:
+        plugin = plugins[0]
+        assert isinstance(plugin, inventory_module._CollectionPlugin)
+        plugin.items.extend([duplicate, duplicate])
+        return pytest.ExitCode.OK
+
+    monkeypatch.setattr(inventory_module, "_reject_pytest_environment", lambda: None)
+    monkeypatch.setattr(inventory_module.pytest, "main", _pytest_main)
+    with pytest.raises(InventoryError, match="duplicate normalized node IDs"):
+        inventory_module.collect_tests(ROOT)
+
+
 def test_cli_select_and_collect_use_fixture_aware_taxonomy_and_atomic_outputs(
     tmp_path: Path,
 ) -> None:
@@ -431,6 +487,73 @@ def test_cli_run_records_completed_outcomes_and_merges_valid_timing(tmp_path: Pa
     ]
     assert "mini-local" in (root / "artifacts/merged.md").read_text(encoding="utf-8")
     assert not list((root / "artifacts").glob(".*.pending"))
+
+
+def test_cli_timing_preserves_distinct_default_path_parameter_ids(tmp_path: Path) -> None:
+    root = _mini_inventory_repository(tmp_path)
+    sample = root / "tests/test_sample.py"
+    sample.write_text(
+        sample.read_text(encoding="utf-8")
+        + r"""
+
+@pytest.mark.parametrize("value", ["results//private", r"results\private"])
+def test_path_identity(value):
+    assert value.startswith("results")
+""",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "--", "tests/test_sample.py"], cwd=root, check=True)
+
+    run = _inventory_cli(
+        root,
+        "run",
+        "--lane",
+        "portable",
+        "--observation",
+        "path-parameter-identities",
+        "--variant",
+        "locked",
+        "--timing-output",
+        "artifacts/path-identities.json",
+        "--external-note",
+        "Regression fixture for portable default pytest parameter identities.",
+        "--",
+        "-q",
+    )
+
+    assert run.returncode == 0, run.stdout + run.stderr
+    timing = json.loads((root / "artifacts/path-identities.json").read_text(encoding="utf-8"))
+    assert timing["integrity"] == {"errors": [], "valid": True}
+    assert timing["pytest"]["selected_count"] == 5
+    assert timing["pytest"]["completed_count"] == 5
+    assert timing["pytest"]["logfinished_count"] == 5
+    path_nodeids = {
+        record["nodeid"]
+        for record in timing["test_outcomes"]
+        if "::test_path_identity[" in record["nodeid"]
+    }
+    assert path_nodeids == {
+        "tests/test_sample.py::test_path_identity[results//private]",
+        r"tests/test_sample.py::test_path_identity[results\\private]",
+    }
+
+    validated = _inventory_cli(
+        root,
+        "collect",
+        "--timing",
+        "artifacts/path-identities.json",
+        "--json-output",
+        "artifacts/path-identities-report.json",
+        "--markdown-output",
+        "artifacts/path-identities-report.md",
+    )
+
+    assert validated.returncode == 0, validated.stdout + validated.stderr
+    report = json.loads(
+        (root / "artifacts/path-identities-report.json").read_text(encoding="utf-8")
+    )
+    assert report["schema_version"] == 4
+    assert report["timings"][0]["sample_id"] == timing["sample_id"]
 
 
 def test_selection_and_output_guards_fail_closed_without_running_pytest(
@@ -625,6 +748,88 @@ def test_run_lane_rejects_source_changes_even_when_pytest_passes(
     assert timing["source_after_digest"] == "b" * 64
     assert "source changed" in " ".join(timing["integrity"]["errors"])
     assert "promised timing phases" in " ".join(timing["integrity"]["errors"])
+
+
+def test_run_lane_rejects_same_count_identity_substitution_with_bounded_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+    selected = (
+        "tests/unit/test_example.py::test_expected_a",
+        "tests/unit/test_example.py::test_expected_b",
+    )
+    unexpected = (
+        "tests/unit/test_example.py::test_substitute["
+        + ("\x1b\n\N{GREEK CAPITAL LETTER OMEGA}" * 400)
+        + "]"
+    )
+    reports: Iterator[dict[str, object] | None] = iter(
+        [
+            None,
+            {
+                "selected_count": 2,
+                "deselected_count": 0,
+                "valid": True,
+                "errors": [],
+            },
+        ]
+    )
+
+    def _consume_report() -> dict[str, object] | None:
+        return next(reports)
+
+    def _pytest_main(
+        _arguments: list[str],
+        *,
+        plugins: list[object],
+    ) -> int:
+        plugin = plugins[0]
+        assert isinstance(plugin, inventory_module._RuntimePlugin)
+        stamp = plugin.started + 0.001
+        plugin.collection_started = stamp
+        plugin.collection_finished = stamp
+        plugin.test_execution_finished = stamp
+        plugin.session_finished = stamp
+        plugin.terminal_started = stamp
+        plugin.terminal_finished = stamp
+        plugin.selected_nodeids = set(selected)
+        plugin.outcomes = {selected[0]: "passed", unexpected: "passed"}
+        plugin.logfinished = {selected[0], unexpected}
+        return 0
+
+    monkeypatch.setattr(
+        inventory_module.pytest_taxonomy,
+        "consume_last_run_report",
+        _consume_report,
+    )
+    monkeypatch.setattr(inventory_module.pytest, "main", _pytest_main)
+
+    exit_code, timing = run_lane(
+        ROOT,
+        MANIFEST_PATH,
+        manifest,
+        "hermetic",
+        [],
+        observation="same-count-substitution",
+        variant="locked",
+        runner_queue_seconds=None,
+        environment_setup_seconds=None,
+        external_note="Intentional equal-cardinality identity substitution fixture.",
+    )
+
+    assert exit_code == 2
+    assert timing["pytest"]["selected_count"] == 2
+    assert timing["pytest"]["completed_count"] == 2
+    assert timing["pytest"]["logfinished_count"] == 2
+    for label in ("pytest_runtest_logfinish", "final outcomes"):
+        mismatch = next(error for error in timing["integrity"]["errors"] if error.startswith(label))
+        assert "missing=1" in mismatch
+        assert "unexpected=1" in mismatch
+        assert "\\x1b" in mismatch
+        assert "\\n" in mismatch
+        assert "\x1b" not in mismatch
+        assert "\n" not in mismatch
+        assert len(mismatch) <= 512
 
 
 def test_source_digest_covers_binary_inputs_but_excludes_generated_baseline(

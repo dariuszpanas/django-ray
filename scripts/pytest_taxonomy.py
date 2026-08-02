@@ -20,6 +20,7 @@ from scripts.test_suite_taxonomy import (
     collection_contract_digest,
     load_manifest,
     nodeid_digest,
+    require_unique_nodeids,
 )
 
 
@@ -144,6 +145,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             selected_records.append(record)
         else:
             deselected.append(item)
+    try:
+        require_unique_nodeids(
+            [record.nodeid for record in collected_records],
+            "taxonomy collection",
+        )
+    except InventoryError as error:
+        raise pytest.UsageError(str(error)) from error
     if deselected:
         config.hook.pytest_deselected(items=deselected)
     items[:] = selected_items
