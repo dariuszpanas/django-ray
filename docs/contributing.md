@@ -172,9 +172,21 @@ uv run make test-cov
 - `src/django_ray/management/commands/django_ray_worker.py`: `>= 90%`
 - `src/django_ray/runner/ray_job.py`: `>= 90%`
 
-`uv run make ci` runs the required format, lint, type, coverage, strict-documentation, and package-build
-checks for the current interpreter. GitHub Actions additionally repeats tests across supported Python
-versions and minimum/latest dependency resolutions.
+`uv run make ci` runs the required format, lint, type, runtime-dependency advisory,
+coverage, strict-documentation, and package-build checks for the current interpreter.
+GitHub Actions additionally repeats tests across supported Python versions and
+minimum/latest dependency resolutions. Run the advisory check alone with
+`uv run make audit-dependencies`; it exports the exact locked default and optional-extra
+runtime graph without development tools, then queries current PyPI advisory data. The
+command requires network access and its result can change when a new advisory is
+published. The check fails when its lock export is stale, incomplete, unpinned, or
+contaminated by the project or audit tool, and an advisory-service failure does not pass
+silently. Blocking CI repeats it under every supported Python version on Linux and on
+Python 3.12 for the documented Windows development boundary so platform markers are not
+covered only by a contributor's workstation. The release workflow repeats that same
+matrix before package building. Each scan also cross-checks its hashed requirements
+against a second locked CycloneDX export so an omitted transitive cannot silently escape
+the advisory input.
 
 `test-xdist` is a fast local iteration target, not the full test or release gate. It invokes pytest
 once with `-n 4` by default and selects tests without the resource-owning `real_ray`, `postgresql`,

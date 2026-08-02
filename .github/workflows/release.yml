@@ -16,9 +16,110 @@ on:
         type: string
 
 jobs:
+  source-preflight:
+    name: Verify Release Source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate manual candidate input
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::candidate_sha must be a lowercase full 40-character commit SHA"
+            exit 1
+          fi
+          if [[ "$CANDIDATE_SHA" != "$EVENT_SHA" ]]; then
+            echo "::error::candidate_sha must match the workflow dispatch ref"
+            exit 1
+          fi
+
+      - name: Check out manual candidate
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.candidate_sha }}
+
+      - name: Check out production tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Refresh release refs
+        run: >-
+          git fetch --force --prune --tags origin
+          "+refs/heads/main:refs/remotes/origin/main"
+
+      - name: Verify manual candidate source
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: >-
+          python3 scripts/verify_release_source.py
+          --manual-candidate "$CANDIDATE_SHA"
+          --event-sha "$EVENT_SHA"
+
+      - name: Verify production tag source
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          python3 scripts/verify_release_source.py
+          --production-tag "$RELEASE_TAG"
+          --event-sha "$EVENT_SHA"
+
+  dependency-audit:
+    name: Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    needs: source-preflight
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.14"
+          - os: windows-latest
+            python-version: "3.12"
+    steps:
+      - name: Check out release candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.9.18"
+          enable-cache: "false"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install locked audit dependencies
+        run: >-
+          uv sync --locked --only-group dev --no-install-project
+          --python ${{ matrix.python-version }}
+
+      - name: Audit locked runtime dependencies
+        run: >-
+          uv run --no-sync --python ${{ matrix.python-version }}
+          python scripts/audit_runtime_dependencies.py
+
   build:
     name: Build Package
     runs-on: ubuntu-latest
+    needs: [source-preflight, dependency-audit]
     outputs:
       version: ${{ steps.validate_testpypi_version.outputs.version || steps.validate_production_version.outputs.version }}
     steps:

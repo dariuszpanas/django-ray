@@ -417,6 +417,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task-ID-bound RuntimeEnv snapshot, and otherwise fails before creating claimable
   work. Unrelated integrity failures are not retried, and this does not add enqueue
   deduplication or exactly-once semantics.
+- The mandatory runtime graph now requires `pyasn1>=0.6.4`, excluding the three
+  high-severity resource-exhaustion advisories published for `pyasn1<=0.6.3`
+  (`CVE-2026-59884`, `CVE-2026-59885`, and `CVE-2026-59886`). A pinned
+  fail-closed runtime-only `pip-audit` check covers the exact locked default and
+  optional-extra non-development graph in the full local gate, every supported Python
+  version on Linux plus Python 3.12 on Windows in blocking CI and again before release
+  package building. The hashed requirements export is cross-checked against a locked
+  CycloneDX graph before scanning, without claiming that django-ray directly decodes
+  attacker-controlled ASN.1.
 - `django_ray_worker --all-queues` now discovers and deduplicates queues across
   every configured django-ray backend alias while ignoring Celery and other
   backends. Queue selectors and explicit execution-mode flags are mutually

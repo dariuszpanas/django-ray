@@ -5,7 +5,7 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install format fix lint typecheck test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci build clean help
+.PHONY: all install format fix lint typecheck audit-dependencies test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
@@ -52,6 +52,10 @@ lint:
 # Type check with ty
 typecheck:
 	ty check
+
+# Audit only the exact locked runtime graph against current PyPI advisories
+audit-dependencies:
+	python scripts/audit_runtime_dependencies.py
 
 # Run all tests
 test:
@@ -136,6 +140,7 @@ ci:
 	ruff format --check .
 	ruff check .
 	ty check
+	python scripts/audit_runtime_dependencies.py
 	pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
@@ -226,6 +231,7 @@ help:
 	@echo "  fix            - Format code and apply safe Ruff fixes"
 	@echo "  lint           - Lint code with Ruff (no modifications)"
 	@echo "  typecheck      - Type check with ty"
+	@echo "  audit-dependencies - Audit the exact locked runtime dependency graph"
 	@echo "  check          - Check formatting, lint, and types (no modifications)"
 	@echo ""
 	@echo "Testing:"

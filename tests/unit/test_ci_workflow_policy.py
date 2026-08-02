@@ -137,6 +137,10 @@ def test_manual_release_is_bound_to_full_fetched_main_sha_before_build() -> None
     )
     assert step_names.index("Verify manual candidate source") < step_names.index("Install uv")
     assert step_names.index("Verify manual candidate source") < step_names.index("Build package")
+    assert _needs(_jobs(RELEASE_WORKFLOW)["build"]) == {
+        "source-preflight",
+        "dependency-audit",
+    }
 
 
 def test_manual_and_production_release_validation_remain_distinct() -> None:
@@ -279,6 +283,115 @@ def test_minimum_dependency_lane_pins_runtime_encryption_dependency() -> None:
     )
 
     assert '"cryptography==42.0.8"' in minimum_install["run"]
+
+
+def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
+    minimum_install = next(
+        step
+        for step in _jobs()["dependency-compatibility"]["steps"]
+        if step.get("name") == "Install minimum supported dependencies"
+    )
+    audit_job = _jobs()["dependency-audit"]
+    audit_command = next(
+        step["run"]
+        for step in audit_job["steps"]
+        if step.get("name") == "Audit locked runtime dependencies"
+    )
+
+    assert '"pyasn1==0.6.4"' in minimum_install["run"]
+    assert audit_job["name"] == (
+        "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"
+    )
+    assert audit_job["runs-on"] == "${{ matrix.os }}"
+    assert audit_job["timeout-minutes"] == "10"
+    assert audit_job["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {
+            "include": [
+                {"os": "ubuntu-latest", "python-version": "3.12"},
+                {"os": "ubuntu-latest", "python-version": "3.13"},
+                {"os": "ubuntu-latest", "python-version": "3.14"},
+                {"os": "windows-latest", "python-version": "3.12"},
+            ]
+        },
+    }
+    audit_install = next(
+        step["run"]
+        for step in audit_job["steps"]
+        if step.get("name") == "Install locked audit dependencies"
+    )
+    assert audit_install == (
+        "uv sync --locked --only-group dev --no-install-project "
+        "--python ${{ matrix.python-version }}"
+    )
+    assert audit_command == (
+        "uv run --no-sync --python ${{ matrix.python-version }} "
+        "python scripts/audit_runtime_dependencies.py"
+    )
+    assert "dependency-audit" in _needs(_jobs()["build"])
+    assert "dependency-audit" in _needs(_gate_job())
+
+
+def test_release_dependency_audit_rechecks_every_supported_environment() -> None:
+    audit_job = _jobs(RELEASE_WORKFLOW)["dependency-audit"]
+    audit_steps = {
+        str(step["name"]): step
+        for step in audit_job["steps"]
+        if isinstance(step, dict) and "name" in step
+    }
+
+    assert audit_job["name"] == (
+        "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"
+    )
+    assert audit_job["runs-on"] == "${{ matrix.os }}"
+    assert audit_job["timeout-minutes"] == "10"
+    assert audit_job["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {
+            "include": [
+                {"os": "ubuntu-latest", "python-version": "3.12"},
+                {"os": "ubuntu-latest", "python-version": "3.13"},
+                {"os": "ubuntu-latest", "python-version": "3.14"},
+                {"os": "windows-latest", "python-version": "3.12"},
+            ]
+        },
+    }
+    assert audit_steps["Check out release candidate"]["with"]["ref"] == "${{ github.sha }}"
+    assert audit_steps["Install locked audit dependencies"]["run"] == (
+        "uv sync --locked --only-group dev --no-install-project "
+        "--python ${{ matrix.python-version }}"
+    )
+    assert audit_steps["Audit locked runtime dependencies"]["run"] == (
+        "uv run --no-sync --python ${{ matrix.python-version }} "
+        "python scripts/audit_runtime_dependencies.py"
+    )
+    assert _needs(audit_job) == {"source-preflight"}
+    assert _needs(_jobs(RELEASE_WORKFLOW)["build"]) == {
+        "source-preflight",
+        "dependency-audit",
+    }
+
+
+def test_release_source_preflight_runs_before_any_dependency_installation() -> None:
+    jobs = _jobs(RELEASE_WORKFLOW)
+    preflight = jobs["source-preflight"]
+    steps = preflight["steps"]
+    step_names = [str(step["name"]) for step in steps]
+    commands = "\n".join(str(step.get("run", "")) for step in steps)
+
+    assert preflight["name"] == "Verify Release Source"
+    assert "Install uv" not in step_names
+    assert "Install dependencies" not in step_names
+    assert "uv sync" not in commands
+    assert "scripts/verify_release_source.py" in commands
+    assert step_names.index("Validate manual candidate input") < step_names.index(
+        "Check out manual candidate"
+    )
+    assert step_names.index("Refresh release refs") < step_names.index(
+        "Verify manual candidate source"
+    )
+    assert _needs(jobs["dependency-audit"]) == {"source-preflight"}
+    assert _needs(jobs["build"]) == {"source-preflight", "dependency-audit"}
 
 
 def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
