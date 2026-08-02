@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import traceback
 from typing import Any
 
 import pytest
@@ -69,6 +70,11 @@ class FakePayloadStorage:
 
 def _use_fake_storage(monkeypatch: pytest.MonkeyPatch, storage: FakePayloadStorage) -> None:
     monkeypatch.setattr(input_storage, "_storage_backend", lambda config: ("s3", storage))
+    monkeypatch.setattr(
+        input_storage,
+        "_storage_backend_for_reference",
+        lambda metadata, config: storage,
+    )
 
 
 def test_prepare_inline_input_preserves_legacy_fields_when_disabled() -> None:
@@ -345,8 +351,54 @@ def test_external_load_rejects_noncanonical_envelope(monkeypatch: pytest.MonkeyP
     ],
 )
 def test_reference_parser_rejects_malformed_metadata(reference: str) -> None:
-    with pytest.raises(InputPayloadValidationError):
+    with pytest.raises(InputPayloadValidationError) as caught:
         input_storage._validated_reference(reference, _s3_config())
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_noncanonical_object_reference_is_rejected_before_sdk_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = "a" * 64
+    base = f"s3://task-inputs/django-ray/inputs/aa/aa/{digest}.json"
+    references = (f"{base}?bytes=%31", f"{base}?%62ytes=1")
+    constructor_calls = 0
+
+    class UnexpectedS3:
+        def __init__(self, **kwargs: Any) -> None:
+            nonlocal constructor_calls
+            constructor_calls += 1
+
+    monkeypatch.setattr(input_storage, "S3ResultStorage", UnexpectedS3)
+
+    for reference in references:
+        with pytest.raises(InputPayloadValidationError, match="reference is invalid"):
+            load_task_input(
+                args_json="null",
+                kwargs_json="null",
+                input_reference=reference,
+                config=_s3_config(),
+            )
+        with pytest.raises(InputPayloadValidationError, match="reference is invalid"):
+            delete_input_reference(reference, _s3_config())
+
+    assert constructor_calls == 0
+
+
+def test_malformed_reference_traceback_does_not_retain_query_tokens() -> None:
+    sensitive = "VERY_PRIVATE_STORAGE_TOKEN"
+    digest = "a" * 64
+    reference = f"s3://task-inputs/django-ray/inputs/aa/aa/{digest}.json?bytes=1&{sensitive}"
+
+    with pytest.raises(InputPayloadValidationError, match="reference is invalid") as caught:
+        input_storage._validated_reference(reference, _s3_config())
+
+    formatted = "".join(traceback.format_exception(caught.type, caught.value, caught.tb))
+    assert sensitive not in formatted
+    assert reference not in formatted
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_filesystem_reference_authorization_and_storage_resolution(tmp_path) -> None:
@@ -373,6 +425,35 @@ def test_filesystem_reference_authorization_and_storage_resolution(tmp_path) -> 
     assert backend.root_path == tmp_path
 
 
+def test_noncanonical_filesystem_query_is_rejected_before_storage_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    digest = "a" * 64
+    reference = f"resultfs://sha256/{digest}?bytes=1&rel={digest[:2]}/{digest[2:4]}/{digest}.json"
+    constructor_calls = 0
+
+    class UnexpectedFilesystem:
+        def __init__(self, root_path: str) -> None:
+            nonlocal constructor_calls
+            constructor_calls += 1
+
+    monkeypatch.setattr(input_storage, "FilesystemResultStorage", UnexpectedFilesystem)
+
+    with pytest.raises(InputPayloadValidationError, match="reference is invalid"):
+        load_task_input(
+            args_json="null",
+            kwargs_json="null",
+            input_reference=reference,
+            config={
+                "INPUT_STORAGE_BACKEND": "filesystem",
+                "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+            },
+        )
+
+    assert constructor_calls == 0
+
+
 @pytest.mark.parametrize(
     "reference",
     [
@@ -394,7 +475,7 @@ def test_filesystem_reference_rejects_invalid_shape(reference: str, tmp_path) ->
 
 def test_filesystem_reference_requires_configured_root() -> None:
     digest = "a" * 64
-    reference = f"resultfs://sha256/{digest}?bytes=1&rel={digest[:2]}/{digest[2:4]}/{digest}.json"
+    reference = f"resultfs://sha256/{digest}?rel={digest[:2]}/{digest[2:4]}/{digest}.json&bytes=1"
     with pytest.raises(InputPayloadValidationError, match="FILESYSTEM_PATH"):
         input_storage._validated_reference(
             reference,
@@ -403,15 +484,46 @@ def test_filesystem_reference_requires_configured_root() -> None:
 
 
 def test_object_reference_rejects_extra_query_and_invalid_digest() -> None:
-    with pytest.raises(InputPayloadValidationError, match="query is invalid"):
+    with pytest.raises(InputPayloadValidationError, match="reference is invalid"):
         input_storage._validated_reference(
             "s3://task-inputs/key?bytes=1&extra=1",
             _s3_config(),
         )
-    with pytest.raises(InputPayloadValidationError, match="digest is invalid"):
+    with pytest.raises(InputPayloadValidationError, match="reference is invalid"):
         input_storage._validated_reference(
             "s3://task-inputs/django-ray/inputs/aa/bb/not-a-digest.json?bytes=1",
             _s3_config(),
+        )
+
+
+def test_object_reference_accepts_only_canonical_encoded_configured_prefix() -> None:
+    digest = "a" * 64
+    config = _s3_config(INPUT_STORAGE_S3_PREFIX="tenant alpha/résults")
+    reference = f"s3://task-inputs/tenant%20alpha/r%C3%A9sults/aa/aa/{digest}.json?bytes=1"
+
+    metadata = input_storage._validated_reference(reference, config)
+
+    assert metadata.digest == digest
+    with pytest.raises(InputPayloadValidationError, match="configured input storage"):
+        input_storage._validated_reference(
+            reference.replace("tenant%20alpha", "%74enant%20alpha"),
+            config,
+        )
+
+
+def test_object_reference_accepts_encoding_only_legacy_prefix() -> None:
+    digest = "a" * 64
+    prefix = "tenant alpha/résults+100%"
+    config = _s3_config(INPUT_STORAGE_S3_PREFIX=prefix)
+    reference = f"s3://task-inputs/{prefix}/aa/aa/{digest}.json?bytes=1"
+
+    metadata = input_storage._validated_reference(reference, config)
+
+    assert metadata.digest == digest
+    with pytest.raises(InputPayloadValidationError, match="configured input storage"):
+        input_storage._validated_reference(
+            reference,
+            _s3_config(INPUT_STORAGE_S3_PREFIX="another-prefix"),
         )
 
 
@@ -467,6 +579,108 @@ def test_s3_storage_resolution_passes_connection_options(
         "endpoint_url": "https://storage.example",
         "region_name": "us-test-1",
     }
+
+
+def test_s3_storage_resolution_preserves_an_explicit_empty_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeS3:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(input_storage, "S3ResultStorage", FakeS3)
+    config = _s3_config(INPUT_STORAGE_S3_PREFIX="")
+
+    input_storage._storage_backend(config)
+
+    assert captured["prefix"] == ""
+
+
+def test_s3_storage_resolution_rejects_a_non_string_prefix_before_client_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initialized = False
+
+    class FakeS3:
+        def __init__(self, **_kwargs: Any) -> None:
+            nonlocal initialized
+            initialized = True
+
+    monkeypatch.setattr(input_storage, "S3ResultStorage", FakeS3)
+
+    with pytest.raises(InputPayloadValidationError, match="INPUT_STORAGE_S3_PREFIX"):
+        input_storage._storage_backend(_s3_config(INPUT_STORAGE_S3_PREFIX=123))
+
+    assert initialized is False
+
+
+def test_historical_input_read_and_delete_dispatch_to_retained_s3_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = input_storage._serialize_envelope(["historical"], {"version": 1})
+    payload_bytes = payload.encode("utf-8")
+    digest = hashlib.sha256(payload_bytes).hexdigest()
+    reference = (
+        f"s3://old-inputs/retained/inputs/{digest[:2]}/{digest[2:4]}/"
+        f"{digest}.json?bytes={len(payload_bytes)}"
+    )
+    load_calls: list[str] = []
+    delete_calls: list[str] = []
+    constructor_kwargs: list[dict[str, Any]] = []
+
+    class RetainedS3:
+        def __init__(self, **kwargs: Any) -> None:
+            constructor_kwargs.append(kwargs)
+
+        def load(self, *, reference: str) -> str:
+            load_calls.append(reference)
+            return payload
+
+        def delete(self, *, reference: str) -> None:
+            delete_calls.append(reference)
+
+    class UnexpectedActiveGCS:
+        def __init__(self, **kwargs: Any) -> None:
+            raise AssertionError("active writer must not handle a retained S3 reference")
+
+    monkeypatch.setattr(input_storage, "S3ResultStorage", RetainedS3)
+    monkeypatch.setattr(input_storage, "GCSResultStorage", UnexpectedActiveGCS)
+    config = {
+        "INPUT_STORAGE_BACKEND": "gcs",
+        "INPUT_STORAGE_GCS_BUCKET": "new-inputs",
+        "INPUT_STORAGE_GCS_PREFIX": "current/inputs",
+        "INPUT_STORAGE_S3_BUCKET": "old-inputs",
+        "INPUT_STORAGE_S3_PREFIX": "retained/inputs",
+        "INPUT_STORAGE_S3_ENDPOINT_URL": "https://retained.example",
+        "INPUT_STORAGE_S3_REGION": "us-test-1",
+    }
+
+    assert load_task_input(
+        args_json="null",
+        kwargs_json="null",
+        input_reference=reference,
+        config=config,
+    ) == (["historical"], {"version": 1})
+    delete_input_reference(reference, config)
+
+    assert load_calls == [reference]
+    assert delete_calls == [reference]
+    assert constructor_kwargs == [
+        {
+            "bucket": "old-inputs",
+            "prefix": "retained/inputs",
+            "endpoint_url": "https://retained.example",
+            "region_name": "us-test-1",
+        },
+        {
+            "bucket": "old-inputs",
+            "prefix": "retained/inputs",
+            "endpoint_url": "https://retained.example",
+            "region_name": "us-test-1",
+        },
+    ]
 
 
 def test_storage_resolution_requires_backend_specific_configuration() -> None:

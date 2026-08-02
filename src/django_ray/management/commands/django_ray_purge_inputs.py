@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import timedelta
 from typing import Any
 
@@ -96,7 +97,10 @@ class Command(BaseCommand):
                 return "skipped"
 
             if not delete:
-                self.stdout.write(f"Would purge input payload {reference}")
+                self.stdout.write(
+                    "Would purge input payload "
+                    f"reference_sha256={self._reference_fingerprint(reference)}"
+                )
                 return "eligible"
 
             try:
@@ -106,14 +110,23 @@ class Command(BaseCommand):
             except Exception as error:
                 payload.cleanup_error = self._format_cleanup_error(error)
                 payload.save(update_fields=["cleanup_error"])
-                self.stderr.write(f"Failed to purge input payload {reference}: {error}")
+                self.stderr.write(
+                    "Failed to purge input payload "
+                    f"reference_sha256={self._reference_fingerprint(reference)}: "
+                    f"{payload.cleanup_error}"
+                )
                 return "failed"
 
             payload.state = InputPayloadState.PURGED
             payload.purged_at = timezone.now()
             payload.cleanup_error = ""
             payload.save(update_fields=["state", "purged_at", "cleanup_error"])
-            self.stdout.write(self.style.SUCCESS(f"Purged input payload {reference}"))
+            self.stdout.write(
+                self.style.SUCCESS(
+                    "Purged input payload "
+                    f"reference_sha256={self._reference_fingerprint(reference)}"
+                )
+            )
             return "purged"
 
     @staticmethod
@@ -131,5 +144,12 @@ class Command(BaseCommand):
 
     @staticmethod
     def _format_cleanup_error(error: Exception) -> str:
-        message = f"{type(error).__name__}: {error}"
-        return message[:2000]
+        name = type(error).__name__
+        if not name or len(name) > 128 or not name.isascii() or not name.replace("_", "").isalnum():
+            return "Exception"
+        return name
+
+    @staticmethod
+    def _reference_fingerprint(reference: str) -> str:
+        encoded = reference.encode("utf-8", errors="surrogatepass")
+        return hashlib.sha256(encoded).hexdigest()[:16]

@@ -404,7 +404,6 @@ class RayTaskBackend(BaseTaskBackend):
                         "Failed to load external task result",
                         extra={
                             "task_id": execution.task_id,
-                            "result_reference": execution.result_reference,
                             "error": str(e),
                         },
                     )
@@ -418,7 +417,6 @@ class RayTaskBackend(BaseTaskBackend):
                         "Failed to decode stored task result payload",
                         extra={
                             "task_id": execution.task_id,
-                            "result_reference": execution.result_reference,
                         },
                     )
 

@@ -80,6 +80,27 @@ def test_management_commands_are_discoverable_in_live_guides() -> None:
     assert {command for command in commands if command not in live_text} == set()
 
 
+def test_result_storage_guide_covers_integrity_rotation_and_incidents() -> None:
+    guide = (DOCS / "reference" / "result-storage.md").read_text(encoding="utf-8")
+
+    assert "## Integrity and Authority Contract" in guide
+    assert "## Configuration Rotation and Legacy References" in guide
+    assert "## Corruption Incident Recovery" in guide
+    assert "SHA-256" in guide
+    assert "archived-attempt" in guide
+    assert "Never change the stored digest or byte count" in guide
+    assert "leading and trailing `/`" in guide
+    assert "concurrently replace digest" in guide
+
+
+def test_input_storage_guide_states_filesystem_trust_boundary() -> None:
+    guide = (DOCS / "reference" / "input-storage.md").read_text(encoding="utf-8")
+
+    assert "INPUT_STORAGE_FILESYSTEM_PATH" in guide
+    assert "concurrently" in guide
+    assert "symlinks or Windows reparse points" in guide
+
+
 def test_celery_ray_portfolio_recipe_is_parseable_and_complete() -> None:
     guide = (DOCS / "celery-migration.md").read_text(encoding="utf-8")
     section = guide.split("### Configure Celery and Ray together", maxsplit=1)[1]

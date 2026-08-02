@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from django_ray import lifecycle
-from django_ray import result_storage as result_storage_module
 from django_ray.models import TaskAttempt, TaskState
 from django_ray.result_storage import is_valid_result_reference
 from django_ray.runtime import distributed
@@ -67,29 +66,11 @@ def test_task_attempt_string_representation_includes_execution_and_state() -> No
     assert str(attempt) == "17 attempt 3 (FAILED)"
 
 
-def test_result_reference_validation_rejects_invalid_url_parse(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _invalid_url(_reference: str) -> object:
-        raise ValueError("invalid URL")
-
-    monkeypatch.setattr(result_storage_module, "urlparse", _invalid_url)
-
-    assert is_valid_result_reference("oversize://sha256/digest?bytes=0") is False
+def test_result_reference_validation_rejects_invalid_url_parse() -> None:
+    assert is_valid_result_reference("s3://[::1/payload?bytes=0") is False
 
 
-def test_result_reference_validation_rejects_absolute_filesystem_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _AbsolutePath:
-        parts = ("drive", "payload.json")
-
-        @staticmethod
-        def is_absolute() -> bool:
-            return True
-
-    monkeypatch.setattr(result_storage_module, "Path", lambda _value: _AbsolutePath())
-
+def test_result_reference_validation_rejects_absolute_filesystem_path() -> None:
     reference = (
         "resultfs://sha256/"
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -98,13 +79,7 @@ def test_result_reference_validation_rejects_absolute_filesystem_path(
     assert is_valid_result_reference(reference) is False
 
 
-def test_result_reference_validation_rejects_non_numeric_byte_count(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        result_storage_module,
-        "parse_qs",
-        lambda _query: {"bytes": ["not-a-number"]},
-    )
-
-    assert is_valid_result_reference("s3://bucket/result?bytes=0") is False
+def test_result_reference_validation_rejects_non_numeric_byte_count() -> None:
+    digest = "a" * 64
+    reference = f"s3://bucket/aa/aa/{digest}.json?bytes=not-a-number"
+    assert is_valid_result_reference(reference) is False

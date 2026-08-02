@@ -12,11 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, urlparse
 
 from django.utils import timezone
 
@@ -27,6 +24,8 @@ from django_ray.result_storage import (
     PayloadStorageBackend,
     ResultStorageError,
     S3ResultStorage,
+    _parse_result_reference,
+    _validate_object_reference,
 )
 
 if TYPE_CHECKING:
@@ -36,7 +35,6 @@ if TYPE_CHECKING:
 INPUT_ENVELOPE_SCHEMA = "django-ray.task-input"
 INPUT_ENVELOPE_VERSION = 1
 EXTERNAL_INPUT_PLACEHOLDER = "null"
-_DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 class InputPayloadError(RuntimeError):
@@ -173,6 +171,15 @@ def _required_string(config: dict[str, Any], name: str) -> str:
     return value
 
 
+def _configured_prefix(config: dict[str, Any], name: str) -> str:
+    value = config.get(name)
+    if value is None:
+        return "django-ray/inputs"
+    if not isinstance(value, str):
+        raise InputPayloadValidationError(f"{name} must be a string")
+    return value
+
+
 def _storage_backend(config: dict[str, Any]) -> tuple[str, PayloadStorageBackend]:
     backend_name = _configured_backend_name(config)
     try:
@@ -185,106 +192,102 @@ def _storage_backend(config: dict[str, Any]) -> tuple[str, PayloadStorageBackend
             region = config.get("INPUT_STORAGE_S3_REGION")
             return backend_name, S3ResultStorage(
                 bucket=_required_string(config, "INPUT_STORAGE_S3_BUCKET"),
-                prefix=str(config.get("INPUT_STORAGE_S3_PREFIX", "django-ray/inputs")),
+                prefix=_configured_prefix(config, "INPUT_STORAGE_S3_PREFIX"),
                 endpoint_url=str(endpoint) if endpoint else None,
                 region_name=str(region) if region else None,
             )
         return backend_name, GCSResultStorage(
             bucket=_required_string(config, "INPUT_STORAGE_GCS_BUCKET"),
-            prefix=str(config.get("INPUT_STORAGE_GCS_PREFIX", "django-ray/inputs")),
+            prefix=_configured_prefix(config, "INPUT_STORAGE_GCS_PREFIX"),
         )
     except ResultStorageError as error:
         raise InputPayloadStorageError("Failed to initialize durable task input storage") from error
 
 
-def _query_values(reference: str) -> tuple[dict[str, list[str]], Any]:
-    if not isinstance(reference, str) or not reference or len(reference) > 500:
-        raise InputPayloadValidationError("Task input reference is invalid")
-    try:
-        parsed = urlparse(reference)
-        query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
-    except ValueError as error:
-        raise InputPayloadValidationError("Task input reference is malformed") from error
-    if parsed.fragment:
-        raise InputPayloadValidationError("Task input reference must not contain a fragment")
-    return query, parsed
-
-
-def _single_query_value(query: dict[str, list[str]], name: str) -> str:
-    values = query.get(name)
-    if values is None or len(values) != 1 or not values[0]:
-        raise InputPayloadValidationError(
-            f"Task input reference must contain exactly one {name} value"
-        )
-    return values[0]
-
-
-def _parse_size(query: dict[str, list[str]]) -> int:
-    raw_size = _single_query_value(query, "bytes")
-    try:
-        size_bytes = int(raw_size)
-    except ValueError as error:
-        raise InputPayloadValidationError("Task input reference byte count is invalid") from error
-    if size_bytes < 0 or str(size_bytes) != raw_size:
-        raise InputPayloadValidationError("Task input reference byte count is invalid")
-    return size_bytes
-
-
-def _expected_object_key(prefix: str, digest: str) -> str:
-    clean_prefix = prefix.strip("/")
-    suffix = f"{digest[:2]}/{digest[2:4]}/{digest}.json"
-    return f"{clean_prefix}/{suffix}" if clean_prefix else suffix
-
-
 def _validated_reference(reference: str, config: dict[str, Any]) -> InputReferenceMetadata:
-    query, parsed = _query_values(reference)
-    backend = _configured_backend_name(config)
-    size_bytes = _parse_size(query)
+    parsed = None
+    try:
+        parsed = _parse_result_reference(reference, allow_encoding_legacy=True)
+    except ResultStorageError:
+        pass
+    if parsed is None:
+        raise InputPayloadValidationError("Task input reference is invalid") from None
 
-    if backend == "filesystem":
-        if set(query) != {"bytes", "rel"}:
-            raise InputPayloadValidationError("Filesystem task input reference query is invalid")
-        if parsed.scheme != "resultfs" or parsed.netloc != "sha256":
-            raise InputPayloadValidationError(
-                "Task input reference does not match the configured filesystem backend"
-            )
-        digest = parsed.path.removeprefix("/")
-        if _DIGEST_PATTERN.fullmatch(digest) is None:
-            raise InputPayloadValidationError("Task input reference digest is invalid")
-        relative_path = PurePosixPath(_single_query_value(query, "rel"))
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise InputPayloadValidationError("Filesystem task input reference path is unsafe")
-        if relative_path.as_posix() != _expected_object_key("", digest):
-            raise InputPayloadValidationError(
-                "Filesystem task input reference path does not match its digest"
-            )
+    if parsed.scheme == "resultfs":
         _required_string(config, "INPUT_STORAGE_FILESYSTEM_PATH")
-        return InputReferenceMetadata(backend, digest, size_bytes)
-
-    if set(query) != {"bytes"}:
-        raise InputPayloadValidationError("Object-storage task input reference query is invalid")
-    key = parsed.path.removeprefix("/")
-    digest = PurePosixPath(key).stem
-    if _DIGEST_PATTERN.fullmatch(digest) is None:
-        raise InputPayloadValidationError("Task input reference digest is invalid")
-
-    if backend == "s3":
+        backend = "filesystem"
+    elif parsed.scheme == "s3":
         bucket = _required_string(config, "INPUT_STORAGE_S3_BUCKET")
-        prefix = str(config.get("INPUT_STORAGE_S3_PREFIX", "django-ray/inputs"))
-        expected_scheme = "s3"
-    else:
+        prefix = _configured_prefix(config, "INPUT_STORAGE_S3_PREFIX")
+        authorized = False
+        try:
+            _validate_object_reference(
+                parsed,
+                scheme="s3",
+                bucket=bucket,
+                prefix=prefix,
+            )
+            authorized = True
+        except ResultStorageError:
+            pass
+        if not authorized:
+            raise InputPayloadValidationError(
+                "Task input reference does not match configured input storage"
+            ) from None
+        backend = "s3"
+    elif parsed.scheme == "gs":
         bucket = _required_string(config, "INPUT_STORAGE_GCS_BUCKET")
-        prefix = str(config.get("INPUT_STORAGE_GCS_PREFIX", "django-ray/inputs"))
-        expected_scheme = "gs"
-    if parsed.scheme != expected_scheme or parsed.netloc != bucket:
+        prefix = _configured_prefix(config, "INPUT_STORAGE_GCS_PREFIX")
+        authorized = False
+        try:
+            _validate_object_reference(
+                parsed,
+                scheme="gs",
+                bucket=bucket,
+                prefix=prefix,
+            )
+            authorized = True
+        except ResultStorageError:
+            pass
+        if not authorized:
+            raise InputPayloadValidationError(
+                "Task input reference does not match configured input storage"
+            ) from None
+        backend = "gcs"
+    else:
         raise InputPayloadValidationError(
-            "Task input reference does not match the configured object-storage backend"
-        )
-    if key != _expected_object_key(prefix, digest):
-        raise InputPayloadValidationError(
-            "Task input reference key is outside the configured input prefix"
-        )
-    return InputReferenceMetadata(backend, digest, size_bytes)
+            "Task input reference does not select retrievable input storage"
+        ) from None
+    return InputReferenceMetadata(backend, parsed.digest, parsed.size_bytes)
+
+
+def _storage_backend_for_reference(
+    metadata: InputReferenceMetadata,
+    config: dict[str, Any],
+) -> PayloadStorageBackend:
+    """Resolve an already authorized active or retained input namespace."""
+    try:
+        if metadata.backend == "filesystem":
+            return FilesystemResultStorage(
+                _required_string(config, "INPUT_STORAGE_FILESYSTEM_PATH")
+            )
+        if metadata.backend == "s3":
+            endpoint = config.get("INPUT_STORAGE_S3_ENDPOINT_URL")
+            region = config.get("INPUT_STORAGE_S3_REGION")
+            return S3ResultStorage(
+                bucket=_required_string(config, "INPUT_STORAGE_S3_BUCKET"),
+                prefix=_configured_prefix(config, "INPUT_STORAGE_S3_PREFIX"),
+                endpoint_url=str(endpoint) if endpoint else None,
+                region_name=str(region) if region else None,
+            )
+        if metadata.backend == "gcs":
+            return GCSResultStorage(
+                bucket=_required_string(config, "INPUT_STORAGE_GCS_BUCKET"),
+                prefix=_configured_prefix(config, "INPUT_STORAGE_GCS_PREFIX"),
+            )
+    except ResultStorageError:
+        raise InputPayloadStorageError("Failed to initialize durable task input storage") from None
+    raise InputPayloadValidationError("Task input reference backend is invalid") from None
 
 
 def prepare_task_input(
@@ -434,7 +437,7 @@ def load_task_input(
 
     resolved_config = config if config is not None else get_settings()
     metadata = _validated_reference(input_reference, resolved_config)
-    _, storage = _storage_backend(resolved_config)
+    storage = _storage_backend_for_reference(metadata, resolved_config)
     try:
         serialized_payload = storage.load(reference=input_reference)
     except (ResultStorageError, OSError, UnicodeError) as error:
@@ -457,8 +460,8 @@ def delete_input_reference(
 ) -> None:
     """Validate and delete a durable input object for a purge transaction."""
     resolved_config = config if config is not None else get_settings()
-    _validated_reference(reference, resolved_config)
-    _, storage = _storage_backend(resolved_config)
+    metadata = _validated_reference(reference, resolved_config)
+    storage = _storage_backend_for_reference(metadata, resolved_config)
     try:
         storage.delete(reference=reference)
     except (ResultStorageError, OSError) as error:

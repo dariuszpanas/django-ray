@@ -49,14 +49,17 @@ Set `INPUT_STORAGE_BACKEND` to `"s3"` and configure
 `INPUT_STORAGE_S3_BUCKET`. `INPUT_STORAGE_S3_PREFIX` defaults to
 `django-ray/inputs`; region and S3-compatible endpoint settings are optional. Install
 `django-ray[s3]` and give enqueueing and worker identities read/write/delete access
-only to the configured bucket and prefix.
+only to the configured bucket and prefix. S3-compatible endpoints must honor the
+conditional create and ETag-conditional delete requests used to prevent overwrite or
+cleanup of a replaced content-addressed input.
 
 ### GCS
 
 Set `INPUT_STORAGE_BACKEND` to `"gcs"` and configure
 `INPUT_STORAGE_GCS_BUCKET`. `INPUT_STORAGE_GCS_PREFIX` defaults to
 `django-ray/inputs`. Install `django-ray[gcs]` and scope credentials to the configured
-bucket and prefix.
+bucket and prefix. Writes are create-only, and reads and deletes are pinned to one GCS
+generation.
 
 Digest-only storage is rejected for inputs because workers must retrieve the original
 payload.
@@ -68,6 +71,20 @@ Workers validate the configured backend, bucket or filesystem root, object prefi
 SHA-256 digest, byte length, schema, version, field set, and canonical encoding before
 importing or calling application code.
 
+Reference grammar and namespace authorization complete before filesystem access, object-store
+client construction, credential discovery, or provider calls. Scheme, authority, digest-derived
+path, query field order, decimal byte count, and percent-encoding must be exact. Runtime readers
+retain only the configuration-bound raw S3/GCS key encoding used by older shared storage writers;
+the configured bucket and raw prefix must still select the exact digest-derived key. Malformed
+references raise a stable bounded validation error without retaining raw query tokens or parser
+exceptions in the durable task traceback.
+
+Filesystem containment assumes `INPUT_STORAGE_FILESYSTEM_PATH` and its parent directory
+tree are operator-controlled. It is not a sandbox against a process that can concurrently
+replace digest directories with symlinks or Windows reparse points between validation and
+I/O. Do not give untrusted task code or unrelated workloads write access to that tree; use
+a dedicated mount and identity for shared durable-input storage.
+
 Missing, malformed, unauthorized, or corrupt input references fail the execution
 without running user code. Malformed, unauthorized, and integrity-validation failures
 are non-retryable because another attempt would read the same invalid reference.
@@ -78,6 +95,54 @@ configuration before forcing a manual retry.
 Ray Core passes only the reference to the executor. Ray Job uses transport version 2
 for referenced inputs and does not place the raw argument payload in its command line.
 Inline tasks retain the version 1 transport.
+
+## Backend and Namespace Rotation
+
+The active `INPUT_STORAGE_BACKEND` selects new writes. Reads and cleanup instead dispatch from
+the validated reference scheme, so a different-scheme namespace can remain configured for queued,
+running, retryable, and retained historical tasks after the writer changes. For example, after
+switching new writes from S3 to GCS, retain the old S3 bucket, prefix, connection settings, and
+credentials until no execution or registry tombstone needs that namespace.
+
+Only one namespace can be configured per scheme. Treat an S3-to-S3 or GCS-to-GCS bucket/prefix
+change as a data migration: pause spillover writes, copy every object byte-for-byte to its exact
+digest-derived key, verify byte counts and SHA-256 digests, update execution and registry references
+in one reviewed restartable migration, exercise representative reads, and only then switch settings.
+For a filesystem-root change, copy and verify the complete digest tree before changing the root;
+filesystem references do not encode which root created them. Rotating credentials without changing
+the authorized namespace requires no reference rewrite, but both enqueue and worker identities must
+have the required access before rollout.
+
+Do not reuse a result-storage namespace for inputs. Input retention cleanup may delete an
+object while a result still references the same content-addressed key. Startup rejects
+identical input/result filesystem roots, S3 endpoint/bucket/prefix namespaces, and GCS
+bucket/prefix namespaces. A shared object-store bucket is supported with distinct
+prefixes, and separate explicit S3-compatible endpoints are separate namespaces;
+filesystem storage requires distinct root directories. Different configured aliases to
+the same physical storage remain an operator responsibility and must also stay disjoint.
+
+An existing deployment that shares a namespace must complete the input-namespace
+rotation above before starting upgraded web processes or workers. For object storage,
+copy and verify the input objects and atomically rewrite both execution and registry
+references; for filesystem storage, copy and verify the digest tree into a distinct input
+root before switching that setting. Pause enqueue, execution, and input purge across the
+cutover so an old process cannot recreate the unsafe shared ownership boundary.
+
+Retain the exact old raw prefix for v0.2/v0.3 references containing percent-escape-like
+text. A raw `%25` segment can also be parsed as the canonical encoding of a different
+object key; the configured retained prefix is what resolves that ambiguity. Do not
+change the prefix before the reviewed object-and-reference migration above.
+
+Those releases stripped leading and trailing `/` characters from configured prefixes.
+For example, `/prod/inputs/` wrote objects and references under `prod/inputs`; normalize
+the setting to `prod/inputs` before starting 0.4.0 and verify representative queued and
+retained payloads. Use the empty string, not `/`, for a prefix-free namespace. Internal
+empty or single-dot segments, backslashes, and control characters are deliberately
+unsupported by the 0.4.0 authority parser; parent segments were already unreadable and
+require the same migration if an old writer created their objects. Migrate affected
+objects while the old release can still read the readable cases: pause enqueue and purge,
+copy and verify each payload into a canonical prefix, atomically rewrite execution and
+registry references, change the setting, and exercise reads before upgrading.
 
 ## Retries and Retention
 
@@ -103,6 +168,11 @@ execution is terminal with an old enough `finished_at`. Cleanup locks the regist
 execution rows so a concurrent enqueue cannot lose a shared payload. Successful cleanup
 keeps execution references and a `PURGED` tombstone for audit. A future enqueue of the
 same content reactivates the object.
+
+Command output identifies a reference only by a 16-character SHA-256 fingerprint. It
+does not print the bucket, prefix, digest locator, provider exception text, or full
+reference. `cleanup_error` retains only the bounded exception class so command logs and
+database diagnostics cannot become a storage-URI or credential oracle.
 
 Purging makes historical manual retry impossible until the same object is restored or
 reactivated. Choose a retention window that covers the application's audit and manual

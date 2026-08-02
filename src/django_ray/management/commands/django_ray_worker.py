@@ -857,9 +857,16 @@ class Command(BaseCommand):
             result_reference = result.get("result_reference")
             if result_reference is None:
                 return True
-            from django_ray.result_storage import is_valid_result_reference
+            from django_ray.result_storage import (
+                ResultStorageError,
+                canonicalize_result_reference,
+            )
 
-            return is_valid_result_reference(result_reference)
+            try:
+                canonicalize_result_reference(result_reference)
+            except ResultStorageError:
+                return False
+            return True
 
         if not isinstance(result.get("error"), str):
             return False
@@ -1706,12 +1713,21 @@ class Command(BaseCommand):
             else None
         )
 
+        prepared_result_reference: str | None = None
         if valid_result is not None and valid_result["success"]:
-            prepared_result_reference = (
-                str(valid_result["result_reference"])
-                if valid_result.get("result_reference")
-                else None
-            )
+            result_reference = valid_result.get("result_reference")
+            if result_reference is not None:
+                from django_ray.result_storage import (
+                    ResultStorageError,
+                    canonicalize_result_reference,
+                )
+
+                try:
+                    prepared_result_reference = canonicalize_result_reference(result_reference)
+                except ResultStorageError:
+                    valid_result = None
+
+        if valid_result is not None and valid_result["success"]:
             handled = self._store_and_succeed_task(
                 current,
                 valid_result.get("result"),
@@ -2743,6 +2759,20 @@ class Command(BaseCommand):
             if not self._is_valid_completion_envelope(result):
                 return False
 
+            prepared_result_reference: str | None = None
+            if result["success"] and result.get("result_reference") is not None:
+                from django_ray.result_storage import (
+                    ResultStorageError,
+                    canonicalize_result_reference,
+                )
+
+                try:
+                    prepared_result_reference = canonicalize_result_reference(
+                        result["result_reference"]
+                    )
+                except ResultStorageError:
+                    return False
+
             handled = False
             current: RayTaskExecution | None = None
             with self._authoritative_task_owner(
@@ -2755,9 +2785,6 @@ class Command(BaseCommand):
                     return True
                 current = owned.execution
                 if result["success"]:
-                    prepared_result_reference = (
-                        str(result["result_reference"]) if result.get("result_reference") else None
-                    )
                     handled = self._store_and_succeed_task(
                         current,
                         result.get("result"),

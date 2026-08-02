@@ -213,6 +213,37 @@ class TestEntrypointPayload:
         assert len(observed_loops) == 1
         assert observed_loops[0].is_closed()
 
+    def test_malformed_input_reference_does_not_enter_durable_traceback(
+        self,
+        monkeypatch,
+    ) -> None:
+        sensitive = "VERY_PRIVATE_STORAGE_TOKEN"
+        digest = "a" * 64
+        reference = f"s3://task-inputs/django-ray/inputs/aa/aa/{digest}.json?bytes=1&{sensitive}"
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        monkeypatch.setattr(
+            "django_ray.input_storage.get_settings",
+            lambda: {
+                "INPUT_STORAGE_BACKEND": "s3",
+                "INPUT_STORAGE_S3_BUCKET": "task-inputs",
+                "INPUT_STORAGE_S3_PREFIX": "django-ray/inputs",
+            },
+        )
+
+        result = json.loads(
+            entrypoint.execute_task(
+                "tests.never_imported",
+                "null",
+                "null",
+                input_reference=reference,
+            )
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "Task input reference is invalid"
+        assert sensitive not in result["traceback"]
+        assert reference not in result["traceback"]
+
     def test_execute_task_preserves_coroutine_exception_type(self, monkeypatch) -> None:
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
 

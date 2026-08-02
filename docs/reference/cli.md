@@ -140,9 +140,11 @@ python manage.py django_ray_purge_inputs --retention-days=30 --delete
 | `--retention-days=N` | Require registry use and every terminal finish to be at least `N` days old; default `30` |
 | `--delete` | Delete eligible objects after row-locking all references |
 
-Storage failures are recorded in `TaskInputPayload.cleanup_error` and make the command
-exit with an error. See [Durable Input Storage](input-storage.md#retries-and-retention)
-before scheduling cleanup.
+Storage failures are recorded as a bounded exception class in
+`TaskInputPayload.cleanup_error` and make the command exit with an error. Dry-run,
+success, and failure output use only a 16-character SHA-256 reference fingerprint; full
+storage references and provider exception messages are not printed. See
+[Durable Input Storage](input-storage.md#retries-and-retention) before scheduling cleanup.
 
 ## django_ray_cleanup_workflow_progress
 

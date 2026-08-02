@@ -295,6 +295,17 @@ class TestWorkerCommandCoverage:
             }
         )
 
+    def test_completion_envelope_requires_configured_filesystem_namespace(self, settings) -> None:
+        digest = "a" * 64
+        reference = f"resultfs://sha256/{digest}?rel=aa/aa/{digest}.json&bytes=1"
+        envelope = {"success": True, "result": None, "result_reference": reference}
+        settings.DJANGO_RAY = {}
+
+        assert not Command._is_valid_completion_envelope(envelope)
+
+        settings.DJANGO_RAY = {"RESULT_STORAGE_FILESYSTEM_PATH": "/srv/django-ray/results"}
+        assert Command._is_valid_completion_envelope(envelope)
+
     def test_ray_cluster_resource_check_returns_resources_and_reraises_errors(
         self, monkeypatch
     ) -> None:

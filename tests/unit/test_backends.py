@@ -18,7 +18,7 @@ from django.tasks.exceptions import InvalidTask, TaskResultDoesNotExist
 from django_ray.backends import RayTaskBackend, TaskResultIdAllocationError
 from django_ray.input_storage import prepare_task_input
 from django_ray.models import RayTaskExecution, TaskState
-from django_ray.result_storage import ResultStorageError
+from django_ray.result_storage import FilesystemResultStorage, ResultStorageError
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
     runtime_env_for_execution,
@@ -755,6 +755,56 @@ class TestRayTaskBackend:
             "Failed to decode stored task result payload" in record.getMessage()
             for record in caplog.records
         )
+
+    def test_get_result_rejects_tampered_external_payload_without_logging_reference(
+        self, monkeypatch, caplog, tmp_path
+    ) -> None:
+        payload = json.dumps({"value": 42})
+        storage = FilesystemResultStorage(tmp_path)
+        reference = storage.store(serialized_result=payload)
+        payload_path = next(tmp_path.rglob("*.json"))
+        payload_path.write_text(json.dumps({"value": 99}), encoding="utf-8")
+        execution = RayTaskExecution.objects.create(
+            task_id="backend-result-ref-tampered",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            result_reference=reference,
+        )
+        monkeypatch.setattr(
+            "django_ray.result_storage.get_settings",
+            lambda: {"RESULT_STORAGE_FILESYSTEM_PATH": str(tmp_path)},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = _make_backend().get_result(execution.task_id)
+
+        assert result.status.name == "SUCCESSFUL"
+        assert result.return_value is None
+        assert "Failed to load external task result" in caplog.text
+        assert reference not in caplog.text
+
+    def test_get_result_does_not_log_malicious_reference(self, caplog) -> None:
+        reference = "s3://user:private-credential@bucket/object?bytes=1"
+        execution = RayTaskExecution.objects.create(
+            task_id="backend-result-ref-malicious",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.SUCCEEDED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            result_reference=reference,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = _make_backend().get_result(execution.task_id)
+
+        assert result.return_value is None
+        assert "Failed to load external task result" in caplog.text
+        assert "private-credential" not in caplog.text
+        assert reference not in caplog.text
 
     def test_get_result_raises_for_missing_execution(self) -> None:
         with pytest.raises(TaskResultDoesNotExist):

@@ -633,8 +633,13 @@ produced a terminal state.
 - Stuck/timeout detection with loss handling and retry path.
 - Startup settings validation fail-fast by default, with migration/bootstrap bypass controls.
 - Result size enforcement with configurable oversized-result backends (`digest`, `filesystem`, `s3`, `gcs`).
-- Backend result retrieval rehydrates `result_reference` payloads for retrievable backends.
-- Versioned, content-addressed input envelopes with retrievable filesystem, S3, and GCS backends.
+- Backend result retrieval rehydrates authorized `result_reference` payloads only after
+  provider/stat size, bounded raw-byte, SHA-256, and UTF-8 verification. New references
+  are canonical; the legacy reader is limited to v0.2/v0.3 object-key encoding.
+- Versioned, content-addressed input envelopes with retrievable filesystem, S3, and GCS backends;
+  strict references are authorized before client construction, while historical reads and cleanup
+  dispatch across configured retained namespaces by validated scheme. Input/result namespaces are
+  disjoint because input retention may delete objects on its independent lifecycle.
 
 ## Observability Surfaces
 
