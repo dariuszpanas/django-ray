@@ -56,21 +56,3 @@ Compiled Graph is more restrictive than ordinary Ray use: policy version 2 rejec
 Windows, aarch64, Ray Client, GPU transport, and every unverified native tuple before
 calling `experimental_compile()`. Dynamic workflows remain supported according to the
 general matrix above.
-
-## piwheels
-
-[piwheels automatically processes PyPI releases](https://www.piwheels.org/faq.html);
-projects do not upload or configure build rows themselves. Its project table shows the
-Python versions associated with supported Debian releases. Those columns are not
-django-ray's support declaration.
-
-The [piwheels JSON metadata for django-ray](https://www.piwheels.org/project/django-ray/json/)
-correctly carries
-`requires_python: ">=3.12"`. Pip will use that metadata when resolving an install.
-The displayed django-ray wheel is `py3-none-any`, while the Ray dependency still needs
-a compatible platform wheel.
-
-If the project should disappear from piwheels entirely because no useful Ray
-installation exists for the platform, the available mechanism is to contact the
-piwheels maintainers and request a skip flag. There is no setting in
-`pyproject.toml` that customizes their version grid.
