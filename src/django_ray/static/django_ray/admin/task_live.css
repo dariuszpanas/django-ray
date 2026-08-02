@@ -1,3 +1,10 @@
+body.django-ray-execution-change #content > h2,
+body.django-ray-execution-change nav > .breadcrumbs {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 #django-ray-live-observability {
   --django-ray-live-accent: #38bdf8;
   --django-ray-live-accent-strong: #0284c7;
