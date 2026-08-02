@@ -11,7 +11,7 @@ k8s-gen-tls-certs:
 	@echo "Certificates generated in ./certs/ray-tls/"
 
 # Create TLS secret in Kubernetes
-k8s-create-tls-secret:
+k8s-create-tls-secret: k8s-evaluation-warning
 	@echo "Creating ray-tls-certs secret..."
 	kubectl create namespace django-ray --dry-run=client -o yaml | kubectl apply -f -
 	kubectl create secret generic ray-tls-certs \

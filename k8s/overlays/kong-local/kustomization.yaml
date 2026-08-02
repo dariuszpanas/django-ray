@@ -1,3 +1,5 @@
+# Evaluation-only KubeRay and Kong profile for trusted local clusters.
+# Do not apply it to a production cluster.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

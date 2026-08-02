@@ -1,4 +1,5 @@
-# Kustomize base configuration for django-ray
+# Kustomize render base for evaluation and maintainer validation only.
+# Do not apply it directly or treat it as a production deployment template.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

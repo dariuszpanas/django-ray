@@ -6,6 +6,7 @@
 .PHONY: k8s-install-kuberay k8s-uninstall-kuberay k8s-kind-load k8s-prepare-kuberay-kind k8s-delete-local-raycluster k8s-deploy-kuberay-kind k8s-delete-kuberay-kind
 .PHONY: k8s-install-kong-local k8s-uninstall-kong-local k8s-deploy-kong-local
 .PHONY: k8s-logs k8s-logs-web k8s-logs-worker k8s-logs-ray k8s-logs-ray-head k8s-logs-ray-workers
+.PHONY: k8s-evaluation-warning
 
 KIND_CLUSTER_NAME ?= kind
 K8S_URL_SCHEME ?= http
@@ -37,6 +38,11 @@ K8S_NAMESPACE ?= django-ray
 K8S_RAY_RESTART ?=
 K8S_FINAL_GATE_EXTRA_ARGS ?=
 
+k8s-evaluation-warning:
+	@echo "WARNING: the checked-in Kubernetes manifests are for trusted, disposable local evaluation only."
+	@echo "They are maintainer-validation assets, not a production-ready deployment."
+	@echo "The requested target may create, update, restart, scale, or delete local cluster resources."
+
 # Build Docker images for Kubernetes
 k8s-build:
 	@echo "Building Django web image..."
@@ -45,7 +51,7 @@ k8s-build:
 	docker build -f Dockerfile.ray -t django-ray-worker:latest .
 
 # Deploy to Kubernetes cluster (dev overlay)
-k8s-deploy: k8s-build
+k8s-deploy: k8s-evaluation-warning k8s-build
 	kubectl apply -k k8s/overlays/dev
 	@echo "Waiting for deployments..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
@@ -58,7 +64,7 @@ k8s-deploy: k8s-build
 	@$(MAKE) --no-print-directory k8s-urls
 
 # Deploy with full resources (16+ CPUs, 32GB+ RAM)
-k8s-deploy-local: k8s-build
+k8s-deploy-local: k8s-evaluation-warning k8s-build
 	kubectl apply -k k8s/overlays/local
 	@echo "Waiting for deployments..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
@@ -71,7 +77,7 @@ k8s-deploy-local: k8s-build
 	@$(MAKE) --no-print-directory k8s-urls
 
 # Deploy with TLS enabled
-k8s-deploy-tls: k8s-build k8s-create-tls-secret
+k8s-deploy-tls: k8s-evaluation-warning k8s-build k8s-create-tls-secret
 	kubectl apply -k k8s/overlays/dev-tls
 	@echo "Waiting for deployments..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
@@ -84,7 +90,7 @@ k8s-deploy-tls: k8s-build k8s-create-tls-secret
 	@$(MAKE) --no-print-directory k8s-urls
 
 # Install/upgrade KubeRay operator (required for RayCluster CRD mode)
-k8s-install-kuberay:
+k8s-install-kuberay: k8s-evaluation-warning
 	helm repo add kuberay https://ray-project.github.io/kuberay-helm/ || true
 	helm repo update
 	helm upgrade --install kuberay-operator kuberay/kuberay-operator \
@@ -93,11 +99,11 @@ k8s-install-kuberay:
 	kubectl wait --for=condition=available deployment -l app.kubernetes.io/name=kuberay-operator -n kuberay-system --timeout=180s
 
 # Uninstall KubeRay operator
-k8s-uninstall-kuberay:
+k8s-uninstall-kuberay: k8s-evaluation-warning
 	helm uninstall kuberay-operator -n kuberay-system || true
 
 # Load locally built images into kind cluster
-k8s-kind-load:
+k8s-kind-load: k8s-evaluation-warning
 	@echo "Attempting to load images into kind cluster: $(KIND_CLUSTER_NAME)"
 	-@kind load docker-image django-ray:latest --name $(KIND_CLUSTER_NAME)
 	-@kind load docker-image django-ray-worker:latest --name $(KIND_CLUSTER_NAME)
@@ -108,12 +114,12 @@ k8s-prepare-kuberay-kind: k8s-build k8s-kind-load k8s-install-kuberay
 
 # Replace the package-owned local RayCluster instead of trusting an in-place
 # profile edit to recreate worker pods or the generated head Service.
-k8s-delete-local-raycluster:
+k8s-delete-local-raycluster: k8s-evaluation-warning
 	kubectl delete raycluster/ray -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=240s
 	kubectl delete service/ray-head-svc -n django-ray --ignore-not-found --wait=true
 
 # Deploy using KubeRay operator on kind
-k8s-deploy-kuberay-kind: k8s-prepare-kuberay-kind
+k8s-deploy-kuberay-kind: k8s-evaluation-warning k8s-prepare-kuberay-kind
 	$(MAKE) --no-print-directory k8s-uninstall-kong-local
 	$(MAKE) --no-print-directory k8s-delete-local-raycluster
 	kubectl apply -k k8s/overlays/kuberay-kind
@@ -136,7 +142,7 @@ k8s-deploy-kuberay-kind: k8s-prepare-kuberay-kind
 	@echo "    make k8s-deploy-kong-local"
 
 # Install Kong Gateway + Kong Ingress Controller for the local overlay
-k8s-install-kong-local:
+k8s-install-kong-local: k8s-evaluation-warning
 	helm repo add kong https://charts.konghq.com/ || true
 	helm repo update
 	helm upgrade --install kong kong/ingress \
@@ -147,12 +153,12 @@ k8s-install-kong-local:
 	kubectl rollout status deployment/kong-gateway -n kong --timeout=180s
 
 # Remove only the package-owned local Kong release and its application routes.
-k8s-uninstall-kong-local:
+k8s-uninstall-kong-local: k8s-evaluation-warning
 	helm uninstall kong --namespace kong --ignore-not-found --wait --timeout 180s
 	kubectl delete ingress/grafana-ingress ingress/prometheus-ingress ingress/ray-dashboard-ingress -n django-ray --ignore-not-found --wait=true
 
 # Deploy KubeRay plus Kong host-based local routes
-k8s-deploy-kong-local: k8s-prepare-kuberay-kind k8s-install-kong-local
+k8s-deploy-kong-local: k8s-evaluation-warning k8s-prepare-kuberay-kind k8s-install-kong-local
 	$(MAKE) --no-print-directory k8s-delete-local-raycluster
 	kubectl apply -k k8s/overlays/kong-local
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s
@@ -177,11 +183,11 @@ k8s-deploy-kong-local: k8s-prepare-kuberay-kind k8s-install-kong-local
 	@$(MAKE) --no-print-directory k8s-urls-kong
 
 # Delete KubeRay operator-based overlay resources
-k8s-delete-kuberay-kind:
+k8s-delete-kuberay-kind: k8s-evaluation-warning
 	kubectl delete -k k8s/overlays/kuberay-kind --ignore-not-found
 
 # Delete deployment
-k8s-delete:
+k8s-delete: k8s-evaluation-warning
 	kubectl delete -k k8s/overlays/dev --ignore-not-found
 
 # Show deployment status
@@ -217,7 +223,7 @@ k8s-final-gate-preflight:
 		--preflight-only $(K8S_FINAL_GATE_EXTRA_ARGS)
 
 # Complete guarded Docker Desktop/Kind KubeRay final integration gate.
-k8s-final-gate:
+k8s-final-gate: k8s-evaluation-warning
 	$(if $(strip $(K8S_CONTEXT)),,$(error K8S_CONTEXT is required (docker-desktop or kind-<name>)))
 	$(if $(strip $(K8S_RAY_RESTART)),,$(error K8S_RAY_RESTART is required (required or skip)))
 	python -m scripts.local_kuberay_gate \
@@ -256,7 +262,7 @@ k8s-urls-kong:
 	@echo   make k8s-urls-kong K8S_KONG_WEB_URL=https://app.example.com K8S_KONG_RAY_DASHBOARD_URL=https://ray.example.com K8S_KONG_GRAFANA_URL=https://grafana.example.com K8S_KONG_PROMETHEUS_URL=https://prometheus.example.com
 
 # Complete reset - delete namespace and redeploy
-k8s-reset:
+k8s-reset: k8s-evaluation-warning
 	@echo "Deleting namespace django-ray..."
 	kubectl delete namespace django-ray --ignore-not-found --wait=true
 	@echo "Redeploying..."
@@ -284,22 +290,22 @@ k8s-logs-ray-workers:
 	kubectl logs -n django-ray -l app=ray,component=worker -c ray-worker --prefix --tail=50 -f --max-log-requests=8
 
 # Restart deployments
-k8s-restart:
+k8s-restart: k8s-evaluation-warning
 	kubectl rollout restart deployment/django-web -n django-ray
 	kubectl rollout restart deployment/django-ray-worker -n django-ray
 
-k8s-restart-ray:
+k8s-restart-ray: k8s-evaluation-warning
 	kubectl rollout restart deployment/ray-head -n django-ray
 	kubectl rollout restart deployment/ray-worker -n django-ray
 
 # Scale Ray workers
-k8s-scale-ray-2:
+k8s-scale-ray-2: k8s-evaluation-warning
 	kubectl scale deployment/ray-worker --replicas=2 -n django-ray
 
-k8s-scale-ray-3:
+k8s-scale-ray-3: k8s-evaluation-warning
 	kubectl scale deployment/ray-worker --replicas=3 -n django-ray
 
-k8s-scale-ray-4:
+k8s-scale-ray-4: k8s-evaluation-warning
 	kubectl scale deployment/ray-worker --replicas=4 -n django-ray
 
 # Shell into pods

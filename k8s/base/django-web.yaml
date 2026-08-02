@@ -73,8 +73,8 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
-          # Keep the probe Host values aligned with DJANGO_ALLOWED_HOSTS when
-          # deriving a production overlay from this base.
+          # Keep the probe Host values aligned with DJANGO_ALLOWED_HOSTS in any
+          # environment-specific deployment design.
           readinessProbe:
             httpGet:
               path: /api/health

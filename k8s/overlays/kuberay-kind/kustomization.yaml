@@ -1,4 +1,5 @@
-# KubeRay operator-based deployment for local kind clusters.
+# Evaluation-only KubeRay deployment for local kind clusters.
+# Do not apply it to a production cluster.
 # This path keeps django-web/django workers in Deployments and delegates
 # Ray head/worker lifecycle to a RayCluster custom resource.
 apiVersion: kustomize.config.k8s.io/v1beta1

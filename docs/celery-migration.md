@@ -41,13 +41,13 @@ django-ray's current supported boundary is:
 | Database | PostgreSQL for production; SQLite is suitable for a local walkthrough |
 | Task manager | At least one `python manage.py django_ray_worker ...` process for each selected queue |
 | Ray | Ray 2.53.0 or a newer compatible release; align Ray and Python versions across task managers and Ray nodes |
-| Production platform | Linux is recommended; Kubernetes deployments should use the documented KubeRay boundary |
+| Production platform | Linux is recommended; evaluate Kubernetes locally through the documented KubeRay boundary and design production topology from its architecture checklist |
 
 Install the package, add `django_ray` to `INSTALLED_APPS`, configure at least one
 `TASKS` backend, configure `DJANGO_RAY`, and apply the package migrations before
 starting task managers. The complete setup is in [Getting Started](getting-started.md);
-execution topology is in [Worker Modes](worker-modes.md), and production deployment is
-in [Kubernetes Deployment](deployment/kubernetes.md).
+execution topology is in [Worker Modes](worker-modes.md), and local Kubernetes evaluation plus
+production architecture requirements are in [Kubernetes Deployment](deployment/kubernetes.md).
 
 Celery and django-ray may use the same Django application during coexistence, but they
 remain separate delivery systems:

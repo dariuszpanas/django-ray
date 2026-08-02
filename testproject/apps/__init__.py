@@ -5,7 +5,7 @@ with Django 6's native task framework:
 
 - sync_tasks: Synchronous execution for testing (no Ray)
 - local_ray: Local Ray instance for development
-- cluster_tasks: Remote Ray cluster for production
+- cluster_tasks: Remote Ray cluster integration example
 - ml_pipeline: Machine learning pattern with data processing
 
 Example usage:
@@ -15,6 +15,6 @@ Example usage:
     # Local Ray (development)
     python manage.py django_ray_worker --local --queue=default
 
-    # Cluster mode (production)
+    # Cluster mode (remote Ray integration)
     python manage.py django_ray_worker --cluster ray://head:10001 --queue=default
 """

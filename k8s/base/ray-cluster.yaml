@@ -1,5 +1,5 @@
-# Ray Cluster deployment using native Kubernetes
-# For production, consider using KubeRay operator instead
+# Static Ray Deployment reference for evaluation and local validation only.
+# A production architecture should evaluate KubeRay lifecycle management.
 #
 # Optimized for: 16 CPUs, 64GB RAM, GPU available
 # Adjust resources based on your Docker Desktop K8s resource allocation

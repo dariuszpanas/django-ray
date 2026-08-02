@@ -162,4 +162,5 @@ failed = RayTaskExecution.objects.filter(state=TaskState.FAILED)
 - [Performance](performance.md) for task granularity and mode selection
 - [Ray-Native Workflows](workflows.md) for chain, group, and fan-out
 - [Runtime Environments](runtime-environments.md) for per-task dependencies
-- [Kubernetes Deployment](deployment/kubernetes.md) for the sample production stack
+- [Kubernetes Deployment](deployment/kubernetes.md) for local evaluation and a production
+  architecture checklist

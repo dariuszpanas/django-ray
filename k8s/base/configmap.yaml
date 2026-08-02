@@ -6,7 +6,8 @@ metadata:
   namespace: django-ray
 data:
   DJANGO_SETTINGS_MODULE: "testproject.settings"
-  # The base manifests are production-capable. Local overlays switch this to demo.
+  # Exercise fail-closed Django configuration checks in the render reference.
+  # This mode does not certify the sample manifests as a production topology.
   DJANGO_DEPLOYMENT_MODE: "production"
   DJANGO_DEBUG: "False"
   DJANGO_ALLOWED_HOSTS: "django-ray.example.com"
@@ -17,7 +18,7 @@ data:
   RAY_DASHBOARD_HOST: "0.0.0.0"
   RAY_DASHBOARD_URL: "http://localhost:30265"
   RAY_STATE_API_ADDRESS: "http://ray-head-svc:8265"
-  # Database configuration (override in production)
+  # Bundled database configuration for evaluation and local validation only.
   DATABASE_ENGINE: "django.db.backends.postgresql"
   DATABASE_NAME: "django_ray"
   DATABASE_HOST: "postgres-svc"

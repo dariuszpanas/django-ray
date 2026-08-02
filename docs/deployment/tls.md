@@ -1,6 +1,13 @@
 # TLS Configuration
 
-Ray supports TLS for encrypted communication between nodes. This is **required** for production deployments.
+Ray supports TLS for encrypted communication between nodes. TLS is necessary in a production
+architecture, but it is only one part of identity, authorization, and network security.
+
+!!! warning "Local evaluation recipe"
+
+    The self-signed certificates and tracked `dev-tls` overlay below are for trusted local
+    evaluation only. Apply them only to a disposable local environment. They are not a production
+    PKI, ingress design, or deployment reference.
 
 ## Overview
 
@@ -98,9 +105,12 @@ Recommended: RSA 4096-bit
 openssl genrsa -out tls.key 4096
 ```
 
-## Production: Using cert-manager
+## Production Certificate Architecture (Not Shipped)
 
-For production, use [cert-manager](https://cert-manager.io/) to automatically manage certificates.
+A production design can use [cert-manager](https://cert-manager.io/) or an equivalent approved PKI
+integration. The following resources illustrate the API shape; do not apply the self-signed issuer
+verbatim. Select organization-approved trust roots, issuer scope, SANs, rotation policy, private-key
+controls, and failure/rollback procedures.
 
 ### 1. Install cert-manager
 
@@ -119,6 +129,9 @@ metadata:
 spec:
   selfSigned: {}
 ```
+
+The `selfSigned` issuer above is suitable only for local API exploration. Replace it with the
+reviewed issuer and trust distribution from the production architecture.
 
 ### 3. Create Certificate
 

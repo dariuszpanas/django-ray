@@ -1,6 +1,12 @@
 # Django-Ray Kubernetes Deployment
 
-This directory contains Kubernetes manifests for deploying django-ray with a Ray cluster using Kustomize.
+This directory contains Kustomize manifests for local django-ray evaluation and maintainer
+integration validation.
+
+> **Evaluation only:** `k8s/base` and every tracked overlay are not production-ready. All
+> `kubectl apply` and `make k8s-deploy...` commands below must target a trusted, disposable local
+> environment. Replacing placeholders does not turn the bundled topology into a production
+> deployment.
 
 ## Directory Structure
 
@@ -10,7 +16,7 @@ k8s/
 │   ├── kustomization.yaml   # Main kustomization file
 │   ├── namespace.yaml       # Namespace definition
 │   ├── configmap.yaml       # Application config
-│   ├── secret.yaml          # Secrets (override in production!)
+│   ├── secret.yaml          # Shared local/render-only Secret reference
 │   ├── postgres.yaml        # PostgreSQL deployment
 │   ├── ray-cluster.yaml     # Ray head + workers
 │   ├── ray-tls-secret.yaml  # TLS certificate secret template
@@ -47,7 +53,7 @@ k8s/
 - Helm, for KubeRay or Kong operator installation targets
 - kind, for `make k8s-deploy-kuberay-kind` image-loading targets
 
-## Quick Start
+## Local Evaluation Quick Start
 
 ### 1. Build Docker Images
 
@@ -95,7 +101,8 @@ The ordinary targets below use `latest` for local iteration. Before merging a ch
 the deployment boundary, follow the source-bound trigger matrix and guarded commands in
 [`docs/deployment/local-kuberay-gate.md`](../docs/deployment/local-kuberay-gate.md). That gate keeps
 mutations in `django-ray`, preserves PostgreSQL/PVCs, and verifies the running image IDs, protected
-task smoke, probes, generic-Ray RuntimeEnv boundary, and Prometheus pools together.
+task smoke, probes, generic-Ray RuntimeEnv boundary, and Prometheus pools together. It is maintainer
+integration validation, not deployment certification or a production-readiness assessment.
 
 This local overlay also opts Django application processes into encrypted durable
 RuntimeEnv snapshots through the explicit `django-secret` fallback. The three
@@ -151,8 +158,8 @@ make k8s-deploy-kuberay-kind KIND_CLUSTER_NAME=my-kind
 
 ## Kong Ingress Controller Path
 
-If production will use Kong, you can validate the same ingress class locally with
-KubeRay plus Kong Ingress Controller.
+To evaluate Kong as a candidate ingress, validate the ingress class locally with KubeRay plus Kong
+Ingress Controller.
 
 This path requires `helm`; the one-command path shares the KubeRay build,
 image-load, and operator prerequisites but applies only the `kong-local`
@@ -235,9 +242,9 @@ Notes:
   `LoadBalancer` on host ports `30080/30443`, so the local entrypoint becomes `http://localhost:30080`.
 - On a plain kind cluster, host-reachable ingress still requires extra networking setup such as
   `extraPortMappings` or `cloud-provider-kind`.
-- Mixed load profiles only reflect real queue throughput if the matching workers are deployed. The Kong
-  local overlay covers `default`, `high-priority`, `low-priority`, `sync`, and `ml`, but production
-  overlays still need queue-specific worker planning.
+- Mixed load profiles only reflect real queue throughput if the matching workers are deployed. The
+  Kong local overlay covers `default`, `high-priority`, `low-priority`, `sync`, and `ml`, but an
+  independently designed deployment still needs queue-specific worker planning.
 - `sync` tasks are not supposed to run through Ray. They need a worker started with `--sync --queue=sync`,
   which is why the Kong local overlay deploys a separate `django-ray-worker-sync`.
 - Because Docker Desktop managed-kind reports duplicated per-node capacity, the practical local ceiling comes
@@ -320,24 +327,42 @@ kubectl delete -k k8s/overlays/dev
 kubectl delete namespace django-ray
 ```
 
-## Production Considerations
+## Production Architecture Checklist
 
 ⚠️ **The base configuration is for development only!**
 
-For production deployment:
+The repository ships no production overlay or certified reference topology. Do not copy the base
+and treat placeholder replacement as a security or availability review. An independently designed
+production topology must address at least:
 
-1. **Secrets**: Use external secret management (Vault, AWS Secrets Manager, etc.).
-   Prefer a dedicated RuntimeEnv snapshot key with an independent retention schedule;
-   do not place it in the shared `django-ray-secret` that the example Ray pods import.
-2. **Database**: Use managed PostgreSQL (RDS, Cloud SQL, Azure Database)
-3. **Ray Cluster**: Consider using [KubeRay operator](https://ray-project.github.io/kuberay/)
-4. **TLS**: Enable TLS for Ray cluster communication (see below)
-5. **Ingress**: Configure proper TLS and domain
-6. **Resources**: Adjust CPU/memory limits based on workload
-7. **Replicas**: Scale Django web and Ray workers as needed
-8. **Storage**: Use proper storage class for PVCs
+1. **KubeRay lifecycle management** instead of the base's static Ray Deployments, including operator,
+   cluster/service upgrade, failure recovery, and rollback ownership.
+2. **Immutable images and RuntimeEnv artifacts** identified by digest or content identity, never the
+   sample's mutable `latest` tags.
+3. **Service identity and application authorization** instead of the sample superuser and shared
+   operator token, with Ray control surfaces kept private.
+4. **TLS, ingress, and network policy**, including certificate rotation and workload-to-workload
+   authorization.
+5. **Managed PostgreSQL and durable object/storage services**, with backup and restore tests.
+6. **Externally managed, component-scoped secrets** instead of `django-ray-secret`, which combines
+   signing, API, database/bootstrap, and sample user credentials. Both the static Ray containers and
+   generic upstream KubeRay head and worker pods import every value through `envFrom`; Prometheus
+   mounts the operator token separately. This evaluation-only credential blast radius is a sample
+   hazard, not a production endorsement.
+7. **Workload-derived resource policy**, quotas, autoscaling, placement, disruption budgets, and
+   tenant isolation.
+8. **Backups, observability, alerting, audit access, and operational ownership** with explicit
+   retention and recovery targets.
+9. **Separately invokable migration and rollback operations** for database, application, Ray, and
+   configuration changes.
 
-### Using KubeRay Operator (Recommended for Production)
+A real reference implementation requires its own threat model, least-privilege design, upgrade and
+rollback contract, and clean-checkout evidence.
+
+### KubeRay Architecture Starting Point
+
+The commands below install the upstream operator for exploration; they do not produce a complete
+django-ray production deployment.
 
 ```bash
 # Install KubeRay operator
@@ -350,7 +375,9 @@ helm install kuberay-operator kuberay/kuberay-operator
 
 ## TLS Configuration
 
-Ray supports TLS for encrypted communication between Ray nodes. This is **required** for production deployments.
+Ray supports TLS for encrypted communication between Ray nodes. TLS is necessary in a production
+design, but the self-signed `dev-tls` example below is local-only and does not supply production
+identity, authorization, ingress, or certificate lifecycle.
 
 ### Quick Start with TLS
 
@@ -414,9 +441,11 @@ The `dev-tls` overlay adds:
 - Environment variables (`RAY_USE_TLS=1`, `RAY_TLS_*`) pointing to the mounted certificates
 - TLS configuration to Ray head, Ray workers, and Django-Ray workers
 
-### Production TLS with cert-manager
+### Certificate Lifecycle Architecture
 
-For production, use [cert-manager](https://cert-manager.io/) to manage certificates:
+A production design can use [cert-manager](https://cert-manager.io/) or an equivalent approved PKI
+integration. The resource below is a schema sketch; select an organization-approved issuer, trust
+roots, SANs, rotation policy, and private-key controls instead of applying it verbatim.
 
 ```yaml
 apiVersion: cert-manager.io/v1
@@ -459,11 +488,11 @@ For more details, see the [Ray TLS documentation](https://docs.ray.io/en/latest/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DJANGO_DEPLOYMENT_MODE` | production in base, demo in local overlays | Fail-closed production checks or local demo mode |
+| `DJANGO_DEPLOYMENT_MODE` | production in base, demo in local overlays | Exercises fail-closed Django settings checks; it does not certify the Kubernetes topology |
 | `DJANGO_SECRET_KEY` | placeholder in base Secret | Random value of at least 50 characters in production |
 | `DJANGO_API_TOKEN` | placeholder in base Secret | Bearer token for non-health API routes; at least 32 characters in production |
 | `DJANGO_DEBUG` | False | Debug mode; production rejects True |
-| `DJANGO_ALLOWED_HOSTS` | `django-ray.example.com` | Explicit comma-separated hosts; production rejects `*`. Keep web probe `Host` headers aligned in production overlays. |
+| `DJANGO_ALLOWED_HOSTS` | `django-ray.example.com` | Explicit comma-separated hosts; production mode rejects `*`. Keep web probe `Host` headers aligned in an independently designed deployment. |
 | `DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE` | `plaintext` | Format for new durable RuntimeEnv snapshots; the local KubeRay overlay selects `encrypted` only on Django application containers |
 | `DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY` | unset | Key ID for new encrypted snapshots; the local KubeRay overlay selects the reserved `django-secret` fallback |
 | `DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK` | `False` | Explicitly permit HKDF derivation from Django signing keys; the local KubeRay overlay sets `true` |
@@ -491,11 +520,12 @@ For more details, see the [Ray TLS documentation](https://docs.ray.io/en/latest/
 | `RAY_MAX_RETRIES` | 3 | Sample project max task attempts |
 | `RAY_RETRY_DELAY_SECONDS` | 5 | Sample project retry backoff seconds |
 
-The base manifests are production-capable templates and must receive real Secret values before
-deployment. The `dev`, `local`, `dev-tls`, `kuberay-kind`, and `kong-local` overlays explicitly
-switch to `DJANGO_DEPLOYMENT_MODE=demo` for local use. Only `/api/livez`, `/api/readyz`, and
-`/api/health` are public; send `Authorization: Bearer $DJANGO_API_TOKEN` for all other API
-requests, including metrics and workflow/log observability.
+The base keeps `DJANGO_DEPLOYMENT_MODE=production` only to exercise fail-closed testproject settings;
+that value does not make its static Ray Deployments, mutable images, bundled services, sample
+identity paths, or shared Secret production-ready. The `dev`, `local`, `dev-tls`, `kuberay-kind`,
+and `kong-local` overlays switch to `demo` for trusted local use. Only `/api/livez`, `/api/readyz`,
+and `/api/health` are public; send `Authorization: Bearer $DJANGO_API_TOKEN` for all other local
+sample API requests, including metrics and workflow/log observability.
 
 ## Local Kubernetes Options
 

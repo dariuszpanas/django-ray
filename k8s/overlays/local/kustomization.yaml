@@ -1,4 +1,5 @@
 # Local development overlay - optimized for AMD GPU workstation
+# Evaluation-only local overlay. Do not apply it to a production cluster.
 # Your machine: 16 CPUs, 32GB RAM, AMD GPU (ROCm)
 #
 # Note: AMD GPU support in Docker Desktop requires:
@@ -24,8 +25,8 @@ resources:
   - ../../base
 
 patches:
-  # This overlay is intentionally local-demo-only. Production must use the base
-  # mode with externalized secrets and explicit allowed hosts.
+  # This overlay is intentionally local-demo-only. A production topology must
+  # be designed separately; the base is only a shared render reference.
   - patch: |-
       - op: replace
         path: /data/DJANGO_DEPLOYMENT_MODE

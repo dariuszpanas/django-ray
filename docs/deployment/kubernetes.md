@@ -1,6 +1,14 @@
 # Kubernetes Deployment
 
-This guide covers deploying django-ray to Kubernetes.
+This guide covers evaluating django-ray on Kubernetes and identifies the architecture work needed
+before an independently designed production deployment.
+
+!!! warning "Evaluation and maintainer validation only"
+
+    The checked-in `k8s/base` and every tracked overlay are local evaluation and maintainer
+    integration-validation assets, not a production-ready stack. Every command below that applies
+    those manifests must target a trusted, disposable local environment. Replacing placeholder
+    values does not make the sample topology production-ready.
 
 ## Prerequisites
 
@@ -8,7 +16,7 @@ This guide covers deploying django-ray to Kubernetes.
 - kubectl configured to access your cluster
 - Docker for building images
 
-## Quick Start
+## Local Evaluation Quick Start
 
 ### 1. Build Images
 
@@ -98,18 +106,38 @@ tools, or a compromised page can expose or restore it. Do not pass bearer tokens
 and do not expose the sample dashboard over an untrusted network or plaintext HTTP. Production front
 ends should use an appropriate identity and session model instead of distributing one operator token.
 
-For a production deployment, start from `k8s/base` (or copy it into an environment overlay),
-replace the placeholder Secret through an external secret manager, and set an explicit host in
-`DJANGO_ALLOWED_HOSTS`. The production mode rejects missing or weak Django/API secrets,
-`DEBUG=True`, and wildcard hosts before Gunicorn starts.
+`k8s/base` is a shared Kustomize render reference, not the starting point for a production
+deployment. It keeps `DJANGO_DEPLOYMENT_MODE=production` so maintainers exercise the sample
+project's fail-closed configuration checks: weak Django/API secrets, `DEBUG=True`, and wildcard
+hosts are rejected before Gunicorn starts. Passing those checks validates Django configuration; it
+does not certify the surrounding Kubernetes topology.
+
+The sample remains intentionally unsuitable for production even after replacing placeholders:
+
+- the bundled testproject, PostgreSQL, Prometheus, and Grafana are packaged as one convenience
+  stack rather than independently operated services;
+- application and static Ray Deployments use mutable `latest` image tags for local iteration;
+- the base manages Ray through static Deployments, while the tracked KubeRay overlays are also
+  local capacity and integration profiles;
+- the setup Job includes sample superuser creation and the dashboard uses one sample operator-token
+  path rather than an application identity model;
+- web, task-manager, setup, PostgreSQL, and both the static and generic KubeRay Ray containers
+  receive the shared `django-ray-secret` through `envFrom`; Prometheus also mounts the operator
+  token from it, combining credentials with different trust scopes across the sample; and
+- local NodePorts, ingress, volumes, resource settings, and lifecycle operations are validation
+  conveniences rather than a reviewed availability, isolation, or recovery design.
+
+Do not deploy the checked-in shared Secret outside this local boundary. Production environments
+must deliver externally managed, component-scoped credentials and service identities only to the
+processes that need them.
 
 The base web readiness and liveness probes connect to the pod IP but explicitly send
-`Host: django-ray.example.com`, matching the base allow-list. A production overlay that changes
-`DJANGO_ALLOWED_HOSTS` must patch both probe `httpHeaders` values to one of its accepted application
-hosts; do not add dynamic pod IPs or a wildcard to the allow-list. The local-demo overlays instead
-send `Host: django-ray.localhost`. The Kong local overlay deliberately uses a TCP readiness probe and
-process liveness probe for its overload-testing profile, while its HTTP startup probe sends the same
-local host header.
+`Host: django-ray.example.com`, matching the base allow-list. An independently designed deployment
+that changes `DJANGO_ALLOWED_HOSTS` must patch both probe `httpHeaders` values to one of its accepted
+application hosts; do not add dynamic pod IPs or a wildcard to the allow-list. The local-demo
+overlays instead send `Host: django-ray.localhost`. The Kong local overlay deliberately uses a TCP
+readiness probe and process liveness probe for its overload-testing profile, while its HTTP startup
+probe sends the same local host header.
 
 When using the Kong local overlay on Docker Desktop's managed kind cluster, use:
 
@@ -173,7 +201,8 @@ Deployments with a `RayCluster` custom resource.
 For source-bound validation before merging deployment-sensitive work, use the guarded
 [local KubeRay final gate](local-kuberay-gate.md). It rejects unexpected contexts and namespaces,
 renders unique immutable application tags without editing this overlay, and records the live API,
-probe, image-ID, RuntimeEnv, and Prometheus evidence.
+probe, image-ID, RuntimeEnv, and Prometheus evidence. This is maintainer validation of the local
+integration boundary, not deployment certification or a production-readiness assessment.
 
 The direct `kuberay-kind` overlay is the constrained-laptop exploratory
 profile: one default/priority task manager, one sync task manager, one ML task
@@ -372,7 +401,11 @@ data:
 ```
 
 If the public application host differs, patch `DJANGO_ALLOWED_HOSTS` and the web readiness and
-liveness probe `Host` headers together in the same production overlay.
+liveness probe `Host` headers together in the same environment-specific deployment design.
+
+`DJANGO_DEPLOYMENT_MODE=production` selects fail-closed Django settings validation in the bundled
+testproject. It does not assert that a manifest, image, credential layout, storage path, or network
+topology is production-ready.
 
 ### Secrets
 
@@ -386,12 +419,19 @@ data:
   DATABASE_PASSWORD: <base64-encoded>
 ```
 
-For production RuntimeEnv snapshot encryption, prefer a dedicated key stored through
-your external secret manager and map it into `RUNTIME_ENV_ENCRYPTION_KEYS` only in
-Django processes that enqueue, retry, inspect, or execute durable tasks. Do not add
-that key to `django-ray-secret`: the example Ray pods currently import that shared
-Secret for Django-aware task execution, while generic Ray nodes do not need the
-database-encryption key.
+The checked-in `django-ray-secret` is a render and local-validation reference only. It combines the
+Django signing key, one operator API token, database/bootstrap credentials, and sample superuser
+credentials. Both the Django-aware static Ray containers and the generic upstream KubeRay head and
+worker pods import every value through `envFrom`; Prometheus separately mounts the operator token.
+That evaluation-only credential blast radius is a documented sample hazard, not an endorsement of
+the layout. Replacing the values does not create least-privilege isolation. A production design must
+source separate, externally managed credentials for each component and must not distribute database,
+signing, bootstrap, or operator credentials to generic Ray nodes.
+
+For durable RuntimeEnv snapshot encryption, use a dedicated key stored through the external secret
+manager and map it into `RUNTIME_ENV_ENCRYPTION_KEYS` only in Django processes that enqueue, retry,
+inspect, or execute durable tasks. Do not add that key to the shared sample Secret; generic Ray nodes
+do not need the database-encryption key.
 
 The local `kuberay-kind` overlay deliberately exercises the lower-configuration
 `django-secret` fallback instead. It patches
@@ -401,12 +441,11 @@ The local `kuberay-kind` overlay deliberately exercises the lower-configuration
 `django-web` and the default, synchronous, and ML task-manager containers. Those
 selectors are not placed in the shared ConfigMap or Ray pod specifications. The base
 and other overlays therefore keep plaintext writes unless they opt in explicitly.
-This local fallback validates encryption behavior, not key isolation: the sample's
-Django-aware Ray pods still import `django-ray-secret`, including the Django signing
-secret from which the fallback key is derived. A production deployment gets the
-read-only database separation described by the threat model only when a dedicated
-RuntimeEnv key is delivered exclusively to the Django application processes that
-need it.
+This local fallback validates encryption behavior, not key isolation: the generic upstream KubeRay
+head and worker pods still import `django-ray-secret`, including the Django signing secret from
+which the fallback key is derived. A production deployment gets the read-only database separation
+described by the threat model only when a dedicated RuntimeEnv key is delivered exclusively to the
+Django application processes that need it.
 See [Runtime Environments](../runtime-environments.md#encrypt-durable-snapshots) for
 the reader-first rollout, key-retention requirements, and downgrade boundary.
 
@@ -422,7 +461,7 @@ The `/api/livez`, `/api/readyz`, and `/api/health` endpoints intentionally do no
 token, so the Kubernetes probes can remain unauthenticated. `/api/metrics`, task submission,
 task results, logs, arguments, and workflow-observability routes are protected.
 
-## Overlays
+## Local Evaluation Overlays
 
 ### Development (default)
 
@@ -566,16 +605,33 @@ The older `Deployment/ray-head` troubleshooting form applies only to the
 legacy static manifests; the KubeRay path owns the head through
 `RayCluster/ray`.
 
-## Production Recommendations
+## Production Architecture Checklist
 
-1. **Use managed PostgreSQL** (RDS, Cloud SQL, Azure Database)
-2. **Enable TLS** for Ray cluster communication
-3. **Use KubeRay operator** for production Ray clusters
-4. **Configure proper resource limits** based on workload
-5. **Set up monitoring** with Prometheus/Grafana
-6. **Use proper secret management** (Vault, External Secrets)
-7. **Configure Ingress** with TLS termination
-8. **Prefer KubeRay operator mode** over static Ray Deployments for lifecycle management
+The repository does not ship a Helm chart, production overlay, or certified reference deployment.
+Treat the following as design-review inputs, not as instructions to promote `k8s/base`:
+
+1. **Ray lifecycle:** use KubeRay rather than the base's static Ray Deployments, and define operator,
+   `RayCluster` or `RayService`, upgrade, failure-recovery, and rollback ownership.
+2. **Immutable supply chain:** publish application, Ray, and RuntimeEnv artifacts under immutable
+   digests or content identities; do not deploy mutable `latest` tags.
+3. **Service identity and authorization:** replace the shared sample operator token and superuser
+   path with workload identity and an application-appropriate user/session model. Keep the Ray
+   Dashboard and control APIs private.
+4. **Network security:** define TLS for external and Ray traffic, ingress policy, DNS, certificate
+   rotation, NetworkPolicies, and any service-mesh boundary.
+5. **Managed state and storage:** operate PostgreSQL, backups, restore tests, RuntimeEnv/object
+   storage, and persistent volumes with explicit durability and availability targets.
+6. **Scoped secrets:** use an external secret manager and component-scoped credentials with rotation
+   and revocation procedures; never reuse the checked-in shared Secret layout.
+7. **Resource policy:** set workload-derived requests, limits, quotas, autoscaling, node placement,
+   disruption budgets, and tenant isolation rather than inheriting local sample values.
+8. **Observability and operations:** define metrics, logs, traces, alerting, retention, audit access,
+   on-call ownership, capacity signals, and tested backup restoration.
+9. **Change safety:** make database migrations, application/Ray upgrades, compatibility checks,
+   rollbacks, and disaster recovery explicit, separately invokable operations.
+
+A future production reference requires its own threat model, least-privilege review, upgrade and
+rollback contract, and clean-checkout evidence. That work is intentionally outside these samples.
 
 ## See Also
 
