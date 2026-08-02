@@ -84,20 +84,31 @@ noncanonical, or missing summaries do not block the lifecycle transition.
 Producer publications reserve one final summary revision so a conflicting terminal
 report can be replaced by the authoritative row-locked task outcome.
 
-The admin action, operational retry endpoint, and worker retry path use the same
+The Admin controls, operational retry endpoint, and worker retry path use the same
 row-locked transition service, so a racing retry request is rejected rather than
-applied twice. Success, permanent failure, timeout, LOST recovery, queue expiry, cancellation, and
-Ray Job `STOPPED` reconciliation use that same terminal archival boundary.
+applied twice. Success, permanent failure, timeout, LOST recovery, queue expiry,
+cancellation, and Ray Job `STOPPED` reconciliation use that same terminal archival
+boundary.
 
-The Admin bulk action adds a separate operator confirmation before calling that
-service. It shows bounded selected, eligible, skipped, and known-workflow counts but
-never renders arguments, results, RuntimeEnv values, errors, or tracebacks. The signed
-confirmation is bound to the operator's current Admin session, expires after 15
-minutes, and covers each row's state, attempt, execution generation, and exact workflow
-run/plan identity. A changed selection fails closed, and at most 100 failed, lost, or
-expired rows can be confirmed together. The row-locked transition rechecks the confirmed state
-as well as the attempt and generation, closing the validation-to-lock race. The warning
-is intentional: retry creates a new attempt and may repeat external effects.
+Manual Admin retry is state-based, not task-type-based. An authorized operator can use
+**Retry task...** on a `FAILED`, `LOST`, or `EXPIRED` execution detail page, or select
+multiple eligible rows in the execution list and choose **Retry selected tasks...**.
+Both entry points open the same confirmation before calling the lifecycle service. It
+shows bounded selected, eligible, skipped, and known-workflow counts but never renders
+arguments, results, RuntimeEnv values, errors, or tracebacks. The signed confirmation
+is bound to the operator's current Admin session, expires after 15 minutes, and covers
+each row's state, attempt, execution generation, and exact workflow run/plan identity.
+A changed selection fails closed, and at most 100 failed, lost, or expired rows can be
+confirmed together. The row-locked transition rechecks the confirmed state as well as
+the attempt and generation, closing the validation-to-lock race. The warning is
+intentional: retry creates a new attempt and may repeat external effects.
+
+The Admin does not retry a `SUCCEEDED` execution. A successful row is the authoritative
+completed history for that invocation, including its result. If the same business work
+must run again because external circumstances changed, enqueue a new task under the
+application's authorization, idempotency, reconciliation, and audit policy. A new task
+identity makes that new intent explicit and avoids rewriting a successful execution.
+The detail page explains this next action instead of presenting a retry button.
 
 Confirmation signatures use Django's `SECRET_KEY` and honor
 `SECRET_KEY_FALLBACKS`. During key rotation, retain the previous key as a fallback for
@@ -107,9 +118,14 @@ protocol. An application that exposes retry through an API must perform object/t
 authorization and implement its own operator confirmation, idempotency, and audit
 policy; never accept or forward the Admin confirmation token.
 
-Application APIs should call `django_ray.lifecycle.retry_task()` with the attempt number
-and execution generation observed during object authorization. Manual retry archives the
-terminal attempt, increments both values, and clears only attempt-local data.
+Application APIs that need an explicit outcome should call
+`django_ray.lifecycle.request_task_retry()` with the attempt number and execution
+generation observed during object authorization. Its stable result distinguishes
+accepted, missing, non-retryable, stale-attempt, stale-generation, and stale-workflow
+requests without returning task arguments, output, or errors. The compatibility helper
+`retry_task()` remains available when a model-or-`None` result is sufficient. Manual
+retry archives the terminal attempt, increments both values, and clears only
+attempt-local data.
 After the state and identity fences pass, the same row lock verifies the persisted
 RuntimeEnv snapshot before any archival or reset. An identified missing, malformed,
 unsupported, unknown-key, authentication-failed, noncanonical, or hash-mismatched
@@ -236,10 +252,11 @@ for execution in failed:
     print(execution.attempt_number)
 ```
 
-The admin page `/admin/django_ray/raytaskexecution/` provides filters, tracebacks,
-manual retry, and cancellation actions. Prefer the admin action for manual retries;
-directly resetting model fields is an internal operation and can leave stale Ray
-handles or result metadata if implemented incompletely.
+The Admin execution list provides filters plus bulk retry and cancellation actions.
+Open one execution detail page for its diagnostics, retry guidance, and the
+**Retry task...** button when eligible. Directly resetting model fields is an internal
+operation and can leave stale Ray handles or result metadata if implemented
+incompletely.
 
 ## Denylist Guidance
 

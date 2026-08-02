@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,8 +17,10 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 
 from django_ray import __version__ as django_ray_version
+from django_ray.lifecycle import TaskRetryRequestResult, TaskRetryRequestStatus
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from testproject import api as testproject_api
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +37,36 @@ def client(settings) -> Client:
 @pytest.fixture
 def unauthenticated_client() -> Client:
     return Client()
+
+
+def test_retry_outcome_supports_django_ninja_without_status_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(testproject_api, "_NINJA_STATUS", None)
+
+    response = testproject_api._retry_execution_outcome(
+        TaskRetryRequestResult(
+            status=TaskRetryRequestStatus.NOT_FOUND,
+            execution_id=321,
+            state=None,
+            attempt_number=None,
+            execution_generation=None,
+        ),
+        status_code=404,
+    )
+
+    assert response == (
+        404,
+        {
+            "code": "NOT_FOUND",
+            "message": "The execution was not found.",
+            "execution_id": 321,
+            "state": None,
+            "attempt_number": None,
+            "execution_generation": None,
+            "next_action": "Verify the execution identifier and object authorization.",
+        },
+    )
 
 
 def test_browser_auth_javascript_executes_credentialed_actions() -> None:
@@ -1419,18 +1452,198 @@ class TestExecutionsAPI:
             attempt_number=1,
         )
 
-        response = client.post(f"/api/executions/{task.pk}/retry")
-        assert response.status_code == 200
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            response = client.post(f"/api/executions/{task.pk}/retry")
+        assert response.status_code == 202
         data = response.json()
+        assert data["code"] == "ACCEPTED"
+        assert data["message"] == "A new task attempt was queued."
+        assert data["execution_id"] == task.pk
         assert data["state"] == "QUEUED"
         assert data["attempt_number"] == 2
         assert data["execution_generation"] == 1
+        assert data["next_action"] == "Poll or inspect the newly queued attempt."
+        assert "result_data" not in data
+        assert "error_message" not in data
         assert TaskAttempt.objects.get(execution=task).state == TaskState.FAILED
 
-        duplicate = client.post(f"/api/executions/{task.pk}/retry")
-        assert duplicate.status_code == 200
-        assert duplicate.json()["attempt_number"] == 2
-        assert duplicate.json()["execution_generation"] == 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            duplicate = client.post(f"/api/executions/{task.pk}/retry")
+        assert duplicate.status_code == 409
+        duplicate_data = duplicate.json()
+        assert duplicate_data["code"] == "NOT_RETRYABLE"
+        assert duplicate_data["state"] == "QUEUED"
+        assert duplicate_data["attempt_number"] == 2
+        assert duplicate_data["execution_generation"] == 1
+        assert "FAILED, CANCELLED, LOST, or EXPIRED" in duplicate_data["next_action"]
+        assert TaskAttempt.objects.filter(execution=task).count() == 1
+
+    def test_retry_succeeded_execution_guides_a_fresh_enqueue_without_mutation(self, client):
+        result_marker = "successful-result-must-not-leak-issue-321"
+        reference_marker = "successful-reference-must-not-leak-issue-321"
+        task = RayTaskExecution.objects.create(
+            task_id="test-retry-succeeded-conflict",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            attempt_number=3,
+            execution_generation=3,
+            workflow_run_id="00000000-0000-0000-0000-000000000321",
+            result_data=json.dumps({"marker": result_marker}),
+            result_reference=f"digest:{reference_marker}",
+            finished_at=datetime(2026, 8, 2, tzinfo=UTC),
+        )
+        before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+
+        response = client.post(f"/api/executions/{task.pk}/retry")
+
+        assert response.status_code == 409
+        data = response.json()
+        assert data == {
+            "code": "NOT_RETRYABLE",
+            "message": "The execution is not retryable from its current state.",
+            "execution_id": task.pk,
+            "state": "SUCCEEDED",
+            "attempt_number": 3,
+            "execution_generation": 3,
+            "next_action": (
+                "Enqueue a new task under the application's authorization and idempotency "
+                "policy; keep this successful execution as completed history."
+            ),
+        }
+        serialized = response.content.decode()
+        assert result_marker not in serialized
+        assert reference_marker not in serialized
+        assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    def test_retry_raced_identity_returns_only_bounded_current_identity(
+        self,
+        client,
+        monkeypatch,
+    ):
+        task = RayTaskExecution.objects.create(
+            task_id="test-retry-raced-identity",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            attempt_number=2,
+            execution_generation=4,
+            workflow_run_id="00000000-0000-0000-0000-000000000322",
+            workflow_plan_fingerprint="sha256:" + ("a" * 64),
+            result_data='{"marker":"raced-result-must-not-leak"}',
+            error_message="raced-error-must-not-leak",
+        )
+
+        def raced_retry(execution_id, **kwargs):
+            assert execution_id == task.pk
+            assert kwargs["expected_attempt_number"] == 2
+            assert kwargs["expected_execution_generation"] == 4
+            assert kwargs["expected_workflow_identity"] == (
+                "00000000-0000-0000-0000-000000000322",
+                "sha256:" + ("a" * 64),
+            )
+            return TaskRetryRequestResult(
+                status=TaskRetryRequestStatus.STALE_ATTEMPT,
+                execution_id=task.pk,
+                state=TaskState.QUEUED,
+                attempt_number=3,
+                execution_generation=5,
+            )
+
+        monkeypatch.setattr("testproject.api.request_task_retry", raced_retry)
+
+        response = client.post(f"/api/executions/{task.pk}/retry")
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "code": "STALE_ATTEMPT",
+            "message": "The execution attempt changed before the retry could be applied.",
+            "execution_id": task.pk,
+            "state": "QUEUED",
+            "attempt_number": 3,
+            "execution_generation": 5,
+            "next_action": (
+                "Refresh and re-authorize the current attempt before deciding whether to retry."
+            ),
+        }
+        serialized = response.content.decode()
+        assert "raced-result-must-not-leak" not in serialized
+        assert "raced-error-must-not-leak" not in serialized
+
+    def test_retry_missing_execution_returns_a_structured_not_found(self, client):
+        response = client.post("/api/executions/99999/retry")
+
+        assert response.status_code == 404
+        assert response.json() == {
+            "code": "NOT_FOUND",
+            "message": "The execution was not found.",
+            "execution_id": 99999,
+            "state": None,
+            "attempt_number": None,
+            "execution_generation": None,
+            "next_action": "Verify the execution identifier and object authorization.",
+        }
+
+    def test_retry_raced_deletion_returns_structured_not_found(
+        self,
+        client,
+        monkeypatch,
+    ):
+        task = RayTaskExecution.objects.create(
+            task_id="test-retry-raced-deletion",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            result_data='{"marker":"deleted-race-result-must-not-leak"}',
+            error_message="deleted-race-error-must-not-leak",
+        )
+
+        def raced_retry(execution_id, **_kwargs):
+            assert execution_id == task.pk
+            return TaskRetryRequestResult(
+                status=TaskRetryRequestStatus.NOT_FOUND,
+                execution_id=task.pk,
+                state=None,
+                attempt_number=None,
+                execution_generation=None,
+            )
+
+        monkeypatch.setattr("testproject.api.request_task_retry", raced_retry)
+
+        response = client.post(f"/api/executions/{task.pk}/retry")
+
+        assert response.status_code == 404
+        assert response.json() == {
+            "code": "NOT_FOUND",
+            "message": "The execution was not found.",
+            "execution_id": task.pk,
+            "state": None,
+            "attempt_number": None,
+            "execution_generation": None,
+            "next_action": "Verify the execution identifier and object authorization.",
+        }
+        serialized = response.content.decode()
+        assert "deleted-race-result-must-not-leak" not in serialized
+        assert "deleted-race-error-must-not-leak" not in serialized
+
+    def test_retry_execution_requires_bearer_authorization(
+        self,
+        unauthenticated_client,
+    ):
+        task = RayTaskExecution.objects.create(
+            task_id="test-retry-unauthorized",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            error_message="authorization must run before retry",
+        )
+
+        response = unauthenticated_client.post(f"/api/executions/{task.pk}/retry")
+
+        assert response.status_code == 401
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_retry_rejects_corrupt_runtime_env_without_disclosure(self, client):
         task = RayTaskExecution.objects.create(

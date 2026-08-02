@@ -269,13 +269,18 @@ completed `add_numbers` record. The task ID should match the API response, its s
 `SUCCEEDED`, and its result should be `42`. The changelist retains django-ray's retry and cancel
 actions while prioritizing compact operational state, timestamps, and the Ray link; workflow
 identity remains on the detail page. The change page retains live durable status, bounded
-workflow detail as clearly labelled action links, and ordered read-only attempt history.
+workflow detail as clearly labelled action links, ordered read-only attempt history, and a
+**Retry task...** button for failed, lost, or expired executions. The button and bulk action use
+the same side-effect warning and fenced confirmation. A succeeded execution instead explains
+that repeating the work requires a fresh enqueue so its completed result and history remain
+authoritative.
 After a recovery, **Workflow execution** stacks previous failed attempts and the current
 successful attempt from oldest to newest. Every graph is independently collapsible; archived
 graphs are fetched only on first open, and the current graph appears exactly once. The page
 shows the RuntimeEnv profile and content hash but intentionally omits the raw snapshot because
 environment values and package URIs can contain sensitive application configuration. Execution
-metadata is read-only; the list's Retry and Cancel actions are the supported fenced control paths.
+metadata is read-only; the detail retry control and list Retry/Cancel actions are the supported
+fenced control paths.
 The default
 `TASK_ATTEMPT_ADMIN_MODE="inline"` hides the
 standalone Task Attempt entry from top-level navigation without invalidating authorized list or

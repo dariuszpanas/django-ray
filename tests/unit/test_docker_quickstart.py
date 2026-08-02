@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -1659,6 +1660,39 @@ def test_django_ray_admin_assets_accept_manifest_hashes() -> None:
     assert stylesheet_match.group("path") == "/static/testproject/admin.0123456789ab.css"
     assert icon_match is not None
     assert icon_match.group("path") == "/static/testproject/django-ray.abcdef012345.svg"
+
+
+def test_admin_status_regions_are_matched_by_semantic_markers() -> None:
+    document = """
+        <p role="status" class="django-ray-task-actions__guidance">Retry guidance.</p>
+        <p role='status' class='django-ray-live__summary' data-field='status'>Live.</p>
+        <p aria-live="polite" role="status" data-workflow-diagnostics-status>
+          Diagnostics.
+        </p>
+    """
+
+    assert docker_smoke._TASK_LIVE_STATUS_RE.search(document) is not None
+    assert docker_smoke._WORKFLOW_DIAGNOSTICS_STATUS_RE.search(document) is not None
+
+
+@pytest.mark.parametrize(
+    ("document", "pattern"),
+    (
+        (
+            '<p class="django-ray-live__summary">Missing role.</p>',
+            docker_smoke._TASK_LIVE_STATUS_RE,
+        ),
+        (
+            '<p role="status">Missing diagnostics marker.</p>',
+            docker_smoke._WORKFLOW_DIAGNOSTICS_STATUS_RE,
+        ),
+    ),
+)
+def test_admin_status_region_patterns_reject_incomplete_contracts(
+    document: str,
+    pattern: re.Pattern[str],
+) -> None:
+    assert pattern.search(document) is None
 
 
 def test_admin_text_request_uses_remaining_shared_deadline(

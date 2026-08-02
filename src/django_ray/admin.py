@@ -27,7 +27,14 @@ from django.db.models import (
     When,
 )
 from django.db.models.functions import Substr
-from django.http import Http404, HttpRequest, HttpResponse, HttpResponseNotAllowed, JsonResponse
+from django.http import (
+    Http404,
+    HttpRequest,
+    HttpResponse,
+    HttpResponseNotAllowed,
+    HttpResponseRedirect,
+    JsonResponse,
+)
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils import timezone
@@ -92,6 +99,11 @@ ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS = 100
 _FULL_WORKFLOW_ATTEMPT_MARKER = '"reporting_policy":"full"'
 ADMIN_RETRY_CONFIRMATION_MAX_TASKS = 100
 ADMIN_RETRY_CONFIRMATION_MAX_AGE_SECONDS = 15 * 60
+ADMIN_RETRYABLE_STATES = (
+    TaskState.FAILED,
+    TaskState.LOST,
+    TaskState.EXPIRED,
+)
 _ADMIN_RETRY_CONFIRMATION_SALT = "django_ray.admin.retry-confirmation.v1"
 _ADMIN_RETRY_CONFIRMATION_MAX_TOKEN_CHARS = 512
 _ADMIN_RETRY_CONFIRMATION_SESSION_KEY = "django_ray_admin_retry_confirmation_nonce_v1"
@@ -836,6 +848,21 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         context["django_ray_archived_workflow_attempts_limit"] = (
             ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS
         )
+        context["django_ray_retry_available"] = False
+        if (
+            obj is not None
+            and self.has_change_permission(request)
+            and self.has_view_permission(request, obj)
+        ):
+            context["django_ray_retry_guidance"] = self._retry_detail_guidance(obj.state)
+            if obj.state in ADMIN_RETRYABLE_STATES:
+                opts = self.model._meta
+                context["django_ray_retry_available"] = True
+                context["django_ray_retry_url"] = reverse(
+                    f"{self.admin_site.name}:{opts.app_label}_{opts.model_name}_retry",
+                    args=[quote(str(obj.pk))],
+                    current_app=self.admin_site.name,
+                )
         return super().render_change_form(
             request,
             context,
@@ -889,10 +916,39 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     ordering = ["-created_at"]
     actions = ["retry_tasks", "cancel_tasks"]
 
+    @staticmethod
+    def _retry_detail_guidance(state: str) -> str:
+        if state in ADMIN_RETRYABLE_STATES:
+            return (
+                "Retrying creates a new attempt and runs the callable again from its "
+                "entry point. Review external side effects before continuing."
+            )
+        if state == TaskState.SUCCEEDED:
+            return (
+                "Retry is unavailable because this execution succeeded. To run the work "
+                "again, enqueue a new task; that preserves this result and attempt history."
+            )
+        if state in {TaskState.QUEUED, TaskState.RUNNING, TaskState.CANCELLING}:
+            return (
+                f"Retry is unavailable while this execution is {state.lower()}. "
+                "Wait for a terminal outcome before choosing a recovery action."
+            )
+        if state == TaskState.CANCELLED:
+            return (
+                "The Admin retry flow is limited to failed, lost, or expired executions. "
+                "To run cancelled work again, enqueue a new task."
+            )
+        return "Retry is unavailable for this execution state."
+
     def get_urls(self) -> list[Any]:
         """Add the authenticated durable-summary endpoint used by the change form."""
         opts = self.model._meta
         custom_urls = [
+            path(
+                "<path:object_id>/retry/",
+                self.admin_site.admin_view(self.retry_view),
+                name=f"{opts.app_label}_{opts.model_name}_retry",
+            ),
             path(
                 "<path:object_id>/observability/",
                 self.admin_site.admin_view(self.observability_view),
@@ -1006,6 +1062,35 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             ),
         }
         return super().change_view(request, object_id, form_url, context)
+
+    def retry_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
+        """Open and complete the fenced retry confirmation from one detail page."""
+        if request.method != "POST":
+            return HttpResponseNotAllowed(["POST"])
+        if not self.has_change_permission(request):
+            raise PermissionDenied
+
+        try:
+            execution_id = self.model._meta.pk.to_python(unquote(object_id))
+            execution = self.get_queryset(request).only("pk", "state").get(pk=execution_id)
+        except (RayTaskExecution.DoesNotExist, ValidationError, ValueError) as error:
+            raise Http404("Ray task execution was not found") from error
+        if not self.has_view_permission(request, execution):
+            raise PermissionDenied
+
+        detail_url = reverse(
+            f"{self.admin_site.name}:{self.opts.app_label}_{self.opts.model_name}_change",
+            args=[quote(str(execution.pk))],
+            current_app=self.admin_site.name,
+        )
+        response = self._retry_tasks_with_confirmation(
+            request,
+            self.get_queryset(request).filter(pk=execution.pk),
+            cancel_url=detail_url,
+        )
+        if response is not None:
+            return response
+        return HttpResponseRedirect(detail_url)
 
     def _observability_execution(
         self,
@@ -2142,10 +2227,19 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         queryset: QuerySet[RayTaskExecution],
     ) -> HttpResponse | None:
         """Confirm, fence, and retry failed, lost, or expired executions."""
+        return self._retry_tasks_with_confirmation(request, queryset)
+
+    def _retry_tasks_with_confirmation(
+        self,
+        request: HttpRequest,
+        queryset: QuerySet[RayTaskExecution],
+        *,
+        cancel_url: str | None = None,
+    ) -> HttpResponse | None:
+        """Share one confirmation and mutation path across list and detail controls."""
         if not self.has_change_permission(request):
             raise PermissionDenied
-        retryable_states = [TaskState.FAILED, TaskState.LOST, TaskState.EXPIRED]
-        tasks_to_retry = queryset.filter(state__in=retryable_states)
+        tasks_to_retry = queryset.filter(state__in=ADMIN_RETRYABLE_STATES)
         if not tasks_to_retry.exists():
             self.message_user(
                 request,
@@ -2184,12 +2278,14 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 raise PermissionDenied
             selected_count = queryset.count()
             retryable_count = len(snapshot)
-            changelist_url = reverse(
-                f"{self.admin_site.name}:{self.opts.app_label}_{self.opts.model_name}_changelist"
-            )
-            changelist_query = request.GET.urlencode()
-            if changelist_query:
-                changelist_url = f"{changelist_url}?{changelist_query}"
+            if cancel_url is None:
+                cancel_url = reverse(
+                    f"{self.admin_site.name}:"
+                    f"{self.opts.app_label}_{self.opts.model_name}_changelist"
+                )
+                changelist_query = request.GET.urlencode()
+                if changelist_query:
+                    cancel_url = f"{cancel_url}?{changelist_query}"
             context = {
                 **self.admin_site.each_context(request),
                 "title": "Confirm full task retry",
@@ -2207,7 +2303,9 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                     session_fingerprint=session_fingerprint,
                 ),
                 "confirmation_max_age_minutes": (ADMIN_RETRY_CONFIRMATION_MAX_AGE_SECONDS // 60),
-                "changelist_url": changelist_url,
+                "cancel_url": cancel_url,
+                # Kept for template extensions written against the original bulk flow.
+                "changelist_url": cancel_url,
             }
             return TemplateResponse(
                 request,

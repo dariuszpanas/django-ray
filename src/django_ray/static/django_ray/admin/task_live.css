@@ -5,6 +5,57 @@ body.django-ray-execution-change nav > .breadcrumbs {
   overflow-wrap: anywhere;
 }
 
+#django-ray-task-actions {
+  background: var(--body-bg, #fff);
+  border: 1px solid var(--color-base-200, var(--hairline-color, #d9e0ea));
+  border-radius: var(--border-radius, 8px);
+  margin-block: 1.5rem;
+  overflow: hidden;
+}
+
+#django-ray-task-actions > h2 {
+  background: var(--darkened-bg, #f8fafc);
+  color: var(--body-fg, #0f172a);
+  font-size: 0.875rem;
+  font-weight: 700;
+  margin: 0;
+  padding: 0.875rem 1rem;
+}
+
+#django-ray-task-actions .django-ray-task-actions__body {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  justify-content: space-between;
+  padding: 1rem;
+}
+
+#django-ray-task-actions .django-ray-task-actions__guidance {
+  margin: 0;
+}
+
+#django-ray-task-actions .django-ray-task-actions__guidance {
+  flex: 1 1 28rem;
+  max-width: 72rem;
+}
+
+#django-ray-task-actions .django-ray-task-actions__retry {
+  min-height: 2.5rem;
+  white-space: nowrap;
+}
+
+#django-ray-task-actions .django-ray-task-actions__retry:focus-visible {
+  outline: 3px solid #0284c7;
+  outline-offset: 2px;
+}
+
+@media (max-width: 40rem) {
+  #django-ray-task-actions .django-ray-task-actions__retry {
+    width: 100%;
+  }
+}
+
 #django-ray-live-observability {
   --django-ray-live-accent: #38bdf8;
   --django-ray-live-accent-strong: #0284c7;

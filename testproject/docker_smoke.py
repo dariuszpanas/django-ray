@@ -125,6 +125,16 @@ _TASK_LIVE_SCRIPT_RE = re.compile(
 _WORKFLOW_DIAGNOSTICS_SCRIPT_RE = re.compile(
     r"""src=["'](?P<path>/static/django_ray/admin/workflow_diagnostics[^"']*\.js)["']"""
 )
+_TASK_LIVE_STATUS_RE = re.compile(
+    r"""<p\b(?=[^>]*\bclass=["'][^"']*\bdjango-ray-live__summary\b[^"']*["'])"""
+    r"""(?=[^>]*\brole=["']status["'])[^>]*>""",
+    re.IGNORECASE,
+)
+_WORKFLOW_DIAGNOSTICS_STATUS_RE = re.compile(
+    r"""<p\b(?=[^>]*\bdata-workflow-diagnostics-status\b)"""
+    r"""(?=[^>]*\brole=["']status["'])[^>]*>""",
+    re.IGNORECASE,
+)
 _DJANGO_RAY_ICON_RE = re.compile(
     r"""(?:href|src)=["'](?P<path>/static/testproject/django-ray[^"']*\.svg)["']"""
 )
@@ -480,7 +490,8 @@ def _verify_unfold_admin_contract(
             or _TASK_LIVE_SCRIPT_RE.search(change_html) is None
             or _WORKFLOW_DIAGNOSTICS_SCRIPT_RE.search(change_html) is None
             or 'aria-labelledby="django-ray-live-heading"' not in change_html
-            or change_html.count('role="status"') != 2
+            or _TASK_LIVE_STATUS_RE.search(change_html) is None
+            or _WORKFLOW_DIAGNOSTICS_STATUS_RE.search(change_html) is None
             or "django-ray-live__grid" not in change_html
             or "django-ray-workflow-diagnostics" not in change_html
             or "Workflow execution" not in change_html
