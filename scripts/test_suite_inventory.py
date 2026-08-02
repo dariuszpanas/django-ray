@@ -40,7 +40,9 @@ from scripts.test_suite_taxonomy import (  # noqa: E402
     collection_contract_digest,
     load_manifest,
     nodeid_digest,
+    normalize_nodeid,
     path_matches,
+    require_unique_nodeids,
 )
 
 __all__ = ("CollectedTest", "InventoryError", "Selection", "load_manifest")
@@ -106,6 +108,10 @@ def collect_tests(root: Path) -> list[CollectedTest]:
     if exit_code != pytest.ExitCode.OK:
         detail = stderr.getvalue().strip() or stdout.getvalue().strip()
         raise InventoryError(f"pytest collection failed with exit code {int(exit_code)}: {detail}")
+    require_unique_nodeids(
+        [item.nodeid for item in plugin.items],
+        "pytest collection",
+    )
     return sorted(plugin.items, key=lambda item: item.nodeid)
 
 
@@ -443,7 +449,10 @@ def _validate_timing_detail_records(
     outcome_counts: dict[str, int],
     selected_items: list[CollectedTest],
 ) -> None:
-    selected_nodeids = {item.nodeid for item in selected_items}
+    selected_nodeids = require_unique_nodeids(
+        [item.nodeid for item in selected_items],
+        "selected timing collection",
+    )
     selected_files = {item.path for item in selected_items}
     test_outcomes = timing.get("test_outcomes")
     if not isinstance(test_outcomes, list) or len(test_outcomes) != len(selected_nodeids):
@@ -545,6 +554,8 @@ def _validate_collection_evidence(
     selected_items: list[CollectedTest],
     items: list[CollectedTest],
 ) -> None:
+    require_unique_nodeids([item.nodeid for item in items], "current collection")
+    require_unique_nodeids([item.nodeid for item in selected_items], "current selection")
     if not isinstance(value, dict):
         raise InventoryError("timing evidence needs taxonomy collection evidence")
     if value.get("valid") is not True or value.get("errors") != []:
@@ -719,6 +730,7 @@ def build_inventory(
     timing_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic classification and overlap evidence."""
+    require_unique_nodeids([item.nodeid for item in items], "inventory collection")
     invalid: list[tuple[str, list[str]]] = []
     for item in items:
         matches = [
@@ -1019,6 +1031,7 @@ class _RuntimePlugin:
         self.test_phases: dict[str, Counter[str]] = defaultdict(Counter)
         self.outcomes: dict[str, str] = {}
         self.logfinished: set[str] = set()
+        self.selected_nodeids: set[str] = set()
         self.coverage_enabled = False
 
     def pytest_configure(self, config: pytest.Config) -> None:
@@ -1050,11 +1063,16 @@ class _RuntimePlugin:
         if self.collection_started is None:
             self.collection_started = time.perf_counter()
 
-    def pytest_collection_finish(self) -> None:
+    def pytest_collection_finish(self, session: pytest.Session) -> None:
         self.collection_finished = time.perf_counter()
+        normalized_nodeids = [normalize_nodeid(item.nodeid) for item in session.items]
+        self.selected_nodeids = require_unique_nodeids(
+            normalized_nodeids,
+            "runtime selection",
+        )
 
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
-        nodeid = report.nodeid.replace("\\", "/")
+        nodeid = normalize_nodeid(report.nodeid)
         self.phase_seconds[report.when] += report.duration
         self.test_phases[nodeid][report.when] += report.duration
         if report.when == "call":
@@ -1071,7 +1089,7 @@ class _RuntimePlugin:
                 self.outcomes[nodeid] = "xfailed" if hasattr(report, "wasxfail") else report.outcome
 
     def pytest_runtest_logfinish(self, nodeid: str) -> None:
-        self.logfinished.add(nodeid.replace("\\", "/"))
+        self.logfinished.add(normalize_nodeid(nodeid))
         self.test_execution_finished = time.perf_counter()
 
     @pytest.hookimpl(trylast=True)
@@ -1089,6 +1107,37 @@ class _RuntimePlugin:
 
 def _elapsed(start: float | None, end: float | None) -> float | None:
     return None if start is None or end is None else round(max(0.0, end - start), 6)
+
+
+def _identity_set_mismatch(
+    label: str,
+    expected: set[str],
+    observed: set[str],
+) -> str | None:
+    """Describe an exact identity-set mismatch without emitting unbounded node IDs."""
+    if expected == observed:
+        return None
+
+    def _difference(name: str, values: set[str]) -> str:
+        ordered = sorted(values)
+
+        def _bounded_repr(value: str) -> str:
+            rendered = ascii(value)
+            return rendered if len(rendered) <= 80 else f"{rendered[:77]}..."
+
+        examples = [_bounded_repr(value) for value in ordered[:2]]
+        remainder = len(ordered) - len(examples)
+        rendered = ", ".join(examples)
+        if remainder:
+            rendered = f"{rendered}, +{remainder} more" if rendered else f"+{remainder} more"
+        return f"{name}={len(ordered)} [{rendered}]"
+
+    message = (
+        f"{label} did not match selected test node IDs ("
+        f"{_difference('missing', expected - observed)}; "
+        f"{_difference('unexpected', observed - expected)})"
+    )
+    return message if len(message) <= 512 else f"{message[:509]}..."
 
 
 def run_lane(
@@ -1199,10 +1248,17 @@ def run_lane(
     if int(exit_code) == 0:
         if selected_count < 1:
             integrity_errors.append("the selected taxonomy group contained no tests")
-        if len(plugin.logfinished) != selected_count:
-            integrity_errors.append("not every selected test reached pytest_runtest_logfinish")
-        if len(plugin.outcomes) != selected_count:
-            integrity_errors.append("not every selected test produced a final outcome")
+        if len(plugin.selected_nodeids) != selected_count:
+            integrity_errors.append(
+                "runtime selection did not retain every taxonomy-selected test node ID"
+            )
+        for label, observed in (
+            ("pytest_runtest_logfinish", plugin.logfinished),
+            ("final outcomes", set(plugin.outcomes)),
+        ):
+            mismatch = _identity_set_mismatch(label, plugin.selected_nodeids, observed)
+            if mismatch is not None:
+                integrity_errors.append(mismatch)
         if group.skip_policy.mode == "forbid" and (
             rendered_outcomes["skipped"] or rendered_outcomes["xfailed"]
         ):

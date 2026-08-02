@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
@@ -14,6 +15,39 @@ MANIFEST_SCHEMA_VERSION = 4
 
 class InventoryError(ValueError):
     """Raised when taxonomy input or collected evidence is inconsistent."""
+
+
+def normalize_nodeid(nodeid: str) -> str:
+    """Normalize only a pytest node ID's portable collector-path component."""
+    collector_path, separator, suffix = nodeid.partition("::")
+    normalized_path = collector_path.replace("\\", "/")
+    return normalized_path if not separator else f"{normalized_path}{separator}{suffix}"
+
+
+def require_unique_nodeids(nodeids: Sequence[str], label: str) -> set[str]:
+    """Return exact node IDs after rejecting canonical identity collisions."""
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    duplicate_ids: set[str] = set()
+    for nodeid in nodeids:
+        if nodeid in seen and nodeid not in duplicate_ids:
+            duplicates.append(nodeid)
+            duplicate_ids.add(nodeid)
+        seen.add(nodeid)
+    if duplicates:
+        examples: list[str] = []
+        for nodeid in duplicates[:3]:
+            rendered = ascii(nodeid)
+            examples.append(rendered if len(rendered) <= 96 else f"{rendered[:93]}...")
+        remainder = len(duplicates) - len(examples)
+        detail = ", ".join(examples)
+        if remainder:
+            detail = f"{detail}, +{remainder} more"
+        message = f"{label} contains duplicate normalized node IDs: {detail}"
+        if len(message) > 512:
+            message = f"{message[:509]}..."
+        raise InventoryError(message)
+    return seen
 
 
 def _normalized_path(value: object, label: str) -> str:
@@ -73,7 +107,7 @@ class CollectedTest:
                 continue
             fixtures.append(name)
         return cls(
-            nodeid=item.nodeid.replace("\\", "/"),
+            nodeid=normalize_nodeid(item.nodeid),
             path=relative_path,
             markers=tuple(sorted({marker.name for marker in item.iter_markers()})),
             fixtures=tuple(sorted(set(fixtures))),
