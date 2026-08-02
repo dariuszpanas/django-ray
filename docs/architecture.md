@@ -516,7 +516,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0016_raytaskexecution_queue_expiration` before starting upgraded workers:
+`0017_raytaskexecution_sensitive_data_permission` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -596,6 +596,13 @@ policy fields. Stop upgraded workers and review all remaining queued work first 
 pre-`0016` code can submit it without a deadline fence. Reversing `0016` leaves the
 `0015` task-ID uniqueness constraint in place.
 
+Migration `0017` adds only the `django_ray.view_sensitive_task_data` permission to
+the `RayTaskExecution` model state. It does not add a database column, rewrite task
+rows, or grant the permission to any user or group. Apply it before delegating access
+to the separate unredacted Admin views. Before reversing it, revoke every user and
+group grant explicitly. Django's permission synchronization creates missing custom
+permissions but does not delete stale permission rows during a schema rollback.
+
 RuntimeEnv encryption has no schema migration. Its rollout is nevertheless
 reader-first: deploy the dual plaintext/encrypted reader everywhere while writes remain
 plaintext, then distribute the complete key ring to every enqueue, retry, admin, and
@@ -644,6 +651,11 @@ produced a terminal state.
 ## Observability Surfaces
 
 - Django admin for task/lease inspection and operations.
+- Redacted task and attempt details for ordinary operators, plus a separate GET-only,
+  non-cacheable allowlist for users who hold both ordinary object view and
+  `django_ray.view_sensitive_task_data` on the owning execution. Database byte-length
+  guards keep oversized raw values out of the application process; RuntimeEnv,
+  completion, workflow, and log payloads remain outside this surface.
 - Authenticated, polling-based live task state and workflow progress in the task admin.
 - Versioned package services for task, queue, attempt, workflow, bounded paginated
   workflow detail, indexed nodes, and bounded live-Ray data.

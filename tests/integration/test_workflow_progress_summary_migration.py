@@ -92,5 +92,5 @@ def test_summary_fields_are_additive_nullable_and_reversible() -> None:
         )
     finally:
         MigrationExecutor(connection).migrate(
-            [("django_ray", "0016_raytaskexecution_queue_expiration")]
+            [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
         )

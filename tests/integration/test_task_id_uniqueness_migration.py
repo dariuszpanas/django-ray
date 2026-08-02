@@ -13,7 +13,7 @@ from django_ray.models import RayTaskExecution
 
 MIGRATE_FROM = [("django_ray", "0014_raytaskexecution_ray_target_address")]
 MIGRATE_TO = [("django_ray", "0015_raytaskexecution_task_id_unique")]
-LATEST = [("django_ray", "0016_raytaskexecution_queue_expiration")]
+LATEST = [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
 
 
 def _assert_task_id_uniqueness_migration_round_trip() -> None:

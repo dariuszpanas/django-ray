@@ -89,6 +89,7 @@ assert (static_root / "unfold/js/app.js").is_file()
 assert (static_root / "django_ray/admin/task_live.css").is_file()
 assert (static_root / "django_ray/admin/task_live.js").is_file()
 assert (static_root / "django_ray/admin/workflow_diagnostics.js").is_file()
+assert (static_root / "django_ray/admin/sensitive_task_data.css").is_file()
 assert (static_root / "testproject/admin.css").is_file()
 assert (static_root / "testproject/django-ray.svg").is_file()
 assert (static_root / "testproject/landing-graph-bg.png").is_file()
@@ -125,6 +126,7 @@ attempt = TaskAttempt.objects.create(
     attempt_number=1,
     state=TaskState.FAILED,
     error_message="unfold-attempt-inline-marker",
+    result_data='{"password":"unfold-attempt-output-marker"}',
 )
 failed_execution = RayTaskExecution.objects.create(
     task_id="unfold-admin-retry",
@@ -186,12 +188,21 @@ attempt_detail_url = reverse(
     args=[attempt.pk],
 )
 attempt_detail = authenticated.get(attempt_detail_url)
+attempt_sensitive_url = reverse(
+    "admin:django_ray_taskattempt_sensitive_data",
+    args=[attempt.pk],
+)
+attempt_sensitive = authenticated.get(attempt_sensitive_url)
 detail_failed_url = reverse(
     "admin:django_ray_raytaskexecution_change",
     args=[detail_failed_execution.pk],
 )
 detail_failed_retry_url = reverse(
     "admin:django_ray_raytaskexecution_retry",
+    args=[detail_failed_execution.pk],
+)
+detail_failed_sensitive_url = reverse(
+    "admin:django_ray_raytaskexecution_sensitive_data",
     args=[detail_failed_execution.pk],
 )
 succeeded_detail_url = reverse(
@@ -203,6 +214,7 @@ succeeded_retry_url = reverse(
     args=[succeeded_execution.pk],
 )
 detail_failed = authenticated.get(detail_failed_url)
+detail_failed_sensitive = authenticated.get(detail_failed_sensitive_url)
 succeeded_detail = authenticated.get(succeeded_detail_url)
 
 assert index.status_code == 200
@@ -210,7 +222,9 @@ assert changelist.status_code == 200
 assert change.status_code == 200
 assert observability.status_code == 200
 assert attempt_detail.status_code == 200
+assert attempt_sensitive.status_code == 200
 assert detail_failed.status_code == 200
+assert detail_failed_sensitive.status_code == 200
 assert succeeded_detail.status_code == 200
 
 login_html = login.content.decode("utf-8")
@@ -218,6 +232,9 @@ index_html = index.content.decode("utf-8")
 changelist_html = changelist.content.decode("utf-8")
 change_html = change.content.decode("utf-8")
 detail_failed_html = detail_failed.content.decode("utf-8")
+detail_failed_sensitive_html = detail_failed_sensitive.content.decode("utf-8")
+attempt_detail_html = attempt_detail.content.decode("utf-8")
+attempt_sensitive_html = attempt_sensitive.content.decode("utf-8")
 succeeded_detail_html = succeeded_detail.content.decode("utf-8")
 
 for rendered_html in (login_html, index_html, changelist_html, change_html):
@@ -328,8 +345,21 @@ assert "unfold-attempt-inline-marker" in change_html
 assert str(attempt) not in change_html
 assert change_html.count(attempt_detail_url) == 1
 assert "field-attempt_detail_link" in change_html
+assert "View unredacted task data" in attempt_detail_html
+assert f'href="{attempt_sensitive_url}"' in attempt_detail_html
+assert "unfold-attempt-output-marker" not in attempt_detail_html
+assert "unfold-attempt-output-marker" in attempt_sensitive_html
+assert "django_ray/admin/sensitive_task_data" in attempt_sensitive_html
+assert "unfold/css/styles" in attempt_sensitive_html
 
 assert "Retry task..." in detail_failed_html
+assert "View unredacted task data" in detail_failed_html
+assert f'href="{detail_failed_sensitive_url}"' in detail_failed_html
+assert "unfold-detail-retry-secret-marker" not in detail_failed_html
+assert "unfold-detail-retry-secret-marker" in detail_failed_sensitive_html
+assert "django_ray/admin/sensitive_task_data" in detail_failed_sensitive_html
+assert "unfold/css/styles" in detail_failed_sensitive_html
+assert "no-store" in detail_failed_sensitive["Cache-Control"]
 assert f'formaction="{detail_failed_retry_url}"' in detail_failed_html
 assert 'form="raytaskexecution_form"' in detail_failed_html
 assert 'name="csrfmiddlewaretoken"' in detail_failed_html
@@ -542,6 +572,7 @@ print(
             "login": login.status_code,
             "observability": observability.status_code,
             "static": stylesheet_response.status_code,
+            "sensitive_diagnostics": "passed",
             "succeeded_retry_guidance": "passed",
             "themed_actions": "passed",
         },
@@ -692,6 +723,10 @@ detail_failed_retry_url = reverse(
     "admin:django_ray_raytaskexecution_retry",
     args=[detail_failed_execution.pk],
 )
+detail_failed_sensitive_url = reverse(
+    "admin:django_ray_raytaskexecution_sensitive_data",
+    args=[detail_failed_execution.pk],
+)
 succeeded_detail_url = reverse(
     "admin:django_ray_raytaskexecution_change",
     args=[succeeded_execution.pk],
@@ -701,12 +736,22 @@ succeeded_retry_url = reverse(
     args=[succeeded_execution.pk],
 )
 detail_failed_response = client.get(detail_failed_url)
+detail_failed_sensitive_response = client.get(detail_failed_sensitive_url)
 succeeded_detail_response = client.get(succeeded_detail_url)
 assert detail_failed_response.status_code == 200
+assert detail_failed_sensitive_response.status_code == 200
 assert succeeded_detail_response.status_code == 200
 detail_failed_html = detail_failed_response.content.decode()
+detail_failed_sensitive_html = detail_failed_sensitive_response.content.decode()
 succeeded_detail_html = succeeded_detail_response.content.decode()
 assert "Retry task..." in detail_failed_html
+assert "View unredacted task data" in detail_failed_html
+assert f'href="{detail_failed_sensitive_url}"' in detail_failed_html
+assert "standard-admin-detail-retry-secret-marker" not in detail_failed_html
+assert "standard-admin-detail-retry-secret-marker" in detail_failed_sensitive_html
+assert "django_ray/admin/sensitive_task_data" in detail_failed_sensitive_html
+assert "unfold/css/styles" not in detail_failed_sensitive_html
+assert "no-store" in detail_failed_sensitive_response["Cache-Control"]
 assert f'formaction="{detail_failed_retry_url}"' in detail_failed_html
 assert 'form="raytaskexecution_form"' in detail_failed_html
 assert 'name="csrfmiddlewaretoken"' in detail_failed_html
@@ -779,6 +824,7 @@ print(
             "attempt_inline": "passed",
             "detail_retry": "passed",
             "retry_confirmation": "passed",
+            "sensitive_diagnostics": "passed",
             "succeeded_retry_guidance": "passed",
             "unfold_imported": False,
         }
@@ -829,6 +875,7 @@ def test_testproject_renders_unfold_admin_contract(tmp_path: Path) -> None:
         "login": 200,
         "observability": 200,
         "static": 200,
+        "sensitive_diagnostics": "passed",
         "succeeded_retry_guidance": "passed",
         "themed_actions": "passed",
     }
@@ -839,5 +886,6 @@ def test_package_admin_uses_standard_django_without_unfold_enabled() -> None:
 
     assert payload["attempt_inline"] == "passed"
     assert payload["detail_retry"] == "passed"
+    assert payload["sensitive_diagnostics"] == "passed"
     assert payload["succeeded_retry_guidance"] == "passed"
     assert payload["unfold_imported"] is False

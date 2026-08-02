@@ -16,16 +16,21 @@ EXPECTED_FILES = {
     "django_ray/static/django_ray/admin/task_live.css",
     "django_ray/static/django_ray/admin/task_live.js",
     "django_ray/static/django_ray/admin/workflow_diagnostics.js",
+    "django_ray/static/django_ray/admin/sensitive_task_data.css",
+    "django_ray/templates/admin/django_ray/sensitive_task_data.html",
+    "django_ray/templates/admin/django_ray/sensitive_task_data_limit.html",
     "django_ray/templates/admin/django_ray/raytaskexecution/change_form.html",
+    "django_ray/templates/admin/django_ray/taskattempt/change_form.html",
     "django_ray/migrations/0001_initial.py",
     "django_ray/migrations/0014_raytaskexecution_ray_target_address.py",
     "django_ray/migrations/0015_raytaskexecution_task_id_unique.py",
     "django_ray/migrations/0016_raytaskexecution_queue_expiration.py",
+    "django_ray/migrations/0017_raytaskexecution_sensitive_data_permission.py",
     "django_ray/management/commands/django_ray_worker.py",
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0016_raytaskexecution_queue_expiration",
+    "0017_raytaskexecution_sensitive_data_permission",
 )
 
 

@@ -1,0 +1,12 @@
+{% extends "admin/change_form.html" %}
+
+{% block object-tools-items %}
+  {{ block.super }}
+  {% if django_ray_sensitive_data_url %}
+    <li>
+      <a href="{{ django_ray_sensitive_data_url }}" class="viewsitelink">
+        View unredacted task data
+      </a>
+    </li>
+  {% endif %}
+{% endblock %}

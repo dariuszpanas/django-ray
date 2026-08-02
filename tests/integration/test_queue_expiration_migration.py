@@ -10,6 +10,7 @@ from django.db.migrations.executor import MigrationExecutor
 
 MIGRATE_FROM = [("django_ray", "0015_raytaskexecution_task_id_unique")]
 MIGRATE_TO = [("django_ray", "0016_raytaskexecution_queue_expiration")]
+LATEST = [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
 
 
 def _assert_existing_queued_rows_get_deadline_from_latest_eligibility(
@@ -60,7 +61,7 @@ def _assert_existing_queued_rows_get_deadline_from_latest_eligibility(
             constraint.name for constraint in new_execution._meta.constraints
         }
     finally:
-        MigrationExecutor(connection).migrate(MIGRATE_TO)
+        MigrationExecutor(connection).migrate(LATEST)
 
 
 def _assert_existing_queued_rows_support_explicit_unlimited_adoption(
@@ -102,7 +103,7 @@ def _assert_existing_queued_rows_support_explicit_unlimited_adoption(
         assert migrated_failed.queue_deadline_at is None
     finally:
         monkeypatch.delenv("DJANGO_RAY_EXISTING_QUEUED_UNLIMITED", raising=False)
-        MigrationExecutor(connection).migrate(MIGRATE_TO)
+        MigrationExecutor(connection).migrate(LATEST)
 
 
 def _assert_reverse_migration_keeps_expired_executions_terminal() -> None:
@@ -142,7 +143,7 @@ def _assert_reverse_migration_keeps_expired_executions_terminal() -> None:
             constraint.name for constraint in old_execution._meta.constraints
         }
     finally:
-        MigrationExecutor(connection).migrate(MIGRATE_TO)
+        MigrationExecutor(connection).migrate(LATEST)
 
 
 @pytest.mark.django_db(transaction=True)

@@ -626,6 +626,54 @@ permission, redaction, and query-bounding behavior. Register both
 `RayTaskExecution` and `TaskAttempt` on the same site when using the package inline,
 otherwise Django cannot resolve its stock attempt-detail link.
 
+### Unredacted task diagnostics
+
+The ordinary execution and attempt detail pages always apply the built-in redaction
+patterns plus `REDACT_PATTERNS`. Redaction is the safe default for every Admin reader;
+there is no setting that globally disables the built-in patterns on those pages.
+
+Migration `0017_raytaskexecution_sensitive_data_permission` adds the explicit
+`django_ray.view_sensitive_task_data` permission. A user who has that permission and
+the ordinary view permission for the requested object sees a **View unredacted task
+data** link on its detail page. Superusers satisfy both checks. The link opens a
+separate GET-only, non-cacheable page; the ordinary detail never embeds raw values in
+hidden HTML, JavaScript, or data attributes.
+
+For an execution, the allowlist is arguments, keyword arguments, input reference,
+result, result reference, cancellation error, error, and traceback. For an archived attempt, the page
+combines the owning execution's original arguments, keyword arguments, and input
+reference with that exact attempt's result, result reference, error, and traceback.
+It never exposes RuntimeEnv snapshots, completion envelopes, workflow progress,
+arbitrary serialization, or task logs. Each selected database value is gated by a
+64 KiB UTF-8 byte limit before it enters Python, and the rendered response has a
+4 MiB safety ceiling. HTML remains autoescaped.
+
+Grant the permission to a tightly controlled incident-response or task-operator group
+rather than every staff account:
+
+```python
+from django.contrib.auth.models import Group, Permission
+
+permission = Permission.objects.get(
+    content_type__app_label="django_ray",
+    codename="view_sensitive_task_data",
+)
+operators = Group.objects.get(name="Task incident responders")
+operators.permissions.add(permission)
+
+# Revoke the global grant when the role no longer needs it.
+operators.permissions.remove(permission)
+```
+
+An object-permission backend may instead grant
+`django_ray.view_sensitive_task_data` on one owning `RayTaskExecution`. Direct attempt
+access evaluates that sensitive grant against the parent execution and evaluates the
+ordinary `view_taskattempt` grant against the attempt. Django's built-in model backend
+does not implement object permissions, so tenant-scoped deployments need an
+object-permission backend or a custom `AdminSite` policy. `RayTaskExecution` currently
+has no user-owner field, and `claimed_by_worker` is runtime worker identity rather than
+task ownership; do not treat it as authorization data.
+
 ## Durable Inputs
 
 ### MAX_INLINE_INPUT_SIZE_BYTES
@@ -845,6 +893,11 @@ values in structured logs, Ray observability responses, the sample operational
 API, and Django admin task details. A configured string or sequence extends the
 built-in patterns for common names such as `password`, `secret`, `token`,
 `authorization`, and `private_key`.
+
+These patterns still govern the ordinary Admin detail. The separately authorized
+[unredacted task diagnostics](#unredacted-task-diagnostics) page deliberately bypasses
+display redaction only for its fixed field allowlist; use the permission boundary when
+debugging requires the stored value instead of weakening the global redaction policy.
 
 ```python
 DJANGO_RAY = {

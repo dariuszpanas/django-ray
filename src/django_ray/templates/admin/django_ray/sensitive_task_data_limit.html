@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+  </head>
+  <body>
+    <main>
+      <h1>{{ title }}</h1>
+      <p>
+        The unredacted view for {{ django_ray_sensitive_subject }} could not be
+        displayed because its rendered response exceeded the fixed
+        {{ django_ray_sensitive_response_limit_bytes }}-byte safety limit.
+      </p>
+      <p>No stored diagnostic values were included in this response.</p>
+      <p><a href="{{ django_ray_sensitive_back_url }}">Return to redacted task detail</a></p>
+    </main>
+  </body>
+</html>

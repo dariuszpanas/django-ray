@@ -13,11 +13,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.core.management import CommandError
 from django.db import IntegrityError, close_old_connections, connection, transaction
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
 from django.utils import timezone
 
+import django_ray.admin as django_ray_admin
 import django_ray.workflow_progress as workflow_progress_module
 from django_ray.input_storage import load_task_input, prepare_task_input, register_task_input
 from django_ray.lifecycle import (
@@ -1797,6 +1801,85 @@ def test_postgresql_reader_bounds_legacy_text_before_transfer(monkeypatch) -> No
     ]
     assert len(selects) == 1
     assert "OCTET_LENGTH" in selects[0].upper()
+
+
+@override_settings(
+    STORAGES={
+        "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+)
+def test_postgresql_sensitive_admin_bounds_unicode_before_transfer(
+    client,
+    monkeypatch,
+) -> None:
+    limit = django_ray_admin.ADMIN_SENSITIVE_DIAGNOSTIC_FIELD_MAX_BYTES
+    exact_value = "\U0001f642" * (limit // 4)
+    assert len(exact_value.encode("utf-8")) == limit
+    task = _execution(
+        "postgres-sensitive-admin-byte-boundary-001",
+        state=TaskState.FAILED,
+        error_traceback=exact_value,
+    )
+    user = get_user_model().objects.create_superuser(
+        username="postgres-sensitive-admin-byte-boundary",
+    )
+    client.force_login(user)
+    sensitive_url = reverse(
+        "admin:django_ray_raytaskexecution_sensitive_data",
+        args=[task.pk],
+    )
+
+    exact_response = client.get(sensitive_url)
+
+    assert exact_response.status_code == 200
+    assert exact_value in exact_response.content.decode("utf-8")
+
+    captured_rows: list[dict[str, Any]] = []
+    original_sections = django_ray_admin._sensitive_sections
+
+    def capture_sensitive_sections(
+        row: dict[str, Any],
+        section_specs: Any,
+    ) -> list[dict[str, Any]]:
+        captured_rows.append(dict(row))
+        return original_sections(row, section_specs)
+
+    monkeypatch.setattr(
+        django_ray_admin,
+        "_sensitive_sections",
+        capture_sensitive_sections,
+    )
+    oversized_value = exact_value + "\u00e9"
+    RayTaskExecution.objects.filter(pk=task.pk).update(
+        error_traceback=oversized_value,
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        oversized_response = client.get(sensitive_url)
+
+    assert oversized_response.status_code == 200
+    oversized_content = oversized_response.content.decode("utf-8")
+    assert exact_value not in oversized_content
+    assert oversized_value not in oversized_content
+    assert f"{limit + 2} bytes" in oversized_content
+    assert captured_rows
+    assert captured_rows[-1]["admin_sensitive_error_traceback_bytes"] == limit + 2
+    assert captured_rows[-1]["admin_sensitive_error_traceback_value"] is None
+
+    bounded_queries = [
+        query["sql"]
+        for query in queries.captured_queries
+        if "admin_sensitive_error_traceback_value" in query["sql"]
+    ]
+    assert len(bounded_queries) == 1
+    bounded_sql = bounded_queries[0].upper()
+    assert "OCTET_LENGTH" in bounded_sql
+    assert "CASE WHEN" in bounded_sql
+    assert "LENGTH(CAST(" not in bounded_sql
+    assert "AS BLOB" not in bounded_sql
 
 
 def test_workflow_progress_cancellation_race_disables_late_writer() -> None:

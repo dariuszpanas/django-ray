@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Django Admin execution and archived-attempt details now offer a separate **View
+  unredacted task data** page to superusers or operators who hold both ordinary object
+  view and the new `django_ray.view_sensitive_task_data` permission. The default page
+  remains redacted. The GET-only response exposes only exact task inputs and the
+  selected execution/attempt outcome (including execution cancellation errors),
+  autoescapes HTML, disables caching, rejects
+  per-field values above 64 KiB in SQL, and never includes RuntimeEnv, completion,
+  workflow-progress, or log payloads. Stock Django Admin and Unfold are both covered.
 - Workflow steps can opt into a strict operator-facing output projection with
   `step(...).with_output_preview(projector)`. Full-reporting Ray leaves validate,
   redact, and fence a small exact-JSON value before terminal schema-v3 node detail is
@@ -654,7 +662,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migration
 
-- Apply migrations `0007` through `0016` before starting upgraded workers:
+- Apply migrations `0007` through `0017` before starting upgraded workers:
   `python manage.py migrate django_ray`.
 - Drain and stop every Ray Job task manager running `0.3.1`-or-older code before
   starting code from this development line. Let in-flight jobs finish and reconcile,
@@ -708,6 +716,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0016` maps `EXPIRED` execution and attempt rows to `FAILED` before dropping the policy
   fields while leaving the `0015` task-ID uniqueness guarantee intact; review all
   still-queued work before starting older workers because they have no deadline fence.
+- `0017_raytaskexecution_sensitive_data_permission` adds the
+  `django_ray.view_sensitive_task_data` model permission without rewriting task rows.
+  Apply it before granting the incident-response role; remove any temporary user or
+  group grants when an investigation ends.
 - Keep the schema-v3 pilot disabled by default until the documented activation gates
   are complete. The current schema-v2 coordinator remains the live compatibility
   writer for full reporting; opt-in full-detail terminal publication is limited to the

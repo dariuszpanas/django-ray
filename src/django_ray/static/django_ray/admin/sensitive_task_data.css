@@ -1,0 +1,62 @@
+.django-ray-sensitive-data {
+  max-width: 90rem;
+}
+
+.django-ray-sensitive-data__warning {
+  border-inline-start: 0.35rem solid var(--error-fg, #ba2121);
+}
+
+.django-ray-sensitive-data__warning-body,
+.django-ray-sensitive-data__subject {
+  padding: 0.75rem 1rem;
+}
+
+.django-ray-sensitive-data__warning-body p,
+.django-ray-sensitive-data__subject {
+  margin: 0;
+}
+
+.django-ray-sensitive-data__warning-body p + p {
+  margin-top: 0.75rem;
+}
+
+.django-ray-sensitive-data__fields {
+  margin: 0;
+}
+
+.django-ray-sensitive-data__field {
+  border-bottom: 1px solid var(--hairline-color, #e8e8e8);
+  padding: 0.75rem 1rem;
+}
+
+.django-ray-sensitive-data__field:last-child {
+  border-bottom: 0;
+}
+
+.django-ray-sensitive-data__field dt {
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+
+.django-ray-sensitive-data__field dd {
+  margin: 0;
+}
+
+.django-ray-sensitive-data__value {
+  background: var(--darkened-bg, #f8f8f8);
+  border: 1px solid var(--hairline-color, #e8e8e8);
+  border-radius: 0.25rem;
+  box-sizing: border-box;
+  margin: 0;
+  max-height: 32rem;
+  max-width: 100%;
+  overflow: auto;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.django-ray-sensitive-data__placeholder {
+  color: var(--body-quiet-color, #666);
+  margin: 0;
+}

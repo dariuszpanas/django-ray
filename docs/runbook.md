@@ -66,6 +66,31 @@ Expected behavior:
   retries an expired attempt; `django_ray_tasks_expired` is only the current-state gauge.
 - incident signal: stale leases rise while claim latency and queue depth increase.
 
+## Failure Diagnostics In Admin
+
+Start on the ordinary execution or archived-attempt detail. It is safe to use for broad
+operator access because arguments, results, errors, and tracebacks are redacted and
+bounded. If redaction removes the evidence needed to diagnose a failure, ask a user who
+has both the ordinary object-view permission and
+`django_ray.view_sensitive_task_data` to open **View unredacted task data**.
+
+The unredacted page is a deliberate incident-data boundary:
+
+1. Confirm that the task belongs to the tenant or operational scope being investigated.
+2. Open only the exact execution or archived attempt involved. Attempt pages reuse the
+   original execution inputs but show the selected attempt's own outcome.
+3. Treat the page as potentially secret-bearing. Do not paste it into tickets, chat, or
+   logs without applying the application's incident-data policy.
+4. Remove a temporary user/group grant after the investigation. Permission revocation
+   takes effect on the next request; the response is GET-only and marked `no-store`.
+
+RuntimeEnv snapshots, completion envelopes, workflow progress, and logs are excluded
+even from this page. Use their separately bounded operational surfaces and deployment
+authorization. A value larger than 64 KiB is reported by byte size but is not loaded or
+rendered; inspect it through a deployment-owned database or result-storage procedure
+with equivalent authorization. There is no built-in task-owner field in 0.4.0, so use
+global groups sparingly or supply an object-permission backend for tenant-scoped grants.
+
 ## Safety Model
 
 Treat production tasks as at-least-once by default. `django-ray` can retry after app exceptions,
