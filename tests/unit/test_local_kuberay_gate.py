@@ -108,6 +108,12 @@ RUNTIME_ENV_TAMPER_TASK_ID = "b5200000-0000-4000-8000-000000000011"
 RUNTIME_ENV_UNKNOWN_KEY_TASK_ID = "c5200000-0000-4000-8000-000000000012"
 
 
+def test_expired_is_a_terminal_failure_in_all_gate_task_vocabularies() -> None:
+    assert "EXPIRED" in gate_module.TASK_FAILURE_STATES
+    assert "EXPIRED" in gate_module.WORKFLOW_PROGRESS_TASK_STATES
+    assert gate_module.WORKFLOW_PROGRESS_FAILURE_STATES == gate_module.TASK_FAILURE_STATES
+
+
 def _token_representations(token: str) -> tuple[str, ...]:
     json_value = json.dumps(token)
     return (

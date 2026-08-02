@@ -17,6 +17,7 @@ from django.db import transaction
 from django_ray.conf.settings import get_settings
 from django_ray.lifecycle import (
     cancel_task,
+    expire_queued_tasks,
     promote_legacy_ray_target,
     record_failure,
     record_lost,
@@ -925,18 +926,26 @@ class Command(BaseCommand):
         if self.shutdown_requested:
             return 0
 
-        # Check how many slots are available
+        sweep_now = datetime.now(UTC)
+        expired = expire_queued_tasks(queues, now=sweep_now, limit=100)
+        if expired:
+            self.stdout.write(self.style.WARNING(f"  Expired {len(expired)} stale queued task(s)"))
+
+        # Check how many slots are available. Expiry sweeping above deliberately
+        # remains independent from execution capacity.
         ray_core_pending = self.ray_core_runner.pending_count if self.ray_core_runner else 0
         active_count = len(self.active_tasks) + ray_core_pending
         available_slots = concurrency - active_count
         if available_slots <= 0:
-            return 0
+            return len(expired)
 
         # Claim tasks from any of the specified queues
-        now = datetime.now(UTC)
-
         from django.db.models import Q
 
+        # Re-read the clock after attempt archival for the bounded expiry batch.
+        # A deadline reached during that work must be excluded from this claim,
+        # even though the next sweep owns its terminal transition.
+        claim_now = datetime.now(UTC)
         with transaction.atomic():
             # A single query keeps immediate and delayed/retried work in the same
             # priority order. Queue names only select workload-isolation boundaries.
@@ -946,14 +955,15 @@ class Command(BaseCommand):
                     state=TaskState.QUEUED,
                     queue_name__in=queues,
                 )
-                .filter(Q(run_after__isnull=True) | Q(run_after__lte=now))
+                .filter(Q(run_after__isnull=True) | Q(run_after__lte=claim_now))
+                .filter(Q(queue_deadline_at__isnull=True) | Q(queue_deadline_at__gt=claim_now))
                 .order_by("-priority", "created_at", "pk")[:available_slots]
             )
 
             for task in tasks:
                 task.state = TaskState.RUNNING
-                task.started_at = now
-                task.last_heartbeat_at = now
+                task.started_at = claim_now
+                task.last_heartbeat_at = claim_now
                 task.claimed_by_worker = self.worker_id
                 task.execution_generation = int(task.execution_generation) + 1
                 task.completion_data = None
@@ -989,7 +999,7 @@ class Command(BaseCommand):
                 continue
             self.process_task(task)
 
-        return len(tasks)
+        return len(expired) + len(tasks)
 
     def _handoff_unsubmitted_task(self, task: RayTaskExecution) -> None:
         """Return a just-claimed task to durable reconciliation on shutdown."""

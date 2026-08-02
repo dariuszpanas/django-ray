@@ -58,6 +58,29 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
 
 
 @pytest.mark.django_db
+def test_explicit_retry_of_expired_task_gets_fresh_deadline() -> None:
+    old_deadline = datetime.now(UTC) - timedelta(days=1)
+    task = RayTaskExecution.objects.create(
+        task_id="retry-expired-queue-deadline-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.EXPIRED,
+        queue_timeout_seconds=120,
+        queue_deadline_at=old_deadline,
+        finished_at=old_deadline,
+        error_message="Task expired before execution after exceeding its queued-wait deadline",
+    )
+    not_before = datetime.now(UTC) + timedelta(hours=1)
+
+    retried = retry_task(task, next_attempt_at=not_before)
+
+    assert retried is not None
+    assert retried.state == TaskState.QUEUED
+    assert retried.queue_timeout_seconds == 120
+    assert retried.queue_deadline_at == not_before + timedelta(seconds=120)
+    assert TaskAttempt.objects.get(execution=task, attempt_number=1).state == TaskState.EXPIRED
+
+
+@pytest.mark.django_db
 def test_retry_task_promotes_legacy_submission_address_to_target() -> None:
     task = RayTaskExecution.objects.create(
         task_id="lifecycle-legacy-routing-001",
@@ -530,6 +553,7 @@ def test_cancellation_request_preserves_pending_completion_publication() -> None
         (TaskState.FAILED, TaskCancellationRequestStatus.ALREADY_TERMINAL),
         (TaskState.CANCELLED, TaskCancellationRequestStatus.ALREADY_TERMINAL),
         (TaskState.LOST, TaskCancellationRequestStatus.ALREADY_TERMINAL),
+        (TaskState.EXPIRED, TaskCancellationRequestStatus.ALREADY_TERMINAL),
     ],
 )
 def test_cancellation_request_returns_stable_noop_status(
@@ -597,19 +621,24 @@ def test_cancellation_attempt_fence_rejects_automatic_retry_replacement() -> Non
         state=TaskState.RUNNING,
         attempt_number=2,
         execution_generation=7,
+        queue_timeout_seconds=60,
     )
     stale_attempt = task.attempt_number
     stale_generation = task.execution_generation
+    next_attempt_at = datetime.now(UTC) + timedelta(hours=1)
     assert record_failure(
         task,
         error_message="automatic retry",
         retry=True,
+        next_attempt_at=next_attempt_at,
     )
 
     task.refresh_from_db()
     assert task.state == TaskState.QUEUED
     assert task.attempt_number == 3
     assert task.execution_generation == stale_generation
+    assert task.run_after == next_attempt_at
+    assert task.queue_deadline_at == next_attempt_at + timedelta(seconds=60)
 
     result = request_task_cancellation(
         task.pk,

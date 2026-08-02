@@ -21,7 +21,7 @@ def workflow_progress_summary(
         execution_generation=execution.execution_generation,
         run_id=str(execution.workflow_run_id),
     )
-    terminal = state in {"SUCCEEDED", "FAILED", "CANCELLED", "LOST"}
+    terminal = state in {"SUCCEEDED", "FAILED", "CANCELLED", "LOST", "EXPIRED"}
     finished_at = "2026-07-20T12:00:02Z" if terminal else None
     return {
         "schema_version": 3,
@@ -43,7 +43,7 @@ def workflow_progress_summary(
             "pending": 0 if terminal else 1,
             "running": 0,
             "succeeded": 1 if state == "SUCCEEDED" else 0,
-            "failed": 1 if state in {"FAILED", "CANCELLED", "LOST"} else 0,
+            "failed": 1 if state in {"FAILED", "CANCELLED", "LOST", "EXPIRED"} else 0,
         },
         "edge_counts": {
             "declared": 0,

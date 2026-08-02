@@ -232,15 +232,18 @@ def _collect_execution_duration() -> _TimingSummary:
     )
 
 
-def _collect_failures() -> tuple[int, int]:
+def _collect_failures() -> tuple[int, int, int]:
     from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 
-    archived = TaskAttempt.objects.filter(state=TaskState.FAILED).aggregate(
-        failures=Count("pk"),
+    archived = TaskAttempt.objects.filter(
+        state__in=(TaskState.FAILED, TaskState.EXPIRED)
+    ).aggregate(
+        failures=Count("pk", filter=Q(state=TaskState.FAILED)),
         timeouts=Count(
             "pk",
-            filter=Q(error_message__startswith=_TIMEOUT_PREFIX),
+            filter=Q(state=TaskState.FAILED, error_message__startswith=_TIMEOUT_PREFIX),
         ),
+        expirations=Count("pk", filter=Q(state=TaskState.EXPIRED)),
     )
 
     matching_attempt = TaskAttempt.objects.filter(
@@ -248,20 +251,22 @@ def _collect_failures() -> tuple[int, int]:
         attempt_number=OuterRef("attempt_number"),
     )
     current = (
-        RayTaskExecution.objects.filter(state=TaskState.FAILED)
+        RayTaskExecution.objects.filter(state__in=(TaskState.FAILED, TaskState.EXPIRED))
         .annotate(_attempt_archived=Exists(matching_attempt))
         .filter(_attempt_archived=False)
     )
     current_counts = current.aggregate(
-        failures=Count("pk"),
+        failures=Count("pk", filter=Q(state=TaskState.FAILED)),
         timeouts=Count(
             "pk",
-            filter=Q(error_message__startswith=_TIMEOUT_PREFIX),
+            filter=Q(state=TaskState.FAILED, error_message__startswith=_TIMEOUT_PREFIX),
         ),
+        expirations=Count("pk", filter=Q(state=TaskState.EXPIRED)),
     )
     return (
         int(archived["failures"] or 0) + int(current_counts["failures"] or 0),
         int(archived["timeouts"] or 0) + int(current_counts["timeouts"] or 0),
+        int(archived["expirations"] or 0) + int(current_counts["expirations"] or 0),
     )
 
 
@@ -321,7 +326,7 @@ def render_prometheus_metrics(
     }
     queue_wait, claim_latency, retries = _collect_timings_and_retries()
     execution_duration = _collect_execution_duration()
-    failures, timeouts = _collect_failures()
+    failures, timeouts, expirations = _collect_failures()
     leases = _collect_lease_health(observed_at=now)
 
     lines: list[str] = []
@@ -352,6 +357,20 @@ def render_prometheus_metrics(
         name="django_ray_tasks_running",
         help_text="Current running tasks",
         value=task_counts.get(TaskState.RUNNING, 0),
+    )
+    lines.append("")
+    _metric(
+        lines,
+        name="django_ray_tasks_expired",
+        help_text="Current tasks expired before execution",
+        value=task_counts.get(TaskState.EXPIRED, 0),
+    )
+    lines.append("")
+    _metric(
+        lines,
+        name="django_ray_expirations_recorded",
+        help_text="Recorded queue expirations across current and archived attempts",
+        value=expirations,
     )
     lines.append("")
     if allowed_queues:

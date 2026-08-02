@@ -45,6 +45,7 @@ def _execution(
         TaskState.FAILED,
         TaskState.CANCELLED,
         TaskState.LOST,
+        TaskState.EXPIRED,
     }
     return RayTaskExecution.objects.create(
         task_id=f"purge-{state.lower()}-{age_days}",
@@ -88,6 +89,7 @@ def test_delete_tombstones_registry_and_retains_execution_reference(
     payload = _payload(reference)
     first = _execution(reference, state=TaskState.FAILED)
     second = _execution(reference, state=TaskState.CANCELLED)
+    third = _execution(reference, state=TaskState.EXPIRED)
     deleted: list[str] = []
     _install_input_storage(monkeypatch, deleted.append)
     stdout = StringIO()
@@ -102,12 +104,14 @@ def test_delete_tombstones_registry_and_retains_execution_reference(
     payload.refresh_from_db()
     first.refresh_from_db()
     second.refresh_from_db()
+    third.refresh_from_db()
     assert deleted == [reference]
     assert payload.state == InputPayloadState.PURGED
     assert payload.purged_at is not None
     assert payload.cleanup_error == ""
     assert first.input_reference == reference
     assert second.input_reference == reference
+    assert third.input_reference == reference
     assert "1 eligible, 1 purged, 0 failed" in stdout.getvalue()
 
 

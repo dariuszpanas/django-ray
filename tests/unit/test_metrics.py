@@ -109,6 +109,12 @@ def test_metrics_use_durable_state_and_bounded_labels(db, settings) -> None:
         state=TaskState.FAILED,
         error_message="Task timed out after 30 seconds",
     )
+    RayTaskExecution.objects.create(
+        task_id="expired-before-submission",
+        callable_path="tasks.slow",
+        state=TaskState.EXPIRED,
+        error_message="Task expired before execution after exceeding its queued-wait deadline",
+    )
     archived_timeout = RayTaskExecution.objects.create(
         task_id="archived-timeout",
         callable_path="tasks.slow",
@@ -120,6 +126,18 @@ def test_metrics_use_durable_state_and_bounded_labels(db, settings) -> None:
         attempt_number=1,
         state=TaskState.FAILED,
         error_message="Task timed out after 10 seconds",
+    )
+    archived_expiration = RayTaskExecution.objects.create(
+        task_id="archived-expiration",
+        callable_path="tasks.slow",
+        state=TaskState.QUEUED,
+        attempt_number=2,
+    )
+    TaskAttempt.objects.create(
+        execution=archived_expiration,
+        attempt_number=1,
+        state=TaskState.EXPIRED,
+        error_message="Task expired before execution after exceeding its queued-wait deadline",
     )
 
     TaskWorkerLease.objects.create(
@@ -161,9 +179,11 @@ def test_metrics_use_durable_state_and_bounded_labels(db, settings) -> None:
     assert samples["django_ray_execution_duration_seconds_count{}"] == 3
     assert samples["django_ray_execution_duration_seconds_sum{}"] == 7
     assert samples["django_ray_execution_duration_seconds_max{}"] == 5
-    assert samples["django_ray_retries_recorded{}"] == 3
+    assert samples["django_ray_retries_recorded{}"] == 4
     assert samples["django_ray_failures_recorded{}"] == 4
     assert samples["django_ray_timeouts_recorded{}"] == 2
+    assert samples["django_ray_tasks_expired{}"] == 1
+    assert samples["django_ray_expirations_recorded{}"] == 2
     assert samples["django_ray_worker_leases{'status': 'healthy'}"] == 1
     assert samples["django_ray_worker_leases{'status': 'stale'}"] == 1
     assert samples["django_ray_worker_leases{'status': 'inactive'}"] == 1

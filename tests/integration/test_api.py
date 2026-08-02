@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -67,7 +68,12 @@ class TestLandingPage:
             queue_name="default",
             state=TaskState.SUCCEEDED,
         )
-
+        RayTaskExecution.objects.create(
+            task_id="landing-test-expired",
+            callable_path="test.task",
+            queue_name="default",
+            state=TaskState.EXPIRED,
+        )
         response = Client().get("/")
         assert response.status_code == 200
 
@@ -91,6 +97,7 @@ class TestLandingPage:
         assert 'id="view-executions"' in content
         assert "survives reloads" in content
         assert 'id="stat-succeeded">1</strong>' in content
+        assert 'id="stat-expired">1</strong>' in content
 
     def test_browser_auth_contract_does_not_embed_or_leak_token(self, settings):
         """The browser session retains its credential without server-side leakage."""
@@ -1203,13 +1210,28 @@ class TestExecutionsAPI:
             queue_name="default",
             state=TaskState.SUCCEEDED,
         )
+        deadline = datetime.now(UTC) - timedelta(seconds=1)
+        RayTaskExecution.objects.create(
+            task_id="test-expired-list",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.EXPIRED,
+            queue_timeout_seconds=60,
+            queue_deadline_at=deadline,
+        )
 
         response = client.get("/api/executions")
         assert response.status_code == 200
         data = response.json()
-        assert data["total"] == 2
+        assert data["total"] == 3
         assert data["queued"] == 1
         assert data["succeeded"] == 1
+        assert data["expired"] == 1
+        expired = next(task for task in data["tasks"] if task["state"] == TaskState.EXPIRED)
+        assert expired["queue_timeout_seconds"] == 60
+        assert abs(datetime.fromisoformat(expired["queue_deadline_at"]) - deadline) < timedelta(
+            milliseconds=1
+        )
 
     def test_list_executions_filter_by_state(self, client):
         """Test filtering executions by state."""
@@ -1465,14 +1487,22 @@ class TestExecutionsAPI:
             state=TaskState.LOST,
             error_message="worker disappeared",
         )
+        expired = RayTaskExecution.objects.create(
+            task_id="test-expired",
+            callable_path="test.task",
+            state=TaskState.EXPIRED,
+            queue_timeout_seconds=60,
+            queue_deadline_at=datetime.now(UTC) - timedelta(seconds=1),
+            error_message="queue deadline elapsed",
+        )
 
         response = client.post("/api/executions/reset")
         assert response.status_code == 200
         data = response.json()
-        assert "2" in data["message"]
+        assert "3" in data["message"]
 
         # Terminal retryable rows are queued through retry_task().
-        assert RayTaskExecution.objects.filter(state=TaskState.QUEUED).count() == 2
+        assert RayTaskExecution.objects.filter(state=TaskState.QUEUED).count() == 3
         failed.refresh_from_db()
         assert failed.state == TaskState.QUEUED
         assert failed.progress_data is None
@@ -1490,6 +1520,14 @@ class TestExecutionsAPI:
         assert lost.state == TaskState.QUEUED
         assert lost.attempt_number == 2
         assert TaskAttempt.objects.get(execution=lost, attempt_number=1).state == TaskState.LOST
+        expired.refresh_from_db()
+        assert expired.state == TaskState.QUEUED
+        assert expired.attempt_number == 2
+        assert expired.queue_deadline_at is not None
+        assert expired.queue_deadline_at > datetime.now(UTC)
+        assert (
+            TaskAttempt.objects.get(execution=expired, attempt_number=1).state == TaskState.EXPIRED
+        )
 
         # Active work is never converted into a retry by the bulk endpoint.
         running.refresh_from_db()
@@ -1564,14 +1602,18 @@ class TestExecutionsAPI:
         RayTaskExecution.objects.create(
             task_id="test-3", callable_path="test", state=TaskState.FAILED
         )
+        RayTaskExecution.objects.create(
+            task_id="test-4", callable_path="test", state=TaskState.EXPIRED
+        )
 
         response = client.get("/api/executions/stats")
         assert response.status_code == 200
         data = response.json()
-        assert data["total"] == 3
+        assert data["total"] == 4
         assert data["queued"] == 1
         assert data["succeeded"] == 1
         assert data["failed"] == 1
+        assert data["expired"] == 1
 
     def test_get_stats_uses_single_grouped_query(self, client):
         """Stats endpoint should aggregate states in one query."""

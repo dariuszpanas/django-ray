@@ -104,6 +104,42 @@ def _execution(task_id: str, **overrides: object) -> RayTaskExecution:
     return RayTaskExecution.objects.create(**values)
 
 
+def test_expiry_wins_concurrent_claim_at_exact_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deadline = datetime.now(UTC)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return deadline if tz is not None else deadline.replace(tzinfo=None)
+
+    monkeypatch.setattr(
+        "django_ray.management.commands.django_ray_worker.datetime",
+        FrozenDateTime,
+    )
+    task = _execution(
+        "postgres-expiry-claim-race-001",
+        queue_timeout_seconds=60,
+        queue_deadline_at=deadline,
+    )
+    first_claimed: list[int] = []
+    second_claimed: list[int] = []
+    first = _claim_command("expiry-worker-a", first_claimed)
+    second = _claim_command("expiry-worker-b", second_claimed)
+
+    _run_concurrently(
+        lambda: first.claim_and_process_tasks(["default"], concurrency=1),
+        lambda: second.claim_and_process_tasks(["default"], concurrency=1),
+    )
+
+    task.refresh_from_db()
+    assert task.state == TaskState.EXPIRED
+    assert first_claimed == []
+    assert second_claimed == []
+    assert TaskAttempt.objects.filter(execution=task, state=TaskState.EXPIRED).count() == 1
+
+
 def _workflow_identity(
     execution: RayTaskExecution,
     run_id: str,

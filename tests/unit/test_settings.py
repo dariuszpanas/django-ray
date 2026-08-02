@@ -12,6 +12,17 @@ from django_ray.conf.settings import validate_settings
 class TestValidateSettings:
     """Tests for validate_settings function."""
 
+    @pytest.mark.parametrize("value", [1, 86400, 2_147_483_647, None])
+    def test_queue_timeout_accepts_positive_integer_or_none(self, value) -> None:
+        validate_settings({"RAY_ADDRESS": "ray://localhost:10001", "QUEUE_TIMEOUT_SECONDS": value})
+
+    @pytest.mark.parametrize("value", [0, -1, True, 1.5, "86400", 2_147_483_648])
+    def test_queue_timeout_rejects_other_values(self, value) -> None:
+        with pytest.raises(ImproperlyConfigured, match="QUEUE_TIMEOUT_SECONDS"):
+            validate_settings(
+                {"RAY_ADDRESS": "ray://localhost:10001", "QUEUE_TIMEOUT_SECONDS": value}
+            )
+
     def test_validate_missing_ray_address(self) -> None:
         """Test that missing RAY_ADDRESS raises error."""
         with pytest.raises(ImproperlyConfigured, match="RAY_ADDRESS"):

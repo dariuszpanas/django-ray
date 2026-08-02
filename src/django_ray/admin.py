@@ -454,6 +454,8 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         "workflow_run_id",
         "created_at",
         "run_after",
+        "queue_timeout_seconds",
+        "queue_deadline_at",
         "started_at",
         "finished_at",
         "last_heartbeat_at",
@@ -516,6 +518,9 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         "workflow_plan_fingerprint",
         "workflow_plan_pinned_attempt",
         "created_at",
+        "run_after",
+        "queue_timeout_seconds",
+        "queue_deadline_at",
         "started_at",
         "finished_at",
         "last_heartbeat_at",
@@ -595,7 +600,15 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         (
             "Timing",
             {
-                "fields": ("created_at", "started_at", "finished_at", "last_heartbeat_at"),
+                "fields": (
+                    "created_at",
+                    "run_after",
+                    "queue_timeout_seconds",
+                    "queue_deadline_at",
+                    "started_at",
+                    "finished_at",
+                    "last_heartbeat_at",
+                ),
             },
         ),
     )
@@ -1862,6 +1875,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             TaskState.CANCELLED: "#ffc107",
             TaskState.CANCELLING: "#ffc107",
             TaskState.LOST: "#dc3545",
+            TaskState.EXPIRED: "#b45309",
         }
         state = str(obj.state)
         color = colors.get(state, "#6c757d")
@@ -1951,13 +1965,13 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
 
     @admin.action(description="Retry selected tasks")
     def retry_tasks(self, request: HttpRequest, queryset: QuerySet[RayTaskExecution]) -> None:
-        """Retry failed or lost tasks by resetting them to QUEUED state."""
-        retryable_states = [TaskState.FAILED, TaskState.LOST]
+        """Retry failed, lost, or expired tasks by resetting them to QUEUED state."""
+        retryable_states = [TaskState.FAILED, TaskState.LOST, TaskState.EXPIRED]
         tasks_to_retry = queryset.filter(state__in=retryable_states)
         if not tasks_to_retry.exists():
             self.message_user(
                 request,
-                "No failed or lost tasks found in selection.",
+                "No failed, lost, or expired tasks found in selection.",
             )
             return
 

@@ -1075,7 +1075,7 @@ def test_metrics_request_uses_shared_client_timeout() -> None:
     ]
 
 
-@pytest.mark.parametrize("terminal_state", ["FAILED", "CANCELLED", "LOST"])
+@pytest.mark.parametrize("terminal_state", ["FAILED", "CANCELLED", "LOST", "EXPIRED"])
 def test_terminal_polling_marks_unsuccessful_states_as_failures(
     terminal_state: str,
 ) -> None:

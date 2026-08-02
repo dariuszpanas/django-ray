@@ -11,7 +11,13 @@
   const attemptNode = panel.querySelector('[data-field="attempt"]');
   const workflowNode = panel.querySelector('[data-field="workflow"]');
   const statusNode = panel.querySelector('[data-field="status"]');
-  const terminalStates = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "LOST"]);
+  const terminalStates = new Set([
+    "SUCCEEDED",
+    "FAILED",
+    "CANCELLED",
+    "LOST",
+    "EXPIRED",
+  ]);
   let timer = null;
   let stopped = false;
   let inFlight = false;

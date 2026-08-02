@@ -200,6 +200,8 @@ class TaskExecutionSchema(Schema):
     runtime_env_profile: str | None
     runtime_env_hash: str
     error_message: str | None
+    queue_timeout_seconds: int | None
+    queue_deadline_at: datetime | None
 
     @field_validator("result_data", mode="before")
     @classmethod
@@ -226,6 +228,7 @@ class TaskListResponseSchema(Schema):
     running: int
     succeeded: int
     failed: int
+    expired: int
 
 
 class MessageSchema(Schema):
@@ -257,6 +260,7 @@ class StatsSchema(Schema):
     running: int
     succeeded: int
     failed: int
+    expired: int
     cancelled: int
     lost: int
 
@@ -720,6 +724,7 @@ def list_executions(
         "running": task_counts.get(TaskState.RUNNING, 0),
         "succeeded": task_counts.get(TaskState.SUCCEEDED, 0),
         "failed": task_counts.get(TaskState.FAILED, 0),
+        "expired": task_counts.get(TaskState.EXPIRED, 0),
     }
 
 
@@ -734,6 +739,7 @@ def get_stats(request):
         "running": task_counts.get(TaskState.RUNNING, 0),
         "succeeded": task_counts.get(TaskState.SUCCEEDED, 0),
         "failed": task_counts.get(TaskState.FAILED, 0),
+        "expired": task_counts.get(TaskState.EXPIRED, 0),
         "cancelled": task_counts.get(TaskState.CANCELLED, 0),
         "lost": task_counts.get(TaskState.LOST, 0),
     }
@@ -742,10 +748,15 @@ def get_stats(request):
 @api.post("/executions/reset", response=MessageSchema, tags=["Admin"])
 def reset_executions(
     request,
-    state: Literal["FAILED", "CANCELLED", "LOST"] | None = None,
+    state: Literal["FAILED", "CANCELLED", "LOST", "EXPIRED"] | None = None,
 ):
     """Retry terminal task executions through the locked lifecycle service."""
-    retryable_states = (TaskState.FAILED, TaskState.CANCELLED, TaskState.LOST)
+    retryable_states = (
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+        TaskState.LOST,
+        TaskState.EXPIRED,
+    )
     if state:
         queryset = RayTaskExecution.objects.filter(state=state.upper())
     else:
@@ -813,7 +824,7 @@ def cancel_execution(request, execution_id: int):
 
 @api.post("/executions/{execution_id}/retry", response=TaskExecutionSchema, tags=["Admin"])
 def retry_execution(request, execution_id: int):
-    """Retry a failed, cancelled, or lost task execution."""
+    """Retry a failed, cancelled, lost, or expired task execution."""
     task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
     try:
         retried = retry_task(

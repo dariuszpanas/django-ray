@@ -426,6 +426,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package building. The hashed requirements export is cross-checked against a locked
   CycloneDX graph before scanning, without claiming that django-ray directly decodes
   attacker-controlled ASN.1.
+- Queued tasks now snapshot a 24-hour wait budget by default and become terminal
+  `EXPIRED` before Ray submission when their indexed absolute deadline is due. Backend
+  aliases may choose a positive `QUEUE_TIMEOUT_SECONDS` or explicit `None` for an
+  unlimited backlog; retries receive a fresh deadline while pre-submission handoff does
+  not. Apply migration `0016_raytaskexecution_queue_expiration` before starting upgraded
+  workers.
 - `django_ray_worker --all-queues` now discovers and deduplicates queues across
   every configured django-ray backend alias while ignoring Celery and other
   backends. Queue selectors and explicit execution-mode flags are mutually
@@ -559,7 +565,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migration
 
-- Apply migrations `0007` through `0015` before starting upgraded workers:
+- Apply migrations `0007` through `0016` before starting upgraded workers:
   `python manage.py migrate django_ray`.
 - Drain and stop every Ray Job task manager running `0.3.1`-or-older code before
   starting code from this development line. Let in-flight jobs finish and reconcile,
@@ -601,6 +607,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preflight and unique-index build on a production-sized staging copy and plan database
   capacity plus a maintenance window; this is not a zero-downtime migration. Reversal
   removes the uniqueness guarantee.
+- Before `0016_raytaskexecution_queue_expiration`, stop old workers and preview the
+  existing queued backlog as documented in [Queue expiration](tasks.md#queue-expiration).
+  The migration gives queued rows a deadline one day after their latest stored
+  eligibility time and snapshots the 24-hour policy on other existing executions for
+  future retries. Set `DJANGO_RAY_EXISTING_QUEUED_UNLIMITED=1` only when the existing
+  queued backlog was intentionally durable. Upgraded workers expire due rows without Ray
+  submission. Pause enqueue traffic for the migration and upgrade every enqueue producer
+  before resuming it: old writers cannot populate a deliberate policy snapshot. Do not run
+  a mixed old/new worker fleet because old workers do not honor the deadline. Reversing
+  `0016` maps `EXPIRED` execution and attempt rows to `FAILED` before dropping the policy
+  fields while leaving the `0015` task-ID uniqueness guarantee intact; review all
+  still-queued work before starting older workers because they have no deadline fence.
 - Keep the schema-v3 pilot disabled by default until the documented activation gates
   are complete. The current schema-v2 coordinator remains the live compatibility
   writer for full reporting; opt-in full-detail terminal publication is limited to the

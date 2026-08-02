@@ -13,7 +13,7 @@ from django.db.migrations.executor import MigrationExecutor
 def test_ray_target_address_is_additive_nullable_and_reversible() -> None:
     migrate_from = [("django_ray", "0013_workflow_progress_detail_storage")]
     migrate_to = [("django_ray", "0014_raytaskexecution_ray_target_address")]
-    latest = [("django_ray", "0015_raytaskexecution_task_id_unique")]
+    latest = [("django_ray", "0016_raytaskexecution_queue_expiration")]
     executor = MigrationExecutor(connection)
     executor.migrate(migrate_from)
     try:

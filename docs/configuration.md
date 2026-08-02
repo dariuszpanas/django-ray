@@ -111,6 +111,7 @@ monotonic schedules; idle claim backoff does not postpone them.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `STUCK_TASK_TIMEOUT_SECONDS` | `int` | `300` | Time before a running task with no worker or monitor heartbeat is considered stuck |
+| `QUEUE_TIMEOUT_SECONDS` | `int` or `None` | `86400` | Queued-wait budget after eligibility (`1`-`2147483647` seconds); `None` deliberately keeps an unlimited backlog |
 | `WORKER_LEASE_SECONDS` | `int` | `60` | Worker lease duration (`1`-`86400` seconds) for distributed coordination |
 | `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval (`1`-`86400` seconds), which must be below the lease duration |
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import signal
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -235,6 +235,7 @@ class TestWorkerCommandCoverage:
 
         assert cmd._get_ray_cluster_resources_with_timeout(0.01) is None
 
+    @pytest.mark.django_db
     def test_claiming_stops_when_all_concurrency_slots_are_full(self) -> None:
         cmd = _make_command()
         cmd.active_tasks = {1: "raysubmit_active"}
@@ -303,6 +304,7 @@ class TestWorkerCommandCoverage:
 
     @pytest.mark.django_db
     def test_handoff_unsubmitted_task_returns_claimed_task_to_queue(self) -> None:
+        deadline = datetime.now(UTC) + timedelta(hours=1)
         task = RayTaskExecution.objects.create(
             task_id="coverage-handoff-001",
             callable_path="testproject.tasks.add_numbers",
@@ -314,6 +316,8 @@ class TestWorkerCommandCoverage:
             ray_job_id="raysubmit_handoff",
             ray_address="ray://cluster:10001",
             ray_target_address="ray://target:10001",
+            queue_timeout_seconds=3600,
+            queue_deadline_at=deadline,
         )
         cmd = _make_command()
 
@@ -327,6 +331,7 @@ class TestWorkerCommandCoverage:
         assert task.ray_job_id is None
         assert task.ray_address is None
         assert task.ray_target_address == "ray://target:10001"
+        assert task.queue_deadline_at == deadline
         assert "handed off before remote submission" in cmd.stdout.getvalue()
 
     @pytest.mark.django_db

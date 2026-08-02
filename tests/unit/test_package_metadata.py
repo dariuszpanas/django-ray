@@ -135,6 +135,7 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
     auto_dark_variables = dict(re.findall(variable_pattern, auto_dark_rule.group("body")))
     assert len(explicit_dark_variables) >= 40
     assert auto_dark_variables == explicit_dark_variables
+    assert 'data-state="EXPIRED"' in stylesheet
 
     script = expected_assets[2].read_text(encoding="utf-8")
     assert "setTimeout(refresh, 3000)" in script
@@ -143,7 +144,7 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
     assert "textContent" in script
     assert "stateNode.dataset.state = state" in script
     assert "innerHTML" not in script
-    assert all(state in script for state in ("SUCCEEDED", "FAILED", "CANCELLED", "LOST"))
+    assert all(state in script for state in ("SUCCEEDED", "FAILED", "CANCELLED", "LOST", "EXPIRED"))
 
     diagnostics_script = expected_assets[3].read_text(encoding="utf-8")
     assert "django-ray-workflow-diagnostics" in diagnostics_script

@@ -20,6 +20,7 @@
     running: document.querySelector("#stat-running"),
     succeeded: document.querySelector("#stat-succeeded"),
     failed: document.querySelector("#stat-failed"),
+    expired: document.querySelector("#stat-expired"),
   };
 
   let apiToken = "";

@@ -20,11 +20,12 @@ EXPECTED_FILES = {
     "django_ray/migrations/0001_initial.py",
     "django_ray/migrations/0014_raytaskexecution_ray_target_address.py",
     "django_ray/migrations/0015_raytaskexecution_task_id_unique.py",
+    "django_ray/migrations/0016_raytaskexecution_queue_expiration.py",
     "django_ray/management/commands/django_ray_worker.py",
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0015_raytaskexecution_task_id_unique",
+    "0016_raytaskexecution_queue_expiration",
 )
 
 

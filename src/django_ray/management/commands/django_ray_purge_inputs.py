@@ -16,6 +16,7 @@ TERMINAL_STATES = (
     TaskState.FAILED,
     TaskState.CANCELLED,
     TaskState.LOST,
+    TaskState.EXPIRED,
 )
 
 

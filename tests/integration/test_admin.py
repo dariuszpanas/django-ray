@@ -2780,7 +2780,7 @@ class TestRayTaskExecutionAdmin:
 
         assert result.returncode == 0, result.stdout + result.stderr
 
-    def test_retry_tasks_requeues_failed_and_lost(self, monkeypatch) -> None:
+    def test_retry_tasks_requeues_failed_lost_and_expired(self, monkeypatch) -> None:
         admin_obj = _task_admin()
         messages: list[str] = []
         monkeypatch.setattr(
@@ -2807,19 +2807,32 @@ class TestRayTaskExecutionAdmin:
             args_json="[]",
             kwargs_json="{}",
         )
+        expired_deadline = datetime.now(UTC) - timedelta(minutes=1)
+        expired = RayTaskExecution.objects.create(
+            task_id="admin-retry-expired-003",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.EXPIRED,
+            attempt_number=1,
+            error_message="expired",
+            args_json="[]",
+            kwargs_json="{}",
+            queue_timeout_seconds=60,
+            queue_deadline_at=expired_deadline,
+        )
         running = RayTaskExecution.objects.create(
-            task_id="admin-retry-003",
+            task_id="admin-retry-004",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
             args_json="[]",
             kwargs_json="{}",
         )
 
-        qs = RayTaskExecution.objects.filter(pk__in=[failed.pk, lost.pk, running.pk])
+        qs = RayTaskExecution.objects.filter(pk__in=[failed.pk, lost.pk, expired.pk, running.pk])
         admin_obj.retry_tasks(_request(), qs)
 
         failed.refresh_from_db()
         lost.refresh_from_db()
+        expired.refresh_from_db()
         running.refresh_from_db()
 
         assert failed.state == TaskState.QUEUED
@@ -2828,10 +2841,17 @@ class TestRayTaskExecutionAdmin:
         assert failed.completion_data is None
         assert lost.state == TaskState.QUEUED
         assert lost.attempt_number == 3
+        assert expired.state == TaskState.QUEUED
+        assert expired.attempt_number == 2
+        assert expired.queue_deadline_at is not None
+        assert expired.queue_deadline_at > datetime.now(UTC)
         assert running.state == TaskState.RUNNING
-        assert messages[-1] == "Queued 2 task(s) for retry."
+        assert messages[-1] == "Queued 3 task(s) for retry."
         assert TaskAttempt.objects.get(execution=failed, attempt_number=3).error_message == "boom"
         assert TaskAttempt.objects.get(execution=lost, attempt_number=2).error_message == "lost"
+        assert (
+            TaskAttempt.objects.get(execution=expired, attempt_number=1).state == TaskState.EXPIRED
+        )
 
     def test_retry_tasks_skips_corrupt_runtime_env_without_aborting_selection(
         self,
@@ -2900,7 +2920,7 @@ class TestRayTaskExecutionAdmin:
 
         admin_obj.retry_tasks(_request(), RayTaskExecution.objects.filter(pk=task.pk))
 
-        assert messages[-1] == "No failed or lost tasks found in selection."
+        assert messages[-1] == "No failed, lost, or expired tasks found in selection."
 
     def test_cancel_tasks_handles_queued_and_running_paths(self, monkeypatch) -> None:
         admin_obj = _task_admin()

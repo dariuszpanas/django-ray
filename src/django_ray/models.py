@@ -41,6 +41,7 @@ class TaskState(models.TextChoices):
     CANCELLED = "CANCELLED", "Cancelled"
     CANCELLING = "CANCELLING", "Cancelling"
     LOST = "LOST", "Lost"
+    EXPIRED = "EXPIRED", "Expired"
 
 
 class InputPayloadState(models.TextChoices):
@@ -196,6 +197,16 @@ class RayTaskExecution(models.Model):
         blank=True,
         help_text="Maximum execution time in seconds (None = no timeout)",
     )
+    queue_timeout_seconds = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Snapshotted queued-wait budget in seconds (None = unlimited)",
+    )
+    queue_deadline_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Absolute instant at which queued work expires",
+    )
 
     # Worker tracking
     claimed_by_worker = models.CharField(
@@ -309,6 +320,10 @@ class RayTaskExecution(models.Model):
             models.Index(
                 fields=["state", "queue_name", "run_after"],
                 name="ray_task_claimable_idx",
+            ),
+            models.Index(
+                fields=["state", "queue_name", "queue_deadline_at"],
+                name="ray_task_expiry_idx",
             ),
             models.Index(
                 fields=["state", "last_heartbeat_at"],

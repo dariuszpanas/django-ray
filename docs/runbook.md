@@ -23,7 +23,8 @@ It does not cover custom business task logic internals.
 ## Quick Triage Checklist
 
 1. Check worker process health (`django_ray_worker` logs, pod/process status).
-2. Check task state distribution (`QUEUED`, `RUNNING`, `FAILED`, `LOST`, `CANCELLING`).
+2. Check task state distribution (`QUEUED`, `RUNNING`, `FAILED`, `LOST`, `EXPIRED`,
+   `CANCELLING`).
 3. Check active worker leases and heartbeat freshness.
 4. Check Ray connectivity from workers.
 5. Check whether failures are retrying or already terminal.
@@ -45,6 +46,8 @@ From `/api/metrics` in the example project:
 - `django_ray_retries_recorded`
 - `django_ray_failures_recorded`
 - `django_ray_timeouts_recorded`
+- `django_ray_tasks_expired`
+- `django_ray_expirations_recorded`
 - `django_ray_worker_leases{status="..."}`
 
 The example endpoint requires its bearer token. Production deployments should use a
@@ -57,6 +60,10 @@ Expected behavior:
 - incident signal: `queued` rises while `running` stays near zero.
 - incident signal: `running` grows and does not drain.
 - incident signal: `failed`/`lost` rises quickly with the same callable path.
+- incident signal: `expired` rises, indicating queued work exceeded its snapshotted
+  wait deadline before a worker could submit it.
+- historical signal: `django_ray_expirations_recorded` rises even if an operator later
+  retries an expired attempt; `django_ray_tasks_expired` is only the current-state gauge.
 - incident signal: stale leases rise while claim latency and queue depth increase.
 
 ## Safety Model
@@ -78,6 +85,16 @@ SELECT state, COUNT(*) AS count
 FROM django_ray_raytaskexecution
 GROUP BY state
 ORDER BY state;
+```
+
+```sql
+-- Queued work at or beyond its snapshotted deadline
+SELECT id, task_id, callable_path, queue_name, queue_deadline_at
+FROM django_ray_raytaskexecution
+WHERE state = 'QUEUED'
+  AND queue_deadline_at IS NOT NULL
+  AND queue_deadline_at <= NOW()
+ORDER BY queue_deadline_at ASC;
 ```
 
 ```sql
@@ -116,7 +133,10 @@ Recovery:
 1. Restart unhealthy worker processes/pods.
 2. Confirm queue flags/settings match enqueue queue names.
 3. If tasks are delayed by retries, inspect `run_after` timestamps before forcing retries.
-4. Confirm `WORKER_POLL_INTERVAL_SECONDS` and
+4. Check `django_ray_tasks_expired` and the oldest `queue_deadline_at`. `EXPIRED` is
+   terminal and never automatically retries; correct worker capacity or routing before
+   using the admin or API retry action, which assigns a fresh deadline.
+5. Confirm `WORKER_POLL_INTERVAL_SECONDS` and
    `WORKER_POLL_MAX_INTERVAL_SECONDS`. An idle worker may take up to the configured
    maximum polling delay to observe newly enqueued work; this is not an end-to-end
    task-start bound. Sustained activity resets it to the base.

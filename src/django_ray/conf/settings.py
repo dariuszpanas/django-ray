@@ -12,6 +12,7 @@ from django.core.exceptions import ImproperlyConfigured
 
 from django_ray.conf.defaults import (
     DEFAULTS,
+    QUEUE_TIMEOUT_SECONDS_MAX,
     TASK_ATTEMPT_ADMIN_MODES,
     WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES,
 )
@@ -156,6 +157,17 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
         ("RAY_STATE_API_TIMEOUT_SECONDS", 1, 60),
         ("MAX_RESULT_SIZE_BYTES", 1024, 100 * 1024 * 1024),
     ]
+
+    queue_timeout = config.get("QUEUE_TIMEOUT_SECONDS")
+    if queue_timeout is not None and (
+        type(queue_timeout) is not int
+        or queue_timeout <= 0
+        or queue_timeout > QUEUE_TIMEOUT_SECONDS_MAX
+    ):
+        raise ImproperlyConfigured(
+            "django-ray: QUEUE_TIMEOUT_SECONDS must be None or an integer between "
+            f"1 and {QUEUE_TIMEOUT_SECONDS_MAX}"
+        )
 
     for name, min_val, max_val in numeric_settings:
         if name not in config:

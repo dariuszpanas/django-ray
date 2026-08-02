@@ -31,6 +31,25 @@ class LifecycleConflictError(Exception):
     """Raised when a transition's expected current state no longer matches."""
 
 
+QUEUE_EXPIRED_ERROR = "Task expired before execution after exceeding its queued-wait deadline"
+
+
+def _refresh_queue_deadline(
+    execution: RayTaskExecution,
+    *,
+    queued_at: datetime,
+    run_after: datetime | None,
+) -> None:
+    """Give a newly queued attempt its full snapshotted wait budget."""
+    if execution.queue_timeout_seconds is None:
+        execution.queue_deadline_at = None
+        return
+    eligibility_at = max(queued_at, run_after) if run_after is not None else queued_at
+    execution.queue_deadline_at = eligibility_at + timedelta(
+        seconds=int(execution.queue_timeout_seconds)
+    )
+
+
 def promote_legacy_ray_target(execution: RayTaskExecution) -> bool:
     """Preserve an old Ray Job route without adopting Ray Core handle metadata.
 
@@ -435,6 +454,7 @@ def request_task_cancellation(
             TaskState.FAILED,
             TaskState.CANCELLED,
             TaskState.LOST,
+            TaskState.EXPIRED,
         }:
             status = TaskCancellationRequestStatus.ALREADY_TERMINAL
         else:
@@ -451,7 +471,12 @@ def request_task_cancellation(
 def retry_task(
     execution: RayTaskExecution | int,
     *,
-    allowed_states: Iterable[str] = (TaskState.FAILED, TaskState.CANCELLED, TaskState.LOST),
+    allowed_states: Iterable[str] = (
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+        TaskState.LOST,
+        TaskState.EXPIRED,
+    ),
     next_attempt_at: Any | None = None,
     expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
@@ -485,6 +510,11 @@ def retry_task(
         current.attempt_number = int(current.attempt_number) + 1
         current.execution_generation = int(current.execution_generation) + 1
         current.run_after = next_attempt_at
+        _refresh_queue_deadline(
+            current,
+            queued_at=datetime.now(UTC),
+            run_after=next_attempt_at,
+        )
         current.result_data = None
         current.result_reference = None
         current.progress_data = None
@@ -509,6 +539,7 @@ def retry_task(
                 "attempt_number",
                 "execution_generation",
                 "run_after",
+                "queue_deadline_at",
                 "result_data",
                 "result_reference",
                 "progress_data",
@@ -582,6 +613,11 @@ def record_failure(
             current.state = TaskState.QUEUED
             current.attempt_number = int(current.attempt_number) + 1
             current.run_after = next_attempt_at
+            _refresh_queue_deadline(
+                current,
+                queued_at=datetime.now(UTC),
+                run_after=next_attempt_at,
+            )
             current.started_at = None
             current.finished_at = None
             current.claimed_by_worker = None
@@ -597,6 +633,7 @@ def record_failure(
                 "state",
                 "attempt_number",
                 "run_after",
+                "queue_deadline_at",
                 "error_message",
                 "error_traceback",
                 "cancellation_status",
@@ -623,6 +660,39 @@ def record_failure(
             )
         execution.__dict__.update(current.__dict__)
         return True
+
+
+def expire_queued_tasks(
+    queue_names: Iterable[str],
+    *,
+    now: datetime,
+    limit: int = 100,
+) -> tuple[int, ...]:
+    """Terminalize one bounded locked batch whose queue deadline is due."""
+    if limit <= 0:
+        return ()
+    with transaction.atomic():
+        rows = list(
+            RayTaskExecution.objects.select_for_update(skip_locked=True)
+            .filter(
+                state=TaskState.QUEUED,
+                queue_name__in=tuple(queue_names),
+                queue_deadline_at__isnull=False,
+                queue_deadline_at__lte=now,
+            )
+            .order_by("queue_deadline_at", "pk")[:limit]
+        )
+        expired: list[int] = []
+        for current in rows:
+            current.state = TaskState.EXPIRED
+            current.finished_at = now
+            current.error_message = QUEUE_EXPIRED_ERROR
+            current.error_traceback = None
+            _record_attempt(current)
+            current.save(update_fields=["state", "finished_at", "error_message", "error_traceback"])
+            if current.pk is not None:
+                expired.append(current.pk)
+        return tuple(expired)
 
 
 def record_lost(
