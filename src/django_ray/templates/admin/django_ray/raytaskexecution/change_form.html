@@ -22,6 +22,32 @@
 
 {% block after_field_sets %}
   {{ block.super }}
+  {% if django_ray_retry_guidance %}
+    <section
+      class="module aligned django-ray-task-actions"
+      id="django-ray-task-actions"
+      aria-labelledby="django-ray-task-actions-heading"
+    >
+      <h2 id="django-ray-task-actions-heading">Task actions</h2>
+      <div class="django-ray-task-actions__body">
+        <p class="django-ray-task-actions__guidance" role="status">
+          {{ django_ray_retry_guidance }}
+        </p>
+        {% if django_ray_retry_available %}
+          <button
+            type="submit"
+            class="button default django-ray-task-actions__retry"
+            form="{{ opts.model_name }}_form"
+            formaction="{{ django_ray_retry_url }}"
+            formmethod="post"
+            formnovalidate
+          >
+            Retry task...
+          </button>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
   {% if django_ray_observability_url %}
     <section
       class="module aligned django-ray-live"

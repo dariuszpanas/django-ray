@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
+import ninja.responses as ninja_responses
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db.models import Count
@@ -26,7 +27,10 @@ from pydantic import Field, field_validator
 
 from django_ray import __version__ as django_ray_version
 from django_ray.lifecycle import (
+    TaskRetryRequestResult,
+    TaskRetryRequestStatus,
     request_task_cancellation,
+    request_task_retry,
     retry_task,
 )
 from django_ray.metrics import render_prometheus_metrics
@@ -217,6 +221,92 @@ class TaskExecutionSchema(Schema):
     @classmethod
     def redact_error(cls, value):
         return redact_text(value) if value is not None else None
+
+
+class RetryExecutionOutcomeSchema(Schema):
+    """Bounded outcome of requesting one manual retry."""
+
+    code: TaskRetryRequestStatus
+    message: str
+    execution_id: int
+    state: str | None
+    attempt_number: int | None
+    execution_generation: int | None
+    next_action: str
+
+
+class RetryExecutionRuntimeEnvConflictSchema(Schema):
+    """Fixed redaction-safe RuntimeEnv retry conflict."""
+
+    detail: Literal["Persisted RuntimeEnv snapshot failed validation"]
+
+
+_RETRY_EXECUTION_RESPONSES = {
+    202: RetryExecutionOutcomeSchema,
+    404: RetryExecutionOutcomeSchema,
+    409: RetryExecutionOutcomeSchema | RetryExecutionRuntimeEnvConflictSchema,
+}
+# Django Ninja 1.5 uses the tuple contract; 1.6 adds Status to avoid its deprecation.
+_NINJA_STATUS = getattr(ninja_responses, "Status", None)
+
+
+def _ninja_status(status_code: int, value: Any) -> object:
+    if _NINJA_STATUS is None:
+        return status_code, value
+    return _NINJA_STATUS(status_code, value)
+
+
+def _retry_execution_outcome(
+    result: TaskRetryRequestResult,
+    *,
+    status_code: int,
+) -> object:
+    messages = {
+        TaskRetryRequestStatus.ACCEPTED: "A new task attempt was queued.",
+        TaskRetryRequestStatus.NOT_RETRYABLE: (
+            "The execution is not retryable from its current state."
+        ),
+        TaskRetryRequestStatus.NOT_FOUND: "The execution was not found.",
+        TaskRetryRequestStatus.STALE_ATTEMPT: (
+            "The execution attempt changed before the retry could be applied."
+        ),
+        TaskRetryRequestStatus.STALE_GENERATION: (
+            "The execution generation changed before the retry could be applied."
+        ),
+        TaskRetryRequestStatus.STALE_WORKFLOW_IDENTITY: (
+            "The workflow identity changed before the retry could be applied."
+        ),
+    }
+    if result.status is TaskRetryRequestStatus.ACCEPTED:
+        next_action = "Poll or inspect the newly queued attempt."
+    elif (
+        result.status is TaskRetryRequestStatus.NOT_RETRYABLE
+        and result.state == TaskState.SUCCEEDED
+    ):
+        next_action = (
+            "Enqueue a new task under the application's authorization and idempotency "
+            "policy; keep this successful execution as completed history."
+        )
+    elif result.status is TaskRetryRequestStatus.NOT_RETRYABLE:
+        next_action = (
+            "Refresh the execution and retry only a FAILED, CANCELLED, LOST, or EXPIRED state."
+        )
+    elif result.status is TaskRetryRequestStatus.NOT_FOUND:
+        next_action = "Verify the execution identifier and object authorization."
+    else:
+        next_action = (
+            "Refresh and re-authorize the current attempt before deciding whether to retry."
+        )
+    payload: dict[str, str | int | None] = {
+        "code": result.status.value,
+        "message": messages[result.status],
+        "execution_id": result.execution_id,
+        "state": result.state,
+        "attempt_number": result.attempt_number,
+        "execution_generation": result.execution_generation,
+        "next_action": next_action,
+    }
+    return _ninja_status(status_code, payload)
 
 
 class TaskListResponseSchema(Schema):
@@ -582,9 +672,12 @@ def enqueue_fail_no_retry(request, queue: str = "default"):
 
     Use this to test manual retry via Django admin:
     1. Call this endpoint - task will fail
-    2. Go to admin, see task in FAILED state
-    3. Select task and use "Retry selected tasks" action
+    2. Open its FAILED execution detail in Admin
+    3. Use "Retry task..." and confirm the side-effect warning
     4. Task runs again (and fails again, but you can observe the retry)
+
+    The execution-list "Retry selected tasks..." action provides the same
+    confirmation for bulk recovery.
     """
     task_obj = tasks.failing_task_no_retry.using(queue_name=queue)
     result = task_obj.enqueue()
@@ -606,7 +699,7 @@ def enqueue_intermittent(request, fail_until_attempt: int = 3, queue: str = "def
 
     Useful for testing retry functionality:
     1. Task fails on attempt 1
-    2. Use admin "Retry selected tasks" action
+    2. Open the execution detail and confirm "Retry task..."
     3. Task fails on attempt 2 (if fail_until_attempt > 2)
     4. Keep retrying until attempt >= fail_until_attempt - task succeeds
 
@@ -822,25 +915,47 @@ def cancel_execution(request, execution_id: int):
     return task
 
 
-@api.post("/executions/{execution_id}/retry", response=TaskExecutionSchema, tags=["Admin"])
+@api.post(
+    "/executions/{execution_id}/retry",
+    response=_RETRY_EXECUTION_RESPONSES,
+    tags=["Admin"],
+)
 def retry_execution(request, execution_id: int):
     """Retry a failed, cancelled, lost, or expired task execution."""
-    task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
+    task = _workflow_observability_executions().filter(pk=execution_id).first()
+    if task is None:
+        return _retry_execution_outcome(
+            TaskRetryRequestResult(
+                status=TaskRetryRequestStatus.NOT_FOUND,
+                execution_id=execution_id,
+                state=None,
+                attempt_number=None,
+                execution_generation=None,
+            ),
+            status_code=404,
+        )
     try:
-        retried = retry_task(
+        outcome = request_task_retry(
             task.pk,
             expected_attempt_number=task.attempt_number,
             expected_execution_generation=task.execution_generation,
+            expected_workflow_identity=(
+                str(task.workflow_run_id) if task.workflow_run_id is not None else None,
+                task.workflow_plan_fingerprint,
+            ),
         )
     except RuntimeEnvSnapshotError:
         raise HttpError(
             409,
             "Persisted RuntimeEnv snapshot failed validation",
         ) from None
-    if retried is not None:
-        return retried
-    task.refresh_from_db()
-    return task
+    if outcome.accepted:
+        status_code = 202
+    elif outcome.status is TaskRetryRequestStatus.NOT_FOUND:
+        status_code = 404
+    else:
+        status_code = 409
+    return _retry_execution_outcome(outcome, status_code=status_code)
 
 
 # ============================================================================

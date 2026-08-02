@@ -40,7 +40,7 @@ If you need a REST API for task management in your project, you can use the test
 | `GET /api/executions/stats` | Get statistics |
 | `GET /api/executions/{id}` | Get execution details |
 | `POST /api/executions/{id}/cancel` | Cancel or request cancellation for an execution |
-| `POST /api/executions/{id}/retry` | Retry failed, cancelled, lost, or expired execution |
+| `POST /api/executions/{id}/retry` | Request retry with bounded `202`, `404`, or `409` outcome |
 | `POST /api/executions/reset` | Retry matching `FAILED`, `CANCELLED`, `LOST`, or `EXPIRED` executions |
 | `POST /api/cluster/workflow-showcase` | Enqueue the bounded full-reporting order-fulfillment showcase |
 | `GET /api/cluster/workflow-showcase/{task_id}` | Poll its bounded summary and compact result or failure |
@@ -87,7 +87,7 @@ through the package lifecycle services:
 ```python
 from django.db.models import Count
 
-from django_ray.lifecycle import request_task_cancellation, retry_task
+from django_ray.lifecycle import request_task_cancellation, request_task_retry
 from django_ray.models import RayTaskExecution, TaskState
 
 # List executions
@@ -106,24 +106,44 @@ def cancel_authorized_execution(execution: RayTaskExecution):
     )
 
 
-def retry_authorized_execution(execution: RayTaskExecution) -> bool:
+def retry_authorized_execution(execution: RayTaskExecution):
     # The generation fence prevents a stale request from retrying a newer attempt.
     # RuntimeEnvSnapshotError remains distinct for the HTTP boundary to map.
-    return (
-        retry_task(
-            execution.pk,
-            expected_attempt_number=execution.attempt_number,
-            expected_execution_generation=execution.execution_generation,
-        )
-        is not None
+    return request_task_retry(
+        execution.pk,
+        expected_attempt_number=execution.attempt_number,
+        expected_execution_generation=execution.execution_generation,
+        expected_workflow_identity=(
+            str(execution.workflow_run_id) if execution.workflow_run_id else None,
+            execution.workflow_plan_fingerprint,
+        ),
     )
 ```
 
-`None` means that the state or attempt/generation fence no longer permits the
-transition. `RuntimeEnvSnapshotError` instead means the locked row has an identified
-snapshot that cannot be verified; do not retry it or include the stored payload in an
-API response. The bundled testproject maps the single retry endpoint to a fixed `409`
-and lets bulk retry skip the corrupt row while continuing with other authorized rows.
+`request_task_retry()` locks and reloads the durable execution row. Its bounded
+`TaskRetryRequestResult.status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `ACCEPTED` | This call queued the replacement attempt and returns its new attempt/generation identity. |
+| `NOT_RETRYABLE` | The current state is not one of the caller's allowed retry states. A successful execution should remain completed history; enqueue a new task for new business intent. |
+| `NOT_FOUND` | No durable execution has that primary key. |
+| `STALE_ATTEMPT` | The caller authorized an older attempt of the same durable execution. |
+| `STALE_GENERATION` | The caller authorized an older execution generation. |
+| `STALE_WORKFLOW_IDENTITY` | The caller authorized a different workflow run or plan identity. |
+
+The service does not authorize the caller or perform an operator confirmation. Resolve
+the object through the application's tenant/ownership policy first, then apply that
+application's confirmation, idempotency, and audit requirements. The bundled
+testproject endpoint returns `202` with `ACCEPTED`, `404` with `NOT_FOUND`, and `409`
+for other bounded outcomes; it never returns the task result or error in this response.
+`RuntimeEnvSnapshotError` instead means the locked row has an identified snapshot that
+cannot be verified. Do not retry it or include the stored payload in an API response.
+The testproject maps it to one fixed redaction-safe `409`, while bulk Admin retry skips
+the corrupt row and continues.
+
+`retry_task()` retains the earlier model-or-`None` compatibility contract for callers
+that do not need to distinguish rejection reasons.
 
 `request_task_cancellation()` locks and reloads the durable execution row. Its bounded
 `TaskCancellationRequestResult.status` is one of:

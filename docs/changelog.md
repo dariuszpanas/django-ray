@@ -337,8 +337,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repeat external effects, distinguishes diagnostic progress/output from checkpoints,
   shows only bounded counts, expires after 15 minutes, is bound to the operator's
   current Admin session and exact state/attempt/generation/workflow identity, and caps
-  one confirmation at 100 eligible rows. Stale, replayed-after-transition, or tampered
-  confirmations fail closed without queueing work.
+  one confirmation at 100 eligible rows. Failed, lost, or expired execution detail
+  pages now expose the same fenced flow through a discoverable **Retry task...**
+  button; other states explain why retry is unavailable, and succeeded work directs
+  the operator to a fresh enqueue. Stale, replayed-after-transition, or tampered
+  confirmations fail closed without queueing work. The sample retry API now returns a
+  bounded `202` accepted outcome or explicit `404`/`409` reasons instead of returning
+  an unchanged successful or raced execution with a misleading `200`.
 - The direct local KubeRay exploratory profile now keeps one default/priority
   task manager and two fixed Ray workers while retaining dedicated sync and ML
   consumers, monitoring, encrypted RuntimeEnv coverage, and the complete

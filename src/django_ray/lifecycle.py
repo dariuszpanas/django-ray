@@ -98,6 +98,33 @@ class TaskCancellationRequestResult:
         return self.status is TaskCancellationRequestStatus.ACCEPTED
 
 
+class TaskRetryRequestStatus(StrEnum):
+    """Bounded result of requesting one manual durable-task retry."""
+
+    ACCEPTED = "ACCEPTED"
+    NOT_RETRYABLE = "NOT_RETRYABLE"
+    NOT_FOUND = "NOT_FOUND"
+    STALE_ATTEMPT = "STALE_ATTEMPT"
+    STALE_GENERATION = "STALE_GENERATION"
+    STALE_WORKFLOW_IDENTITY = "STALE_WORKFLOW_IDENTITY"
+
+
+@dataclass(frozen=True)
+class TaskRetryRequestResult:
+    """Stable manual-retry result without authorization or execution payloads."""
+
+    status: TaskRetryRequestStatus
+    execution_id: int
+    state: str | None
+    attempt_number: int | None
+    execution_generation: int | None
+
+    @property
+    def accepted(self) -> bool:
+        """Return whether this call queued the replacement attempt."""
+        return self.status is TaskRetryRequestStatus.ACCEPTED
+
+
 def _canonical_utc(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
@@ -468,7 +495,7 @@ def request_task_cancellation(
         )
 
 
-def retry_task(
+def _request_task_retry(
     execution: RayTaskExecution | int,
     *,
     allowed_states: Iterable[str] = (
@@ -481,22 +508,26 @@ def retry_task(
     expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
     expected_workflow_identity: tuple[str | None, str | None] | None = None,
-) -> RayTaskExecution | None:
-    """Queue a failed execution for its next one-based attempt.
-
-    The row lock makes retries from the admin, API, and workers mutually
-    exclusive. ``None`` means another transition won the race, the current
-    state is not retryable, or an optional attempt/generation/workflow fence
-    is stale. The workflow identity tuple contains the run ID followed by the
-    plan fingerprint; pass ``(None, None)`` to fence an execution that has no
-    workflow identity.
-    """
+) -> tuple[TaskRetryRequestResult, RayTaskExecution | None]:
+    """Apply one retry request and retain its bounded transition outcome."""
     execution_id = execution.pk if isinstance(execution, RayTaskExecution) else execution
     allowed = tuple(allowed_states)
     with transaction.atomic():
         current = RayTaskExecution.objects.select_for_update().filter(pk=execution_id).first()
         if current is None:
-            return None
+            return (
+                TaskRetryRequestResult(
+                    status=TaskRetryRequestStatus.NOT_FOUND,
+                    execution_id=execution_id,
+                    state=None,
+                    attempt_number=None,
+                    execution_generation=None,
+                ),
+                None,
+            )
+        state = str(current.state)
+        attempt_number = int(current.attempt_number)
+        generation = int(current.execution_generation)
         current_workflow_identity = (
             str(current.workflow_run_id) if current.workflow_run_id is not None else None,
             (
@@ -505,27 +536,60 @@ def retry_task(
                 else None
             ),
         )
-        if (
-            current.state not in allowed
-            or (
-                expected_attempt_number is not None
-                and current.attempt_number != expected_attempt_number
+        if expected_attempt_number is not None and attempt_number != expected_attempt_number:
+            return (
+                TaskRetryRequestResult(
+                    status=TaskRetryRequestStatus.STALE_ATTEMPT,
+                    execution_id=execution_id,
+                    state=state,
+                    attempt_number=attempt_number,
+                    execution_generation=generation,
+                ),
+                None,
             )
-            or (
-                expected_execution_generation is not None
-                and current.execution_generation != expected_execution_generation
-            )
-            or (
-                expected_workflow_identity is not None
-                and current_workflow_identity != expected_workflow_identity
-            )
+        if expected_execution_generation is not None and generation != (
+            expected_execution_generation
         ):
-            return None
+            return (
+                TaskRetryRequestResult(
+                    status=TaskRetryRequestStatus.STALE_GENERATION,
+                    execution_id=execution_id,
+                    state=state,
+                    attempt_number=attempt_number,
+                    execution_generation=generation,
+                ),
+                None,
+            )
+        if (
+            expected_workflow_identity is not None
+            and current_workflow_identity != expected_workflow_identity
+        ):
+            return (
+                TaskRetryRequestResult(
+                    status=TaskRetryRequestStatus.STALE_WORKFLOW_IDENTITY,
+                    execution_id=execution_id,
+                    state=state,
+                    attempt_number=attempt_number,
+                    execution_generation=generation,
+                ),
+                None,
+            )
+        if current.state not in allowed:
+            return (
+                TaskRetryRequestResult(
+                    status=TaskRetryRequestStatus.NOT_RETRYABLE,
+                    execution_id=execution_id,
+                    state=state,
+                    attempt_number=attempt_number,
+                    execution_generation=generation,
+                ),
+                None,
+            )
         runtime_env_for_execution(current)
         _record_attempt(current)
         current.state = TaskState.QUEUED
-        current.attempt_number = int(current.attempt_number) + 1
-        current.execution_generation = int(current.execution_generation) + 1
+        current.attempt_number = attempt_number + 1
+        current.execution_generation = generation + 1
         current.run_after = next_attempt_at
         _refresh_queue_deadline(
             current,
@@ -577,7 +641,83 @@ def retry_task(
                 "cancellation_error",
             ]
         )
-        return current
+        return (
+            TaskRetryRequestResult(
+                status=TaskRetryRequestStatus.ACCEPTED,
+                execution_id=execution_id,
+                state=TaskState.QUEUED,
+                attempt_number=int(current.attempt_number),
+                execution_generation=int(current.execution_generation),
+            ),
+            current,
+        )
+
+
+def request_task_retry(
+    execution: RayTaskExecution | int,
+    *,
+    allowed_states: Iterable[str] = (
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+        TaskState.LOST,
+        TaskState.EXPIRED,
+    ),
+    next_attempt_at: Any | None = None,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
+    expected_workflow_identity: tuple[str | None, str | None] | None = None,
+) -> TaskRetryRequestResult:
+    """Request a retry and return a bounded reason for the locked outcome.
+
+    Authorization belongs to the caller. The optional attempt, generation, and
+    workflow identity fences distinguish a stale request from a current row that
+    is not retryable. RuntimeEnv verification failures remain exceptions so an
+    adapter can map them to one fixed redaction-safe response.
+    """
+    result, _execution = _request_task_retry(
+        execution,
+        allowed_states=allowed_states,
+        next_attempt_at=next_attempt_at,
+        expected_attempt_number=expected_attempt_number,
+        expected_execution_generation=expected_execution_generation,
+        expected_workflow_identity=expected_workflow_identity,
+    )
+    return result
+
+
+def retry_task(
+    execution: RayTaskExecution | int,
+    *,
+    allowed_states: Iterable[str] = (
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+        TaskState.LOST,
+        TaskState.EXPIRED,
+    ),
+    next_attempt_at: Any | None = None,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
+    expected_workflow_identity: tuple[str | None, str | None] | None = None,
+) -> RayTaskExecution | None:
+    """Queue a failed execution while retaining the historical return contract.
+
+    The row lock makes retries from the admin, API, and workers mutually
+    exclusive. ``None`` means another transition won the race, the current
+    state is not retryable, or an optional attempt/generation/workflow fence
+    is stale. New adapters that need the bounded rejection reason should use
+    :func:`request_task_retry`. The workflow identity tuple contains the run
+    ID followed by the plan fingerprint; pass ``(None, None)`` to fence an
+    execution that has no workflow identity.
+    """
+    _result, retried = _request_task_retry(
+        execution,
+        allowed_states=allowed_states,
+        next_attempt_at=next_attempt_at,
+        expected_attempt_number=expected_attempt_number,
+        expected_execution_generation=expected_execution_generation,
+        expected_workflow_identity=expected_workflow_identity,
+    )
+    return retried
 
 
 def record_failure(

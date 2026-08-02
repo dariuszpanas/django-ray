@@ -134,6 +134,22 @@ failed_execution = RayTaskExecution.objects.create(
     args_json="[]",
     kwargs_json="{}",
 )
+detail_failed_execution = RayTaskExecution.objects.create(
+    task_id="unfold-admin-detail-retry",
+    callable_path="testproject.tasks.failing_task",
+    state=TaskState.FAILED,
+    error_message="unfold-detail-retry-secret-marker",
+    args_json="[]",
+    kwargs_json="{}",
+)
+succeeded_execution = RayTaskExecution.objects.create(
+    task_id="unfold-admin-succeeded",
+    callable_path="testproject.tasks.add_numbers",
+    state=TaskState.SUCCEEDED,
+    result_data='{"result": "unfold-succeeded-result-marker"}',
+    args_json="[]",
+    kwargs_json="{}",
+)
 queued_execution = RayTaskExecution.objects.create(
     task_id="unfold-admin-cancel",
     callable_path="testproject.tasks.add_numbers",
@@ -170,17 +186,39 @@ attempt_detail_url = reverse(
     args=[attempt.pk],
 )
 attempt_detail = authenticated.get(attempt_detail_url)
+detail_failed_url = reverse(
+    "admin:django_ray_raytaskexecution_change",
+    args=[detail_failed_execution.pk],
+)
+detail_failed_retry_url = reverse(
+    "admin:django_ray_raytaskexecution_retry",
+    args=[detail_failed_execution.pk],
+)
+succeeded_detail_url = reverse(
+    "admin:django_ray_raytaskexecution_change",
+    args=[succeeded_execution.pk],
+)
+succeeded_retry_url = reverse(
+    "admin:django_ray_raytaskexecution_retry",
+    args=[succeeded_execution.pk],
+)
+detail_failed = authenticated.get(detail_failed_url)
+succeeded_detail = authenticated.get(succeeded_detail_url)
 
 assert index.status_code == 200
 assert changelist.status_code == 200
 assert change.status_code == 200
 assert observability.status_code == 200
 assert attempt_detail.status_code == 200
+assert detail_failed.status_code == 200
+assert succeeded_detail.status_code == 200
 
 login_html = login.content.decode("utf-8")
 index_html = index.content.decode("utf-8")
 changelist_html = changelist.content.decode("utf-8")
 change_html = change.content.decode("utf-8")
+detail_failed_html = detail_failed.content.decode("utf-8")
+succeeded_detail_html = succeeded_detail.content.decode("utf-8")
 
 for rendered_html in (login_html, index_html, changelist_html, change_html):
     assert "unfold/css/styles" in rendered_html
@@ -224,7 +262,7 @@ assert "django-ray-live__grid" in change_html
 assert "django-ray-workflow-diagnostics" in change_html
 assert "django-ray-workflow__summary" in change_html
 assert 'aria-labelledby="django-ray-live-heading"' in change_html
-assert change_html.count('role="status"') == 2
+assert change_html.count('role="status"') == 3
 assert "Workflow execution" in change_html
 workflow_attempt_query = f"?attempt_number={execution.attempt_number}"
 workflow_paths = {
@@ -290,6 +328,43 @@ assert "unfold-attempt-inline-marker" in change_html
 assert str(attempt) not in change_html
 assert change_html.count(attempt_detail_url) == 1
 assert "field-attempt_detail_link" in change_html
+
+assert "Retry task..." in detail_failed_html
+assert f'formaction="{detail_failed_retry_url}"' in detail_failed_html
+assert 'form="raytaskexecution_form"' in detail_failed_html
+assert 'name="csrfmiddlewaretoken"' in detail_failed_html
+assert "enqueue a new task" in succeeded_detail_html
+assert "Retry task..." not in succeeded_detail_html
+assert succeeded_retry_url not in succeeded_detail_html
+
+detail_retry_response = authenticated.post(detail_failed_retry_url)
+assert detail_retry_response.status_code == 200
+detail_retry_confirmation_html = detail_retry_response.content.decode()
+assert "Confirm full task retry" in detail_retry_confirmation_html
+assert "Retry can repeat external effects" in detail_retry_confirmation_html
+assert "does not resume at the failed node" in detail_retry_confirmation_html
+assert f'href="{detail_failed_url}"' in detail_retry_confirmation_html
+assert 'name="csrfmiddlewaretoken"' in detail_retry_confirmation_html
+assert "unfold-detail-retry-secret-marker" not in detail_retry_confirmation_html
+detail_failed_execution.refresh_from_db()
+assert detail_failed_execution.state == TaskState.FAILED
+detail_token_match = re.search(
+    r'name="retry_confirmation_token"[^>]*value="([^"]+)"',
+    detail_retry_confirmation_html,
+    re.DOTALL,
+)
+assert detail_token_match is not None
+confirmed_detail_retry_response = authenticated.post(
+    detail_failed_retry_url,
+    {
+        "post": "yes",
+        "retry_confirmation_token": html.unescape(detail_token_match.group(1)),
+    },
+)
+assert confirmed_detail_retry_response.status_code == 302
+assert confirmed_detail_retry_response.url == detail_failed_url
+detail_failed_execution.refresh_from_db()
+assert detail_failed_execution.state == TaskState.QUEUED
 
 retry_response = authenticated.post(
     reverse("admin:django_ray_raytaskexecution_changelist"),
@@ -461,11 +536,13 @@ print(
             "change_view": change.status_code,
             "changelist": changelist.status_code,
             "collectstatic": "passed",
+            "detail_retry": "passed",
             "index": index.status_code,
             "layout": "passed",
             "login": login.status_code,
             "observability": observability.status_code,
             "static": stylesheet_response.status_code,
+            "succeeded_retry_guidance": "passed",
             "themed_actions": "passed",
         },
         sort_keys=True,
@@ -592,9 +669,78 @@ failed_execution = RayTaskExecution.objects.create(
     state=TaskState.FAILED,
     error_message="standard-admin-retry-secret-marker",
 )
+detail_failed_execution = RayTaskExecution.objects.create(
+    task_id="standard-admin-detail-retry",
+    callable_path="testproject.tasks.failing_task",
+    state=TaskState.FAILED,
+    error_message="standard-admin-detail-retry-secret-marker",
+)
+succeeded_execution = RayTaskExecution.objects.create(
+    task_id="standard-admin-succeeded",
+    callable_path="testproject.tasks.add_numbers",
+    state=TaskState.SUCCEEDED,
+    result_data='{"result": "standard-admin-succeeded-result-marker"}',
+)
 client = Client()
 client.force_login(user)
 changelist_url = reverse("admin:django_ray_raytaskexecution_changelist")
+detail_failed_url = reverse(
+    "admin:django_ray_raytaskexecution_change",
+    args=[detail_failed_execution.pk],
+)
+detail_failed_retry_url = reverse(
+    "admin:django_ray_raytaskexecution_retry",
+    args=[detail_failed_execution.pk],
+)
+succeeded_detail_url = reverse(
+    "admin:django_ray_raytaskexecution_change",
+    args=[succeeded_execution.pk],
+)
+succeeded_retry_url = reverse(
+    "admin:django_ray_raytaskexecution_retry",
+    args=[succeeded_execution.pk],
+)
+detail_failed_response = client.get(detail_failed_url)
+succeeded_detail_response = client.get(succeeded_detail_url)
+assert detail_failed_response.status_code == 200
+assert succeeded_detail_response.status_code == 200
+detail_failed_html = detail_failed_response.content.decode()
+succeeded_detail_html = succeeded_detail_response.content.decode()
+assert "Retry task..." in detail_failed_html
+assert f'formaction="{detail_failed_retry_url}"' in detail_failed_html
+assert 'form="raytaskexecution_form"' in detail_failed_html
+assert 'name="csrfmiddlewaretoken"' in detail_failed_html
+assert "enqueue a new task" in succeeded_detail_html
+assert "Retry task..." not in succeeded_detail_html
+assert succeeded_retry_url not in succeeded_detail_html
+
+detail_retry_response = client.post(detail_failed_retry_url)
+assert detail_retry_response.status_code == 200
+detail_retry_html = detail_retry_response.content.decode()
+assert "Confirm full task retry" in detail_retry_html
+assert "Retry can repeat external effects" in detail_retry_html
+assert f'href="{detail_failed_url}"' in detail_retry_html
+assert "standard-admin-detail-retry-secret-marker" not in detail_retry_html
+detail_failed_execution.refresh_from_db()
+assert detail_failed_execution.state == TaskState.FAILED
+detail_token_match = re.search(
+    r'name="retry_confirmation_token"[^>]*value="([^"]+)"',
+    detail_retry_html,
+    re.DOTALL,
+)
+assert detail_token_match is not None
+confirmed_detail_response = client.post(
+    detail_failed_retry_url,
+    {
+        "post": "yes",
+        "retry_confirmation_token": html.unescape(detail_token_match.group(1)),
+    },
+)
+assert confirmed_detail_response.status_code == 302
+assert confirmed_detail_response.url == detail_failed_url
+detail_failed_execution.refresh_from_db()
+assert detail_failed_execution.state == TaskState.QUEUED
+
 retry_response = client.post(
     changelist_url,
     {
@@ -631,7 +777,9 @@ print(
         {
             "admin": type(admin.site).__name__,
             "attempt_inline": "passed",
+            "detail_retry": "passed",
             "retry_confirmation": "passed",
+            "succeeded_retry_guidance": "passed",
             "unfold_imported": False,
         }
     )
@@ -675,11 +823,13 @@ def test_testproject_renders_unfold_admin_contract(tmp_path: Path) -> None:
         "change_view": 200,
         "changelist": 200,
         "collectstatic": "passed",
+        "detail_retry": "passed",
         "index": 200,
         "layout": "passed",
         "login": 200,
         "observability": 200,
         "static": 200,
+        "succeeded_retry_guidance": "passed",
         "themed_actions": "passed",
     }
 
@@ -688,4 +838,6 @@ def test_package_admin_uses_standard_django_without_unfold_enabled() -> None:
     payload = _run_probe(STANDARD_ADMIN_PROBE)
 
     assert payload["attempt_inline"] == "passed"
+    assert payload["detail_retry"] == "passed"
+    assert payload["succeeded_retry_guidance"] == "passed"
     assert payload["unfold_imported"] is False

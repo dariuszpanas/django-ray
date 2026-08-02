@@ -9,10 +9,12 @@ import pytest
 
 from django_ray.lifecycle import (
     TaskCancellationRequestStatus,
+    TaskRetryRequestStatus,
     cancel_task,
     record_failure,
     record_lost,
     request_task_cancellation,
+    request_task_retry,
     retry_task,
     succeed_task,
 )
@@ -161,6 +163,130 @@ def test_retry_task_rejects_a_stale_execution_generation() -> None:
         is None
     )
 
+    task.refresh_from_db()
+    assert task.state == TaskState.FAILED
+    assert task.attempt_number == 3
+    assert task.execution_generation == 7
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+@pytest.mark.django_db
+def test_request_task_retry_reports_acceptance_and_duplicate_current_state() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-retry-request-accepted-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        attempt_number=2,
+        execution_generation=4,
+        error_message="first attempt failed",
+    )
+
+    accepted = request_task_retry(
+        task.pk,
+        expected_attempt_number=2,
+        expected_execution_generation=4,
+    )
+
+    assert accepted.status is TaskRetryRequestStatus.ACCEPTED
+    assert accepted.accepted is True
+    assert accepted.execution_id == task.pk
+    assert accepted.state == TaskState.QUEUED
+    assert accepted.attempt_number == 3
+    assert accepted.execution_generation == 5
+    assert TaskAttempt.objects.get(execution=task, attempt_number=2).state == TaskState.FAILED
+
+    duplicate = request_task_retry(
+        task.pk,
+        expected_attempt_number=3,
+        expected_execution_generation=5,
+    )
+
+    assert duplicate.status is TaskRetryRequestStatus.NOT_RETRYABLE
+    assert duplicate.accepted is False
+    assert duplicate.state == TaskState.QUEUED
+    assert duplicate.attempt_number == 3
+    assert duplicate.execution_generation == 5
+    assert TaskAttempt.objects.filter(execution=task).count() == 1
+
+
+@pytest.mark.django_db
+def test_request_task_retry_preserves_a_succeeded_execution() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-retry-request-succeeded-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.SUCCEEDED,
+        attempt_number=3,
+        execution_generation=3,
+        workflow_run_id="00000000-0000-0000-0000-000000000321",
+        result_data='{"sensitive_result":"must-remain-current"}',
+        result_reference="digest:successful-result",
+        finished_at=datetime(2026, 8, 2, tzinfo=UTC),
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+
+    outcome = request_task_retry(
+        task.pk,
+        expected_attempt_number=3,
+        expected_execution_generation=3,
+    )
+
+    assert outcome.status is TaskRetryRequestStatus.NOT_RETRYABLE
+    assert outcome.accepted is False
+    assert outcome.execution_id == task.pk
+    assert outcome.state == TaskState.SUCCEEDED
+    assert outcome.attempt_number == 3
+    assert outcome.execution_generation == 3
+    assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+@pytest.mark.django_db
+def test_request_task_retry_reports_stale_and_missing_fences() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-retry-request-stale-001",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        attempt_number=3,
+        execution_generation=7,
+        workflow_run_id="00000000-0000-0000-0000-000000000322",
+        workflow_plan_fingerprint="sha256:" + "a" * 64,
+        error_message="current failure",
+    )
+
+    stale_attempt = request_task_retry(
+        task.pk,
+        expected_attempt_number=2,
+        expected_execution_generation=7,
+    )
+    stale_generation = request_task_retry(
+        task.pk,
+        expected_attempt_number=3,
+        expected_execution_generation=6,
+    )
+    stale_workflow = request_task_retry(
+        task.pk,
+        expected_attempt_number=3,
+        expected_execution_generation=7,
+        expected_workflow_identity=(
+            "00000000-0000-0000-0000-000000000323",
+            "sha256:" + "b" * 64,
+        ),
+    )
+    missing = request_task_retry(task.pk + 100_000)
+
+    assert stale_attempt.status is TaskRetryRequestStatus.STALE_ATTEMPT
+    assert stale_generation.status is TaskRetryRequestStatus.STALE_GENERATION
+    assert stale_workflow.status is TaskRetryRequestStatus.STALE_WORKFLOW_IDENTITY
+    for outcome in (stale_attempt, stale_generation, stale_workflow):
+        assert outcome.state == TaskState.FAILED
+        assert outcome.attempt_number == 3
+        assert outcome.execution_generation == 7
+        assert outcome.accepted is False
+    assert missing.status is TaskRetryRequestStatus.NOT_FOUND
+    assert missing.state is None
+    assert missing.attempt_number is None
+    assert missing.execution_generation is None
+    assert missing.accepted is False
     task.refresh_from_db()
     assert task.state == TaskState.FAILED
     assert task.attempt_number == 3

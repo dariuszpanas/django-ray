@@ -2786,7 +2786,10 @@ class TestRayTaskExecutionAdmin:
         assert 'src="/static/django_ray/admin/workflow_diagnostics.js"' in content
         assert 'aria-labelledby="django-ray-live-heading"' in content
         assert 'id="django-ray-live-heading"' in content
-        assert content.count('role="status"') == 2
+        assert content.count('role="status"') == 3
+        assert 'id="django-ray-task-actions"' in content
+        assert "Retry is unavailable while this execution is running" in content
+        assert "Retry task..." not in content
         assert 'aria-live="polite"' in content
         assert 'class="django-ray-live__grid"' in content
         assert 'class="django-ray-live__state"' in content
@@ -2981,6 +2984,286 @@ class TestRayTaskExecutionAdmin:
             TaskAttempt.objects.get(execution=expired, attempt_number=1).state == TaskState.EXPIRED
         )
 
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_execution_detail_exposes_retry_or_fresh_enqueue_guidance(self) -> None:
+        user = get_user_model().objects.create_superuser(username="retry-detail-guidance")
+        failed = RayTaskExecution.objects.create(
+            task_id="admin-retry-detail-failed",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+        succeeded = RayTaskExecution.objects.create(
+            task_id="admin-retry-detail-succeeded",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.SUCCEEDED,
+            result_data='{"value": 42}',
+        )
+        client = Client()
+        client.force_login(user)
+        retry_url = reverse(
+            "admin:django_ray_raytaskexecution_retry",
+            args=[failed.pk],
+        )
+
+        failed_response = client.get(
+            reverse(
+                "admin:django_ray_raytaskexecution_change",
+                args=[failed.pk],
+            )
+        )
+        failed_html = failed_response.content.decode()
+        assert failed_response.status_code == 200
+        assert 'id="django-ray-task-actions"' in failed_html
+        assert "Retrying creates a new attempt" in failed_html
+        assert "Retry task..." in failed_html
+        assert f'formaction="{retry_url}"' in failed_html
+        assert 'name="csrfmiddlewaretoken"' in failed_html
+        document = parse_html(failed_html)
+        detail_form = next(
+            element
+            for element in _walk_html(document)
+            if dict(element.attributes).get("id") == "raytaskexecution_form"
+        )
+        retry_button = next(
+            element
+            for element in _walk_html(document)
+            if "django-ray-task-actions__retry" in dict(element.attributes).get("class", "").split()
+        )
+        assert detail_form.name == "form"
+        assert retry_button.name == "button"
+        assert dict(retry_button.attributes) == {
+            "class": "button default django-ray-task-actions__retry",
+            "form": "raytaskexecution_form",
+            "formaction": retry_url,
+            "formmethod": "post",
+            "formnovalidate": None,
+            "type": "submit",
+        }
+        assert sum(element.name == "form" for element in _walk_html(detail_form)) == 1
+
+        succeeded_response = client.get(
+            reverse(
+                "admin:django_ray_raytaskexecution_change",
+                args=[succeeded.pk],
+            )
+        )
+        succeeded_html = succeeded_response.content.decode()
+        assert succeeded_response.status_code == 200
+        assert "Retry is unavailable because this execution succeeded" in succeeded_html
+        assert "enqueue a new task" in succeeded_html
+        assert "Retry task..." not in succeeded_html
+        assert retry_url not in succeeded_html
+        admin_obj = _task_admin()
+        assert "cancelled work again" in admin_obj._retry_detail_guidance(TaskState.CANCELLED)
+        assert (
+            admin_obj._retry_detail_guidance("UNKNOWN")
+            == "Retry is unavailable for this execution state."
+        )
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_execution_detail_retry_reuses_confirmation_and_returns_to_detail(self) -> None:
+        user = get_user_model().objects.create_superuser(username="retry-detail-flow")
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-detail-flow",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+            attempt_number=3,
+            execution_generation=8,
+            error_message="retry-detail-secret-marker",
+        )
+        client = Client()
+        client.force_login(user)
+        detail_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[task.pk],
+        )
+        retry_url = reverse(
+            "admin:django_ray_raytaskexecution_retry",
+            args=[task.pk],
+        )
+
+        assert client.get(retry_url).status_code == 405
+        confirmation = client.post(retry_url)
+        confirmation_html = confirmation.content.decode()
+        assert confirmation.status_code == 200
+        assert "Confirm full task retry" in confirmation_html
+        assert "Retry can repeat external effects" in confirmation_html
+        assert f'href="{detail_url}"' in confirmation_html
+        assert "retry-detail-secret-marker" not in confirmation_html
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 3
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+        token_match = re.search(
+            r'name="retry_confirmation_token"[^>]*value="([^"]+)"',
+            confirmation_html,
+            re.DOTALL,
+        )
+        assert token_match is not None
+        confirmed = client.post(
+            retry_url,
+            {
+                "post": "yes",
+                "retry_confirmation_token": token_match.group(1),
+            },
+        )
+        assert confirmed.status_code == 302
+        assert confirmed.headers["Location"] == detail_url
+        task.refresh_from_db()
+        assert task.state == TaskState.QUEUED
+        assert task.attempt_number == 4
+        assert task.execution_generation == 9
+        assert TaskAttempt.objects.filter(execution=task, attempt_number=3).exists()
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_execution_detail_retry_rejects_succeeded_crafted_post(self) -> None:
+        user = get_user_model().objects.create_superuser(username="retry-detail-succeeded-post")
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-detail-succeeded-post",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.SUCCEEDED,
+            result_data='{"value": 42}',
+        )
+        client = Client()
+        client.force_login(user)
+        detail_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[task.pk],
+        )
+        retry_url = reverse(
+            "admin:django_ray_raytaskexecution_retry",
+            args=[task.pk],
+        )
+
+        response = client.post(retry_url)
+
+        assert response.status_code == 302
+        assert response.headers["Location"] == detail_url
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.attempt_number == 1
+        assert task.execution_generation == 0
+        assert task.result_data == '{"value": 42}'
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_execution_detail_retry_requires_global_change_permission(self) -> None:
+        user = get_user_model().objects.create_user(
+            username="retry-detail-view-only",
+            is_staff=True,
+        )
+        user.user_permissions.add(
+            Permission.objects.get(
+                content_type__app_label="django_ray",
+                codename="view_raytaskexecution",
+            )
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-detail-view-only",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+        client = Client()
+        client.force_login(user)
+        detail_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[task.pk],
+        )
+        retry_url = reverse(
+            "admin:django_ray_raytaskexecution_retry",
+            args=[task.pk],
+        )
+
+        detail = client.get(detail_url)
+        retry = client.post(retry_url)
+
+        assert detail.status_code == 200
+        assert 'id="django-ray-task-actions"' not in detail.content.decode()
+        assert "Retry task..." not in detail.content.decode()
+        assert retry.status_code == 403
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    def test_execution_detail_retry_rejects_missing_invalid_and_denied_objects(
+        self,
+        monkeypatch,
+    ) -> None:
+        admin_obj = _task_admin()
+
+        with pytest.raises(Http404):
+            admin_obj.retry_view(_retry_request(), "not-an-integer")
+        with pytest.raises(Http404):
+            admin_obj.retry_view(_retry_request(), "999999")
+
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-detail-object-denied",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+        monkeypatch.setattr(admin_obj, "has_view_permission", lambda request, obj=None: False)
+
+        with pytest.raises(PermissionDenied):
+            admin_obj.retry_view(_retry_request(), str(task.pk))
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_execution_detail_retry_requires_csrf_for_both_posts(self) -> None:
+        user = get_user_model().objects.create_superuser(username="retry-detail-csrf")
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-detail-csrf",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(user)
+        detail_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[task.pk],
+        )
+        retry_url = reverse(
+            "admin:django_ray_raytaskexecution_retry",
+            args=[task.pk],
+        )
+
+        assert client.post(retry_url).status_code == 403
+        detail = client.get(detail_url)
+        csrf_match = re.search(
+            r'name="csrfmiddlewaretoken" value="([^"]+)"',
+            detail.content.decode(),
+        )
+        assert csrf_match is not None
+        confirmation = client.post(
+            retry_url,
+            {"csrfmiddlewaretoken": csrf_match.group(1)},
+        )
+        assert confirmation.status_code == 200
+        confirmation_html = confirmation.content.decode()
+        confirmation_token_match = re.search(
+            r'name="retry_confirmation_token"[^>]*value="([^"]+)"',
+            confirmation_html,
+            re.DOTALL,
+        )
+        assert confirmation_token_match is not None
+        confirmed_data = {
+            "post": "yes",
+            "retry_confirmation_token": confirmation_token_match.group(1),
+        }
+
+        assert client.post(retry_url, confirmed_data).status_code == 403
+        confirmed = client.post(
+            retry_url,
+            {**confirmed_data, "csrfmiddlewaretoken": csrf_match.group(1)},
+        )
+        assert confirmed.status_code == 302
+        assert confirmed.headers["Location"] == detail_url
+        task.refresh_from_db()
+        assert task.state == TaskState.QUEUED
+
     def test_retry_confirmation_cancel_preserves_changelist_context(self) -> None:
         admin_obj = _task_admin()
         task = RayTaskExecution.objects.create(
@@ -3006,6 +3289,36 @@ class TestRayTaskExecutionAdmin:
             f'href="{changelist_url}?state__exact=FAILED&amp;q=invoice&amp;page=2"'
             in response.content.decode()
         )
+
+    def test_retry_confirmation_fails_closed_without_session_or_snapshot(
+        self,
+        monkeypatch,
+    ) -> None:
+        admin_obj = _task_admin()
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, message: messages.append(str(message)),
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-confirmation-session-snapshot",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+        )
+        queryset = RayTaskExecution.objects.filter(pk=task.pk)
+        invalid_session = _retry_request()
+        invalid_session.session = {"django_ray_admin_retry_confirmation_nonce_v1": "invalid"}
+
+        with pytest.raises(PermissionDenied):
+            admin_obj.retry_tasks(invalid_session, queryset)
+
+        monkeypatch.setattr("django_ray.admin._admin_retry_snapshot", lambda _queryset: [])
+        assert admin_obj.retry_tasks(_retry_request(), queryset) is None
+        assert messages == ["No failed, lost, or expired tasks found in selection."]
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_retry_confirmation_is_actor_and_session_bound_and_stale_fails_closed(
         self,
