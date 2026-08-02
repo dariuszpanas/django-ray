@@ -6,6 +6,8 @@ import argparse
 import importlib.metadata
 from pathlib import Path
 
+from packaging.version import Version
+
 EXPECTED_FILES = {
     "django_ray/__init__.py",
     "django_ray/admin.py",
@@ -80,6 +82,22 @@ def verify_installed_wheel(expected_version: str) -> None:
         raise RuntimeError(
             "cryptography>=42.0.8 must be exactly one unconditional runtime dependency"
         )
+
+    pyasn1_requirements = [
+        "".join(requirement.split()).lower().replace("_", "-")
+        for requirement in (distribution.requires or ())
+        if requirement.partition(";")[0].strip().lower().replace("_", "-").startswith("pyasn1")
+        and not requirement.partition(";")[0]
+        .strip()
+        .lower()
+        .replace("_", "-")
+        .startswith("pyasn1-modules")
+    ]
+    if pyasn1_requirements != ["pyasn1>=0.6.4"]:
+        raise RuntimeError("pyasn1>=0.6.4 must be exactly one runtime security floor")
+    installed_pyasn1 = Version(importlib.metadata.version("pyasn1"))
+    if installed_pyasn1 < Version("0.6.4"):
+        raise RuntimeError(f"installed pyasn1 {installed_pyasn1} is below the 0.6.4 security floor")
 
     import cryptography
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM

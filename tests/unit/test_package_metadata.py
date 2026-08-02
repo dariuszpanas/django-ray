@@ -181,3 +181,23 @@ def test_cryptography_is_an_unconditional_runtime_dependency() -> None:
         all("cryptography" not in requirement for requirement in requirements)
         for requirements in project["optional-dependencies"].values()
     )
+
+
+def test_pyasn1_security_floor_is_an_unconditional_runtime_dependency() -> None:
+    """Mandatory Ray extras must not resolve the known-vulnerable pyasn1 range."""
+    project_root = Path(__file__).parents[2]
+    config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = config["project"]
+
+    assert project["dependencies"].count("pyasn1>=0.6.4") == 1
+    assert config["dependency-groups"]["dev"].count("pip-audit==2.10.1") == 1
+    assert all(
+        all("pyasn1" not in requirement for requirement in requirements)
+        for requirements in project["optional-dependencies"].values()
+    )
+
+    lock = tomllib.loads((project_root / "uv.lock").read_text(encoding="utf-8"))
+    locked_versions = [
+        package["version"] for package in lock["package"] if package["name"] == "pyasn1"
+    ]
+    assert locked_versions == ["0.6.4"]

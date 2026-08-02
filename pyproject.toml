@@ -39,6 +39,7 @@ classifiers = [
 dependencies = [
     "cryptography>=42.0.8",
     "django>=6.0",
+    "pyasn1>=0.6.4",
     "ray[default]>=2.53.0",
 ]
 
@@ -82,6 +83,7 @@ dev = [
     "pytest-xdist==3.8.0",
     "pyyaml>=6.0",
     "locust>=2.43",
+    "pip-audit==2.10.1",
     "zensical>=0.0.42",
 ]
 
