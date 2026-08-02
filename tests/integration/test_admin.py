@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -2632,9 +2633,12 @@ class TestRayTaskExecutionAdmin:
         self,
     ) -> None:
         assert "unfold" not in django_settings.INSTALLED_APPS
+        callable_path = (
+            "testproject.tasks.order_fulfillment_recovery_showcase_with_an_unbroken_callable_name"
+        )
         execution = RayTaskExecution.objects.create(
             task_id="admin-live-form-001",
-            callable_path="testproject.tasks.add_numbers",
+            callable_path=callable_path,
             state=TaskState.RUNNING,
             progress_data="legacy-graph" * 10_000,
             workflow_progress_summary_json="summary" * 10_000,
@@ -2678,6 +2682,17 @@ class TestRayTaskExecutionAdmin:
         )
         attempt_query = f"?attempt_number={execution.attempt_number}"
         assert response.status_code == 200
+        body_match = re.search(r'<body class="(?P<classes>[^"]*)"', content)
+        assert body_match is not None
+        assert "django-ray-execution-change" in body_match.group("classes").split()
+        assert f"<h2>{execution}</h2>" in content
+        breadcrumbs_match = re.search(
+            r'<div class="breadcrumbs">(?P<body>.*?)</div>',
+            content,
+            flags=re.DOTALL,
+        )
+        assert breadcrumbs_match is not None
+        assert str(execution) in breadcrumbs_match.group("body")
         assert 'class="module aligned django-ray-live"' in content
         assert 'id="django-ray-live-observability"' in content
         assert f'data-observability-url="{endpoint}"' in content

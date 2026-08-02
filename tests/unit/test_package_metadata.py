@@ -72,6 +72,16 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
     assert 'html[data-theme="auto"]' in stylesheet
     assert "@media (prefers-color-scheme: dark)" in stylesheet
     assert "@media (max-width: 640px)" in stylesheet
+    stock_execution_label_rule = re.search(
+        r"body\.django-ray-execution-change #content > h2,\s*"
+        r"body\.django-ray-execution-change nav > \.breadcrumbs\s*"
+        r"\{(?P<body>[^}]*)\}",
+        stylesheet,
+    )
+    assert stock_execution_label_rule is not None
+    assert "max-width: 100%;" in stock_execution_label_rule.group("body")
+    assert "min-width: 0;" in stock_execution_label_rule.group("body")
+    assert "overflow-wrap: anywhere;" in stock_execution_label_rule.group("body")
     assert "--django-ray-live-action-bg: #e0f2fe;" in stylesheet
     assert "--django-ray-live-action-fg: #075985;" in stylesheet
     assert "--django-ray-live-action-hover-fg: #0c4a6e;" in stylesheet

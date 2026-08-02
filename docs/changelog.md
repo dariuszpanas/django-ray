@@ -407,6 +407,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stock Django Admin execution detail pages now wrap long task object labels in
+  both the native subtitle and breadcrumb. The rule is scoped to the custom
+  execution change page, preserving durable identities, unrelated Admin pages,
+  Unfold presentation, and existing inline/table scrolling without creating
+  document-level mobile overflow.
 - Django task-result IDs are now globally unique at the database boundary. Enqueue
   retries a proven UUIDv4 collision a small bounded number of times, recomputes the
   task-ID-bound RuntimeEnv snapshot, and otherwise fails before creating claimable
