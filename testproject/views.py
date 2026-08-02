@@ -30,5 +30,6 @@ def landing_page(request: HttpRequest) -> HttpResponse:
         "running": counts.get(TaskState.RUNNING, 0),
         "succeeded": counts.get(TaskState.SUCCEEDED, 0),
         "failed": counts.get(TaskState.FAILED, 0),
+        "expired": counts.get(TaskState.EXPIRED, 0),
     }
     return render(request, "testproject/landing.html", context)

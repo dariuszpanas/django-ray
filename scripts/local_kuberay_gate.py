@@ -371,6 +371,7 @@ WORKFLOW_PROGRESS_COLLECTION_PATHS = {
     "topology_edges": "topology/edges",
     "node_details": "nodes",
 }
+TASK_FAILURE_STATES = frozenset({"FAILED", "CANCELLED", "LOST", "EXPIRED"})
 WORKFLOW_PROGRESS_TASK_STATES = frozenset(
     {
         "QUEUED",
@@ -380,9 +381,10 @@ WORKFLOW_PROGRESS_TASK_STATES = frozenset(
         "CANCELLED",
         "CANCELLING",
         "LOST",
+        "EXPIRED",
     }
 )
-WORKFLOW_PROGRESS_FAILURE_STATES = frozenset({"FAILED", "CANCELLED", "LOST"})
+WORKFLOW_PROGRESS_FAILURE_STATES = TASK_FAILURE_STATES
 MAX_COMMAND_ERROR_LINES = 60
 MAX_DIAGNOSTIC_LINES = 80
 MAX_OUTPUT_CHARACTERS = 16_000
@@ -4483,7 +4485,7 @@ class LocalKubeRayGate:
                     self.evidence.task_result = result
                     self.evidence.api_execution_delete_rejected = True
                     return
-                if last_state in {"FAILED", "CANCELLED", "LOST"}:
+                if last_state in TASK_FAILURE_STATES:
                     raise ValueError(f"add_numbers reached terminal state {last_state}")
             if time.monotonic() >= deadline:
                 raise ValueError(
@@ -4593,7 +4595,7 @@ class LocalKubeRayGate:
                 if execution.get("error") is not None:
                     raise ValueError("RuntimeEnv encryption canary succeeded with an error")
                 return execution
-            if last_state in {"FAILED", "CANCELLED", "LOST"}:
+            if last_state in TASK_FAILURE_STATES:
                 raise ValueError(
                     f"RuntimeEnv encryption canary reached terminal state {last_state}"
                 )
@@ -4782,7 +4784,7 @@ class LocalKubeRayGate:
                             "RuntimeEnv corruption API lifecycle evidence is inconsistent"
                         )
                     return
-                if last_state in {"SUCCEEDED", "CANCELLED", "LOST"}:
+                if last_state in (TASK_FAILURE_STATES - {"FAILED"}) | {"SUCCEEDED"}:
                     raise ValueError(
                         f"RuntimeEnv corruption reached unexpected terminal state {last_state}"
                     )

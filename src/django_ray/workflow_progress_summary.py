@@ -123,9 +123,11 @@ class WorkflowProgressTruncationReason(StrEnum):
 
 WORKFLOW_PROGRESS_REPORTING_POLICIES = frozenset({"full", "sampled", "terminal_only", "disabled"})
 WORKFLOW_PROGRESS_STATES = frozenset(
-    {"RUNNING", "CANCELLING", "SUCCEEDED", "FAILED", "CANCELLED", "LOST"}
+    {"RUNNING", "CANCELLING", "SUCCEEDED", "FAILED", "CANCELLED", "LOST", "EXPIRED"}
 )
-WORKFLOW_PROGRESS_TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "CANCELLED", "LOST"})
+WORKFLOW_PROGRESS_TERMINAL_STATES = frozenset(
+    {"SUCCEEDED", "FAILED", "CANCELLED", "LOST", "EXPIRED"}
+)
 
 
 def workflow_progress_detail_is_last_observed(value: Any) -> bool:

@@ -31,6 +31,7 @@ from django_ray.workflow_progress_summary import (
     WORKFLOW_PROGRESS_LEGACY_MAX_BYTES,
     WORKFLOW_PROGRESS_SUMMARY_MAX_BYTES,
     WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
+    WORKFLOW_PROGRESS_TERMINAL_STATES,
     WorkflowProgressSummaryError,
     deserialize_workflow_progress_summary,
     serialize_workflow_progress_summary,
@@ -621,7 +622,7 @@ def _validate_revision_advance(
         new_revision = current[field]
         if old_revision is not None and (new_revision is None or new_revision < old_revision):
             raise WorkflowProgressSummaryConflictError(f"workflow progress {field} regressed")
-    if previous["state"] in {"SUCCEEDED", "FAILED", "CANCELLED", "LOST"}:
+    if previous["state"] in WORKFLOW_PROGRESS_TERMINAL_STATES:
         raise WorkflowProgressSummaryConflictError(
             "terminal workflow progress summary cannot advance"
         )

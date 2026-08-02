@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ImproperlyConfigured
@@ -39,6 +39,7 @@ from django.tasks import TaskResult, TaskResultStatus
 from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.exceptions import TaskResultDoesNotExist
 
+from django_ray.conf.defaults import QUEUE_TIMEOUT_SECONDS_MAX
 from django_ray.conf.settings import get_settings
 from django_ray.input_storage import (
     InputPayloadError,
@@ -73,6 +74,7 @@ STATE_TO_STATUS: dict[str, TaskResultStatus] = {
     TaskState.CANCELLED: TaskResultStatus.FAILED,
     TaskState.CANCELLING: TaskResultStatus.RUNNING,
     TaskState.LOST: TaskResultStatus.FAILED,
+    TaskState.EXPIRED: TaskResultStatus.FAILED,
 }
 
 
@@ -112,6 +114,7 @@ class RayTaskBackend(BaseTaskBackend):
         - RAY_ADDRESS: Optional Ray Job cluster target (defaults to DJANGO_RAY)
         - RAY_RUNTIME_ENV: Runtime environment for Ray workers
         - TIMEOUT_SECONDS: Optional positive per-task execution timeout
+        - QUEUE_TIMEOUT_SECONDS: Positive queued-wait budget or None for unlimited
     """
 
     # Backend capabilities
@@ -154,6 +157,18 @@ class RayTaskBackend(BaseTaskBackend):
             raise ImproperlyConfigured(
                 "django-ray: TASKS backend OPTIONS['TIMEOUT_SECONDS'] must be a positive integer"
             )
+        self.queue_timeout_seconds = options.get(
+            "QUEUE_TIMEOUT_SECONDS", get_settings()["QUEUE_TIMEOUT_SECONDS"]
+        )
+        if self.queue_timeout_seconds is not None and (
+            type(self.queue_timeout_seconds) is not int
+            or self.queue_timeout_seconds <= 0
+            or self.queue_timeout_seconds > QUEUE_TIMEOUT_SECONDS_MAX
+        ):
+            raise ImproperlyConfigured(
+                "django-ray: TASKS backend OPTIONS['QUEUE_TIMEOUT_SECONDS'] must be None "
+                f"or an integer between 1 and {QUEUE_TIMEOUT_SECONDS_MAX}"
+            )
 
     def enqueue(
         self,
@@ -191,6 +206,12 @@ class RayTaskBackend(BaseTaskBackend):
         prepared_input = prepare_task_input(list(args), kwargs)
 
         now = datetime.now(UTC)
+        eligible_at = max(now, task.run_after) if task.run_after is not None else now
+        queue_deadline_at = (
+            eligible_at + timedelta(seconds=self.queue_timeout_seconds)
+            if self.queue_timeout_seconds is not None
+            else None
+        )
         with transaction.atomic():
             register_task_input(prepared_input)
             for allocation_attempt in range(1, _TASK_ID_ALLOCATION_ATTEMPTS + 1):
@@ -214,6 +235,8 @@ class RayTaskBackend(BaseTaskBackend):
                             runtime_env_json=stored_runtime_env.serialized,
                             runtime_env_hash=stored_runtime_env.digest,
                             timeout_seconds=self.timeout_seconds,
+                            queue_timeout_seconds=self.queue_timeout_seconds,
+                            queue_deadline_at=queue_deadline_at,
                             created_at=now,
                         )
                 except IntegrityError as error:
@@ -302,7 +325,10 @@ class RayTaskBackend(BaseTaskBackend):
 
         # Parse errors if task failed
         errors: list[TaskError] = []
-        if execution.state in (TaskState.FAILED, TaskState.LOST) and execution.error_message:
+        if (
+            execution.state in (TaskState.FAILED, TaskState.LOST, TaskState.EXPIRED)
+            and execution.error_message
+        ):
             # Extract exception class from traceback or use generic Exception
             exception_class_path = "builtins.Exception"
             if execution.error_traceback:

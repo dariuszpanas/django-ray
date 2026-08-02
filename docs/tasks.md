@@ -225,6 +225,63 @@ owns the worker thread until the coroutine returns. Sync cancellation and timeou
 handling therefore occur only when the worker regains control. Application code should
 still use bounded client timeouts and cancellation-safe cleanup.
 
+## Queue expiration
+
+django-ray snapshots a 24-hour queued-wait budget by default. The budget begins at the
+later of enqueue/requeue time and `run_after`; at the exact absolute deadline the worker
+records terminal `EXPIRED` without submitting to Ray or automatically retrying. Configure
+one backend alias with `OPTIONS["QUEUE_TIMEOUT_SECONDS"]` as an integer from `1` through
+`2147483647`, or set it explicitly to `None` for intentionally durable work. Unlimited
+queues require idempotent tasks, backlog alerts, and an operator drain or discard policy.
+Django 6 has no per-call task expiration field, so this is a backend-alias policy rather
+than a task argument.
+
+Keep intentionally durable work on a visibly separate backend alias and queue instead of
+disabling the safety default for unrelated tasks:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["default"],
+    },
+    "durable": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": ["durable"],
+        "OPTIONS": {"QUEUE_TIMEOUT_SECONDS": None},
+    },
+}
+```
+
+Before applying migration `0016`, stop every old worker and pause every process that can
+enqueue work. Old code cannot populate the new policy snapshot, so this upgrade requires
+a bounded maintenance window rather than a mixed-version rolling writer deployment.
+Preview the first 100 existing queued rows and their proposed deadlines:
+
+```console
+python manage.py shell -c "from datetime import timedelta; from django_ray.models import RayTaskExecution, TaskState; rows = RayTaskExecution.objects.filter(state=TaskState.QUEUED).order_by('created_at', 'pk').values_list('pk', 'created_at', 'run_after')[:100]; print([(pk, max(created_at, run_after) + timedelta(days=1) if run_after else created_at + timedelta(days=1)) for pk, created_at, run_after in rows])"
+```
+
+Their adopted deadline is one day after `max(created_at, run_after)`. All other existing
+executions snapshot the 24-hour policy so any later retry also receives the safe default.
+Operators who intentionally require the entire existing backlog to remain unlimited may
+set the opt-out only on the migration process:
+
+```console
+DJANGO_RAY_EXISTING_QUEUED_UNLIMITED=1 python manage.py migrate django_ray
+```
+
+This one-time opt-out affects only rows already queued during migration; configure an
+explicit unlimited backend alias for new durable work. Start upgraded workers only after
+the migration and policy review, deploy upgraded code to every enqueue producer, and only
+then resume enqueue traffic.
+
+Reversing `0016` converts current and archived `EXPIRED` states to `FAILED` before it
+drops the queue-policy fields while preserving migration `0015`'s task-ID uniqueness
+constraint. Stop upgraded workers first and review every remaining `QUEUED` row before
+rollback: older django-ray versions have no deadline fence and can submit that backlog as
+soon as they start.
+
 ## Reading Current Status
 
 The object returned by `enqueue()` is an enqueue-time snapshot. Fetch it again to see

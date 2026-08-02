@@ -30,6 +30,7 @@ const elementIds = [
   "stat-running",
   "stat-succeeded",
   "stat-failed",
+  "stat-expired",
 ];
 
 class FakeClassList {

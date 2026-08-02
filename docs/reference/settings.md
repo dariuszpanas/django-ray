@@ -375,6 +375,25 @@ and fully qualified names.
 
 ## Reliability
 
+### QUEUE_TIMEOUT_SECONDS
+
+- **Type**: `int | None` (booleans are rejected)
+- **Default**: `86400` (24 hours)
+- **Allowed**: `1` to `2147483647`, or `None`
+
+Maximum time that an execution may remain queued after it becomes eligible. django-ray
+snapshots the effective value on every enqueue. The absolute deadline is the later of
+enqueue time and `run_after`, plus this budget. A worker reaching that deadline records
+terminal `EXPIRED` without submitting the task to Ray or automatically retrying it.
+An explicit or automatic retry refreshes the deadline from the new eligibility time;
+shutdown handoff of an unsubmitted claim does not.
+
+A Django Tasks backend alias may override the process-wide value through
+`OPTIONS["QUEUE_TIMEOUT_SECONDS"]`. Set it explicitly to `None` only for a deliberately
+unlimited queue with idempotent tasks, backlog alerts, and an operator drain or discard
+policy. See [Queue expiration](../tasks.md#queue-expiration) for backend examples and the
+existing-backlog migration procedure.
+
 ### STUCK_TASK_TIMEOUT_SECONDS
 
 - **Type**: `int`
@@ -878,6 +897,7 @@ DJANGO_RAY = {
     "DEFAULT_CONCURRENCY": 50,
     "MAX_TASK_ATTEMPTS": 3,
     "RETRY_BACKOFF_SECONDS": 60,
+    "QUEUE_TIMEOUT_SECONDS": 86400,
     "STUCK_TASK_TIMEOUT_SECONDS": 300,
     "WORKER_LEASE_SECONDS": 60,
     "WORKER_HEARTBEAT_SECONDS": 15,

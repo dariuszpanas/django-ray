@@ -64,8 +64,9 @@ Uncaught exception type, message, and traceback are stored on `RayTaskExecution`
 | `SUCCEEDED` | Result recorded successfully |
 | `FAILED` | Permanent failure or retries exhausted |
 | `LOST` | No live owner or reconcilable Ray execution was found |
+| `EXPIRED` | The queued-wait deadline arrived before execution began |
 
-A retry transitions a failed attempt back to `QUEUED` with `run_after` set to the
+A retry transitions a failed, lost, cancelled, or expired attempt back to `QUEUED` with `run_after` set to the
 calculated backoff time.
 
 Attempt numbers are one-based and increase for both automatic and manual retries;
@@ -85,7 +86,7 @@ report can be replaced by the authoritative row-locked task outcome.
 
 The admin action, operational retry endpoint, and worker retry path use the same
 row-locked transition service, so a racing retry request is rejected rather than
-applied twice. Success, permanent failure, timeout, LOST recovery, cancellation, and
+applied twice. Success, permanent failure, timeout, LOST recovery, queue expiry, cancellation, and
 Ray Job `STOPPED` reconciliation use that same terminal archival boundary.
 
 Application APIs should call `django_ray.lifecycle.retry_task()` with the attempt number

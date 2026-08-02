@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from django_ray.lifecycle import QUEUE_EXPIRED_ERROR
 from django_ray.models import (
     CancellationStatus,
     RayTaskExecution,
@@ -72,6 +73,144 @@ class TestWorkerSync:
         assert task.error_message is None
         assert task.finished_at is not None
         assert task.claimed_by_worker == "test-worker"
+
+    def test_expiry_wins_at_deadline_without_submission_when_capacity_is_full(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        deadline = datetime.now(UTC)
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return deadline if tz is not None else deadline.replace(tzinfo=None)
+
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.datetime",
+            FrozenDateTime,
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-expired-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+            created_at=deadline - timedelta(days=14),
+            queue_timeout_seconds=60,
+            queue_deadline_at=deadline,
+        )
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "ray"
+        cmd.worker_id = "saturated-worker"
+        cmd.active_tasks = {999: "already-running"}
+
+        assert cmd.claim_and_process_tasks(["default"], concurrency=1) == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.EXPIRED
+        assert task.started_at is None
+        assert task.ray_job_id is None
+        assert task.error_message == QUEUE_EXPIRED_ERROR
+        attempt = TaskAttempt.objects.get(execution=task, attempt_number=1)
+        assert attempt.state == TaskState.EXPIRED
+
+    def test_deadline_reached_during_expiry_sweep_is_not_claimed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        deadline = datetime.now(UTC) + timedelta(minutes=1)
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-expired-during-sweep-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+            queue_timeout_seconds=60,
+            queue_deadline_at=deadline,
+        )
+        observed_times = iter((deadline - timedelta(microseconds=1), deadline))
+
+        class AdvancingDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = next(observed_times)
+                return value if tz is not None else value.replace(tzinfo=None)
+
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.datetime",
+            AdvancingDateTime,
+        )
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "local"
+        cmd.worker_id = "deadline-race-worker"
+        cmd.active_tasks = {}
+        processed: list[int] = []
+        monkeypatch.setattr(cmd, "process_task", lambda execution: processed.append(execution.pk))
+
+        assert cmd.claim_and_process_tasks(["default"], concurrency=1) == 0
+
+        task.refresh_from_db()
+        assert processed == []
+        assert task.state == TaskState.QUEUED
+        assert task.started_at is None
+        assert task.claimed_by_worker is None
+
+    def test_overdue_rows_beyond_sweep_limit_are_not_claimed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        deadline = datetime.now(UTC) - timedelta(seconds=1)
+        RayTaskExecution.objects.bulk_create(
+            [
+                RayTaskExecution(
+                    task_id=f"test-worker-expired-batch-{index:03d}",
+                    callable_path="testproject.tasks.add_numbers",
+                    queue_name="default",
+                    state=TaskState.QUEUED,
+                    args_json="[5, 3]",
+                    kwargs_json="{}",
+                    queue_timeout_seconds=60,
+                    queue_deadline_at=deadline,
+                )
+                for index in range(101)
+            ]
+        )
+        eligible = RayTaskExecution.objects.create(
+            task_id="test-worker-expiry-batch-eligible",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+        )
+        from django_ray.management.commands.django_ray_worker import Command
+
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "local"
+        cmd.worker_id = "bounded-expiry-worker"
+        cmd.active_tasks = {}
+        processed: list[int] = []
+        monkeypatch.setattr(cmd, "process_task", lambda task: processed.append(task.pk))
+
+        assert cmd.claim_and_process_tasks(["default"], concurrency=1) == 101
+
+        assert processed == [eligible.pk]
+        assert (
+            RayTaskExecution.objects.filter(
+                state=TaskState.QUEUED,
+                queue_deadline_at__lte=deadline,
+            ).count()
+            == 1
+        )
 
     def test_sync_worker_executes_an_encrypted_runtime_env_snapshot(
         self,

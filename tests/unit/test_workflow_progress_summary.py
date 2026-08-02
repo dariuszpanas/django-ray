@@ -86,7 +86,7 @@ def _summary(
     published_detail: bool = False,
     state: str = "RUNNING",
 ) -> dict[str, object]:
-    terminal = state in {"SUCCEEDED", "FAILED", "CANCELLED", "LOST"}
+    terminal = state in {"SUCCEEDED", "FAILED", "CANCELLED", "LOST", "EXPIRED"}
     finished_at = "2026-07-20T12:00:02Z" if terminal else None
     return {
         "schema_version": 3,
@@ -108,7 +108,7 @@ def _summary(
             "pending": 0 if terminal else 1,
             "running": 0,
             "succeeded": 1 if state == "SUCCEEDED" else 0,
-            "failed": 1 if state in {"FAILED", "CANCELLED", "LOST"} else 0,
+            "failed": 1 if state in {"FAILED", "CANCELLED", "LOST", "EXPIRED"} else 0,
         },
         "edge_counts": {
             "declared": 0,
@@ -185,6 +185,16 @@ def test_schema_v3_is_canonical_bounded_and_hides_internal_manifest(
     assert "task_execution_pk" not in public["run_identity"]
     assert decoded["storage"]["manifest_id"] == "manifest_125"
     assert decoded["run_identity"]["task_execution_pk"] == identity.task_execution_pk
+
+
+def test_expired_is_a_terminal_workflow_summary_state(workflow_run_identity) -> None:
+    summary = normalize_workflow_progress_summary(
+        _summary(workflow_run_identity, state=TaskState.EXPIRED),
+        expected_identity=workflow_run_identity,
+    )
+
+    assert summary["state"] == TaskState.EXPIRED
+    assert summary["terminal"]["outcome"] == TaskState.EXPIRED
 
 
 def test_summary_byte_limit_accepts_exact_boundary_and_rejects_next_byte(

@@ -30,10 +30,15 @@ async def _async_backend_task(value: int) -> int:
     return value + 1
 
 
-def _make_backend(*, timeout_seconds: int | None = None) -> RayTaskBackend:
+def _make_backend(
+    *,
+    timeout_seconds: int | None = None,
+    queue_timeout_seconds: int | None = 86400,
+) -> RayTaskBackend:
     options = {
         "RAY_ADDRESS": "auto",
         "TIMEOUT_SECONDS": timeout_seconds,
+        "QUEUE_TIMEOUT_SECONDS": queue_timeout_seconds,
     }
     return RayTaskBackend(
         "default",
@@ -50,6 +55,77 @@ class TestRayTaskBackend:
 
     def test_backend_advertises_priority_support(self) -> None:
         assert _make_backend().supports_priority is True
+
+    @pytest.mark.parametrize(
+        ("global_options", "expected"),
+        [
+            ({"RAY_ADDRESS": "auto"}, 86400),
+            ({"RAY_ADDRESS": "auto", "QUEUE_TIMEOUT_SECONDS": 75}, 75),
+        ],
+    )
+    def test_backend_uses_global_queue_timeout_fallback(
+        self,
+        settings,
+        global_options,
+        expected,
+    ) -> None:
+        settings.DJANGO_RAY = global_options
+
+        backend = RayTaskBackend(
+            "default",
+            {"QUEUES": ["default"], "OPTIONS": {"RAY_ADDRESS": "auto"}},
+        )
+
+        assert backend.queue_timeout_seconds == expected
+
+    def test_backend_snapshots_default_and_unlimited_queue_policy(self) -> None:
+        from django.tasks.base import Task
+
+        run_after = datetime.now(UTC) + timedelta(hours=2)
+        task = Task(
+            priority=0,
+            func=_async_backend_task,
+            backend="default",
+            queue_name="default",
+            run_after=run_after,
+        )
+        bounded = _make_backend(queue_timeout_seconds=60).enqueue(task, args=(1,), kwargs={})
+        unlimited = _make_backend(queue_timeout_seconds=None).enqueue(task, args=(2,), kwargs={})
+
+        bounded_row = RayTaskExecution.objects.get(task_id=bounded.id)
+        unlimited_row = RayTaskExecution.objects.get(task_id=unlimited.id)
+        assert bounded_row.queue_timeout_seconds == 60
+        assert bounded_row.queue_deadline_at == run_after + timedelta(seconds=60)
+        assert unlimited_row.queue_timeout_seconds is None
+        assert unlimited_row.queue_deadline_at is None
+
+    def test_expired_execution_maps_to_failed_task_result_with_stable_error(self) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="backend-expired-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.EXPIRED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            error_message="Task expired before execution after exceeding its queued-wait deadline",
+        )
+
+        result = _make_backend().get_result(execution.task_id)
+
+        from django.tasks import TaskResultStatus
+
+        assert result.status is TaskResultStatus.FAILED
+        assert result.errors[0].traceback == execution.error_message
+
+    @pytest.mark.parametrize("value", [0, -1, True, 1.5, "60", 2_147_483_648])
+    def test_backend_rejects_invalid_queue_timeout(self, value) -> None:
+        with pytest.raises(ImproperlyConfigured, match="QUEUE_TIMEOUT_SECONDS"):
+            RayTaskBackend(
+                "default",
+                {
+                    "QUEUES": ["default"],
+                    "OPTIONS": {"RAY_ADDRESS": "auto", "QUEUE_TIMEOUT_SECONDS": value},
+                },
+            )
 
     def test_backend_keeps_legacy_address_attribute(self) -> None:
         assert RayTaskBackend("default", {"QUEUES": ["default"]}).ray_address == "auto"
@@ -171,6 +247,7 @@ class TestRayTaskBackend:
             "RUNTIME_ENV_ENCRYPTION_KEYS": {"backend-key": key},
             "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "backend-key",
         }
+        run_after = datetime.now(UTC) + timedelta(hours=2)
         backend = RayTaskBackend(
             "encrypted",
             {
@@ -178,6 +255,7 @@ class TestRayTaskBackend:
                 "OPTIONS": {
                     "RAY_ADDRESS": "auto",
                     "RAY_RUNTIME_ENV": {"env_vars": {"API_TOKEN": marker}},
+                    "QUEUE_TIMEOUT_SECONDS": 90,
                 },
             },
         )
@@ -200,13 +278,19 @@ class TestRayTaskBackend:
         monkeypatch.setattr("django_ray.backends.prepare_task_input", record_prepare)
 
         with caplog.at_level(logging.WARNING, logger="django_ray.backend"):
-            result = backend.enqueue(add_numbers, args=(2, 3), kwargs={})
+            result = backend.enqueue(
+                add_numbers.using(run_after=run_after),
+                args=(2, 3),
+                kwargs={},
+            )
 
         execution = RayTaskExecution.objects.get(task_id=replacement_id)
         assert result.id == replacement_id
         assert RayTaskExecution.objects.filter(task_id=collided_id).count() == 1
         assert observed_task_ids == [collided_id, replacement_id]
         assert prepared_inputs == 1
+        assert execution.queue_timeout_seconds == 90
+        assert execution.queue_deadline_at == run_after + timedelta(seconds=90)
         assert runtime_env_for_execution(execution).spec == {"env_vars": {"API_TOKEN": marker}}
         assert "retrying allocation" in caplog.text
         assert collided_id not in caplog.text

@@ -74,6 +74,7 @@ _TERMINAL_STATES = frozenset(
         TaskState.FAILED,
         TaskState.CANCELLED,
         TaskState.LOST,
+        TaskState.EXPIRED,
     }
 )
 _EXPECTED_INGRESS_KINDS = frozenset(

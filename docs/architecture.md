@@ -177,7 +177,7 @@ Primary execution record for one task attempt chain.
 | `callable_path` | Dotted import path for callable |
 | `queue_name` | Queue used for claim/execution |
 | `priority` | Django priority from `-100` to `100`; larger values are claimed sooner |
-| `state` | `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `CANCELLING`, `LOST` |
+| `state` | `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `CANCELLING`, `LOST`, `EXPIRED` |
 | `attempt_number` | Current attempt counter |
 | `args_json`, `kwargs_json` | Serialized arguments, or JSON `null` placeholders for external input |
 | `input_reference` | Optional durable pointer to a versioned combined input envelope |
@@ -195,6 +195,7 @@ Primary execution record for one task attempt chain.
 | `claimed_by_worker` | Worker lease owner that currently owns the task |
 | `run_after` | Delayed/retry scheduling timestamp |
 | `timeout_seconds` | Optional timeout from the selected backend's `OPTIONS["TIMEOUT_SECONDS"]` |
+| `queue_timeout_seconds`, `queue_deadline_at` | Snapshotted nullable queue policy and indexed absolute expiry deadline |
 | `created_at`, `started_at`, `finished_at`, `last_heartbeat_at` | Lifecycle timestamps |
 
 The worker evaluates `timeout_seconds` during periodic reconciliation, so timeout
@@ -346,10 +347,11 @@ detail deletion.
 ```text
 QUEUED -> RUNNING -> SUCCEEDED
 QUEUED -> CANCELLED
+QUEUED -> EXPIRED
 RUNNING -> CANCELLING -> CANCELLED
 RUNNING -> FAILED
 RUNNING -> LOST
-FAILED/LOST -> QUEUED (if retry policy allows)
+FAILED/LOST/CANCELLED/EXPIRED -> QUEUED (authorized retry)
 ```
 
 Notes:
@@ -440,7 +442,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0015_raytaskexecution_task_id_unique` before starting upgraded workers:
+`0016_raytaskexecution_queue_expiration` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -505,6 +507,20 @@ migration against a production-sized staging copy, confirm free database capacit
 backup/recovery procedures, and keep every enqueue producer and task manager stopped
 until the constraint is present. This release deliberately prefers one portable,
 fail-closed migration over claiming an unproven zero-downtime index rollout.
+
+Migration `0016` adds the snapshotted queue-wait policy and indexed absolute deadline.
+Before applying it, stop old task managers, pause all enqueue producers, and preview the
+queued backlog using the documented [queue-expiration procedure](tasks.md#queue-expiration).
+Existing queued rows receive a deadline one day after `max(created_at, run_after)` unless
+the migration process explicitly sets `DJANGO_RAY_EXISTING_QUEUED_UNLIMITED=1`; other
+existing executions retain the 24-hour policy for any later retry. Pre-`0016` writers
+cannot populate a deliberate snapshot and pre-`0016` task managers do not enforce
+deadlines, so upgrade every enqueue producer before resuming traffic, start upgraded
+workers only after the migration, and do not operate a mixed fleet.
+Reversal maps `EXPIRED` current and archived attempts to `FAILED` before dropping the
+policy fields. Stop upgraded workers and review all remaining queued work first because
+pre-`0016` code can submit it without a deadline fence. Reversing `0016` leaves the
+`0015` task-ID uniqueness constraint in place.
 
 RuntimeEnv encryption has no schema migration. Its rollout is nevertheless
 reader-first: deploy the dual plaintext/encrypted reader everywhere while writes remain

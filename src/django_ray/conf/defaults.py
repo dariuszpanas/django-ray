@@ -8,6 +8,7 @@ from typing import Any
 # sampled reporting for a later producer implementation.
 WORKFLOW_PROGRESS_RUNTIME_REPORTING_POLICIES = frozenset({"full", "terminal_only", "disabled"})
 TASK_ATTEMPT_ADMIN_MODES = frozenset({"inline", "standalone", "both"})
+QUEUE_TIMEOUT_SECONDS_MAX = 2_147_483_647
 
 DEFAULTS: dict[str, Any] = {
     # Ray connection
@@ -32,6 +33,9 @@ DEFAULTS: dict[str, Any] = {
     "RUNNER": "ray_job",  # "ray_job" or "ray_core"
     # Concurrency
     "DEFAULT_CONCURRENCY": 10,
+    # Queued work expires 24 hours after it first becomes eligible. ``None``
+    # is an explicit unlimited-backlog policy.
+    "QUEUE_TIMEOUT_SECONDS": 24 * 60 * 60,
     # Worker polling
     "WORKER_POLL_INTERVAL_SECONDS": 0.1,
     "WORKER_POLL_MAX_INTERVAL_SECONDS": 0.1,

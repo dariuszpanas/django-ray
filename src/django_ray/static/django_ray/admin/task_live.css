@@ -160,7 +160,11 @@ body.django-ray-execution-change nav > .breadcrumbs {
 }
 
 #django-ray-live-observability
-  .django-ray-live__state:is([data-state="QUEUED"], [data-state="CANCELLED"]) {
+  .django-ray-live__state:is(
+    [data-state="QUEUED"],
+    [data-state="CANCELLED"],
+    [data-state="EXPIRED"]
+  ) {
   background: var(--django-ray-live-warning-bg);
   border-color: var(--django-ray-live-warning-border);
   color: var(--django-ray-live-warning-fg);
