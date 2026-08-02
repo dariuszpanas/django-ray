@@ -8,6 +8,7 @@
 #   - sync: For testing (runs in sync mode)
 #   - ml: Machine learning pipeline tasks
 #
+# Evaluation-only local overlay. Do not apply it to a production cluster.
 # Usage:
 #   kubectl apply -k k8s/overlays/dev
 #
@@ -23,8 +24,8 @@ resources:
   - worker-ml.yaml
 
 patches:
-  # This overlay is intentionally local-demo-only. Production must use the base
-  # mode with externalized secrets and explicit allowed hosts.
+  # This overlay is intentionally local-demo-only. A production topology must
+  # be designed separately; the base is only a shared render reference.
   - patch: |-
       - op: replace
         path: /data/DJANGO_DEPLOYMENT_MODE

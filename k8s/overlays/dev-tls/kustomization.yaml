@@ -1,4 +1,5 @@
 # Development overlay with TLS enabled
+# Evaluation-only local overlay. Do not apply it to a production cluster.
 # Use: kubectl apply -k k8s/overlays/dev-tls
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -11,8 +12,8 @@ resources:
 
 # Patch Ray head for TLS
 patches:
-  # This overlay is a local development example; production must provide
-  # external secrets and use the base production mode explicitly.
+  # This overlay is a local development example. A production topology must
+  # provide scoped external secrets and be designed separately from this base.
   - target:
       kind: ConfigMap
       name: django-ray-config

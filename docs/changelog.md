@@ -446,6 +446,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state-derived `Output` availability value. Pending, running, failed, and
   completed-without-retained-value states are unambiguous without exposing or
   fabricating internal node results.
+- Kubernetes adoption guidance now identifies every checked-in manifest and overlay as an
+  evaluation or maintainer-validation asset rather than a production-ready stack. It explains the
+  fail-closed `DJANGO_DEPLOYMENT_MODE=production` setting without treating it as topology
+  certification, documents the shared-Secret and sample-service hazards, emits that boundary before
+  every in-repository Kubernetes Make mutator, and replaces promotion of `k8s/base` with an explicit
+  production architecture checklist.
 - Local environment bootstrap now selects the available Python 3.12 patch release instead of
   requiring an unavailable historical patch, so `uv` and `make` commands work in fresh development
   containers and continue receiving compatible Python patch updates.

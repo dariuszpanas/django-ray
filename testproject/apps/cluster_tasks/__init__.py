@@ -1,7 +1,7 @@
 """Cluster Tasks App - Demonstrates remote Ray cluster execution.
 
 This app shows how to use django-ray with a remote Ray cluster for:
-- Production deployments on Kubernetes
+- Trusted local Kubernetes evaluation and maintainer validation
 - Multi-node distributed execution
 - Large-scale task processing
 
@@ -13,6 +13,7 @@ Usage:
     export RAY_ADDRESS=ray://ray-head:10001
     python manage.py django_ray_worker --queue=default
 
-Kubernetes deployment:
-    See k8s/ directory for deployment manifests.
+Kubernetes evaluation:
+    Read docs/deployment/kubernetes.md before using the k8s/ manifests. The
+    checked-in topology is not a production-ready deployment.
 """

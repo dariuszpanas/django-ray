@@ -7,6 +7,10 @@ RuntimeEnv archive, generic Ray nodes, application task managers, protected HTTP
 probes, encrypted durable RuntimeEnv storage, full and terminal-only schema-v3 workflow progress,
 multi-attempt recovery, authenticated admin presentation, and live Prometheus discovery.
 
+This is a maintainer integration-validation gate for the checked-in local profile. A passing run
+is not deployment certification, a threat-model review, or evidence that the sample manifests form
+a production-ready topology.
+
 Run it only against the dedicated local `django-ray` namespace. The command fails before its first
 Docker build or Kubernetes mutation unless the checkout is clean, the active context is the named
 context, the context is `docker-desktop` or `kind-<name>`, its API server is local, and the rendered

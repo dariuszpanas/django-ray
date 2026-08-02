@@ -280,7 +280,9 @@ credentials are not production hardening.
 
 ## Kubernetes Deployment
 
-Deploy using Kustomize manifests in `k8s/`:
+Evaluate the bundled Kustomize manifests in `k8s/` only on a trusted, disposable local
+environment. They are maintainer-validation assets, not a production-ready deployment, and
+replacing their placeholder values does not make the sample topology production-ready.
 
 ```bash
 # Build images

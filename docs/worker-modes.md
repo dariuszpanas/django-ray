@@ -137,4 +137,5 @@ default.
 
 - [Performance](performance.md) for workload-size and batching guidance
 - [Runtime Environments](runtime-environments.md) for environment startup cost
-- [Kubernetes Deployment](deployment/kubernetes.md) for production topology
+- [Kubernetes Deployment](deployment/kubernetes.md) for local evaluation and the production
+  architecture checklist
