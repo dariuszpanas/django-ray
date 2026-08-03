@@ -457,6 +457,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Read-only execution and archived-attempt details no longer advertise Django
+  Admin's empty `LogEntry` history page. Durable task attempt and workflow
+  diagnostics remain unchanged, while the permission-gated **Sensitive data**
+  action stays as a standalone object tool in stock Django Admin and Unfold.
 - Stock Django Admin execution detail pages now wrap long task object labels in
   both the native subtitle and breadcrumb. The rule is scoped to the custom
   execution change page, preserving durable identities, unrelated Admin pages,

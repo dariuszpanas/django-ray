@@ -164,12 +164,15 @@ queued_execution = RayTaskExecution.objects.create(
 permission_request = RequestFactory().get("/admin/")
 permission_request.user = user
 execution_admin = admin.site._registry[RayTaskExecution]
+attempt_admin = admin.site._registry[TaskAttempt]
 assert execution_admin.has_change_permission(permission_request) is True
 assert execution_admin.has_change_permission(permission_request, execution) is False
 assert set(execution_admin.get_actions(permission_request)) == {
     "retry_tasks",
     "cancel_tasks",
 }
+execution_admin.view_on_site = lambda obj: f"/runtime/executions/{obj.pk}/"
+attempt_admin.view_on_site = lambda obj: f"/runtime/attempts/{obj.pk}/"
 
 anonymous = Client()
 login = anonymous.get(reverse("admin:login"))
@@ -351,6 +354,16 @@ assert "Sensitive data" in attempt_detail_html
 assert f'href="{attempt_sensitive_url}"' in attempt_detail_html
 assert "django-ray-admin-action--sensitive" in attempt_detail_html
 assert 'class="django-ray-admin-action django-ray-admin-action--sensitive"' in attempt_detail_html
+assert (
+    reverse(
+        "admin:django_ray_taskattempt_history",
+        args=[attempt.pk],
+    )
+    not in attempt_detail_html
+)
+assert 'class="historylink"' not in attempt_detail_html
+assert f'href="/runtime/attempts/{attempt.pk}/"' in attempt_detail_html
+assert "View on site" in attempt_detail_html
 assert 'aria-label="View sensitive task data"' in attempt_detail_html
 assert "unfold-attempt-output-marker" not in attempt_detail_html
 assert "unfold-attempt-output-marker" in attempt_sensitive_html
@@ -366,6 +379,19 @@ assert "django-ray-admin-action--retry" in detail_failed_html
 assert 'aria-describedby="django-ray-task-actions-guidance"' in detail_failed_html
 assert "django-ray-admin-action--sensitive" in detail_failed_html
 assert 'class="django-ray-admin-action django-ray-admin-action--sensitive"' in detail_failed_html
+assert (
+    reverse(
+        "admin:django_ray_raytaskexecution_history",
+        args=[detail_failed_execution.pk],
+    )
+    not in detail_failed_html
+)
+assert 'class="historylink"' not in detail_failed_html
+assert (
+    f'href="/runtime/executions/{detail_failed_execution.pk}/"'
+    in detail_failed_html
+)
+assert "View on site" in detail_failed_html
 assert "unfold-detail-retry-secret-marker" not in detail_failed_html
 assert "unfold-detail-retry-secret-marker" in detail_failed_sensitive_html
 assert "django-ray-sensitive-data__header" in detail_failed_sensitive_html
@@ -806,6 +832,14 @@ assert "django-ray-admin-action--retry" in detail_failed_html
 assert 'aria-describedby="django-ray-task-actions-guidance"' in detail_failed_html
 assert "django-ray-admin-action--sensitive" in detail_failed_html
 assert 'class="django-ray-admin-action django-ray-admin-action--sensitive"' in detail_failed_html
+assert (
+    reverse(
+        "admin:django_ray_raytaskexecution_history",
+        args=[detail_failed_execution.pk],
+    )
+    not in detail_failed_html
+)
+assert 'class="historylink"' not in detail_failed_html
 assert "standard-admin-detail-retry-secret-marker" not in detail_failed_html
 assert "standard-admin-detail-retry-secret-marker" in detail_failed_sensitive_html
 assert detail_failed_sensitive_html.count("<h1>Unredacted task data</h1>") == 1

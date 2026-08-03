@@ -159,11 +159,29 @@ def test_ordinary_details_stay_redacted_and_hide_unredacted_link(
 
     assert execution_response.status_code == 200
     assert attempt_response.status_code == 200
-    for response in (execution_response, attempt_response):
+    details = (
+        (
+            execution_response,
+            reverse(
+                "admin:django_ray_raytaskexecution_history",
+                args=[execution.pk],
+            ),
+        ),
+        (
+            attempt_response,
+            reverse(
+                "admin:django_ray_taskattempt_history",
+                args=[first_attempt.pk],
+            ),
+        ),
+    )
+    for response, history_url in details:
         content = response.content.decode("utf-8")
         assert "sensitive-marker" not in content
         assert "[REDACTED]" in content
         assert _LINK_LABEL not in content
+        assert history_url not in content
+        assert 'class="object-tools"' not in content
 
 
 def test_unredacted_pages_require_both_sensitive_and_ordinary_view_permissions(
@@ -301,6 +319,58 @@ def test_superuser_can_view_execution_and_attempt_sensitive_data(
     assert 'class="django-ray-admin-action django-ray-admin-action--secondary"' in execution_content
     assert attempt_response.status_code == 200
     assert "attempt-one-error-sensitive-marker" in attempt_response.content.decode("utf-8")
+
+
+def test_read_only_task_details_hide_empty_django_admin_history(
+    client,
+    sensitive_history,
+    monkeypatch,
+) -> None:
+    user = get_user_model().objects.create_superuser(username="task-detail-object-tools")
+    client.force_login(user)
+    execution = sensitive_history["execution"]
+    attempt = sensitive_history["first_attempt"]
+    execution_site_url = f"/runtime/executions/{execution.pk}/"
+    attempt_site_url = f"/runtime/attempts/{attempt.pk}/"
+    monkeypatch.setattr(
+        admin.site._registry[RayTaskExecution],
+        "view_on_site",
+        lambda obj: f"/runtime/executions/{obj.pk}/",
+    )
+    monkeypatch.setattr(
+        admin.site._registry[TaskAttempt],
+        "view_on_site",
+        lambda obj: f"/runtime/attempts/{obj.pk}/",
+    )
+
+    details = (
+        (
+            client.get(_execution_urls(execution)[0]),
+            reverse(
+                "admin:django_ray_raytaskexecution_history",
+                args=[execution.pk],
+            ),
+            execution_site_url,
+        ),
+        (
+            client.get(_attempt_urls(attempt)[0]),
+            reverse(
+                "admin:django_ray_taskattempt_history",
+                args=[attempt.pk],
+            ),
+            attempt_site_url,
+        ),
+    )
+
+    for response, history_url, site_url in details:
+        content = response.content.decode("utf-8")
+        assert response.status_code == 200
+        assert history_url not in content
+        assert 'class="historylink"' not in content
+        assert f'href="{site_url}"' in content
+        assert 'class="viewsitelink"' in content
+        assert "View on site" in content
+        assert _LINK_LABEL in content
 
 
 def test_sensitive_permission_revocation_applies_to_the_next_request(
