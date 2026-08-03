@@ -17,11 +17,11 @@ capability tuple is independently verified.
 
 ## Current support state
 
-Policy version 2 has **no verified native capability rows**. The rows below are canary
-candidates, not a support claim. The required isolated canaries succeeded for all
-three releases, but the 2026-07-20 promotion review retained the empty verified set:
+Policy version 3 has **no verified native capability rows**. The rows below are canary
+candidates, not a support claim. The required isolated canaries succeeded for both
+current candidates, and the 2026-08-02 policy review retained the empty verified set:
 the hosted runners did not provide the exact container, immutable deployment,
-shared-memory, and object-store profiles required by policy version 2. An incomplete
+shared-memory, and object-store profiles required by policy version 3. An incomplete
 candidate returns `INCOMPLETE_CAPABILITY_CONTEXT`; a complete but unpromoted exact
 tuple returns `CANDIDATE_REQUIRES_SMOKE`.
 
@@ -33,24 +33,27 @@ the pilot evidence validator without enabling native execution.
 
 | Ray | Python | OS and architecture | Status | Why it is listed |
 |---|---|---|---|---|
-| 2.53.0 | 3.12 | Linux x86_64 | Candidate | django-ray's minimum Ray release |
-| 2.56.0 | 3.12 | Linux x86_64 | Candidate | Version in the current lock and initial Windows investigation |
+| 2.56.0 | 3.12 | Linux x86_64 | Candidate | Package security floor, current lock, and initial Windows investigation |
 | 2.56.1 | 3.12 | Linux x86_64 | Candidate | Latest PyPI and Ray release reviewed on 2026-07-19 |
 
 The versions are exact. A new patch, minor, prerelease, or nightly is rejected until it
 is deliberately added as a candidate and then independently verified. Python 3.13 and
 3.14 remain supported for ordinary django-ray execution but are not Compiled Graph
-candidates in policy version 2.
+candidates in policy version 3.
 
 Version sources:
 
-- [Ray 2.53.0 on PyPI](https://pypi.org/project/ray/2.53.0/)
 - [Ray 2.56.0 on PyPI](https://pypi.org/project/ray/2.56.0/)
 - [Ray 2.56.1 on PyPI](https://pypi.org/project/ray/2.56.1/) and the
   [Ray 2.56.1 release](https://github.com/ray-project/ray/releases/tag/ray-2.56.1)
 
-The general django-ray dependency remains `ray[default]>=2.53.0`. That broader range
+The general django-ray dependency is `ray[default]>=2.56.0`. That broader range
 does not imply Compiled Graph eligibility.
+
+Ray 2.53.0 remains named only in the retained 2026-07-19 and 2026-07-20
+investigation records below. It predates the current package security floor and is no
+longer a candidate or supported installation target; preserving the old observation
+does not make it eligible for a future capability promotion.
 
 ### Pinned Linux/KubeRay pilot profile
 
@@ -232,13 +235,13 @@ reuse design is defined separately in
 [ADR-0002](design/adr-0002-compiled-session-ownership.md); this page decides whether an
 exact runtime tuple may attempt that design.
 
-| Topology | Policy version 2 | Contract |
+| Topology | Policy version 3 | Contract |
 |---|---|---|
 | Direct Ray Core driver | Candidate | A directly connected, non-Ray-Client driver compiles, invokes, drains, and tears down the graph in the same process. This is the diagnostic control topology. |
 | Local nested Ray Core owner | Candidate | A directly connected Ray Core driver submits one outer task, which owns compilation and all invocations for the durable run. This is the production-intended intra-task pilot topology; the smoke owner has retries disabled to avoid multiplying a native crash. |
 | Ray Job driver | Candidate | Compilation and invocation must occur in the submitted Ray Job driver, not in the Django worker or Job Submission client. Driver drain must finish before job exit. |
 | Ray Client driver | Rejected | Compilation in the Ray Client driver itself would place the compiler owner across the proxy boundary. No such owner contract is validated; use Ray Jobs or dynamic Ray tasks. |
-| Nested cluster-side owner submitted through Ray Client | Deferred/unverified | The Ray Client process submits an ordinary outer task, but compilation and every invocation occur in that cluster-side task. Policy version 2 models this as a separate `ray-client` submission transport and rejects it; it cannot inherit evidence from a `direct-ray-core` nested owner. |
+| Nested cluster-side owner submitted through Ray Client | Deferred/unverified | The Ray Client process submits an ordinary outer task, but compilation and every invocation occur in that cluster-side task. Policy version 3 models this as a separate `ray-client` submission transport and rejects it; it cannot inherit evidence from a `direct-ray-core` nested owner. |
 | Windows policy gate | Rejected | Every Windows tuple fails closed before Ray import. Retained evidence below covers only the three release candidates with direct-driver and nested-task owners; it does not claim every Windows version or topology crashes. |
 
 Ray documents that only the compiling process may invoke a graph. It also documents
@@ -255,7 +258,7 @@ nested-task row.
 
 ## Transport and dependency policy
 
-| Transport | Policy version 2 | Dependencies and limits |
+| Transport | Policy version 3 | Dependencies and limits |
 |---|---|---|
 | CPU shared memory | Candidate | The django-ray runtime keeps its normal `ray[default]` dependency. Native canaries install `ray[cgraph]` as recommended by Ray so a missing Compiled Graph extra cannot produce a false compatibility result. No GPU package becomes an application dependency. |
 | GPU/NCCL | Rejected | Requires a separately tested `ray[cgraph]`, CuPy package matching the CUDA major, NVIDIA driver/runtime, NCCL, GPU topology, tensor schema, and peer-to-peer transport matrix. |
@@ -390,7 +393,7 @@ application process or ordinary test run.
 ### Retained platform evidence
 
 The 2026-07-19 evidence pass used CPU shared-memory transport for three exact Ray
-releases. Linux jobs ran on
+releases, including the now historical pre-floor 2.53.0 observation. Linux jobs ran on
 `Linux-6.17.0-1020-azure-x86_64-with-glibc2.39`, with CPython 3.12.13 and
 `ray[cgraph]`, in GitHub Actions run `29714241117`. The Windows investigation used
 Windows 11 build 26200 AMD64, CPython 3.12.12, the synced virtual-environment
@@ -438,16 +441,22 @@ The required PR #92 canaries ran the hardened policy-v2 probe again in GitHub Ac
 run [`29759326381`](https://github.com/dariuszpanas/django-ray/actions/runs/29759326381).
 Ray 2.53.0, 2.56.0, and 2.56.1 each completed the local nested owner smoke and verified
 its echo result. Those successes are discovery evidence, not permission to compile.
+The 2.53.0 row is additionally ineligible because it is below the current package
+security floor.
 Every decision remained ineligible because the generic hosted runner reported `host`
 as its container profile and left the immutable deployment, shared-memory, and object-
 store profiles unresolved.
 
-The [2026-07-20 capability review](investigations/compiled-graph-capability-review-2026-07-20.json)
-records `no_promotion`, an empty verified row list, the exact workflow/head/tested-tree
-identities, the mutable runner-image context, job and artifact IDs, GitHub archive
-digests, and SHA-256 plus byte size for every retained evidence file. The hosted runner
-was requested through `ubuntu-latest`; its `ubuntu-24.04` image is not an immutable
-production KubeRay image, so no exact production tuple can be inferred from it.
+The [2026-08-02 policy review](investigations/compiled-graph-capability-review-2026-08-02.json)
+records `no_promotion` and an empty verified row list for policy version 3 after the
+package security floor removed Ray 2.53.0 from the candidate set. It retains the current
+2.56.0 and 2.56.1 observations from the
+[2026-07-20 capability review](investigations/compiled-graph-capability-review-2026-07-20.json),
+including their exact workflow/head/tested-tree identities, mutable runner-image
+context, job and artifact IDs, archive digests, and per-file hashes and sizes. The
+hosted runner was requested through `ubuntu-latest`; its `ubuntu-24.04` image is not an
+immutable production KubeRay image, so no exact production tuple can be inferred from
+it. The earlier policy-v2 review remains immutable historical provenance.
 
 GitHub expires these candidate artifacts on 2026-10-18. Expiry does not invalidate the
 safe no-promotion decision: an unavailable discovery artifact cannot make an empty

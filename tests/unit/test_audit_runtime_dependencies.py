@@ -18,7 +18,7 @@ def _write_test_project(project_root: Path) -> None:
         """\
 [project]
 name = "django-ray"
-dependencies = ["django>=6.0", "pyasn1>=0.6.4", "ray[default]>=2.53.0"]
+dependencies = ["django>=6.0", "pyasn1>=0.6.4", "ray[default]>=2.56.0"]
 
 [project.optional-dependencies]
 s3 = ["boto3>=1.34"]
@@ -39,7 +39,7 @@ django==6.0 \\
     --hash=sha256:bbb
 pyasn1==0.6.4 \\
     --hash=sha256:ccc
-ray==2.53.0 \\
+ray==2.56.0 \\
     --hash=sha256:ddd
 """,
         encoding="utf-8",
@@ -54,7 +54,7 @@ def _write_valid_sbom(sbom_path: Path) -> None:
                     {"name": "boto3", "version": "1.34.0"},
                     {"name": "django", "version": "6.0"},
                     {"name": "pyasn1", "version": "0.6.4"},
-                    {"name": "ray", "version": "2.53.0"},
+                    {"name": "ray", "version": "2.56.0"},
                 ]
             }
         ),
@@ -183,7 +183,7 @@ def test_audit_propagates_scanner_failure(tmp_path: Path, monkeypatch: pytest.Mo
             "django==6.0 \\\n    --hash=sha256:bbb\n"
             "django-ray==0.4.0 \\\n    --hash=sha256:eee\n"
             "pyasn1==0.6.4 \\\n    --hash=sha256:ccc\n"
-            "ray==2.53.0 \\\n    --hash=sha256:ddd\n",
+            "ray==2.56.0 \\\n    --hash=sha256:ddd\n",
             "must not include the django-ray project",
         ),
         (
@@ -191,14 +191,14 @@ def test_audit_propagates_scanner_failure(tmp_path: Path, monkeypatch: pytest.Mo
             "django==6.0 \\\n    --hash=sha256:bbb\n"
             "pip-audit==2.10.1 \\\n    --hash=sha256:fff\n"
             "pyasn1==0.6.4 \\\n    --hash=sha256:ccc\n"
-            "ray==2.53.0 \\\n    --hash=sha256:ddd\n",
+            "ray==2.56.0 \\\n    --hash=sha256:ddd\n",
             "must not include the development audit tool",
         ),
         (
             "boto3==1.34.0 \\\n    --hash=sha256:aaa\n"
             "django==6.0 \\\n    --hash=sha256:bbb\n"
             "pyasn1==0.6.4\n"
-            "ray==2.53.0 \\\n    --hash=sha256:ddd\n",
+            "ray==2.56.0 \\\n    --hash=sha256:ddd\n",
             "missing hashes for 'pyasn1'",
         ),
     ],

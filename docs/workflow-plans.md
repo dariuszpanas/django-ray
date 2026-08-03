@@ -286,7 +286,7 @@ or a database schema:
     "django_ray_plan_api": 1,
     "compiled_graph": {
       "schema_version": 2,
-      "policy_version": 2,
+      "policy_version": 3,
       "reason": "CANDIDATE_REQUIRES_SMOKE",
       "topology": "nested-ray-task",
       "submission_transport": "direct-ray-core",

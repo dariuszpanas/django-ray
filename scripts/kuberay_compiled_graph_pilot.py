@@ -38,6 +38,9 @@ from uuid import uuid4
 
 from django_ray.runtime.compiled_graph import (
     _PROFILE_DISTRIBUTIONS,
+    COMPILED_GRAPH_CAPABILITY_SCHEMA_VERSION,
+    COMPILED_GRAPH_POLICY_VERSION,
+    CompiledGraphCapabilityDecision,
     CompiledGraphReason,
     CompiledGraphRuntimeIdentity,
     CompiledGraphSubmissionTransport,
@@ -57,6 +60,12 @@ from django_ray.runtime.compiled_graph_probe import (
 )
 
 PILOT_SCHEMA_VERSION = 1
+_HISTORICAL_COMPILED_GRAPH_POLICY_VERSIONS = frozenset({2})
+_CANDIDATE_REQUIRES_SMOKE_MESSAGE = (
+    "Runtime matches a candidate Compiled Graph row, but no reviewed native "
+    "subprocess smoke verifies this exact capability tuple. Dynamic execution "
+    "remains available."
+)
 PROFILE_NAME = "django-ray-cgraph-kuberay-cpu-v1"
 PILOT_NAMESPACE = "django-ray-cgraph-pilot"
 RAYCLUSTER_NAME = "django-ray-cgraph-pilot"
@@ -4051,6 +4060,8 @@ def _require_exact_pilot_dependency_profile(profile: dict[str, Any]) -> dict[str
 def _evaluate_exact_pilot_profile_admission(
     expected_identity: dict[str, str | None],
     observed_identity: dict[str, str | None],
+    *,
+    policy_version: Any = COMPILED_GRAPH_POLICY_VERSION,
 ) -> dict[str, Any]:
     """Apply the pilot's exact-profile gate before any native subprocess."""
 
@@ -4060,11 +4071,10 @@ def _evaluate_exact_pilot_profile_admission(
         name for name, expected in expected_identity.items() if observed_identity[name] != expected
     )
     runtime = CompiledGraphRuntimeIdentity(**observed_identity)
-    decision = evaluate_compiled_graph_support(
-        CompiledGraphTopology.DIRECT_DRIVER,
-        CompiledGraphTransport.CPU_SHARED_MEMORY,
-        submission_transport=CompiledGraphSubmissionTransport.DIRECT_RAY_CORE,
-        runtime=runtime,
+    decision = _candidate_smoke_decision(
+        runtime,
+        CompiledGraphTopology.DIRECT_DRIVER.value,
+        policy_version=policy_version,
     )
     admitted = not changed_dimensions
     return {
@@ -4164,7 +4174,7 @@ def _validate_native_observation(
         ),
     )
     if identity != expected_identity:
-        raise PilotError(f"policy-v2 runtime identity changed: {identity!r}")
+        raise PilotError(f"policy-v3 runtime identity changed: {identity!r}")
     if decision.runtime.asdict() != identity:
         raise PilotError("parent capability decision and child runtime identity differ")
     if (
@@ -4380,12 +4390,69 @@ def _is_exact_json_integer(value: Any, *, expected: int | None = None) -> bool:
     return type(value) is int and (expected is None or value == expected)
 
 
+def _candidate_smoke_decision(
+    identity: CompiledGraphRuntimeIdentity,
+    topology: str,
+    *,
+    policy_version: Any,
+) -> CompiledGraphCapabilityDecision:
+    """Recreate a current or explicitly retained candidate decision."""
+    if policy_version == COMPILED_GRAPH_POLICY_VERSION:
+        decision = evaluate_compiled_graph_support(
+            topology,
+            CompiledGraphTransport.CPU_SHARED_MEMORY,
+            submission_transport=CompiledGraphSubmissionTransport.DIRECT_RAY_CORE,
+            runtime=identity,
+        )
+    elif type(policy_version) is int and policy_version in (
+        _HISTORICAL_COMPILED_GRAPH_POLICY_VERSIONS
+    ):
+        capability_payload = {
+            **identity.asdict(),
+            "topology": topology,
+            "submission_transport": CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value,
+            "transport": CompiledGraphTransport.CPU_SHARED_MEMORY.value,
+        }
+        capability_bytes = json.dumps(
+            capability_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        decision = CompiledGraphCapabilityDecision(
+            eligible=False,
+            reason=CompiledGraphReason.CANDIDATE_REQUIRES_SMOKE,
+            message=_CANDIDATE_REQUIRES_SMOKE_MESSAGE,
+            topology=topology,
+            submission_transport=CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value,
+            transport=CompiledGraphTransport.CPU_SHARED_MEMORY.value,
+            runtime=identity,
+            candidate=True,
+            verified=False,
+            capability_set=(
+                f"ray-cgraph-policy-v{policy_version}:{sha256(capability_bytes).hexdigest()}"
+            ),
+            schema_version=COMPILED_GRAPH_CAPABILITY_SCHEMA_VERSION,
+            policy_version=policy_version,
+        )
+    else:
+        raise PilotError("blocked evidence topology identity or policy proof is inconsistent")
+    if (
+        decision.reason is not CompiledGraphReason.CANDIDATE_REQUIRES_SMOKE
+        or decision.eligible
+        or not decision.candidate
+        or decision.verified
+    ):
+        raise PilotError("blocked evidence policy identity no longer reaches the smoke gate")
+    return decision
+
+
 def _expected_retained_decision(
     profile: dict[str, Any],
     record: dict[str, Any],
     topology: str,
     *,
     shared_memory_bytes: int,
+    policy_version: Any = COMPILED_GRAPH_POLICY_VERSION,
 ) -> Any:
     identity = CompiledGraphRuntimeIdentity(
         **_expected_policy_identity(
@@ -4396,20 +4463,11 @@ def _expected_retained_decision(
             shared_memory_profile=f"tmpfs:/dev/shm:size={shared_memory_bytes}",
         )
     )
-    decision = evaluate_compiled_graph_support(
+    return _candidate_smoke_decision(
+        identity,
         topology,
-        CompiledGraphTransport.CPU_SHARED_MEMORY,
-        submission_transport=CompiledGraphSubmissionTransport.DIRECT_RAY_CORE,
-        runtime=identity,
+        policy_version=policy_version,
     )
-    if (
-        decision.reason is not CompiledGraphReason.CANDIDATE_REQUIRES_SMOKE
-        or decision.eligible
-        or not decision.candidate
-        or decision.verified
-    ):
-        raise PilotError("blocked evidence policy identity no longer reaches the smoke gate")
-    return decision
 
 
 def _validate_retained_probe_outcome(
@@ -4604,11 +4662,15 @@ def _validate_retained_topology_outcome(
     profile: dict[str, Any],
     record: dict[str, Any],
 ) -> None:
+    retained_decision = outcome.get("decision")
+    if not isinstance(retained_decision, dict):
+        raise PilotError("blocked evidence topology identity or policy proof is inconsistent")
     expected_decision = _expected_retained_decision(
         profile,
         record,
         topology,
         shared_memory_bytes=profile["cluster"]["shared_memory_bytes_per_pod"],
+        policy_version=retained_decision.get("policy_version"),
     )
     expected_keys = {
         "schema_version",
@@ -4765,13 +4827,27 @@ def _validate_retained_near_neighbor(
         **baseline_identity,
         "shared_memory_profile": f"tmpfs:/dev/shm:size={changed_bytes}",
     }
+    baseline_admission = value.get("baseline_admission")
+    changed_admission = value.get("changed_admission")
+    if not isinstance(baseline_admission, dict) or not isinstance(changed_admission, dict):
+        raise PilotError("blocked evidence near-neighbor proof is inconsistent")
+    baseline_decision = baseline_admission.get("decision")
+    changed_decision = changed_admission.get("decision")
+    if not isinstance(baseline_decision, dict) or not isinstance(changed_decision, dict):
+        raise PilotError("blocked evidence near-neighbor proof is inconsistent")
+    baseline_policy_version = baseline_decision.get("policy_version")
+    changed_policy_version = changed_decision.get("policy_version")
+    if baseline_policy_version != changed_policy_version:
+        raise PilotError("blocked evidence near-neighbor proof is inconsistent")
     expected_baseline_admission = _evaluate_exact_pilot_profile_admission(
         baseline_identity,
         baseline_identity,
+        policy_version=baseline_policy_version,
     )
     expected_changed_admission = _evaluate_exact_pilot_profile_admission(
         baseline_identity,
         changed_identity,
+        policy_version=changed_policy_version,
     )
     if (
         set(value) != expected_keys

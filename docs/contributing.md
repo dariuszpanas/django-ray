@@ -753,7 +753,8 @@ operations.
 2. Keep active release work under `Unreleased`. Update the same development version
    in `pyproject.toml`, `src/django_ray/__init__.py`, `uv.lock`, and the release
    assertion.
-3. Run the candidate checks locally against the built wheel:
+3. Run the candidate checks locally against both built distributions and the installed
+   wheel:
 
 ```bash
 uv run make ci
@@ -761,7 +762,7 @@ uv run python scripts/validate_release.py --testpypi-candidate vX.Y.Z
 uv build
 uv run --isolated --no-project --python 3.12 \
   --with ./dist/django_ray-X.Y.Z-py3-none-any.whl \
-  python scripts/verify_wheel.py --version X.Y.Z
+  python scripts/verify_wheel.py --version X.Y.Z --dist-dir dist
 ```
 
 4. Merge the preparation PR only after its required checks pass. Fetch `origin` again,
@@ -777,9 +778,10 @@ Compiled Graph capability review to agree. It accepts the normal non-empty
 version. The production validator remains stricter: it requires one dated target
 heading and an empty `Unreleased` section.
 
-The installed-wheel smoke checks metadata, import provenance, management-command
-discovery, the exact migration leaf, and a fresh database migration. The release
-workflow repeats that wheel smoke on every supported Python version.
+The distribution smoke checks the wheel `METADATA` and sdist `PKG-INFO` security floor,
+then checks installed-wheel metadata, import provenance, management-command discovery,
+the exact migration leaf, and a fresh database migration. The release workflow repeats
+that gate on every supported Python version.
 
 After explicit authorization, an optional TestPyPI rehearsal can be dispatched from
 the exact current `main` commit:

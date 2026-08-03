@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # This digest is the linux/amd64 Ray 2.56.0 Python 3.12 image used by the
-# django-ray policy-v2 pilot. Updating it requires new #102-style evidence.
+# django-ray policy-v3 pilot. Updating it requires new #102-style evidence.
 ARG RAY_BASE_IMAGE=rayproject/ray@sha256:2951c07de396a8b746f9c678b52c6e2282e614e00f80e6846a9ccd12945ae6b0
 FROM ${RAY_BASE_IMAGE}
 

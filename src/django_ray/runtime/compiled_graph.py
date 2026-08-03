@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 COMPILED_GRAPH_CAPABILITY_SCHEMA_VERSION = 2
-COMPILED_GRAPH_POLICY_VERSION = 2
+COMPILED_GRAPH_POLICY_VERSION = 3
 _MAX_IDENTITY_FIELD_CHARS = 1_024
 _MAX_DECISION_TEXT_CHARS = 2_048
 _MAX_REQUEST_DIMENSION_CHARS = 256
@@ -197,11 +197,10 @@ class _CapabilityIdentity:
 
 # Exact versions are intentional. Compiled Graph is beta, and a future patch release is
 # not silently treated as equivalent until its subprocess canary has passed. 2.56.0 is
-# retained because it is the repository lock; 2.56.1 is the latest release when policy
-# version 1 was established.
+# retained because it is the package security floor and repository lock; 2.56.1 is the
+# latest release reviewed when the original candidate set was established.
 _CANDIDATE_RUNTIMES = frozenset(
     {
-        _CandidateRuntime("2.53.0", (3, 12)),
         _CandidateRuntime("2.56.0", (3, 12)),
         _CandidateRuntime("2.56.1", (3, 12)),
     }

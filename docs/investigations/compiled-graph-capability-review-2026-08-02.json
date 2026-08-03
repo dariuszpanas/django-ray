@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "review_id": "compiled-graph-capability-review-2026-08-02",
+  "reviewed_on": "2026-08-02",
+  "issue": "https://github.com/dariuszpanas/django-ray/issues/338",
+  "parent_issue": "https://github.com/dariuszpanas/django-ray/issues/86",
+  "policy_version": 3,
+  "capability_schema_version": 2,
+  "decision": "no_promotion",
+  "scope": "Policy-v3 review after raising the package security floor and removing Ray 2.53.0 from the candidate set; this is not a support claim.",
+  "decision_summary": "The retained 2.56.0 and 2.56.1 native probes succeeded, but neither captured the exact production container, immutable deployment, shared-memory, and object-store profiles required by policy version 3.",
+  "verified_capability_rows": [],
+  "quarantined_evidence_ids": [],
+  "workflow_run": {
+    "repository": "dariuszpanas/django-ray",
+    "workflow": ".github/workflows/ci.yml",
+    "workflow_id": 225192181,
+    "run_id": 29759326381,
+    "run_number": 182,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "url": "https://github.com/dariuszpanas/django-ray/actions/runs/29759326381",
+    "pull_request": "https://github.com/dariuszpanas/django-ray/pull/92",
+    "head_sha": "d54aa5d5e2d57a382e387bd0276e2dc16b61bd42",
+    "synthetic_merge_sha": "776b2f69bfdc30763abfd466732fd58eae14e704",
+    "tested_tree_sha": "e0820c5c07765d918476402f55446e8130b7923a",
+    "repository_merge_sha": "90aba75696f39b4d77dd0ef39e604ad167b973c1",
+    "started_at": "2026-07-20T16:22:37Z",
+    "completed_at": "2026-07-20T16:25:08Z",
+    "conclusion": "success",
+    "runner": {
+      "requested_labels": [
+        "ubuntu-latest"
+      ],
+      "image": "ubuntu-24.04",
+      "image_version": "20260714.240.1",
+      "immutable": false
+    }
+  },
+  "artifacts": [
+    {
+      "evidence_id": "github-actions:29759326381:artifact:8468066557",
+      "ray_version": "2.56.0",
+      "job_id": 88409701353,
+      "job_url": "https://github.com/dariuszpanas/django-ray/actions/runs/29759326381/job/88409701353",
+      "artifact_id": 8468066557,
+      "artifact_name": "compiled-graph-ray-2.56.0",
+      "artifact_url": "https://github.com/dariuszpanas/django-ray/actions/runs/29759326381/artifacts/8468066557",
+      "api_url": "https://api.github.com/repos/dariuszpanas/django-ray/actions/artifacts/8468066557",
+      "archive_size_bytes": 2304,
+      "archive_digest": "sha256:4430fefd13d1203cb2c84c9765da5eaa363fbdc0e30fc1117d323526966ccda9",
+      "created_at": "2026-07-20T16:23:01Z",
+      "expires_at": "2026-10-18T16:22:37Z",
+      "quarantined": false,
+      "files": [
+        {
+          "path": "environment.json",
+          "size_bytes": 177,
+          "sha256": "9bf7206cc54ffdfbe7ecd9d2e34c6c063289e46520ffe5678d31cdd68a453722"
+        },
+        {
+          "path": "packages.txt",
+          "size_bytes": 2005,
+          "sha256": "1644605ea4dff9ffa88ce1fa7a31b60f0f382318f23fce816134e0832bf6fa07"
+        },
+        {
+          "path": "probe.json",
+          "size_bytes": 1705,
+          "sha256": "dafc55d392a4d1a823a256afe0f906e811421e10de434a99ec0f676c6f6e7c05"
+        }
+      ],
+      "observation": {
+        "native_probe_status": "success",
+        "result_verified": true,
+        "adapter_eligible": false,
+        "adapter_reason": "INCOMPLETE_CAPABILITY_CONTEXT",
+        "topology": "nested-ray-task",
+        "submission_transport": "direct-ray-core",
+        "transport": "cpu-shared-memory",
+        "missing_dimensions": [
+          "deployment_profile",
+          "shared_memory_profile",
+          "object_store_profile",
+          "container_profile_specificity",
+          "deployment_profile_immutable"
+        ]
+      }
+    },
+    {
+      "evidence_id": "github-actions:29759326381:artifact:8468065248",
+      "ray_version": "2.56.1",
+      "job_id": 88409701415,
+      "job_url": "https://github.com/dariuszpanas/django-ray/actions/runs/29759326381/job/88409701415",
+      "artifact_id": 8468065248,
+      "artifact_name": "compiled-graph-ray-2.56.1",
+      "artifact_url": "https://github.com/dariuszpanas/django-ray/actions/runs/29759326381/artifacts/8468065248",
+      "api_url": "https://api.github.com/repos/dariuszpanas/django-ray/actions/artifacts/8468065248",
+      "archive_size_bytes": 2305,
+      "archive_digest": "sha256:e755fab0fe3b07ecf390fa193e2a409dc40232d3e83a8bc6db20e464a85d0bb5",
+      "created_at": "2026-07-20T16:22:58Z",
+      "expires_at": "2026-10-18T16:22:37Z",
+      "quarantined": false,
+      "files": [
+        {
+          "path": "environment.json",
+          "size_bytes": 177,
+          "sha256": "a9a1dcdf11c2e6aeeefe7107e0467f25f6e74f77f64a263cf86ca7164191f228"
+        },
+        {
+          "path": "packages.txt",
+          "size_bytes": 2005,
+          "sha256": "aa5255e36f5af57f33c05d1b8b43f01584bed9c296edd6b0d3c42857a2cdd6da"
+        },
+        {
+          "path": "probe.json",
+          "size_bytes": 1705,
+          "sha256": "1319909b6b2ecb01c025b12005f4c59829921f2276c74d39e83e149ee2621da8"
+        }
+      ],
+      "observation": {
+        "native_probe_status": "success",
+        "result_verified": true,
+        "adapter_eligible": false,
+        "adapter_reason": "INCOMPLETE_CAPABILITY_CONTEXT",
+        "topology": "nested-ray-task",
+        "submission_transport": "direct-ray-core",
+        "transport": "cpu-shared-memory",
+        "missing_dimensions": [
+          "deployment_profile",
+          "shared_memory_profile",
+          "object_store_profile",
+          "container_profile_specificity",
+          "deployment_profile_immutable"
+        ]
+      }
+    }
+  ],
+  "decision_basis": {
+    "retained_current_candidate_probes": 2,
+    "promotion_eligible_artifacts": 0,
+    "removed_pre_floor_candidates": [
+      "2.53.0"
+    ],
+    "shared_missing_dimensions": [
+      "deployment_profile",
+      "shared_memory_profile",
+      "object_store_profile",
+      "container_profile_specificity",
+      "deployment_profile_immutable"
+    ],
+    "limitations": [
+      "The generic GitHub-hosted runner identity is not an exact production KubeRay container profile.",
+      "No immutable production deployment or image digest was supplied.",
+      "The shared-memory and Ray object-store capacity and spill profiles were unresolved.",
+      "Native success for direct Ray Core submission does not authorize Ray Client or Ray Job submission.",
+      "Ray 2.53.0 evidence is retained only by the immutable policy-v2 review and is ineligible under the package security floor."
+    ]
+  },
+  "maintenance_policy": {
+    "latest_review_wins": true,
+    "no_promotion": {
+      "artifact_expiry_invalidates_policy": false,
+      "reason": "An expired discovery artifact cannot make an empty verified set less safe; retain its recorded hashes and collect fresh evidence before any promotion."
+    },
+    "verified_rows": {
+      "must_match_runtime_policy_exactly": true,
+      "evidence_ids_required": true,
+      "reviewed_on_required": true,
+      "revalidate_on_or_before_required": true,
+      "unexpired_artifacts_required": true,
+      "quarantined_rows_allowed": false
+    },
+    "quarantine_triggers": [
+      "A required canary for the exact row times out, crashes, or returns a mismatched result.",
+      "The runtime identity, owner topology, submission transport, or channel transport changes.",
+      "Ray, Python, ABI, dependency, kernel/libc, container, deployment, shared-memory, or object-store identity changes.",
+      "A relevant upstream regression or security advisory invalidates the reviewed evidence."
+    ]
+  },
+  "follow_up": {
+    "issue": "https://github.com/dariuszpanas/django-ray/issues/102",
+    "purpose": "Capture promotion-grade evidence in one pinned Linux/KubeRay image with all policy version 3 profiles supplied.",
+    "required_before_promotion": true
+  }
+}

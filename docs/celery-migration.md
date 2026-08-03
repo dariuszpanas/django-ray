@@ -40,7 +40,7 @@ django-ray's current supported boundary is:
 | Django | 6.0 or a newer compatible release, including Django's Tasks framework |
 | Database | PostgreSQL for production; SQLite is suitable for a local walkthrough |
 | Task manager | At least one `python manage.py django_ray_worker ...` process for each selected queue |
-| Ray | Ray 2.53.0 or a newer compatible release; align Ray and Python versions across task managers and Ray nodes |
+| Ray | Ray 2.56.0 or a newer compatible release; align Ray and Python versions across task managers and Ray nodes |
 | Production platform | Linux is recommended; evaluate Kubernetes locally through the documented KubeRay boundary and design production topology from its architecture checklist |
 
 Install the package, add `django_ray` to `INSTALLED_APPS`, configure at least one
