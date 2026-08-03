@@ -54,6 +54,8 @@ project resources, task stats, and a smoke-task trigger:
 ## Development
 
 - [Contributing](contributing.md) - How to contribute
+- [Security policy](https://github.com/dariuszpanas/django-ray/security/policy) - Supported releases
+  and private vulnerability reporting
 - [Architecture](architecture.md) - System design overview
 - [Workflow Plan Contract](workflow-plans.md) - Versioned plan vocabulary,
   classification, identity, and strategy eligibility

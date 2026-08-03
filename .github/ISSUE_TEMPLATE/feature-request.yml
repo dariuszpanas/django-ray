@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a non-security improvement to django-ray
+title: "feat: "
+labels:
+  - enhancement
+assignees:
+  - dariuszpanas
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Suspected security vulnerability? Stop and use the [private vulnerability report](https://github.com/dariuszpanas/django-ray/security/advisories/new). Do not put vulnerability details, exploit instructions, credentials, secrets, or private data in a public issue.
+
+  - type: checkboxes
+    id: security-boundary
+    attributes:
+      label: Security check
+      options:
+        - label: This is an ordinary feature request, not a suspected security vulnerability, and it contains no credentials, secrets, or private data.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or adoption barrier
+      description: Describe the task-automation or orchestration problem from the user's perspective.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-outcome
+    attributes:
+      label: Proposed outcome
+      description: Describe the behavior or workflow you would like django-ray to support.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional. Describe current workarounds or adjacent Ray and Django capabilities.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional non-sensitive context
+      description: Optional. Do not include credentials, private data, or unredacted task payloads and diagnostics.
+    validations:
+      required: false

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/dariuszpanas/django-ray/security/advisories/new
+    about: Do not put vulnerability details, exploit instructions, or secrets in a public issue.

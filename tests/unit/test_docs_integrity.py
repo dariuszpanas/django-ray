@@ -8,16 +8,92 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from django_ray.conf.defaults import DEFAULTS
 
 ROOT = Path(__file__).parents[2]
 DOCS = ROOT / "docs"
 EVIDENCE_DIRECTORIES = {"benchmarks", "investigations"}
 SETTINGS_OUTSIDE_DJANGO_RAY = {"RAY_DASHBOARD_URL"}
+PRIVATE_VULNERABILITY_REPORT_URL = (
+    "https://github.com/dariuszpanas/django-ray/security/advisories/new"
+)
+SECURITY_POLICY_URL = "https://github.com/dariuszpanas/django-ray/security/policy"
 
 
 def test_repository_llms_guide_matches_published_copy() -> None:
     assert (ROOT / "llms.txt").read_bytes() == (DOCS / "llms.txt").read_bytes()
+
+
+def test_security_policy_is_private_bounded_and_discoverable() -> None:
+    policy = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    normalized_policy = " ".join(policy.split())
+
+    assert "## Supported versions" in policy
+    assert "Latest version published on PyPI" in policy
+    assert "Earlier versions" in policy
+    assert "does not maintain parallel security-support branches" in normalized_policy
+    assert PRIVATE_VULNERABILITY_REPORT_URL in policy
+    assert "Do **not** open a public issue, discussion, or pull request" in policy
+    assert "does not promise a response, fix, or disclosure deadline" in normalized_policy
+    assert "develop and test a fix before publishing exploit-enabling details" in normalized_policy
+    assert "sanitized, non-actionable public issue" in normalized_policy
+
+    root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    root_contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    docs_home = (DOCS / "README.md").read_text(encoding="utf-8")
+    docs_contributing = (DOCS / "contributing.md").read_text(encoding="utf-8")
+
+    assert SECURITY_POLICY_URL in root_readme
+    assert "[`SECURITY.md`](SECURITY.md)" in root_contributing
+    assert SECURITY_POLICY_URL in docs_home
+    assert SECURITY_POLICY_URL in docs_contributing
+    assert PRIVATE_VULNERABILITY_REPORT_URL in docs_contributing
+
+
+def test_issue_forms_keep_vulnerability_details_private() -> None:
+    template_directory = ROOT / ".github" / "ISSUE_TEMPLATE"
+    config = yaml.safe_load((template_directory / "config.yml").read_text(encoding="utf-8"))
+    bug_form = yaml.safe_load((template_directory / "bug-report.yml").read_text(encoding="utf-8"))
+    feature_form = yaml.safe_load(
+        (template_directory / "feature-request.yml").read_text(encoding="utf-8")
+    )
+    security_contact_form = yaml.safe_load(
+        (template_directory / "security-contact.yml").read_text(encoding="utf-8")
+    )
+
+    assert config["blank_issues_enabled"] is False
+    security_link = next(
+        link for link in config["contact_links"] if link["url"] == PRIVATE_VULNERABILITY_REPORT_URL
+    )
+    assert "privately" in security_link["name"].lower()
+    assert "public issue" in security_link["about"].lower()
+    assert "secrets" in security_link["about"].lower()
+
+    assert bug_form["labels"] == ["bug"]
+    assert bug_form["assignees"] == ["dariuszpanas"]
+    assert feature_form["labels"] == ["enhancement"]
+    assert feature_form["assignees"] == ["dariuszpanas"]
+    for issue_form in (bug_form, feature_form):
+        rendered_form = str(issue_form)
+        assert PRIVATE_VULNERABILITY_REPORT_URL in rendered_form
+        assert "not a suspected security vulnerability" in rendered_form
+        assert "credentials, secrets, or private data" in rendered_form
+
+    assert security_contact_form["labels"] == ["area:security"]
+    assert security_contact_form["assignees"] == ["dariuszpanas"]
+    assert {item["type"] for item in security_contact_form["body"]} == {
+        "checkboxes",
+        "markdown",
+    }
+    rendered_security_contact = str(security_contact_form)
+    assert PRIVATE_VULNERABILITY_REPORT_URL in rendered_security_contact
+    assert "private vulnerability report and it is unavailable" in rendered_security_contact
+    assert (
+        "affected component or version, impact, reproduction details" in rendered_security_contact
+    )
+    assert "credentials, secrets, or private data" in rendered_security_contact
 
 
 def _nav_markdown_paths(value: Any) -> set[Path]:
