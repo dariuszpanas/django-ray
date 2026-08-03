@@ -29,7 +29,11 @@ from django_ray.observability import (
     get_workflow_progress as get_public_workflow_progress,
 )
 from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
-from django_ray.runtime.context import WORKFLOW_PROGRESS_SCHEMA_VERSION, WorkflowRunIdentity
+from django_ray.runtime.context import (
+    WORKFLOW_PROGRESS_SCHEMA_VERSION,
+    DurableTaskContext,
+    WorkflowRunIdentity,
+)
 from django_ray.workflow_plans import (
     PLAN_DOMAIN_SEPARATOR,
     PLAN_FORMAT,
@@ -41,7 +45,7 @@ from django_ray.workflow_progress import (
     WorkflowProgressReadSource,
     WorkflowProgressSummaryConflictError,
     _assign_workflow_progress_summary_locked,
-    claim_workflow_run,
+    allocate_workflow_run,
     persist_workflow_progress_summary,
     read_workflow_progress,
 )
@@ -926,12 +930,15 @@ def test_claiming_replacement_run_clears_v3_and_legacy_progress(running_executio
     assert persist_workflow_progress_summary(old, _summary(old))
     running_execution.progress_data = json.dumps({"schema_version": 1, "revision": 7})
     running_execution.save(update_fields=["progress_data"])
-    replacement = _identity(
-        running_execution,
-        "00000000-0000-0000-0000-000000000126",
+    replacement = allocate_workflow_run(
+        DurableTaskContext(
+            task_pk=running_execution.pk,
+            attempt_number=running_execution.attempt_number,
+            execution_generation=running_execution.execution_generation,
+        )
     )
 
-    assert claim_workflow_run(replacement)
+    assert replacement is not None
     running_execution.refresh_from_db()
     assert running_execution.workflow_progress_summary_json is None
     assert running_execution.progress_data is None

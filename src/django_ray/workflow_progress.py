@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from secrets import randbits
 from typing import Any
 from uuid import UUID
 
-from django.db import transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Case, F, Func, IntegerField, Q, TextField, Value, When
 from django.utils import timezone
 
@@ -17,6 +19,7 @@ from django_ray.models import RayTaskExecution, TaskState, WorkflowProgressRunSt
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
     WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION,
+    DurableTaskContext,
     WorkflowRunIdentity,
 )
 from django_ray.workflow_plans import (
@@ -38,8 +41,16 @@ from django_ray.workflow_progress_summary import (
 )
 
 MAX_PLAN_SELECTION_BYTES = 16 * 1024
+WORKFLOW_RUN_NAMESPACE_MAX = (1 << 63) - 1
+WORKFLOW_RUN_NAMESPACE_ALLOCATION_ATTEMPTS = 3
+WORKFLOW_RUN_SEQUENCE_MAX = (1 << 59) - 1
 _MAX_RUN_IDENTITY_INTEGER = (1 << 63) - 1
 _MAX_SUMMARY_REVISION = (1 << 63) - 1
+_UUID_LOW_PAYLOAD_MASK = (1 << 62) - 1
+_WORKFLOW_RUN_NAMESPACE_UNIQUE_CONSTRAINT = "ray_task_wf_run_ns_uniq"
+_SQLITE_WORKFLOW_RUN_NAMESPACE_UNIQUE_ERROR = (
+    "UNIQUE constraint failed: django_ray_raytaskexecution.workflow_run_namespace"
+)
 _RUN_IDENTITY_KEYS = frozenset(
     {
         "schema_version",
@@ -49,10 +60,15 @@ _RUN_IDENTITY_KEYS = frozenset(
         "execution_generation",
     }
 )
+logger = logging.getLogger(__name__)
 
 
 class WorkflowProgressSummaryConflictError(RuntimeError):
     """Raised when a valid summary conflicts with already accepted state."""
+
+
+class WorkflowRunAllocationError(RuntimeError):
+    """Raised when database-authoritative workflow-run allocation cannot advance."""
 
 
 class WorkflowProgressReadSource(StrEnum):
@@ -145,13 +161,230 @@ def _diagnostic(
     )
 
 
-def claim_workflow_run(
+def _workflow_run_id(namespace: int, sequence: int) -> str:
+    """Encode one database namespace and sequence injectively as UUIDv8."""
+    if not 1 <= namespace <= WORKFLOW_RUN_NAMESPACE_MAX:
+        raise WorkflowRunAllocationError("django-ray: workflow run allocation namespace is invalid")
+    if not 1 <= sequence <= WORKFLOW_RUN_SEQUENCE_MAX:
+        raise WorkflowRunAllocationError(
+            "django-ray: workflow run allocation sequence is exhausted"
+        )
+    payload = (namespace << 59) | sequence
+    value = (
+        ((payload >> 74) << 80)
+        | (8 << 76)
+        | (((payload >> 62) & 0xFFF) << 64)
+        | (2 << 62)
+        | (payload & _UUID_LOW_PAYLOAD_MASK)
+    )
+    return str(UUID(int=value))
+
+
+def _is_workflow_run_namespace_unique_violation(error: IntegrityError) -> bool:
+    """Identify only the constraint that owns workflow-run namespaces."""
+    cause = error.__cause__
+    diagnostics = getattr(cause, "diag", None)
+    constraint_name = getattr(diagnostics, "constraint_name", None)
+    if constraint_name is not None:
+        return constraint_name == _WORKFLOW_RUN_NAMESPACE_UNIQUE_CONSTRAINT
+
+    if connection.vendor != "sqlite" or cause is None:
+        return False
+    return (
+        getattr(cause, "sqlite_errorname", None) == "SQLITE_CONSTRAINT_UNIQUE"
+        and str(cause) == _SQLITE_WORKFLOW_RUN_NAMESPACE_UNIQUE_ERROR
+    )
+
+
+def _reserve_workflow_run_namespace(execution: RayTaskExecution) -> int:
+    """Reserve one opaque database-unique namespace with bounded retries."""
+    existing = execution.workflow_run_namespace
+    if existing is not None:
+        if not isinstance(existing, int) or not 1 <= existing <= WORKFLOW_RUN_NAMESPACE_MAX:
+            raise WorkflowRunAllocationError(
+                "django-ray: workflow run allocation namespace is invalid"
+            )
+        return existing
+
+    for allocation_attempt in range(1, WORKFLOW_RUN_NAMESPACE_ALLOCATION_ATTEMPTS + 1):
+        candidate = randbits(63)
+        if candidate != 0:
+            try:
+                # The savepoint keeps the surrounding ownership transaction
+                # usable after PostgreSQL rejects a colliding namespace.
+                with transaction.atomic():
+                    updated = RayTaskExecution.objects.filter(
+                        pk=execution.pk,
+                        state=TaskState.RUNNING,
+                        attempt_number=execution.attempt_number,
+                        execution_generation=execution.execution_generation,
+                        workflow_run_namespace__isnull=True,
+                    ).update(workflow_run_namespace=candidate)
+            except IntegrityError as error:
+                if not _is_workflow_run_namespace_unique_violation(error):
+                    raise
+            else:
+                if updated == 1:
+                    execution.workflow_run_namespace = candidate
+                    return candidate
+                current = (
+                    RayTaskExecution.objects.filter(pk=execution.pk)
+                    .values_list(
+                        "workflow_run_namespace",
+                        flat=True,
+                    )
+                    .first()
+                )
+                if current is not None and 1 <= current <= WORKFLOW_RUN_NAMESPACE_MAX:
+                    execution.workflow_run_namespace = current
+                    return current
+                raise WorkflowRunAllocationError(
+                    "django-ray: workflow run allocation lost its execution fence"
+                )
+
+        if allocation_attempt < WORKFLOW_RUN_NAMESPACE_ALLOCATION_ATTEMPTS:
+            logger.warning(
+                "Workflow run namespace candidate collided; retrying allocation",
+                extra={
+                    "allocation_attempt": allocation_attempt,
+                    "allocation_limit": WORKFLOW_RUN_NAMESPACE_ALLOCATION_ATTEMPTS,
+                },
+            )
+
+    logger.error(
+        "Workflow run namespace allocation exhausted its collision budget",
+        extra={
+            "allocation_attempt": WORKFLOW_RUN_NAMESPACE_ALLOCATION_ATTEMPTS,
+            "allocation_limit": WORKFLOW_RUN_NAMESPACE_ALLOCATION_ATTEMPTS,
+        },
+    )
+    raise WorkflowRunAllocationError(
+        "django-ray: could not allocate a workflow run namespace after 3 attempts"
+    )
+
+
+def _advance_workflow_run_sequence(execution: RayTaskExecution) -> int | None:
+    """Atomically reserve the next sequence while the execution fence is current."""
+    updated = RayTaskExecution.objects.filter(
+        pk=execution.pk,
+        state=TaskState.RUNNING,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+        workflow_run_sequence__lt=WORKFLOW_RUN_SEQUENCE_MAX,
+    ).update(workflow_run_sequence=F("workflow_run_sequence") + 1)
+    if updated != 1:
+        still_current = (
+            RayTaskExecution.objects.filter(
+                pk=execution.pk,
+                state=TaskState.RUNNING,
+                attempt_number=execution.attempt_number,
+                execution_generation=execution.execution_generation,
+            )
+            .values_list("workflow_run_sequence", flat=True)
+            .first()
+        )
+        if still_current is None:
+            return None
+        raise WorkflowRunAllocationError(
+            "django-ray: workflow run allocation sequence is exhausted"
+        )
+    execution.refresh_from_db(fields=["workflow_run_sequence"])
+    sequence = execution.workflow_run_sequence
+    if not isinstance(sequence, int):
+        raise WorkflowRunAllocationError("django-ray: workflow run allocation sequence is invalid")
+    return sequence
+
+
+def _activate_workflow_run(
+    execution: RayTaskExecution,
+    identity: WorkflowRunIdentity,
+    *,
+    plan: EffectiveWorkflowPlan | None = None,
+    selection: PlanSelection | None = None,
+) -> None:
+    """Replace current ownership on one already locked execution row."""
+    previous_run_id = execution.workflow_run_id
+    if previous_run_id is not None and str(previous_run_id) != identity.run_id:
+        WorkflowProgressRunStorage.objects.filter(
+            execution=execution,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+            run_id=previous_run_id,
+        ).delete()
+    update_fields = [
+        "workflow_run_id",
+        "progress_data",
+        "workflow_progress_summary_json",
+    ]
+    execution.workflow_run_id = identity.run_id
+    execution.progress_data = None
+    execution.workflow_progress_summary_json = None
+    if plan is not None and selection is not None:
+        update_fields.extend(_pin_plan_fields(execution, plan, selection))
+    execution.last_heartbeat_at = timezone.now()
+    update_fields.append("last_heartbeat_at")
+    execution.save(update_fields=list(dict.fromkeys(update_fields)))
+
+
+def allocate_workflow_run(
+    task_context: DurableTaskContext,
+    *,
+    plan: EffectiveWorkflowPlan | None = None,
+    selection: PlanSelection | None = None,
+) -> WorkflowRunIdentity | None:
+    """Allocate fresh ownership from a database namespace and monotonic sequence."""
+    if (plan is None) != (selection is None):
+        raise ValueError("workflow plan and selection must be supplied together")
+    if task_context.attempt_number is None or task_context.execution_generation is None:
+        return None
+    with transaction.atomic():
+        execution = (
+            RayTaskExecution.objects.select_for_update()
+            .filter(
+                pk=task_context.task_pk,
+                state=TaskState.RUNNING,
+                attempt_number=task_context.attempt_number,
+                execution_generation=task_context.execution_generation,
+            )
+            .first()
+        )
+        if execution is None:
+            return None
+        namespace = _reserve_workflow_run_namespace(execution)
+        previous_run_id = (
+            str(execution.workflow_run_id) if execution.workflow_run_id is not None else None
+        )
+        for collision_attempt in range(1, 3):
+            sequence = _advance_workflow_run_sequence(execution)
+            if sequence is None:
+                return None
+            identity = WorkflowRunIdentity(
+                task_execution_pk=execution.pk,
+                attempt_number=execution.attempt_number,
+                execution_generation=execution.execution_generation,
+                run_id=_workflow_run_id(namespace, sequence),
+            )
+            if identity.run_id != previous_run_id:
+                break
+            logger.warning(
+                "Workflow run ID candidate matched current ownership; advancing sequence",
+                extra={"allocation_attempt": collision_attempt},
+            )
+        else:
+            raise WorkflowRunAllocationError(
+                "django-ray: workflow run allocation could not advance ownership"
+            )
+        _activate_workflow_run(execution, identity, plan=plan, selection=selection)
+        return identity
+
+
+def reclaim_workflow_run(
     identity: WorkflowRunIdentity,
     *,
     plan: EffectiveWorkflowPlan | None = None,
     selection: PlanSelection | None = None,
 ) -> bool:
-    """Claim current progress ownership for one running workflow invocation."""
+    """Reclaim only the exact current identity without allocating a fresh run."""
     if (plan is None) != (selection is None):
         raise ValueError("workflow plan and selection must be supplied together")
     with transaction.atomic():
@@ -162,33 +395,24 @@ def claim_workflow_run(
                 state=TaskState.RUNNING,
                 attempt_number=identity.attempt_number,
                 execution_generation=identity.execution_generation,
+                workflow_run_id=identity.run_id,
             )
             .first()
         )
         if execution is None:
             return False
-        previous_run_id = execution.workflow_run_id
-        if previous_run_id is not None and str(previous_run_id) != identity.run_id:
-            WorkflowProgressRunStorage.objects.filter(
-                execution=execution,
-                attempt_number=execution.attempt_number,
-                execution_generation=execution.execution_generation,
-                run_id=previous_run_id,
-            ).delete()
-        update_fields = [
-            "workflow_run_id",
-            "progress_data",
-            "workflow_progress_summary_json",
-        ]
-        execution.workflow_run_id = identity.run_id
-        execution.progress_data = None
-        execution.workflow_progress_summary_json = None
-        if plan is not None and selection is not None:
-            update_fields.extend(_pin_plan_fields(execution, plan, selection))
-        execution.last_heartbeat_at = timezone.now()
-        update_fields.append("last_heartbeat_at")
-        execution.save(update_fields=list(dict.fromkeys(update_fields)))
+        _activate_workflow_run(execution, identity, plan=plan, selection=selection)
         return True
+
+
+def claim_workflow_run(
+    identity: WorkflowRunIdentity,
+    *,
+    plan: EffectiveWorkflowPlan | None = None,
+    selection: PlanSelection | None = None,
+) -> bool:
+    """Compatibility spelling for exact reclaim; this function never allocates."""
+    return reclaim_workflow_run(identity, plan=plan, selection=selection)
 
 
 def pin_workflow_plan(
@@ -789,8 +1013,11 @@ __all__ = [
     "WorkflowProgressReadResult",
     "WorkflowProgressReadSource",
     "WorkflowProgressSummaryConflictError",
+    "WorkflowRunAllocationError",
+    "allocate_workflow_run",
     "claim_workflow_run",
     "pin_workflow_plan",
+    "reclaim_workflow_run",
     "refresh_workflow_run_activity",
     "persist_workflow_progress",
     "persist_workflow_progress_summary",

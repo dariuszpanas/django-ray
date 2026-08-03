@@ -9,7 +9,19 @@ from pathlib import Path
 
 import pytest
 
-from scripts.verify_wheel import verify_distribution_archives
+from scripts.verify_wheel import (
+    EXPECTED_FILES,
+    EXPECTED_MIGRATION_LEAF,
+    verify_distribution_archives,
+)
+
+
+def test_release_boundary_tracks_workflow_run_allocation_migration() -> None:
+    assert "django_ray/migrations/0018_workflow_run_allocation.py" in EXPECTED_FILES
+    assert EXPECTED_MIGRATION_LEAF == (
+        "django_ray",
+        "0018_workflow_run_allocation",
+    )
 
 
 def _metadata(*, ray_requirement: str = "ray[default]>=2.56.0") -> bytes:

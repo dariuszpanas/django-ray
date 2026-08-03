@@ -58,6 +58,4 @@ def test_existing_and_rolling_writer_rows_gain_nullable_plan_fields() -> None:
             field.name for field in reverted_execution._meta.get_fields()
         }
     finally:
-        MigrationExecutor(connection).migrate(
-            [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
-        )
+        MigrationExecutor(connection).migrate([("django_ray", "0018_workflow_run_allocation")])

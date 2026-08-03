@@ -162,9 +162,7 @@ def _assert_priority_migration_round_trip() -> None:
             .values_list("task_id", flat=True)
         ) == ["priority-migration-older", "priority-migration-newer"]
     finally:
-        MigrationExecutor(connection).migrate(
-            [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
-        )
+        MigrationExecutor(connection).migrate([("django_ray", "0018_workflow_run_allocation")])
 
 
 @pytest.mark.django_db(transaction=True)

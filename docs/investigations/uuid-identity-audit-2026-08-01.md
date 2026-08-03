@@ -13,7 +13,7 @@ generation fence used after an identifier is created.
 |---|---|---|
 | Public Django task-result UUID | The baseline allowed duplicate durable rows. Distinct database primary keys let both rows execute, while public result lookup became ambiguous. Migration `0015` and the enqueue allocator add a named global uniqueness constraint, exact database-error classification, bounded candidate regeneration, and fail-closed exhaustion. | Fix in #292 before 0.4.0. |
 | Worker lease UUID | The baseline worker uses `update_or_create()`, so a second process can overwrite and adopt a live lease. Ownership can alias and leave a Ray Job indefinitely `RUNNING`. | Fix in #293 before 0.4.0. |
-| Workflow run UUID | Different task, attempt, or generation tuples cannot alias. Within the exact tuple, a repeated UUID is interpreted as intentional reclaim and can mix diagnostic progress, although task/result generation fences still prevent duplicate application execution. | Future observability hardening in #295. |
+| Workflow run UUID | Fresh allocation reserves an opaque namespace under a database uniqueness constraint, advances a non-resetting per-execution sequence, and injectively encodes both values as UUIDv8. Repeated namespace candidates are retried instead of adopted, while a separate exact-current reclaim path preserves coordinator restart semantics without allocating a fresh identity. | Fixed in #295 for 0.4.0. |
 | Compiled invocation UUID | Duplicate admission is rejected, and every adapter callback carries a monotonic action token. | No release action. |
 | Topology manifest UUID | The UUID is a database primary key. A collision becomes a storage conflict and the staging transaction rolls back without adoption. | No release action. |
 | Preparation workspace and quarantine UUID | Exclusive directory creation or an explicit existence check fails closed without touching the pre-existing path. | No release action. |
@@ -48,8 +48,11 @@ registration back and creates no claimable task.
 
 ## Scale interpretation
 
-UUIDv4 supplies 122 random bits. Its birthday-collision probability remains tiny even
-at very large volumes, but a repeated or faulty randomness source can collide
-immediately. Database uniqueness, exact error classification, generation fences, and
-exclusive ownership are therefore the safety controls; UUID probability is only a
-capacity characteristic.
+UUIDv4 supplies 122 random bits. Its birthday-collision probability remains tiny even at
+very large volumes, but a repeated or faulty randomness source can collide immediately.
+Database uniqueness, exact error classification, generation fences, and exclusive
+ownership are therefore the safety controls; UUID probability is only a capacity
+characteristic. Workflow UUIDv8 values use those 122 payload bits as an exact 63-bit
+database-unique namespace plus a 59-bit non-resetting row sequence. The database retries
+a colliding namespace candidate, and the injective encoding then makes every fresh run
+distinct across retained execution rows as well as repeated allocations of one row.

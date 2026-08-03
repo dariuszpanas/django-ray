@@ -45,7 +45,11 @@ class WorkflowRunIdentity:
 
     @classmethod
     def create(cls, task_context: DurableTaskContext) -> WorkflowRunIdentity | None:
-        """Create a run identity when the durable context is fenceable."""
+        """Create an unclaimed compatibility identity when context is fenceable.
+
+        Fresh durable ownership is allocated by ``allocate_workflow_run()``. A value
+        returned here cannot bootstrap ownership through the reclaim-only claim API.
+        """
         if task_context.attempt_number is None or task_context.execution_generation is None:
             return None
         return cls(

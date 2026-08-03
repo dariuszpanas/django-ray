@@ -29,6 +29,8 @@ _WORKFLOW_DETAIL_EVENT_LIMIT = 32
 _WORKFLOW_DETAIL_ENCODED_BYTES_LIMIT = 8 * 1024 * 1024
 _WORKFLOW_DETAIL_DECODED_BYTES_LIMIT = 16 * 1024 * 1024
 _WORKFLOW_DETAIL_RECORD_BYTES_LIMIT = 16 * 1024
+_WORKFLOW_RUN_NAMESPACE_MAX = (1 << 63) - 1
+_WORKFLOW_RUN_SEQUENCE_MAX = (1 << 59) - 1
 
 
 class TaskState(models.TextChoices):
@@ -262,6 +264,23 @@ class RayTaskExecution(models.Model):
         editable=False,
         help_text="Current workflow invocation allowed to persist progress",
     )
+    workflow_run_namespace = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(_WORKFLOW_RUN_NAMESPACE_MAX),
+        ],
+        help_text="Database-unique opaque namespace for workflow run IDs",
+    )
+    workflow_run_sequence = models.PositiveBigIntegerField(
+        default=0,
+        db_default=0,
+        editable=False,
+        validators=[MaxValueValidator(_WORKFLOW_RUN_SEQUENCE_MAX)],
+        help_text="Monotonic database allocation sequence for workflow run IDs",
+    )
     workflow_plan_fingerprint = models.CharField(
         max_length=71,
         null=True,
@@ -344,6 +363,27 @@ class RayTaskExecution(models.Model):
             models.CheckConstraint(
                 condition=models.Q(priority__gte=-100, priority__lte=100),
                 name="ray_task_priority_valid_range",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    workflow_run_sequence__gte=0,
+                    workflow_run_sequence__lte=_WORKFLOW_RUN_SEQUENCE_MAX,
+                ),
+                name="ray_task_wf_run_seq_cap",
+            ),
+            models.UniqueConstraint(
+                fields=["workflow_run_namespace"],
+                name="ray_task_wf_run_ns_uniq",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(workflow_run_namespace__isnull=True)
+                    | models.Q(
+                        workflow_run_namespace__gte=1,
+                        workflow_run_namespace__lte=_WORKFLOW_RUN_NAMESPACE_MAX,
+                    )
+                ),
+                name="ray_task_wf_run_ns_range",
             ),
         ]
         verbose_name = "Ray Task Execution"

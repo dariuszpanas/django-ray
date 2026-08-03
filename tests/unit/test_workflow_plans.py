@@ -49,7 +49,7 @@ from django_ray.workflow_plans import (
     runtime_env_plan_identity_from_transport,
     validate_plan_selection_manifest,
 )
-from django_ray.workflow_progress import claim_workflow_run, pin_workflow_plan
+from django_ray.workflow_progress import allocate_workflow_run, pin_workflow_plan
 from django_ray.workflow_progress_protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
@@ -223,6 +223,28 @@ def _materialize(signature, *args, context=BASE_CONTEXT, **kwargs):
         invocation_kwargs=kwargs,
         build_context=context,
     )
+
+
+def _task_context(execution: RayTaskExecution) -> DurableTaskContext:
+    return DurableTaskContext(
+        task_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+
+
+def _allocate(
+    execution: RayTaskExecution,
+    plan,
+    selection,
+) -> WorkflowRunIdentity:
+    identity = allocate_workflow_run(
+        _task_context(execution),
+        plan=plan,
+        selection=selection,
+    )
+    assert identity is not None
+    return identity
 
 
 @pytest.mark.django_db
@@ -2092,18 +2114,17 @@ def test_terminal_only_result_serialization_failure_publishes_only_failed_summar
     def return_unserializable_result() -> set[object]:
         context = get_current_task_context()
         assert context is not None
-        identity = WorkflowRunIdentity.create(context)
-        assert identity is not None
         selection = materialized.plan.eligibility.select(
             "dynamic_tasks",
             requested_policy="auto",
             reporting_policy="terminal_only",
         )
-        assert claim_workflow_run(
-            identity,
+        identity = allocate_workflow_run(
+            context,
             plan=materialized.plan,
             selection=selection,
         )
+        assert identity is not None
         return {object()}
 
     monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
@@ -2262,20 +2283,22 @@ def test_plan_pinning_enforces_serialized_plan_and_selection_bounds(
     )
     plan = _materialize(step(increment), 1).plan
     selection = plan.eligibility.select("dynamic_tasks", requested_policy="auto")
-    identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000091",
-    )
     oversized_plan = replace(plan, canonical_json="x" * (MAX_PLAN_BYTES + 1))
 
     with pytest.raises(ValueError, match="workflow plan exceeds persistence limit"):
-        claim_workflow_run(identity, plan=oversized_plan, selection=selection)
+        allocate_workflow_run(
+            _task_context(execution),
+            plan=oversized_plan,
+            selection=selection,
+        )
 
     monkeypatch.setattr("django_ray.workflow_progress.MAX_PLAN_SELECTION_BYTES", 1)
     with pytest.raises(ValueError, match="selection exceeds persistence limit"):
-        claim_workflow_run(identity, plan=plan, selection=selection)
+        allocate_workflow_run(
+            _task_context(execution),
+            plan=plan,
+            selection=selection,
+        )
 
 
 @pytest.mark.django_db
@@ -2290,15 +2313,12 @@ def test_plan_pinning_rejects_same_fingerprint_with_different_manifest() -> None
         workflow_plan_fingerprint=plan.fingerprint,
         workflow_plan_json="{}",
     )
-    identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000092",
-    )
-
     with pytest.raises(WorkflowPlanMismatchError, match="manifest does not match"):
-        claim_workflow_run(identity, plan=plan, selection=selection)
+        allocate_workflow_run(
+            _task_context(execution),
+            plan=plan,
+            selection=selection,
+        )
 
 
 @pytest.mark.django_db
@@ -2323,15 +2343,12 @@ def test_retry_unsafe_plan_message_reports_truncated_path_count() -> None:
         workflow_plan_json=plan.canonical_json,
         workflow_plan_pinned_attempt=1,
     )
-    identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000093",
-    )
-
     with pytest.raises(WorkflowPlanMismatchError, match="and 2 more"):
-        claim_workflow_run(identity, plan=unsafe_plan, selection=selection)
+        allocate_workflow_run(
+            _task_context(execution),
+            plan=unsafe_plan,
+            selection=selection,
+        )
 
 
 @pytest.mark.django_db
@@ -2344,28 +2361,16 @@ def test_retry_must_match_the_plan_pinned_by_the_first_attempt() -> None:
     )
     first_plan = _materialize(step(increment), 1).plan
     first_selection = first_plan.eligibility.select("dynamic_tasks", requested_policy="auto")
-    first_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000101",
-    )
-    assert claim_workflow_run(first_identity, plan=first_plan, selection=first_selection)
+    _allocate(execution, first_plan, first_selection)
     assert record_failure(execution, error_message="retry", retry=True)
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
     execution.refresh_from_db()
 
     replacement = _materialize(step(increment, ray_options={"num_cpus": 2}), 1).plan
     replacement_selection = replacement.eligibility.select("dynamic_tasks", requested_policy="auto")
-    retry_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000102",
-    )
     with pytest.raises(WorkflowPlanMismatchError, match="different effective plan"):
-        claim_workflow_run(
-            retry_identity,
+        allocate_workflow_run(
+            _task_context(execution),
             plan=replacement,
             selection=replacement_selection,
         )
@@ -2403,13 +2408,7 @@ def test_retry_rejects_result_buffer_resource_drift_before_effects() -> None:
         "dynamic_tasks",
         requested_policy="auto",
     )
-    first_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000121",
-    )
-    assert claim_workflow_run(first_identity, plan=first_plan, selection=first_selection)
+    _allocate(execution, first_plan, first_selection)
     assert record_failure(execution, error_message="retry", retry=True)
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
     execution.refresh_from_db()
@@ -2419,17 +2418,11 @@ def test_retry_rejects_result_buffer_resource_drift_before_effects() -> None:
         "dynamic_tasks",
         requested_policy="auto",
     )
-    retry_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000122",
-    )
     SIDE_EFFECTS.clear()
 
     with pytest.raises(WorkflowPlanMismatchError, match="different effective plan"):
-        claim_workflow_run(
-            retry_identity,
+        allocate_workflow_run(
+            _task_context(execution),
             plan=replacement,
             selection=replacement_selection,
         )
@@ -2457,43 +2450,20 @@ def test_retry_rejects_opaque_runtime_env_even_when_secret_free_plan_matches() -
     assert first_plan.retry_safe is False
     assert first_plan.retry_unsafe_paths == ("environments.by_node.0.spec.working_dir",)
     selection = first_plan.eligibility.select("dynamic_tasks", requested_policy="auto")
-    first_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000111",
-    )
-    assert claim_workflow_run(first_identity, plan=first_plan, selection=selection)
+    _allocate(execution, first_plan, selection)
 
     # Repeated binding in the same fenced attempt is allowed. A later durable
     # attempt is not, because the redacted URI cannot be compared to the pin.
-    same_attempt_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000112",
-    )
-    assert claim_workflow_run(
-        same_attempt_identity,
-        plan=rotated_plan,
-        selection=selection,
-    )
+    _allocate(execution, rotated_plan, selection)
     assert record_failure(execution, error_message="retry", retry=True)
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
     execution.refresh_from_db()
-    retry_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000113",
-    )
-
     with pytest.raises(
         WorkflowPlanMismatchError,
         match="cannot verify runtime environment",
     ) as error:
-        claim_workflow_run(
-            retry_identity,
+        allocate_workflow_run(
+            _task_context(execution),
             plan=rotated_plan,
             selection=selection,
         )
@@ -2533,24 +2503,11 @@ def test_retry_allows_content_hashed_local_runtime_env(tmp_path) -> None:
         state=TaskState.RUNNING,
         execution_generation=5,
     )
-    first_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000121",
-    )
-    assert claim_workflow_run(first_identity, plan=plan, selection=selection)
+    _allocate(execution, plan, selection)
     assert record_failure(execution, error_message="retry", retry=True)
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
     execution.refresh_from_db()
-    retry_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000122",
-    )
-
-    assert claim_workflow_run(retry_identity, plan=plan, selection=selection)
+    _allocate(execution, plan, selection)
     execution.refresh_from_db()
     assert execution.workflow_plan_pinned_attempt == 1
 
@@ -2582,13 +2539,7 @@ def test_rolling_writer_pin_attempt_is_initialized_only_for_retry_safe_plan() ->
         workflow_plan_fingerprint=safe_plan.fingerprint,
         workflow_plan_json=safe_plan.canonical_json,
     )
-    safe_identity = WorkflowRunIdentity(
-        safe_execution.pk,
-        safe_execution.attempt_number,
-        safe_execution.execution_generation,
-        "00000000-0000-0000-0000-000000000131",
-    )
-    assert claim_workflow_run(safe_identity, plan=safe_plan, selection=safe_selection)
+    _allocate(safe_execution, safe_plan, safe_selection)
     safe_execution.refresh_from_db()
     assert safe_execution.workflow_plan_pinned_attempt == 2
 
@@ -2606,16 +2557,9 @@ def test_rolling_writer_pin_attempt_is_initialized_only_for_retry_safe_plan() ->
         workflow_plan_fingerprint=unsafe_plan.fingerprint,
         workflow_plan_json=unsafe_plan.canonical_json,
     )
-    unsafe_identity = WorkflowRunIdentity(
-        unsafe_execution.pk,
-        unsafe_execution.attempt_number,
-        unsafe_execution.execution_generation,
-        "00000000-0000-0000-0000-000000000132",
-    )
-
     with pytest.raises(WorkflowPlanMismatchError, match="cannot verify runtime environment"):
-        claim_workflow_run(
-            unsafe_identity,
+        allocate_workflow_run(
+            _task_context(unsafe_execution),
             plan=unsafe_plan,
             selection=unsafe_selection,
         )

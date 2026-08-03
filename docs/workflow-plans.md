@@ -712,6 +712,42 @@ cleanup action is scoped to this identity. The plan fingerprint and definition r
 describe *what* is intended; run and invocation identity describe *which execution* may
 write current state.
 
+Fresh run creation and coordinator reclaim are distinct persistence operations:
+
+- `allocate_workflow_run()` accepts the durable task context but no caller-selected run
+  ID. It locks the current execution, reserves an opaque 63-bit namespace through a
+  database uniqueness constraint, advances a non-resetting 59-bit row sequence, and
+  injectively encodes the pair as UUIDv8. A repeated namespace candidate is retried
+  rather than adopted, while the complete outer attempt/generation fence remains
+  authoritative.
+- `reclaim_workflow_run()` succeeds only for the exact current four-field identity. It
+  does not advance the allocation sequence or adopt another ID. The compatibility
+  `claim_workflow_run()` spelling has the same reclaim-only behavior and cannot bootstrap
+  fresh ownership.
+- A restarted coordinator that durably retained its complete identity may reclaim it.
+  A restart without that proof allocates a fresh identity and fences the prior writer.
+  Reclaim keeps normalized run storage but clears the current snapshot projections so
+  the replacement coordinator can republish from its own revision stream.
+
+Migration `0018_workflow_run_allocation` initializes existing rows with a null namespace
+and sequence zero without changing their active run ID, so an exact legacy identity
+remains reclaimable. The sequence retains a database default of zero: a pre-`0018`
+enqueue writer can omit both allocation columns after the schema migration, and its new
+row enters the same compatibility state. The first fresh allocation reserves a
+namespace and advances the counter; if its derived ID equals the migrated current ID,
+allocation advances again before changing ownership. Namespace reservation retries only
+the named uniqueness constraint and propagates unrelated integrity failures.
+
+Apply the additive migration first, then drain all older workflow coordinators and
+workers before starting 0.4 processes. The database default keeps schema-first enqueue
+writes compatible, but a mixed old/new coordinator fleet can still use the older
+caller-generated claim path and is outside the collision-hardening guarantee. A
+code-only rollback may retain migration `0018` after new coordinators and active
+workflows are drained; old enqueue writers continue to receive sequence zero. Reverse
+the migration only in a separate stopped-writer window because reversal drops the
+allocation metadata. Fixed exhaustion diagnostics contain no task ID, namespace
+candidate, plan, or application data.
+
 The compatibility path for the version 1 progress schema is additive:
 
 - current dynamic node IDs remain runtime expansion paths scoped to one invocation;

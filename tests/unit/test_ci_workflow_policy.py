@@ -454,6 +454,17 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     )
 
     assert makefile_paths == set(postgresql_lane["selection"]["paths"])
+    assert "tests/integration/test_workflow_run_allocation_migration.py" in makefile_paths
+
+    schema_migrations = next(
+        domain
+        for domain in taxonomy["domains"]
+        if domain["id"] == "schema-migrations-and-bootstrap"
+    )
+    assert (
+        "tests/integration/test_workflow_run_allocation_migration.py"
+        in schema_migrations["selection"]["paths"]
+    )
 
 
 def test_live_cluster_scenarios_are_process_isolated_bounded_and_visible() -> None:

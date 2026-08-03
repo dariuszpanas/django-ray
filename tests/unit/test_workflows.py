@@ -15,6 +15,7 @@ import pytest
 
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
+    DurableTaskContext,
     WorkflowRunIdentity,
     durable_task_execution,
     get_current_task_execution_pk,
@@ -2767,7 +2768,7 @@ def test_ray_map_cleanup_has_a_hard_deadline() -> None:
 @pytest.mark.django_db
 def test_ray_executor_flushes_failed_progress_snapshot() -> None:
     from django_ray.models import RayTaskExecution
-    from django_ray.workflow_progress import claim_workflow_run
+    from django_ray.workflow_progress import allocate_workflow_run
 
     execution = RayTaskExecution.objects.create(
         task_id="workflow-flush",
@@ -2776,13 +2777,14 @@ def test_ray_executor_flushes_failed_progress_snapshot() -> None:
         attempt_number=2,
         execution_generation=4,
     )
-    identity = WorkflowRunIdentity(
-        task_execution_pk=execution.pk,
-        attempt_number=2,
-        execution_generation=4,
-        run_id="00000000-0000-0000-0000-000000000008",
+    identity = allocate_workflow_run(
+        DurableTaskContext(
+            task_pk=execution.pk,
+            attempt_number=2,
+            execution_generation=4,
+        )
     )
-    assert claim_workflow_run(identity) is True
+    assert identity is not None
     snapshot_ref = object()
     snapshot = {
         "schema_version": WORKFLOW_PROGRESS_SCHEMA_VERSION,
@@ -2817,7 +2819,7 @@ def test_ray_executor_disables_reporter_after_stale_write(
     workflow_progress_warning_records,
 ) -> None:
     from django_ray.models import RayTaskExecution, TaskState
-    from django_ray.workflow_progress import claim_workflow_run
+    from django_ray.workflow_progress import allocate_workflow_run
 
     execution = RayTaskExecution.objects.create(
         task_id="workflow-stale-flush",
@@ -2826,13 +2828,14 @@ def test_ray_executor_disables_reporter_after_stale_write(
         attempt_number=1,
         execution_generation=2,
     )
-    identity = WorkflowRunIdentity(
-        task_execution_pk=execution.pk,
-        attempt_number=1,
-        execution_generation=2,
-        run_id="00000000-0000-0000-0000-000000000009",
+    identity = allocate_workflow_run(
+        DurableTaskContext(
+            task_pk=execution.pk,
+            attempt_number=1,
+            execution_generation=2,
+        )
     )
-    assert claim_workflow_run(identity) is True
+    assert identity is not None
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.CANCELLED)
 
     snapshot = {
