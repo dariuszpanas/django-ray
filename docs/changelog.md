@@ -488,6 +488,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process-control exceptions. Detail responses disable caching and MIME sniffing.
   SQLite and PostgreSQL byte semantics, exact boundary behavior, and unsupported
   databases are covered explicitly.
+- Ordinary execution and archived-attempt Admin details now use explicit column
+  allowlists and database byte guards before diagnostic text can reach Python on
+  SQLite or PostgreSQL. Values above the 4,096-character/16 KiB ordinary-field
+  ceiling become a fixed omission notice, rendered pages have aggregate byte
+  ceilings and disable caching, malformed stored JSON fails closed with a fixed
+  diagnostic-free notice, ordinary template-render failures return a fixed bounded
+  `503` without swallowing process-control exceptions, and the package ceiling includes
+  in-place template-response middleware changes and post-render replacement responses.
+  Live-status polling applies the same guarded error read. Immutable change URLs accept
+  only `GET` and `HEAD`; inapplicable stock history and delete routes are absent, and
+  their direct URL shapes return `404` before an execution or attempt query.
+  Contextual attempt history renders at most the newest 25 rows, states the exact
+  shown and omitted counts, and links to the paginated attempt list where every
+  retained row still has an exact bounded detail. The privileged Sensitive data
+  views retain their separate authorization and existing 64 KiB/4 MiB bounds.
 - Read-only execution and archived-attempt details no longer advertise Django
   Admin's empty `LogEntry` history page. Durable task attempt and workflow
   diagnostics remain unchanged, while the permission-gated **Sensitive data**

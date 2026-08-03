@@ -279,6 +279,31 @@ normalizes and bounds the same allowlisted fields but deliberately skips pattern
 redaction. Direct database consumers must treat the stored fields as raw sensitive
 evidence and apply an equivalent authorized presentation boundary before rendering them.
 
+Ordinary execution and attempt detail pages additionally use audited SQL projections.
+SQLite measures the UTF-8 storage through a BLOB cast and PostgreSQL uses
+`OCTET_LENGTH`; a `CASE` expression returns a diagnostic field only when it is at most
+4,096 characters and 16 KiB. Oversized values produce a fixed notice rather than
+transferring a prefix, and the raw model field stays deferred throughout rendering.
+Stored JSON that cannot be parsed and redacted safely also produces a fixed notice;
+its malformed raw text remains available only through the separately authorized
+Sensitive data view.
+Each complete page also has a fixed encoded-response ceiling and sends
+`Cache-Control: no-store`. If ordinary template rendering raises an application
+exception, the view discards it and returns a fixed diagnostic-free `503` within the
+same ceiling with `no-store` and `nosniff`; process-control exceptions are not swallowed.
+The ceiling runs at Django's lazy render boundary after in-place template-response
+middleware changes and includes the response returned by post-render callbacks. A project
+middleware that replaces the response object, or changes it later in `process_response`,
+owns the replacement's size and cache/security headers; no view-level hook can inspect
+that later object. Immutable change URLs accept only `GET` and `HEAD`; `POST` returns a
+fixed `403` and other methods return `405` before an object query. Stock history and delete
+URL patterns are not registered for executions or attempts, and matching direct paths
+return `404` before either model is queried.
+These ordinary bounds do not widen, replace, or bypass the separately authorized
+Sensitive data view.
+Numeric limits are surface-specific workload budgets, not a privilege hierarchy; a
+larger limit does not imply broader authorization or access to more sensitive fields.
+
 Redaction checks raw, normalized, control-removed, and composed terminal forms. A
 configured marker therefore remains sensitive when terminal formatting, Unicode
 zero-width shaping, or more than one control-sequence family splits its characters.
@@ -379,12 +404,14 @@ for durable task state and workflow progress. Polling uses ordinary same-origin 
 requests, pauses while the tab is hidden, and stops when the task reaches a terminal
 state. Responses use `Cache-Control: no-store`.
 
-The polling queryset defers both progress payload columns and the complete workflow plan
-and strategy-selection snapshots. Its follow-up workflow read uses a database byte guard
-for only the 16 KiB schema-v3 summary and explicitly disables the legacy fallback. It
-never selects or parses `progress_data`, the plan blobs, topology pages, or normalized
-detail rows. Runs without a schema-v3 summary therefore appear as not yet reported in
-the high-frequency panel, regardless of plan policy. The lazy workflow diagnostics
+The polling queryset projects its error through the same 4,096-character/16 KiB
+database guard and defers both progress payload columns and the complete workflow plan
+and strategy-selection snapshots. Its follow-up workflow read uses a separate database byte
+guard for only the 16 KiB schema-v3 summary and explicitly disables the legacy fallback.
+It never selects or parses a complete oversized error, `progress_data`, the plan blobs,
+topology pages, or normalized detail rows. Runs without a schema-v3 summary therefore
+appear as not yet reported in the high-frequency panel, regardless of plan policy. The
+lazy workflow diagnostics
 request distinguishes disabled reporting, active and missing terminal-only reporting,
 an active requested-but-not-reported full run, and a terminal requested-but-missing
 snapshot. A terminal-only summary shows its outcome and omitted-by-policy detail without
@@ -437,18 +464,23 @@ failure-origin/path distinctions use text and symbols in addition to color. For
 full-reporting publications with verified useful retained collections, the bounded JSON
 routes remain visible fallbacks whenever a graph cannot be shown safely.
 
-By default, the same change form presents ordered immutable attempt history
-contextually. The inline selects only attempt identity, state, timing, and a bounded
-redacted error preview; it does not load complete tracebacks, results, result
+By default, the same change form presents immutable attempt history contextually. The
+inline selects at most the newest 25 rows, ordered newest first, and reports the exact
+total, shown, and omitted counts. Its filtered paginated-list link retains access to
+every attempt's exact bounded detail without embedding an unbounded formset. The inline
+selects only attempt identity, state, timing, and an error guarded at 512 characters
+and 2 KiB before transfer; it does not load complete tracebacks, results, result
 references, or workflow summaries. Oversized error text is replaced by a fixed link
 prompt next to the attempt-detail link rather than selecting or displaying an
 arbitrary prefix.
 
-Previous failed attempts also receive individual collapsed execution-graph panels in
-that same **Workflow execution** boundary. The panels precede the current attempt in one
-chronological stack, reuse the same private bounded readers, and do not request anything
-while hidden. The first open fetches the exact archived attempt once; its rendered graph
-or fixed unavailable/error state is then cached until the page is reloaded. Every
+Previous failed attempts inside that newest embedded window also receive individual
+collapsed execution-graph panels in the same **Workflow execution** boundary. The
+panels precede the current attempt in one chronological stack, reuse the same private
+bounded readers, and do not request anything while hidden. Older omitted attempts use
+their exact bounded detail and graph links from the paginated list instead of expanding
+the parent page. The first open fetches the exact archived attempt once; its rendered
+graph or fixed unavailable/error state is then cached until the page is reloaded. Every
 endpoint and node-detail link retains the selected attempt number, and the browser
 refuses mixed current/archive endpoint metadata before making a request. The current
 attempt is rendered once at the end of the stack, so a successful recovery remains

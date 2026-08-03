@@ -329,13 +329,7 @@ assert "user:pass@private.example" not in change_html
 assert "Execution metadata is read-only" in change_html
 assert 'name="_save"' not in change_html
 assert 'name="_continue"' not in change_html
-assert (
-    reverse(
-        "admin:django_ray_raytaskexecution_delete",
-        args=[execution.pk],
-    )
-    not in change_html
-)
+assert f"/admin/django_ray/raytaskexecution/{execution.pk}/delete/" not in change_html
 for immutable_field in (
     "priority",
     "queue_name",
@@ -346,21 +340,22 @@ for immutable_field in (
 ):
     assert f'name="{immutable_field}"' not in change_html
 assert "Attempt history" in change_html
+assert "django-ray-attempt-history-scope" in change_html
+assert "Showing all 1 attempt" in change_html
+assert "newest first" in change_html
 assert "unfold-attempt-inline-marker" in change_html
 assert str(attempt) not in change_html
 assert change_html.count(attempt_detail_url) == 1
 assert "field-attempt_detail_link" in change_html
+assert "no-store" in change["Cache-Control"]
+assert change["X-Content-Type-Options"] == "nosniff"
+assert "no-store" in attempt_detail["Cache-Control"]
+assert attempt_detail["X-Content-Type-Options"] == "nosniff"
 assert "Sensitive data" in attempt_detail_html
 assert f'href="{attempt_sensitive_url}"' in attempt_detail_html
 assert "django-ray-admin-action--sensitive" in attempt_detail_html
 assert 'class="django-ray-admin-action django-ray-admin-action--sensitive"' in attempt_detail_html
-assert (
-    reverse(
-        "admin:django_ray_taskattempt_history",
-        args=[attempt.pk],
-    )
-    not in attempt_detail_html
-)
+assert f"/admin/django_ray/taskattempt/{attempt.pk}/history/" not in attempt_detail_html
 assert 'class="historylink"' not in attempt_detail_html
 assert f'href="/runtime/attempts/{attempt.pk}/"' in attempt_detail_html
 assert "View on site" in attempt_detail_html
@@ -380,10 +375,7 @@ assert 'aria-describedby="django-ray-task-actions-guidance"' in detail_failed_ht
 assert "django-ray-admin-action--sensitive" in detail_failed_html
 assert 'class="django-ray-admin-action django-ray-admin-action--sensitive"' in detail_failed_html
 assert (
-    reverse(
-        "admin:django_ray_raytaskexecution_history",
-        args=[detail_failed_execution.pk],
-    )
+    f"/admin/django_ray/raytaskexecution/{detail_failed_execution.pk}/history/"
     not in detail_failed_html
 )
 assert 'class="historylink"' not in detail_failed_html
@@ -795,6 +787,12 @@ detail_failed_execution = RayTaskExecution.objects.create(
     state=TaskState.FAILED,
     error_message="standard-admin-detail-retry-secret-marker",
 )
+TaskAttempt.objects.create(
+    execution=detail_failed_execution,
+    attempt_number=1,
+    state=TaskState.FAILED,
+    error_message="standard-admin-attempt-inline-marker",
+)
 succeeded_execution = RayTaskExecution.objects.create(
     task_id="standard-admin-succeeded",
     callable_path="testproject.tasks.add_numbers",
@@ -834,6 +832,12 @@ detail_failed_html = detail_failed_response.content.decode()
 detail_failed_sensitive_html = detail_failed_sensitive_response.content.decode()
 succeeded_detail_html = succeeded_detail_response.content.decode()
 assert "Retry task..." in detail_failed_html
+assert "django-ray-attempt-history-scope" in detail_failed_html
+assert "Showing all 1 attempt" in detail_failed_html
+assert "newest first" in detail_failed_html
+assert "standard-admin-attempt-inline-marker" in detail_failed_html
+assert "no-store" in detail_failed_response["Cache-Control"]
+assert detail_failed_response["X-Content-Type-Options"] == "nosniff"
 assert "Sensitive data" in detail_failed_html
 assert f'href="{detail_failed_sensitive_url}"' in detail_failed_html
 assert "django-ray-admin-action--retry" in detail_failed_html
@@ -841,10 +845,7 @@ assert 'aria-describedby="django-ray-task-actions-guidance"' in detail_failed_ht
 assert "django-ray-admin-action--sensitive" in detail_failed_html
 assert 'class="django-ray-admin-action django-ray-admin-action--sensitive"' in detail_failed_html
 assert (
-    reverse(
-        "admin:django_ray_raytaskexecution_history",
-        args=[detail_failed_execution.pk],
-    )
+    f"/admin/django_ray/raytaskexecution/{detail_failed_execution.pk}/history/"
     not in detail_failed_html
 )
 assert 'class="historylink"' not in detail_failed_html

@@ -575,6 +575,9 @@ def _verify_unfold_admin_contract(
             raise DockerSmokeError("admin change view exposed direct execution editing")
         if (
             "Attempt history" not in change_html
+            or "django-ray-attempt-history-scope" not in change_html
+            or "Showing all 1 attempt" not in change_html
+            or "newest first" not in change_html
             or change_html.count(attempt_detail_path) != 1
             or str(attempt) in change_html
         ):

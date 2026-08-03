@@ -485,13 +485,7 @@ class TestRayTaskExecutionAdmin:
         assert "Execution metadata is read-only" in read_content
         assert 'name="_save"' not in read_content
         assert 'name="_continue"' not in read_content
-        assert (
-            reverse(
-                "admin:django_ray_raytaskexecution_delete",
-                args=[execution.pk],
-            )
-            not in read_content
-        )
+        assert f"/admin/django_ray/raytaskexecution/{execution.pk}/delete/" not in read_content
         for field in (
             "priority",
             "queue_name",
@@ -546,7 +540,9 @@ class TestRayTaskExecutionAdmin:
 
         assert admin_obj.args_json_display(task) == "-"
         assert admin_obj.kwargs_json_display(task) == '{"value": 1}'
-        assert admin_obj.result_data_display(task) == "[REDACTED]"
+        assert admin_obj.result_data_display(task) == (
+            "Stored JSON omitted because it could not be parsed and redacted safely."
+        )
         assert admin_obj.progress_data_display(task) == '{"step": 1}'
         assert admin_obj.completion_data_display(task) == '{"success": true}'
         assert admin_obj.cancellation_error_display(task) == "stop uncertain\nmanual review"
@@ -4157,9 +4153,9 @@ class TestTaskAttemptAdmin:
         content = response.content.decode("utf-8")
         assert response.status_code == 200
         assert content.count("data-workflow-attempt-graph=") == 2
-        assert 'data-workflow-attempt-graph="1"' in content
+        assert 'data-workflow-attempt-graph="1"' not in content
         assert 'data-workflow-attempt-graph="2"' in content
-        assert 'data-workflow-attempt-graph="3"' not in content
+        assert 'data-workflow-attempt-graph="3"' in content
         assert "2-panel safety limit" in content
 
     def test_diagnostics_are_redacted_bounded_and_not_raw_model_fields(self, settings) -> None:
@@ -4303,8 +4299,8 @@ class TestTaskAttemptAdmin:
         assert "Attempt history" in change_html
         assert change_html.count(first_detail_url) == 1
         assert change_html.count(second_detail_url) == 1
-        assert change_html.index("first-attempt-marker") < change_html.index(
-            "second-attempt-marker"
+        assert change_html.index("second-attempt-marker") < change_html.index(
+            "first-attempt-marker"
         )
         assert detail.status_code == 200
         assert attempt_list.status_code == 200

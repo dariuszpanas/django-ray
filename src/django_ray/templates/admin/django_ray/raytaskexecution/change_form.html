@@ -247,6 +247,14 @@
                     {{ django_ray_archived_workflow_attempts_limit }}-panel safety limit.
                   </p>
                 {% endif %}
+                {% if django_ray_archived_workflow_attempts_history_omitted %}
+                  <p class="django-ray-workflow-attempts__notice" role="status">
+                    Older attempts are not embedded in this bounded page.
+                    <a href="{{ django_ray_attempt_history_url }}">
+                      Open the paginated attempt list for their exact bounded details.
+                    </a>
+                  </p>
+                {% endif %}
                 <div
                   class="django-ray-workflow-attempts__current"
                   data-workflow-current-graph
@@ -260,6 +268,28 @@
           </details>
         {% endwith %}
       {% endif %}
+    </section>
+  {% endif %}
+  {% if django_ray_attempt_history_total %}
+    <section
+      class="module aligned django-ray-attempt-history-scope"
+      aria-label="Attempt history scope"
+    >
+      <p>
+        <strong>Attempt history:</strong>
+        {% if django_ray_attempt_history_omitted %}
+          Showing the newest {{ django_ray_attempt_history_shown }} of
+          {{ django_ray_attempt_history_total }} attempts; the
+          {{ django_ray_attempt_history_omitted }} older attempt{{ django_ray_attempt_history_omitted|pluralize }}
+          are omitted from this page.
+        {% else %}
+          Showing all {{ django_ray_attempt_history_total }} attempt{{ django_ray_attempt_history_total|pluralize }},
+          newest first.
+        {% endif %}
+        <a href="{{ django_ray_attempt_history_url }}">
+          Open the paginated attempt list for exact bounded details.
+        </a>
+      </p>
     </section>
   {% endif %}
 {% endblock %}

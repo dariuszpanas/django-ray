@@ -1,0 +1,18 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+  <div id="content-main" class="django-ray-detail-limit-page">
+    <section class="module">
+      <h2>{% translate "Task detail response limit reached" %}</h2>
+      <p>
+        This ordinary Admin detail could not be rendered within its fixed
+        {{ django_ray_detail_response_limit_bytes }}-byte response limit.
+        No stored diagnostic value is included in this fallback.
+      </p>
+      <p>
+        <a href="{{ django_ray_detail_back_url }}">Return to the bounded task list.</a>
+      </p>
+    </section>
+  </div>
+{% endblock %}

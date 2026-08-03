@@ -13,12 +13,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.management import CommandError
 from django.db import IntegrityError, close_old_connections, connection, transaction
-from django.test import override_settings
+from django.test import RequestFactory, override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import reverse
+from django.urls import resolve, reverse
 from django.utils import timezone
 
 import django_ray.admin as django_ray_admin
@@ -1875,6 +1876,107 @@ def test_postgresql_sensitive_admin_bounds_unicode_before_transfer(
     assert "CASE WHEN" in bounded_sql
     assert "LENGTH(CAST(" not in bounded_sql
     assert "AS BLOB" not in bounded_sql
+
+
+def test_postgresql_ordinary_admin_details_bound_unicode_before_transfer() -> None:
+    limit = django_ray_admin.ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES
+    exact_value = "\U0001f642" * (limit // 4)
+    oversized_value = "\u00e9" * ((limit // 2) + 1)
+    assert len(exact_value.encode("utf-8")) == limit
+    assert len(oversized_value.encode("utf-8")) == limit + 2
+    execution = _execution(
+        "postgres-ordinary-admin-byte-boundary-001",
+        state=TaskState.FAILED,
+        result_data=exact_value,
+        error_message=oversized_value,
+    )
+    attempt = TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=1,
+        state=TaskState.FAILED,
+        result_data=exact_value,
+        error_message=oversized_value,
+    )
+    user = get_user_model().objects.create_superuser(
+        username="postgres-ordinary-admin-byte-boundary",
+    )
+    execution_url = reverse(
+        "admin:django_ray_raytaskexecution_change",
+        args=[execution.pk],
+    )
+    execution_request = RequestFactory().get(execution_url)
+    execution_request.user = user
+    execution_request.resolver_match = resolve(execution_url)
+    attempt_url = reverse(
+        "admin:django_ray_taskattempt_change",
+        args=[attempt.pk],
+    )
+    attempt_request = RequestFactory().get(attempt_url)
+    attempt_request.user = user
+    attempt_request.resolver_match = resolve(attempt_url)
+
+    with CaptureQueriesContext(connection) as execution_queries:
+        loaded_execution = (
+            django_ray_admin.RayTaskExecutionAdmin(
+                RayTaskExecution,
+                admin.site,
+            )
+            .get_queryset(execution_request)
+            .get(pk=execution.pk)
+        )
+    with CaptureQueriesContext(connection) as attempt_queries:
+        loaded_attempt = (
+            django_ray_admin.TaskAttemptAdmin(
+                TaskAttempt,
+                admin.site,
+            )
+            .get_queryset(attempt_request)
+            .get(pk=attempt.pk)
+        )
+    inline_request = RequestFactory().get("/admin/")
+    inline_request.user = user
+    with CaptureQueriesContext(connection) as inline_queries:
+        inline_attempt = (
+            django_ray_admin.TaskAttemptInline(
+                TaskAttempt,
+                admin.site,
+            )
+            .get_queryset(inline_request)
+            .get(pk=attempt.pk)
+        )
+
+    for loaded in (loaded_execution, loaded_attempt):
+        assert django_ray_admin._bounded_admin_text_value(loaded, "result_data") == (
+            exact_value,
+            "value",
+        )
+        assert django_ray_admin._bounded_admin_text_value(loaded, "error_message") == (
+            None,
+            "oversized",
+        )
+        assert {"result_data", "error_message"}.issubset(loaded.get_deferred_fields())
+    assert django_ray_admin._bounded_admin_text_value(
+        inline_attempt,
+        "error_message",
+        max_bytes=django_ray_admin.ADMIN_ATTEMPT_INLINE_MAX_BYTES,
+        max_chars=django_ray_admin.ADMIN_ATTEMPT_INLINE_MAX_CHARS,
+        namespace="inline",
+    ) == (None, "oversized")
+    assert inline_attempt.__dict__["admin_inline_total"] == 1
+    bounded_queries = [
+        query["sql"]
+        for captured in (execution_queries, attempt_queries, inline_queries)
+        for query in captured.captured_queries
+        if "admin_detail_error_message_value" in query["sql"]
+        or "admin_inline_error_message_value" in query["sql"]
+    ]
+    assert len(bounded_queries) == 3
+    for query in bounded_queries:
+        bounded_sql = query.upper()
+        assert "OCTET_LENGTH" in bounded_sql
+        assert "CASE WHEN" in bounded_sql
+        assert "LENGTH(CAST(" not in bounded_sql
+        assert "AS BLOB" not in bounded_sql
 
 
 def test_postgresql_execution_list_bounds_unicode_before_transfer() -> None:

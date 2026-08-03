@@ -324,6 +324,9 @@ The runtime block records:
   retained Ray pod UID/container/image identity-set SHA-256;
 - ready replica counts for all application Deployments;
 - unauthenticated/authenticated status summary plus the fresh task ID, `SUCCEEDED`, and result `5`;
+- the authenticated ordinary Admin probe's fixed newest-first attempt-history scope,
+  exact bounded attempt-detail link, and live-status response, without exposing
+  standalone attempt navigation or raw RuntimeEnv data;
 - scalar booleans for the encrypted RuntimeEnv overlay, decrypted-marker canary, exact durable
   envelope and marker absence, corrupt-ciphertext and unknown-key rejection before Ray, retry
   preservation, protected-value log scan, and full `django-ray-secret` preservation. Encryption
