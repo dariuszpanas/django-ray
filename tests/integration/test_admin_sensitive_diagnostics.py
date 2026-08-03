@@ -162,17 +162,11 @@ def test_ordinary_details_stay_redacted_and_hide_unredacted_link(
     details = (
         (
             execution_response,
-            reverse(
-                "admin:django_ray_raytaskexecution_history",
-                args=[execution.pk],
-            ),
+            f"/admin/django_ray/raytaskexecution/{execution.pk}/history/",
         ),
         (
             attempt_response,
-            reverse(
-                "admin:django_ray_taskattempt_history",
-                args=[first_attempt.pk],
-            ),
+            f"/admin/django_ray/taskattempt/{first_attempt.pk}/history/",
         ),
     )
     for response, history_url in details:
@@ -346,18 +340,12 @@ def test_read_only_task_details_hide_empty_django_admin_history(
     details = (
         (
             client.get(_execution_urls(execution)[0]),
-            reverse(
-                "admin:django_ray_raytaskexecution_history",
-                args=[execution.pk],
-            ),
+            f"/admin/django_ray/raytaskexecution/{execution.pk}/history/",
             execution_site_url,
         ),
         (
             client.get(_attempt_urls(attempt)[0]),
-            reverse(
-                "admin:django_ray_taskattempt_history",
-                args=[attempt.pk],
-            ),
+            f"/admin/django_ray/taskattempt/{attempt.pk}/history/",
             attempt_site_url,
         ),
     )

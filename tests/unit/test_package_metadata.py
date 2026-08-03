@@ -66,6 +66,7 @@ def test_admin_observability_assets_are_inside_the_wheel_package() -> None:
         / "raytaskexecution"
         / "change_form.html",
         package_root / "templates" / "admin" / "django_ray" / "taskattempt" / "change_form.html",
+        package_root / "templates" / "admin" / "django_ray" / "bounded_task_detail_limit.html",
         package_root / "templates" / "admin" / "django_ray" / "sensitive_task_data.html",
         package_root / "templates" / "admin" / "django_ray" / "sensitive_task_data_limit.html",
         package_root / "static" / "django_ray" / "admin" / "task_live.css",

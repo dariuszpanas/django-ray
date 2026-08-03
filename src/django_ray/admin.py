@@ -6,7 +6,9 @@ import re
 import secrets
 from collections.abc import Callable
 from datetime import datetime
+from types import MethodType
 from typing import Any, cast
+from urllib.parse import urlencode
 
 from django.apps import apps
 from django.contrib import admin, messages
@@ -18,6 +20,7 @@ from django.db import connection, transaction
 from django.db.models import (
     BooleanField,
     Case,
+    Count,
     F,
     Func,
     IntegerField,
@@ -25,8 +28,9 @@ from django.db.models import (
     TextField,
     Value,
     When,
+    Window,
 )
-from django.db.models.functions import Substr
+from django.db.models.functions import Length, RowNumber
 from django.http import (
     Http404,
     HttpRequest,
@@ -94,6 +98,12 @@ DjangoRayTabularInline = cast(Any, _ConfiguredTabularInline)
 RAY_DASHBOARD_URL = "http://localhost:8265"
 ADMIN_DIAGNOSTIC_MAX_CHARS = 4096
 ADMIN_ATTEMPT_INLINE_MAX_CHARS = 512
+ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES = ADMIN_DIAGNOSTIC_MAX_CHARS * 4
+ADMIN_ATTEMPT_INLINE_MAX_BYTES = ADMIN_ATTEMPT_INLINE_MAX_CHARS * 4
+ADMIN_ATTEMPT_INLINE_MAX_ROWS = 25
+ADMIN_EXECUTION_DETAIL_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
+ADMIN_ATTEMPT_DETAIL_RESPONSE_MAX_BYTES = 512 * 1024
+ADMIN_OBSERVABILITY_RESPONSE_MAX_BYTES = 64 * 1024
 ADMIN_SENSITIVE_DIAGNOSTIC_FIELD_MAX_BYTES = 64 * 1024
 ADMIN_SENSITIVE_DIAGNOSTIC_RESPONSE_MAX_BYTES = 4 * 1024 * 1024
 ADMIN_WORKFLOW_DIAGNOSTICS_MAX_BYTES = 16 * 1024
@@ -115,6 +125,69 @@ _ADMIN_RETRY_CONFIRMATION_SESSION_NONCE = re.compile(r"[A-Za-z0-9_-]{43}")
 _ADMIN_SENSITIVE_PERMISSION = "django_ray.view_sensitive_task_data"
 _ADMIN_SENSITIVE_RESPONSE_OVERHEAD_BYTES = 64 * 1024
 _ADMIN_SENSITIVE_HTML_EXPANSION_FACTOR = 6
+_ADMIN_DETAIL_OVERSIZED_MESSAGE = (
+    "Stored diagnostic omitted because it exceeds the ordinary Admin read limit."
+)
+_ADMIN_DETAIL_UNAVAILABLE_MESSAGE = (
+    "Stored diagnostic unavailable because its bounded read could not be validated."
+)
+_ADMIN_DETAIL_INVALID_JSON_MESSAGE = (
+    "Stored JSON omitted because it could not be parsed and redacted safely."
+)
+_ADMIN_DETAIL_RENDER_FAILURE_BODY = b"Task detail could not be rendered safely."
+_ADMIN_EXECUTION_DETAIL_DIAGNOSTIC_FIELDS = (
+    "args_json",
+    "kwargs_json",
+    "input_reference",
+    "result_data",
+    "result_reference",
+    "completion_data",
+    "cancellation_error",
+    "error_message",
+    "error_traceback",
+)
+_ADMIN_EXECUTION_DETAIL_FIELDS = (
+    "pk",
+    "task_id",
+    "callable_path",
+    "priority",
+    "queue_name",
+    "state",
+    "attempt_number",
+    "execution_generation",
+    "ray_job_id",
+    "ray_target_address",
+    "ray_address",
+    "claimed_by_worker",
+    "runtime_env_profile",
+    "runtime_env_hash",
+    "workflow_run_id",
+    "workflow_plan_fingerprint",
+    "workflow_plan_pinned_attempt",
+    "created_at",
+    "run_after",
+    "queue_timeout_seconds",
+    "queue_deadline_at",
+    "started_at",
+    "finished_at",
+    "last_heartbeat_at",
+    "cancellation_status",
+)
+_ADMIN_ATTEMPT_DETAIL_DIAGNOSTIC_FIELDS = (
+    "error_message",
+    "error_traceback",
+    "result_data",
+    "result_reference",
+)
+_ADMIN_ATTEMPT_DETAIL_FIELDS = (
+    "pk",
+    "execution_id",
+    "attempt_number",
+    "state",
+    "started_at",
+    "finished_at",
+    "created_at",
+)
 _ADMIN_SENSITIVE_EXECUTION_SECTIONS = (
     (
         "Task input",
@@ -348,6 +421,135 @@ class _AdminOctetLength(Func):
         )
 
 
+def _admin_bounded_annotation_name(namespace: str, field_name: str, suffix: str) -> str:
+    """Build one private annotation name for a guarded text projection."""
+    return f"admin_{namespace}_{field_name}_{suffix}"
+
+
+def _annotate_bounded_admin_text(
+    queryset: QuerySet[Any],
+    *,
+    field_names: tuple[str, ...],
+    max_bytes: int,
+    max_chars: int,
+    namespace: str,
+) -> QuerySet[Any]:
+    """Project text only when the database proves its UTF-8 byte size is safe."""
+    lengths = {
+        _admin_bounded_annotation_name(namespace, field_name, "bytes"): _AdminOctetLength(
+            F(field_name)
+        )
+        for field_name in field_names
+    }
+    queryset = queryset.annotate(**lengths)
+    characters = {
+        _admin_bounded_annotation_name(namespace, field_name, "chars"): Length(F(field_name))
+        for field_name in field_names
+    }
+    queryset = queryset.annotate(**characters)
+    values = {
+        _admin_bounded_annotation_name(namespace, field_name, "value"): Case(
+            When(
+                **{
+                    f"{_admin_bounded_annotation_name(namespace, field_name, 'bytes')}__lte": (
+                        max_bytes
+                    ),
+                    f"{_admin_bounded_annotation_name(namespace, field_name, 'chars')}__lte": (
+                        max_chars
+                    ),
+                },
+                then=F(field_name),
+            ),
+            default=Value(None),
+            output_field=TextField(),
+        )
+        for field_name in field_names
+    }
+    return queryset.annotate(**values)
+
+
+def _bounded_admin_text_value(
+    obj: Any,
+    field_name: str,
+    *,
+    max_bytes: int = ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES,
+    max_chars: int = ADMIN_DIAGNOSTIC_MAX_CHARS,
+    namespace: str = "detail",
+) -> tuple[str | None, str]:
+    """Validate one SQL-guarded value without triggering a deferred-field read."""
+    stored = obj.__dict__
+    bytes_name = _admin_bounded_annotation_name(namespace, field_name, "bytes")
+    chars_name = _admin_bounded_annotation_name(namespace, field_name, "chars")
+    value_name = _admin_bounded_annotation_name(namespace, field_name, "value")
+    has_bytes = bytes_name in stored
+    has_chars = chars_name in stored
+    has_value = value_name in stored
+    if not has_bytes and not has_chars and not has_value:
+        # Display helpers are also public testable utilities for caller-created
+        # model instances. A real bounded queryset always supplies both aliases.
+        if field_name not in stored:
+            return None, "unavailable"
+        raw = stored[field_name]
+        return (raw, "value") if raw is None or isinstance(raw, str) else (None, "unavailable")
+    if not has_bytes or not has_chars or not has_value:
+        return None, "unavailable"
+
+    byte_length = stored[bytes_name]
+    char_length = stored[chars_name]
+    value = stored[value_name]
+    if byte_length is None:
+        return (None, "value") if char_length is None and value is None else (None, "unavailable")
+    if (
+        type(byte_length) is not int
+        or byte_length < 0
+        or type(char_length) is not int
+        or char_length < 0
+    ):
+        return None, "unavailable"
+    if byte_length > max_bytes or char_length > max_chars:
+        return (None, "oversized") if value is None else (None, "unavailable")
+    if not isinstance(value, str):
+        return None, "unavailable"
+    try:
+        encoded_bytes = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None, "unavailable"
+    if encoded_bytes != byte_length or len(value) != char_length:
+        return None, "unavailable"
+    return value, "value"
+
+
+def _ordinary_admin_text_display(
+    obj: Any,
+    field_name: str,
+    *,
+    max_chars: int = ADMIN_DIAGNOSTIC_MAX_CHARS,
+    max_bytes: int = ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES,
+    namespace: str = "detail",
+) -> str:
+    value, status = _bounded_admin_text_value(
+        obj,
+        field_name,
+        max_bytes=max_bytes,
+        max_chars=max_chars,
+        namespace=namespace,
+    )
+    if status == "oversized":
+        return _ADMIN_DETAIL_OVERSIZED_MESSAGE
+    if status != "value":
+        return _ADMIN_DETAIL_UNAVAILABLE_MESSAGE
+    return _bounded_redacted_text(value, max_chars=max_chars)
+
+
+def _ordinary_admin_json_display(obj: Any, field_name: str) -> str:
+    value, status = _bounded_admin_text_value(obj, field_name)
+    if status == "oversized":
+        return _ADMIN_DETAIL_OVERSIZED_MESSAGE
+    if status != "value":
+        return _ADMIN_DETAIL_UNAVAILABLE_MESSAGE
+    return _bounded_redacted_json(value)
+
+
 def _secure_admin_response(response: HttpResponse) -> HttpResponse:
     """Apply the fixed cache and MIME-sniffing policy to lazy diagnostics."""
     response["Cache-Control"] = "no-store"
@@ -376,6 +578,113 @@ def _admin_json_response(
         raise ValueError("Admin workflow diagnostics exceed their response limit")
     return _secure_admin_response(
         HttpResponse(content, status=status, content_type="application/json; charset=utf-8")
+    )
+
+
+def _bounded_admin_detail_response(
+    request: HttpRequest,
+    response: HttpResponse,
+    *,
+    admin_site: admin.AdminSite,
+    opts: Any,
+    max_bytes: int,
+) -> HttpResponse:
+    """Defer the ordinary detail cap until Django finishes template middleware."""
+    if response.status_code != 200:
+        return _secure_admin_response(response)
+
+    def bound_rendered_response(rendered_response: HttpResponse) -> HttpResponse:
+        if getattr(rendered_response, "streaming", False):
+            return _bounded_admin_detail_render_failure(max_bytes=max_bytes)
+        if len(rendered_response.content) <= max_bytes:
+            return _secure_admin_response(rendered_response)
+
+        limited = TemplateResponse(
+            request,
+            "admin/django_ray/bounded_task_detail_limit.html",
+            {
+                **admin_site.each_context(request),
+                "title": "Task detail response limit reached",
+                "opts": opts,
+                "django_ray_detail_response_limit_bytes": max_bytes,
+                "django_ray_detail_back_url": reverse(
+                    f"{admin_site.name}:{opts.app_label}_{opts.model_name}_changelist",
+                    current_app=admin_site.name,
+                ),
+            },
+            status=413,
+        )
+        limited_response = limited.render()
+        if getattr(limited_response, "streaming", False):
+            return _bounded_admin_detail_render_failure(max_bytes=max_bytes)
+        if len(limited_response.content) > max_bytes:
+            limited_response = HttpResponse(
+                "Task detail response exceeds its fixed safety limit.",
+                status=413,
+                content_type="text/plain; charset=utf-8",
+            )
+        return _secure_admin_response(limited_response)
+
+    if not isinstance(response, TemplateResponse):
+        try:
+            return bound_rendered_response(response)
+        except Exception:
+            return _bounded_admin_detail_render_failure(max_bytes=max_bytes)
+
+    original_render = response.render
+
+    def render_with_bound(_response: TemplateResponse) -> HttpResponse:
+        try:
+            rendered_response = original_render()
+            return bound_rendered_response(rendered_response)
+        except Exception:
+            return _bounded_admin_detail_render_failure(max_bytes=max_bytes)
+
+    cast(Any, response).render = MethodType(render_with_bound, response)
+    return _secure_admin_response(response)
+
+
+def _readonly_admin_urls(stock_urls: list[Any], *, opts: Any) -> list[Any]:
+    """Remove stock object routes that are inapplicable to immutable task records."""
+    omitted_names = {
+        f"{opts.app_label}_{opts.model_name}_delete",
+        f"{opts.app_label}_{opts.model_name}_history",
+    }
+    return [url for url in stock_urls if getattr(url, "name", None) not in omitted_names]
+
+
+def _readonly_admin_removed_object_route(
+    _request: HttpRequest,
+    **_kwargs: Any,
+) -> HttpResponse:
+    """Keep removed stock route-shaped paths from falling into Admin's catch-all."""
+    raise Http404("This read-only task record does not expose that Admin route.")
+
+
+def _readonly_admin_change_method_response(request: HttpRequest) -> HttpResponse | None:
+    """Reject mutation and non-read methods before immutable object lookup."""
+    if request.method in {"GET", "HEAD"}:
+        return None
+    if request.method == "POST":
+        return _secure_admin_response(
+            HttpResponse(
+                "Task execution details are read-only.",
+                status=403,
+                content_type="text/plain; charset=utf-8",
+            )
+        )
+    return _secure_admin_response(HttpResponseNotAllowed(["GET", "HEAD"]))
+
+
+def _bounded_admin_detail_render_failure(*, max_bytes: int) -> HttpResponse:
+    """Return one fixed 503 when ordinary detail rendering cannot complete safely."""
+    content = _ADMIN_DETAIL_RENDER_FAILURE_BODY[: max(0, max_bytes)]
+    return _secure_admin_response(
+        HttpResponse(
+            content,
+            status=503,
+            content_type="text/plain; charset=utf-8",
+        )
     )
 
 
@@ -504,8 +813,8 @@ def _bounded_redacted_json(value: str | None) -> str:
         return "-"
     try:
         rendered = safe_json_dumps(json.loads(value))
-    except (TypeError, json.JSONDecodeError):
-        rendered = redact_text(value)
+    except (RecursionError, TypeError, UnicodeError, ValueError):
+        return _ADMIN_DETAIL_INVALID_JSON_MESSAGE
     return Truncator(rendered).chars(
         ADMIN_DIAGNOSTIC_MAX_CHARS,
         truncate="... [truncated]",
@@ -721,7 +1030,7 @@ class TaskAttemptInline(DjangoRayTabularInline):
         "error_summary",
     )
     readonly_fields = fields
-    ordering = ("attempt_number",)
+    ordering = ("-attempt_number",)
     extra = 0
     can_delete = False
     hide_title = True
@@ -729,26 +1038,38 @@ class TaskAttemptInline(DjangoRayTabularInline):
     verbose_name_plural = "Attempt history"
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[TaskAttempt]:
-        """Keep large attempt diagnostics out of the contextual history query."""
-        return (
+        """Return only the newest fixed number of guarded attempt summaries."""
+        queryset = (
             super()
             .get_queryset(request)
             .annotate(
-                admin_error_preview=Substr(
-                    "error_message",
-                    1,
-                    ADMIN_ATTEMPT_INLINE_MAX_CHARS + 1,
-                )
+                admin_inline_total=Window(
+                    expression=Count("pk"),
+                    partition_by=[F("execution_id")],
+                ),
+                admin_inline_rank=Window(
+                    expression=RowNumber(),
+                    partition_by=[F("execution_id")],
+                    order_by=F("attempt_number").desc(),
+                ),
             )
-            .defer(
-                "error_message",
-                "error_traceback",
-                "result_data",
-                "result_reference",
-                "workflow_progress_summary_json",
+            .filter(admin_inline_rank__lte=ADMIN_ATTEMPT_INLINE_MAX_ROWS)
+            .only(
+                "pk",
+                "execution_id",
+                "attempt_number",
+                "state",
+                "started_at",
+                "finished_at",
             )
-            .order_by("attempt_number")
         )
+        return _annotate_bounded_admin_text(
+            queryset,
+            field_names=("error_message",),
+            max_bytes=ADMIN_ATTEMPT_INLINE_MAX_BYTES,
+            max_chars=ADMIN_ATTEMPT_INLINE_MAX_CHARS,
+            namespace="inline",
+        ).order_by("-attempt_number")
 
     def has_add_permission(
         self,
@@ -805,11 +1126,17 @@ class TaskAttemptInline(DjangoRayTabularInline):
 
     @admin.display(description="Error")
     def error_summary(self, obj: TaskAttempt) -> str:
-        preview = getattr(obj, "admin_error_preview", None)
-        if not hasattr(obj, "admin_error_preview"):
-            preview = obj.error_message
-        if preview not in (None, "") and len(preview) > ADMIN_ATTEMPT_INLINE_MAX_CHARS:
+        preview, status = _bounded_admin_text_value(
+            obj,
+            "error_message",
+            max_bytes=ADMIN_ATTEMPT_INLINE_MAX_BYTES,
+            max_chars=ADMIN_ATTEMPT_INLINE_MAX_CHARS,
+            namespace="inline",
+        )
+        if status == "oversized":
             return "Open the attempt detail to view bounded diagnostics."
+        if status != "value":
+            return _ADMIN_DETAIL_UNAVAILABLE_MESSAGE
         return _bounded_redacted_text(
             preview,
             max_chars=ADMIN_ATTEMPT_INLINE_MAX_CHARS,
@@ -848,7 +1175,6 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         "runtime_env_hash",
         "workflow_plan_fingerprint",
         "workflow_plan_pinned_attempt",
-        "error_message",
     )
     workflow_read_fields = (
         "pk",
@@ -1001,7 +1327,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     )
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[RayTaskExecution]:
-        """Keep complete workflow payloads out of routine Admin reads."""
+        """Use allowlisted and SQL-guarded projections for routine Admin reads."""
         queryset = (
             super()
             .get_queryset(request)
@@ -1014,11 +1340,18 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             )
         )
         resolver_match = request.resolver_match
-        if (
-            resolver_match is not None
-            and resolver_match.url_name
-            == f"{self.opts.app_label}_{self.opts.model_name}_changelist"
+        url_name = resolver_match.url_name if resolver_match is not None else None
+        if request.__dict__.get("_django_ray_bounded_execution_detail") is True or url_name == (
+            f"{self.opts.app_label}_{self.opts.model_name}_change"
         ):
+            return _annotate_bounded_admin_text(
+                queryset.only(*_ADMIN_EXECUTION_DETAIL_FIELDS),
+                field_names=_ADMIN_EXECUTION_DETAIL_DIAGNOSTIC_FIELDS,
+                max_bytes=ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES,
+                max_chars=ADMIN_DIAGNOSTIC_MAX_CHARS,
+                namespace="detail",
+            )
+        if url_name == f"{self.opts.app_label}_{self.opts.model_name}_changelist":
             queryset = queryset.defer(
                 "args_json",
                 "kwargs_json",
@@ -1055,11 +1388,37 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         """Expose bounded failed-attempt identities already authorized for the inline."""
         archived_attempts: list[int] = []
         archived_attempts_truncated = False
+        attempt_history_total: int | None = None
+        attempt_history_shown = 0
+        attempt_history_omitted = 0
+        attempt_history_url: str | None = None
         if obj is not None:
             for inline_formset in context.get("inline_admin_formsets", ()):
                 if not isinstance(inline_formset.opts, TaskAttemptInline):
                     continue
-                for inline_form in inline_formset:
+                inline_forms = list(inline_formset)
+                attempt_history_shown = len(inline_forms)
+                first_attempt = inline_forms[0].original if inline_forms else None
+                annotated_total = (
+                    first_attempt.__dict__.get("admin_inline_total")
+                    if isinstance(first_attempt, TaskAttempt)
+                    else 0
+                )
+                attempt_history_total = (
+                    annotated_total
+                    if type(annotated_total) is int and annotated_total >= attempt_history_shown
+                    else attempt_history_shown
+                )
+                attempt_history_omitted = attempt_history_total - attempt_history_shown
+                attempt_history_url = (
+                    reverse(
+                        f"{self.admin_site.name}:django_ray_taskattempt_changelist",
+                        current_app=self.admin_site.name,
+                    )
+                    + "?"
+                    + urlencode({"execution__id__exact": obj.pk})
+                )
+                for inline_form in inline_forms:
                     attempt = inline_form.original
                     if (
                         not isinstance(attempt, TaskAttempt)
@@ -1072,11 +1431,17 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                         break
                     archived_attempts.append(attempt.attempt_number)
                 break
+        archived_attempts.sort()
         context["django_ray_archived_workflow_attempts"] = tuple(archived_attempts)
         context["django_ray_archived_workflow_attempts_truncated"] = archived_attempts_truncated
         context["django_ray_archived_workflow_attempts_limit"] = (
             ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS
         )
+        context["django_ray_archived_workflow_attempts_history_omitted"] = attempt_history_omitted
+        context["django_ray_attempt_history_total"] = attempt_history_total
+        context["django_ray_attempt_history_shown"] = attempt_history_shown
+        context["django_ray_attempt_history_omitted"] = attempt_history_omitted
+        context["django_ray_attempt_history_url"] = attempt_history_url
         context["django_ray_admin_uses_unfold"] = _DJANGO_RAY_ADMIN_USES_UNFOLD
         context["show_history"] = False
         context["django_ray_retry_available"] = False
@@ -1188,6 +1553,14 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         opts = self.model._meta
         custom_urls = [
             path(
+                "<path:object_id>/history/",
+                self.admin_site.admin_view(_readonly_admin_removed_object_route),
+            ),
+            path(
+                "<path:object_id>/delete/",
+                self.admin_site.admin_view(_readonly_admin_removed_object_route),
+            ),
+            path(
                 "<path:object_id>/sensitive-data/",
                 self.admin_site.admin_view(self.sensitive_data_view),
                 name=f"{opts.app_label}_{opts.model_name}_sensitive_data",
@@ -1243,7 +1616,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 name=f"{opts.app_label}_{opts.model_name}_workflow_node_detail",
             ),
         ]
-        return custom_urls + super().get_urls()
+        return custom_urls + _readonly_admin_urls(super().get_urls(), opts=opts)
 
     def change_view(
         self,
@@ -1253,6 +1626,9 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         extra_context: dict[str, Any] | None = None,
     ) -> HttpResponse:
         """Provide the package-owned polling URL to the custom change form."""
+        method_response = _readonly_admin_change_method_response(request)
+        if method_response is not None:
+            return method_response
         opts = self.model._meta
         context = {
             **(extra_context or {}),
@@ -1309,7 +1685,18 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 current_app=self.admin_site.name,
             ),
         }
-        return super().change_view(request, object_id, form_url, context)
+        request.__dict__["_django_ray_bounded_execution_detail"] = True
+        try:
+            response = super().change_view(request, object_id, form_url, context)
+            return _bounded_admin_detail_response(
+                request,
+                response,
+                admin_site=self.admin_site,
+                opts=self.opts,
+                max_bytes=ADMIN_EXECUTION_DETAIL_RESPONSE_MAX_BYTES,
+            )
+        finally:
+            request.__dict__.pop("_django_ray_bounded_execution_detail", None)
 
     def sensitive_data_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
         """Render a bounded, permission-gated view of stored task diagnostics."""
@@ -1405,7 +1792,14 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         """Load only bounded task metadata before the authorized read service."""
         try:
             execution_id = self.model._meta.pk.to_python(unquote(object_id))
-            return self.get_queryset(request).only(*self.observability_fields).get(pk=execution_id)
+            queryset = _annotate_bounded_admin_text(
+                self.get_queryset(request).only(*self.observability_fields),
+                field_names=("error_message",),
+                max_bytes=ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES,
+                max_chars=ADMIN_DIAGNOSTIC_MAX_CHARS,
+                namespace="observability",
+            )
+            return queryset.get(pk=execution_id)
         except (RayTaskExecution.DoesNotExist, ValidationError, ValueError) as error:
             raise Http404("Ray task execution was not found") from error
 
@@ -2038,6 +2432,18 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         if request.method != "GET":
             return HttpResponseNotAllowed(["GET"])
         execution = self._observability_execution(request, object_id)
+        error_message, error_status = _bounded_admin_text_value(
+            execution,
+            "error_message",
+            max_bytes=ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES,
+            namespace="observability",
+        )
+        if error_status == "oversized":
+            execution.error_message = _ADMIN_DETAIL_OVERSIZED_MESSAGE
+        elif error_status != "value":
+            execution.error_message = _ADMIN_DETAIL_UNAVAILABLE_MESSAGE
+        else:
+            execution.error_message = error_message
 
         from django_ray import observability
 
@@ -2067,6 +2473,8 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         )
         if summary.get("error_message") is not None:
             summary["error_message"] = _bounded_redacted_text(summary["error_message"])
+        if error_status != "value":
+            summary["error_message_truncated"] = True
         if workflow_error is not None:
             summary["workflow_error"] = workflow_error
             summary["workflow_error_code"] = workflow_error_code
@@ -2124,9 +2532,20 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         summary["workflow_availability"] = (
             progress_envelope.get("availability") if progress_envelope is not None else None
         )
-        response = JsonResponse(summary)
-        response["Cache-Control"] = "no-store"
-        return response
+        try:
+            return _admin_json_response(
+                summary,
+                max_bytes=ADMIN_OBSERVABILITY_RESPONSE_MAX_BYTES,
+            )
+        except ValueError:
+            return _admin_json_response(
+                {
+                    "code": "RESPONSE_LIMIT",
+                    "message": "Live task status exceeds its fixed response limit.",
+                },
+                status=413,
+                max_bytes=ADMIN_OBSERVABILITY_RESPONSE_MAX_BYTES,
+            )
 
     @staticmethod
     def _workflow_graph_issue_response(issue: AdminWorkflowGraphError) -> HttpResponse:
@@ -2354,23 +2773,23 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
 
     @admin.display(description="Arguments")
     def args_json_display(self, obj: RayTaskExecution) -> str:
-        return self._redacted_json(obj.args_json)
+        return _ordinary_admin_json_display(obj, "args_json")
 
     @admin.display(description="Keyword arguments")
     def kwargs_json_display(self, obj: RayTaskExecution) -> str:
-        return self._redacted_json(obj.kwargs_json)
+        return _ordinary_admin_json_display(obj, "kwargs_json")
 
     @admin.display(description="Input reference")
     def input_reference_display(self, obj: RayTaskExecution) -> str:
-        return _bounded_redacted_text(obj.input_reference)
+        return _ordinary_admin_text_display(obj, "input_reference")
 
     @admin.display(description="Result")
     def result_data_display(self, obj: RayTaskExecution) -> str:
-        return self._redacted_json(obj.result_data)
+        return _ordinary_admin_json_display(obj, "result_data")
 
     @admin.display(description="Result reference")
     def result_reference_display(self, obj: RayTaskExecution) -> str:
-        return _bounded_redacted_text(obj.result_reference)
+        return _ordinary_admin_text_display(obj, "result_reference")
 
     @admin.display(description="Progress")
     def progress_data_display(self, obj: RayTaskExecution) -> str:
@@ -2378,19 +2797,24 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
 
     @admin.display(description="Completion envelope")
     def completion_data_display(self, obj: RayTaskExecution) -> str:
-        return self._redacted_json(obj.completion_data)
+        return _ordinary_admin_json_display(obj, "completion_data")
 
     @admin.display(description="Error")
     def error_message_display(self, obj: RayTaskExecution) -> str:
-        return _bounded_redacted_text(obj.error_message)
+        return _ordinary_admin_text_display(obj, "error_message")
 
     @admin.display(description="Cancellation error")
     def cancellation_error_display(self, obj: RayTaskExecution) -> str:
-        return _bounded_redacted_text(obj.cancellation_error)
+        return _ordinary_admin_text_display(obj, "cancellation_error")
 
     @admin.display(description="Traceback")
     def error_traceback_display(self, obj: RayTaskExecution) -> str:
-        return _bounded_traceback_display(obj.error_traceback)
+        value, status = _bounded_admin_text_value(obj, "error_traceback")
+        if status == "oversized":
+            value = _ADMIN_DETAIL_OVERSIZED_MESSAGE
+        elif status != "value":
+            value = _ADMIN_DETAIL_UNAVAILABLE_MESSAGE
+        return _bounded_traceback_display(value)
 
     @admin.display(description="Ray Job ID")
     def ray_job_id_display(self, obj: RayTaskExecution) -> str:
@@ -2776,12 +3200,44 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
         opts = self.model._meta
         custom_urls = [
             path(
+                "<path:object_id>/history/",
+                self.admin_site.admin_view(_readonly_admin_removed_object_route),
+            ),
+            path(
+                "<path:object_id>/delete/",
+                self.admin_site.admin_view(_readonly_admin_removed_object_route),
+            ),
+            path(
                 "<path:object_id>/sensitive-data/",
                 self.admin_site.admin_view(self.sensitive_data_view),
                 name=f"{opts.app_label}_{opts.model_name}_sensitive_data",
-            )
+            ),
         ]
-        return custom_urls + super().get_urls()
+        return custom_urls + _readonly_admin_urls(super().get_urls(), opts=opts)
+
+    def change_view(
+        self,
+        request: HttpRequest,
+        object_id: str,
+        form_url: str = "",
+        extra_context: dict[str, Any] | None = None,
+    ) -> HttpResponse:
+        """Render one cache-disabled attempt detail within a fixed response bound."""
+        method_response = _readonly_admin_change_method_response(request)
+        if method_response is not None:
+            return method_response
+        request.__dict__["_django_ray_bounded_attempt_detail"] = True
+        try:
+            response = super().change_view(request, object_id, form_url, extra_context)
+            return _bounded_admin_detail_response(
+                request,
+                response,
+                admin_site=self.admin_site,
+                opts=self.opts,
+                max_bytes=ADMIN_ATTEMPT_DETAIL_RESPONSE_MAX_BYTES,
+            )
+        finally:
+            request.__dict__.pop("_django_ray_bounded_attempt_detail", None)
 
     def sensitive_data_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
         """Render exact inputs plus the selected archived attempt's outcome."""
@@ -2874,13 +3330,11 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
         )
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[TaskAttempt]:
-        """Bound routine list reads while retaining detail diagnostics."""
+        """Use allowlisted and SQL-guarded projections for routine Admin reads."""
         queryset = super().get_queryset(request).defer("workflow_progress_summary_json")
         resolver_match = request.resolver_match
-        if (
-            resolver_match is not None
-            and resolver_match.url_name == "django_ray_taskattempt_changelist"
-        ):
+        url_name = resolver_match.url_name if resolver_match is not None else None
+        if url_name == "django_ray_taskattempt_changelist":
             queryset = queryset.only(
                 "pk",
                 "execution_id",
@@ -2899,6 +3353,17 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
                     default=Value(False),
                     output_field=BooleanField(),
                 )
+            )
+        if (
+            request.__dict__.get("_django_ray_bounded_attempt_detail") is True
+            or url_name == "django_ray_taskattempt_change"
+        ):
+            queryset = _annotate_bounded_admin_text(
+                queryset.only(*_ADMIN_ATTEMPT_DETAIL_FIELDS),
+                field_names=_ADMIN_ATTEMPT_DETAIL_DIAGNOSTIC_FIELDS,
+                max_bytes=ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES,
+                max_chars=ADMIN_DIAGNOSTIC_MAX_CHARS,
+                namespace="detail",
             )
         return queryset
 
@@ -2979,19 +3444,24 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
 
     @admin.display(description="Error")
     def error_message_display(self, obj: TaskAttempt) -> str:
-        return _bounded_redacted_text(obj.error_message)
+        return _ordinary_admin_text_display(obj, "error_message")
 
     @admin.display(description="Traceback")
     def error_traceback_display(self, obj: TaskAttempt) -> str:
-        return _bounded_traceback_display(obj.error_traceback)
+        value, status = _bounded_admin_text_value(obj, "error_traceback")
+        if status == "oversized":
+            value = _ADMIN_DETAIL_OVERSIZED_MESSAGE
+        elif status != "value":
+            value = _ADMIN_DETAIL_UNAVAILABLE_MESSAGE
+        return _bounded_traceback_display(value)
 
     @admin.display(description="Result")
     def result_data_display(self, obj: TaskAttempt) -> str:
-        return _bounded_redacted_json(obj.result_data)
+        return _ordinary_admin_json_display(obj, "result_data")
 
     @admin.display(description="Result reference")
     def result_reference_display(self, obj: TaskAttempt) -> str:
-        return _bounded_redacted_text(obj.result_reference)
+        return _ordinary_admin_text_display(obj, "result_reference")
 
 
 class ActiveWorkerFilter(admin.SimpleListFilter):
