@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from collections.abc import Iterator
 from datetime import datetime
 from hashlib import sha256
 from typing import Annotated, Any, Literal
@@ -19,6 +20,7 @@ from django.core import signing
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
 from django.db.models import (
+    BooleanField,
     Case,
     Count,
     F,
@@ -54,7 +56,7 @@ from django_ray.observability import (
     get_workflow_node_snapshot,
     get_workflow_progress,
 )
-from django_ray.redaction import redact_text, redact_value, safe_json_dumps
+from django_ray.redaction import REDACTED, redact_text, redact_value, safe_json_dumps
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
     resolve_runtime_env_profile,
@@ -95,7 +97,14 @@ _EXECUTION_LIST_CURSOR_SALT = "testproject.execution-list.v1"
 _EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES = 4_096
 _EXECUTION_LIST_RESPONSE_MAX_BYTES = 256 * 1_024
 _EXECUTION_LIST_DIAGNOSTIC_OMISSION_REASON = "stored_value_exceeds_list_limit"
-_EXECUTION_LIST_DATABASE_VENDORS = frozenset({"postgresql", "sqlite"})
+_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES = 64 * 1_024
+_EXECUTION_DETAIL_RESPONSE_MAX_BYTES = 256 * 1_024
+_EXECUTION_RESULT_JSON_MAX_DEPTH = 20
+_EXECUTION_RESULT_JSON_DEPTH_SCAN_MAX_ITEMS = 4_096
+_EXECUTION_DETAIL_DIAGNOSTIC_OMISSION_REASON = "stored_value_exceeds_detail_limit"
+_EXECUTION_DETAIL_EXTERNAL_RESULT_OMISSION_REASON = "external_result_not_loaded"
+_EXECUTION_DETAIL_RESPONSE_OMISSION_REASON = "response_size_limit"
+_EXECUTION_PROJECTION_DATABASE_VENDORS = frozenset({"postgresql", "sqlite"})
 
 _EXECUTION_LIST_VALUE_FIELDS = (
     "id",
@@ -117,6 +126,29 @@ _EXECUTION_LIST_VALUE_FIELDS = (
     "_list_result_data_bytes",
     "_list_error_message",
     "_list_error_message_bytes",
+)
+
+_EXECUTION_DETAIL_VALUE_FIELDS = (
+    "id",
+    "task_id",
+    "callable_path",
+    "queue_name",
+    "state",
+    "attempt_number",
+    "execution_generation",
+    "workflow_run_id",
+    "created_at",
+    "started_at",
+    "finished_at",
+    "runtime_env_profile",
+    "runtime_env_hash",
+    "queue_timeout_seconds",
+    "queue_deadline_at",
+    "_detail_result_data",
+    "_detail_result_data_bytes",
+    "_detail_error_message",
+    "_detail_error_message_bytes",
+    "_detail_has_result_reference",
 )
 
 
@@ -248,6 +280,29 @@ class TaskResultSchema(Schema):
         return redact_value(value)
 
 
+def _json_value_requires_fixed_redaction(value: Any) -> bool:
+    """Detect excessive JSON depth or indeterminate depth within fixed work."""
+    pending: list[tuple[Iterator[Any], int]] = [(iter((value,)), 0)]
+    inspected_items = 0
+    while pending:
+        iterator, depth = pending[-1]
+        try:
+            item = next(iterator)
+        except StopIteration:
+            pending.pop()
+            continue
+        if inspected_items >= _EXECUTION_RESULT_JSON_DEPTH_SCAN_MAX_ITEMS:
+            return True
+        inspected_items += 1
+        if depth > _EXECUTION_RESULT_JSON_MAX_DEPTH:
+            return True
+        if isinstance(item, dict):
+            pending.append((iter(item.values()), depth + 1))
+        elif isinstance(item, list):
+            pending.append((iter(item), depth + 1))
+    return False
+
+
 class TaskExecutionSchema(Schema):
     """Schema for task execution details (internal model)."""
 
@@ -272,12 +327,16 @@ class TaskExecutionSchema(Schema):
     @field_validator("result_data", mode="before")
     @classmethod
     def redact_json_fields(cls, value):
+        """Decode valid JSON before redaction and hide undecodable source text."""
         if value is None:
             return None
         try:
-            return safe_json_dumps(json.loads(value))
-        except (TypeError, json.JSONDecodeError):
-            return redact_text(value)
+            parsed = json.loads(value)
+            if _json_value_requires_fixed_redaction(parsed):
+                return REDACTED
+            return safe_json_dumps(parsed)
+        except (RecursionError, TypeError, ValueError, UnicodeError):
+            return REDACTED
 
     @field_validator("error_message", mode="before")
     @classmethod
@@ -290,6 +349,32 @@ class TaskExecutionListItemSchema(TaskExecutionSchema):
 
     result_data_omission_reason: Literal["stored_value_exceeds_list_limit"] | None
     error_message_omission_reason: Literal["stored_value_exceeds_list_limit"] | None
+
+
+class TaskExecutionDetailSchema(TaskExecutionSchema):
+    """Exact execution projection with explicit diagnostic read bounds."""
+
+    result_data_omission_reason: (
+        Literal[
+            "stored_value_exceeds_detail_limit",
+            "external_result_not_loaded",
+            "response_size_limit",
+        ]
+        | None
+    )
+    error_message_omission_reason: (
+        Literal["stored_value_exceeds_detail_limit", "response_size_limit"] | None
+    )
+    diagnostic_max_bytes: Literal[65536]
+    response_max_bytes: Literal[262144]
+
+
+class TaskExecutionDetailUnavailableSchema(Schema):
+    """Fixed response when even bounded detail metadata cannot be rendered safely."""
+
+    code: Literal["execution_detail_response_limit"]
+    message: Literal["Execution detail exceeds its fixed response limit."]
+    response_max_bytes: Literal[262144]
 
 
 class RetryExecutionOutcomeSchema(Schema):
@@ -946,36 +1031,60 @@ def _decode_execution_list_cursor(
     return created_at, execution_id
 
 
+def _guarded_execution_diagnostics(
+    queryset: QuerySet[RayTaskExecution],
+    *,
+    annotation_prefix: str,
+    max_bytes: int,
+    surface: str,
+) -> QuerySet[RayTaskExecution]:
+    """Project inline diagnostics only when their stored byte length is bounded."""
+    if connection.vendor not in _EXECUTION_PROJECTION_DATABASE_VENDORS:
+        raise ImproperlyConfigured(
+            f"The testproject execution {surface} supports only SQLite and PostgreSQL byte guards"
+        )
+    result_bytes_field = f"_{annotation_prefix}_result_data_bytes"
+    error_bytes_field = f"_{annotation_prefix}_error_message_bytes"
+    result_value_field = f"_{annotation_prefix}_result_data"
+    error_value_field = f"_{annotation_prefix}_error_message"
+    return queryset.annotate(
+        **{
+            result_bytes_field: _DatabaseByteLength("result_data"),
+            error_bytes_field: _DatabaseByteLength("error_message"),
+        }
+    ).annotate(
+        **{
+            result_value_field: Case(
+                When(
+                    Q(**{f"{result_bytes_field}__lte": max_bytes}),
+                    then=F("result_data"),
+                ),
+                default=Value(None),
+                output_field=TextField(),
+            ),
+            error_value_field: Case(
+                When(
+                    Q(**{f"{error_bytes_field}__lte": max_bytes}),
+                    then=F("error_message"),
+                ),
+                default=Value(None),
+                output_field=TextField(),
+            ),
+        }
+    )
+
+
 def _bounded_execution_list_rows(
     queryset: QuerySet[RayTaskExecution],
     *,
     limit: int,
 ) -> list[dict[str, Any]]:
     """Load one bounded page without transferring oversized diagnostics."""
-    if connection.vendor not in _EXECUTION_LIST_DATABASE_VENDORS:
-        raise ImproperlyConfigured(
-            "The testproject execution list supports only SQLite and PostgreSQL byte guards"
-        )
-    guarded = queryset.annotate(
-        _list_result_data_bytes=_DatabaseByteLength("result_data"),
-        _list_error_message_bytes=_DatabaseByteLength("error_message"),
-    ).annotate(
-        _list_result_data=Case(
-            When(
-                _list_result_data_bytes__lte=_EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES,
-                then=F("result_data"),
-            ),
-            default=Value(None),
-            output_field=TextField(),
-        ),
-        _list_error_message=Case(
-            When(
-                _list_error_message_bytes__lte=_EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES,
-                then=F("error_message"),
-            ),
-            default=Value(None),
-            output_field=TextField(),
-        ),
+    guarded = _guarded_execution_diagnostics(
+        queryset,
+        annotation_prefix="list",
+        max_bytes=_EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES,
+        surface="list",
     )
     return list(
         guarded.order_by("-created_at", "-pk").values(*_EXECUTION_LIST_VALUE_FIELDS)[: limit + 1]
@@ -1051,19 +1160,28 @@ def _execution_list_payload(
     )
 
 
-def _encode_execution_list_response(
+def _encode_api_schema_response(
     request: Any,
-    response: TaskListResponseSchema,
+    response: Schema,
+    *,
+    status_code: int,
 ) -> bytes:
     """Render with the configured API encoder so the byte bound is exact."""
     rendered = api.renderer.render(
         request,
         response.model_dump(),
-        response_status=200,
+        response_status=status_code,
     )
     if isinstance(rendered, str):
         return rendered.encode(api.renderer.charset)
     return bytes(rendered)
+
+
+def _encode_execution_list_response(
+    request: Any,
+    response: TaskListResponseSchema,
+) -> bytes:
+    return _encode_api_schema_response(request, response, status_code=200)
 
 
 def _bounded_execution_list_response(
@@ -1113,6 +1231,145 @@ def _bounded_execution_list_response(
     if len(encoded) > _EXECUTION_LIST_RESPONSE_MAX_BYTES:
         raise ImproperlyConfigured("Execution list response metadata exceeds its byte bound")
     return HttpResponse(encoded, status=200, content_type=api.get_content_type())
+
+
+def _bounded_execution_detail_row(execution_id: int) -> dict[str, Any]:
+    """Read one exact execution through a single guarded values projection."""
+    guarded = _guarded_execution_diagnostics(
+        RayTaskExecution.objects.all(),
+        annotation_prefix="detail",
+        max_bytes=_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES,
+        surface="detail",
+    ).annotate(
+        _detail_has_result_reference=Case(
+            When(
+                Q(result_reference__isnull=False) & ~Q(result_reference=""),
+                then=Value(True),
+            ),
+            default=Value(False),
+            output_field=BooleanField(),
+        )
+    )
+    return get_object_or_404(
+        guarded.values(*_EXECUTION_DETAIL_VALUE_FIELDS),
+        pk=execution_id,
+    )
+
+
+def _validated_diagnostic_byte_count(value: Any) -> int | None:
+    """Reject an impossible database length instead of weakening an omission decision."""
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ImproperlyConfigured("Execution detail database byte length is invalid")
+    return value
+
+
+def _execution_detail_item(row: dict[str, Any]) -> TaskExecutionDetailSchema:
+    """Convert one exact guarded row into its redacted public response."""
+    values = dict(row)
+    result_bytes = _validated_diagnostic_byte_count(values.pop("_detail_result_data_bytes"))
+    error_bytes = _validated_diagnostic_byte_count(values.pop("_detail_error_message_bytes"))
+    result_data = values.pop("_detail_result_data")
+    error_message = values.pop("_detail_error_message")
+    has_result_reference = values.pop("_detail_has_result_reference") is True
+
+    values["result_data"] = result_data
+    values["error_message"] = error_message
+    if result_bytes is not None and result_bytes > _EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES:
+        result_omission_reason = _EXECUTION_DETAIL_DIAGNOSTIC_OMISSION_REASON
+    elif result_data is None and has_result_reference:
+        result_omission_reason = _EXECUTION_DETAIL_EXTERNAL_RESULT_OMISSION_REASON
+    else:
+        result_omission_reason = None
+    values["result_data_omission_reason"] = result_omission_reason
+    values["error_message_omission_reason"] = (
+        _EXECUTION_DETAIL_DIAGNOSTIC_OMISSION_REASON
+        if error_bytes is not None and error_bytes > _EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
+        else None
+    )
+    values["diagnostic_max_bytes"] = _EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
+    values["response_max_bytes"] = _EXECUTION_DETAIL_RESPONSE_MAX_BYTES
+    return TaskExecutionDetailSchema.model_validate(values)
+
+
+def _try_encode_execution_detail_response(
+    request: Any,
+    response: TaskExecutionDetailSchema,
+) -> bytes | None:
+    """Return encoded detail or a fail-closed marker for unsafe renderer failures."""
+    try:
+        return _encode_api_schema_response(request, response, status_code=200)
+    except Exception:
+        # Operational renderer failures fail closed; process control must propagate.
+        return None
+
+
+def _execution_detail_http_response(encoded: bytes, *, status_code: int) -> HttpResponse:
+    response = HttpResponse(
+        encoded,
+        status=status_code,
+        content_type=api.get_content_type(),
+    )
+    response["Cache-Control"] = "no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _execution_detail_unavailable_response(request: Any) -> HttpResponse:
+    """Return a fixed, diagnostic-free failure that is independent of stored values."""
+    unavailable = TaskExecutionDetailUnavailableSchema.model_validate(
+        {
+            "code": "execution_detail_response_limit",
+            "message": "Execution detail exceeds its fixed response limit.",
+            "response_max_bytes": _EXECUTION_DETAIL_RESPONSE_MAX_BYTES,
+        }
+    )
+    try:
+        encoded = _encode_api_schema_response(request, unavailable, status_code=503)
+    except Exception:
+        # The raw fixed body remains available without swallowing BaseException.
+        encoded = b""
+    if not encoded or len(encoded) > _EXECUTION_DETAIL_RESPONSE_MAX_BYTES:
+        encoded = (
+            b'{"code":"execution_detail_response_limit",'
+            b'"message":"Execution detail exceeds its fixed response limit.",'
+            b'"response_max_bytes":262144}'
+        )
+    return _execution_detail_http_response(encoded, status_code=503)
+
+
+def _bounded_execution_detail_response(
+    request: Any,
+    row: dict[str, Any],
+) -> HttpResponse:
+    """Render one exact detail while omitting diagnostics that exceed the total cap."""
+    response = _execution_detail_item(row)
+    encoded = _try_encode_execution_detail_response(request, response)
+    if encoded is None:
+        return _execution_detail_unavailable_response(request)
+    if len(encoded) <= _EXECUTION_DETAIL_RESPONSE_MAX_BYTES:
+        return _execution_detail_http_response(encoded, status_code=200)
+
+    for field_name, reason_field_name in (
+        ("result_data", "result_data_omission_reason"),
+        ("error_message", "error_message_omission_reason"),
+    ):
+        if getattr(response, field_name) is None:
+            continue
+        response = response.model_copy(
+            update={
+                field_name: None,
+                reason_field_name: _EXECUTION_DETAIL_RESPONSE_OMISSION_REASON,
+            }
+        )
+        encoded = _try_encode_execution_detail_response(request, response)
+        if encoded is None:
+            return _execution_detail_unavailable_response(request)
+        if len(encoded) <= _EXECUTION_DETAIL_RESPONSE_MAX_BYTES:
+            return _execution_detail_http_response(encoded, status_code=200)
+
+    return _execution_detail_unavailable_response(request)
 
 
 @api.get("/executions", response=TaskListResponseSchema, tags=["Admin"])
@@ -1247,11 +1504,18 @@ def reset_executions(
     return {"message": message}
 
 
-@api.get("/executions/{execution_id}", response=TaskExecutionSchema, tags=["Admin"])
+@api.get(
+    "/executions/{execution_id}",
+    response={
+        200: TaskExecutionDetailSchema,
+        503: TaskExecutionDetailUnavailableSchema,
+    },
+    tags=["Admin"],
+)
 def get_execution(request, execution_id: int):
     """Get detailed execution record by internal ID."""
-    task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
-    return task
+    row = _bounded_execution_detail_row(execution_id)
+    return _bounded_execution_detail_response(request, row)
 
 
 @api.post("/executions/{execution_id}/cancel", response=TaskExecutionSchema, tags=["Admin"])

@@ -954,6 +954,10 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
                         "task_id": TASK_ID,
                         "state": "SUCCEEDED",
                         "result_data": "5",
+                        "result_data_omission_reason": None,
+                        "error_message_omission_reason": None,
+                        "diagnostic_max_bytes": 65_536,
+                        "response_max_bytes": 262_144,
                     },
                 )
             return Response(200, {})
@@ -3681,6 +3685,16 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
     gate = LocalKubeRayGate(_config())
     token = "local-token-that-must-never-be-printed-123456"
     calls: list[tuple[str, str, bool]] = []
+    detail_response: dict[str, object] = {
+        "id": 17,
+        "task_id": TASK_ID,
+        "state": "SUCCEEDED",
+        "result_data": "5",
+        "result_data_omission_reason": None,
+        "error_message_omission_reason": None,
+        "diagnostic_max_bytes": 65_536,
+        "response_max_bytes": 262_144,
+    }
     monkeypatch.setattr(gate, "_secret_token", lambda: token)
 
     def request(
@@ -3721,14 +3735,7 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
         if path == "/api/executions/17" and method == "DELETE":
             return 405, b"{}"
         if path == "/api/executions/17":
-            return 200, json.dumps(
-                {
-                    "id": 17,
-                    "task_id": TASK_ID,
-                    "state": "SUCCEEDED",
-                    "result_data": "5",
-                }
-            ).encode()
+            return 200, json.dumps(detail_response).encode()
         return 200, b"{}"
 
     monkeypatch.setattr(gate, "_http", request)
@@ -3750,6 +3757,10 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
         ("/api/executions/17", "DELETE", True),
         ("/api/executions/17", "GET", True),
     ]
+
+    detail_response["response_max_bytes"] = None
+    with pytest.raises(ValueError, match="lost its bounded projection contract"):
+        gate._verify_api()
 
 
 def test_api_smoke_rejects_an_openapi_execution_delete() -> None:

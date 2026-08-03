@@ -393,6 +393,8 @@ MAX_OUTPUT_CHARACTERS = 16_000
 MAX_GATE_ERROR_CHARACTERS = MAX_OUTPUT_CHARACTERS - 256
 MAX_HTTP_RESPONSE_BYTES = 64 * 1024
 MAX_OPENAPI_SCHEMA_BYTES = 128_000
+EXPECTED_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES = 64 * 1024
+EXPECTED_EXECUTION_DETAIL_RESPONSE_MAX_BYTES = 256 * 1024
 MAX_FAILURE_CONTEXT_CHARACTERS = 4_000
 EVIDENCE_LINE_LIMIT = 72
 BEARER_TOKEN68_PATTERN = re.compile(r"[A-Za-z0-9._~+/-]+={0,2}\Z")
@@ -4491,9 +4493,15 @@ class LocalKubeRayGate:
                         or detail.get("task_id") != task_id
                         or detail.get("state") != "SUCCEEDED"
                         or detail_result != 5
+                        or detail.get("result_data_omission_reason") is not None
+                        or detail.get("error_message_omission_reason") is not None
+                        or detail.get("diagnostic_max_bytes")
+                        != EXPECTED_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
+                        or detail.get("response_max_bytes")
+                        != EXPECTED_EXECUTION_DETAIL_RESPONSE_MAX_BYTES
                     ):
                         raise ValueError(
-                            "execution changed after the rejected DELETE lifecycle probe"
+                            "execution detail changed or lost its bounded projection contract"
                         )
                     self.evidence.task_state = last_state
                     self.evidence.task_result = result

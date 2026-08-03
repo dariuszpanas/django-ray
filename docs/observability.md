@@ -187,11 +187,30 @@ truncation reasons distinguish a stored diagnostic that was not loaded
 (`stored_value_exceeds_list_limit`) from a page that stopped at either the page-size
 (`page_limit`) or response-size (`response_size_limit`) boundary. Its signed,
 filter-bound `next_cursor` uses keyset continuation after the last complete returned
-item, so concurrent inserts do not shift the next page. These claims do not extend to
-`GET /api/executions/{id}`: that authenticated, redacted route is an exact operator
-lookup and does not share the list bounds. The list byte guard is supported on the
-testproject's SQLite and PostgreSQL paths; other database LOB semantics fail
-configuration explicitly rather than inheriting this bounded claim.
+item, so concurrent inserts do not shift the next page. An included malformed, deep,
+or conversion-failing result becomes the fixed `[REDACTED]` marker with a `null`
+omission reason because the field was redacted rather than omitted. The list byte guard
+is supported on the testproject's SQLite and PostgreSQL paths; other database LOB
+semantics fail configuration explicitly rather than inheriting this bounded claim.
+
+The separate `GET /api/executions/{id}` exact operator lookup has its own bounded
+contract. A single values projection selects only public response fields and applies
+65,536-byte database guards to inline result and error values. Unreturned inputs,
+tracebacks, RuntimeEnv data, workflow data, and completion envelopes do not cross the
+database boundary. `stored_value_exceeds_detail_limit` identifies an oversized inline
+diagnostic, while `external_result_not_loaded` identifies a result reference that the
+route deliberately does not resolve. Malformed, truncated, too-deep, or
+Unicode-conversion-failing inline result JSON becomes the fixed `[REDACTED]` marker;
+this is redaction, so the omission reason remains `null`. Redaction can expand an
+included valid value, so the renderer enforces a separate 256 KiB response ceiling: it
+omits result before error with `response_size_limit`, then returns the fixed
+`execution_detail_response_limit` `503` if bounded metadata still cannot fit. An
+ordinary exception from either renderer attempt also fails closed to that
+diagnostic-free response; process-control exceptions propagate. Responses disable
+caching and MIME sniffing. This byte projection has the same explicit
+SQLite/PostgreSQL support boundary as the list. Global bearer authentication remains
+a testproject convenience; an application must impose its own tenant, ownership, or
+object policy on the exact lookup.
 
 `get_workflow_node_snapshot()` always returns durable node data first. Live Ray state
 and logs are opt-in:

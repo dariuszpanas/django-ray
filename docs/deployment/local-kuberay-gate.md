@@ -215,6 +215,9 @@ The gate performs these bounded layers:
 9. Requires unauthenticated enqueue/stats/metrics/executions requests to return `401`; requires the
    same protected reads to return `200` with the in-memory token; then polls only the fresh task via
    an exact `task_id` filter and `limit=1` until it reaches durable `SUCCEEDED` with `result_data=5`.
+   It rejects `DELETE`, then requires the exact detail read to preserve that row and result while
+   advertising 65,536-byte diagnostic guards, a 262,144-byte response ceiling, and no omission for
+   the small inline value.
 10. Enqueues the lightweight `thin` RuntimeEnv probe and requires its sanitized result to report
     `storage_encryption_verified=true`. A sensitive-output-suppressed in-pod inspector then reads the
     raw database field, requires the exact canonical AES-256-GCM envelope with the guarded

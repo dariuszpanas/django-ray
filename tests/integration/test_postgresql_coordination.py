@@ -1922,6 +1922,60 @@ def test_postgresql_execution_list_bounds_unicode_before_transfer() -> None:
     assert "AS BLOB" not in bounded_sql
 
 
+def test_postgresql_execution_detail_bounds_unicode_before_transfer() -> None:
+    limit = testproject_api._EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
+    exact_value = "\U0001f642" * (limit // 4)
+    oversized_value = exact_value + "\u00e9"
+    assert len(exact_value.encode("utf-8")) == limit
+    assert len(oversized_value.encode("utf-8")) == limit + 2
+    exact = _execution(
+        "postgres-execution-detail-exact-boundary-001",
+        state=TaskState.FAILED,
+        result_data=exact_value,
+        error_message=exact_value,
+    )
+    oversized = _execution(
+        "postgres-execution-detail-over-boundary-001",
+        state=TaskState.FAILED,
+        result_data=oversized_value,
+        error_message=oversized_value,
+    )
+
+    exact_row = testproject_api._bounded_execution_detail_row(exact.pk)
+    exact_item = testproject_api._execution_detail_item(exact_row)
+
+    assert exact_row["_detail_result_data_bytes"] == limit
+    assert exact_row["_detail_error_message_bytes"] == limit
+    assert exact_row["_detail_result_data"] == exact_value
+    assert exact_row["_detail_error_message"] == exact_value
+    assert exact_item.result_data_omission_reason is None
+    assert exact_item.error_message_omission_reason is None
+
+    with CaptureQueriesContext(connection) as queries:
+        oversized_row = testproject_api._bounded_execution_detail_row(oversized.pk)
+
+    assert oversized_row["_detail_result_data_bytes"] == limit + 2
+    assert oversized_row["_detail_error_message_bytes"] == limit + 2
+    assert oversized_row["_detail_result_data"] is None
+    assert oversized_row["_detail_error_message"] is None
+    oversized_item = testproject_api._execution_detail_item(oversized_row)
+    assert oversized_item.result_data_omission_reason == "stored_value_exceeds_detail_limit"
+    assert oversized_item.error_message_omission_reason == "stored_value_exceeds_detail_limit"
+
+    selects = [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].lstrip().upper().startswith("SELECT")
+        and "django_ray_raytaskexecution" in query["sql"]
+    ]
+    assert len(selects) == 1
+    bounded_sql = selects[0].upper()
+    assert "OCTET_LENGTH" in bounded_sql
+    assert "CASE WHEN" in bounded_sql
+    assert "LENGTH(CAST(" not in bounded_sql
+    assert "AS BLOB" not in bounded_sql
+
+
 def test_workflow_progress_cancellation_race_disables_late_writer() -> None:
     task = _execution(
         "postgres-workflow-cancel-race-001",
