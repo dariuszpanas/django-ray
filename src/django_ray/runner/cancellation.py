@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from django_ray.lifecycle import request_task_cancellation
 from django_ray.models import TaskState
+from django_ray.redaction import materialize_exception_text
 
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
@@ -56,7 +57,7 @@ def prepare_remote_cancellation(
             supported=True,
             error=CancellationOutcome(
                 CancellationOutcomeStatus.INDETERMINATE,
-                f"Cancellation preparation raised {type(exc).__name__}: {exc}",
+                f"Cancellation preparation raised {materialize_exception_text(exc)}",
             ),
         )
 
@@ -82,7 +83,7 @@ def request_remote_cancellation(
         except Exception as exc:
             return CancellationOutcome(
                 CancellationOutcomeStatus.INDETERMINATE,
-                f"Prepared cancellation request raised {type(exc).__name__}: {exc}",
+                f"Prepared cancellation request raised {materialize_exception_text(exc)}",
             )
 
     cancel_with_status = getattr(runner, "cancel_with_status", None)
@@ -93,7 +94,7 @@ def request_remote_cancellation(
     except Exception as exc:  # pragma: no cover - exercised by backend implementations
         return CancellationOutcome(
             CancellationOutcomeStatus.INDETERMINATE,
-            f"Cancellation request raised {type(exc).__name__}: {exc}",
+            f"Cancellation request raised {materialize_exception_text(exc)}",
         )
 
     if accepted:

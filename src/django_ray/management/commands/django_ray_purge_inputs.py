@@ -10,6 +10,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import transaction
 from django.utils import timezone
 
+from django_ray.management.diagnostics import render_exception_type_label
 from django_ray.models import InputPayloadState, RayTaskExecution, TaskInputPayload, TaskState
 
 TERMINAL_STATES = (
@@ -144,10 +145,7 @@ class Command(BaseCommand):
 
     @staticmethod
     def _format_cleanup_error(error: Exception) -> str:
-        name = type(error).__name__
-        if not name or len(name) > 128 or not name.isascii() or not name.replace("_", "").isalnum():
-            return "Exception"
-        return name
+        return render_exception_type_label(error)
 
     @staticmethod
     def _reference_fingerprint(reference: str) -> str:

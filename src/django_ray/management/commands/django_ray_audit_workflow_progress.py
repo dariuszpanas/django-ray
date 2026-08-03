@@ -6,6 +6,7 @@ from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 
+from django_ray.management.diagnostics import render_console_diagnostic
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.workflow_progress_storage import (
     WorkflowProgressStorageError,
@@ -43,7 +44,8 @@ class Command(BaseCommand):
                 using=str(options["database"]),
             )
         except (WorkflowProgressStorageError, WorkflowProgressStorageIntegrityError) as error:
-            raise CommandError(f"Workflow progress detail audit failed: {error}") from error
+            diagnostic = render_console_diagnostic(error)
+            raise CommandError(f"Workflow progress detail audit failed: {diagnostic}") from None
         states = ",".join(f"{state}:{count}" for state, count in result.state_counts)
         self.stdout.write(
             "Workflow progress detail audit passed: "

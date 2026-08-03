@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from threading import BoundedSemaphore, Event, Thread
 from typing import TYPE_CHECKING, Any
 
+from django_ray.redaction import materialize_exception_message, safe_exception_type_name
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
 
 if TYPE_CHECKING:
@@ -421,7 +422,11 @@ class RayCoreRunner(BaseRunner):
             # Remove from pending on error
             if self._pending_tasks.get(task_pk) is core_handle:
                 self._pending_tasks.pop(task_pk, None)
-            return JobInfo(job_id=handle.ray_job_id, status=JobStatus.FAILED, message=str(e))
+            return JobInfo(
+                job_id=handle.ray_job_id,
+                status=JobStatus.FAILED,
+                message=materialize_exception_message(e),
+            )
 
     def cancel(self, handle: SubmissionHandle) -> bool:
         """Cancel a Ray Core task.
@@ -517,7 +522,7 @@ class RayCoreRunner(BaseRunner):
             except Exception as exc:  # pragma: no cover - defensive backend boundary
                 result[0] = CancellationOutcome(
                     CancellationOutcomeStatus.INDETERMINATE,
-                    f"Ray Core cancellation raised {type(exc).__name__}",
+                    f"Ray Core cancellation raised {safe_exception_type_name(exc)}",
                 )
             finally:
                 _RAY_CORE_CANCEL_SLOT.release()
@@ -620,7 +625,7 @@ class RayCoreRunner(BaseRunner):
                     {
                         "success": False,
                         "result": None,
-                        "error": str(e),
+                        "error": materialize_exception_message(e),
                         "traceback": None,
                         "exception_type": type(e).__module__ + "." + type(e).__name__,
                     }

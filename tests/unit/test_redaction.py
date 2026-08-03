@@ -497,8 +497,24 @@ def test_redact_exception_does_not_expose_secret() -> None:
 
     rendered = redact_exception(error, patterns=[r"access-token"])
 
-    assert rendered == f"RuntimeError: {REDACTED}"
+    assert rendered == REDACTED
     assert "abc123" not in rendered
+
+
+def test_redact_exception_survives_message_and_type_rendering_failures() -> None:
+    calls = 0
+
+    class BrokenError(RuntimeError):
+        def __str__(self) -> str:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("secondary password=do-not-expose")
+
+    unsafe_error = type("Unsafe\x1b[31mError", (BrokenError,), {})()
+
+    assert redact_exception(unsafe_error) == "Exception: exception message unavailable"
+    assert redact_text(unsafe_error) == "Exception: exception message unavailable"
+    assert calls == 2
 
 
 def test_non_json_values_are_represented_by_type_only() -> None:
@@ -524,10 +540,13 @@ def test_non_string_mapping_keys_never_invoke_user_string_conversion() -> None:
 
 
 def test_result_metadata_is_bounded() -> None:
-    metadata = result_metadata({"secret": "value", "items": [1, 2, 3]})
+    metadata = result_metadata(
+        {"secret": "value", "items": [1, 2, 3]},
+        serialized_size_bytes=47,
+    )
 
     assert metadata["result_type"] == "builtins.dict"
-    assert isinstance(metadata["result_size_bytes"], int)
+    assert metadata["result_size_bytes"] == 47
     assert "value" not in str(metadata)
 
 
@@ -547,17 +566,51 @@ def test_redaction_handles_depth_binary_values_and_exception_text() -> None:
     )
 
 
-def test_result_metadata_handles_unserializable_values(monkeypatch) -> None:
+def test_result_metadata_never_serializes_application_values(monkeypatch) -> None:
     import django_ray.redaction as redaction
 
     monkeypatch.setattr(
-        redaction.json, "dumps", lambda *_args, **_kwargs: (_ for _ in ()).throw(TypeError)
+        redaction.json,
+        "dumps",
+        lambda *_args, **_kwargs: pytest.fail("result metadata must not serialize the value"),
     )
 
-    metadata = result_metadata(object())
+    metadata = result_metadata({"large": [object()] * 10_000})
 
-    assert metadata["result_type"] == "builtins.object"
+    assert metadata["result_type"] == "builtins.dict"
     assert metadata["result_size_bytes"] is None
+
+
+def test_result_metadata_normalizes_and_bounds_provider_type_names() -> None:
+    unsafe_value = type("Unsafe\x1b[31mResult", (), {})()
+    oversized_value = type("x" * 300, (), {})()
+
+    assert "\x1b" not in result_metadata(unsafe_value)["result_type"]
+    assert result_metadata(oversized_value)["result_type"] == "result"
+    assert result_metadata(None, serialized_size_bytes=-1)["result_size_bytes"] is None
+
+
+def test_result_metadata_rejects_oversized_type_names_before_normalizing(
+    monkeypatch,
+) -> None:
+    import django_ray.redaction as redaction
+
+    values = (
+        type("Result", (), {"__module__": "m" * 257})(),
+        type("Q" * 257, (), {})(),
+        type("Q" * 128, (), {"__module__": "m" * 128})(),
+    )
+    monkeypatch.setattr(
+        redaction,
+        "normalize_terminal_text",
+        lambda _value: pytest.fail("oversized type metadata must not be normalized"),
+    )
+
+    assert [result_metadata(value)["result_type"] for value in values] == [
+        "result",
+        "result",
+        "result",
+    ]
 
 
 def test_configured_patterns_use_django_settings_and_accept_custom_string(monkeypatch) -> None:

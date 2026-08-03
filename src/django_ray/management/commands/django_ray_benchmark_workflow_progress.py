@@ -24,6 +24,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import connection
 from django.db.migrations.recorder import MigrationRecorder
 
+from django_ray.management.diagnostics import render_exception_type_label
 from django_ray.redaction import redact_value
 
 BENCHMARK_SCHEMA_VERSION = 1
@@ -123,7 +124,7 @@ def _schema_version() -> str:
             if app == "django_ray"
         )
     except Exception as error:  # pragma: no cover - backend-specific defensive path
-        return f"unavailable:{type(error).__name__}"
+        return f"unavailable:{render_exception_type_label(error)}"
     return applied[-1] if applied else "unmigrated"
 
 
@@ -474,7 +475,7 @@ def _database_evidence(documents: dict[str, dict[str, object]]) -> dict[str, obj
         evidence = {
             "status": "unavailable",
             "vendor": "postgresql",
-            "reason": f"{type(error).__name__}: database probe failed",
+            "reason": f"{render_exception_type_label(error)}: database probe failed",
         }
     finally:
         try:

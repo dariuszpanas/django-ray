@@ -1417,8 +1417,10 @@ class TestWorkerCommandRuntimeDb:
 
     def test_cleanup_expired_leases_logs_and_handles_errors(self, monkeypatch) -> None:
         cmd = _make_command(worker_id="cleanup-worker")
-        warnings: list[str] = []
-        cmd.logger = SimpleNamespace(warning=lambda message: warnings.append(str(message)))
+        warnings: list[tuple[str, bool]] = []
+        cmd.logger = SimpleNamespace(
+            warning=lambda message, *, exc_info=False: warnings.append((str(message), exc_info))
+        )
 
         monkeypatch.setattr("django_ray.runner.leasing.cleanup_expired_leases", lambda: 2)
         cmd.cleanup_expired_leases()
@@ -1429,7 +1431,7 @@ class TestWorkerCommandRuntimeDb:
             lambda: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
         )
         cmd.cleanup_expired_leases()
-        assert any("cleanup failed" in message for message in warnings)
+        assert warnings == [("Failed to cleanup expired leases", True)]
 
     def test_shutdown_releases_lease_and_handles_ray_disconnect(self, monkeypatch) -> None:
         cmd = _make_command(worker_id="shutdown-worker")

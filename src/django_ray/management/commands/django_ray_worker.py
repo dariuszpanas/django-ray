@@ -27,8 +27,16 @@ from django_ray.lifecycle import (
     succeed_task,
 )
 from django_ray.logging import get_worker_logger
+from django_ray.management.diagnostics import (
+    render_console_diagnostic,
+    render_console_resource_summary,
+)
 from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
-from django_ray.redaction import redact_text
+from django_ray.redaction import (
+    materialize_exception_message,
+    materialize_exception_text,
+    safe_exception_type_name,
+)
 from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.cancellation import (
     CancellationOutcome,
@@ -265,7 +273,8 @@ class Command(BaseCommand):
                 self._init_local_ray()
                 self.ray_core_runner = RayCoreRunner()
             except Exception as error:
-                self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {error}"))
+                diagnostic = render_console_diagnostic(error)
+                self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {diagnostic}"))
                 self.stdout.write("Will retry connection during operation...")
         elif self.execution_mode == "cluster":
             assert self.cluster_address is not None
@@ -273,7 +282,10 @@ class Command(BaseCommand):
                 self._init_cluster_ray(self.cluster_address)
                 self.ray_core_runner = RayCoreRunner()
             except Exception as error:
-                self.stdout.write(self.style.WARNING(f"Initial cluster connection failed: {error}"))
+                diagnostic = render_console_diagnostic(error)
+                self.stdout.write(
+                    self.style.WARNING(f"Initial cluster connection failed: {diagnostic}")
+                )
                 self.stdout.write("Will retry connection during operation...")
 
     def _get_default_execution_mode(self, settings: dict[str, Any]) -> tuple[str, str | None]:
@@ -340,10 +352,10 @@ class Command(BaseCommand):
                     raise CommandError(f"TASKS backend {alias!r} must define BACKEND")
                 try:
                     backend_class = import_string(backend_path)
-                except ImportError as error:
+                except ImportError:
                     raise CommandError(
                         f"Cannot import TASKS backend {alias!r} while resolving --all-queues"
-                    ) from error
+                    ) from None
                 if not isinstance(backend_class, type):
                     raise CommandError(f"TASKS backend {alias!r} does not resolve to a class")
                 if not issubclass(backend_class, RayTaskBackend):
@@ -426,11 +438,8 @@ class Command(BaseCommand):
 
         # Clear RAY_ADDRESS to ensure we start a fresh local instance
         if "RAY_ADDRESS" in os.environ:
-            self.stdout.write(
-                self.style.WARNING(
-                    f"Clearing RAY_ADDRESS={os.environ['RAY_ADDRESS']} for local mode"
-                )
-            )
+            address = render_console_diagnostic(os.environ["RAY_ADDRESS"])
+            self.stdout.write(self.style.WARNING(f"Clearing RAY_ADDRESS={address} for local mode"))
             del os.environ["RAY_ADDRESS"]
 
         # Disable Ray's uv runtime env hook - it causes issues on Windows
@@ -472,7 +481,8 @@ class Command(BaseCommand):
         if ray.is_initialized():
             ray.shutdown()
 
-        self.stdout.write(f"Connecting to Ray cluster at {address}...")
+        rendered_address = render_console_diagnostic(address)
+        self.stdout.write(f"Connecting to Ray cluster at {rendered_address}...")
         ray.init(
             address=address,
             ignore_reinit_error=True,
@@ -480,7 +490,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS("Connected to Ray cluster"))
         # Show cluster resources
         resources = ray.cluster_resources()
-        self.stdout.write(f"  Cluster resources: {resources}")
+        self.stdout.write(f"  Cluster resources: {render_console_resource_summary(resources)}")
 
     def _create_lease(self, queue: str) -> None:
         """Acquire a new worker lease without adopting an existing row.
@@ -541,12 +551,14 @@ class Command(BaseCommand):
                 continue
             except IntegrityError as error:
                 if not is_worker_id_primary_key_collision(error):
-                    raise CommandError("Could not create worker lease") from error
+                    diagnostic = render_console_diagnostic(error)
+                    raise CommandError(f"Could not create worker lease: {diagnostic}") from None
                 if attempt + 1 < _WORKER_ID_ALLOCATION_ATTEMPTS:
                     self._set_worker_id(generate_worker_id())
                 continue
             except Exception as error:
-                raise CommandError("Could not create worker lease") from error
+                diagnostic = render_console_diagnostic(error)
+                raise CommandError(f"Could not create worker lease: {diagnostic}") from None
 
             self.lease = lease
             self.lease_identity = identity
@@ -704,7 +716,10 @@ class Command(BaseCommand):
                         queue_name=self.lease_queue_name
                     )
         except Exception as error:
-            self._request_shutdown_for_lease_loss(f"worker lease heartbeat failed: {error}")
+            self._request_shutdown_for_lease_loss(
+                "worker lease heartbeat failed",
+                error=error,
+            )
             return
 
         if updated:
@@ -764,16 +779,30 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f"  Lease restored: {self.worker_id}"))
             return True
         except Exception as error:
-            self._request_shutdown_for_lease_loss(f"worker lease restoration failed: {error}")
+            self._request_shutdown_for_lease_loss(
+                "worker lease restoration failed",
+                error=error,
+            )
             return False
 
-    def _request_shutdown_for_lease_loss(self, reason: str) -> None:
+    def _request_shutdown_for_lease_loss(
+        self,
+        reason: str,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
         """Fail closed when this process cannot prove lease ownership."""
         if not self.shutdown_requested:
             self.stdout.write(
                 self.style.ERROR("\nWorker lease ownership lost; shutting down before claims")
             )
-        self.logger.error(reason)
+        if error is None:
+            self.logger.error(reason)
+        else:
+            self.logger.error(
+                reason,
+                exc_info=(type(error), error, error.__traceback__),
+            )
         self.lease_ownership_lost = True
         # These capabilities belong to the expired immutable lease identity.
         # Retire them immediately so no later reconciliation or shutdown path
@@ -802,7 +831,10 @@ class Command(BaseCommand):
                     allow_takeover=False,
                 )
         except Exception as error:
-            self._request_shutdown_for_lease_loss(f"worker lease heartbeat failed: {error}")
+            self._request_shutdown_for_lease_loss(
+                "worker lease heartbeat failed",
+                error=error,
+            )
             return False
         if not updated:
             return False
@@ -920,7 +952,8 @@ class Command(BaseCommand):
                     return  # Connection is healthy
                 self.stdout.write(self.style.WARNING("\nRay health check timed out"))
         except Exception as e:
-            self.stdout.write(self.style.WARNING(f"\nRay connection lost: {e}"))
+            diagnostic = render_console_diagnostic(e)
+            self.stdout.write(self.style.WARNING(f"\nRay connection lost: {diagnostic}"))
 
         # Connection is broken or Ray is not initialized - try to reconnect
         self._reconnect_ray()
@@ -937,7 +970,7 @@ class Command(BaseCommand):
                 ray.shutdown()
                 self.stdout.write("  Shut down existing Ray connection")
         except Exception as e:
-            self.stdout.write(f"  Error during shutdown: {e}")
+            self.stdout.write(f"  Error during shutdown: {render_console_diagnostic(e)}")
 
         # Wait a moment before reconnecting
         time.sleep(2)
@@ -961,7 +994,9 @@ class Command(BaseCommand):
                             f"\n  Reconnected to Ray (attempt {attempt}/{max_retries})"
                         )
                     )
-                    self.stdout.write(f"  Cluster resources: {resources}")
+                    self.stdout.write(
+                        f"  Cluster resources: {render_console_resource_summary(resources)}"
+                    )
 
                     # Clear any stale Ray task references - they're invalid now
                     if self.ray_core_runner and self.ray_core_runner.pending_count > 0:
@@ -980,9 +1015,10 @@ class Command(BaseCommand):
                     return  # Success!
 
             except Exception as e:
+                diagnostic = render_console_diagnostic(e)
                 self.stdout.write(
                     self.style.WARNING(
-                        f"  Reconnection attempt {attempt}/{max_retries} failed: {e}"
+                        f"  Reconnection attempt {attempt}/{max_retries} failed: {diagnostic}"
                     )
                 )
                 if attempt < max_retries:
@@ -1167,7 +1203,10 @@ class Command(BaseCommand):
 
     def process_task(self, task: RayTaskExecution) -> None:
         """Process a single task."""
-        self.stdout.write(self.style.NOTICE(f"\nProcessing task {task.pk}: {task.callable_path}"))
+        rendered_callable_path = render_console_diagnostic(task.callable_path)
+        self.stdout.write(
+            self.style.NOTICE(f"\nProcessing task {task.pk}: {rendered_callable_path}")
+        )
 
         # Update heartbeat before task execution to prevent lease expiration
         # during long-running tasks
@@ -1183,8 +1222,8 @@ class Command(BaseCommand):
         except RuntimeEnvSnapshotError as error:
             self._handle_task_failure(
                 task,
-                error_message=str(error),
-                exception_type=type(error).__name__,
+                error_message=materialize_exception_message(error),
+                exception_type=safe_exception_type_name(error),
                 retryable=False,
                 expected_claimed_by_worker=self.worker_id,
                 expected_attempt_number=int(task.attempt_number),
@@ -1257,9 +1296,7 @@ class Command(BaseCommand):
                     expected_execution_generation=expected_execution_generation,
                 ):
                     return
-                self.stdout.write(
-                    self.style.SUCCESS(f"  Task {task.pk} succeeded: {result['result']}")
-                )
+                self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} succeeded"))
             else:
                 # Task failed - check if we should retry
                 self._handle_task_failure(
@@ -1276,8 +1313,8 @@ class Command(BaseCommand):
         except Exception as e:
             self._handle_task_failure(
                 task,
-                error_message=str(e),
-                exception_type=type(e).__name__,
+                error_message=materialize_exception_message(e),
+                exception_type=safe_exception_type_name(e),
                 retryable=False if isinstance(e, RuntimeEnvSnapshotError) else None,
                 expected_claimed_by_worker=expected_worker_id,
                 expected_attempt_number=expected_attempt_number,
@@ -1325,7 +1362,7 @@ class Command(BaseCommand):
             # Preserve success semantics if external storage is unavailable.
             task.result_reference = DigestResultStorage().store(serialized_result=serialized_result)
             diagnostics.append(
-                f"  Result storage backend failed ({e}); "
+                f"  Result storage backend failed ({materialize_exception_text(e)}); "
                 "falling back to digest-only result_reference"
             )
 
@@ -1394,7 +1431,7 @@ class Command(BaseCommand):
                 task.__dict__.update(current.__dict__)
 
         for message in diagnostics:
-            self.stdout.write(self.style.WARNING(message))
+            self.stdout.write(self.style.WARNING(render_console_diagnostic(message)))
         return persisted
 
     def _handle_task_failure(
@@ -1451,7 +1488,8 @@ class Command(BaseCommand):
                 should_retry=False,
                 reason="Persisted RuntimeEnv snapshot failed validation",
             )
-            error_message = f"{error_message}\nAutomatic retry blocked: {storage_error}"
+            storage_message = materialize_exception_message(storage_error)
+            error_message = f"{error_message}\nAutomatic retry blocked: {storage_message}"
             handled = record_failure(
                 task,
                 error_message=error_message,
@@ -1468,19 +1506,20 @@ class Command(BaseCommand):
             )
         if not handled:
             return False
-        display_error_message = redact_text(task.error_message or error_message)
+        rendered_error = render_console_diagnostic(task.error_message or error_message)
         if retry_decision.should_retry:
             self.stdout.write(
                 self.style.WARNING(
                     f"  Task {task.pk} failed, scheduling retry "
-                    f"at {retry_decision.next_attempt_at}: {display_error_message}"
+                    f"at {retry_decision.next_attempt_at}: {rendered_error}"
                 )
             )
         else:
             reason = retry_decision.reason or "No retry configured"
+            rendered_reason = render_console_diagnostic(reason)
             self.stdout.write(
                 self.style.ERROR(
-                    f"  Task {task.pk} failed permanently ({reason}): {display_error_message}"
+                    f"  Task {task.pk} failed permanently ({rendered_reason}): {rendered_error}"
                 )
             )
         return True
@@ -1572,12 +1611,15 @@ class Command(BaseCommand):
         except Exception as exc:
             cancellation = CancellationOutcome(
                 CancellationOutcomeStatus.INDETERMINATE,
-                f"Cancellation request raised {type(exc).__name__}: {exc}",
+                f"Cancellation request raised {materialize_exception_text(exc)}",
             )
-        message = f": {cancellation.message}" if cancellation.message else ""
+        message = (
+            f": {render_console_diagnostic(cancellation.message)}" if cancellation.message else ""
+        )
+        rendered_job_id = render_console_diagnostic(handle.ray_job_id)
         self.stdout.write(
             self.style.WARNING(
-                f"  Discarded stale {backend_name} submission {handle.ray_job_id}; "
+                f"  Discarded stale {backend_name} submission {rendered_job_id}; "
                 f"cancellation {cancellation.status.value}{message}"
             )
         )
@@ -1654,7 +1696,7 @@ class Command(BaseCommand):
             return (
                 "unknown",
                 None,
-                f"tracking inspection raised {type(exc).__name__}: {exc}",
+                f"tracking inspection raised {materialize_exception_text(exc)}",
             )
 
         if current is None:
@@ -1809,10 +1851,13 @@ class Command(BaseCommand):
 
         retained = disposition in {"owned", "unknown"}
         action = "retaining exact tracking" if retained else "retiring local tracking"
-        explanation = f"; {inspection_detail}" if inspection_detail else ""
+        explanation = (
+            f"; {render_console_diagnostic(inspection_detail)}" if inspection_detail else ""
+        )
+        rendered_detail = render_console_diagnostic(detail)
         self.stdout.write(
             self.style.WARNING(
-                f"  Task {task.pk} could not confirm Ray Job tracking ({detail}); "
+                f"  Task {task.pk} could not confirm Ray Job tracking ({rendered_detail}); "
                 f"{action}{explanation}"
             )
         )
@@ -1960,7 +2005,9 @@ class Command(BaseCommand):
 
         retained = disposition in {"owned", "unknown"}
         action = "retaining exact tracking" if retained else "retiring local tracking"
-        explanation = f"; {inspection_detail}" if inspection_detail else ""
+        explanation = (
+            f"; {render_console_diagnostic(inspection_detail)}" if inspection_detail else ""
+        )
         self.stdout.write(
             self.style.WARNING(f"  Task {task.pk} Ray Job identity mismatch; {action}{explanation}")
         )
@@ -2026,11 +2073,11 @@ class Command(BaseCommand):
 
             self._handle_task_failure(
                 task,
-                error_message=f"Failed to submit to Ray Core: {e}",
+                error_message=(f"Failed to submit to Ray Core: {materialize_exception_message(e)}"),
                 error_traceback=(
                     None if isinstance(e, RuntimeEnvSnapshotError) else traceback.format_exc()
                 ),
-                exception_type=type(e).__name__,
+                exception_type=safe_exception_type_name(e),
                 retryable=(
                     False
                     if isinstance(e, (RuntimeEnvSnapshotError, WorkflowPlanMismatchError))
@@ -2061,9 +2108,12 @@ class Command(BaseCommand):
             )
             self._handle_task_failure(
                 task,
-                error_message=f"Failed to persist Ray Core submission tracking: {exc}",
+                error_message=(
+                    "Failed to persist Ray Core submission tracking: "
+                    f"{materialize_exception_message(exc)}"
+                ),
                 error_traceback=traceback.format_exc(),
-                exception_type=type(exc).__name__,
+                exception_type=safe_exception_type_name(exc),
                 retryable=False,
                 expected_claimed_by_worker=expected_worker_id,
                 expected_attempt_number=expected_attempt_number,
@@ -2140,7 +2190,8 @@ class Command(BaseCommand):
         try:
             completed = self.ray_core_runner.poll_completed()
         except Exception as e:
-            self.stdout.write(self.style.ERROR(f"\nError polling Ray Core tasks: {e}"))
+            diagnostic = render_console_diagnostic(e)
+            self.stdout.write(self.style.ERROR(f"\nError polling Ray Core tasks: {diagnostic}"))
             return 0
 
         for completion in completed:
@@ -2199,9 +2250,7 @@ class Command(BaseCommand):
                             )
                         )
                         continue
-                    self.stdout.write(
-                        self.style.SUCCESS(f"\n  Task {task.pk} completed: {result.get('result')}")
-                    )
+                    self.stdout.write(self.style.SUCCESS(f"\n  Task {task.pk} completed"))
                 else:
                     self._handle_task_failure(
                         task,
@@ -2217,8 +2266,9 @@ class Command(BaseCommand):
             except RayTaskExecution.DoesNotExist:
                 self.stdout.write(self.style.WARNING(f"\n  Task {task_pk} not found in database"))
             except Exception as e:
+                diagnostic = render_console_diagnostic(e)
                 self.stdout.write(
-                    self.style.ERROR(f"\n  Error processing task {task_pk} result: {e}")
+                    self.style.ERROR(f"\n  Error processing task {task_pk} result: {diagnostic}")
                 )
 
         return len(completed)
@@ -2249,11 +2299,11 @@ class Command(BaseCommand):
 
             self._handle_task_failure(
                 task,
-                error_message=f"Failed to submit to Ray: {e}",
+                error_message=f"Failed to submit to Ray: {materialize_exception_message(e)}",
                 error_traceback=(
                     None if isinstance(e, RuntimeEnvSnapshotError) else traceback.format_exc()
                 ),
-                exception_type=type(e).__name__,
+                exception_type=safe_exception_type_name(e),
                 retryable=(
                     False
                     if isinstance(e, (RuntimeEnvSnapshotError, WorkflowPlanMismatchError))
@@ -2280,11 +2330,14 @@ class Command(BaseCommand):
 
             self._handle_task_failure(
                 task,
-                error_message=f"Failed to reserve Ray Job submission identity: {exc}",
+                error_message=(
+                    "Failed to reserve Ray Job submission identity: "
+                    f"{materialize_exception_message(exc)}"
+                ),
                 error_traceback=(
                     None if isinstance(exc, RuntimeEnvSnapshotError) else traceback.format_exc()
                 ),
-                exception_type=type(exc).__name__,
+                exception_type=safe_exception_type_name(exc),
                 retryable=(
                     False
                     if isinstance(exc, (RuntimeEnvSnapshotError, WorkflowPlanMismatchError))
@@ -2329,8 +2382,8 @@ class Command(BaseCommand):
                     runner,
                     reserved_handle,
                     mismatched_handle,
-                    error_message=str(exc),
-                    exception_type=type(exc).__name__,
+                    error_message=materialize_exception_message(exc),
+                    exception_type=safe_exception_type_name(exc),
                     expected_worker_id=expected_worker_id,
                     expected_attempt_number=expected_attempt_number,
                     expected_execution_generation=expected_execution_generation,
@@ -2353,7 +2406,7 @@ class Command(BaseCommand):
                     expected_worker_id=expected_worker_id,
                     expected_attempt_number=expected_attempt_number,
                     expected_execution_generation=expected_execution_generation,
-                    detail=f"{type(tracking_exc).__name__}: {tracking_exc}",
+                    detail=materialize_exception_text(tracking_exc),
                 )
                 return
             if not still_reserved:
@@ -2389,11 +2442,13 @@ class Command(BaseCommand):
             if released:
                 self._handle_task_failure(
                     task,
-                    error_message=f"Failed to submit to Ray: {exc}",
+                    error_message=(
+                        f"Failed to submit to Ray: {materialize_exception_message(exc)}"
+                    ),
                     error_traceback=(
                         None if isinstance(exc, RuntimeEnvSnapshotError) else traceback.format_exc()
                     ),
-                    exception_type=type(exc).__name__,
+                    exception_type=safe_exception_type_name(exc),
                     retryable=(
                         False
                         if isinstance(
@@ -2445,7 +2500,7 @@ class Command(BaseCommand):
                 expected_worker_id=expected_worker_id,
                 expected_attempt_number=expected_attempt_number,
                 expected_execution_generation=expected_execution_generation,
-                detail=f"{type(exc).__name__}: {exc}",
+                detail=materialize_exception_text(exc),
             )
             return
         if not still_reserved:
@@ -3120,11 +3175,8 @@ class Command(BaseCommand):
             if handled is False:
                 return
             complete_tracking()
-            self.stdout.write(
-                self.style.ERROR(
-                    f"\nTask {task.pk} failed: {redact_text(task.error_message or 'Ray job failed')}"
-                )
-            )
+            diagnostic = render_console_diagnostic(task.error_message or "Ray job failed")
+            self.stdout.write(self.style.ERROR(f"\nTask {task.pk} failed: {diagnostic}"))
             return
 
         if job_info.status == JobStatus.STOPPED:
@@ -3165,11 +3217,9 @@ class Command(BaseCommand):
             return
 
         scope = "orphaned " if orphaned else ""
-        unknown_detail = redact_text(job_info.message) if job_info.message else "no details"
+        diagnostic = render_console_diagnostic(job_info.message or "no details")
         self.stdout.write(
-            self.style.WARNING(
-                f"\nTask {task.pk} {scope}Ray job status is unknown: {unknown_detail}"
-            )
+            self.style.WARNING(f"\nTask {task.pk} {scope}Ray job status is unknown: {diagnostic}")
         )
 
     def _request_timeout_cancellation(self, task: RayTaskExecution) -> CancellationOutcome:
@@ -3216,7 +3266,10 @@ class Command(BaseCommand):
                 elif self.active_tasks.get(task_pk) == ray_job_id:
                     self.active_tasks.pop(task_pk, None)
             except Exception as e:
-                self.stdout.write(self.style.ERROR(f"\nError reconciling task {task_pk}: {e}"))
+                diagnostic = render_console_diagnostic(e)
+                self.stdout.write(
+                    self.style.ERROR(f"\nError reconciling task {task_pk}: {diagnostic}")
+                )
 
         if self.shutdown_requested:
             return len(completed_tasks)
@@ -3252,8 +3305,9 @@ class Command(BaseCommand):
                     orphaned=True,
                 )
             except Exception as e:
+                diagnostic = render_console_diagnostic(e)
                 self.stdout.write(
-                    self.style.ERROR(f"\nError reconciling orphaned task {task.pk}: {e}")
+                    self.style.ERROR(f"\nError reconciling orphaned task {task.pk}: {diagnostic}")
                 )
 
         adopted_count = len(set(self.active_tasks) - active_task_ids_before)
@@ -3449,8 +3503,9 @@ class Command(BaseCommand):
                                 expected_execution_generation=current.execution_generation,
                             )
                         except RuntimeEnvSnapshotError as error:
+                            diagnostic = render_console_diagnostic(error)
                             self.stdout.write(
-                                self.style.ERROR(f"  Automatic retry blocked: {error}")
+                                self.style.ERROR(f"  Automatic retry blocked: {diagnostic}")
                             )
 
                 if self.shutdown_requested:
@@ -3500,9 +3555,9 @@ class Command(BaseCommand):
                     self.style.NOTICE(f"\nCleaned up {deleted_count} expired worker lease(s)")
                 )
             return deleted_count
-        except Exception as e:
+        except Exception:
             # Don't fail on lease cleanup errors
-            self.logger.warning(f"Failed to cleanup expired leases: {e}")
+            self.logger.warning("Failed to cleanup expired leases", exc_info=True)
             return 0
 
     def _claim_orphaned_cancellation(
@@ -3532,7 +3587,7 @@ class Command(BaseCommand):
             except Exception as exc:
                 return CancellationOutcome(
                     CancellationOutcomeStatus.INDETERMINATE,
-                    f"Could not cancel Ray Job: {exc}",
+                    f"Could not cancel Ray Job: {materialize_exception_message(exc)}",
                 )
 
         if self.ray_core_runner is not None:
@@ -3551,7 +3606,7 @@ class Command(BaseCommand):
             except Exception as exc:
                 return CancellationOutcome(
                     CancellationOutcomeStatus.INDETERMINATE,
-                    f"Could not cancel Ray Core task: {exc}",
+                    f"Could not cancel Ray Core task: {materialize_exception_message(exc)}",
                 )
 
         if ray_job_id:
@@ -3659,7 +3714,8 @@ class Command(BaseCommand):
                         except Exception as exc:
                             outcome = CancellationOutcome(
                                 CancellationOutcomeStatus.INDETERMINATE,
-                                f"Ray Core shutdown cancellation failed: {exc}",
+                                "Ray Core shutdown cancellation failed: "
+                                f"{materialize_exception_message(exc)}",
                             )
                         current.state = TaskState.CANCELLING
                         current.cancellation_status = CancellationStatus(outcome.status.value)

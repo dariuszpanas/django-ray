@@ -136,7 +136,7 @@ class TestWorkerCommandCoverage:
                 {"RUNNER": "ray_core", "RAY_ADDRESS": "auto", "DEFAULT_CONCURRENCY": 1},
                 "_init_local_ray",
                 "local unavailable",
-                "Initial Ray init failed: local unavailable",
+                "Initial Ray init failed: RuntimeError: local unavailable",
             ),
             (
                 {
@@ -146,7 +146,7 @@ class TestWorkerCommandCoverage:
                 },
                 "_init_cluster_ray",
                 "cluster unavailable",
-                "Initial cluster connection failed: cluster unavailable",
+                "Initial cluster connection failed: RuntimeError: cluster unavailable",
             ),
         ):
             cmd = _make_command()

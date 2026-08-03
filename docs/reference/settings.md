@@ -932,11 +932,11 @@ Run `python manage.py check` with deployment settings during upgrade. Rewrite re
 anchors or boundaries as consuming markers, expand a backreference/lookaround into
 bounded alternatives, or keep richer classification in application code.
 
-Successful task logs expose only result type and serialized size. The completion
-envelope is persisted through the database channel and is not printed to Ray
-stdout. Redaction does not encrypt task data or protect direct application
-`print()` calls; secure the database, result backend, admin, API, and Ray
-dashboard separately.
+Successful task logs use a fixed success marker and do not traverse or print the
+return value for status metadata. The completion envelope is persisted through
+the database channel and is not printed to Ray stdout. Redaction does not encrypt
+task data or protect direct application `print()` calls; secure the database,
+result backend, admin, API, and Ray dashboard separately.
 
 ## Django Settings
 

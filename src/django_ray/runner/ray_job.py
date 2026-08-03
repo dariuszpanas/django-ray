@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from django_ray.conf.settings import get_settings
+from django_ray.redaction import materialize_exception_message, materialize_exception_text
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
 from django_ray.runner.errors import RayJobSubmissionUncertainError
@@ -292,7 +293,7 @@ class RayJobRunner(BaseRunner):
                 raise RayJobSubmissionUncertainError(
                     handle.ray_job_id,
                     f"submission request or post-request cleanup raised "
-                    f"{type(exc).__name__}: {exc}",
+                    f"{materialize_exception_text(exc)}",
                 ) from exc
             raise
 
@@ -331,7 +332,7 @@ class RayJobRunner(BaseRunner):
             return JobInfo(
                 job_id=handle.ray_job_id,
                 status=JobStatus.UNKNOWN,
-                message=str(e),
+                message=materialize_exception_message(e),
             )
 
     def cancel(self, handle: SubmissionHandle) -> bool:
@@ -360,7 +361,7 @@ class RayJobRunner(BaseRunner):
         except Exception as exc:
             return CancellationOutcome(
                 CancellationOutcomeStatus.INDETERMINATE,
-                f"Ray Job stop request raised {type(exc).__name__}: {exc}",
+                f"Ray Job stop request raised {materialize_exception_text(exc)}",
             )
 
     def cancel_with_status(self, handle: SubmissionHandle) -> CancellationOutcome:
@@ -370,7 +371,7 @@ class RayJobRunner(BaseRunner):
         except Exception as exc:
             return CancellationOutcome(
                 CancellationOutcomeStatus.INDETERMINATE,
-                f"Ray Job stop request raised {type(exc).__name__}: {exc}",
+                f"Ray Job stop request raised {materialize_exception_text(exc)}",
             )
         return self.cancel_prepared_with_status(handle, client)
 

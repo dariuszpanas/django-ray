@@ -46,6 +46,8 @@ _ESC_STRING_CONTROL_INTRODUCERS = {
 _TERMINAL_SEQUENCE_MAX_CHARS = 4096
 _REDACTION_TEXT_MAX_CHARS = 64 * 1024
 _REDACTION_VALUE_MAX_ITEMS = 4096
+_RESULT_TYPE_MAX_CHARS = 256
+_RESULT_TYPE_MAX_BYTES = 256
 
 # Frozen from Unicode 16.0's ``Cf`` assignments so supported Python versions
 # make the same terminal-safety decision. The source tables are UnicodeData.txt
@@ -865,6 +867,63 @@ def _safe_type(value: Any) -> str:
     return f"<{value_type.__module__}.{value_type.__qualname__}>"
 
 
+def safe_exception_type_name(value: BaseException) -> str:
+    """Return a fixed-shape exception label without invoking provider code."""
+    try:
+        name = type.__getattribute__(type(value), "__name__")
+    except Exception:
+        return "Exception"
+    if (
+        type(name) is not str
+        or not name
+        or len(name) > 128
+        or not name.isascii()
+        or not name.replace("_", "").isalnum()
+    ):
+        return "Exception"
+    return name
+
+
+def materialize_exception_message(value: BaseException) -> str:
+    """Return an unredacted exception message with a fixed failure fallback.
+
+    This helper makes provider-controlled ``__str__`` implementations inert; it
+    is not a display boundary. Callers that expose the returned text must still
+    pass the complete diagnostic through ``redact_text``.
+    """
+    try:
+        return str(value)
+    except Exception:
+        return "exception message unavailable"
+
+
+def materialize_exception_text(value: BaseException) -> str:
+    """Return unredacted bounded type and message text without secondary failure."""
+    return f"{safe_exception_type_name(value)}: {materialize_exception_message(value)}"
+
+
+def _bounded_result_type(value: Any) -> str:
+    """Return inert result type metadata without traversing the result value."""
+    value_type = type(value)
+    try:
+        module = type.__getattribute__(value_type, "__module__")
+        qualname = type.__getattribute__(value_type, "__qualname__")
+    except Exception:
+        return "result"
+    if (
+        type(module) is not str
+        or type(qualname) is not str
+        or not module
+        or not qualname
+        or len(module) + 1 + len(qualname) > _RESULT_TYPE_MAX_CHARS
+    ):
+        return "result"
+    rendered = normalize_terminal_text(f"{module}.{qualname}")
+    if not rendered or len(rendered.encode("utf-8", errors="replace")) > _RESULT_TYPE_MAX_BYTES:
+        return "result"
+    return rendered
+
+
 def redact_value(
     value: Any,
     *,
@@ -954,7 +1013,7 @@ def redact_text(value: Any, *, patterns: Sequence[str] | str | None = None) -> s
     if isinstance(value, str):
         text = value
     elif isinstance(value, BaseException):
-        text = f"{type(value).__name__}: {value}"
+        text = materialize_exception_text(value)
     else:
         text = str(value)
     if len(text) > _REDACTION_TEXT_MAX_CHARS:
@@ -966,7 +1025,7 @@ def redact_text(value: Any, *, patterns: Sequence[str] | str | None = None) -> s
 
 def redact_exception(value: BaseException, *, patterns: Sequence[str] | str | None = None) -> str:
     """Return a compact, redacted exception description for structured logs."""
-    return f"{type(value).__name__}: {redact_text(str(value), patterns=patterns)}"
+    return redact_text(value, patterns=patterns)
 
 
 def safe_json_dumps(value: Any, *, patterns: Sequence[str] | str | None = None) -> str:
@@ -974,15 +1033,24 @@ def safe_json_dumps(value: Any, *, patterns: Sequence[str] | str | None = None) 
     return json.dumps(redact_value(value, patterns=patterns), default=_safe_type)
 
 
-def result_metadata(value: Any) -> dict[str, Any]:
-    """Return bounded metadata for a result without serializing its contents."""
-    try:
-        size_bytes = len(json.dumps(value, default=_safe_type).encode("utf-8"))
-    except Exception:
-        size_bytes = None
-    value_type = type(value)
+def result_metadata(
+    value: Any,
+    *,
+    serialized_size_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Return bounded metadata without traversing or serializing result data.
+
+    Callers may pass a non-negative byte size already computed by the durable
+    serialization boundary.  This helper never derives that size by walking
+    application-owned values merely for operational output.
+    """
+    size_bytes = (
+        serialized_size_bytes
+        if type(serialized_size_bytes) is int and serialized_size_bytes >= 0
+        else None
+    )
     return {
-        "result_type": f"{value_type.__module__}.{value_type.__qualname__}",
+        "result_type": _bounded_result_type(value),
         "result_size_bytes": size_bytes,
     }
 
@@ -991,10 +1059,13 @@ __all__ = [
     "DEFAULT_REDACT_PATTERNS",
     "REDACTED",
     "RedactionPatternError",
+    "materialize_exception_message",
+    "materialize_exception_text",
     "normalize_terminal_text",
     "redact_exception",
     "redact_text",
     "redact_value",
     "result_metadata",
+    "safe_exception_type_name",
     "safe_json_dumps",
 ]
