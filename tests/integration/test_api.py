@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
@@ -19,6 +20,7 @@ from django.test.utils import CaptureQueriesContext
 from django_ray import __version__ as django_ray_version
 from django_ray.lifecycle import TaskRetryRequestResult, TaskRetryRequestStatus
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.redaction import redact_text
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from testproject import api as testproject_api
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
@@ -1230,6 +1232,16 @@ class TestExecutionsAPI:
         data = response.json()
         assert data["total"] == 0
         assert data["tasks"] == []
+        assert data["limit"] == testproject_api._EXECUTION_LIST_DEFAULT_LIMIT
+        assert data["returned_count"] == 0
+        assert data["has_more"] is False
+        assert data["next_cursor"] is None
+        assert data["truncated"] is False
+        assert data["truncation_reason"] is None
+        assert data["diagnostic_max_bytes"] == (
+            testproject_api._EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES
+        )
+        assert data["response_max_bytes"] == (testproject_api._EXECUTION_LIST_RESPONSE_MAX_BYTES)
 
     def test_list_executions_with_data(self, client):
         """Test listing executions with existing tasks."""
@@ -1306,6 +1318,233 @@ class TestExecutionsAPI:
 
         assert response.status_code == 200
         assert [task["task_id"] for task in response.json()["tasks"]] == ["gate-target"]
+
+    @pytest.mark.parametrize(
+        "limit",
+        (
+            "not-an-integer",
+            "0",
+            "-1",
+            str(testproject_api._EXECUTION_LIST_MAX_LIMIT + 1),
+        ),
+    )
+    def test_list_executions_rejects_invalid_page_sizes(self, client, limit):
+        response = client.get("/api/executions", {"limit": limit})
+
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize(
+        "cursor",
+        (
+            "not-a-signed-cursor",
+            "x" * (testproject_api._EXECUTION_LIST_CURSOR_MAX_CHARACTERS + 1),
+        ),
+    )
+    def test_list_executions_rejects_invalid_cursors(self, client, cursor):
+        response = client.get("/api/executions", {"cursor": cursor})
+
+        assert response.status_code == 422
+
+    def test_execution_list_openapi_documents_page_bounds(self, client):
+        operation = client.get("/api/openapi.json").json()["paths"]["/api/executions"]["get"]
+        parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
+
+        limit = parameters["limit"]["schema"]
+        assert limit["minimum"] == testproject_api._EXECUTION_LIST_MIN_LIMIT
+        assert limit["maximum"] == testproject_api._EXECUTION_LIST_MAX_LIMIT
+        assert limit["default"] == testproject_api._EXECUTION_LIST_DEFAULT_LIMIT
+
+        cursor = parameters["cursor"]["schema"]
+        cursor_string = next(item for item in cursor["anyOf"] if item.get("type") == "string")
+        assert cursor_string["maxLength"] == (testproject_api._EXECUTION_LIST_CURSOR_MAX_CHARACTERS)
+        assert parameters["cursor"]["required"] is False
+
+    def test_list_executions_paginates_with_stable_continuation_metadata(self, client):
+        tasks = RayTaskExecution.objects.bulk_create(
+            [
+                RayTaskExecution(
+                    task_id=f"paged-{index}",
+                    callable_path="test.task",
+                    state=TaskState.QUEUED,
+                )
+                for index in range(5)
+            ]
+        )
+
+        first = client.get("/api/executions?limit=2")
+        first_data = first.json()
+        inserted = RayTaskExecution.objects.create(
+            task_id="paged-concurrent-insert",
+            callable_path="test.task",
+            state=TaskState.QUEUED,
+        )
+        second = client.get(
+            "/api/executions",
+            {"limit": 2, "cursor": first_data["next_cursor"]},
+        )
+        second_data = second.json()
+        third = client.get(
+            "/api/executions",
+            {"limit": 2, "cursor": second_data["next_cursor"]},
+        )
+
+        assert first.status_code == second.status_code == third.status_code == 200
+        third_data = third.json()
+        assert first_data["total"] == 5
+        assert second_data["total"] == third_data["total"] == 6
+        assert first_data["returned_count"] == second_data["returned_count"] == 2
+        assert first_data["has_more"] is second_data["has_more"] is True
+        assert isinstance(first_data["next_cursor"], str)
+        assert isinstance(second_data["next_cursor"], str)
+        assert first_data["next_cursor"] != second_data["next_cursor"]
+        assert first_data["truncation_reason"] == "page_limit"
+        assert second_data["truncation_reason"] == "page_limit"
+        assert third_data["returned_count"] == 1
+        assert third_data["has_more"] is False
+        assert third_data["next_cursor"] is None
+        assert third_data["truncation_reason"] is None
+        returned_ids = {
+            item["id"] for page in (first_data, second_data, third_data) for item in page["tasks"]
+        }
+        assert returned_ids == {task.pk for task in tasks}
+        assert inserted.pk not in returned_ids
+
+    def test_execution_list_cursor_is_tamper_evident_and_filter_bound(self, client):
+        for index in range(2):
+            RayTaskExecution.objects.create(
+                task_id=f"cursor-queued-{index}",
+                callable_path="test.task",
+                state=TaskState.QUEUED,
+            )
+        RayTaskExecution.objects.create(
+            task_id="cursor-succeeded",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+        )
+        first = client.get("/api/executions", {"state": "queued", "limit": 1})
+        cursor = first.json()["next_cursor"]
+        assert isinstance(cursor, str)
+
+        tamper_index = len(cursor) // 2
+        replacement = "A" if cursor[tamper_index] != "A" else "B"
+        tampered = cursor[:tamper_index] + replacement + cursor[tamper_index + 1 :]
+
+        assert (
+            client.get(
+                "/api/executions",
+                {"state": "queued", "cursor": tampered},
+            ).status_code
+            == 422
+        )
+        assert (
+            client.get(
+                "/api/executions",
+                {"state": "SUCCEEDED", "cursor": cursor},
+            ).status_code
+            == 422
+        )
+
+    def test_list_executions_omits_oversized_diagnostics_in_the_database_query(
+        self,
+        client,
+    ):
+        oversized = "x\x00" + "y" * testproject_api._EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES
+        task = RayTaskExecution.objects.create(
+            task_id="oversized-list-diagnostics",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            result_data=oversized,
+            error_message=oversized,
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get("/api/executions?task_id=oversized-list-diagnostics")
+
+        assert response.status_code == 200
+        item = response.json()["tasks"][0]
+        assert item["result_data"] is None
+        assert item["error_message"] is None
+        assert item["result_data_omission_reason"] == "stored_value_exceeds_list_limit"
+        assert item["error_message_omission_reason"] == "stored_value_exceeds_list_limit"
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(task_selects) == 2
+        guarded_select = next(query for query in task_selects if "CASE WHEN" in query)
+        assert "LENGTH(CAST(" in guarded_select or "OCTET_LENGTH(" in guarded_select
+        assert 'THEN "django_ray_raytaskexecution"."result_data"' in guarded_select
+        assert 'THEN "django_ray_raytaskexecution"."error_message"' in guarded_select
+
+        detail = client.get(f"/api/executions/{task.pk}")
+        assert detail.status_code == 200
+        assert detail.json()["result_data"] == redact_text(oversized)
+        assert detail.json()["error_message"] == redact_text(oversized)
+
+    def test_execution_list_fails_clearly_on_an_unsupported_database(self, monkeypatch):
+        monkeypatch.setattr(connection, "vendor", "oracle")
+
+        with pytest.raises(ImproperlyConfigured, match="only SQLite and PostgreSQL"):
+            testproject_api._bounded_execution_list_rows(
+                RayTaskExecution.objects.all(),
+                limit=1,
+            )
+
+    def test_list_executions_enforces_the_aggregate_encoded_response_bound(self, client):
+        diagnostic = "x" * (testproject_api._EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES - 100)
+        tasks = RayTaskExecution.objects.bulk_create(
+            [
+                RayTaskExecution(
+                    task_id=f"aggregate-bound-{index}",
+                    callable_path="test.task",
+                    state=TaskState.FAILED,
+                    result_data=diagnostic,
+                    error_message=diagnostic,
+                )
+                for index in range(40)
+            ]
+        )
+
+        first = client.get(
+            "/api/executions",
+            {"limit": testproject_api._EXECUTION_LIST_MAX_LIMIT},
+        )
+        repeated = client.get(
+            "/api/executions",
+            {"limit": testproject_api._EXECUTION_LIST_MAX_LIMIT},
+        )
+
+        assert first.status_code == 200
+        assert first.content == repeated.content
+        assert len(first.content) <= testproject_api._EXECUTION_LIST_RESPONSE_MAX_BYTES
+        first_data = first.json()
+        assert 0 < first_data["returned_count"] < len(tasks)
+        assert first_data["has_more"] is True
+        assert first_data["truncated"] is True
+        assert first_data["truncation_reason"] == "response_size_limit"
+        assert isinstance(first_data["next_cursor"], str)
+        assert all(
+            item["result_data_omission_reason"] is None
+            and item["error_message_omission_reason"] is None
+            for item in first_data["tasks"]
+        )
+
+        second = client.get(
+            "/api/executions",
+            {
+                "limit": testproject_api._EXECUTION_LIST_MAX_LIMIT,
+                "cursor": first_data["next_cursor"],
+            },
+        )
+        assert second.status_code == 200
+        assert len(second.content) <= testproject_api._EXECUTION_LIST_RESPONSE_MAX_BYTES
+        second_data = second.json()
+        first_ids = {item["id"] for item in first_data["tasks"]}
+        second_ids = {item["id"] for item in second_data["tasks"]}
+        assert first_ids.isdisjoint(second_ids)
+        assert first_ids | second_ids == {task.pk for task in tasks}
 
     def test_get_execution(self, client):
         """Test getting a specific execution by internal ID."""

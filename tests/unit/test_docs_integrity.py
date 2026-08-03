@@ -177,6 +177,23 @@ def test_input_storage_guide_states_filesystem_trust_boundary() -> None:
     assert "symlinks or Windows reparse points" in guide
 
 
+def test_execution_api_docs_limit_bounded_claims_to_the_list_surface() -> None:
+    api_reference = (DOCS / "reference" / "api.md").read_text(encoding="utf-8")
+    observability = (DOCS / "observability.md").read_text(encoding="utf-8")
+
+    for document in (api_reference, observability):
+        assert "4,096" in document
+        assert "256 KiB" in document
+        assert "stored_value_exceeds_list_limit" in document
+        assert "response_size_limit" in document
+        assert "next_cursor" in document
+        assert "filter-bound" in document
+        assert "SQLite" in document and "PostgreSQL" in document
+        assert "GET /api/executions/{id}" in document
+        assert "exact operator" in document
+        assert "lookup" in document
+
+
 def test_celery_ray_portfolio_recipe_is_parseable_and_complete() -> None:
     guide = (DOCS / "celery-migration.md").read_text(encoding="utf-8")
     section = guide.split("### Configure Celery and Ray together", maxsplit=1)[1]

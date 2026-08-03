@@ -9,13 +9,27 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import datetime
-from typing import Any, Literal
+from hashlib import sha256
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import ninja.responses as ninja_responses
 from django.conf import settings
+from django.core import signing
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models import Count
+from django.db import connection
+from django.db.models import (
+    Case,
+    Count,
+    F,
+    Func,
+    IntegerField,
+    Q,
+    QuerySet,
+    TextField,
+    Value,
+    When,
+)
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.tasks import task_backends
@@ -71,6 +85,54 @@ def _workflow_observability_executions():
         "workflow_progress_summary_json",
         "runtime_env_json",
     )
+
+
+_EXECUTION_LIST_MIN_LIMIT = 1
+_EXECUTION_LIST_DEFAULT_LIMIT = 50
+_EXECUTION_LIST_MAX_LIMIT = 100
+_EXECUTION_LIST_CURSOR_MAX_CHARACTERS = 512
+_EXECUTION_LIST_CURSOR_SALT = "testproject.execution-list.v1"
+_EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES = 4_096
+_EXECUTION_LIST_RESPONSE_MAX_BYTES = 256 * 1_024
+_EXECUTION_LIST_DIAGNOSTIC_OMISSION_REASON = "stored_value_exceeds_list_limit"
+_EXECUTION_LIST_DATABASE_VENDORS = frozenset({"postgresql", "sqlite"})
+
+_EXECUTION_LIST_VALUE_FIELDS = (
+    "id",
+    "task_id",
+    "callable_path",
+    "queue_name",
+    "state",
+    "attempt_number",
+    "execution_generation",
+    "workflow_run_id",
+    "created_at",
+    "started_at",
+    "finished_at",
+    "runtime_env_profile",
+    "runtime_env_hash",
+    "queue_timeout_seconds",
+    "queue_deadline_at",
+    "_list_result_data",
+    "_list_result_data_bytes",
+    "_list_error_message",
+    "_list_error_message_bytes",
+)
+
+
+class _DatabaseByteLength(Func):
+    """Return stored text bytes without SQLite's embedded-NUL text shortcut."""
+
+    function = "OCTET_LENGTH"
+    output_field = IntegerField()
+
+    def as_sqlite(self, compiler: Any, connection: Any, **extra_context: Any) -> Any:
+        return self.as_sql(
+            compiler,
+            connection,
+            template="LENGTH(CAST(%(expressions)s AS BLOB))",
+            **extra_context,
+        )
 
 
 _WORKFLOW_OBSERVABILITY_CALLABLES = frozenset(
@@ -223,6 +285,13 @@ class TaskExecutionSchema(Schema):
         return redact_text(value) if value is not None else None
 
 
+class TaskExecutionListItemSchema(TaskExecutionSchema):
+    """Execution summary with explicit list-only diagnostic omissions."""
+
+    result_data_omission_reason: Literal["stored_value_exceeds_list_limit"] | None
+    error_message_omission_reason: Literal["stored_value_exceeds_list_limit"] | None
+
+
 class RetryExecutionOutcomeSchema(Schema):
     """Bounded outcome of requesting one manual retry."""
 
@@ -312,13 +381,24 @@ def _retry_execution_outcome(
 class TaskListResponseSchema(Schema):
     """Schema for task list response."""
 
-    tasks: list[TaskExecutionSchema]
+    tasks: list[TaskExecutionListItemSchema]
     total: int
     queued: int
     running: int
     succeeded: int
     failed: int
     expired: int
+    limit: int
+    returned_count: int
+    has_more: bool
+    next_cursor: Annotated[
+        str | None,
+        Field(max_length=_EXECUTION_LIST_CURSOR_MAX_CHARACTERS),
+    ]
+    truncated: bool
+    truncation_reason: Literal["page_limit", "response_size_limit"] | None
+    diagnostic_max_bytes: Literal[4096]
+    response_max_bytes: Literal[262144]
 
 
 class MessageSchema(Schema):
@@ -785,13 +865,273 @@ def get_task(request, task_id: str):
 # ============================================================================
 
 
+def _execution_list_filter_fingerprint(
+    *,
+    state: str | None,
+    queue: str | None,
+    task_id: str | None,
+) -> str:
+    """Bind an opaque continuation to the exact normalized filters."""
+    encoded = json.dumps(
+        {"queue": queue, "state": state, "task_id": task_id},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _encode_execution_list_cursor(
+    row: dict[str, Any],
+    *,
+    filter_fingerprint: str,
+) -> str:
+    """Sign one keyset position without exposing filter values."""
+    created_at = row.get("created_at")
+    execution_id = row.get("id")
+    if not isinstance(created_at, datetime) or not isinstance(execution_id, int):
+        raise ImproperlyConfigured("Execution list row has no cursor position")
+    cursor = signing.Signer(salt=_EXECUTION_LIST_CURSOR_SALT).sign_object(
+        {
+            "created_at": created_at.isoformat(),
+            "filter": filter_fingerprint,
+            "id": execution_id,
+            "version": 1,
+        },
+        compress=False,
+    )
+    if len(cursor) > _EXECUTION_LIST_CURSOR_MAX_CHARACTERS:
+        raise ImproperlyConfigured("Execution list cursor exceeds its character bound")
+    return cursor
+
+
+def _decode_execution_list_cursor(
+    cursor: str,
+    *,
+    filter_fingerprint: str,
+) -> tuple[datetime, int]:
+    """Authenticate and validate one filter-bound keyset position."""
+    try:
+        payload = signing.Signer(salt=_EXECUTION_LIST_CURSOR_SALT).unsign_object(cursor)
+        if not isinstance(payload, dict) or set(payload) != {
+            "created_at",
+            "filter",
+            "id",
+            "version",
+        }:
+            raise ValueError
+        created_at_text = payload["created_at"]
+        stored_fingerprint = payload["filter"]
+        execution_id = payload["id"]
+        version = payload["version"]
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version != 1
+            or not isinstance(created_at_text, str)
+            or len(created_at_text) > 64
+            or not isinstance(stored_fingerprint, str)
+            or len(stored_fingerprint) != 64
+            or not isinstance(execution_id, int)
+            or isinstance(execution_id, bool)
+            or execution_id < 1
+            or not secrets.compare_digest(stored_fingerprint, filter_fingerprint)
+        ):
+            raise ValueError
+        created_at = datetime.fromisoformat(created_at_text)
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise ValueError
+    except (signing.BadSignature, TypeError, ValueError) as error:
+        raise HttpError(422, "Invalid execution-list cursor.") from error
+    return created_at, execution_id
+
+
+def _bounded_execution_list_rows(
+    queryset: QuerySet[RayTaskExecution],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Load one bounded page without transferring oversized diagnostics."""
+    if connection.vendor not in _EXECUTION_LIST_DATABASE_VENDORS:
+        raise ImproperlyConfigured(
+            "The testproject execution list supports only SQLite and PostgreSQL byte guards"
+        )
+    guarded = queryset.annotate(
+        _list_result_data_bytes=_DatabaseByteLength("result_data"),
+        _list_error_message_bytes=_DatabaseByteLength("error_message"),
+    ).annotate(
+        _list_result_data=Case(
+            When(
+                _list_result_data_bytes__lte=_EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES,
+                then=F("result_data"),
+            ),
+            default=Value(None),
+            output_field=TextField(),
+        ),
+        _list_error_message=Case(
+            When(
+                _list_error_message_bytes__lte=_EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES,
+                then=F("error_message"),
+            ),
+            default=Value(None),
+            output_field=TextField(),
+        ),
+    )
+    return list(
+        guarded.order_by("-created_at", "-pk").values(*_EXECUTION_LIST_VALUE_FIELDS)[: limit + 1]
+    )
+
+
+def _execution_list_item(row: dict[str, Any]) -> TaskExecutionListItemSchema:
+    """Convert one guarded database projection into its redacted public shape."""
+    values = dict(row)
+    result_bytes = values.pop("_list_result_data_bytes")
+    error_bytes = values.pop("_list_error_message_bytes")
+    values["result_data"] = values.pop("_list_result_data")
+    values["error_message"] = values.pop("_list_error_message")
+    values["result_data_omission_reason"] = (
+        _EXECUTION_LIST_DIAGNOSTIC_OMISSION_REASON
+        if result_bytes is not None and result_bytes > _EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES
+        else None
+    )
+    values["error_message_omission_reason"] = (
+        _EXECUTION_LIST_DIAGNOSTIC_OMISSION_REASON
+        if error_bytes is not None and error_bytes > _EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES
+        else None
+    )
+    return TaskExecutionListItemSchema.model_validate(values)
+
+
+def _execution_list_payload(
+    *,
+    tasks: list[TaskExecutionListItemSchema],
+    task_counts: dict[str, int],
+    limit: int,
+    filter_fingerprint: str,
+    continuation_row: dict[str, Any] | None,
+    page_limited: bool,
+    response_size_limited: bool,
+) -> TaskListResponseSchema:
+    """Build fixed pagination and truncation metadata for one response."""
+    has_more = page_limited or response_size_limited
+    if response_size_limited:
+        truncation_reason = "response_size_limit"
+    elif page_limited:
+        truncation_reason = "page_limit"
+    else:
+        truncation_reason = None
+    returned_count = len(tasks)
+    if has_more and continuation_row is None:
+        raise ImproperlyConfigured("Execution list cannot advance past an omitted first row")
+    return TaskListResponseSchema.model_validate(
+        {
+            "tasks": tasks,
+            "total": sum(task_counts.values()),
+            "queued": task_counts.get(TaskState.QUEUED, 0),
+            "running": task_counts.get(TaskState.RUNNING, 0),
+            "succeeded": task_counts.get(TaskState.SUCCEEDED, 0),
+            "failed": task_counts.get(TaskState.FAILED, 0),
+            "expired": task_counts.get(TaskState.EXPIRED, 0),
+            "limit": limit,
+            "returned_count": returned_count,
+            "has_more": has_more,
+            "next_cursor": (
+                _encode_execution_list_cursor(
+                    continuation_row,
+                    filter_fingerprint=filter_fingerprint,
+                )
+                if continuation_row is not None and has_more
+                else None
+            ),
+            "truncated": has_more,
+            "truncation_reason": truncation_reason,
+            "diagnostic_max_bytes": _EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES,
+            "response_max_bytes": _EXECUTION_LIST_RESPONSE_MAX_BYTES,
+        }
+    )
+
+
+def _encode_execution_list_response(
+    request: Any,
+    response: TaskListResponseSchema,
+) -> bytes:
+    """Render with the configured API encoder so the byte bound is exact."""
+    rendered = api.renderer.render(
+        request,
+        response.model_dump(),
+        response_status=200,
+    )
+    if isinstance(rendered, str):
+        return rendered.encode(api.renderer.charset)
+    return bytes(rendered)
+
+
+def _bounded_execution_list_response(
+    request: Any,
+    *,
+    rows: list[dict[str, Any]],
+    task_counts: dict[str, int],
+    limit: int,
+    filter_fingerprint: str,
+) -> HttpResponse:
+    """Return only complete items that fit the fixed aggregate byte budget."""
+    page_limited = len(rows) > limit
+    selected_rows = rows[:limit]
+    tasks: list[TaskExecutionListItemSchema] = []
+    response_size_limited = False
+
+    for index, row in enumerate(selected_rows):
+        item = _execution_list_item(row)
+        candidate_tasks = [*tasks, item]
+        remaining_selected_rows = index + 1 < len(selected_rows)
+        candidate = _execution_list_payload(
+            tasks=candidate_tasks,
+            task_counts=task_counts,
+            limit=limit,
+            filter_fingerprint=filter_fingerprint,
+            continuation_row=row,
+            page_limited=page_limited and not remaining_selected_rows,
+            response_size_limited=remaining_selected_rows,
+        )
+        if len(_encode_execution_list_response(request, candidate)) > (
+            _EXECUTION_LIST_RESPONSE_MAX_BYTES
+        ):
+            response_size_limited = True
+            break
+        tasks.append(item)
+
+    response = _execution_list_payload(
+        tasks=tasks,
+        task_counts=task_counts,
+        limit=limit,
+        filter_fingerprint=filter_fingerprint,
+        continuation_row=selected_rows[len(tasks) - 1] if tasks else None,
+        page_limited=page_limited,
+        response_size_limited=response_size_limited,
+    )
+    encoded = _encode_execution_list_response(request, response)
+    if len(encoded) > _EXECUTION_LIST_RESPONSE_MAX_BYTES:
+        raise ImproperlyConfigured("Execution list response metadata exceeds its byte bound")
+    return HttpResponse(encoded, status=200, content_type=api.get_content_type())
+
+
 @api.get("/executions", response=TaskListResponseSchema, tags=["Admin"])
 def list_executions(
     request,
-    state: str | None = None,
-    queue: str | None = None,
-    task_id: str | None = None,
-    limit: int = 50,
+    state: Annotated[str | None, Field(max_length=20)] = None,
+    queue: Annotated[str | None, Field(max_length=100)] = None,
+    task_id: Annotated[str | None, Field(max_length=255)] = None,
+    limit: Annotated[
+        int,
+        Field(
+            ge=_EXECUTION_LIST_MIN_LIMIT,
+            le=_EXECUTION_LIST_MAX_LIMIT,
+        ),
+    ] = _EXECUTION_LIST_DEFAULT_LIMIT,
+    cursor: Annotated[
+        str | None,
+        Field(max_length=_EXECUTION_LIST_CURSOR_MAX_CHARACTERS),
+    ] = None,
 ):
     """List task executions with optional filtering.
 
@@ -799,26 +1139,39 @@ def list_executions(
     """
     queryset = _workflow_observability_executions()
 
-    if state:
-        queryset = queryset.filter(state=state.upper())
-    if queue:
-        queryset = queryset.filter(queue_name=queue)
-    if task_id:
-        queryset = queryset.filter(task_id=task_id)
+    normalized_state = state.upper() if state else None
+    normalized_queue = queue if queue else None
+    normalized_task_id = task_id if task_id else None
+    if normalized_state:
+        queryset = queryset.filter(state=normalized_state)
+    if normalized_queue:
+        queryset = queryset.filter(queue_name=normalized_queue)
+    if normalized_task_id:
+        queryset = queryset.filter(task_id=normalized_task_id)
 
-    queryset = queryset.order_by("-created_at")[:limit]
+    filter_fingerprint = _execution_list_filter_fingerprint(
+        state=normalized_state,
+        queue=normalized_queue,
+        task_id=normalized_task_id,
+    )
+    if cursor is not None:
+        cursor_created_at, cursor_id = _decode_execution_list_cursor(
+            cursor,
+            filter_fingerprint=filter_fingerprint,
+        )
+        queryset = queryset.filter(
+            Q(created_at__lt=cursor_created_at) | Q(created_at=cursor_created_at, pk__lt=cursor_id)
+        )
 
+    rows = _bounded_execution_list_rows(queryset, limit=limit)
     task_counts = _task_state_counts()
-
-    return {
-        "tasks": list(queryset),
-        "total": sum(task_counts.values()),
-        "queued": task_counts.get(TaskState.QUEUED, 0),
-        "running": task_counts.get(TaskState.RUNNING, 0),
-        "succeeded": task_counts.get(TaskState.SUCCEEDED, 0),
-        "failed": task_counts.get(TaskState.FAILED, 0),
-        "expired": task_counts.get(TaskState.EXPIRED, 0),
-    }
+    return _bounded_execution_list_response(
+        request,
+        rows=rows,
+        task_counts=task_counts,
+        limit=limit,
+        filter_fingerprint=filter_fingerprint,
+    )
 
 
 @api.get("/executions/stats", response=StatsSchema, tags=["Admin"])

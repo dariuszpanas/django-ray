@@ -36,9 +36,9 @@ If you need a REST API for task management in your project, you can use the test
 | `GET /api/health` | Health check |
 | `GET /api/metrics` | Prometheus metrics |
 | `GET /api/tasks/{task_id}` | Get status, timestamps, and redacted arguments by task ID; return values and failure diagnostics are omitted |
-| `GET /api/executions` | List bounded, redacted task-execution projections |
+| `GET /api/executions` | Page through bounded, redacted task-execution projections |
 | `GET /api/executions/stats` | Get statistics |
-| `GET /api/executions/{id}` | Get execution details |
+| `GET /api/executions/{id}` | Get exact redacted execution details; list bounds do not apply |
 | `POST /api/executions/{id}/cancel` | Cancel or request cancellation for an execution |
 | `POST /api/executions/{id}/retry` | Request retry with bounded `202`, `404`, or `409` outcome |
 | `POST /api/executions/reset` | Retry matching `FAILED`, `CANCELLED`, `LOST`, or `EXPIRED` executions |
@@ -55,6 +55,35 @@ If you need a REST API for task management in your project, you can use the test
 `/api/executions` exposes only its ordinary redacted result/error fields. The 0.4.0
 testproject has no pattern-unredacted diagnostics HTTP endpoint; privileged failure
 inspection is deliberately confined to the separately authorized Django Admin view.
+
+### Bounded execution-list example
+
+`GET /api/executions` accepts a `limit` from 1 through 100 and defaults to 50. It
+orders by newest creation time and primary key, keeps the existing filters and global
+state counts, and returns `returned_count`, `has_more`, and a signed, filter-bound
+`next_cursor` for continuation. The cursor is bound to the exact state, queue, and
+task-id filters, so it cannot be reused under a different query. Keyset continuation
+remains anchored after the last complete returned item when newer executions are
+inserted. A malformed, oversized, modified, or filter-mismatched cursor is rejected
+with `422`.
+`truncation_reason` is the fixed `page_limit` value when another requested-size page
+exists or `response_size_limit` when the encoded response ceiling is reached.
+
+The list query measures `result_data` and `error_message` in the database. A stored
+value over 4,096 bytes is not transferred to the application; its field is `null` and
+the corresponding `*_omission_reason` is the fixed
+`stored_value_exceeds_list_limit` value. Included values still pass through the normal
+redaction policy. This database expression is deliberately supported only on the
+testproject's SQLite walkthrough and PostgreSQL deployment paths; another database
+fails configuration clearly instead of pretending that its LOB byte semantics are
+bounded. The complete encoded response is at most 256 KiB, and only complete items
+that fit that ceiling are returned. Continue with the unchanged filters and
+`next_cursor` rather than increasing `limit`.
+
+`GET /api/executions/{id}` remains the separate exact operator lookup used for focused
+diagnosis. It is authenticated and redacted, but it is not covered by the list's
+per-field or aggregate bounds. Production adapters should authorize that detail route
+more narrowly or replace it with an application-specific bounded projection.
 
 ### 0.4.0 workflow graph migration
 

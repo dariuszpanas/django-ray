@@ -61,6 +61,7 @@ from django_ray.workflow_progress_summary import (
     deserialize_workflow_progress_summary,
     serialize_workflow_progress_summary,
 )
+from testproject import api as testproject_api
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.postgresql]
@@ -1876,6 +1877,51 @@ def test_postgresql_sensitive_admin_bounds_unicode_before_transfer(
     ]
     assert len(bounded_queries) == 1
     bounded_sql = bounded_queries[0].upper()
+    assert "OCTET_LENGTH" in bounded_sql
+    assert "CASE WHEN" in bounded_sql
+    assert "LENGTH(CAST(" not in bounded_sql
+    assert "AS BLOB" not in bounded_sql
+
+
+def test_postgresql_execution_list_bounds_unicode_before_transfer() -> None:
+    limit = testproject_api._EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES
+    exact_value = "\U0001f642" * (limit // 4)
+    oversized_value = exact_value + "\u00e9"
+    assert len(exact_value.encode("utf-8")) == limit
+    assert len(oversized_value.encode("utf-8")) == limit + 2
+    task = _execution(
+        "postgres-execution-list-byte-boundary-001",
+        state=TaskState.FAILED,
+        result_data=oversized_value,
+        error_message=oversized_value,
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        rows = testproject_api._bounded_execution_list_rows(
+            RayTaskExecution.objects.filter(pk=task.pk),
+            limit=1,
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["_list_result_data_bytes"] == limit + 2
+    assert row["_list_error_message_bytes"] == limit + 2
+    assert row["_list_result_data"] is None
+    assert row["_list_error_message"] is None
+    item = testproject_api._execution_list_item(row)
+    assert item.result_data is None
+    assert item.error_message is None
+    assert item.result_data_omission_reason == "stored_value_exceeds_list_limit"
+    assert item.error_message_omission_reason == "stored_value_exceeds_list_limit"
+
+    selects = [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].lstrip().upper().startswith("SELECT")
+        and "django_ray_raytaskexecution" in query["sql"]
+    ]
+    assert len(selects) == 1
+    bounded_sql = selects[0].upper()
     assert "OCTET_LENGTH" in bounded_sql
     assert "CASE WHEN" in bounded_sql
     assert "LENGTH(CAST(" not in bounded_sql
