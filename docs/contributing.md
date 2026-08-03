@@ -82,8 +82,10 @@ feedback," bodies that merely repeat the header, and commands with no recorded r
 the change as breaking. Wrap ordinary **commit prose** at 72 characters. PR descriptions use natural
 Markdown without artificial hard wrapping. Structurally validated generated dependency headers and
 metadata, URL destinations, complete Markdown tables, and recognized Git trailers are exempt from
-mechanical wrapping. Structurally complete Dependabot messages keep their generated validation path
-without a bot-wide exception.
+mechanical wrapping. The required hosted check validates only the PR title for trusted Dependabot
+pull requests because GitHub controls their generated commit bodies and offers no body-formatting
+option. The exception requires the exact `dependabot[bot]` author, a same-repository head, and a
+`dependabot/*` branch; every other pull request retains full commit-message validation.
 
 PR descriptions and issue trailers are supplemental: they must not be the only place durable commit
 context exists. Keep material facts aligned between the PR and every retained logical commit, but
@@ -102,9 +104,11 @@ Worktree-specific configuration keeps linked worktrees pointed at their own trac
 normally removes lines beginning with `#` as comments. Setting the comment character to `;` preserves
 the template's optional `##` headings; the template uses `;` for instructions that Git should remove.
 
-The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
-every commit in the PR. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`,
-`revert`, `style`, or `test`; an optional scope and `!` are allowed:
+The required `Commit Messages` GitHub Actions check validates the PR title and, for ordinary pull
+requests, the full message of every commit. Trusted same-repository Dependabot pull requests keep the
+required check but validate only their Conventional Commit PR title; the required `CI Gate` still
+validates their complete change. Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`,
+`refactor`, `revert`, `style`, or `test`; an optional scope and `!` are allowed:
 
 ```text
 <type>[optional scope][!]: <imperative summary>
@@ -517,8 +521,10 @@ Keep commits focused and do not squash the PR. Once the required checks pass, en
 gh pr merge --auto --rebase <PR-number>
 ```
 
-The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and every full
-commit message, and reports a required status check without needing secrets from the PR. The separate
+The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and ordinary PR
+commit messages, and reports a required status check without needing secrets from the PR. Its
+title-only Dependabot path is limited by trusted event metadata to the bot's same-repository branch
+namespace. The separate
 required `CI Gate` runs after every blocking job and passes only when lint, docs, typing, all supported
 Python tests, PostgreSQL coordination, live-cluster faults, testproject, the tracked Docker Compose
 smoke, minimum/latest dependencies, and package build all report `success`. Its `always()` condition
