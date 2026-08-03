@@ -76,7 +76,7 @@ def _runtime(
         ),
     ],
 )
-@pytest.mark.parametrize("ray_version", ["2.53.0", "2.56.0", "2.56.1"])
+@pytest.mark.parametrize("ray_version", ["2.56.0", "2.56.1"])
 def test_proposed_linux_cpu_rows_remain_unverified_candidates(
     ray_version: str,
     topology: CompiledGraphTopology,
@@ -96,11 +96,11 @@ def test_proposed_linux_cpu_rows_remain_unverified_candidates(
     assert decision.verified is False
     assert decision.reason is CompiledGraphReason.CANDIDATE_REQUIRES_SMOKE
     assert decision.plan_rejection_code == "INCOMPATIBLE_PLATFORM"
-    assert (decision.capability_set or "").startswith("ray-cgraph-policy-v2:")
+    assert (decision.capability_set or "").startswith("ray-cgraph-policy-v3:")
     assert decision.submission_transport == submission_transport.value
     serialized = json.loads(json.dumps(decision.asdict()))
     assert serialized["schema_version"] == 2
-    assert serialized["policy_version"] == 2
+    assert serialized["policy_version"] == 3
     assert serialized["beta"] is True
 
 
@@ -402,7 +402,7 @@ def test_dependency_profile_must_name_the_exact_ray_release() -> None:
         (
             _runtime(ray_version="2.56.2"),
             CompiledGraphReason.UNSUPPORTED_RAY_VERSION,
-            "2.53.0, 2.56.0, 2.56.1",
+            "2.56.0, 2.56.1",
         ),
         (
             _runtime(ray_version="3.0.0.dev0"),
@@ -569,10 +569,10 @@ def test_deployment_storage_profiles_require_explicit_configuration(monkeypatch)
 def test_candidate_rows_are_sorted_and_verified_rows_start_empty() -> None:
     rows = candidate_compiled_graph_runtime_rows()
 
-    assert [row["ray_version"] for row in rows] == ["2.53.0", "2.56.0", "2.56.1"]
+    assert [row["ray_version"] for row in rows] == ["2.56.0", "2.56.1"]
     assert all(row["python_minor"] == "3.12" for row in rows)
     rows[0]["ray_version"] = "changed"
-    assert candidate_compiled_graph_runtime_rows()[0]["ray_version"] == "2.53.0"
+    assert candidate_compiled_graph_runtime_rows()[0]["ray_version"] == "2.56.0"
     assert verified_compiled_graph_capability_rows() == ()
 
 
@@ -646,7 +646,8 @@ def test_capability_review_retains_exact_no_promotion_decision() -> None:
     record = json.loads(path.read_text(encoding="utf-8"))
 
     assert record["schema_version"] == 1
-    assert record["policy_version"] == compiled_graph.COMPILED_GRAPH_POLICY_VERSION == 2
+    assert record["policy_version"] == 2
+    assert compiled_graph.COMPILED_GRAPH_POLICY_VERSION == 3
     assert (
         record["capability_schema_version"]
         == compiled_graph.COMPILED_GRAPH_CAPABILITY_SCHEMA_VERSION
@@ -796,7 +797,7 @@ def test_candidate_versions_remain_policy_data_without_a_hosted_native_smoke() -
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     candidate_versions = {row["ray_version"] for row in candidate_compiled_graph_runtime_rows()}
 
-    assert candidate_versions == {"2.53.0", "2.56.0", "2.56.1"}
+    assert candidate_versions == {"2.56.0", "2.56.1"}
     assert "compiled-graph-candidate-smoke" not in workflow
     assert "ray[cgraph]" not in workflow
     assert "--candidate-native" not in workflow
@@ -805,7 +806,7 @@ def test_candidate_versions_remain_policy_data_without_a_hosted_native_smoke() -
 def test_gpu_dependencies_are_not_mandatory_application_dependencies() -> None:
     project = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert '"ray[default]>=2.53.0"' in project
+    assert '"ray[default]>=2.56.0"' in project
     assert "cupy" not in project.lower()
     assert '"ray[cgraph]' not in project
 

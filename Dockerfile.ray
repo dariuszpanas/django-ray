@@ -3,7 +3,7 @@
 #
 # Build: docker build -f Dockerfile.ray -t django-ray-worker:latest .
 
-ARG RAY_VERSION=2.53.0
+ARG RAY_VERSION=2.56.0
 ARG PYTHON_VERSION=py312
 
 FROM rayproject/ray:${RAY_VERSION}-${PYTHON_VERSION}

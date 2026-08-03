@@ -1558,6 +1558,16 @@ def test_prometheus_rbac_is_namespaced_and_has_no_node_permission() -> None:
     ]
 
 
+def test_monitoring_imports_dashboards_from_the_running_ray_release() -> None:
+    """Do not ship stale generated snapshots beside the runtime dashboard importer."""
+    monitoring = (ROOT / "k8s/base/monitoring.yaml").read_text(encoding="utf-8")
+
+    assert 'DASHBOARDS_PATH = "/tmp/ray/session_latest/metrics/grafana/dashboards"' in monitoring
+    assert 'pattern = os.path.join(DASHBOARDS_PATH, "*_dashboard.json")' in monitoring
+    assert not (ROOT / "k8s/base/ray_default_dashboard.json").exists()
+    assert not (ROOT / "k8s/base/ray_data_dashboard.json").exists()
+
+
 def test_render_guard_rejects_cluster_scoped_and_cross_namespace_resources() -> None:
     cluster_scoped = _resources()
     cluster_scoped.append(

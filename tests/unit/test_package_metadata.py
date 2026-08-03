@@ -6,6 +6,7 @@ from pathlib import Path
 
 from coverage import Coverage
 from coverage.results import should_fail_under
+from packaging.version import Version
 
 
 def test_coverage_floor_uses_central_two_decimal_precision() -> None:
@@ -238,3 +239,35 @@ def test_pyasn1_security_floor_is_an_unconditional_runtime_dependency() -> None:
         package["version"] for package in lock["package"] if package["name"] == "pyasn1"
     ]
     assert locked_versions == ["0.6.4"]
+
+
+def test_ray_security_floor_is_an_unconditional_runtime_dependency() -> None:
+    """Fresh installs must not resolve Ray releases below upstream security fixes."""
+    project_root = Path(__file__).parents[2]
+    config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = config["project"]
+
+    assert project["dependencies"].count("ray[default]>=2.56.0") == 1
+    assert all(
+        all(not requirement.startswith("ray[") for requirement in requirements)
+        for requirements in project["optional-dependencies"].values()
+    )
+
+    lock = tomllib.loads((project_root / "uv.lock").read_text(encoding="utf-8"))
+    locked_versions = [
+        Version(package["version"]) for package in lock["package"] if package["name"] == "ray"
+    ]
+    assert len(locked_versions) == 1
+    assert locked_versions[0] >= Version("2.56.0")
+
+
+def test_ray_security_floor_is_consistent_across_public_install_paths() -> None:
+    """Docs and the default Ray image must not bypass the package security floor."""
+    project_root = Path(__file__).parents[2]
+    readme = (project_root / "README.md").read_text(encoding="utf-8")
+    ray_dockerfile = (project_root / "Dockerfile.ray").read_text(encoding="utf-8")
+
+    assert "Ray 2.56.0+" in readme
+    assert "Ray 2.53.0+" not in readme
+    assert "ARG RAY_VERSION=2.56.0" in ray_dockerfile
+    assert "ARG RAY_VERSION=2.53.0" not in ray_dockerfile

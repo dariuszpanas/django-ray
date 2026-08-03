@@ -3629,6 +3629,14 @@ def test_historical_blocked_evidence_remains_self_consistent_across_profile_vers
         == "972d9d9ad3f39f2e97ebc9bd491cd5222a69cb39f01ec7c28578b7ae0976d702"
     )
     record = json.loads(evidence_bytes)
+    retained_decisions = [outcome["decision"] for outcome in record["topologies"]]
+
+    assert pilot.COMPILED_GRAPH_POLICY_VERSION == 3
+    assert {decision["policy_version"] for decision in retained_decisions} == {2}
+    assert all(
+        decision["capability_set"].startswith("ray-cgraph-policy-v2:")
+        for decision in retained_decisions
+    )
 
     pilot._validate_blocked_evidence_record(
         record,

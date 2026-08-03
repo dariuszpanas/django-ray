@@ -619,7 +619,7 @@ jobs:
             "cryptography==42.0.8" \
             "django==6.0" \
             "pyasn1==0.6.4" \
-            "ray[default]==2.53.0" \
+            "ray[default]==2.56.0" \
             "django-ninja==1.5.1" \
             "django-unfold==0.102.0" \
             "whitenoise==6.6" \
@@ -672,13 +672,15 @@ jobs:
       - name: Build package
         run: uv build
 
-      - name: Verify installed wheel and migrations
+      - name: Verify distribution metadata, installed wheel, and migrations
         run: |
           wheel="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
           test -n "$wheel"
           uv run --isolated --no-project --python 3.12 \
             --with "$wheel" \
-            python scripts/verify_wheel.py --version "$(uv version --short)"
+            python scripts/verify_wheel.py \
+              --version "$(uv version --short)" \
+              --dist-dir dist
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

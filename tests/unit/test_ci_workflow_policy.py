@@ -299,6 +299,7 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     )
 
     assert '"pyasn1==0.6.4"' in minimum_install["run"]
+    assert '"ray[default]==2.56.0"' in minimum_install["run"]
     assert audit_job["name"] == (
         "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"
     )
@@ -588,11 +589,26 @@ def test_package_job_smokes_the_installed_wheel_without_a_new_matrix() -> None:
     }
 
     assert "strategy" not in package_job
-    smoke = steps["Verify installed wheel and migrations"]["run"]
+    smoke = steps["Verify distribution metadata, installed wheel, and migrations"]["run"]
     assert "--isolated --no-project --python 3.12" in smoke
     assert '--with "$wheel"' in smoke
     assert "scripts/verify_wheel.py" in smoke
+    assert "--dist-dir dist" in smoke
     assert '"$(uv version --short)"' in smoke
+
+
+def test_release_matrix_verifies_wheel_and_sdist_metadata() -> None:
+    release_job = _jobs(RELEASE_WORKFLOW)["test"]
+    steps = {
+        step["name"]: step
+        for step in release_job["steps"]
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+
+    smoke = steps["Verify distribution metadata and installed wheel"]["run"]
+    assert "scripts/verify_wheel.py" in smoke
+    assert "--dist-dir dist" in smoke
+    assert '"${{ needs.build.outputs.version }}"' in smoke
 
 
 def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:

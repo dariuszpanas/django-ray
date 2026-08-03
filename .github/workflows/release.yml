@@ -256,8 +256,11 @@ jobs:
           uv venv --python ${{ matrix.python-version }}
           uv pip install dist/*.whl
 
-      - name: Verify installed wheel
-        run: uv run --no-sync python scripts/verify_wheel.py --version "${{ needs.build.outputs.version }}"
+      - name: Verify distribution metadata and installed wheel
+        run: >-
+          uv run --no-sync python scripts/verify_wheel.py
+          --version "${{ needs.build.outputs.version }}"
+          --dist-dir dist
 
   publish-testpypi:
     name: Publish to TestPyPI

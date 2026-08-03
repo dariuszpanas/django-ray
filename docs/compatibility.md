@@ -6,11 +6,21 @@
 |---|---|
 | Python | 3.12, 3.13, 3.14 |
 | Django | 6.0 or newer compatible release |
-| Ray | 2.53.0 or newer compatible release |
+| Ray | 2.56.0 or newer compatible release |
 | Production operating system | Linux recommended |
 
 Python 3.12 is the floor because Django 6.0 requires Python 3.12+, not because Ray does.
 Current [Ray releases support a wider Python range](https://pypi.org/project/ray/).
+
+Ray 2.56.0 is the django-ray 0.4 security floor. Earlier releases fall below fixes in
+published upstream Ray advisories for the
+[dashboard and Jobs boundary](https://github.com/ray-project/ray/security/advisories/GHSA-q5fh-2hc8-f6rq),
+[Ray Data Parquet reads](https://github.com/ray-project/ray/security/advisories/GHSA-mw35-8rx3-xf9r),
+and the
+[Ray Data WebDataset reader](https://github.com/ray-project/ray/security/advisories/GHSA-hhrp-gw25-jr43).
+Upgrade the task managers, Ray head, and Ray workers together before installing
+django-ray 0.4; do not use a mixed Ray minor-version cluster as a rolling-upgrade
+shortcut.
 
 Ray Client and cluster execution are most predictable when the task manager and Ray
 cluster use the same Ray version and Python minor version. Patch-version differences
@@ -35,11 +45,14 @@ CI covers:
 - the committed lock on every supported Python minor;
 - minimum direct dependencies on the oldest supported Python;
 - the newest resolvable dependencies on the newest supported Python;
-- package installation from the built wheel on every supported Python minor.
+- matching wheel and sdist security metadata plus package installation from the built
+  wheel on every supported Python minor.
 
 Updating the lock is therefore separate from raising a package's minimum supported
 version. A lower bound should move only when django-ray uses a newer API or the older
-dependency is no longer supportable.
+dependency is no longer supportable. A published dependency security fix is such a
+support boundary: the repository lock protects its own reproducible environment, while
+the declared lower bound controls what a downstream fresh install may resolve.
 
 ## Platforms
 
@@ -52,7 +65,7 @@ that Ray is available on every Python/platform combination.
 - Ray publishes Linux aarch64 wheels for supported Python versions, but users must
   confirm their OS, architecture, and Python ABI match an available Ray wheel.
 
-Compiled Graph is more restrictive than ordinary Ray use: policy version 2 rejects
+Compiled Graph is more restrictive than ordinary Ray use: policy version 3 rejects
 Windows, aarch64, Ray Client, GPU transport, and every unverified native tuple before
 calling `experimental_compile()`. Dynamic workflows remain supported according to the
 general matrix above.

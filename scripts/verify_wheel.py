@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import tarfile
+import zipfile
+from email.parser import Parser
 from pathlib import Path
 
 from packaging.version import Version
@@ -34,6 +37,74 @@ EXPECTED_MIGRATION_LEAF = (
     "django_ray",
     "0017_raytaskexecution_sensitive_data_permission",
 )
+
+
+def _verify_ray_security_floor(requirements: list[str], *, source: str) -> None:
+    ray_requirements = [
+        "".join(requirement.split()).lower().replace("_", "-")
+        for requirement in requirements
+        if requirement.partition(";")[0]
+        .strip()
+        .lower()
+        .replace("_", "-")
+        .startswith("ray[default]")
+    ]
+    if ray_requirements != ["ray[default]>=2.56.0"]:
+        raise RuntimeError(
+            f"{source} must contain exactly one ray[default]>=2.56.0 runtime security floor"
+        )
+
+
+def _verify_archive_metadata(metadata_text: str, *, expected_version: str, source: str) -> None:
+    metadata = Parser().parsestr(metadata_text)
+    if metadata.get("Name") != "django-ray":
+        raise RuntimeError(f"{source} has unexpected package name {metadata.get('Name')!r}")
+    if metadata.get("Version") != expected_version:
+        raise RuntimeError(
+            f"{source} metadata version {metadata.get('Version')!r} != {expected_version!r}"
+        )
+    _verify_ray_security_floor(metadata.get_all("Requires-Dist", []), source=source)
+
+
+def verify_distribution_archives(dist_dir: Path, expected_version: str) -> None:
+    """Verify the built wheel and sdist publish the same Ray security floor."""
+    wheels = sorted(dist_dir.glob("*.whl"))
+    sdists = sorted(dist_dir.glob("*.tar.gz"))
+    if len(wheels) != 1 or len(sdists) != 1:
+        raise RuntimeError(
+            "distribution directory must contain exactly one wheel and one .tar.gz sdist"
+        )
+
+    with zipfile.ZipFile(wheels[0]) as archive:
+        metadata_names = [
+            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+        ]
+        if len(metadata_names) != 1:
+            raise RuntimeError("wheel must contain exactly one .dist-info/METADATA file")
+        wheel_metadata = archive.read(metadata_names[0]).decode("utf-8")
+    _verify_archive_metadata(
+        wheel_metadata,
+        expected_version=expected_version,
+        source="wheel archive metadata",
+    )
+
+    with tarfile.open(sdists[0], mode="r:gz") as archive:
+        metadata_members = [
+            member
+            for member in archive.getmembers()
+            if member.isfile() and member.name.endswith("/PKG-INFO") and member.name.count("/") == 1
+        ]
+        if len(metadata_members) != 1:
+            raise RuntimeError("sdist must contain exactly one root package PKG-INFO file")
+        metadata_file = archive.extractfile(metadata_members[0])
+        if metadata_file is None:
+            raise RuntimeError("sdist PKG-INFO could not be read")
+        sdist_metadata = metadata_file.read().decode("utf-8")
+    _verify_archive_metadata(
+        sdist_metadata,
+        expected_version=expected_version,
+        source="sdist archive metadata",
+    )
 
 
 def verify_installed_wheel(expected_version: str) -> None:
@@ -107,6 +178,14 @@ def verify_installed_wheel(expected_version: str) -> None:
     if installed_pyasn1 < Version("0.6.4"):
         raise RuntimeError(f"installed pyasn1 {installed_pyasn1} is below the 0.6.4 security floor")
 
+    _verify_ray_security_floor(
+        list(distribution.requires or ()),
+        source="installed wheel metadata",
+    )
+    installed_ray = Version(importlib.metadata.version("ray"))
+    if installed_ray < Version("2.56.0"):
+        raise RuntimeError(f"installed Ray {installed_ray} is below the 2.56.0 security floor")
+
     import cryptography
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -172,9 +251,13 @@ def verify_installed_wheel(expected_version: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--dist-dir", type=Path)
     args = parser.parse_args()
+    if args.dist_dir is not None:
+        verify_distribution_archives(args.dist_dir, args.version)
     verify_installed_wheel(args.version)
-    print(f"Verified django-ray {args.version} wheel")
+    archive_suffix = " and source distribution" if args.dist_dir is not None else ""
+    print(f"Verified django-ray {args.version} wheel{archive_suffix}")
     return 0
 
 

@@ -622,7 +622,7 @@ def test_compiled_graph_compatibility_uses_the_versioned_adapter_record() -> Non
 
     assert "message" not in compatibility
     assert compatibility["schema_version"] == 2
-    assert compatibility["policy_version"] == 2
+    assert compatibility["policy_version"] == 3
     assert compatibility["reason"] == "CANDIDATE_REQUIRES_SMOKE"
     assert compatibility["plan_rejection_code"] == "INCOMPATIBLE_PLATFORM"
     assert compatibility["topology"] == "nested-ray-task"
