@@ -35,14 +35,62 @@
   outline-offset: 2px;
 }
 
-.django-ray-admin-action.django-ray-admin-action--retry {
-  background: #0369a1;
-  border-color: #0369a1;
+#django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--retry {
+  --django-ray-retry-bg: #0369a1;
+  --django-ray-retry-hover-bg: #075985;
+  --django-ray-retry-active-bg: #0c4a6e;
+  --django-ray-retry-focus-ring: #075985;
+  --django-ray-retry-disabled-bg: #cbd5e1;
+  --django-ray-retry-disabled-border: #94a3b8;
+  --django-ray-retry-disabled-fg: #334155;
+  background: var(--django-ray-retry-bg);
+  border-color: var(--django-ray-retry-bg);
   box-shadow: 0 1px 2px rgb(15 23 42 / 18%);
   color: #fff;
   cursor: pointer;
   display: inline-flex;
   padding: 0.5rem 0.875rem;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 80ms ease;
+}
+
+#django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--retry:hover:not(:disabled) {
+  background: var(--django-ray-retry-hover-bg);
+  border-color: var(--django-ray-retry-hover-bg);
+  box-shadow: 0 4px 8px rgb(15 23 42 / 22%);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+#django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--retry:focus-visible {
+  outline: 3px solid var(--django-ray-retry-focus-ring);
+  outline-offset: 2px;
+}
+
+#django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--retry:active:not(:disabled) {
+  background: var(--django-ray-retry-active-bg);
+  border-color: var(--django-ray-retry-active-bg);
+  box-shadow: inset 0 2px 4px rgb(15 23 42 / 28%);
+  color: #fff;
+  transform: translateY(1px);
+}
+
+#django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--retry:disabled {
+  background: var(--django-ray-retry-disabled-bg);
+  border-color: var(--django-ray-retry-disabled-border);
+  box-shadow: none;
+  color: var(--django-ray-retry-disabled-fg);
+  cursor: not-allowed;
+  opacity: 1;
+  transform: none;
 }
 
 a.django-ray-admin-action.django-ray-admin-action--sensitive {
@@ -88,6 +136,15 @@ a.django-ray-admin-action.django-ray-admin-action--sensitive:focus-visible {
 }
 
 :is(html.dark, html[data-theme="dark"])
+  #django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--retry {
+  --django-ray-retry-focus-ring: #38bdf8;
+  --django-ray-retry-disabled-bg: #3f4148;
+  --django-ray-retry-disabled-border: #71717a;
+  --django-ray-retry-disabled-fg: #e4e4e7;
+}
+
+:is(html.dark, html[data-theme="dark"])
   a.django-ray-admin-action.django-ray-admin-action--sensitive {
   background: rgb(245 158 11 / 14%);
   border-color: #b45309;
@@ -123,6 +180,15 @@ a.django-ray-admin-action.django-ray-admin-action--sensitive:focus-visible {
   }
 
   html[data-theme="auto"]
+    #django-ray-task-actions
+    .django-ray-admin-action.django-ray-admin-action--retry {
+    --django-ray-retry-focus-ring: #38bdf8;
+    --django-ray-retry-disabled-bg: #3f4148;
+    --django-ray-retry-disabled-border: #71717a;
+    --django-ray-retry-disabled-fg: #e4e4e7;
+  }
+
+  html[data-theme="auto"]
     a.django-ray-admin-action.django-ray-admin-action--sensitive {
     background: rgb(245 158 11 / 14%);
     border-color: #b45309;
@@ -150,5 +216,19 @@ a.django-ray-admin-action.django-ray-admin-action--sensitive:focus-visible {
     background: #27272a;
     border-color: #71717a;
     color: #fafafa;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #django-ray-task-actions
+    .django-ray-admin-action.django-ray-admin-action--retry {
+    transition: none;
+  }
+
+  #django-ray-task-actions
+    .django-ray-admin-action.django-ray-admin-action--retry:hover:not(:disabled),
+  #django-ray-task-actions
+    .django-ray-admin-action.django-ray-admin-action--retry:active:not(:disabled) {
+    transform: none;
   }
 }
