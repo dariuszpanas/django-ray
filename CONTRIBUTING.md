@@ -76,8 +76,11 @@ body; `!` in the header is sufficient to mark the change as breaking. Wrap ordin
 at 72 characters so history remains readable in narrow terminals. This wrapping rule does not apply
 to PR descriptions, which use natural Markdown without artificial hard wrapping. Structurally
 validated generated dependency headers and metadata, URL destinations, complete Markdown tables,
-and recognized Git trailers are not required to wrap. Structurally complete Dependabot messages keep
-their generated validation path without a bot-wide bypass.
+and recognized Git trailers are not required to wrap. The required hosted check validates only the
+PR title for trusted Dependabot pull requests because GitHub controls their generated commit bodies
+and does not provide body-formatting options. This exception requires the exact `dependabot[bot]`
+author, a same-repository head, and a `dependabot/*` branch; all other pull requests retain full
+commit-message validation.
 
 Install the tracked template for this checkout:
 
@@ -109,8 +112,10 @@ independently. PR descriptions use natural Markdown rather than 72-column hard w
 logical commits as the change needs; one large atomic commit is valid, while unrelated cleanup belongs
 in a separate change.
 
-The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
-every commit in the PR. The separate required `CI Gate` check fails unless lint, docs, typing,
+The required `Commit Messages` GitHub Actions check validates the PR title and, for ordinary pull
+requests, the full message of every commit. Trusted same-repository Dependabot pull requests keep the
+required check but validate only their Conventional Commit PR title; the separate required `CI Gate`
+still validates their complete change. `CI Gate` fails unless lint, docs, typing,
 supported-Python tests, PostgreSQL, live-cluster faults, testproject, the tracked Docker Compose
 smoke, minimum/latest dependencies, and package build all succeed. Use one of `build`, `chore`, `ci`,
 `docs`, `feat`, `fix`, `perf`,
@@ -130,8 +135,10 @@ gh pr merge --auto --rebase <PR-number>
 ```
 
 Auto-merge waits for both required checks and then applies the rebase merge method, so each descriptive
-commit remains visible on `main`. The `Commit Messages` workflow validates the PR title and each commit
-through the read-only `pull_request_target` event. `CI Gate` runs with `always()` and rejects failed,
+commit remains visible on `main`. The `Commit Messages` workflow validates the PR title and ordinary
+PR commits from a base-branch checkout with read-only repository permission. Its title-only
+Dependabot path is limited by trusted `pull_request_target` event metadata to the bot's
+same-repository branch namespace. `CI Gate` runs with `always()` and rejects failed,
 cancelled, timed-out, or skipped blocking jobs, including a package build skipped after an upstream
 failure.
 

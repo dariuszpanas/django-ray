@@ -28,6 +28,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           pr_ref="refs/remotes/pull/${PR_NUMBER}/head"
           git fetch --no-tags --force origin \
@@ -42,4 +46,8 @@ jobs:
 
           python scripts/check_conventional_commits.py \
             --title "$PR_TITLE" \
-            --range "${PR_BASE_SHA}..${pr_ref}"
+            --range "${PR_BASE_SHA}..${pr_ref}" \
+            --pr-author-login "$PR_AUTHOR_LOGIN" \
+            --pr-head-ref "$PR_HEAD_REF" \
+            --pr-head-repository "$PR_HEAD_REPOSITORY" \
+            --repository "$REPOSITORY"

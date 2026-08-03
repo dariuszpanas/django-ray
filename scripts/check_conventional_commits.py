@@ -988,6 +988,7 @@ def validate(
     commit_range: str | None,
     commit_file: str | None = None,
     commit_json_file: str | None = None,
+    require_commits: bool = True,
 ) -> list[str]:
     """Validate a PR title and/or commit headers and return all errors."""
     messages = list(commits)
@@ -1002,11 +1003,65 @@ def validate(
     if title is not None:
         if error := validate_header(title, label="PR title"):
             errors.append(error)
-    if not messages:
+    if require_commits and not messages:
         errors.append("No commit headers were found to validate.")
     for index, message in enumerate(messages, start=1):
         errors.extend(validate_message(message, label=f"Commit {index}"))
     return errors
+
+
+def _is_trusted_dependabot_pr(
+    *,
+    author_login: str | None,
+    head_ref: str | None,
+    head_repository: str | None,
+    repository: str | None,
+) -> bool:
+    """Limit title-only validation to GitHub's same-repository Dependabot PRs."""
+    return (
+        author_login == "dependabot[bot]"
+        and bool(repository)
+        and head_repository == repository
+        and head_ref is not None
+        and head_ref.startswith("dependabot/")
+    )
+
+
+def validate_pull_request(
+    *,
+    title: str | None,
+    commits: Sequence[str],
+    commit_range: str | None,
+    commit_file: str | None = None,
+    commit_json_file: str | None = None,
+    author_login: str | None = None,
+    head_ref: str | None = None,
+    head_repository: str | None = None,
+    repository: str | None = None,
+) -> list[str]:
+    """Apply the hosted PR policy while keeping every untrusted path strict."""
+    if _is_trusted_dependabot_pr(
+        author_login=author_login,
+        head_ref=head_ref,
+        head_repository=head_repository,
+        repository=repository,
+    ):
+        if title is None:
+            return ["Trusted Dependabot pull request validation requires a PR title."]
+        return validate(
+            title=title,
+            commits=[],
+            commit_range=None,
+            require_commits=False,
+        )
+
+    return validate(
+        title=title,
+        commits=commits,
+        commit_range=commit_range,
+        commit_file=commit_file,
+        commit_json_file=commit_json_file,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1031,18 +1086,41 @@ def _parser() -> argparse.ArgumentParser:
         "--commit-json-file",
         help="JSON file containing an array of full commit messages.",
     )
+    parser.add_argument("--pr-author-login", help="GitHub pull request author login.")
+    parser.add_argument("--pr-head-ref", help="GitHub pull request head branch.")
+    parser.add_argument("--pr-head-repository", help="GitHub pull request head repository.")
+    parser.add_argument("--repository", help="GitHub Actions repository name.")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    pr_context = (
+        args.pr_author_login,
+        args.pr_head_ref,
+        args.pr_head_repository,
+        args.repository,
+    )
+    if any(value is not None for value in pr_context) and not all(
+        value is not None for value in pr_context
+    ):
+        print(
+            "::error::Pull request context requires --pr-author-login, --pr-head-ref, "
+            "--pr-head-repository, and --repository together.",
+            file=sys.stderr,
+        )
+        return 1
     try:
-        errors = validate(
+        errors = validate_pull_request(
             title=args.title,
             commits=args.commit,
             commit_range=args.commit_range,
             commit_file=args.commit_file,
             commit_json_file=args.commit_json_file,
+            author_login=args.pr_author_login,
+            head_ref=args.pr_head_ref,
+            head_repository=args.pr_head_repository,
+            repository=args.repository,
         )
     except RuntimeError as exc:
         print(f"::error::{exc}", file=sys.stderr)

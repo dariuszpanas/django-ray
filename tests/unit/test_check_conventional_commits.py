@@ -1200,6 +1200,119 @@ def test_validate_reads_full_commit_messages_from_git_range(
     )
 
 
+@pytest.mark.parametrize(
+    ("context", "uses_title_only"),
+    [
+        (
+            {
+                "author_login": "dependabot[bot]",
+                "head_ref": "dependabot/uv/python-minor-patch",
+                "head_repository": "owner/project",
+                "repository": "owner/project",
+            },
+            True,
+        ),
+        (
+            {
+                "author_login": "contributor",
+                "head_ref": "dependabot/uv/python-minor-patch",
+                "head_repository": "owner/project",
+                "repository": "owner/project",
+            },
+            False,
+        ),
+        (
+            {
+                "author_login": "dependabot[bot]",
+                "head_ref": "dependabot/uv/python-minor-patch",
+                "head_repository": "fork/project",
+                "repository": "owner/project",
+            },
+            False,
+        ),
+        (
+            {
+                "author_login": "dependabot[bot]",
+                "head_ref": "chore/dependency-update",
+                "head_repository": "owner/project",
+                "repository": "owner/project",
+            },
+            False,
+        ),
+        (
+            {
+                "author_login": "dependabot[bot]",
+                "head_ref": "dependabot/uv/python-minor-patch",
+                "head_repository": "",
+                "repository": "",
+            },
+            False,
+        ),
+    ],
+)
+def test_pull_request_context_limits_title_only_validation_to_trusted_dependabot(
+    context: dict[str, str],
+    uses_title_only: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ranges: list[str] = []
+
+    def messages_from_git(commit_range: str) -> list[str]:
+        ranges.append(commit_range)
+        return ["Update dependencies without a Conventional Commit header"]
+
+    monkeypatch.setattr(CHECKER, "_messages_from_git", messages_from_git)
+
+    errors = CHECKER.validate_pull_request(
+        title="chore(deps): update locked dependencies",
+        commits=[],
+        commit_range="origin/main..HEAD",
+        **context,
+    )
+
+    if uses_title_only:
+        assert errors == []
+        assert ranges == []
+    else:
+        assert any("Commit 1 is not a Conventional Commit header" in error for error in errors)
+        assert ranges == ["origin/main..HEAD"]
+
+
+def test_trusted_dependabot_still_requires_a_valid_pr_title() -> None:
+    errors = CHECKER.validate_pull_request(
+        title="Update locked dependencies",
+        commits=[],
+        commit_range="unused",
+        author_login="dependabot[bot]",
+        head_ref="dependabot/uv/python-minor-patch",
+        head_repository="owner/project",
+        repository="owner/project",
+    )
+
+    assert any("PR title is not a Conventional Commit header" in error for error in errors)
+
+
+def test_pull_request_context_must_be_complete(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        CHECKER.main(
+            [
+                "--title",
+                "chore(deps): update locked dependencies",
+                "--pr-author-login",
+                "dependabot[bot]",
+            ]
+        )
+        == 1
+    )
+
+    assert capsys.readouterr().err == (
+        "::error::Pull request context requires --pr-author-login, --pr-head-ref, "
+        "--pr-head-repository, and --repository together.\n"
+    )
+
+
 def test_tracked_template_renders_as_a_valid_commit_message() -> None:
     rendered = (
         TEMPLATE.read_text(encoding="utf-8")
@@ -1245,7 +1358,7 @@ def test_portable_history_guidance_distinguishes_commit_and_pr_surfaces() -> Non
     assert "natural Markdown without artificial hard wrapping" in normalized_template
 
 
-def test_commit_workflow_validates_the_fetched_pr_range_without_rest_api() -> None:
+def test_commit_workflow_scopes_dependabot_to_title_validation() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert "pull_request_target:" in workflow
@@ -1255,10 +1368,22 @@ def test_commit_workflow_validates_the_fetched_pr_range_without_rest_api() -> No
     assert "ref: ${{ github.event.repository.default_branch }}" in workflow
     assert "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}" in workflow
     assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in workflow
+    assert "PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}" in workflow
+    assert "PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}" in workflow
+    assert "PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in workflow
+    assert "REPOSITORY: ${{ github.repository }}" in workflow
     assert '"refs/pull/${PR_NUMBER}/head:${pr_ref}"' in workflow
     assert 'fetched_head="$(git rev-parse "$pr_ref")"' in workflow
     assert 'if [ "$fetched_head" != "$PR_HEAD_SHA" ]; then' in workflow
     assert 'git cat-file -e "${PR_BASE_SHA}^{commit}"' in workflow
-    assert "PR_AUTHOR_LOGIN" not in workflow
     assert "--body-policy" not in workflow
     assert '--range "${PR_BASE_SHA}..${pr_ref}"' in workflow
+    assert '--pr-author-login "$PR_AUTHOR_LOGIN"' in workflow
+    assert '--pr-head-ref "$PR_HEAD_REF"' in workflow
+    assert '--pr-head-repository "$PR_HEAD_REPOSITORY"' in workflow
+    assert '--repository "$REPOSITORY"' in workflow
+    assert "--title-only" not in workflow
+
+    fetched_head = workflow.index('fetched_head="$(git rev-parse "$pr_ref")"')
+    validation = workflow.index("python scripts/check_conventional_commits.py")
+    assert fetched_head < validation
