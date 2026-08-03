@@ -182,7 +182,12 @@ def retry_authorized_execution(execution: RayTaskExecution):
     )
 ```
 
-`request_task_retry()` locks and reloads the durable execution row. Its bounded
+`request_task_retry()` uses one `select_for_update()` query for lifecycle and workflow
+identity fields. Only after every state and identity fence passes does it read the exact
+RuntimeEnv, routing, deadline, and attempt-archive fields needed for the accepted
+transition while the row remains locked. Rejected paths do not transfer them. It does
+not reload deferred fields implicitly or transfer unrelated task inputs, progress,
+workflow plan body/selection, completion, or cancellation payload columns. Its bounded
 `TaskRetryRequestResult.status` is one of:
 
 | Status | Meaning |
@@ -205,9 +210,14 @@ The testproject maps it to one fixed redaction-safe `409`, while bulk Admin retr
 the corrupt row and continues.
 
 `retry_task()` retains the earlier model-or-`None` compatibility contract for callers
-that do not need to distinguish rejection reasons.
+that do not need to distinguish rejection reasons. Unrelated fields on the returned
+model remain deferred and may load after the transaction if a caller accesses them.
 
-`request_task_cancellation()` locks and reloads the durable execution row. Its bounded
+`request_task_cancellation()` locks only lifecycle identity. An accepted queued
+cancellation then reads the exact attempt-archive fields it needs while retaining that
+lock. Running work uses a database-side completion-presence check without transferring
+the completion envelope, and rejected paths do not transfer archive fields. No path
+reloads a deferred execution field implicitly inside the transaction. Its bounded
 `TaskCancellationRequestResult.status` is one of:
 
 | Status | Meaning |

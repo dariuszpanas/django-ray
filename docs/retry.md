@@ -126,6 +126,19 @@ requests without returning task arguments, output, or errors. The compatibility 
 `retry_task()` remains available when a model-or-`None` result is sufficient. Manual
 retry archives the terminal attempt, increments both values, and clears only
 attempt-local data.
+The transactional reads are deliberately projected. One `select_for_update()` query
+locks only durable state and workflow-identity fences. After those fences accept the
+retry, one explicit read loads the RuntimeEnv, routing, queue-deadline,
+result-reference, diagnostic, and workflow-summary fields needed to validate and
+archive that attempt while the lock remains held. Rejected requests never transfer
+those fields, and the transaction never performs an implicit deferred-field reload.
+Task arguments, the durable input reference, application progress, workflow plan body
+and selection, completion envelope, and unrelated cancellation diagnostic are not
+transferred. They remain unchanged or are reset through named update fields. The model returned by the
+compatibility `retry_task()` helper therefore keeps unrelated payload fields deferred;
+accessing one can issue a normal query after the helper transaction block exits. An
+application-owned outer `atomic()` block may still remain open at that point.
+Prefer `request_task_retry()` when a bounded transition result is enough.
 After the state and identity fences pass, the same row lock verifies the persisted
 RuntimeEnv snapshot before any archival or reset. An identified missing, malformed,
 unsupported, unknown-key, authentication-failed, noncanonical, or hash-mismatched
@@ -144,7 +157,13 @@ interruption. Its stable result distinguishes accepted, duplicate, terminal, mis
 stale-attempt, stale-generation, completion-pending, and invalid-state requests. A
 running row whose Ray Job entrypoint has already published its durable completion
 returns `COMPLETION_PENDING` and remains owned by reconciliation. Cancellation does
-not discard that terminal channel. It does not guarantee immediate interruption of
+not discard that terminal channel. The lock projection contains only lifecycle
+identity. An accepted queued cancellation reads the exact attempt-archive fields it
+needs while retaining the row lock; rejected paths do not transfer them. The transaction
+does not implicitly reload deferred execution fields. A running request checks
+completion presence in SQL without transferring the completion envelope. Task inputs,
+RuntimeEnv, progress, workflow plan, completion content, and unrelated cancellation
+payloads remain outside these projections. Cancellation does not guarantee immediate interruption of
 already-running synchronous Python code.
 
 Tasks with durable external inputs keep the same immutable `input_reference` across

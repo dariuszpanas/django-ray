@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import base64
+import re
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from django.db import DatabaseError, connection, router
+from django.test.utils import CaptureQueriesContext
 
+from django_ray.input_storage import EXTERNAL_INPUT_PLACEHOLDER
 from django_ray.lifecycle import (
     TaskCancellationRequestStatus,
     TaskRetryRequestStatus,
@@ -18,13 +23,86 @@ from django_ray.lifecycle import (
     retry_task,
     succeed_task,
 )
-from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.models import (
+    InputPayloadState,
+    RayTaskExecution,
+    TaskAttempt,
+    TaskInputPayload,
+    TaskState,
+)
 from django_ray.redaction import REDACTED, normalize_terminal_text, redact_text
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
     normalize_runtime_env,
     runtime_env_for_storage,
 )
+from django_ray.workflow_progress_summary import (
+    deserialize_workflow_progress_summary,
+    serialize_workflow_progress_summary,
+)
+from tests.workflow_progress_summary_helpers import workflow_progress_summary
+
+_LOCK_PROJECTION = {"id", "state", "attempt_number", "execution_generation"}
+_ATTEMPT_ARCHIVE_READ_PROJECTION = {
+    "started_at",
+    "finished_at",
+    "error_message",
+    "error_traceback",
+    "result_data",
+    "result_reference",
+    "workflow_progress_summary_json",
+    "workflow_run_id",
+}
+_RETRY_LOCK_PROJECTION = _LOCK_PROJECTION | {
+    "workflow_plan_fingerprint",
+    "workflow_run_id",
+}
+_RETRY_ACCEPTED_READ_PROJECTION = (_ATTEMPT_ARCHIVE_READ_PROJECTION - {"workflow_run_id"}) | {
+    "task_id",
+    "queue_timeout_seconds",
+    "ray_target_address",
+    "ray_job_id",
+    "ray_address",
+    "runtime_env_profile",
+    "runtime_env_json",
+    "runtime_env_hash",
+}
+_REJECTED_PATH_PAYLOAD_COLUMNS = {
+    "args_json",
+    "kwargs_json",
+    "input_reference",
+    "result_data",
+    "result_reference",
+    "error_message",
+    "error_traceback",
+    "runtime_env_json",
+    "progress_data",
+    "workflow_plan_json",
+    "workflow_plan_selection",
+    "completion_data",
+    "cancellation_error",
+}
+
+
+def _execution_select_projections(
+    queries: CaptureQueriesContext,
+) -> list[tuple[set[str], str]]:
+    table = RayTaskExecution._meta.db_table
+    table_pattern = re.escape(table)
+    selected: list[tuple[set[str], str]] = []
+    for query in queries.captured_queries:
+        sql = " ".join(query["sql"].split())
+        if not sql.upper().startswith("SELECT") or f'FROM "{table}"' not in sql:
+            continue
+        select_clause = re.split(r"\s+FROM\s+", sql, maxsplit=1, flags=re.IGNORECASE)[0]
+        fields = set(
+            re.findall(
+                rf'"{table_pattern}"\."([^"]+)"',
+                select_clause,
+            )
+        )
+        selected.append((fields, sql))
+    return selected
 
 
 @pytest.mark.django_db
@@ -81,6 +159,390 @@ def test_explicit_retry_of_expired_task_gets_fresh_deadline() -> None:
     assert retried.queue_timeout_seconds == 120
     assert retried.queue_deadline_at == not_before + timedelta(seconds=120)
     assert TaskAttempt.objects.get(execution=task, attempt_number=1).state == TaskState.EXPIRED
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("storage_mode", ["inline", "external"])
+def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
+    storage_mode: str,
+) -> None:
+    unrelated_marker = f"unrelated-{storage_mode}-" + ("x" * 65_536)
+    input_reference: str | None = None
+    result_data: str | None = '{"result":"inline"}'
+    result_reference: str | None = None
+    args_json = '["inline"]'
+    kwargs_json = '{"mode":"inline"}'
+    payload: TaskInputPayload | None = None
+    if storage_mode == "external":
+        digest = "a" * 64
+        input_reference = f"s3://task-inputs/django-ray/inputs/aa/aa/{digest}.json?bytes=42"
+        args_json = EXTERNAL_INPUT_PLACEHOLDER
+        kwargs_json = EXTERNAL_INPUT_PLACEHOLDER
+        result_data = None
+        result_reference = "digest:" + ("b" * 64)
+        payload = TaskInputPayload.objects.create(
+            reference=input_reference,
+            backend="s3",
+            digest=digest,
+            size_bytes=42,
+            envelope_version=1,
+        )
+    task = RayTaskExecution.objects.create(
+        task_id=f"lifecycle-projected-retry-{storage_mode}",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.FAILED,
+        attempt_number=2,
+        execution_generation=4,
+        args_json=args_json,
+        kwargs_json=kwargs_json,
+        input_reference=input_reference,
+        result_data=result_data,
+        result_reference=result_reference,
+        progress_data=unrelated_marker,
+        workflow_plan_json=unrelated_marker,
+        workflow_plan_selection=unrelated_marker,
+        completion_data=unrelated_marker,
+        cancellation_error=unrelated_marker,
+        error_message="retryable failure",
+        error_traceback="RetryError: retryable failure",
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        retried = retry_task(
+            task.pk,
+            expected_attempt_number=2,
+            expected_execution_generation=4,
+        )
+
+    assert retried is not None
+    projections = _execution_select_projections(queries)
+    assert [fields for fields, _sql in projections] == [
+        _RETRY_LOCK_PROJECTION,
+        _RETRY_ACCEPTED_READ_PROJECTION,
+    ]
+    current = RayTaskExecution.objects.get(pk=task.pk)
+    assert current.state == TaskState.QUEUED
+    assert current.attempt_number == 3
+    assert current.execution_generation == 5
+    assert current.args_json == args_json
+    assert current.kwargs_json == kwargs_json
+    assert current.input_reference == input_reference
+    assert current.result_data is None
+    assert current.result_reference is None
+    archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+    assert archived.result_data == result_data
+    assert archived.result_reference == result_reference
+    assert archived.error_message == "retryable failure"
+    assert archived.error_traceback == "RetryError: retryable failure"
+    if payload is not None:
+        payload.refresh_from_db()
+        assert payload.state == InputPayloadState.ACTIVE
+
+    assert {"args_json", "kwargs_json", "input_reference", "workflow_plan_json"}.issubset(
+        retried.get_deferred_fields()
+    )
+    with CaptureQueriesContext(connection) as caller_queries:
+        assert retried.input_reference == input_reference
+    assert len(caller_queries) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "state",
+        "expected_attempt",
+        "expected_generation",
+        "workflow_fence",
+        "expected_status",
+    ),
+    [
+        (TaskState.QUEUED, 3, 8, None, TaskRetryRequestStatus.NOT_RETRYABLE),
+        (TaskState.SUCCEEDED, 3, 8, None, TaskRetryRequestStatus.NOT_RETRYABLE),
+        (TaskState.FAILED, 2, 8, None, TaskRetryRequestStatus.STALE_ATTEMPT),
+        (TaskState.FAILED, 3, 7, None, TaskRetryRequestStatus.STALE_GENERATION),
+        (
+            TaskState.FAILED,
+            3,
+            8,
+            ("00000000-0000-0000-0000-000000000999", "sha256:" + ("f" * 64)),
+            TaskRetryRequestStatus.STALE_WORKFLOW_IDENTITY,
+        ),
+    ],
+)
+def test_retry_noop_and_stale_paths_use_one_bounded_lock(
+    state: str,
+    expected_attempt: int,
+    expected_generation: int,
+    workflow_fence: tuple[str | None, str | None] | None,
+    expected_status: TaskRetryRequestStatus,
+) -> None:
+    marker = "unrelated-retry-noop-" + ("q" * 65_536)
+    task = RayTaskExecution.objects.create(
+        task_id=f"lifecycle-projected-retry-noop-{state.lower()}-{expected_attempt}",
+        callable_path="testproject.tasks.add_numbers",
+        state=state,
+        attempt_number=3,
+        execution_generation=8,
+        args_json=marker,
+        kwargs_json=marker,
+        input_reference="s3://task-inputs/example.json?bytes=42",
+        progress_data=marker,
+        workflow_plan_json=marker,
+        workflow_plan_selection=marker,
+        completion_data=marker,
+        cancellation_error=marker,
+        result_data=marker,
+        error_message=marker,
+        error_traceback=marker,
+        runtime_env_json=marker,
+        runtime_env_hash=marker,
+        workflow_run_id="00000000-0000-0000-0000-000000000335",
+        workflow_plan_fingerprint="sha256:" + ("a" * 64),
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        result = request_task_retry(
+            task.pk,
+            expected_attempt_number=expected_attempt,
+            expected_execution_generation=expected_generation,
+            expected_workflow_identity=workflow_fence,
+        )
+
+    assert result.status is expected_status
+    projections = _execution_select_projections(queries)
+    assert [fields for fields, _sql in projections] == [_RETRY_LOCK_PROJECTION]
+    assert projections[0][0].isdisjoint(_REJECTED_PATH_PAYLOAD_COLUMNS)
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+@pytest.mark.django_db
+def test_cancellation_uses_state_specific_projections_without_payload_reload() -> None:
+    unrelated_marker = "unrelated-cancel-" + ("x" * 65_536)
+    queued = RayTaskExecution.objects.create(
+        task_id="lifecycle-projected-cancel-queued",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.QUEUED,
+        attempt_number=2,
+        execution_generation=4,
+        args_json=unrelated_marker,
+        kwargs_json=unrelated_marker,
+        input_reference="s3://task-inputs/example.json?bytes=42",
+        runtime_env_json=unrelated_marker,
+        progress_data=unrelated_marker,
+        workflow_plan_json=unrelated_marker,
+        completion_data=unrelated_marker,
+        cancellation_error=unrelated_marker,
+        result_data='{"cancelled":"result"}',
+        result_reference="digest:" + ("c" * 64),
+        error_message="queued cancellation",
+        error_traceback="CancellationError: queued cancellation",
+        workflow_run_id="00000000-0000-0000-0000-000000000335",
+    )
+    summary = workflow_progress_summary(queued)
+    RayTaskExecution.objects.filter(pk=queued.pk).update(
+        workflow_progress_summary_json=serialize_workflow_progress_summary(summary)
+    )
+
+    with CaptureQueriesContext(connection) as queued_queries:
+        queued_result = request_task_cancellation(
+            queued.pk,
+            expected_attempt_number=2,
+            expected_execution_generation=4,
+        )
+
+    assert queued_result.status is TaskCancellationRequestStatus.ACCEPTED
+    queued_projections = _execution_select_projections(queued_queries)
+    assert [fields for fields, _sql in queued_projections] == [
+        _LOCK_PROJECTION,
+        _ATTEMPT_ARCHIVE_READ_PROJECTION,
+    ]
+    archived = TaskAttempt.objects.get(execution=queued, attempt_number=2)
+    assert archived.workflow_progress_summary_json is not None
+    assert (
+        deserialize_workflow_progress_summary(archived.workflow_progress_summary_json)["state"]
+        == TaskState.CANCELLED
+    )
+    assert archived.result_data == '{"cancelled":"result"}'
+    assert archived.result_reference == "digest:" + ("c" * 64)
+    assert archived.error_message == "queued cancellation"
+    assert archived.error_traceback == "CancellationError: queued cancellation"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("completion_pending", "expected_status", "expected_state"),
+    [
+        (False, TaskCancellationRequestStatus.ACCEPTED, TaskState.CANCELLING),
+        (True, TaskCancellationRequestStatus.COMPLETION_PENDING, TaskState.RUNNING),
+    ],
+)
+def test_running_cancellation_uses_presence_projection_without_diagnostics(
+    completion_pending: bool,
+    expected_status: TaskCancellationRequestStatus,
+    expected_state: str,
+) -> None:
+    unrelated_marker = "unrelated-running-cancel-" + ("y" * 65_536)
+    running = RayTaskExecution.objects.create(
+        task_id=f"lifecycle-projected-cancel-running-{completion_pending}",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=3,
+        execution_generation=7,
+        args_json=unrelated_marker,
+        kwargs_json=unrelated_marker,
+        completion_data=unrelated_marker if completion_pending else None,
+        result_data=unrelated_marker,
+        error_message=unrelated_marker,
+        error_traceback=unrelated_marker,
+    )
+
+    with CaptureQueriesContext(connection) as running_queries:
+        running_result = request_task_cancellation(running.pk)
+
+    assert running_result.status is expected_status
+    running_projections = _execution_select_projections(running_queries)
+    assert [fields for fields, _sql in running_projections] == [
+        _LOCK_PROJECTION,
+        set(),
+    ]
+    assert all(
+        fields.isdisjoint(_REJECTED_PATH_PAYLOAD_COLUMNS) for fields, _sql in running_projections
+    )
+    running.refresh_from_db()
+    assert running.state == expected_state
+
+
+@pytest.mark.django_db
+def test_running_cancellation_keeps_presence_read_on_locked_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-cancel-database-affinity",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=4,
+    )
+
+    class PrimaryReplicaProbe:
+        read_calls = 0
+        write_calls = 0
+
+        def db_for_read(self, model: type[RayTaskExecution], **_hints: Any) -> str:
+            if model is RayTaskExecution:
+                self.read_calls += 1
+            return "unconfigured-replica"
+
+        def db_for_write(self, model: type[RayTaskExecution], **_hints: Any) -> str:
+            if model is RayTaskExecution:
+                self.write_calls += 1
+            return "default"
+
+    probe = PrimaryReplicaProbe()
+    monkeypatch.setattr(router, "routers", [probe])
+
+    result = request_task_cancellation(task.pk)
+
+    assert result.status is TaskCancellationRequestStatus.ACCEPTED
+    assert probe.read_calls == 0
+    assert probe.write_calls >= 1
+    task.refresh_from_db(using="default")
+    assert task.state == TaskState.CANCELLING
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("state", "expected_attempt", "expected_generation", "expected_status"),
+    [
+        (
+            TaskState.CANCELLING,
+            3,
+            8,
+            TaskCancellationRequestStatus.ALREADY_REQUESTED,
+        ),
+        (
+            TaskState.SUCCEEDED,
+            3,
+            8,
+            TaskCancellationRequestStatus.ALREADY_TERMINAL,
+        ),
+        (
+            TaskState.RUNNING,
+            2,
+            8,
+            TaskCancellationRequestStatus.STALE_ATTEMPT,
+        ),
+        (
+            TaskState.RUNNING,
+            3,
+            7,
+            TaskCancellationRequestStatus.STALE_GENERATION,
+        ),
+    ],
+)
+def test_cancellation_duplicate_terminal_and_stale_paths_use_one_bounded_lock(
+    state: str,
+    expected_attempt: int,
+    expected_generation: int,
+    expected_status: TaskCancellationRequestStatus,
+) -> None:
+    marker = "unrelated-noop-" + ("z" * 65_536)
+    task = RayTaskExecution.objects.create(
+        task_id=f"lifecycle-projected-cancel-{state.lower()}",
+        callable_path="testproject.tasks.add_numbers",
+        state=state,
+        attempt_number=3,
+        execution_generation=8,
+        args_json=marker,
+        kwargs_json=marker,
+        completion_data=marker,
+        result_data=marker,
+        error_message=marker,
+        error_traceback=marker,
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        result = request_task_cancellation(
+            task.pk,
+            expected_attempt_number=expected_attempt,
+            expected_execution_generation=expected_generation,
+        )
+
+    assert result.status is expected_status
+    projections = _execution_select_projections(queries)
+    assert [fields for fields, _sql in projections] == [_LOCK_PROJECTION]
+    assert projections[0][0].isdisjoint(_REJECTED_PATH_PAYLOAD_COLUMNS)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["retry", "cancel"])
+def test_attempt_storage_failure_rolls_back_projected_lifecycle_transition(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    state = TaskState.FAILED if operation == "retry" else TaskState.QUEUED
+    task = RayTaskExecution.objects.create(
+        task_id=f"lifecycle-projected-storage-failure-{operation}",
+        callable_path="testproject.tasks.add_numbers",
+        state=state,
+        attempt_number=2,
+        execution_generation=4,
+        error_message="retained failure",
+        result_reference="digest:" + ("c" * 64),
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+
+    def fail_attempt_storage(*_args: Any, **_kwargs: Any) -> None:
+        raise DatabaseError("attempt storage unavailable")
+
+    monkeypatch.setattr(TaskAttempt.objects, "update_or_create", fail_attempt_storage)
+    transition = retry_task if operation == "retry" else request_task_cancellation
+
+    with pytest.raises(DatabaseError, match="attempt storage unavailable"):
+        transition(task.pk)
+
+    assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
 @pytest.mark.django_db
@@ -445,14 +907,21 @@ def test_retry_task_missing_encryption_key_preserves_the_complete_execution(
         "RUNTIME_ENV_STORAGE_MODE": "plaintext",
     }
 
-    with pytest.raises(RuntimeEnvSnapshotError, match="decryption key is unavailable") as exc_info:
-        retry_task(task.pk)
+    with CaptureQueriesContext(connection) as queries:
+        with pytest.raises(
+            RuntimeEnvSnapshotError, match="decryption key is unavailable"
+        ) as exc_info:
+            retry_task(task.pk)
 
     after = RayTaskExecution.objects.filter(pk=task.pk).values().get()
     assert after == before
     assert not TaskAttempt.objects.filter(execution=task).exists()
     assert stored.serialized not in str(exc_info.value)
     assert "arbitrary-encrypted-retry-marker-8b2a" not in str(exc_info.value)
+    assert [fields for fields, _sql in _execution_select_projections(queries)] == [
+        _RETRY_LOCK_PROJECTION,
+        _RETRY_ACCEPTED_READ_PROJECTION,
+    ]
 
 
 @pytest.mark.django_db

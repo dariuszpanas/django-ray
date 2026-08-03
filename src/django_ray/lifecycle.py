@@ -34,6 +34,70 @@ class LifecycleConflictError(Exception):
 QUEUE_EXPIRED_ERROR = "Task expired before execution after exceeding its queued-wait deadline"
 
 
+_LIFECYCLE_LOCK_FIELDS = (
+    "pk",
+    "state",
+    "attempt_number",
+    "execution_generation",
+)
+_ATTEMPT_ARCHIVE_READ_FIELDS = (
+    "started_at",
+    "finished_at",
+    "error_message",
+    "error_traceback",
+    "result_data",
+    "result_reference",
+    "workflow_progress_summary_json",
+    "workflow_run_id",
+)
+_RETRY_LOCK_FIELDS = (
+    *_LIFECYCLE_LOCK_FIELDS,
+    "workflow_run_id",
+    "workflow_plan_fingerprint",
+)
+_RETRY_ACCEPTED_READ_FIELDS = (
+    "task_id",
+    "started_at",
+    "finished_at",
+    "error_message",
+    "error_traceback",
+    "result_data",
+    "result_reference",
+    "workflow_progress_summary_json",
+    "queue_timeout_seconds",
+    "ray_target_address",
+    "ray_job_id",
+    "ray_address",
+    "runtime_env_profile",
+    "runtime_env_json",
+    "runtime_env_hash",
+)
+
+
+def _locked_execution(
+    execution_id: int,
+    *,
+    fields: tuple[str, ...],
+) -> RayTaskExecution | None:
+    """Lock one row while selecting only the lifecycle fields this path needs."""
+    try:
+        return RayTaskExecution.objects.select_for_update().only(*fields).get(pk=execution_id)
+    except RayTaskExecution.DoesNotExist:
+        return None
+
+
+def _load_locked_execution_fields(
+    execution: RayTaskExecution,
+    *,
+    fields: tuple[str, ...],
+) -> None:
+    """Load one exact projection after this transaction has locked the row."""
+    database = execution._state.db or "default"
+    values = RayTaskExecution.objects.using(database).filter(pk=execution.pk).values(*fields).get()
+    for field, value in values.items():
+        setattr(execution, field, value)
+
+
 def _refresh_queue_deadline(
     execution: RayTaskExecution,
     *,
@@ -409,7 +473,7 @@ def request_task_cancellation(
     controlling either a replacement attempt or a replacement execution.
     """
     with transaction.atomic():
-        current = RayTaskExecution.objects.select_for_update().filter(pk=execution_id).first()
+        current = _locked_execution(execution_id, fields=_LIFECYCLE_LOCK_FIELDS)
         if current is None:
             return TaskCancellationRequestResult(
                 status=TaskCancellationRequestStatus.NOT_FOUND,
@@ -443,6 +507,7 @@ def request_task_cancellation(
             )
 
         if current.state == TaskState.QUEUED:
+            _load_locked_execution_fields(current, fields=_ATTEMPT_ARCHIVE_READ_FIELDS)
             current.state = TaskState.CANCELLED
             current.finished_at = datetime.now(UTC)
             _record_attempt(current)
@@ -456,7 +521,16 @@ def request_task_cancellation(
             )
 
         if current.state == TaskState.RUNNING:
-            if current.completion_data is not None:
+            database = current._state.db or "default"
+            completion_pending = (
+                RayTaskExecution.objects.using(database)
+                .filter(
+                    pk=execution_id,
+                    completion_data__isnull=False,
+                )
+                .exists()
+            )
+            if completion_pending:
                 return TaskCancellationRequestResult(
                     status=TaskCancellationRequestStatus.COMPLETION_PENDING,
                     execution_id=execution_id,
@@ -513,7 +587,7 @@ def _request_task_retry(
     execution_id = execution.pk if isinstance(execution, RayTaskExecution) else execution
     allowed = tuple(allowed_states)
     with transaction.atomic():
-        current = RayTaskExecution.objects.select_for_update().filter(pk=execution_id).first()
+        current = _locked_execution(execution_id, fields=_RETRY_LOCK_FIELDS)
         if current is None:
             return (
                 TaskRetryRequestResult(
@@ -528,14 +602,6 @@ def _request_task_retry(
         state = str(current.state)
         attempt_number = int(current.attempt_number)
         generation = int(current.execution_generation)
-        current_workflow_identity = (
-            str(current.workflow_run_id) if current.workflow_run_id is not None else None,
-            (
-                str(current.workflow_plan_fingerprint)
-                if current.workflow_plan_fingerprint is not None
-                else None
-            ),
-        )
         if expected_attempt_number is not None and attempt_number != expected_attempt_number:
             return (
                 TaskRetryRequestResult(
@@ -560,10 +626,18 @@ def _request_task_retry(
                 ),
                 None,
             )
-        if (
-            expected_workflow_identity is not None
-            and current_workflow_identity != expected_workflow_identity
-        ):
+        if expected_workflow_identity is not None:
+            current_workflow_identity = (
+                str(current.workflow_run_id) if current.workflow_run_id is not None else None,
+                (
+                    str(current.workflow_plan_fingerprint)
+                    if current.workflow_plan_fingerprint is not None
+                    else None
+                ),
+            )
+        else:
+            current_workflow_identity = None
+        if current_workflow_identity != expected_workflow_identity:
             return (
                 TaskRetryRequestResult(
                     status=TaskRetryRequestStatus.STALE_WORKFLOW_IDENTITY,
@@ -585,6 +659,7 @@ def _request_task_retry(
                 ),
                 None,
             )
+        _load_locked_execution_fields(current, fields=_RETRY_ACCEPTED_READ_FIELDS)
         runtime_env_for_execution(current)
         _record_attempt(current)
         current.state = TaskState.QUEUED

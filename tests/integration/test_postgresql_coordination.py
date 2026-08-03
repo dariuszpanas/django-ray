@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -24,7 +25,12 @@ from django.utils import timezone
 
 import django_ray.admin as django_ray_admin
 import django_ray.workflow_progress as workflow_progress_module
-from django_ray.input_storage import load_task_input, prepare_task_input, register_task_input
+from django_ray.input_storage import (
+    EXTERNAL_INPUT_PLACEHOLDER,
+    load_task_input,
+    prepare_task_input,
+    register_task_input,
+)
 from django_ray.lifecycle import (
     TaskCancellationRequestStatus,
     record_failure,
@@ -206,6 +212,27 @@ def _execution(task_id: str, **overrides: object) -> RayTaskExecution:
     }
     values.update(overrides)
     return RayTaskExecution.objects.create(**values)
+
+
+def _execution_select_projections(
+    queries: CaptureQueriesContext,
+) -> list[tuple[set[str], str]]:
+    table = RayTaskExecution._meta.db_table
+    table_pattern = re.escape(table)
+    selected: list[tuple[set[str], str]] = []
+    for query in queries.captured_queries:
+        sql = " ".join(query["sql"].split())
+        if not sql.upper().startswith("SELECT") or f'FROM "{table}"' not in sql:
+            continue
+        select_clause = re.split(r"\s+FROM\s+", sql, maxsplit=1, flags=re.IGNORECASE)[0]
+        fields = set(
+            re.findall(
+                rf'"{table_pattern}"\."([^"]+)"',
+                select_clause,
+            )
+        )
+        selected.append((fields, sql))
+    return selected
 
 
 def test_expiry_wins_concurrent_claim_at_exact_deadline(
@@ -1341,6 +1368,190 @@ def test_concurrent_manual_retry_advances_attempt_and_generation_once() -> None:
             expected_execution_generation=7,
         )
         is None
+    )
+
+
+def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> None:
+    unrelated_marker = "postgres-unrelated-lifecycle-" + ("x" * 131_072)
+    required_result = "postgres-required-result-" + ("y" * 65_536)
+    digest = "d" * 64
+    input_reference = f"s3://task-inputs/django-ray/inputs/dd/dd/{digest}.json?bytes=131072"
+    payload = TaskInputPayload.objects.create(
+        reference=input_reference,
+        backend="s3",
+        digest=digest,
+        size_bytes=131_072,
+        envelope_version=1,
+    )
+    result_reference = "digest:" + ("e" * 64)
+    task = _execution(
+        "postgres-projected-manual-retry-001",
+        state=TaskState.FAILED,
+        attempt_number=3,
+        execution_generation=7,
+        args_json=EXTERNAL_INPUT_PLACEHOLDER,
+        kwargs_json=EXTERNAL_INPUT_PLACEHOLDER,
+        input_reference=input_reference,
+        result_data=required_result,
+        result_reference=result_reference,
+        progress_data=unrelated_marker,
+        workflow_plan_json=unrelated_marker,
+        workflow_plan_selection=unrelated_marker,
+        completion_data=unrelated_marker,
+        cancellation_error=unrelated_marker,
+        error_message="retryable failure",
+        error_traceback="RetryError: retryable failure",
+    )
+
+    with CaptureQueriesContext(connection) as retry_queries:
+        retried = retry_task(
+            task.pk,
+            expected_attempt_number=3,
+            expected_execution_generation=7,
+        )
+
+    assert retried is not None
+    retry_projections = _execution_select_projections(retry_queries)
+    assert [fields for fields, _sql in retry_projections] == [
+        {
+            "id",
+            "state",
+            "attempt_number",
+            "execution_generation",
+            "workflow_run_id",
+            "workflow_plan_fingerprint",
+        },
+        {
+            "task_id",
+            "started_at",
+            "finished_at",
+            "error_message",
+            "error_traceback",
+            "result_data",
+            "result_reference",
+            "workflow_progress_summary_json",
+            "queue_timeout_seconds",
+            "ray_target_address",
+            "ray_job_id",
+            "ray_address",
+            "runtime_env_profile",
+            "runtime_env_json",
+            "runtime_env_hash",
+        },
+    ]
+    assert "FOR UPDATE" in retry_projections[0][1].upper()
+    forbidden_payload_columns = {
+        "args_json",
+        "kwargs_json",
+        "input_reference",
+        "progress_data",
+        "workflow_plan_json",
+        "workflow_plan_selection",
+        "completion_data",
+        "cancellation_error",
+    }
+    assert all(fields.isdisjoint(forbidden_payload_columns) for fields, _sql in retry_projections)
+    task.refresh_from_db()
+    assert task.args_json == EXTERNAL_INPUT_PLACEHOLDER
+    assert task.kwargs_json == EXTERNAL_INPUT_PLACEHOLDER
+    assert task.input_reference == input_reference
+    assert task.result_data is None
+    assert task.result_reference is None
+    archived = TaskAttempt.objects.get(execution=task, attempt_number=3)
+    assert archived.result_data == required_result
+    assert archived.result_reference == result_reference
+    assert archived.error_message == "retryable failure"
+    assert archived.error_traceback == "RetryError: retryable failure"
+    payload.refresh_from_db()
+    assert payload.state == InputPayloadState.ACTIVE
+
+    cancellation_result_reference = "digest:" + ("f" * 64)
+    queued = _execution(
+        "postgres-projected-queued-cancellation-001",
+        state=TaskState.QUEUED,
+        attempt_number=4,
+        execution_generation=9,
+        args_json=unrelated_marker,
+        kwargs_json=unrelated_marker,
+        result_data=required_result,
+        result_reference=cancellation_result_reference,
+        error_message="queued cancellation",
+        error_traceback="CancellationError: queued cancellation",
+        runtime_env_json=unrelated_marker,
+        progress_data=unrelated_marker,
+        workflow_plan_json=unrelated_marker,
+        completion_data=unrelated_marker,
+        cancellation_error=unrelated_marker,
+    )
+
+    with CaptureQueriesContext(connection) as queued_cancellation_queries:
+        queued_cancellation = request_task_cancellation(
+            queued.pk,
+            expected_attempt_number=4,
+            expected_execution_generation=9,
+        )
+
+    assert queued_cancellation.status is TaskCancellationRequestStatus.ACCEPTED
+    queued_cancellation_projections = _execution_select_projections(queued_cancellation_queries)
+    assert [fields for fields, _sql in queued_cancellation_projections] == [
+        {
+            "id",
+            "state",
+            "attempt_number",
+            "execution_generation",
+        },
+        {
+            "started_at",
+            "finished_at",
+            "error_message",
+            "error_traceback",
+            "result_data",
+            "result_reference",
+            "workflow_progress_summary_json",
+            "workflow_run_id",
+        },
+    ]
+    assert "FOR UPDATE" in queued_cancellation_projections[0][1].upper()
+    assert all(
+        fields.isdisjoint(forbidden_payload_columns)
+        for fields, _sql in queued_cancellation_projections
+    )
+    queued_attempt = TaskAttempt.objects.get(execution=queued, attempt_number=4)
+    assert queued_attempt.result_data == required_result
+    assert queued_attempt.result_reference == cancellation_result_reference
+    assert queued_attempt.error_message == "queued cancellation"
+    assert queued_attempt.error_traceback == "CancellationError: queued cancellation"
+
+    completion_marker = "postgres-unrelated-completion-" + ("z" * 131_072)
+    running = _execution(
+        "postgres-projected-cancellation-001",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=5,
+        args_json=unrelated_marker,
+        kwargs_json=unrelated_marker,
+        result_data=unrelated_marker,
+        error_traceback=unrelated_marker,
+        completion_data=completion_marker,
+    )
+
+    with CaptureQueriesContext(connection) as cancellation_queries:
+        cancellation = request_task_cancellation(running.pk)
+
+    assert cancellation.status is TaskCancellationRequestStatus.COMPLETION_PENDING
+    cancellation_projections = _execution_select_projections(cancellation_queries)
+    assert [fields for fields, _sql in cancellation_projections] == [
+        {
+            "id",
+            "state",
+            "attempt_number",
+            "execution_generation",
+        },
+        set(),
+    ]
+    assert "FOR UPDATE" in cancellation_projections[0][1].upper()
+    assert all(
+        fields.isdisjoint(forbidden_payload_columns) for fields, _sql in cancellation_projections
     )
 
 
