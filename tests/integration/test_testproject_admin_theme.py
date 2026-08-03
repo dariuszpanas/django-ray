@@ -575,6 +575,8 @@ diagnostics_stylesheet_response.close()
 assert b".django-ray-admin-action--sensitive" in diagnostics_stylesheet_body
 assert b"a.django-ray-admin-action.django-ray-admin-action--sensitive" in diagnostics_stylesheet_body
 assert b".django-ray-admin-action--retry" in diagnostics_stylesheet_body
+assert b"--django-ray-retry-hover-border: #7dd3fc" in diagnostics_stylesheet_body
+assert b"0 0 0 3px var(--django-ray-retry-hover-ring)" in diagnostics_stylesheet_body
 assert b".django-ray-admin-action--secondary" in diagnostics_stylesheet_body
 assert b"outline: 3px solid #075985" in diagnostics_stylesheet_body
 assert b"outline-color: #38bdf8" in diagnostics_stylesheet_body

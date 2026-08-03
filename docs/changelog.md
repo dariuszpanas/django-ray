@@ -386,7 +386,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the operator to a fresh enqueue. Stale, replayed-after-transition, or tampered
   confirmations fail closed without queueing work. The sample retry API now returns a
   bounded `202` accepted outcome or explicit `404`/`409` reasons instead of returning
-  an unchanged successful or raced execution with a misleading `200`.
+  an unchanged successful or raced execution with a misleading `200`. The detail-page
+  control also uses a high-contrast border, halo, and shadow on hover so its clickability
+  remains apparent in stock Django Admin and Unfold, including dark and reduced-motion
+  presentations.
 - The direct local KubeRay exploratory profile now keeps one default/priority
   task manager and two fixed Ray workers while retaining dedicated sync and ML
   consumers, monitoring, encrypted RuntimeEnv coverage, and the complete
