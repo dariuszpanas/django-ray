@@ -5,6 +5,10 @@ steps. The outer task is queued, retried, cancelled, and recorded in the databas
 Internal workflow steps are submitted directly to Ray and exchange intermediate
 values through Ray object references without creating a database row per step.
 
+This is unrelated to the removed upstream `ray.workflow` package. See the
+[Ray Ecosystem Support and Install Matrix](ray-ecosystem.md#ray-workflows) for that
+distinction and the durable boundary for optional Ray components.
+
 This model is intended for fan-out workloads where database-backed dispatch would
 cost more than the individual units of work.
 

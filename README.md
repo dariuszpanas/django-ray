@@ -23,9 +23,9 @@ Django projects often need background task execution. While Celery has been the 
 - **Horizontal scaling**: Scale from a single machine to thousands of nodes without changing your code
 - **Resource-aware scheduling**: Request specific CPU, GPU, or memory for tasks
 - **Actor model support**: Maintain stateful workers when needed
-- **Ray ecosystem compatibility**: Integrate Ray Data, Train, Tune, RLlib, or Serve in
-  application-owned code where appropriate; django-ray 0.4 provides durable tasks and workflows,
-  not first-class adapters for those components
+- **Explicit Ray ecosystem boundary**: Run Ray Data, Train, Tune, or RLlib in
+  application-owned code after installing its component extra; keep online serving on
+  Ray Serve's separate lifecycle. These are not first-class adapters in django-ray.
 
 Despite Ray's capabilities, there was no straightforward way to use it with Django's built-in Tasks framework. django-ray bridges this gap, letting you leverage Ray's distributed computing power while keeping Django's familiar patterns and database-backed reliability.
 
@@ -46,8 +46,9 @@ django-ray bridges Django's built-in Tasks framework with Ray's distributed comp
 - **Automatic retries**: Failed tasks are retried with exponential backoff
 - **Admin visibility**: Monitor and manage tasks through Django admin
 - **Graceful shutdown**: Workers handle signals properly for clean shutdown
-- **Ray-native workflows**: Chain, group, and dynamically fan out low-overhead
-  internal steps behind one durable Django task
+- **Django-durable workflows on Ray Core**: Chain, group, and dynamically fan out
+  low-overhead internal steps behind one durable Django task; this is unrelated to the
+  former, removed `ray.workflow` package
 - **RuntimeEnv profiles**: Run versioned or lightweight Python environments on a
   generic Ray cluster, with immutable environment identity per durable task
 - **Observable workflow graphs**: Track dependency edges, node progress, Ray
@@ -77,6 +78,12 @@ Or with uv:
 ```bash
 uv add django-ray
 ```
+
+The base package installs `ray[default]` for Ray Core, Ray Client, Ray Jobs, and live
+Dashboard/State diagnostics. It does not install usable Ray Data, Train, Tune, RLlib,
+Serve, Serve LLM, or native Compiled Graph dependencies. Review the
+[Ray Ecosystem Support and Install Matrix](https://django-ray.readthedocs.io/en/latest/ray-ecosystem/)
+before adding one of those components to a task image or RuntimeEnv.
 
 ## Quick Start
 
@@ -404,6 +411,8 @@ Source docs remain in the [`docs/`](https://github.com/dariuszpanas/django-ray/t
 - [Getting Started](https://github.com/dariuszpanas/django-ray/blob/main/docs/getting-started.md) - Installation and basic setup
 - [Configuration](https://github.com/dariuszpanas/django-ray/blob/main/docs/configuration.md) - All configuration options
 - [Worker Modes](https://github.com/dariuszpanas/django-ray/blob/main/docs/worker-modes.md) - Execution modes explained
+- [Ray Ecosystem Support](https://github.com/dariuszpanas/django-ray/blob/main/docs/ray-ecosystem.md) -
+  Component installs, durable exchange, lifecycle ownership, and evidence
 - [Tasks](https://github.com/dariuszpanas/django-ray/blob/main/docs/tasks.md) - Defining and enqueueing tasks
 - [Queues](https://github.com/dariuszpanas/django-ray/blob/main/docs/queues.md) - Working with task queues
 - [Retry & Error Handling](https://github.com/dariuszpanas/django-ray/blob/main/docs/retry.md) - Configuring retries

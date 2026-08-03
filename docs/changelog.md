@@ -414,6 +414,16 @@ and the detailed [migration notes](#migration) before enabling their opt-in writ
 
 ### Changed
 
+- A Ray ecosystem support and install matrix now distinguishes the
+  `ray[default]>=2.56.0` Core/Jobs base, live-only Dashboard/State diagnostics, the
+  tested application-owned Ray Data recipe, untested application-owned Train, Tune,
+  and RLlib workloads, the separate Serve lifecycle, and disabled Compiled Graph
+  groundwork. It defines bounded JSON plus immutable artifact/checkpoint URIs,
+  idempotent completion manifests, explicit lifecycle/recovery ownership, and a
+  Ray Client-versus-Jobs adoption path without adding package extras, adapters, APIs,
+  models, or migrations. It also distinguishes django-ray workflows from the removed
+  upstream `ray.workflow` package and records the current Ray Data and base-import
+  evidence instead of repeating stale support claims.
 - The required Ray dependency now starts at 2.56.0 instead of 2.53.0 so a fresh
   django-ray installation cannot resolve below published upstream security fixes.
   The minimum-dependency lane, installed-wheel verification, ordinary compatibility

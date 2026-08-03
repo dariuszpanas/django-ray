@@ -4,6 +4,9 @@
 
 **Decision: defer package integration and keep Ray Serve application-owned.**
 
+For the package-wide install and durable-object boundary, see the
+[Ray Ecosystem Support and Install Matrix](../ray-ecosystem.md).
+
 django-ray will not add Serve fields to `RayTaskExecution`, a `django-ray[serve]`
 Django app, deployment APIs, or a Serve reconciler at this time. Applications can call
 an independently operated Serve endpoint as they would any other authenticated service.

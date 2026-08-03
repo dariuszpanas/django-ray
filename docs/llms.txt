@@ -20,6 +20,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   versioned task services, bounded metrics, live admin updates, and optional Ray data.
 - [Compatibility](https://django-ray.readthedocs.io/en/latest/compatibility/):
   supported Python, Django, Ray, CI, and platform policy.
+- [Ray ecosystem support](https://django-ray.readthedocs.io/en/latest/ray-ecosystem/):
+  component installs, base-import evidence, finite workload ownership, durable
+  artifact contracts, and explicit non-guarantees.
 - [Migrating from Celery](https://django-ray.readthedocs.io/en/latest/celery-migration/):
   move producers through Django Tasks, classify semantic gaps, coexist safely, and
   drain Celery before removing it.

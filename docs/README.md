@@ -27,6 +27,8 @@ project resources, task stats, and a smoke-task trigger:
 - [Performance](performance.md) - Choosing task boundaries, batching, and RuntimeEnv strategy
 - [Observability](observability.md) - Versioned services, metrics, and live admin updates
 - [Compatibility](compatibility.md) - Supported versions, CI policy, and platform limits
+- [Ray Ecosystem Support](ray-ecosystem.md) - Component installs, durable exchange,
+  lifecycle ownership, evidence, and adoption gates
 - [Migrating from Celery](celery-migration.md) - Workload classification,
   coexistence, semantic rewrites, and safe Celery drain
 - [Compiled Graph Compatibility](compiled-graph-compatibility.md) - Candidate and

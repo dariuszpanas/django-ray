@@ -4,6 +4,9 @@ Ray Compiled Graph is not currently an enabled django-ray execution strategy. Th
 defines the fail-closed compatibility contract and the evidence required before a
 future strategy may call Ray's beta native APIs.
 
+For the package-wide install and durable-object boundary, see the
+[Ray Ecosystem Support and Install Matrix](ray-ecosystem.md).
+
 Compiled Graph is an execution strategy for a validated static actor region in an
 [effective workflow plan](workflow-plans.md). It is not a Django task type, and it does
 not make a data-dependent workflow static. When this policy rejects compilation,
