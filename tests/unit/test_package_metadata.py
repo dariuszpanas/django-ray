@@ -230,6 +230,8 @@ def test_admin_retry_action_has_complete_interaction_feedback() -> None:
     for declaration in (
         "--django-ray-retry-bg: #0369a1;",
         "--django-ray-retry-hover-bg: #075985;",
+        "--django-ray-retry-hover-border: #7dd3fc;",
+        "--django-ray-retry-hover-ring: rgb(14 165 233 / 42%);",
         "--django-ray-retry-active-bg: #0c4a6e;",
         "--django-ray-retry-focus-ring: #075985;",
         "--django-ray-retry-disabled-bg: #cbd5e1;",
@@ -248,8 +250,10 @@ def test_admin_retry_action_has_complete_interaction_feedback() -> None:
         rf"{retry_selector}:hover:not\(:disabled\)",
     )
     assert "background: var(--django-ray-retry-hover-bg);" in hover_rule
-    assert "border-color: var(--django-ray-retry-hover-bg);" in hover_rule
-    assert "transform: translateY(-1px);" in hover_rule
+    assert "border-color: var(--django-ray-retry-hover-border);" in hover_rule
+    assert "0 0 0 3px var(--django-ray-retry-hover-ring)" in hover_rule
+    assert "0 6px 14px rgb(15 23 42 / 30%)" in hover_rule
+    assert "transform: translateY(-2px);" in hover_rule
 
     focus_rule = _css_rule_body(stylesheet, rf"{retry_selector}:focus-visible")
     assert "outline: 3px solid var(--django-ray-retry-focus-ring);" in focus_rule
@@ -281,6 +285,8 @@ def test_admin_retry_action_has_complete_interaction_feedback() -> None:
     )
     for theme_rule in (explicit_dark_rule, auto_dark_rule):
         assert "--django-ray-retry-focus-ring: #38bdf8;" in theme_rule
+        assert "--django-ray-retry-hover-border: #bae6fd;" in theme_rule
+        assert "--django-ray-retry-hover-ring: rgb(56 189 248 / 55%);" in theme_rule
         assert "--django-ray-retry-disabled-bg: #3f4148;" in theme_rule
         assert "--django-ray-retry-disabled-border: #71717a;" in theme_rule
         assert "--django-ray-retry-disabled-fg: #e4e4e7;" in theme_rule
