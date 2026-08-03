@@ -26,6 +26,11 @@ Ray Client and cluster execution are most predictable when the task manager and 
 cluster use the same Ray version and Python minor version. Patch-version differences
 may produce a warning; different minor versions should not be treated as compatible.
 
+The general version range and base `ray[default]` dependency do not install or promise
+every optional Ray component. See the
+[Ray Ecosystem Support and Install Matrix](ray-ecosystem.md) before adding Data, Train,
+Tune, RLlib, Serve, or Compiled Graph to an application workload.
+
 Ray Compiled Graph has a separate, exact, fail-closed capability policy because its
 native beta channels have narrower version, platform, transport, and process-owner
 constraints. The general Ray version range in this table does not enable compilation.
@@ -68,4 +73,4 @@ that Ray is available on every Python/platform combination.
 Compiled Graph is more restrictive than ordinary Ray use: policy version 3 rejects
 Windows, aarch64, Ray Client, GPU transport, and every unverified native tuple before
 calling `experimental_compile()`. Dynamic workflows remain supported according to the
-general matrix above.
+version matrix above.

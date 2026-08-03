@@ -11,6 +11,9 @@ outer task is in `testproject/apps/cluster_tasks/tasks.py`. Copy and adapt both 
 application that owns the data format, storage, model, authorization, and retention
 policy.
 
+For how this recipe fits alongside Ray Core, Jobs, Train, Tune, RLlib, Serve, and
+Compiled Graph, see the [Ray Ecosystem Support and Install Matrix](ray-ecosystem.md).
+
 ## Supported Ray Data boundary
 
 Install the Ray Data extra at the exact Ray version used by the cluster. The bundled

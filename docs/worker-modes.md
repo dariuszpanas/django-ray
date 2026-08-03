@@ -3,6 +3,9 @@
 The task-manager process always claims durable work from Django's database. Its
 execution mode determines how that work reaches Ray.
 
+For how these transports compose with Data, Train, Tune, RLlib, Serve, and Compiled
+Graph, see the [Ray Ecosystem Support and Install Matrix](ray-ecosystem.md).
+
 ## Comparison
 
 | Mode | Command | Best fit | Relative startup cost |
