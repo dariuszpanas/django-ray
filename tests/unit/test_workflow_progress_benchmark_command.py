@@ -328,6 +328,19 @@ def test_package_and_schema_metadata_fallbacks(monkeypatch) -> None:
     assert benchmark._schema_version() == "unmigrated"
 
 
+def test_schema_version_redacts_configured_exception_type(monkeypatch, settings) -> None:
+    settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"TenantCanaryError"]}
+    error_type = type("TenantCanaryError", (RuntimeError,), {})
+
+    class BrokenRecorder:
+        def __init__(self, _connection) -> None:
+            raise error_type("provider message is intentionally omitted")
+
+    monkeypatch.setattr(benchmark, "MigrationRecorder", BrokenRecorder)
+
+    assert benchmark._schema_version() == "unavailable:[REDACTED]"
+
+
 def test_source_revision_is_strict_and_normalized(monkeypatch) -> None:
     monkeypatch.setenv("GITHUB_SHA", "A" * 40)
     assert benchmark._source_revision() == "a" * 40

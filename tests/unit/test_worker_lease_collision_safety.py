@@ -464,13 +464,15 @@ class TestWorkerLeaseCollisionSafety:
                     "NOT NULL constraint failed: django_ray_taskworkerlease.hostname"
                 )
             except sqlite3.IntegrityError as cause:
-                raise IntegrityError("unrelated lease constraint") from cause
+                raise IntegrityError("api\x1b[31m_key=do-not-expose") from cause
 
         monkeypatch.setattr(TaskWorkerLease.objects, "create", fail_with_unrelated_integrity_error)
 
-        with pytest.raises(CommandError, match="Could not create worker lease"):
+        with pytest.raises(CommandError) as captured:
             command._create_lease("default")
 
+        assert str(captured.value) == "Could not create worker lease: [REDACTED]"
+        assert captured.value.__suppress_context__ is True
         assert generated == []
         assert command.lease_identity is None
 

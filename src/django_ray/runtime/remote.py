@@ -79,7 +79,7 @@ def execute_django_task_remote(
     compiled_graph_submission_transport: str | None = None,
 ) -> str:
     """Execute one durable django-ray task on a Ray worker."""
-    from django_ray.redaction import redact_text, result_metadata
+    from django_ray.redaction import redact_text
     from django_ray.runtime.context import durable_task_execution
     from django_ray.runtime.entrypoint import execute_task
 
@@ -105,8 +105,7 @@ def execute_django_task_remote(
 
     parsed = json.loads(result)
     if parsed.get("success"):
-        metadata = result_metadata(parsed.get("result"))
-        print(f"[Task {task_id}] SUCCESS: {metadata}", flush=True)
+        print(f"[Task {task_id}] SUCCESS", flush=True)
     else:
         print(
             f"[Task {task_id}] FAILED: {redact_text(parsed.get('error'))}",

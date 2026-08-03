@@ -303,6 +303,30 @@ class TestCancellationHelpers:
         assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
         assert "status-aware client unavailable" in (outcome.message or "")
 
+    def test_request_remote_cancellation_survives_broken_exception_message(self) -> None:
+        calls = 0
+
+        class BrokenCancellationError(RuntimeError):
+            def __str__(self) -> str:
+                nonlocal calls
+                calls += 1
+                raise RuntimeError("secondary password=do-not-expose")
+
+        class Runner:
+            def cancel_with_status(self, _handle):
+                raise BrokenCancellationError()
+
+        outcome = request_remote_cancellation(
+            Runner(), SubmissionHandle("job", "", datetime.now(UTC))
+        )
+
+        assert outcome.status == CancellationOutcomeStatus.INDETERMINATE
+        assert outcome.message == (
+            "Cancellation request raised BrokenCancellationError: exception message unavailable"
+        )
+        assert "secondary password" not in (outcome.message or "")
+        assert calls == 1
+
     def test_request_remote_cancellation_uses_prepared_capability(self) -> None:
         expected = CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
         capability = object()

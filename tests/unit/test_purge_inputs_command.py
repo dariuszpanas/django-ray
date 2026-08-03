@@ -11,6 +11,7 @@ from types import ModuleType
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.test import override_settings
 from django.utils import timezone
 
 from django_ray.management.commands.django_ray_purge_inputs import Command
@@ -225,6 +226,20 @@ def test_cleanup_error_class_name_is_bounded_and_safe() -> None:
 
     assert Command._format_cleanup_error(unsafe_error) == "Exception"
     assert Command._format_cleanup_error(OSError("private path")) == "OSError"
+
+
+@override_settings(DJANGO_RAY={"REDACT_PATTERNS": [r"TenantCanaryError"]})
+def test_cleanup_error_class_name_uses_configured_redaction_without_message() -> None:
+    calls = 0
+
+    class TenantCanaryError(RuntimeError):
+        def __str__(self) -> str:
+            nonlocal calls
+            calls += 1
+            return "provider password=do-not-expose"
+
+    assert Command._format_cleanup_error(TenantCanaryError()) == "[REDACTED]"
+    assert calls == 0
 
 
 @pytest.mark.django_db

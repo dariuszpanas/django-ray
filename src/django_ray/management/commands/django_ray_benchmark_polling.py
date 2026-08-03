@@ -20,6 +20,7 @@ from django.db import close_old_connections, connection
 from django.db.migrations.recorder import MigrationRecorder
 
 from django_ray.management.commands.django_ray_worker import Command as WorkerCommand
+from django_ray.management.diagnostics import render_console_diagnostic
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.runner.leasing import WorkerLeaseIdentity, get_heartbeat_interval
 from django_ray.runner.polling import AdaptivePollingPolicy
@@ -615,7 +616,9 @@ class Command(BaseCommand):
                     stop.set()
             except Exception as exc:
                 with metrics.lock:
-                    metrics.errors.append(f"worker {worker_index}: {type(exc).__name__}: {exc}")
+                    metrics.errors.append(
+                        f"worker {worker_index}: {render_console_diagnostic(exc)}"
+                    )
                 stop.set()
                 try:
                     ready.abort()
@@ -645,7 +648,8 @@ class Command(BaseCommand):
             for thread in started_threads:
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
             self._delete_exact_leases(lease_identities)
-            raise CommandError(f"could not start benchmark workers: {exc}") from exc
+            diagnostic = render_console_diagnostic(exc)
+            raise CommandError(f"could not start benchmark workers: {diagnostic}") from None
         return _WorkerGroup(
             stop=stop,
             ready=ready,

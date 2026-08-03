@@ -357,13 +357,37 @@ source. Replace anchors and boundaries with the intended consuming marker, expan
 backreference/lookaround into bounded alternatives, or perform richer classification in
 application code before passing a small marker to the redaction boundary.
 
-Successful task logs contain only result type and serialized size, never the
-complete return value. Ray Job completion envelopes are persisted through the
-database channel and are not printed to Ray stdout. Redaction is a safety
-boundary for operational output, not encryption: task results and arguments
-remain in the database/result backend for authorized readers, and application
-code that prints directly to stdout bypasses this policy. Protect the API,
-admin, Ray dashboard, and result storage with the appropriate access controls.
+Package-owned management commands apply the same policy when they render
+exceptions or Ray control-plane diagnostics. An exception's bounded class label
+and provider message enter one matching boundary, so a configured pattern may
+match the label, the message, or text spanning their separator. Before a
+diagnostic reaches the console, ANSI and control-string introducers are made
+inert, C0/C1 and unsafe Unicode formatting controls are neutralized, and
+configured secret patterns are evaluated across every bounded terminal
+interpretation. Oversized input and exhausted matching budgets fail closed before
+the rendered result is limited to 4 KiB; output truncation therefore cannot
+bypass a configured pattern.
+
+This diagnostic boundary does not rewrite ordinary command structure or durable
+identity. Task, attempt, generation, and worker IDs; lifecycle enums; numeric
+counts; and benchmark JSON keys remain unchanged. Custom Ray resource names use
+the same terminal-safe redaction boundary while numeric counts remain intact; the
+summary is capped at 256 entries and 4 KiB. Machine-readable benchmark output
+keeps its documented schema while exception-bearing diagnostic fields use the
+safe renderer. Type-only benchmark and input-purge failure fields apply configured
+patterns to the validated exception class label; input purge never materializes
+the provider message.
+
+Successful task logs and task-manager status lines use a fixed success marker;
+they never traverse or print the complete return value merely to describe it.
+Ray Job completion envelopes are persisted through the database channel and are
+not printed to Ray stdout. Redaction is a safety boundary for operational output,
+not encryption: durable task failure and cancellation diagnostics, task results,
+and arguments remain available to authorized readers. Framework lifecycle paths
+guard provider exception conversion with a fixed fallback, but do not treat that
+fallback as storage redaction. Application code that prints directly to stdout
+bypasses this policy. Protect the API, admin, Ray dashboard, and result storage
+with the appropriate access controls.
 The admin never renders the raw durable RuntimeEnv snapshot because arbitrary
 `env_vars`, package references, and URIs cannot be made safe through
 name-pattern redaction alone. It shows only the profile and content hash.

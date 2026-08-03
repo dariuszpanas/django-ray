@@ -742,6 +742,54 @@ class TestRayCoreRunnerRuntime:
         assert "ray get failed" in (info.message or "")
         assert 4 not in runner._pending_tasks
 
+    def test_error_envelopes_survive_broken_exception_messages(self, monkeypatch) -> None:
+        calls = 0
+
+        class BrokenRayError(RuntimeError):
+            def __str__(self) -> str:
+                nonlocal calls
+                calls += 1
+                raise RuntimeError("secondary password=do-not-expose")
+
+        fake = _install_fake_ray(monkeypatch)
+        status_runner = RayCoreRunner()
+        status_ref = _FakeObjectRef("broken-status")
+        fake.values[status_ref] = BrokenRayError()
+        fake.ready_refs.add(status_ref)
+        status_runner._pending_tasks[5] = RayCoreHandle(
+            task_pk=5,
+            object_ref=status_ref,
+            submitted_at=datetime.now(UTC),
+            task_name="status",
+            attempt_number=1,
+            execution_generation=0,
+            ray_job_id="02000000",
+            ray_task_id="broken-status",
+        )
+
+        info = status_runner.get_status(_make_handle("02000000:broken-status"))
+
+        poll_runner = RayCoreRunner()
+        poll_ref = _FakeObjectRef("broken-poll")
+        fake.values[poll_ref] = BrokenRayError()
+        fake.ready_refs.add(poll_ref)
+        poll_runner._pending_tasks[6] = RayCoreHandle(
+            task_pk=6,
+            object_ref=poll_ref,
+            submitted_at=datetime.now(UTC),
+            task_name="poll",
+            attempt_number=2,
+            execution_generation=3,
+        )
+
+        completion = poll_runner.poll_completed()[0]
+
+        assert info.status == JobStatus.FAILED
+        assert info.message == "exception message unavailable"
+        assert json.loads(completion.result_json)["error"] == "exception message unavailable"
+        assert "secondary password" not in completion.result_json
+        assert calls == 2
+
     def test_cancel_returns_false_when_task_not_pending(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
         runner = RayCoreRunner()

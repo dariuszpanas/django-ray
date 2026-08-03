@@ -145,7 +145,60 @@ class TestStructuredLogAdapter:
                 logger.exception("Task failed")
 
         assert "secret-value" not in caplog.text
-        assert "RuntimeError" in caplog.text
+        assert "RuntimeError" not in caplog.text
+        assert "[REDACTED]" in caplog.text
+        assert "Traceback" not in caplog.text
+
+    def test_exception_type_name_uses_the_same_redaction_boundary(self, caplog, settings):
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"TenantCanaryError"]}
+        error_type = type("TenantCanaryError", (RuntimeError,), {})
+        logger = get_logger("test.redacted-exception-type")
+
+        with caplog.at_level(logging.ERROR):
+            try:
+                raise error_type("ordinary provider failure")
+            except error_type:
+                logger.exception("Task failed")
+
+        assert "TenantCanaryError" not in caplog.text
+        assert "ordinary provider failure" not in caplog.text
+        assert "[REDACTED]" in caplog.text
+
+    def test_exception_pattern_can_span_type_and_message(self, caplog, settings):
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"BoundaryCanaryError: provider marker"]}
+        error_type = type("BoundaryCanaryError", (RuntimeError,), {})
+        logger = get_logger("test.redacted-exception-boundary")
+
+        with caplog.at_level(logging.ERROR):
+            try:
+                raise error_type("provider marker")
+            except error_type:
+                logger.exception("Task failed")
+
+        assert "BoundaryCanaryError" not in caplog.text
+        assert "provider marker" not in caplog.text
+        assert "[REDACTED]" in caplog.text
+
+    def test_exception_logging_survives_an_unrenderable_message(self, caplog):
+        calls = 0
+
+        class BrokenError(RuntimeError):
+            def __str__(self) -> str:
+                nonlocal calls
+                calls += 1
+                raise RuntimeError("secondary password=do-not-expose")
+
+        logger = get_logger("test.unrenderable-exception")
+        with caplog.at_level(logging.ERROR):
+            try:
+                raise BrokenError()
+            except BrokenError:
+                logger.exception("Cleanup failed")
+
+        assert calls == 1
+        assert "Cleanup failed" in caplog.text
+        assert "BrokenError: exception message unavailable" in caplog.text
+        assert "secondary password" not in caplog.text
         assert "Traceback" not in caplog.text
 
     def test_terminal_formatting_is_removed_without_dropping_format_arguments(self, caplog):

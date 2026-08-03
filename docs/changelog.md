@@ -461,6 +461,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Admin's empty `LogEntry` history page. Durable task attempt and workflow
   diagnostics remain unchanged, while the permission-gated **Sensitive data**
   action stays as a standalone object tool in stock Django Admin and Unfold.
+- Package-owned management commands now treat exception and Ray control-plane
+  text as untrusted console diagnostics. Worker connection, lease, heartbeat,
+  reconnect, polling, reconciliation, retry, shutdown, result-storage, and Ray
+  status paths apply a 4 KiB console cap after the shared bounded terminal-safe
+  matcher, so output truncation and mixed control finals cannot bypass configured
+  patterns. Exception class labels and provider messages enter that matcher as one
+  value; type-only benchmark and input-purge diagnostics match the validated label
+  without materializing a provider message. Successful task status uses a fixed
+  marker instead of traversing the application result again. Workflow audits and
+  polling benchmark failures use the same boundary, machine-readable benchmark
+  schemas and ordinary identifiers remain stable, and resource summaries redact
+  custom names while retaining numeric counts. Structured cleanup logging keeps
+  its shared lazy exception boundary. Worker and cancellation lifecycle paths use
+  a fixed fallback when an exception message cannot be rendered, without changing
+  durable success, cancellation, or reconciliation semantics; durable diagnostic
+  fields remain protected by their existing authorization boundary rather than
+  being rewritten as console output.
 - Stock Django Admin execution detail pages now wrap long task object labels in
   both the native subtitle and breadcrumb. The rule is scoped to the custom
   execution change page, preserving durable identities, unrelated Admin pages,

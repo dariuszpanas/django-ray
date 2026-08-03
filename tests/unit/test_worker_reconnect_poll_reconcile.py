@@ -318,7 +318,7 @@ class TestWorkerDispatchAndReconnectHelpers:
 
         cmd._reconnect_ray()
 
-        assert "Error during shutdown: shutdown failed" in cmd.stdout.getvalue()
+        assert "Error during shutdown: RuntimeError: shutdown failed" in cmd.stdout.getvalue()
 
 
 @pytest.mark.django_db
@@ -894,7 +894,7 @@ class TestWorkerReconnectPollReconcile:
 
         cmd.poll_ray_core_tasks()
 
-        assert "Error polling Ray Core tasks: poll exploded" in cmd.stdout.getvalue()
+        assert "Error polling Ray Core tasks: RuntimeError: poll exploded" in cmd.stdout.getvalue()
 
     def test_poll_ray_core_tasks_processes_success_failure_missing_and_bad_json(
         self, monkeypatch

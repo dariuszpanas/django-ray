@@ -941,6 +941,38 @@ class TestRayJobRunnerStatusAndControl:
         assert info.job_id == "raysubmit_fail_001"
         assert "ray api unavailable" in (info.message or "")
 
+    def test_status_and_cancellation_survive_broken_exception_messages(self, monkeypatch) -> None:
+        calls = 0
+
+        class BrokenControlError(RuntimeError):
+            def __str__(self) -> str:
+                nonlocal calls
+                calls += 1
+                raise RuntimeError("secondary password=do-not-expose")
+
+        class FailingClient:
+            def get_job_status(self, _job_id):
+                raise BrokenControlError()
+
+            def stop_job(self, _job_id):
+                raise BrokenControlError()
+
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: FailingClient())
+        handle = self._make_handle("raysubmit_broken_control_001")
+
+        info = runner.get_status(handle)
+        cancellation = runner.cancel_with_status(handle)
+
+        assert info.status == JobStatus.UNKNOWN
+        assert info.message == "exception message unavailable"
+        assert cancellation.status == CancellationOutcomeStatus.INDETERMINATE
+        assert cancellation.message == (
+            "Ray Job stop request raised BrokenControlError: exception message unavailable"
+        )
+        assert "secondary password" not in (cancellation.message or "")
+        assert calls == 2
+
     def test_control_methods_normalize_client_construction_failure(self, monkeypatch) -> None:
         runner = RayJobRunner()
 
