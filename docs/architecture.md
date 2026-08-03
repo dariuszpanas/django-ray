@@ -186,6 +186,8 @@ Primary execution record for one task attempt chain.
 | `progress_data` | Current schema-v1/v2 compatibility snapshot of retained actor state; actor-side rejection/truncation and fixed-shape, secret-free cost diagnostics remain in the envelope |
 | `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence, one accepted terminal-only summary, or an accepted default-off terminal-pilot publication |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
+| `workflow_run_namespace` | Nullable opaque 63-bit namespace reserved under a database uniqueness constraint when the row first allocates a fresh workflow run; legacy rows remain null until then |
+| `workflow_run_sequence` | Internal non-resetting 59-bit fresh-allocation counter combined injectively with the row namespace in each new workflow UUIDv8 |
 | `runtime_env_profile` | Optional name selected by the enqueueing backend |
 | `runtime_env_json` | Canonical immutable plaintext mapping or strict versioned AES-256-GCM envelope used by execution and retries; the write format is opt-in while readers always support both |
 | `runtime_env_hash` | Unkeyed SHA-256 identity of canonical plaintext used for integrity checks and cache correlation; it remains visible in encrypted mode and leaks equality |
@@ -313,9 +315,21 @@ replacing the execution generation.
 Stuck-task recovery also revalidates the observed worker owner, backend handle, last
 task-monitor heartbeat, and absence of a durable completion envelope under that row
 lock. Accepted current-run workflow progress advances that same task-monitor heartbeat.
-Workflow-run claims and plan pins do so as well, including idempotent plan verification.
+Fresh workflow-run allocation, exact run reclaim, and plan pins do so as well, including
+idempotent plan verification.
 The exact current-run fence after RuntimeEnv preparation refreshes activity before any
 workflow leaves are submitted.
+A fresh allocator never accepts a caller-selected run ID. Under the task row lock it
+reserves an opaque 63-bit namespace through a database uniqueness constraint, advances a
+non-resetting 59-bit row sequence, and injectively encodes both values in a UUIDv8. A
+namespace collision is retried only when the database names that exact constraint;
+unrelated integrity failures propagate, while bounded collision or sequence exhaustion
+fails closed without candidate or task data. The allocator then clears superseded
+progress projections and makes the new identity current. Reclaim is a separate operation:
+it must present the exact current task, attempt, execution generation, and run ID, does
+not allocate a namespace or advance the sequence, preserves normalized run storage, and
+retains the existing restart behavior of clearing current snapshots before a new
+coordinator republishes them.
 A concurrent heartbeat, Ray Job orphan adoption, workflow activity, or completion
 publication therefore invalidates a stale `LOST` decision instead of retrying work that
 has become live or has already completed. An exact locally tracked Ray Core handle also
@@ -516,7 +530,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0017_raytaskexecution_sensitive_data_permission` before starting upgraded workers:
+`0018_workflow_run_allocation` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -600,8 +614,20 @@ Migration `0017` adds only the `django_ray.view_sensitive_task_data` permission 
 the `RayTaskExecution` model state. It does not add a database column, rewrite task
 rows, or grant the permission to any user or group. Apply it before delegating access
 to the separate pattern-unredacted, terminal-inert Admin views. Before reversing it,
-revoke every user and group grant explicitly. Django's permission synchronization creates missing custom
-permissions but does not delete stale permission rows during a schema rollback.
+revoke every user and group grant explicitly. Django's permission synchronization
+creates missing custom permissions but does not delete stale permission rows during a
+schema rollback.
+
+Migration `0018` adds the nullable workflow-run namespace and the non-null allocation
+sequence. Its persistent database default of zero lets pre-`0018` enqueue writers omit
+the sequence during a schema-first rollout or code-only rollback. Existing and
+old-writer rows therefore enter the compatibility state with a null namespace and
+sequence zero; their active run IDs remain unchanged and exactly reclaimable. Drain
+older workflow coordinators and workers before starting 0.4 code so only the new
+allocator can create fresh workflow ownership under the strengthened guarantee. For a
+code rollback, stop new coordinators and drain active workflows first, retain migration
+`0018`, and then start the old code; reversing `0018` separately drops the allocation
+metadata and requires a stopped-writer maintenance window.
 
 RuntimeEnv encryption has no schema migration. Its rollout is nevertheless
 reader-first: deploy the dual plaintext/encrypted reader everywhere while writes remain

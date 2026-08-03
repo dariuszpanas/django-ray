@@ -627,22 +627,25 @@ class _RayExecutor(_Executor):
         if self.task_context is None:
             self.materialized_plan = prepare_materialized_plan_for_ray(materialized_plan)
             return
-        identity = WorkflowRunIdentity.create(self.task_context)
-        if identity is None:
+        if (
+            self.task_context.attempt_number is None
+            or self.task_context.execution_generation is None
+        ):
             self.materialized_plan = prepare_materialized_plan_for_ray(materialized_plan)
             return
-        from django_ray.workflow_progress import claim_workflow_run
+        from django_ray.workflow_progress import allocate_workflow_run
 
         selection = materialized_plan.plan.eligibility.select(
             "dynamic_tasks",
             requested_policy=requested_policy,
             reporting_policy=reporting_policy,
         )
-        if not claim_workflow_run(
-            identity,
+        identity = allocate_workflow_run(
+            self.task_context,
             plan=materialized_plan.plan,
             selection=selection,
-        ):
+        )
+        if identity is None:
             from django_ray.workflow_plans import WorkflowPlanMismatchError
 
             raise WorkflowPlanMismatchError(

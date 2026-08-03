@@ -821,8 +821,8 @@ def test_fold_plan_fingerprint_changes_for_effective_semantics() -> None:
 def test_retry_rejects_fold_resource_drift_before_leaf_effects() -> None:
     from django_ray.lifecycle import record_failure
     from django_ray.models import RayTaskExecution, TaskState
-    from django_ray.runtime.context import WorkflowRunIdentity
-    from django_ray.workflow_progress import claim_workflow_run
+    from django_ray.runtime.context import DurableTaskContext
+    from django_ray.workflow_progress import allocate_workflow_run
 
     execution = RayTaskExecution.objects.create(
         task_id="workflow-result-fold-plan-retry",
@@ -851,13 +851,16 @@ def test_retry_rejects_fold_resource_drift_before_leaf_effects() -> None:
         "dynamic_tasks",
         requested_policy="auto",
     )
-    first_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000131",
+    first_identity = allocate_workflow_run(
+        DurableTaskContext(
+            execution.pk,
+            execution.attempt_number,
+            execution.execution_generation,
+        ),
+        plan=first_plan,
+        selection=first_selection,
     )
-    assert claim_workflow_run(first_identity, plan=first_plan, selection=first_selection)
+    assert first_identity is not None
     assert record_failure(execution, error_message="retry", retry=True)
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
     execution.refresh_from_db()
@@ -870,17 +873,15 @@ def test_retry_rejects_fold_resource_drift_before_leaf_effects() -> None:
         "dynamic_tasks",
         requested_policy="auto",
     )
-    retry_identity = WorkflowRunIdentity(
-        execution.pk,
-        execution.attempt_number,
-        execution.execution_generation,
-        "00000000-0000-0000-0000-000000000132",
-    )
     SIDE_EFFECTS.clear()
 
     with pytest.raises(WorkflowPlanMismatchError, match="different effective plan"):
-        claim_workflow_run(
-            retry_identity,
+        allocate_workflow_run(
+            DurableTaskContext(
+                execution.pk,
+                execution.attempt_number,
+                execution.execution_generation,
+            ),
             plan=replacement,
             selection=replacement_selection,
         )

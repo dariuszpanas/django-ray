@@ -15,7 +15,7 @@ from django.db.models.deletion import RESTRICT
 def test_detail_storage_tables_are_additive_reversible_and_rolling_safe() -> None:
     migrate_from = [("django_ray", "0012_workflow_progress_summary")]
     migrate_to = [("django_ray", "0013_workflow_progress_detail_storage")]
-    latest = [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
+    latest = [("django_ray", "0018_workflow_run_allocation")]
     executor = MigrationExecutor(connection)
     executor.migrate(migrate_from)
     try:

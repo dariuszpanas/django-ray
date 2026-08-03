@@ -49,10 +49,10 @@ from django_ray.runner.cancellation import (
 )
 from django_ray.runner.leasing import WorkerLeaseIdentity, get_active_workers
 from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
-from django_ray.runtime.context import WorkflowRunIdentity
+from django_ray.runtime.context import DurableTaskContext, WorkflowRunIdentity
 from django_ray.workflow_progress import (
     WorkflowProgressDiagnosticCode,
-    claim_workflow_run,
+    allocate_workflow_run,
     persist_workflow_progress,
     persist_workflow_progress_summary,
     read_workflow_progress,
@@ -325,16 +325,16 @@ def test_unrelated_postgresql_integrity_error_does_not_regenerate_identity(
     assert command.lease_identity is None
 
 
-def _workflow_identity(
-    execution: RayTaskExecution,
-    run_id: str,
-) -> WorkflowRunIdentity:
-    return WorkflowRunIdentity(
-        task_execution_pk=execution.pk,
-        attempt_number=execution.attempt_number,
-        execution_generation=execution.execution_generation,
-        run_id=run_id,
+def _allocate_workflow_identity(execution: RayTaskExecution) -> WorkflowRunIdentity:
+    identity = allocate_workflow_run(
+        DurableTaskContext(
+            task_pk=execution.pk,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+        )
     )
+    assert identity is not None
+    return identity
 
 
 def _workflow_snapshot(
@@ -1122,8 +1122,7 @@ def test_progress_publication_invalidates_waiting_stale_lost_transition() -> Non
         attempt_number=2,
         execution_generation=7,
     )
-    identity = _workflow_identity(task, "00000000-0000-0000-0000-00000000012b")
-    assert claim_workflow_run(identity) is True
+    identity = _allocate_workflow_identity(task)
     stale_lost_snapshot = RayTaskExecution.objects.get(pk=task.pk)
     progress_snapshot = _workflow_snapshot(identity, 1)
     publication_locked = Event()
@@ -1587,8 +1586,7 @@ def test_workflow_progress_retry_race_cannot_resurrect_cleared_snapshot() -> Non
         execution_generation=7,
         started_at=datetime.now(UTC),
     )
-    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000021")
-    assert claim_workflow_run(identity) is True
+    identity = _allocate_workflow_identity(task)
     assert persist_workflow_progress(identity, _workflow_snapshot(identity, 1)) is True
     retry = RayTaskExecution.objects.get(pk=task.pk)
 
@@ -1620,8 +1618,7 @@ def test_v3_summary_retry_race_cannot_resurrect_cleared_summary() -> None:
         execution_generation=7,
         started_at=datetime.now(UTC),
     )
-    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000125")
-    assert claim_workflow_run(identity)
+    identity = _allocate_workflow_identity(task)
     task.refresh_from_db(fields=["workflow_run_id"])
     assert persist_workflow_progress_summary(identity, workflow_progress_summary(task))
     retry = RayTaskExecution.objects.get(pk=task.pk)
@@ -1678,8 +1675,7 @@ def test_v3_summary_terminal_race_leaves_terminal_state_authoritative() -> None:
         execution_generation=8,
         started_at=datetime.now(UTC),
     )
-    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000126")
-    assert claim_workflow_run(identity)
+    identity = _allocate_workflow_identity(task)
     task.refresh_from_db(fields=["workflow_run_id"])
     assert persist_workflow_progress_summary(identity, workflow_progress_summary(task))
     completion = RayTaskExecution.objects.get(pk=task.pk)
@@ -1731,8 +1727,7 @@ def test_v3_conflicting_terminal_writer_cannot_override_lost_outcome() -> None:
         execution_generation=9,
         started_at=datetime.now(UTC),
     )
-    identity = _workflow_identity(task, "00000000-0000-0000-0000-00000000012a")
-    assert claim_workflow_run(identity)
+    identity = _allocate_workflow_identity(task)
     task.refresh_from_db(fields=["workflow_run_id"])
     assert persist_workflow_progress_summary(identity, workflow_progress_summary(task))
     lost = RayTaskExecution.objects.get(pk=task.pk)
@@ -1769,8 +1764,7 @@ def test_v3_summary_writer_rolls_back_with_owning_transaction() -> None:
         state=TaskState.RUNNING,
         execution_generation=2,
     )
-    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000127")
-    assert claim_workflow_run(identity)
+    identity = _allocate_workflow_identity(task)
     task.refresh_from_db(fields=["workflow_run_id"])
 
     with pytest.raises(RuntimeError, match="roll back summary"):
@@ -1936,8 +1930,7 @@ def test_workflow_progress_cancellation_race_disables_late_writer() -> None:
         execution_generation=4,
         started_at=datetime.now(UTC),
     )
-    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000022")
-    assert claim_workflow_run(identity) is True
+    identity = _allocate_workflow_identity(task)
     cancellation = RayTaskExecution.objects.get(pk=task.pk)
 
     results = _run_concurrently(
@@ -1964,8 +1957,7 @@ def test_workflow_progress_timeout_race_cannot_write_after_terminal_state() -> N
         started_at=datetime.now(UTC) - timedelta(minutes=5),
         timeout_seconds=1,
     )
-    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000023")
-    assert claim_workflow_run(identity) is True
+    identity = _allocate_workflow_identity(task)
     timeout = RayTaskExecution.objects.get(pk=task.pk)
 
     results = _run_concurrently(
@@ -1987,8 +1979,7 @@ def test_workflow_progress_lost_recovery_clears_obsolete_run() -> None:
         execution_generation=5,
         started_at=datetime.now(UTC),
     )
-    identity = _workflow_identity(task, "00000000-0000-0000-0000-000000000024")
-    assert claim_workflow_run(identity) is True
+    identity = _allocate_workflow_identity(task)
     lost = RayTaskExecution.objects.get(pk=task.pk)
 
     def recover_lost() -> bool:
@@ -2042,9 +2033,7 @@ def test_workflow_run_claim_is_consistent_for_concurrent_reader() -> None:
         attempt_number=1,
         execution_generation=2,
     )
-    old = _workflow_identity(task, "00000000-0000-0000-0000-000000000025")
-    replacement = _workflow_identity(task, "00000000-0000-0000-0000-000000000026")
-    assert claim_workflow_run(old) is True
+    old = _allocate_workflow_identity(task)
     assert persist_workflow_progress(old, _workflow_snapshot(old, 1)) is True
 
     def read_progress_pair() -> tuple[str | None, str | None]:
@@ -2058,11 +2047,12 @@ def test_workflow_run_claim_is_consistent_for_concurrent_reader() -> None:
         return current_run_id, snapshot_run_id
 
     results = _run_concurrently(
-        lambda: claim_workflow_run(replacement),
+        lambda: _allocate_workflow_identity(task),
         read_progress_pair,
     )
 
-    assert results[0] is True
+    replacement = results[0]
+    assert isinstance(replacement, WorkflowRunIdentity)
     reader_result = results[1]
     assert isinstance(reader_result, tuple)
     observed_run_id, snapshot_run_id = reader_result
@@ -2073,22 +2063,17 @@ def test_workflow_run_claim_is_consistent_for_concurrent_reader() -> None:
     assert persist_workflow_progress(old, _workflow_snapshot(old, 2)) is False
 
 
-def test_concurrent_replacement_claims_delete_only_superseded_run_storage() -> None:
+def test_concurrent_fresh_allocations_serialize_sequence_reservations() -> None:
     task = _execution(
         "postgres-workflow-storage-replacement-race-001",
         state=TaskState.RUNNING,
         attempt_number=2,
         execution_generation=5,
     )
-    old = _workflow_identity(task, "00000000-0000-0000-0000-000000000131")
-    replacement_a = _workflow_identity(task, "00000000-0000-0000-0000-000000000132")
-    replacement_b = _workflow_identity(task, "00000000-0000-0000-0000-000000000133")
+    old = _allocate_workflow_identity(task)
     unrelated_run_id = "00000000-0000-0000-0000-000000000134"
-    assert claim_workflow_run(old) is True
     for run_id, attempt_number, execution_generation in (
         (old.run_id, 2, 5),
-        (replacement_a.run_id, 2, 5),
-        (replacement_b.run_id, 2, 5),
         (unrelated_run_id, 2, 5),
         (old.run_id, 1, 4),
     ):
@@ -2100,14 +2085,19 @@ def test_concurrent_replacement_claims_delete_only_superseded_run_storage() -> N
         )
 
     results = _run_concurrently(
-        lambda: claim_workflow_run(replacement_a),
-        lambda: claim_workflow_run(replacement_b),
+        lambda: _allocate_workflow_identity(task),
+        lambda: _allocate_workflow_identity(task),
     )
 
-    assert results == [True, True]
+    assert all(isinstance(result, WorkflowRunIdentity) for result in results)
+    replacement_ids = {
+        result.run_id for result in results if isinstance(result, WorkflowRunIdentity)
+    }
+    assert len(replacement_ids) == 2
     task.refresh_from_db()
     final_run_id = str(task.workflow_run_id)
-    assert final_run_id in {replacement_a.run_id, replacement_b.run_id}
+    assert final_run_id in replacement_ids
+    assert task.workflow_run_sequence == 3
     current_run_ids = {
         str(run_id)
         for run_id in WorkflowProgressRunStorage.objects.filter(
@@ -2116,13 +2106,61 @@ def test_concurrent_replacement_claims_delete_only_superseded_run_storage() -> N
             execution_generation=5,
         ).values_list("run_id", flat=True)
     }
-    assert current_run_ids == {final_run_id, unrelated_run_id}
+    assert current_run_ids == {unrelated_run_id}
     assert WorkflowProgressRunStorage.objects.filter(
         execution=task,
         attempt_number=1,
         execution_generation=4,
         run_id=old.run_id,
     ).exists()
+
+
+def test_workflow_namespace_collision_retries_under_postgresql_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collided_namespace = 0x1317A23B01FD4215
+    replacement_namespace = 0x2317A23B01FD4215
+    first_task = _execution(
+        "postgres-workflow-namespace-collision-001",
+        state=TaskState.RUNNING,
+        execution_generation=1,
+    )
+    second_task = _execution(
+        "postgres-workflow-namespace-collision-002",
+        state=TaskState.RUNNING,
+        execution_generation=1,
+    )
+    candidate_barrier = Barrier(2)
+    candidate_guard = Lock()
+    candidate_calls = 0
+
+    def collide_then_replace(_bits: int) -> int:
+        nonlocal candidate_calls
+        with candidate_guard:
+            candidate_calls += 1
+            allocation_call = candidate_calls
+        if allocation_call <= 2:
+            candidate_barrier.wait(timeout=10)
+            return collided_namespace
+        return replacement_namespace
+
+    monkeypatch.setattr(workflow_progress_module, "randbits", collide_then_replace)
+
+    results = _run_concurrently(
+        lambda: _allocate_workflow_identity(first_task),
+        lambda: _allocate_workflow_identity(second_task),
+    )
+
+    first_task.refresh_from_db()
+    second_task.refresh_from_db()
+    assert all(isinstance(result, WorkflowRunIdentity) for result in results)
+    run_ids = {result.run_id for result in results if isinstance(result, WorkflowRunIdentity)}
+    assert len(run_ids) == 2
+    assert candidate_calls == 3
+    assert {
+        first_task.workflow_run_namespace,
+        second_task.workflow_run_namespace,
+    } == {collided_namespace, replacement_namespace}
 
 
 def test_input_cleanup_racing_reenqueue_preserves_shared_payload(settings, tmp_path) -> None:

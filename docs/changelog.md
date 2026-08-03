@@ -471,6 +471,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task-ID-bound RuntimeEnv snapshot, and otherwise fails before creating claimable
   work. Unrelated integrity failures are not retried, and this does not add enqueue
   deduplication or exactly-once semantics.
+- Fresh workflow runs now reserve a database-unique opaque namespace and advance a
+  non-resetting row sequence, then encode both injectively as UUIDv8. Forced namespace
+  collisions are retried only for the named database constraint, so repeated random
+  candidates cannot alias another retained execution and unrelated integrity failures
+  are not masked. Fresh allocation no longer accepts a caller-selected identity; exact
+  coordinator reclaim is a separate operation that preserves its existing snapshot-reset
+  and run-storage behavior. Migration `0018_workflow_run_allocation` retains active legacy
+  run IDs with a null namespace and sequence zero for exact reclaim, while the first fresh
+  allocation advances past a derived collision. A persistent database default keeps
+  pre-migration enqueue writers compatible with the schema-first window and a code-only
+  rollback while assigning their rows sequence zero. Drain old workflow coordinators
+  and workers before starting 0.4 processes; mixed old/new coordinators are outside the
+  strengthened guarantee. Bounded namespace or sequence exhaustion fails closed with a
+  secret-free diagnostic.
 - The mandatory runtime graph now requires `pyasn1>=0.6.4`, excluding the three
   high-severity resource-exhaustion advisories published for `pyasn1<=0.6.3`
   (`CVE-2026-59884`, `CVE-2026-59885`, and `CVE-2026-59886`). A pinned
@@ -715,7 +729,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migration
 
-- Apply migrations `0007` through `0017` before starting upgraded workers:
+- Apply migrations `0007` through `0018` before starting upgraded workers:
   `python manage.py migrate django_ray`.
 - Drain and stop every Ray Job task manager running `0.3.1`-or-older code before
   starting code from this development line. Let in-flight jobs finish and reconcile,
@@ -773,6 +787,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `django_ray.view_sensitive_task_data` model permission without rewriting task rows.
   Apply it before granting the incident-response role; remove any temporary user or
   group grants when an investigation ends.
+- `0018_workflow_run_allocation` adds a nullable workflow-run namespace and a non-null
+  allocation sequence with a persistent database default of zero. That default permits
+  old enqueue writers to omit the new fields during a schema-first rollout or code-only
+  rollback. Drain older workflow coordinators before starting 0.4 code. Before a code
+  rollback, stop new coordinators and drain active workflows; retain `0018` for that
+  rollback and reverse it only in a separate stopped-writer maintenance window because
+  reversal drops allocation metadata.
 - Keep the schema-v3 pilot disabled by default until the documented activation gates
   are complete. The current schema-v2 coordinator remains the live compatibility
   writer for full reporting; opt-in full-detail terminal publication is limited to the

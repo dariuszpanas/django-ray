@@ -53,6 +53,4 @@ def test_existing_progress_gains_nullable_run_identity_and_reverses() -> None:
         reverted = reverted_execution.objects.get(task_id="workflow-progress-migration")
         assert reverted.progress_data == legacy_progress
     finally:
-        MigrationExecutor(connection).migrate(
-            [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
-        )
+        MigrationExecutor(connection).migrate([("django_ray", "0018_workflow_run_allocation")])
