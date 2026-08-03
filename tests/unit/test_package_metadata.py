@@ -9,6 +9,12 @@ from coverage.results import should_fail_under
 from packaging.version import Version
 
 
+def _css_rule_body(stylesheet: str, selector: str) -> str:
+    match = re.search(rf"{selector}\s*\{{(?P<body>[^}}]*)\}}", stylesheet)
+    assert match is not None
+    return match.group("body")
+
+
 def test_coverage_floor_uses_central_two_decimal_precision() -> None:
     """Coverage must enforce the configured floor at its displayed precision."""
     project_root = Path(__file__).parents[2]
@@ -206,6 +212,87 @@ def test_unfold_is_testproject_only_and_reproducibly_pinned() -> None:
         for extra, requirements in project["optional-dependencies"].items()
         if extra != "sample"
     )
+
+
+def test_admin_retry_action_has_complete_interaction_feedback() -> None:
+    """The native detail retry button must stay legible in every interaction state."""
+    project_root = Path(__file__).parents[2]
+    stylesheet = (
+        project_root / "src/django_ray/static/django_ray/admin/diagnostics.css"
+    ).read_text(encoding="utf-8")
+    retry_selector = (
+        r"#django-ray-task-actions\s+"
+        r"\.django-ray-admin-action\.django-ray-admin-action--retry"
+    )
+
+    base_rule = _css_rule_body(stylesheet, retry_selector)
+    for declaration in (
+        "--django-ray-retry-bg: #0369a1;",
+        "--django-ray-retry-hover-bg: #075985;",
+        "--django-ray-retry-active-bg: #0c4a6e;",
+        "--django-ray-retry-focus-ring: #075985;",
+        "--django-ray-retry-disabled-bg: #cbd5e1;",
+        "--django-ray-retry-disabled-border: #94a3b8;",
+        "--django-ray-retry-disabled-fg: #334155;",
+        "background-color 120ms ease",
+        "border-color 120ms ease",
+        "box-shadow 120ms ease",
+        "transform 80ms ease;",
+    ):
+        assert declaration in base_rule
+    assert "transition: all" not in base_rule
+
+    hover_rule = _css_rule_body(
+        stylesheet,
+        rf"{retry_selector}:hover:not\(:disabled\)",
+    )
+    assert "background: var(--django-ray-retry-hover-bg);" in hover_rule
+    assert "border-color: var(--django-ray-retry-hover-bg);" in hover_rule
+    assert "transform: translateY(-1px);" in hover_rule
+
+    focus_rule = _css_rule_body(stylesheet, rf"{retry_selector}:focus-visible")
+    assert "outline: 3px solid var(--django-ray-retry-focus-ring);" in focus_rule
+    assert "outline-offset: 2px;" in focus_rule
+
+    active_rule = _css_rule_body(
+        stylesheet,
+        rf"{retry_selector}:active:not\(:disabled\)",
+    )
+    assert "background: var(--django-ray-retry-active-bg);" in active_rule
+    assert "box-shadow: inset 0 2px 4px" in active_rule
+    assert "transform: translateY(1px);" in active_rule
+
+    disabled_rule = _css_rule_body(stylesheet, rf"{retry_selector}:disabled")
+    assert "background: var(--django-ray-retry-disabled-bg);" in disabled_rule
+    assert "border-color: var(--django-ray-retry-disabled-border);" in disabled_rule
+    assert "color: var(--django-ray-retry-disabled-fg);" in disabled_rule
+    assert "cursor: not-allowed;" in disabled_rule
+    assert "opacity: 1;" in disabled_rule
+    assert "transform: none;" in disabled_rule
+
+    explicit_dark_rule = _css_rule_body(
+        stylesheet,
+        r":is\(html\.dark, html\[data-theme=\"dark\"\]\)\s+" + retry_selector,
+    )
+    auto_dark_rule = _css_rule_body(
+        stylesheet,
+        r"html\[data-theme=\"auto\"\]\s+" + retry_selector,
+    )
+    for theme_rule in (explicit_dark_rule, auto_dark_rule):
+        assert "--django-ray-retry-focus-ring: #38bdf8;" in theme_rule
+        assert "--django-ray-retry-disabled-bg: #3f4148;" in theme_rule
+        assert "--django-ray-retry-disabled-border: #71717a;" in theme_rule
+        assert "--django-ray-retry-disabled-fg: #e4e4e7;" in theme_rule
+
+    reduced_motion = stylesheet[stylesheet.index("@media (prefers-reduced-motion: reduce)") :]
+    reduced_base_rule = _css_rule_body(reduced_motion, retry_selector)
+    assert "transition: none;" in reduced_base_rule
+    reduced_interaction_rule = _css_rule_body(
+        reduced_motion,
+        rf"{retry_selector}:hover:not\(:disabled\)\s*,\s*"
+        rf"{retry_selector}:active:not\(:disabled\)",
+    )
+    assert "transform: none;" in reduced_interaction_rule
 
 
 def test_cryptography_is_an_unconditional_runtime_dependency() -> None:

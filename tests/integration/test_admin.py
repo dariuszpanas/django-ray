@@ -3048,6 +3048,7 @@ class TestRayTaskExecutionAdmin:
         )
         assert detail_form.name == "form"
         assert retry_button.name == "button"
+        assert "disabled" not in dict(retry_button.attributes)
         assert dict(retry_button.attributes) == {
             "aria-describedby": "django-ray-task-actions-guidance",
             "class": (

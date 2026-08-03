@@ -588,6 +588,14 @@ assert b"outline: 3px solid #075985" in diagnostics_stylesheet_body
 assert b"outline-color: #38bdf8" in diagnostics_stylesheet_body
 assert b"html[data-theme=\"dark\"]" in diagnostics_stylesheet_body
 assert b"html[data-theme=\"auto\"]" in diagnostics_stylesheet_body
+for interaction_marker in (
+    b":hover:not(:disabled)",
+    b":focus-visible",
+    b":active:not(:disabled)",
+    b":disabled",
+    b"@media (prefers-reduced-motion: reduce)",
+):
+    assert interaction_marker in diagnostics_stylesheet_body
 
 sensitive_stylesheet_match = re.search(
     r'''href=["'](?P<path>/static/django_ray/admin/sensitive_task_data[^"']*\.css)["']''',
