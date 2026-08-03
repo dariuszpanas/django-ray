@@ -837,6 +837,11 @@ the exact authorized commit before it builds.
 
 - **Issues**: [GitHub Issues](https://github.com/dariuszpanas/django-ray/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/dariuszpanas/django-ray/discussions)
+- **Security vulnerabilities**: read the
+  [Security Policy](https://github.com/dariuszpanas/django-ray/security/policy) and use the
+  [private vulnerability report](https://github.com/dariuszpanas/django-ray/security/advisories/new).
+  Do not include vulnerability details, exploit instructions, credentials, or secrets in a public
+  issue.
 
 ## License
 

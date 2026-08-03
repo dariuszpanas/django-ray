@@ -372,6 +372,12 @@ Source docs remain in the [`docs/`](https://github.com/dariuszpanas/django-ray/t
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for branch, commit, pull request, staging, and validation
 conventions. Automated contributors must also follow [`AGENTS.md`](AGENTS.md).
 
+## Security
+
+Report suspected vulnerabilities through the private channel in
+the [security policy](https://github.com/dariuszpanas/django-ray/security/policy). Do not put
+vulnerability details, exploit instructions, credentials, or secrets in a public issue.
+
 ## License
 
 This project is licensed under the BSD 3-Clause License - see the [LICENSE](https://github.com/dariuszpanas/django-ray/blob/main/LICENSE) file for details.

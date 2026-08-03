@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible, non-security defect in django-ray
+title: "bug: "
+labels:
+  - bug
+assignees:
+  - dariuszpanas
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Suspected security vulnerability? Stop and use the [private vulnerability report](https://github.com/dariuszpanas/django-ray/security/advisories/new). Do not put vulnerability details, exploit instructions, credentials, secrets, or private data in a public issue.
+
+  - type: checkboxes
+    id: security-boundary
+    attributes:
+      label: Security check
+      options:
+        - label: This is an ordinary bug report, not a suspected security vulnerability, and it contains no credentials, secrets, or private data.
+          required: true
+
+  - type: input
+    id: django-ray-version
+    attributes:
+      label: django-ray version
+      description: Provide the installed release or commit.
+      placeholder: 0.3.1
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include relevant Python, Django, Ray, database, worker mode, and operating-system versions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current behavior
+      description: Describe the observed problem and its user impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest reproducible example using synthetic, non-sensitive data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Optional. Remove credentials, tokens, personal data, task inputs, task results, and other sensitive values before pasting logs or screenshots.
+    validations:
+      required: false

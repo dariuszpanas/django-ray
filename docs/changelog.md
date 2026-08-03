@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A checked-in security policy and issue-reporting guidance now route suspected
+  vulnerabilities to GitHub's private reporting form, define the pre-1.0
+  latest-release support boundary, and keep actionable exploit evidence and
+  secrets out of public issues while a fix is being developed.
 - Django Admin execution and archived-attempt details now offer a separate **Sensitive
   data** action to superusers or operators who hold both ordinary object
   view and the new `django_ray.view_sensitive_task_data` permission. The default page

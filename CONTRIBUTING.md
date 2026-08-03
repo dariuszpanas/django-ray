@@ -4,6 +4,10 @@ Thank you for contributing. The full development, testing, documentation, and re
 [`docs/contributing.md`](docs/contributing.md). The conventions below apply to human contributors and
 automated agents alike.
 
+Suspected security vulnerabilities do not belong in public issues or pull requests. Follow
+[`SECURITY.md`](SECURITY.md) and use its private reporting channel without publishing reproduction
+details, exploit instructions, credentials, or secrets.
+
 ## Branches
 
 Create branches from an up-to-date `main`. Use lowercase kebab-case after one of these prefixes:

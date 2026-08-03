@@ -1,0 +1,22 @@
+name: Request a private security contact
+description: Use only when GitHub's private vulnerability report form is unavailable
+title: "security: request private contact"
+labels:
+  - area:security
+assignees:
+  - dariuszpanas
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this public form only if the [private vulnerability report](https://github.com/dariuszpanas/django-ray/security/advisories/new) is unavailable to you. This issue asks a maintainer to arrange a private channel. Do not identify the affected component or version, describe impact, provide reproduction details, or include credentials, secrets, private data, logs, screenshots, task payloads, or diagnostics.
+
+  - type: checkboxes
+    id: safe-contact-request
+    attributes:
+      label: Public disclosure safety
+      options:
+        - label: I tried the private vulnerability report and it is unavailable to me.
+          required: true
+        - label: I have not included the affected component or version, impact, reproduction details, credentials, secrets, or private data.
+          required: true
