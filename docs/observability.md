@@ -180,6 +180,19 @@ their tenant or ownership policy. The pre-0.4.0 `/graph` complete-graph example 
 removed. Existing schema-v1/v2 rows remain aggregate-readable through the summary
 route, while topology and node detail require the bounded page routes.
 
+The separate testproject `GET /api/executions` example has its own proven bounds: a
+1-to-100 page size (50 by default), database-side 4,096-byte guards for inline result
+and error values, and a 256 KiB encoded-response ceiling. Fixed omission and
+truncation reasons distinguish a stored diagnostic that was not loaded
+(`stored_value_exceeds_list_limit`) from a page that stopped at either the page-size
+(`page_limit`) or response-size (`response_size_limit`) boundary. Its signed,
+filter-bound `next_cursor` uses keyset continuation after the last complete returned
+item, so concurrent inserts do not shift the next page. These claims do not extend to
+`GET /api/executions/{id}`: that authenticated, redacted route is an exact operator
+lookup and does not share the list bounds. The list byte guard is supported on the
+testproject's SQLite and PostgreSQL paths; other database LOB semantics fail
+configuration explicitly rather than inheriting this bounded claim.
+
 `get_workflow_node_snapshot()` always returns durable node data first. Live Ray state
 and logs are opt-in:
 
