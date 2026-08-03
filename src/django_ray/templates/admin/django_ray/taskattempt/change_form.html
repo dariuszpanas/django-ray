@@ -1,7 +1,21 @@
 {% extends "admin/change_form.html" %}
+{% load i18n %}
+
+{% block object-tools %}
+  {% if django_ray_admin_uses_unfold or has_absolute_url or django_ray_sensitive_data_url %}
+    {{ block.super }}
+  {% endif %}
+{% endblock %}
 
 {% block object-tools-items %}
-  {{ block.super }}
+  {% if django_ray_admin_uses_unfold %}
+    {# Unfold honors show_history=False and retains its configured view-on-site tool. #}
+    {{ block.super }}
+  {% elif has_absolute_url %}
+    <li>
+      <a href="{{ absolute_url }}" class="viewsitelink">{% translate "View on site" %}</a>
+    </li>
+  {% endif %}
   {% if django_ray_sensitive_data_url %}
     <li>
       <a

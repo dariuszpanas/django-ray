@@ -78,7 +78,9 @@ from django_ray.workflow_progress_summary import (
     WORKFLOW_PROGRESS_TERMINAL_STATES,
 )
 
-if apps.is_installed("unfold"):
+_DJANGO_RAY_ADMIN_USES_UNFOLD = apps.is_installed("unfold")
+
+if _DJANGO_RAY_ADMIN_USES_UNFOLD:
     from unfold.admin import ModelAdmin as _ConfiguredModelAdmin
     from unfold.admin import TabularInline as _ConfiguredTabularInline
 else:
@@ -1075,6 +1077,8 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         context["django_ray_archived_workflow_attempts_limit"] = (
             ADMIN_WORKFLOW_ARCHIVED_GRAPH_MAX_ATTEMPTS
         )
+        context["django_ray_admin_uses_unfold"] = _DJANGO_RAY_ADMIN_USES_UNFOLD
+        context["show_history"] = False
         context["django_ray_retry_available"] = False
         context["django_ray_sensitive_data_url"] = None
         if (
@@ -2738,6 +2742,8 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
         obj: TaskAttempt | None = None,
     ) -> HttpResponse:
         """Offer the explicit sensitive-data view only to authorized readers."""
+        context["django_ray_admin_uses_unfold"] = _DJANGO_RAY_ADMIN_USES_UNFOLD
+        context["show_history"] = False
         context["django_ray_sensitive_data_url"] = None
         if obj is not None and self.has_view_permission(request, obj):
             database = str(getattr(obj._state, "db", None) or "default")
