@@ -38,7 +38,7 @@ If you need a REST API for task management in your project, you can use the test
 | `GET /api/tasks/{task_id}` | Get status, timestamps, and redacted arguments by task ID; return values and failure diagnostics are omitted |
 | `GET /api/executions` | Page through bounded, redacted task-execution projections |
 | `GET /api/executions/stats` | Get statistics |
-| `GET /api/executions/{id}` | Get exact redacted execution details; list bounds do not apply |
+| `GET /api/executions/{id}` | Get one bounded, redacted execution-detail projection |
 | `POST /api/executions/{id}/cancel` | Cancel or request cancellation for an execution |
 | `POST /api/executions/{id}/retry` | Request retry with bounded `202`, `404`, or `409` outcome |
 | `POST /api/executions/reset` | Retry matching `FAILED`, `CANCELLED`, `LOST`, or `EXPIRED` executions |
@@ -73,17 +73,46 @@ The list query measures `result_data` and `error_message` in the database. A sto
 value over 4,096 bytes is not transferred to the application; its field is `null` and
 the corresponding `*_omission_reason` is the fixed
 `stored_value_exceeds_list_limit` value. Included values still pass through the normal
-redaction policy. This database expression is deliberately supported only on the
-testproject's SQLite walkthrough and PostgreSQL deployment paths; another database
-fails configuration clearly instead of pretending that its LOB byte semantics are
-bounded. The complete encoded response is at most 256 KiB, and only complete items
+redaction policy. Malformed, deep, or conversion-failing included result JSON becomes
+the fixed `[REDACTED]` marker; because this is redaction rather than omission, its
+omission reason remains `null`. This database expression is deliberately supported
+only on the testproject's SQLite walkthrough and PostgreSQL deployment paths; another
+database fails configuration clearly instead of pretending that its LOB byte semantics
+are bounded. The complete encoded response is at most 256 KiB, and only complete items
 that fit that ceiling are returned. Continue with the unchanged filters and
 `next_cursor` rather than increasing `limit`.
 
-`GET /api/executions/{id}` remains the separate exact operator lookup used for focused
-diagnosis. It is authenticated and redacted, but it is not covered by the list's
-per-field or aggregate bounds. Production adapters should authorize that detail route
-more narrowly or replace it with an application-specific bounded projection.
+### Bounded execution-detail example
+
+`GET /api/executions/{id}` is the separate exact operator lookup used for focused
+diagnosis. One database statement selects only the public response fields. Stored
+arguments and input references, traceback and cancellation details, RuntimeEnv data,
+workflow plans and progress, and completion envelopes are not selected. The query
+measures inline `result_data` and `error_message` before transfer and returns either
+value only when it is at most 65,536 bytes. A larger stored value is `null` with the
+fixed `stored_value_exceeds_detail_limit` reason.
+
+An external result reference is never returned or resolved by this route. When a row
+has only an external result, `result_data` is `null` and
+`result_data_omission_reason` is `external_result_not_loaded`; applications should use
+their separately authorized result-retrieval policy if they choose to expose that
+data. Included inline values still pass through the normal redaction policy. If that
+result is malformed or truncated JSON, too deeply nested to decode, or cannot complete
+its Unicode-safe conversion, the field is the fixed `[REDACTED]` marker. That is
+redaction rather than omission, so its omission reason remains `null`. If processing a
+valid value would make the encoded response exceed 256 KiB, the example first omits the
+result so a failure diagnostic can remain, then omits the error if necessary. Each such
+field uses `response_size_limit`. If fixed metadata still cannot fit, or the configured
+renderer raises an ordinary exception while encoding either response, the route returns
+a small `503` response with the code `execution_detail_response_limit`. Process-control
+exceptions are not swallowed.
+
+Successful detail responses and the fixed limit failure use `Cache-Control: no-store`
+and `X-Content-Type-Options: nosniff`. As with the list, the database byte expression
+is supported on the testproject's SQLite and PostgreSQL paths; another database fails
+configuration clearly. The example keeps global bearer authentication for
+walkthroughs. Production adapters should add their tenant, ownership, or object policy
+before exposing an exact lookup.
 
 ### 0.4.0 workflow graph migration
 

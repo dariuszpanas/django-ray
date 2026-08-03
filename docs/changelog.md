@@ -477,6 +477,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The authenticated testproject exact execution lookup now uses one explicit public
+  database projection instead of hydrating a complete execution row. Inline result and
+  error values are guarded at 64 KiB before transfer, external result references are
+  acknowledged without storage access, and fixed omission reasons distinguish stored,
+  external, and rendered-response limits. Across the list and exact lookup, malformed,
+  deep, or conversion-failing result JSON becomes one fixed `[REDACTED]` marker instead
+  of returning undecoded source text. The exact response is capped at 256 KiB; ordinary
+  renderer exceptions use the same fixed bounded `503` fallback without swallowing
+  process-control exceptions. Detail responses disable caching and MIME sniffing.
+  SQLite and PostgreSQL byte semantics, exact boundary behavior, and unsupported
+  databases are covered explicitly.
 - Read-only execution and archived-attempt details no longer advertise Django
   Admin's empty `LogEntry` history page. Durable task attempt and workflow
   diagnostics remain unchanged, while the permission-gated **Sensitive data**

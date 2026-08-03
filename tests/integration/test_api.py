@@ -20,7 +20,7 @@ from django.test.utils import CaptureQueriesContext
 from django_ray import __version__ as django_ray_version
 from django_ray.lifecycle import TaskRetryRequestResult, TaskRetryRequestStatus
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
-from django_ray.redaction import redact_text
+from django_ray.redaction import REDACTED, redact_text
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from testproject import api as testproject_api
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
@@ -1480,8 +1480,11 @@ class TestExecutionsAPI:
 
         detail = client.get(f"/api/executions/{task.pk}")
         assert detail.status_code == 200
-        assert detail.json()["result_data"] == redact_text(oversized)
-        assert detail.json()["error_message"] == redact_text(oversized)
+        detail_payload = detail.json()
+        assert detail_payload["result_data"] == REDACTED
+        assert detail_payload["error_message"] == redact_text(oversized)
+        assert detail_payload["result_data_omission_reason"] is None
+        assert detail_payload["error_message_omission_reason"] is None
 
     def test_execution_list_fails_clearly_on_an_unsupported_database(self, monkeypatch):
         monkeypatch.setattr(connection, "vendor", "oracle")
@@ -1492,15 +1495,28 @@ class TestExecutionsAPI:
                 limit=1,
             )
 
+    def test_execution_detail_fails_clearly_on_an_unsupported_database(self, monkeypatch):
+        monkeypatch.setattr(connection, "vendor", "oracle")
+
+        with pytest.raises(
+            ImproperlyConfigured,
+            match="execution detail supports only SQLite and PostgreSQL",
+        ):
+            testproject_api._bounded_execution_detail_row(1)
+
     def test_list_executions_enforces_the_aggregate_encoded_response_bound(self, client):
-        diagnostic = "x" * (testproject_api._EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES - 100)
+        diagnostic = "x" * (testproject_api._EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES - 102)
+        serialized_result = json.dumps(diagnostic)
+        assert len(serialized_result.encode()) == (
+            testproject_api._EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES - 100
+        )
         tasks = RayTaskExecution.objects.bulk_create(
             [
                 RayTaskExecution(
                     task_id=f"aggregate-bound-{index}",
                     callable_path="test.task",
                     state=TaskState.FAILED,
-                    result_data=diagnostic,
+                    result_data=serialized_result,
                     error_message=diagnostic,
                 )
                 for index in range(40)
@@ -1560,6 +1576,523 @@ class TestExecutionsAPI:
         data = response.json()
         assert data["id"] == task.pk
         assert data["callable_path"] == "testproject.tasks.add_numbers"
+        assert data["result_data_omission_reason"] is None
+        assert data["error_message_omission_reason"] is None
+        assert data["diagnostic_max_bytes"] == (
+            testproject_api._EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
+        )
+        assert data["response_max_bytes"] == (testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES)
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+    def test_execution_detail_uses_one_public_projection_without_loading_external_result(
+        self,
+        client,
+        monkeypatch,
+    ):
+        protected_marker = "protected-execution-detail-marker"
+        task = RayTaskExecution.objects.create(
+            task_id="test-detail-public-projection",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            args_json=f'["{protected_marker}-args"]',
+            kwargs_json=f'{{"secret":"{protected_marker}-kwargs"}}',
+            input_reference=f"digest:{protected_marker}-input",
+            result_reference=f"digest:{protected_marker}-result",
+            runtime_env_json=f'{{"secret":"{protected_marker}-runtime"}}',
+            progress_data=f'{{"secret":"{protected_marker}-progress"}}',
+            workflow_progress_summary_json=(f'{{"secret":"{protected_marker}-summary"}}'),
+            workflow_plan_json=f'{{"secret":"{protected_marker}-plan"}}',
+            workflow_plan_selection=f'{{"secret":"{protected_marker}-selection"}}',
+            completion_data=f'{{"secret":"{protected_marker}-completion"}}',
+            cancellation_error=f"{protected_marker}-cancellation",
+            error_traceback=f"{protected_marker}-traceback",
+        )
+
+        def reject_external_load(*args, **kwargs):
+            raise AssertionError("execution detail must not load external result storage")
+
+        monkeypatch.setattr(
+            "django_ray.result_storage.load_result_reference",
+            reject_external_load,
+        )
+        captured_rows = []
+        original_item = testproject_api._execution_detail_item
+
+        def capture_item(row):
+            captured_rows.append(dict(row))
+            return original_item(row)
+
+        monkeypatch.setattr(testproject_api, "_execution_detail_item", capture_item)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get(f"/api/executions/{task.pk}")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["result_data"] is None
+        assert payload["result_data_omission_reason"] == "external_result_not_loaded"
+        assert protected_marker not in response.content.decode()
+        assert len(captured_rows) == 1
+        assert set(captured_rows[0]) == set(testproject_api._EXECUTION_DETAIL_VALUE_FIELDS)
+        assert captured_rows[0]["_detail_has_result_reference"] is True
+        assert "result_reference" not in captured_rows[0]
+
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(task_selects) == 1
+        detail_sql = task_selects[0]
+        assert "result_reference" in detail_sql
+        assert "FOR UPDATE" not in detail_sql.upper()
+        for protected_field in (
+            "args_json",
+            "kwargs_json",
+            "input_reference",
+            "runtime_env_json",
+            "progress_data",
+            "workflow_progress_summary_json",
+            "workflow_plan_json",
+            "workflow_plan_selection",
+            "completion_data",
+            "cancellation_error",
+            "error_traceback",
+        ):
+            assert protected_field not in detail_sql
+
+    def test_execution_detail_enforces_embedded_nul_byte_boundary_before_transfer(
+        self,
+        client,
+        monkeypatch,
+    ):
+        limit = testproject_api._EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
+        exact_value = "x\x00" + "y" * (limit - 2)
+        protected_marker = "oversized-detail-secret-marker"
+        oversized_value = "x\x00" + "y" * (limit - len(protected_marker)) + protected_marker
+        assert len(exact_value.encode()) == limit
+        assert len(oversized_value.encode()) == limit + 2
+        exact = RayTaskExecution.objects.create(
+            task_id="test-detail-exact-byte-boundary",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            result_data=exact_value,
+            error_message=exact_value,
+        )
+        oversized = RayTaskExecution.objects.create(
+            task_id="test-detail-over-byte-boundary",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            result_data=oversized_value,
+            error_message=oversized_value,
+        )
+
+        exact_response = client.get(f"/api/executions/{exact.pk}")
+
+        assert exact_response.status_code == 200
+        exact_payload = exact_response.json()
+        assert exact_payload["result_data"] == REDACTED
+        assert exact_payload["error_message"] == redact_text(exact_value)
+        assert exact_payload["result_data_omission_reason"] is None
+        assert exact_payload["error_message_omission_reason"] is None
+
+        captured_rows = []
+        original_item = testproject_api._execution_detail_item
+
+        def capture_item(row):
+            captured_rows.append(dict(row))
+            return original_item(row)
+
+        monkeypatch.setattr(testproject_api, "_execution_detail_item", capture_item)
+        with CaptureQueriesContext(connection) as queries:
+            oversized_response = client.get(f"/api/executions/{oversized.pk}")
+
+        assert oversized_response.status_code == 200
+        oversized_payload = oversized_response.json()
+        assert oversized_payload["result_data"] is None
+        assert oversized_payload["error_message"] is None
+        assert (
+            oversized_payload["result_data_omission_reason"] == "stored_value_exceeds_detail_limit"
+        )
+        assert (
+            oversized_payload["error_message_omission_reason"]
+            == "stored_value_exceeds_detail_limit"
+        )
+        assert protected_marker not in oversized_response.content.decode()
+        assert captured_rows[0]["_detail_result_data"] is None
+        assert captured_rows[0]["_detail_error_message"] is None
+        assert captured_rows[0]["_detail_result_data_bytes"] == limit + 2
+        assert captured_rows[0]["_detail_error_message_bytes"] == limit + 2
+
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(task_selects) == 1
+        guarded_sql = task_selects[0]
+        assert "CASE WHEN" in guarded_sql
+        assert "LENGTH(CAST(" in guarded_sql
+        assert 'THEN "django_ray_raytaskexecution"."result_data"' in guarded_sql
+        assert 'THEN "django_ray_raytaskexecution"."error_message"' in guarded_sql
+
+    def test_execution_detail_omits_result_first_at_aggregate_response_limit(
+        self,
+        client,
+    ):
+        limit = testproject_api._EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
+        diagnostic = "\\" * limit
+        serialized_result = json.dumps("\\" * ((limit - 2) // 2))
+        assert len(serialized_result.encode()) == limit
+        task = RayTaskExecution.objects.create(
+            task_id="test-detail-aggregate-response-boundary",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            result_data=serialized_result,
+            error_message=diagnostic,
+        )
+
+        response = client.get(f"/api/executions/{task.pk}")
+        repeated = client.get(f"/api/executions/{task.pk}")
+
+        assert response.status_code == repeated.status_code == 200
+        assert response.content == repeated.content
+        assert len(response.content) <= testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES
+        payload = response.json()
+        assert payload["result_data"] is None
+        assert payload["result_data_omission_reason"] == "response_size_limit"
+        assert payload["error_message"] == diagnostic
+        assert payload["error_message_omission_reason"] is None
+
+    def test_execution_detail_returns_fixed_bounded_failure_when_metadata_cannot_fit(
+        self,
+        client,
+        monkeypatch,
+    ):
+        task = RayTaskExecution.objects.create(
+            task_id="test-detail-fixed-response-limit-failure",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            result_data="stored-result-must-not-leak",
+            error_message="stored-error-must-not-leak",
+        )
+
+        monkeypatch.setattr(
+            testproject_api,
+            "_try_encode_execution_detail_response",
+            lambda request, response: (
+                b"x" * (testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES + 1)
+            ),
+        )
+
+        response = client.get(f"/api/executions/{task.pk}")
+
+        assert response.status_code == 503
+        assert len(response.content) <= testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES
+        assert response.json() == {
+            "code": "execution_detail_response_limit",
+            "message": "Execution detail exceeds its fixed response limit.",
+            "response_max_bytes": testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES,
+        }
+        assert b"stored-result" not in response.content
+        assert b"stored-error" not in response.content
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+    @pytest.mark.parametrize(
+        ("failure_mode", "expected_statuses"),
+        (
+            ("initial", [200, 503]),
+            ("fallback", [200, 200, 503]),
+            ("fixed", [200, 503]),
+        ),
+    )
+    def test_execution_detail_renderer_exceptions_return_fixed_bounded_failure(
+        self,
+        client,
+        monkeypatch,
+        failure_mode,
+        expected_statuses,
+    ):
+        task = RayTaskExecution.objects.create(
+            task_id=f"test-detail-renderer-{failure_mode}",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            result_data="stored-renderer-result-must-not-leak",
+            error_message="stored-renderer-error-must-not-leak",
+        )
+        original_render = testproject_api.api.renderer.render
+        statuses = []
+
+        def render(request, data, *, response_status):
+            statuses.append(response_status)
+            if failure_mode == "fallback" and len(statuses) == 1:
+                return b"x" * (testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES + 1)
+            if failure_mode == "fixed" or response_status == 200:
+                raise RuntimeError("custom renderer failed")
+            return original_render(request, data, response_status=response_status)
+
+        monkeypatch.setattr(testproject_api.api.renderer, "render", render)
+
+        response = client.get(f"/api/executions/{task.pk}")
+
+        assert response.status_code == 503
+        assert statuses == expected_statuses
+        assert response.json() == {
+            "code": "execution_detail_response_limit",
+            "message": "Execution detail exceeds its fixed response limit.",
+            "response_max_bytes": testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES,
+        }
+        assert len(response.content) <= testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES
+        assert b"stored-renderer-result" not in response.content
+        assert b"stored-renderer-error" not in response.content
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+    @pytest.mark.parametrize("exception_type", (SystemExit, KeyboardInterrupt))
+    def test_execution_detail_renderer_does_not_swallow_process_control(
+        self,
+        client,
+        monkeypatch,
+        exception_type,
+    ):
+        task = RayTaskExecution.objects.create(
+            task_id=f"test-detail-renderer-{exception_type.__name__}",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data="5",
+        )
+
+        def render(request, data, *, response_status):
+            raise exception_type("process control")
+
+        monkeypatch.setattr(testproject_api.api.renderer, "render", render)
+
+        with pytest.raises(exception_type, match="process control"):
+            client.get(f"/api/executions/{task.pk}")
+
+    @pytest.mark.parametrize("exception_type", (SystemExit, KeyboardInterrupt))
+    def test_execution_detail_fixed_renderer_does_not_swallow_process_control(
+        self,
+        monkeypatch,
+        exception_type,
+    ):
+        def render(request, data, *, response_status):
+            raise exception_type("process control")
+
+        monkeypatch.setattr(testproject_api.api.renderer, "render", render)
+
+        with pytest.raises(exception_type, match="process control"):
+            testproject_api._execution_detail_unavailable_response(object())
+
+    def test_execution_detail_decodes_valid_json_escapes_before_redaction(
+        self,
+        client,
+        settings,
+    ):
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
+        task = RayTaskExecution.objects.create(
+            task_id="test-detail-valid-escaped-key",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data=r'{"\u0070assword":"CANARY_VALID_ESCAPED_KEY"}',
+        )
+
+        detail = client.get(f"/api/executions/{task.pk}")
+        listing = client.get("/api/executions", {"task_id": task.task_id})
+
+        assert detail.status_code == listing.status_code == 200
+        detail_result = detail.json()["result_data"]
+        list_result = listing.json()["tasks"][0]["result_data"]
+        assert json.loads(detail_result) == {"password": REDACTED}
+        assert json.loads(list_result) == {"password": REDACTED}
+        assert "CANARY_VALID_ESCAPED_KEY" not in detail.content.decode()
+        assert "CANARY_VALID_ESCAPED_KEY" not in listing.content.decode()
+        assert detail.json()["result_data_omission_reason"] is None
+        assert listing.json()["tasks"][0]["result_data_omission_reason"] is None
+
+    @pytest.mark.parametrize(
+        ("case_name", "result_data"),
+        (
+            (
+                "escaped-key",
+                r'{"\u0070assword":"CANARY_ESCAPED_KEY",',
+            ),
+            (
+                "escaped-value",
+                r'{"safe":"\u0043ANARY_ESCAPED_VALUE",',
+            ),
+            (
+                "mixed-escapes",
+                r'{"pass\u0077ord":"CAN\u0041RY_MIXED",',
+            ),
+            (
+                "unicode-key",
+                r'{"p\u00e4ssword":"CANARY_UNICODE_KEY",',
+            ),
+            (
+                "truncated-escape",
+                r'{"safe":"CANARY_TRUNCATED\u00',
+            ),
+            (
+                "embedded-control",
+                '{"safe":"CANARY_CONTROL\x00"',
+            ),
+        ),
+    )
+    def test_execution_detail_and_list_malformed_json_fail_closed(
+        self,
+        client,
+        settings,
+        case_name,
+        result_data,
+    ):
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password", r"pässword"]}
+        task = RayTaskExecution.objects.create(
+            task_id=f"test-detail-malformed-{case_name}",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data=result_data,
+        )
+
+        detail = client.get(f"/api/executions/{task.pk}")
+        listing = client.get("/api/executions", {"task_id": task.task_id})
+
+        assert detail.status_code == listing.status_code == 200
+        assert detail.json()["result_data"] == REDACTED
+        assert listing.json()["tasks"][0]["result_data"] == REDACTED
+        assert detail.json()["result_data_omission_reason"] is None
+        assert listing.json()["tasks"][0]["result_data_omission_reason"] is None
+        assert "CANARY" not in detail.content.decode()
+        assert "CANARY" not in listing.content.decode()
+
+    def test_execution_detail_deep_json_conversion_fails_closed(
+        self,
+        client,
+    ):
+        result_data = "[" * 10_000 + '"CANARY_DEEP"' + "]" * 10_000
+        task = RayTaskExecution.objects.create(
+            task_id="test-detail-deep-json-conversion",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data=result_data,
+        )
+
+        response = client.get(f"/api/executions/{task.pk}")
+
+        assert response.status_code == 200
+        assert response.json()["result_data"] == REDACTED
+        assert response.json()["result_data_omission_reason"] is None
+        assert "CANARY_DEEP" not in response.content.decode()
+
+    def test_execution_detail_and_list_json_depth_boundary_is_stable(
+        self,
+        client,
+    ):
+        accepted_value = "[" * 20 + '"visible-depth-boundary"' + "]" * 20
+        rejected_value = "[" * 21 + '"CANARY_OVER_DEPTH"' + "]" * 21
+        accepted = RayTaskExecution.objects.create(
+            task_id="test-detail-json-depth-accepted",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data=accepted_value,
+        )
+        rejected = RayTaskExecution.objects.create(
+            task_id="test-detail-json-depth-rejected",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data=rejected_value,
+        )
+
+        accepted_detail = client.get(f"/api/executions/{accepted.pk}")
+        accepted_list = client.get("/api/executions", {"task_id": accepted.task_id})
+        rejected_detail = client.get(f"/api/executions/{rejected.pk}")
+        rejected_list = client.get("/api/executions", {"task_id": rejected.task_id})
+
+        assert accepted_detail.status_code == accepted_list.status_code == 200
+        assert rejected_detail.status_code == rejected_list.status_code == 200
+        assert json.loads(accepted_detail.json()["result_data"]) == json.loads(accepted_value)
+        assert json.loads(accepted_list.json()["tasks"][0]["result_data"]) == json.loads(
+            accepted_value
+        )
+        assert rejected_detail.json()["result_data"] == REDACTED
+        assert rejected_list.json()["tasks"][0]["result_data"] == REDACTED
+        assert "CANARY_OVER_DEPTH" not in rejected_detail.content.decode()
+        assert "CANARY_OVER_DEPTH" not in rejected_list.content.decode()
+
+    def test_execution_detail_depth_scan_exhaustion_is_fixed_redaction(
+        self,
+        client,
+    ):
+        nested_safe_value = "[" * 21 + '"CANARY_AFTER_SENSITIVE_WIDTH"' + "]" * 21
+        result_data = (
+            '{"password":'
+            + json.dumps([0] * testproject_api._EXECUTION_RESULT_JSON_DEPTH_SCAN_MAX_ITEMS)
+            + ',"safe":'
+            + nested_safe_value
+            + "}"
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="test-detail-json-depth-budget-exhausted",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data=result_data,
+        )
+
+        response = client.get(f"/api/executions/{task.pk}")
+
+        assert response.status_code == 200
+        assert response.json()["result_data"] == REDACTED
+        assert "<max-depth>" not in response.content.decode()
+        assert "CANARY_AFTER_SENSITIVE_WIDTH" not in response.content.decode()
+
+    def test_execution_json_depth_preflight_has_fixed_width_work(self):
+        traversed_items = 0
+
+        class CountingList(list):
+            def __iter__(self):
+                nonlocal traversed_items
+                for item in super().__iter__():
+                    traversed_items += 1
+                    yield item
+
+        value = CountingList(
+            [None] * (testproject_api._EXECUTION_RESULT_JSON_DEPTH_SCAN_MAX_ITEMS + 100)
+        )
+
+        assert testproject_api._json_value_requires_fixed_redaction(value) is True
+        assert traversed_items == testproject_api._EXECUTION_RESULT_JSON_DEPTH_SCAN_MAX_ITEMS
+
+    def test_execution_detail_unicode_conversion_failure_is_fixed_redaction(
+        self,
+        client,
+        monkeypatch,
+    ):
+        task = RayTaskExecution.objects.create(
+            task_id="test-detail-unicode-conversion-failure",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data='{"safe":"CANARY_UNICODE_CONVERSION"}',
+        )
+
+        def reject_conversion(value):
+            raise UnicodeError("forced conversion failure")
+
+        monkeypatch.setattr(testproject_api, "safe_json_dumps", reject_conversion)
+
+        detail = client.get(f"/api/executions/{task.pk}")
+        listing = client.get("/api/executions", {"task_id": task.task_id})
+
+        assert detail.status_code == listing.status_code == 200
+        assert detail.json()["result_data"] == REDACTED
+        assert listing.json()["tasks"][0]["result_data"] == REDACTED
+        assert detail.json()["result_data_omission_reason"] is None
+        assert listing.json()["tasks"][0]["result_data_omission_reason"] is None
+        assert "CANARY_UNICODE_CONVERSION" not in detail.content.decode()
+        assert "CANARY_UNICODE_CONVERSION" not in listing.content.decode()
 
     def test_execution_payload_redacts_sensitive_fields(self, client, settings):
         """Operator-facing execution details must not echo stored secrets."""
@@ -1617,6 +2150,26 @@ class TestExecutionsAPI:
         response = client.get("/api/executions/99999")
         assert response.status_code == 404
 
+    def test_get_execution_requires_authentication_before_database_access(
+        self,
+        unauthenticated_client,
+    ):
+        task = RayTaskExecution.objects.create(
+            task_id="test-detail-auth-before-query",
+            callable_path="test.task",
+            state=TaskState.QUEUED,
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            response = unauthenticated_client.get(f"/api/executions/{task.pk}")
+
+        assert response.status_code == 401
+        assert not [
+            query
+            for query in queries.captured_queries
+            if "django_ray_raytaskexecution" in query["sql"]
+        ]
+
     def test_delete_execution_is_not_a_supported_lifecycle_operation(self, client):
         """A REST client cannot erase the durable row behind active Ray work."""
         task = RayTaskExecution.objects.create(
@@ -1633,8 +2186,34 @@ class TestExecutionsAPI:
         """The reusable sample contract exposes only the lifecycle-safe detail read."""
         schema_response = client.get("/api/openapi.json")
         assert schema_response.status_code == 200
-        execution_path = schema_response.json()["paths"]["/api/executions/{execution_id}"]
+        schema = schema_response.json()
+        execution_path = schema["paths"]["/api/executions/{execution_id}"]
         assert set(execution_path) == {"get"}
+        responses = execution_path["get"]["responses"]
+        assert responses["200"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/TaskExecutionDetailSchema"
+        }
+        assert responses["503"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/TaskExecutionDetailUnavailableSchema"
+        }
+        detail_schema = schema["components"]["schemas"]["TaskExecutionDetailSchema"]
+        detail_properties = detail_schema["properties"]
+        assert detail_properties["diagnostic_max_bytes"]["const"] == (
+            testproject_api._EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
+        )
+        assert detail_properties["response_max_bytes"]["const"] == (
+            testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES
+        )
+        result_reason = next(
+            item
+            for item in detail_properties["result_data_omission_reason"]["anyOf"]
+            if "enum" in item
+        )
+        assert result_reason["enum"] == [
+            "stored_value_exceeds_detail_limit",
+            "external_result_not_loaded",
+            "response_size_limit",
+        ]
 
     def test_cancel_queued_execution(self, client):
         """Test cancelling a queued execution."""
@@ -1682,6 +2261,22 @@ class TestExecutionsAPI:
         assert second.status_code == 200
         assert first.json()["state"] == "SUCCEEDED"
         assert second.json()["state"] == "SUCCEEDED"
+
+    def test_cancel_terminal_execution_fails_wide_inline_result_closed(self, client):
+        task = RayTaskExecution.objects.create(
+            task_id="test-cancel-terminal-wide-result",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+            result_data=json.dumps(
+                [0] * (testproject_api._EXECUTION_RESULT_JSON_DEPTH_SCAN_MAX_ITEMS + 1)
+            ),
+        )
+
+        response = client.post(f"/api/executions/{task.pk}/cancel")
+
+        assert response.status_code == 200
+        assert response.json()["state"] == "SUCCEEDED"
+        assert response.json()["result_data"] == REDACTED
 
     def test_retry_failed_execution(self, client):
         """Test retrying a failed execution."""

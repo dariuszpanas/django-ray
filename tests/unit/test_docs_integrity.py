@@ -177,14 +177,19 @@ def test_input_storage_guide_states_filesystem_trust_boundary() -> None:
     assert "symlinks or Windows reparse points" in guide
 
 
-def test_execution_api_docs_limit_bounded_claims_to_the_list_surface() -> None:
+def test_execution_api_docs_define_bounded_list_and_detail_surfaces() -> None:
     api_reference = (DOCS / "reference" / "api.md").read_text(encoding="utf-8")
     observability = (DOCS / "observability.md").read_text(encoding="utf-8")
 
     for document in (api_reference, observability):
+        normalized = " ".join(document.lower().split())
         assert "4,096" in document
         assert "256 KiB" in document
         assert "stored_value_exceeds_list_limit" in document
+        assert "65,536" in document
+        assert "stored_value_exceeds_detail_limit" in document
+        assert "external_result_not_loaded" in document
+        assert "execution_detail_response_limit" in document
         assert "response_size_limit" in document
         assert "next_cursor" in document
         assert "filter-bound" in document
@@ -192,6 +197,10 @@ def test_execution_api_docs_limit_bounded_claims_to_the_list_surface() -> None:
         assert "GET /api/executions/{id}" in document
         assert "exact operator" in document
         assert "lookup" in document
+        assert "malformed" in normalized
+        assert "[redacted]" in normalized
+        assert "ordinary exception" in normalized
+        assert "process-control exceptions" in normalized
 
 
 def test_celery_ray_portfolio_recipe_is_parseable_and_complete() -> None:
