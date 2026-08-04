@@ -262,11 +262,17 @@ uv run make createsuperuser  # Create admin user
 
 ```bash
 uv run make worker           # Ray Job API mode
-uv run make worker-local     # Local Ray (recommended)
+uv run make worker-local     # Native local Ray for single-host development
 uv run make worker-sync      # Sync mode (no Ray)
 uv run make worker-all       # All django-ray backend queues, local Ray
 uv run make worker-cluster   # Connect to cluster
 ```
+
+Linux is the production target. Ray's native Windows support is beta, so prefer WSL2 or
+the documented Docker path for repeatable development and keep one native local-Ray
+owner on a Windows host at a time. See the
+[platform compatibility boundary](https://django-ray.readthedocs.io/en/latest/compatibility/#platforms)
+before choosing native local mode.
 
 ### Quick Start (End-to-End Testing)
 

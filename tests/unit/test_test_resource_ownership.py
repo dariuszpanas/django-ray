@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -21,6 +22,25 @@ class _CollectedItem:
 
     def get_closest_marker(self, name: str) -> object | None:
         return object() if name in self.markers else None
+
+
+@dataclass
+class _ConfigOption:
+    collectonly: bool = False
+
+
+@dataclass
+class _Config:
+    rootpath: Path
+    option: _ConfigOption = field(default_factory=_ConfigOption)
+    stash: dict[object, object] = field(default_factory=dict)
+
+
+@dataclass
+class _Session:
+    config: _Config
+    items: list[_CollectedItem]
+    testsfailed: int = 0
 
 
 @dataclass
@@ -239,6 +259,118 @@ def test_external_resource_guard_is_tryfirst() -> None:
     hook_options = conftest.pytest_collection_modifyitems.pytest_impl
 
     assert hook_options["tryfirst"] is True
+
+
+def test_real_ray_ownership_hook_runs_after_final_deselection() -> None:
+    hook_options = conftest.pytest_collection_finish.pytest_impl
+
+    assert hook_options["trylast"] is True
+
+
+@pytest.mark.parametrize(
+    ("collectonly", "testsfailed", "markers"),
+    [
+        (True, 0, {"real_ray"}),
+        (False, 1, {"real_ray"}),
+        (False, 0, set()),
+    ],
+)
+def test_real_ray_ownership_ignores_non_executing_final_selections(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    collectonly: bool,
+    testsfailed: int,
+    markers: set[str],
+) -> None:
+    class _UnexpectedOwnership:
+        def __init__(self) -> None:
+            raise AssertionError("ownership must remain inert")
+
+    monkeypatch.setattr(conftest, "RealRayOwnershipLock", _UnexpectedOwnership)
+    session = _Session(
+        config=_Config(
+            rootpath=tmp_path,
+            option=_ConfigOption(collectonly=collectonly),
+        ),
+        items=[_CollectedItem(markers=markers)],
+        testsfailed=testsfailed,
+    )
+
+    conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("first_release_hook", ["sessionfinish", "unconfigure"])
+def test_real_ray_ownership_uses_final_items_and_releases_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    first_release_hook: str,
+) -> None:
+    acquired: list[dict[str, object]] = []
+    release_calls: list[bool] = []
+
+    class _FakeOwnership:
+        def acquire(self, owner: dict[str, object]) -> None:
+            acquired.append(owner)
+
+        def release(self) -> None:
+            release_calls.append(True)
+
+    monkeypatch.setattr(conftest, "RealRayOwnershipLock", _FakeOwnership)
+    config = _Config(rootpath=tmp_path)
+    session = _Session(
+        config=config,
+        items=[
+            _CollectedItem(markers={"real_ray"}),
+            _CollectedItem(markers={"real_ray", "compiled_graph_opt_in"}),
+            _CollectedItem(),
+        ],
+    )
+
+    conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
+
+    assert len(acquired) == 1
+    assert acquired[0]["pid"] == os.getpid()
+    assert acquired[0]["rootpath"] == str(tmp_path.resolve())
+    assert acquired[0]["selected_count"] == 2
+
+    if first_release_hook == "sessionfinish":
+        conftest.pytest_sessionfinish(session, 0)  # type: ignore[arg-type]
+        conftest.pytest_unconfigure(config)  # type: ignore[arg-type]
+    else:
+        conftest.pytest_unconfigure(config)  # type: ignore[arg-type]
+        conftest.pytest_sessionfinish(session, 0)  # type: ignore[arg-type]
+
+    assert release_calls == [True]
+
+
+def test_real_ray_ownership_contention_becomes_bounded_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _ContendedOwnership:
+        def acquire(self, owner: dict[str, object]) -> None:
+            del owner
+            raise conftest.RealRayOwnershipUnavailableError(
+                tmp_path / "owner.lock",
+                {
+                    "pid": 4242,
+                    "hostname": "other-host",
+                    "rootpath": "other-worktree",
+                    "selected_count": 2,
+                },
+            )
+
+        def release(self) -> None:
+            raise AssertionError("an unacquired lock must not be released")
+
+    monkeypatch.setattr(conftest, "RealRayOwnershipLock", _ContendedOwnership)
+    session = _Session(
+        config=_Config(rootpath=tmp_path),
+        items=[_CollectedItem(markers={"real_ray"})],
+    )
+
+    with pytest.raises(pytest.UsageError, match=r"owner metadata: .*4242"):
+        conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
 
 
 def test_compiled_graph_opt_in_requires_real_ray_marker() -> None:

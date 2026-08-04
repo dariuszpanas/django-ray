@@ -656,6 +656,20 @@ uv run python scripts/test_suite_inventory.py run \
   -- -v
 ```
 
+Any non-collection pytest session whose final selected items include `real_ray` acquires
+one OS-released host-wide django-ray test lock before executing tests. The lock spans
+processes and linked worktrees, so two agents cannot accidentally start independent local
+Ray test owners on the same machine. A contender fails before test execution with bounded
+owner metadata; it does not wait, retry, skip, or delete another process's state. The lock
+file may remain after a process exits, but the operating-system lock is released
+automatically and stale contents never establish ownership. Collect-only inventory and
+sessions with no selected `real_ray` case remain lock-free.
+
+This guard protects the validity of local evidence; it is not a workaround for Ray's
+native Windows lifecycle issue and does not prove that an upstream version fixed it. Run
+real-Ray commands serially, then interpret the supported Linux and KubeRay gates separately
+from the documented [native Windows boundary](compatibility.md#platforms).
+
 Tests that request `ray_cluster` or `live_ray_cluster` are checked during collection for the
 matching marker. Add a new external-resource fixture to `EXTERNAL_RESOURCE_FIXTURE_MARKERS` in
 `tests/conftest.py` so an unmarked consumer cannot silently enter another lane.

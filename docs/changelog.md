@@ -56,6 +56,10 @@ and the detailed [migration notes](#migration) before enabling their opt-in writ
 
 ### Development scope
 
+- Native Windows Ray remains a best-effort development boundary; Linux is the production
+  target. Real-Ray pytest sessions now take an OS-released host-wide lock across processes
+  and worktrees so concurrent local clusters cannot contaminate development evidence. The
+  guard fails before test execution instead of waiting, retrying, or skipping coverage.
 - Supported execution remains synchronous, dynamic Ray Core, and Ray Job. The current
   unreleased development line adds durable priority scheduling, bounded worker polling,
   opt-in durable oversized inputs, coroutine tasks, workflow plan and bounded map/reduce

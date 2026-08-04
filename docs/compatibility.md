@@ -65,8 +65,16 @@ Ray publishes platform-specific wheels. A pure-Python django-ray wheel does not 
 that Ray is available on every Python/platform combination.
 
 - Linux is the production target for clusters and Kubernetes.
-- Ray's Windows multi-node support remains experimental; Windows is useful for local
-  development and tests.
+- Ray's
+  [native Windows support remains beta](https://docs.ray.io/en/latest/ray-overview/installation.html#windows-support),
+  and multi-node Windows clusters are untested upstream. django-ray retains Windows for
+  best-effort local development and
+  test visibility, not as a production or release-certification target. Repeated native
+  local-Ray lifecycles have intermittently aborted during startup before any job, worker,
+  object, or application task registered; the upstream investigation is
+  [ray-project/ray#65181](https://github.com/ray-project/ray/issues/65181). No Ray release
+  is currently identified as the fix. Use Linux, WSL2, or the documented Docker path for
+  repeatable evaluation, and keep one native local-Ray owner on a Windows host at a time.
 - Ray publishes Linux aarch64 wheels for supported Python versions, but users must
   confirm their OS, architecture, and Python ABI match an available Ray wheel.
 
