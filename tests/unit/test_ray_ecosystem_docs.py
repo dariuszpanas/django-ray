@@ -143,6 +143,7 @@ def test_ray_ecosystem_component_evidence_and_decision_links_are_current() -> No
 
     for destination in (
         "ray-data.md",
+        "ray-serve-gateway.md",
         "design/ray-serve-boundary.md",
         "compiled-graph-compatibility.md",
     ):
@@ -175,6 +176,10 @@ def test_ray_ecosystem_component_evidence_and_decision_links_are_current() -> No
     assert "enables no product strategy" in compiled
     assert "fails the residual-resource cleanup invariant" in compiled
     assert "cannot promote it" in compiled
+
+    serve = re.sub(r"\s+", " ", _section(content, "Ray Serve and Serve LLM", level=3))
+    assert "tested against a loopback fake upstream" in serve
+    assert "does not prove a live Serve or KubeRay deployment" in serve
 
     official = _section(content, "Official Ray references")
     official_destinations = re.findall(r"\[[^\]]+\]\(([^)]+)\)", official)

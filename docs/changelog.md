@@ -424,6 +424,15 @@ and the detailed [migration notes](#migration) before enabling their opt-in writ
   models, or migrations. It also distinguishes django-ray workflows from the removed
   upstream `ray.workflow` package and records the current Ray Data and base-import
   evidence instead of repeating stale support claims.
+- A Django-to-private-Ray-Serve guide now provides a canonical executable gateway for
+  bounded authenticated online inference without writing a FastAPI ingress. It maps
+  upstream timeout, application-owned overload, unavailable, model-error, and
+  invalid-response outcomes into a fixed public contract; rejects redirects; and keeps
+  request, response, and diagnostic data bounded. The recipe targets the private
+  KubeRay `*-serve-svc` data plane and is tested against a loopback fake upstream.
+  Serve configuration, replicas, health, rollout, traffic switching, and rollback
+  remain application/platform-owned; no package dependency, API, model, migration, or
+  deployment integration is added.
 - The required Ray dependency now starts at 2.56.0 instead of 2.53.0 so a fresh
   django-ray installation cannot resolve below published upstream security fixes.
   The minimum-dependency lane, installed-wheel verification, ordinary compatibility

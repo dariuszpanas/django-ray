@@ -57,6 +57,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   named profiles, code delivery, cache behavior, and security boundaries.
 - [Ray Serve integration boundary](https://django-ray.readthedocs.io/en/latest/design/ray-serve-boundary/):
   deferred ownership, lifecycle, security, and packaging decision.
+- [Django gateway to private Ray Serve](https://django-ray.readthedocs.io/en/latest/ray-serve-gateway/):
+  authenticated bounded online inference, private data-plane routing, fixed failure
+  mapping, and sync/async guidance.
 
 ## Operations and reference
 

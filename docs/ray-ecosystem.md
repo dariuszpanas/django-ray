@@ -46,7 +46,7 @@ namespace which happens to import has all dependencies required for real work.
 | **Ray Train** | **Install:** matching `ray[train]` plus a framework; base does not guarantee a usable path.<br>**0.4 status:** Documented application-owned workload; untested. |
 | **Ray Tune** | **Install:** matching `ray[tune]` plus trainable/search dependencies; base does not guarantee a usable path.<br>**0.4 status:** Documented application-owned workload; untested. |
 | **RLlib** | **Install:** matching `ray[rllib]` plus framework/environment dependencies; base does not guarantee a usable path.<br>**0.4 status:** Documented application-owned workload; untested. |
-| **Ray Serve** | **Install:** matching `ray[serve]` in the serving environment; base does not guarantee a usable path.<br>**0.4 status:** Separate application/platform-owned service. |
+| **Ray Serve** | **Install:** matching `ray[serve]` in the serving environment; base does not guarantee a usable path.<br>**0.4 status:** Separate application/platform-owned service. See the [Django gateway recipe](ray-serve-gateway.md). |
 | **Ray Serve LLM** | **Install:** matching `ray[serve,llm]` plus engine/model dependencies; base does not guarantee a usable path.<br>**0.4 status:** Deferred, evidence-gated service. |
 | **Compiled Graph** | **Install:** base `ray.dag` imports; native canaries use matching `ray[cgraph]`.<br>**0.4 status:** Experimental groundwork; no enabled strategy. |
 
@@ -257,10 +257,11 @@ owns cluster rollout; the platform or GitOps layer owns approval, traffic switch
 and rollback. A public Django gateway can own normal Django request validation and
 business permissions while it calls the private Serve data plane.
 
-**Evidence and limit.** The [Ray Serve boundary](design/ray-serve-boundary.md) is a
-design decision, not deployment support. Issue #284 owns the copyable Django gateway
-recipe. Serve LLM remains deferred until a real model/engine/hardware tuple has bounded
-evidence.
+**Evidence and limit.** The [Ray Serve boundary](design/ray-serve-boundary.md) remains
+a design decision, not deployment support. The executable
+[Django gateway recipe](ray-serve-gateway.md) is tested against a loopback fake
+upstream; it does not prove a live Serve or KubeRay deployment. Serve LLM remains
+deferred until a real model/engine/hardware tuple has bounded evidence.
 
 ### Compiled Graph
 
