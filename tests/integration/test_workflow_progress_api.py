@@ -75,7 +75,6 @@ def workflow_execution(db) -> RayTaskExecution:
         "/api/cluster/workflows/task-id/topology/edges",
         "/api/cluster/workflows/task-id/nodes",
         "/api/cluster/workflows/task-id/node-detail?node_id=node-id",
-        "/api/cluster/workflows/task-id/nodes/node-id",
     ],
 )
 def test_bounded_workflow_routes_require_bearer_authentication(path: str) -> None:
@@ -159,48 +158,16 @@ def test_bounded_workflow_routes_normalize_query_errors_to_declared_error(
 
 
 @pytest.mark.django_db
-def test_live_node_route_preserves_live_and_log_query_contract(
+def test_legacy_live_node_route_is_unavailable(
     client: Client,
     workflow_execution: RayTaskExecution,
-    monkeypatch,
 ) -> None:
-    calls: list[dict[str, Any]] = []
-
-    def snapshot(candidate, node_id, **kwargs):
-        assert candidate.pk == workflow_execution.pk
-        calls.append({"node_id": node_id, **kwargs})
-        return {
-            "node": {"node_id": node_id, "label": "apply"},
-            "live": {
-                "ray_state": [{"state": "RUNNING"}],
-                "logs": {"stdout": "ready", "stderr": ""},
-                "reason": None,
-            },
-        }
-
-    monkeypatch.setattr("testproject.api.get_workflow_node_snapshot", snapshot)
-
     response = client.get(
         f"/api/cluster/workflows/{workflow_execution.task_id}/nodes/node-a",
         {"include_logs": "true", "tail": "17"},
     )
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "task_id": workflow_execution.task_id,
-        "node": {"node_id": "node-a", "label": "apply"},
-        "ray_state": [{"state": "RUNNING"}],
-        "logs": {"stdout": "ready", "stderr": ""},
-        "observability_error": None,
-    }
-    assert calls == [
-        {
-            "node_id": "node-a",
-            "include_live": True,
-            "include_logs": True,
-            "tail": 17,
-        }
-    ]
+    assert response.status_code == 404
 
 
 @pytest.mark.django_db

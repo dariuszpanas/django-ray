@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import logging
 import os
 import subprocess
@@ -243,7 +244,7 @@ def test_workflow_showcase_user_runs_one_success_at_a_time() -> None:
         scenario_name: str,
     ) -> dict[str, str]:
         observed.append(("poll", (task_id, timeout_seconds, scenario_name)))
-        return {"status": "SUCCEEDED"}
+        return {"status": "SUCCESSFUL"}
 
     def result(task_id: str) -> dict[str, object]:
         observed.append(("result", task_id))
@@ -732,7 +733,7 @@ def test_observability_demo_follows_every_successful_enqueue() -> None:
     user._poll_task_to_terminal = (  # type: ignore[method-assign]
         lambda task_id, *, scenario_name, timeout_seconds: (
             polls.append((task_id, scenario_name, timeout_seconds))
-            or {"task_id": task_id, "status": "SUCCEEDED"}
+            or {"task_id": task_id, "status": "SUCCESSFUL"}
         )
     )
 
@@ -743,7 +744,7 @@ def test_observability_demo_follows_every_successful_enqueue() -> None:
     )
 
     assert polls == [("demo-task-id", "demo family", 12.0)]
-    assert result == {"task_id": "demo-task-id", "status": "SUCCEEDED"}
+    assert result == {"task_id": "demo-task-id", "status": "SUCCESSFUL"}
 
 
 @pytest.mark.parametrize("enqueue_result", [None, {"task_id": "demo-task-id"}])
@@ -878,11 +879,22 @@ class _Response:
         text: str = "",
         status_code: int = 200,
         json_error: bool = False,
+        content: bytes | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.status_code = status_code
         self._payload = payload
         self.text = text
         self.json_error = json_error
+        self.content = json.dumps(payload).encode() if content is None else content
+        self.headers = (
+            {
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            }
+            if headers is None
+            else headers
+        )
         self.failures: list[str] = []
         self.successes = 0
 
@@ -923,6 +935,28 @@ def _polling_user(*responses: _Response) -> locustfile.AuthenticatedTaskUser:
     user = object.__new__(locustfile.AuthenticatedTaskUser)
     user.client = _PollingClient(list(responses))  # type: ignore[assignment]
     return user
+
+
+def _task_status_payload(
+    *,
+    state: str = "SUCCEEDED",
+    task_id: str = "task-id",
+    omission_reason: str | None = None,
+) -> dict[str, Any]:
+    args: list[int] | None = [2, 3] if omission_reason is None else None
+    kwargs: dict[str, object] | None = {} if omission_reason is None else None
+    return {
+        "task_id": task_id,
+        "status": locustfile._TASK_STATUS_BY_STATE[state],
+        "state": state,
+        "attempt_number": 1,
+        "execution_generation": 1,
+        "args": args,
+        "kwargs": kwargs,
+        "input_omission_reason": omission_reason,
+        "input_max_bytes": locustfile._TASK_STATUS_INPUT_MAX_BYTES,
+        "response_max_bytes": locustfile._TASK_STATUS_RESPONSE_MAX_BYTES,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1079,7 +1113,8 @@ def test_metrics_request_uses_shared_client_timeout() -> None:
 def test_terminal_polling_marks_unsuccessful_states_as_failures(
     terminal_state: str,
 ) -> None:
-    response = _Response({"task_id": "task-id", "status": terminal_state})
+    payload = _task_status_payload(state=terminal_state)
+    response = _Response(payload)
     user = _polling_user(response)
 
     result = user._poll_task_to_terminal(
@@ -1089,14 +1124,15 @@ def test_terminal_polling_marks_unsuccessful_states_as_failures(
         scenario_name="demo scenario",
     )
 
-    assert result == {"task_id": "task-id", "status": terminal_state}
+    assert result == payload
     assert response.successes == 0
     assert response.failures
     assert terminal_state in response.failures[0]
 
 
 def test_terminal_polling_accepts_only_successful_completion() -> None:
-    response = _Response({"task_id": "task-id", "status": "SUCCESSFUL"})
+    payload = _task_status_payload()
+    response = _Response(payload)
     user = _polling_user(response)
 
     result = user._poll_task_to_terminal(
@@ -1106,7 +1142,7 @@ def test_terminal_polling_accepts_only_successful_completion() -> None:
         scenario_name="demo scenario",
     )
 
-    assert result == {"task_id": "task-id", "status": "SUCCESSFUL"}
+    assert result == payload
     assert response.successes == 1
     assert response.failures == []
 
@@ -1114,8 +1150,8 @@ def test_terminal_polling_accepts_only_successful_completion() -> None:
 def test_terminal_polling_is_bounded_and_records_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = _Response({"task_id": "task-id", "status": "RUNNING"})
-    second = _Response({"task_id": "task-id", "status": "RUNNING"})
+    first = _Response(_task_status_payload(state="RUNNING"))
+    second = _Response(_task_status_payload(state="RUNNING"))
     user = _polling_user(first, second)
     monotonic_values = iter([0.0, 0.0, 0.0, 0.25, 1.0])
     sleeps: list[float] = []
@@ -1142,8 +1178,9 @@ def test_terminal_polling_is_bounded_and_records_timeout(
 def test_terminal_polling_follows_active_state_to_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    running = _Response({"task_id": "task-id", "status": "RUNNING"})
-    succeeded = _Response({"task_id": "task-id", "status": "SUCCEEDED"})
+    running = _Response(_task_status_payload(state="RUNNING"))
+    succeeded_payload = _task_status_payload()
+    succeeded = _Response(succeeded_payload)
     user = _polling_user(running, succeeded)
     monkeypatch.setattr(locustfile.time, "sleep", lambda _seconds: None)
 
@@ -1154,14 +1191,14 @@ def test_terminal_polling_follows_active_state_to_success(
         scenario_name="demo scenario",
     )
 
-    assert result == {"task_id": "task-id", "status": "SUCCEEDED"}
+    assert result == succeeded_payload
     assert user.client.calls == 2
     assert running.successes == 1
     assert succeeded.successes == 1
 
 
 def test_terminal_polling_rejects_mismatched_task_identity() -> None:
-    response = _Response({"task_id": "different-task", "status": "SUCCEEDED"})
+    response = _Response(_task_status_payload(task_id="different-task"))
     user = _polling_user(response)
 
     result = user._poll_task_to_terminal(
@@ -1175,3 +1212,89 @@ def test_terminal_polling_rejects_mismatched_task_identity() -> None:
     assert response.successes == 0
     assert response.failures
     assert "mismatched task ID" in response.failures[0]
+
+
+@pytest.mark.parametrize(
+    "omission_reason",
+    [
+        None,
+        "external_input_not_loaded",
+        "stored_input_exceeds_status_limit",
+        "malformed_inline_input",
+        "encoded_response_limit",
+    ],
+)
+def test_task_status_contract_accepts_the_fixed_omission_vocabulary(
+    omission_reason: str | None,
+) -> None:
+    payload = _task_status_payload(omission_reason=omission_reason)
+    response = _Response(payload)
+
+    assert (
+        locustfile._task_status_contract_error(
+            response,
+            payload,
+            task_id="task-id",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("status", "FAILED", "state/status pair"),
+        ("attempt_number", True, "attempt number"),
+        ("execution_generation", -1, "execution generation"),
+        ("input_max_bytes", 1, "input byte limit"),
+        ("response_max_bytes", 1, "encoded byte limit"),
+        ("input_omission_reason", "invented", "unknown input omission reason"),
+    ],
+)
+def test_terminal_polling_rejects_task_status_contract_drift(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    payload = _task_status_payload()
+    payload[field] = value
+    response = _Response(payload)
+    user = _polling_user(response)
+
+    assert (
+        user._poll_task_to_terminal(
+            "task-id",
+            timeout_seconds=1,
+            poll_interval_seconds=0,
+            scenario_name="demo scenario",
+        )
+        is None
+    )
+    assert response.failures and message in response.failures[0]
+
+
+def test_terminal_polling_rejects_oversized_or_cacheable_status_responses() -> None:
+    oversized = _Response(
+        _task_status_payload(),
+        content=b"x" * (locustfile._TASK_STATUS_RESPONSE_MAX_BYTES + 1),
+    )
+    cacheable = _Response(
+        _task_status_payload(),
+        headers={
+            "Cache-Control": "public",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+    for response, expected in ((oversized, "64 KiB"), (cacheable, "caching")):
+        user = _polling_user(response)
+        assert (
+            user._poll_task_to_terminal(
+                "task-id",
+                timeout_seconds=1,
+                poll_interval_seconds=0,
+                scenario_name="demo scenario",
+            )
+            is None
+        )
+        assert response.failures and expected in response.failures[0]

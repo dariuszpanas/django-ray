@@ -119,6 +119,12 @@ protocol. An application that exposes retry through an API must perform object/t
 authorization and implement its own operator confirmation, idempotency, and audit
 policy; never accept or forward the Admin confirmation token.
 
+The testproject no longer exposes the arbitrary `POST /api/executions/reset` bulk
+adapter. Its HTTP retry surface is only `POST /api/executions/{id}/retry`, fenced by the
+attempt and execution generation observed during object authorization. The Admin's
+signed, capped multi-row confirmation remains available to staff; removing the sample
+bulk API does not remove that operator workflow.
+
 Application APIs that need an explicit outcome should call
 `django_ray.lifecycle.request_task_retry()` with the attempt number and execution
 generation observed during object authorization. Its stable result distinguishes
@@ -166,6 +172,14 @@ completion presence in SQL without transferring the completion envelope. Task in
 RuntimeEnv, progress, workflow plan, completion content, and unrelated cancellation
 payloads remain outside these projections. Cancellation does not guarantee immediate interruption of
 already-running synchronous Python code.
+
+The testproject maps cancellation to a fixed bounded HTTP outcome: `202` only for
+`ACCEPTED`, `404` for `NOT_FOUND`, and `409` for `ALREADY_REQUESTED`,
+`ALREADY_TERMINAL`, `COMPLETION_PENDING`, `STALE_ATTEMPT`, `STALE_GENERATION`, and
+`INVALID_STATE`. The response contains only `code`, `message`, `execution_id`, `state`,
+`attempt_number`, `execution_generation`, `next_action`, and
+`response_max_bytes=4096`, and the complete body is at most 4,096 bytes. It does not
+refresh or serialize unrelated execution fields or return task payloads and diagnostics.
 
 Tasks with durable external inputs keep the same immutable `input_reference` across
 automatic and manual retries; a retry does not upload a replacement. Corrupt,

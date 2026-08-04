@@ -9,9 +9,12 @@ from io import StringIO
 import pytest
 from django.db import connection
 from django.db.models import Q
+from django.test import Client
+from django.test.utils import CaptureQueriesContext
 
 from django_ray.management.commands.django_ray_benchmark_polling import Command
-from django_ray.models import RayTaskExecution, TaskWorkerLease
+from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from testproject import api as testproject_api
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.postgresql]
 
@@ -21,6 +24,77 @@ def _require_postgresql() -> None:
     """Keep the default SQLite suite fast while making this gate explicit."""
     if connection.vendor != "postgresql":
         pytest.skip("requires tests.postgres_settings and a PostgreSQL test database")
+
+
+@pytest.fixture
+def api_client(settings) -> Client:
+    token = settings.DJANGO_API_TOKEN
+    assert isinstance(token, str) and token
+    return Client(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+
+def test_postgresql_task_status_uses_database_byte_guards(api_client: Client) -> None:
+    protected = "\u00e9" * testproject_api._TASK_STATUS_INPUT_MAX_BYTES
+    execution = RayTaskExecution.objects.create(
+        task_id="postgresql-bounded-task-status",
+        callable_path="missing.module.callable",
+        state=TaskState.QUEUED,
+        args_json=json.dumps([protected], ensure_ascii=False),
+        kwargs_json="{}",
+        result_data=json.dumps({"protected": protected}, ensure_ascii=False),
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        response = api_client.get(f"/api/tasks/{execution.task_id}")
+
+    assert response.status_code == 200
+    assert response.json()["input_omission_reason"] == "stored_input_exceeds_status_limit"
+    assert response.json()["args"] is None
+    assert protected not in response.content.decode()
+    task_selects = [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].lstrip().upper().startswith("SELECT")
+        and "django_ray_raytaskexecution" in query["sql"]
+    ]
+    assert len(task_selects) == 1
+    assert "OCTET_LENGTH(" in task_selects[0]
+    assert "result_data" not in task_selects[0]
+
+
+def test_postgresql_workflow_poll_guards_diagnostics_before_transfer(
+    api_client: Client,
+) -> None:
+    protected = "\u00e9" * testproject_api._POLL_DIAGNOSTIC_MAX_BYTES
+    execution = RayTaskExecution.objects.create(
+        task_id="postgresql-bounded-runtime-env-poll",
+        callable_path="testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+        state=TaskState.FAILED,
+        runtime_env_hash="a" * 64,
+        result_data=json.dumps({"protected": protected}, ensure_ascii=False),
+        error_message=protected,
+        error_traceback=protected,
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        response = api_client.get(f"/api/cluster/runtime-env/{execution.task_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["result"] is None
+    assert payload["error"] is None
+    assert payload["result_omission_reason"] == "stored_result_exceeds_poll_limit"
+    assert payload["error_omission_reason"] == "stored_error_exceeds_poll_limit"
+    assert protected not in response.content.decode()
+    task_selects = [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].lstrip().upper().startswith("SELECT")
+        and "django_ray_raytaskexecution" in query["sql"]
+    ]
+    assert len(task_selects) == 1
+    assert "OCTET_LENGTH(" in task_selects[0]
+    assert "error_traceback" not in task_selects[0]
 
 
 def test_production_claim_benchmark_records_repeatable_metrics_and_cleans_up() -> None:

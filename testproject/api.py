@@ -7,6 +7,7 @@ Tasks are defined using @task decorator and enqueued using .enqueue().
 from __future__ import annotations
 
 import json
+import math
 import secrets
 from collections.abc import Iterator
 from datetime import datetime
@@ -32,9 +33,9 @@ from django.db.models import (
     Value,
     When,
 )
-from django.http import Http404, HttpResponse
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
-from django.tasks import task_backends
+from django.tasks import TaskResultStatus
 from django.tasks.exceptions import InvalidTaskBackend
 from ninja import NinjaAPI, Schema
 from ninja.errors import HttpError
@@ -43,19 +44,15 @@ from pydantic import Field, field_validator
 
 from django_ray import __version__ as django_ray_version
 from django_ray.lifecycle import (
+    TaskCancellationRequestResult,
+    TaskCancellationRequestStatus,
     TaskRetryRequestResult,
     TaskRetryRequestStatus,
     request_task_cancellation,
     request_task_retry,
-    retry_task,
 )
 from django_ray.metrics import render_prometheus_metrics
-from django_ray.models import RayTaskExecution, TaskState
-from django_ray.observability import (
-    WorkflowObservabilityError,
-    get_workflow_node_snapshot,
-    get_workflow_progress,
-)
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.redaction import REDACTED, redact_text, redact_value, safe_json_dumps
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
@@ -105,6 +102,47 @@ _EXECUTION_DETAIL_DIAGNOSTIC_OMISSION_REASON = "stored_value_exceeds_detail_limi
 _EXECUTION_DETAIL_EXTERNAL_RESULT_OMISSION_REASON = "external_result_not_loaded"
 _EXECUTION_DETAIL_RESPONSE_OMISSION_REASON = "response_size_limit"
 _EXECUTION_PROJECTION_DATABASE_VENDORS = frozenset({"postgresql", "sqlite"})
+_TASK_STATUS_INPUT_MAX_BYTES = 16 * 1024
+_TASK_STATUS_RESPONSE_MAX_BYTES = 64 * 1024
+_POLL_DIAGNOSTIC_MAX_BYTES = 16 * 1024
+_POLL_ATTEMPT_ERROR_MAX_BYTES = 4 * 1024
+_POLL_ATTEMPT_MAX_COUNT = 4
+_POLL_RESPONSE_MAX_BYTES = 64 * 1024
+_CANCELLATION_RESPONSE_MAX_BYTES = 4 * 1024
+
+_TASK_STATUS_BY_STATE = {
+    TaskState.QUEUED: TaskResultStatus.READY.value,
+    TaskState.RUNNING: TaskResultStatus.RUNNING.value,
+    TaskState.SUCCEEDED: TaskResultStatus.SUCCESSFUL.value,
+    TaskState.FAILED: TaskResultStatus.FAILED.value,
+    TaskState.CANCELLED: TaskResultStatus.FAILED.value,
+    TaskState.CANCELLING: TaskResultStatus.RUNNING.value,
+    TaskState.LOST: TaskResultStatus.FAILED.value,
+    TaskState.EXPIRED: TaskResultStatus.FAILED.value,
+}
+
+
+def _reject_non_finite_json_constant(_value: str) -> float:
+    """Reject Python's non-standard NaN and infinity JSON extensions."""
+    raise ValueError("non-finite JSON constants are not supported")
+
+
+def _finite_json_float(value: str) -> float:
+    """Parse a JSON number only when its binary float remains finite."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("JSON number exceeds the finite float range")
+    return parsed
+
+
+def _strict_json_loads(value: Any) -> Any:
+    """Decode interoperable JSON without accepting non-finite numbers."""
+    return json.loads(
+        value,
+        parse_constant=_reject_non_finite_json_constant,
+        parse_float=_finite_json_float,
+    )
+
 
 _EXECUTION_LIST_VALUE_FIELDS = (
     "id",
@@ -149,6 +187,39 @@ _EXECUTION_DETAIL_VALUE_FIELDS = (
     "_detail_error_message",
     "_detail_error_message_bytes",
     "_detail_has_result_reference",
+)
+
+_TASK_STATUS_VALUE_FIELDS = (
+    "task_id",
+    "state",
+    "attempt_number",
+    "execution_generation",
+    "created_at",
+    "started_at",
+    "finished_at",
+    "_status_args_json",
+    "_status_kwargs_json",
+    "_status_input_bytes",
+    "_status_has_input_reference",
+)
+
+_POLL_EXECUTION_VALUE_FIELDS = (
+    "id",
+    "task_id",
+    "state",
+    "attempt_number",
+    "execution_generation",
+    "workflow_run_id",
+    "runtime_env_profile",
+    "runtime_env_hash",
+    "created_at",
+    "started_at",
+    "finished_at",
+    "_poll_result_data",
+    "_poll_result_data_bytes",
+    "_poll_error_message",
+    "_poll_error_message_bytes",
+    "_poll_has_result_reference",
 )
 
 
@@ -280,6 +351,45 @@ class TaskResultSchema(Schema):
         return redact_value(value)
 
 
+class TaskStatusSchema(Schema):
+    """Bounded monitoring projection for one durable task."""
+
+    task_id: str
+    status: str
+    state: str
+    attempt_number: int
+    execution_generation: int
+    enqueued_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    args: list | None
+    kwargs: dict | None
+    input_omission_reason: (
+        Literal[
+            "external_input_not_loaded",
+            "stored_input_exceeds_status_limit",
+            "malformed_inline_input",
+            "encoded_response_limit",
+        ]
+        | None
+    )
+    input_max_bytes: Literal[16384]
+    response_max_bytes: Literal[65536]
+
+    @field_validator("args", "kwargs", mode="before")
+    @classmethod
+    def redact_inputs(cls, value):
+        return redact_value(value) if value is not None else None
+
+
+class TaskStatusNotFoundSchema(Schema):
+    """Fixed response for a missing bounded task-status row."""
+
+    code: Literal["task_status_not_found"]
+    message: Literal["Task status was not found."]
+    response_max_bytes: Literal[65536]
+
+
 def _json_value_requires_fixed_redaction(value: Any) -> bool:
     """Detect excessive JSON depth or indeterminate depth within fixed work."""
     pending: list[tuple[Iterator[Any], int]] = [(iter((value,)), 0)]
@@ -400,6 +510,26 @@ _RETRY_EXECUTION_RESPONSES = {
     404: RetryExecutionOutcomeSchema,
     409: RetryExecutionOutcomeSchema | RetryExecutionRuntimeEnvConflictSchema,
 }
+
+
+class CancellationExecutionOutcomeSchema(Schema):
+    """Bounded outcome of requesting one execution cancellation."""
+
+    code: TaskCancellationRequestStatus
+    message: str
+    execution_id: int
+    state: str | None
+    attempt_number: int | None
+    execution_generation: int | None
+    next_action: str
+    response_max_bytes: Literal[4096]
+
+
+_CANCELLATION_EXECUTION_RESPONSES = {
+    202: CancellationExecutionOutcomeSchema,
+    404: CancellationExecutionOutcomeSchema,
+    409: CancellationExecutionOutcomeSchema,
+}
 # Django Ninja 1.5 uses the tuple contract; 1.6 adds Status to avoid its deprecation.
 _NINJA_STATUS = getattr(ninja_responses, "Status", None)
 
@@ -463,6 +593,71 @@ def _retry_execution_outcome(
     return _ninja_status(status_code, payload)
 
 
+def _cancellation_execution_outcome(
+    request: Any,
+    result: TaskCancellationRequestResult,
+    *,
+    status_code: int,
+) -> HttpResponse:
+    """Render one fixed cancellation result without execution diagnostics."""
+    messages = {
+        TaskCancellationRequestStatus.ACCEPTED: "Cancellation was accepted.",
+        TaskCancellationRequestStatus.ALREADY_REQUESTED: (
+            "Cancellation was already requested for this execution."
+        ),
+        TaskCancellationRequestStatus.ALREADY_TERMINAL: (
+            "The execution is already terminal and cannot be cancelled."
+        ),
+        TaskCancellationRequestStatus.COMPLETION_PENDING: (
+            "A terminal completion is awaiting durable reconciliation."
+        ),
+        TaskCancellationRequestStatus.NOT_FOUND: "The execution was not found.",
+        TaskCancellationRequestStatus.STALE_ATTEMPT: (
+            "The execution attempt changed before cancellation could be applied."
+        ),
+        TaskCancellationRequestStatus.STALE_GENERATION: (
+            "The execution generation changed before cancellation could be applied."
+        ),
+        TaskCancellationRequestStatus.INVALID_STATE: (
+            "The execution is not cancellable from its current state."
+        ),
+    }
+    if result.status is TaskCancellationRequestStatus.ACCEPTED:
+        if result.state == TaskState.CANCELLED:
+            next_action = "The queued attempt is cancelled; retain its archived history."
+        else:
+            next_action = "Poll until the worker records a terminal cancellation outcome."
+    elif result.status is TaskCancellationRequestStatus.ALREADY_REQUESTED:
+        next_action = "Poll the current attempt instead of submitting a duplicate request."
+    elif result.status is TaskCancellationRequestStatus.COMPLETION_PENDING:
+        next_action = "Poll until reconciliation records the terminal state."
+    elif result.status is TaskCancellationRequestStatus.NOT_FOUND:
+        next_action = "Verify the execution identifier and object authorization."
+    elif result.status in {
+        TaskCancellationRequestStatus.STALE_ATTEMPT,
+        TaskCancellationRequestStatus.STALE_GENERATION,
+    }:
+        next_action = "Refresh and re-authorize the current attempt before cancelling."
+    else:
+        next_action = "Leave the current execution unchanged and inspect its lifecycle state."
+    response = CancellationExecutionOutcomeSchema.model_validate(
+        {
+            "code": result.status,
+            "message": messages[result.status],
+            "execution_id": result.execution_id,
+            "state": result.state,
+            "attempt_number": result.attempt_number,
+            "execution_generation": result.execution_generation,
+            "next_action": next_action,
+            "response_max_bytes": _CANCELLATION_RESPONSE_MAX_BYTES,
+        }
+    )
+    encoded = _encode_api_schema_response(request, response, status_code=status_code)
+    if len(encoded) > _CANCELLATION_RESPONSE_MAX_BYTES:
+        raise ImproperlyConfigured("Cancellation response exceeds its byte bound")
+    return _bounded_api_http_response(encoded, status_code=status_code)
+
+
 class TaskListResponseSchema(Schema):
     """Schema for task list response."""
 
@@ -484,12 +679,6 @@ class TaskListResponseSchema(Schema):
     truncation_reason: Literal["page_limit", "response_size_limit"] | None
     diagnostic_max_bytes: Literal[4096]
     response_max_bytes: Literal[262144]
-
-
-class MessageSchema(Schema):
-    """Simple message response."""
-
-    message: str
 
 
 class HealthSchema(Schema):
@@ -521,7 +710,7 @@ class StatsSchema(Schema):
 
 
 class WorkflowResultSchema(Schema):
-    """Status and result for a Ray-native workflow task."""
+    """Bounded status and diagnostics for a Ray-native workflow task."""
 
     task_id: str
     state: str
@@ -531,6 +720,20 @@ class WorkflowResultSchema(Schema):
     progress: dict | None
     result: dict | None
     error: str | None
+    result_omission_reason: (
+        Literal[
+            "external_result_not_loaded",
+            "stored_result_exceeds_poll_limit",
+            "malformed_inline_result",
+            "encoded_response_limit",
+        ]
+        | None
+    )
+    error_omission_reason: (
+        Literal["stored_error_exceeds_poll_limit", "encoded_response_limit"] | None
+    )
+    diagnostic_max_bytes: Literal[16384]
+    response_max_bytes: Literal[65536]
 
     @field_validator("progress", "result", mode="before")
     @classmethod
@@ -549,6 +752,9 @@ class WorkflowRecoveryAttemptSchema(Schema):
     attempt_number: int
     state: str
     error: str | None
+    error_omission_reason: (
+        Literal["stored_error_exceeds_attempt_limit", "encoded_response_limit"] | None
+    )
 
     @field_validator("error", mode="before")
     @classmethod
@@ -562,31 +768,7 @@ class WorkflowRecoveryResultSchema(WorkflowResultSchema):
     attempt_number: int
     runtime_env_profile: str
     attempts: list[WorkflowRecoveryAttemptSchema]
-
-
-class WorkflowNodeSchema(Schema):
-    """Durable node metadata enriched with optional live Ray data."""
-
-    task_id: str
-    node: dict
-    ray_state: list[dict] | None
-    logs: dict[str, str] | None
-    observability_error: str | None
-
-    @field_validator("node", "ray_state", mode="before")
-    @classmethod
-    def redact_node_payload(cls, value):
-        return redact_value(value)
-
-    @field_validator("logs", mode="before")
-    @classmethod
-    def redact_logs(cls, value):
-        return redact_value(value)
-
-    @field_validator("observability_error", mode="before")
-    @classmethod
-    def redact_observability_error(cls, value):
-        return redact_text(value) if value is not None else None
+    attempt_error_max_bytes: Literal[4096]
 
 
 class WorkflowProgressSummaryReadSchema(Schema):
@@ -676,7 +858,7 @@ def _workflow_read_error_response(
 
 
 class RuntimeEnvResultSchema(Schema):
-    """Durable task state plus its immutable RuntimeEnv identity."""
+    """Bounded task state plus its immutable RuntimeEnv identity."""
 
     task_id: str
     state: str
@@ -687,6 +869,20 @@ class RuntimeEnvResultSchema(Schema):
     finished_at: datetime | None
     result: dict | None
     error: str | None
+    result_omission_reason: (
+        Literal[
+            "external_result_not_loaded",
+            "stored_result_exceeds_poll_limit",
+            "malformed_inline_result",
+            "encoded_response_limit",
+        ]
+        | None
+    )
+    error_omission_reason: (
+        Literal["stored_error_exceeds_poll_limit", "encoded_response_limit"] | None
+    )
+    diagnostic_max_bytes: Literal[16384]
+    response_max_bytes: Literal[65536]
 
     @field_validator("result", mode="before")
     @classmethod
@@ -925,24 +1121,20 @@ def enqueue_echo(request, queue: str = "default"):
 # ============================================================================
 
 
-@api.get("/tasks/{task_id}", response=TaskResultSchema, tags=["Tasks"])
-def get_task(request, task_id: str):
-    """Get task status by task ID (UUID).
-
-    Uses Django 6's native get_result() API.
-    """
-    backend = task_backends["default"]
-    result = backend.get_result(task_id)
-
-    return {
-        "task_id": result.id,
-        "status": result.status.value,
-        "enqueued_at": result.enqueued_at,
-        "started_at": result.started_at,
-        "finished_at": result.finished_at,
-        "args": result.args,
-        "kwargs": result.kwargs,
-    }
+@api.get(
+    "/tasks/{task_id}",
+    response={200: TaskStatusSchema, 404: TaskStatusNotFoundSchema},
+    tags=["Tasks"],
+)
+def get_task(
+    request,
+    task_id: Annotated[str, Field(max_length=255)],
+):
+    """Return one bounded monitoring projection without loading a TaskResult."""
+    row = _bounded_task_status_row(task_id)
+    if row is None:
+        return _task_status_not_found_response(request)
+    return _bounded_task_status_response(request, row)
 
 
 # ============================================================================
@@ -1175,6 +1367,149 @@ def _encode_api_schema_response(
     if isinstance(rendered, str):
         return rendered.encode(api.renderer.charset)
     return bytes(rendered)
+
+
+def _bounded_api_http_response(encoded: bytes, *, status_code: int) -> HttpResponse:
+    """Return one rendered API response with monitoring-safe cache headers."""
+    response = HttpResponse(
+        encoded,
+        status=status_code,
+        content_type=api.get_content_type(),
+    )
+    response["Cache-Control"] = "no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _require_projection_database(*, surface: str) -> None:
+    if connection.vendor not in _EXECUTION_PROJECTION_DATABASE_VENDORS:
+        raise ImproperlyConfigured(
+            f"The testproject {surface} supports only SQLite and PostgreSQL byte guards"
+        )
+
+
+def _bounded_task_status_row(task_id: str) -> dict[str, Any] | None:
+    """Read one task status through an unlocked, byte-guarded SQL projection."""
+    _require_projection_database(surface="task status")
+    guarded = (
+        RayTaskExecution.objects.annotate(
+            _status_args_bytes=_DatabaseByteLength("args_json"),
+            _status_kwargs_bytes=_DatabaseByteLength("kwargs_json"),
+        )
+        .annotate(
+            _status_input_bytes=F("_status_args_bytes") + F("_status_kwargs_bytes"),
+        )
+        .annotate(
+            _status_args_json=Case(
+                When(
+                    (Q(input_reference__isnull=True) | Q(input_reference=""))
+                    & Q(_status_input_bytes__lte=_TASK_STATUS_INPUT_MAX_BYTES),
+                    then=F("args_json"),
+                ),
+                default=Value(None),
+                output_field=TextField(),
+            ),
+            _status_kwargs_json=Case(
+                When(
+                    (Q(input_reference__isnull=True) | Q(input_reference=""))
+                    & Q(_status_input_bytes__lte=_TASK_STATUS_INPUT_MAX_BYTES),
+                    then=F("kwargs_json"),
+                ),
+                default=Value(None),
+                output_field=TextField(),
+            ),
+            _status_has_input_reference=Case(
+                When(
+                    Q(input_reference__isnull=False) & ~Q(input_reference=""),
+                    then=Value(True),
+                ),
+                default=Value(False),
+                output_field=BooleanField(),
+            ),
+        )
+        .filter(task_id=task_id)
+        .values(*_TASK_STATUS_VALUE_FIELDS)
+    )
+    return guarded.first()
+
+
+def _task_status_item(row: dict[str, Any]) -> TaskStatusSchema:
+    """Decode only a bounded inline input pair into the public status schema."""
+    input_bytes = _validated_diagnostic_byte_count(row.get("_status_input_bytes"))
+    has_input_reference = row.get("_status_has_input_reference") is True
+    args_json = row.get("_status_args_json")
+    kwargs_json = row.get("_status_kwargs_json")
+    args: list[Any] | None = None
+    kwargs: dict[str, Any] | None = None
+
+    if has_input_reference:
+        omission_reason = "external_input_not_loaded"
+    elif input_bytes is not None and input_bytes > _TASK_STATUS_INPUT_MAX_BYTES:
+        omission_reason = "stored_input_exceeds_status_limit"
+    else:
+        try:
+            parsed_args = _strict_json_loads(args_json)
+            parsed_kwargs = _strict_json_loads(kwargs_json)
+            if not isinstance(parsed_args, list) or not isinstance(parsed_kwargs, dict):
+                raise ValueError
+        except (RecursionError, TypeError, ValueError, UnicodeError):
+            omission_reason = "malformed_inline_input"
+        else:
+            args = parsed_args
+            kwargs = parsed_kwargs
+            omission_reason = None
+
+    state = str(row["state"])
+    return TaskStatusSchema.model_validate(
+        {
+            "task_id": row["task_id"],
+            "status": _TASK_STATUS_BY_STATE.get(state, TaskResultStatus.READY.value),
+            "state": state,
+            "attempt_number": row["attempt_number"],
+            "execution_generation": row["execution_generation"],
+            "enqueued_at": row["created_at"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "args": args,
+            "kwargs": kwargs,
+            "input_omission_reason": omission_reason,
+            "input_max_bytes": _TASK_STATUS_INPUT_MAX_BYTES,
+            "response_max_bytes": _TASK_STATUS_RESPONSE_MAX_BYTES,
+        }
+    )
+
+
+def _bounded_task_status_response(request: Any, row: dict[str, Any]) -> HttpResponse:
+    """Render one task-status row under its exact aggregate response ceiling."""
+    response = _task_status_item(row)
+    encoded = _encode_api_schema_response(request, response, status_code=200)
+    if len(encoded) > _TASK_STATUS_RESPONSE_MAX_BYTES:
+        response = response.model_copy(
+            update={
+                "args": None,
+                "kwargs": None,
+                "input_omission_reason": "encoded_response_limit",
+            }
+        )
+        encoded = _encode_api_schema_response(request, response, status_code=200)
+    if len(encoded) > _TASK_STATUS_RESPONSE_MAX_BYTES:
+        raise ImproperlyConfigured("Task status response metadata exceeds its byte bound")
+    return _bounded_api_http_response(encoded, status_code=200)
+
+
+def _task_status_not_found_response(request: Any) -> HttpResponse:
+    """Return a fixed missing-row response independent of stored task data."""
+    response = TaskStatusNotFoundSchema.model_validate(
+        {
+            "code": "task_status_not_found",
+            "message": "Task status was not found.",
+            "response_max_bytes": _TASK_STATUS_RESPONSE_MAX_BYTES,
+        }
+    )
+    encoded = _encode_api_schema_response(request, response, status_code=404)
+    if len(encoded) > _TASK_STATUS_RESPONSE_MAX_BYTES:
+        raise ImproperlyConfigured("Task status missing response exceeds its byte bound")
+    return _bounded_api_http_response(encoded, status_code=404)
 
 
 def _encode_execution_list_response(
@@ -1448,62 +1783,6 @@ def get_stats(request):
     }
 
 
-@api.post("/executions/reset", response=MessageSchema, tags=["Admin"])
-def reset_executions(
-    request,
-    state: Literal["FAILED", "CANCELLED", "LOST", "EXPIRED"] | None = None,
-):
-    """Retry terminal task executions through the locked lifecycle service."""
-    retryable_states = (
-        TaskState.FAILED,
-        TaskState.CANCELLED,
-        TaskState.LOST,
-        TaskState.EXPIRED,
-    )
-    if state:
-        queryset = RayTaskExecution.objects.filter(state=state.upper())
-    else:
-        queryset = RayTaskExecution.objects.filter(state__in=retryable_states)
-
-    execution_ids = list(queryset.values_list("pk", flat=True))
-    count = 0
-    blocked = 0
-    for execution_id in execution_ids:
-        execution = (
-            RayTaskExecution.objects.only(
-                "pk",
-                "state",
-                "attempt_number",
-                "execution_generation",
-            )
-            .filter(pk=execution_id)
-            .first()
-        )
-        if execution is None:
-            continue
-        try:
-            reset = (
-                retry_task(
-                    execution.pk,
-                    expected_attempt_number=execution.attempt_number,
-                    expected_execution_generation=execution.execution_generation,
-                )
-                is not None
-            )
-        except RuntimeEnvSnapshotError:
-            blocked += 1
-            continue
-        count += int(reset)
-
-    message = f"Reset {count} execution(s) to QUEUED state"
-    if blocked:
-        message += (
-            f"; blocked {blocked} execution(s) because their persisted RuntimeEnv "
-            "snapshots failed validation"
-        )
-    return {"message": message}
-
-
 @api.get(
     "/executions/{execution_id}",
     response={
@@ -1518,18 +1797,39 @@ def get_execution(request, execution_id: int):
     return _bounded_execution_detail_response(request, row)
 
 
-@api.post("/executions/{execution_id}/cancel", response=TaskExecutionSchema, tags=["Admin"])
+@api.post(
+    "/executions/{execution_id}/cancel",
+    response=_CANCELLATION_EXECUTION_RESPONSES,
+    tags=["Admin"],
+)
 def cancel_execution(request, execution_id: int):
-    """Cancel a queued or running task execution."""
-    task = get_object_or_404(_workflow_observability_executions(), pk=execution_id)
-
-    request_task_cancellation(
-        task.pk,
-        expected_attempt_number=task.attempt_number,
-        expected_execution_generation=task.execution_generation,
+    """Request cancellation and return only the bounded lifecycle outcome."""
+    authorized_identity = (
+        RayTaskExecution.objects.filter(pk=execution_id)
+        .values("pk", "attempt_number", "execution_generation")
+        .first()
     )
-    task.refresh_from_db()
-    return task
+    if authorized_identity is None:
+        outcome = TaskCancellationRequestResult(
+            status=TaskCancellationRequestStatus.NOT_FOUND,
+            execution_id=execution_id,
+            state=None,
+            attempt_number=None,
+            execution_generation=None,
+        )
+    else:
+        outcome = request_task_cancellation(
+            execution_id,
+            expected_attempt_number=authorized_identity["attempt_number"],
+            expected_execution_generation=authorized_identity["execution_generation"],
+        )
+    if outcome.accepted:
+        status_code = 202
+    elif outcome.status is TaskCancellationRequestStatus.NOT_FOUND:
+        status_code = 404
+    else:
+        status_code = 409
+    return _cancellation_execution_outcome(request, outcome, status_code=status_code)
 
 
 @api.post(
@@ -1962,28 +2262,23 @@ def cluster_workflow_benchmark(
     response=WorkflowResultSchema,
     tags=["Workflows"],
 )
-def get_cluster_workflow_benchmark(request, task_id: str):
-    """Return workflow state, timing summary, leaf details, or failure."""
-    execution = get_object_or_404(
-        _workflow_observability_executions(),
-        task_id=task_id,
-        callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
+def get_cluster_workflow_benchmark(
+    request,
+    task_id: Annotated[str, Field(max_length=255)],
+):
+    """Return one bounded polling snapshot for the fan-out example."""
+    row = _bounded_poll_execution_row(
+        task_id,
+        callable_paths=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark",),
     )
-    result = _result_value_for_execution(execution)
-    try:
-        progress = get_workflow_progress(execution)
-    except WorkflowObservabilityError:
-        progress = None
-    return {
-        "task_id": execution.task_id,
-        "state": execution.state,
-        "created_at": execution.created_at,
-        "started_at": execution.started_at,
-        "finished_at": execution.finished_at,
-        "progress": progress,
-        "result": result,
-        "error": execution.error_message,
-    }
+    return _bounded_poll_response(
+        request,
+        schema_type=WorkflowResultSchema,
+        payload=_workflow_poll_payload(
+            row,
+            progress=_bounded_workflow_poll_progress(row),
+        ),
+    )
 
 
 @api.post("/cluster/complex-workflow", response=TaskResultSchema, tags=["Workflows"])
@@ -2037,27 +2332,23 @@ def cluster_complex_workflow(
     response=WorkflowResultSchema,
     tags=["Workflows"],
 )
-def get_cluster_complex_workflow(request, task_id: str):
-    """Return live progress and results for the nested workflow example."""
-    execution = get_object_or_404(
-        _workflow_observability_executions(),
-        task_id=task_id,
-        callable_path=("testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"),
+def get_cluster_complex_workflow(
+    request,
+    task_id: Annotated[str, Field(max_length=255)],
+):
+    """Return one bounded polling snapshot for the nested workflow example."""
+    row = _bounded_poll_execution_row(
+        task_id,
+        callable_paths=("testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",),
     )
-    try:
-        progress = get_workflow_progress(execution)
-    except WorkflowObservabilityError:
-        progress = None
-    return {
-        "task_id": execution.task_id,
-        "state": execution.state,
-        "created_at": execution.created_at,
-        "started_at": execution.started_at,
-        "finished_at": execution.finished_at,
-        "progress": progress,
-        "result": _result_value_for_execution(execution),
-        "error": execution.error_message,
-    }
+    return _bounded_poll_response(
+        request,
+        schema_type=WorkflowResultSchema,
+        payload=_workflow_poll_payload(
+            row,
+            progress=_bounded_workflow_poll_progress(row),
+        ),
+    )
 
 
 @api.post("/cluster/workflow-showcase", response=TaskResultSchema, tags=["Workflows"])
@@ -2104,32 +2395,23 @@ def cluster_workflow_showcase(
     response=WorkflowResultSchema,
     tags=["Workflows"],
 )
-def get_cluster_workflow_showcase(request, task_id: str):
+def get_cluster_workflow_showcase(
+    request,
+    task_id: Annotated[str, Field(max_length=255)],
+):
     """Return a bounded progress summary and the compact result or failure."""
-    execution = get_object_or_404(
-        _workflow_observability_executions(),
-        task_id=task_id,
-        callable_path=("testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task"),
+    row = _bounded_poll_execution_row(
+        task_id,
+        callable_paths=("testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task",),
     )
-    try:
-        progress = get_workflow_progress_summary(
-            execution,
-            authorize=_authorize_example_workflow,
-            include_legacy=False,
-            infer_current_reporting_policy=False,
-        )
-    except WorkflowProgressReadError:
-        progress = None
-    return {
-        "task_id": execution.task_id,
-        "state": execution.state,
-        "created_at": execution.created_at,
-        "started_at": execution.started_at,
-        "finished_at": execution.finished_at,
-        "progress": progress,
-        "result": _result_value_for_execution(execution),
-        "error": execution.error_message,
-    }
+    return _bounded_poll_response(
+        request,
+        schema_type=WorkflowResultSchema,
+        payload=_workflow_poll_payload(
+            row,
+            progress=_bounded_workflow_poll_progress(row),
+        ),
+    )
 
 
 @api.post(
@@ -2193,49 +2475,32 @@ def cluster_workflow_recovery_showcase(
     response=WorkflowRecoveryResultSchema,
     tags=["Workflows"],
 )
-def get_cluster_workflow_recovery_showcase(request, task_id: str):
+def get_cluster_workflow_recovery_showcase(
+    request,
+    task_id: Annotated[str, Field(max_length=255)],
+):
     """Return the current result and the complete bounded attempt sequence."""
-    execution = get_object_or_404(
-        _workflow_observability_executions(),
-        task_id=task_id,
-        callable_path=(
-            "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"
+    row = _bounded_poll_execution_row(
+        task_id,
+        callable_paths=(
+            "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task",
         ),
     )
-    try:
-        progress = get_workflow_progress_summary(
-            execution,
-            authorize=_authorize_example_workflow,
-            include_legacy=False,
-            infer_current_reporting_policy=False,
-        )
-    except WorkflowProgressReadError:
-        progress = None
-    attempt_rows = execution.attempts.order_by("attempt_number").values(
-        "attempt_number",
-        "state",
-        "error_message",
-    )[:4]
-    return {
-        "task_id": execution.task_id,
-        "state": execution.state,
-        "attempt_number": execution.attempt_number,
-        "runtime_env_profile": execution.runtime_env_profile,
-        "attempts": [
-            {
-                "attempt_number": attempt["attempt_number"],
-                "state": attempt["state"],
-                "error": attempt["error_message"],
-            }
-            for attempt in attempt_rows
-        ],
-        "created_at": execution.created_at,
-        "started_at": execution.started_at,
-        "finished_at": execution.finished_at,
-        "progress": progress,
-        "result": _result_value_for_execution(execution),
-        "error": execution.error_message,
-    }
+    payload = _workflow_poll_payload(
+        row,
+        progress=_bounded_workflow_poll_progress(row),
+    )
+    payload.update(
+        attempt_number=row["attempt_number"],
+        runtime_env_profile=row["runtime_env_profile"],
+        attempts=_bounded_recovery_attempts(row),
+        attempt_error_max_bytes=_POLL_ATTEMPT_ERROR_MAX_BYTES,
+    )
+    return _bounded_poll_response(
+        request,
+        schema_type=WorkflowRecoveryResultSchema,
+        payload=payload,
+    )
 
 
 @api.get(
@@ -2360,41 +2625,6 @@ def get_cluster_workflow_node_details(
 
 
 @api.get(
-    "/cluster/workflows/{task_id}/nodes/{node_id}",
-    response=WorkflowNodeSchema,
-    tags=["Workflows"],
-)
-def get_cluster_workflow_node(
-    request,
-    task_id: str,
-    node_id: str,
-    include_logs: bool = False,
-    tail: int = 200,
-):
-    """Return durable node metadata plus live Ray state and optional log tails."""
-    execution = get_object_or_404(_workflow_observability_executions(), task_id=task_id)
-    snapshot = get_workflow_node_snapshot(
-        execution,
-        node_id,
-        include_live=True,
-        include_logs=include_logs,
-        tail=tail,
-    )
-    if snapshot is None:
-        raise Http404("Workflow node was not found")
-
-    live = snapshot["live"]
-
-    return {
-        "task_id": execution.task_id,
-        "node": snapshot["node"],
-        "ray_state": live["ray_state"],
-        "logs": live["logs"],
-        "observability_error": live["reason"],
-    }
-
-
-@api.get(
     "/cluster/workflows/{task_id}/node-detail",
     response={
         200: WorkflowProgressNodeReadSchema,
@@ -2438,22 +2668,206 @@ _RUNTIME_ENV_BACKENDS = {
 }
 
 
-def _result_backend_alias_for_execution(execution: RayTaskExecution) -> str:
-    profile = execution.runtime_env_profile or "project"
-    return _RUNTIME_ENV_BACKENDS.get(profile, "default")
+def _bounded_poll_execution_row(
+    task_id: str,
+    *,
+    callable_paths: tuple[str, ...],
+) -> dict[str, Any]:
+    """Load one polling snapshot without transferring unrelated task payloads."""
+    guarded = _guarded_execution_diagnostics(
+        RayTaskExecution.objects.filter(
+            task_id=task_id,
+            callable_path__in=callable_paths,
+        ),
+        annotation_prefix="poll",
+        max_bytes=_POLL_DIAGNOSTIC_MAX_BYTES,
+        surface="polling",
+    ).annotate(
+        _poll_has_result_reference=Case(
+            When(
+                Q(result_reference__isnull=False) & ~Q(result_reference=""),
+                then=Value(True),
+            ),
+            default=Value(False),
+            output_field=BooleanField(),
+        )
+    )
+    return get_object_or_404(
+        guarded.values(*_POLL_EXECUTION_VALUE_FIELDS),
+    )
 
 
-def _result_value_for_execution(execution: RayTaskExecution) -> object:
-    """Resolve durable task return values, including externally stored payloads."""
-    if execution.state != TaskState.SUCCEEDED:
-        return json.loads(execution.result_data) if execution.result_data else None
+def _poll_result_and_error(
+    row: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None, str | None]:
+    """Decode only guarded inline poll diagnostics and classify every omission."""
+    result_bytes = _validated_diagnostic_byte_count(row.get("_poll_result_data_bytes"))
+    error_bytes = _validated_diagnostic_byte_count(row.get("_poll_error_message_bytes"))
+    result_data = row.get("_poll_result_data")
+    error = row.get("_poll_error_message")
+    has_result_reference = row.get("_poll_has_result_reference") is True
 
-    backend_alias = _result_backend_alias_for_execution(execution)
+    result: dict[str, Any] | None = None
+    if result_bytes is not None and result_bytes > _POLL_DIAGNOSTIC_MAX_BYTES:
+        result_omission_reason = "stored_result_exceeds_poll_limit"
+    elif result_data is not None:
+        try:
+            parsed_result = _strict_json_loads(result_data)
+            if not isinstance(parsed_result, dict):
+                raise ValueError
+        except (RecursionError, TypeError, ValueError, UnicodeError):
+            result_omission_reason = "malformed_inline_result"
+        else:
+            result = parsed_result
+            result_omission_reason = None
+    elif has_result_reference:
+        result_omission_reason = "external_result_not_loaded"
+    else:
+        result_omission_reason = None
+
+    error_omission_reason = (
+        "stored_error_exceeds_poll_limit"
+        if error_bytes is not None and error_bytes > _POLL_DIAGNOSTIC_MAX_BYTES
+        else None
+    )
+    return result, error, result_omission_reason, error_omission_reason
+
+
+def _bounded_workflow_poll_progress(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Return only the package's bounded aggregate workflow summary."""
+    execution = RayTaskExecution(pk=row["id"])
     try:
-        backend = task_backends[backend_alias]
-    except (KeyError, InvalidTaskBackend):
-        backend = task_backends["default"]
-    return backend.get_result(execution.task_id).return_value
+        progress = get_workflow_progress_summary(
+            execution,
+            authorize=_authorize_example_workflow,
+            include_legacy=True,
+            infer_current_reporting_policy=False,
+            attempt_number=row["attempt_number"],
+        )
+    except WorkflowProgressReadError:
+        return None
+
+    identity = progress.get("run_identity")
+    expected_run_id = str(row["workflow_run_id"]) if row["workflow_run_id"] is not None else None
+    if isinstance(identity, dict):
+        if (
+            identity.get("attempt_number") != row["attempt_number"]
+            or identity.get("execution_generation") != row["execution_generation"]
+            or identity.get("run_id") != expected_run_id
+        ):
+            return None
+    elif expected_run_id is not None:
+        return None
+    return progress
+
+
+def _bounded_recovery_attempts(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read only archived attempt identities and guarded error text."""
+    _require_projection_database(surface="workflow recovery attempts")
+    attempts = (
+        TaskAttempt.objects.filter(
+            execution_id=row["id"],
+            attempt_number__lte=row["attempt_number"],
+        )
+        .annotate(_poll_attempt_error_bytes=_DatabaseByteLength("error_message"))
+        .annotate(
+            _poll_attempt_error=Case(
+                When(
+                    _poll_attempt_error_bytes__lte=_POLL_ATTEMPT_ERROR_MAX_BYTES,
+                    then=F("error_message"),
+                ),
+                default=Value(None),
+                output_field=TextField(),
+            )
+        )
+        .order_by("attempt_number")
+        .values(
+            "attempt_number",
+            "state",
+            "_poll_attempt_error",
+            "_poll_attempt_error_bytes",
+        )[:_POLL_ATTEMPT_MAX_COUNT]
+    )
+    rows: list[dict[str, Any]] = []
+    for attempt in attempts:
+        error_bytes = _validated_diagnostic_byte_count(attempt["_poll_attempt_error_bytes"])
+        rows.append(
+            {
+                "attempt_number": attempt["attempt_number"],
+                "state": attempt["state"],
+                "error": attempt["_poll_attempt_error"],
+                "error_omission_reason": (
+                    "stored_error_exceeds_attempt_limit"
+                    if error_bytes is not None and error_bytes > _POLL_ATTEMPT_ERROR_MAX_BYTES
+                    else None
+                ),
+            }
+        )
+    return rows
+
+
+def _bounded_poll_response(
+    request: Any,
+    *,
+    schema_type: Any,
+    payload: dict[str, Any],
+) -> HttpResponse:
+    """Render a polling payload while dropping only diagnostics that exceed the cap."""
+    mutable = dict(payload)
+
+    def render() -> bytes:
+        response = schema_type.model_validate(mutable)
+        return _encode_api_schema_response(request, response, status_code=200)
+
+    encoded = render()
+    for value_field, reason_field in (
+        ("result", "result_omission_reason"),
+        ("error", "error_omission_reason"),
+    ):
+        if len(encoded) <= _POLL_RESPONSE_MAX_BYTES:
+            break
+        if mutable.get(value_field) is None:
+            continue
+        mutable[value_field] = None
+        mutable[reason_field] = "encoded_response_limit"
+        encoded = render()
+
+    if len(encoded) > _POLL_RESPONSE_MAX_BYTES:
+        attempts = mutable.get("attempts")
+        if isinstance(attempts, list):
+            for attempt in attempts:
+                if len(encoded) <= _POLL_RESPONSE_MAX_BYTES:
+                    break
+                if isinstance(attempt, dict) and attempt.get("error") is not None:
+                    attempt["error"] = None
+                    attempt["error_omission_reason"] = "encoded_response_limit"
+                    encoded = render()
+
+    if len(encoded) > _POLL_RESPONSE_MAX_BYTES:
+        raise ImproperlyConfigured("Polling response metadata exceeds its byte bound")
+    return _bounded_api_http_response(encoded, status_code=200)
+
+
+def _workflow_poll_payload(
+    row: dict[str, Any],
+    *,
+    progress: dict[str, Any] | None,
+) -> dict[str, Any]:
+    result, error, result_reason, error_reason = _poll_result_and_error(row)
+    return {
+        "task_id": row["task_id"],
+        "state": row["state"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "progress": progress,
+        "result": result,
+        "error": error,
+        "result_omission_reason": result_reason,
+        "error_omission_reason": error_reason,
+        "diagnostic_max_bytes": _POLL_DIAGNOSTIC_MAX_BYTES,
+        "response_max_bytes": _POLL_RESPONSE_MAX_BYTES,
+    }
 
 
 @api.post("/cluster/runtime-env/probe", response=TaskResultSchema, tags=["Runtime Environments"])
@@ -2509,27 +2923,38 @@ def cluster_runtime_env_benchmark(
     response=RuntimeEnvResultSchema,
     tags=["Runtime Environments"],
 )
-def get_cluster_runtime_env_result(request, task_id: str):
-    """Return a probe or benchmark result with the durable environment identity."""
-    execution = get_object_or_404(
-        RayTaskExecution.objects.defer("runtime_env_json"),
-        task_id=task_id,
-        callable_path__in=[
+def get_cluster_runtime_env_result(
+    request,
+    task_id: Annotated[str, Field(max_length=255)],
+):
+    """Return a bounded probe result with the durable environment identity."""
+    row = _bounded_poll_execution_row(
+        task_id,
+        callable_paths=(
             "testproject.apps.cluster_tasks.tasks.runtime_env_probe",
             "testproject.apps.cluster_tasks.tasks.runtime_env_benchmark",
-        ],
+        ),
     )
-    return {
-        "task_id": execution.task_id,
-        "state": execution.state,
-        "runtime_env_profile": execution.runtime_env_profile,
-        "runtime_env_hash": execution.runtime_env_hash,
-        "created_at": execution.created_at,
-        "started_at": execution.started_at,
-        "finished_at": execution.finished_at,
-        "result": _result_value_for_execution(execution),
-        "error": execution.error_message,
-    }
+    result, error, result_reason, error_reason = _poll_result_and_error(row)
+    return _bounded_poll_response(
+        request,
+        schema_type=RuntimeEnvResultSchema,
+        payload={
+            "task_id": row["task_id"],
+            "state": row["state"],
+            "runtime_env_profile": row["runtime_env_profile"],
+            "runtime_env_hash": row["runtime_env_hash"],
+            "created_at": row["created_at"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "result": result,
+            "error": error,
+            "result_omission_reason": result_reason,
+            "error_omission_reason": error_reason,
+            "diagnostic_max_bytes": _POLL_DIAGNOSTIC_MAX_BYTES,
+            "response_max_bytes": _POLL_RESPONSE_MAX_BYTES,
+        },
+    )
 
 
 # ============================================================================

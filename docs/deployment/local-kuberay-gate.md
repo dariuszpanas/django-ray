@@ -213,13 +213,21 @@ The gate performs these bounded layers:
 8. Verifies live readiness/liveness paths and `Host: django-ray.localhost`, a Ready web pod, and its
    restart count.
 9. Requires unauthenticated enqueue/stats/metrics/executions requests to return `401`; requires the
-   same protected reads to return `200` with the in-memory token; then polls only the fresh task via
-   an exact `task_id` filter and `limit=1` until it reaches durable `SUCCEEDED` with `result_data=5`.
-   It rejects `DELETE`, then requires the exact detail read to preserve that row and result while
-   advertising 65,536-byte diagnostic guards, a 262,144-byte response ceiling, and no omission for
-   the small inline value.
-10. Enqueues the lightweight `thin` RuntimeEnv probe and requires its sanitized result to report
-    `storage_encryption_verified=true`. A sensitive-output-suppressed in-pod inspector then reads the
+   same protected reads to return `200` with the in-memory token; then polls the fresh task through
+   the exact `/api/tasks/{task_id}` status route and execution-list filter. The status response must
+   keep consistent Django and durable states, exact attempt identity, the fixed input-omission
+   vocabulary, a 16,384-byte combined inline-input guard, a 65,536-byte response ceiling, and the
+   no-store/nosniff headers. The execution must reach durable `SUCCEEDED` with `result_data=5`.
+   OpenAPI must omit the removed bulk-reset, complete-graph, and live-node routes while retaining the
+   exact retry and durable indexed node-detail replacements. The gate also rejects execution
+   `DELETE`, then requires the exact detail read to preserve the row and result while advertising
+   65,536-byte diagnostic guards, a 262,144-byte response ceiling, and no omission for the small
+   inline value.
+10. Enqueues the lightweight `thin` RuntimeEnv probe, keeps every poll within the gate's 65,536-byte
+    HTTP read, and requires each response to advertise the 16,384-byte diagnostic guard, 65,536-byte
+    response ceiling, fixed result/error omission vocabulary, and consistent value/omission pairs.
+    Its sanitized result must report `storage_encryption_verified=true`. A
+    sensitive-output-suppressed in-pod inspector then reads the
     raw database field, requires the exact canonical AES-256-GCM envelope with the guarded
     Django-secret key selection, and proves the fixed plaintext marker is absent. The marker, raw
     envelope, nonce, and ciphertext are registered with both command and gate redactors before any
@@ -236,7 +244,9 @@ The gate performs these bounded layers:
     error; its terminal snapshot may legitimately retain pending or running downstream nodes that Ray
     did not execute after their dependency failed. For both runs, the gate requires terminal
     schema-v3 summaries and complete one-page topology-node, topology-edge, and node-detail readers
-    with matching run identity, publication revisions, graph membership, states, and counts.
+    with matching run identity, publication revisions, graph membership, states, and counts. Each
+    task poll must remain within the gate's 65,536-byte HTTP read and advertise the same 16,384-byte
+    diagnostic guard, response ceiling, fixed omission vocabulary, and value/omission consistency.
 12. Repeats the success and deterministic failure through the explicit
     `reporting_policy=terminal_only` testproject option. Each run must remain on attempt 1 and expose
     one revision-1 schema-v3 summary with `reporting_policy="terminal_only"` and
@@ -249,7 +259,9 @@ The gate performs these bounded layers:
     replays from the entry and fails at the mid-workflow join after seven upstream nodes succeed,
     and attempt 3 replays the complete workflow and succeeds. The gate requires distinct run IDs,
     generations 1 through 3, one stable plan fingerprint, exact fixture errors, no fourth attempt,
-    and a current result that identifies successful attempt 3 without a stale error. The temporary
+    and a current result that identifies successful attempt 3 without a stale error. Its task poll
+    must meet the common diagnostic and response contract, advertise the 4,096-byte archived-attempt
+    error guard, and use only the fixed attempt-error omission vocabulary. The temporary
     setup job must build the bounded deterministic recovery archive, the Django endpoint must verify
     and report the explicit `recovery-showcase` profile, and the Ray Client task manager must upload
     those exact content-hashed bytes before the generic Ray pods execute them. Archived Admin

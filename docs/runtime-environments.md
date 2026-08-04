@@ -520,6 +520,17 @@ POST /api/cluster/runtime-env/benchmark?profile=numpy-2-3&package=numpy&repeats=
 GET  /api/cluster/runtime-env/{task_id}
 ```
 
+The `GET` poller selects only the public state, timing, RuntimeEnv identity, and bounded
+current diagnostics. It does not transfer the RuntimeEnv snapshot, task input, workflow
+data, completion envelope, or unrelated execution fields. Inline result and error
+values are guarded at 16,384 bytes each before transfer, external result storage is
+never loaded, and the complete response is at most 65,536 bytes. Result omission uses
+`external_result_not_loaded`, `stored_result_exceeds_poll_limit`,
+`malformed_inline_result`, or `encoded_response_limit`; error omission uses
+`stored_error_exceeds_poll_limit` or `encoded_response_limit`. The response advertises
+`diagnostic_max_bytes=16384` and `response_max_bytes=65536` so clients can enforce the
+same ceiling.
+
 The benchmark runs repeated workflow leaves with the same profile and reports
 per-run elapsed time so cold setup and cache reuse are easy to compare.
 `recovery-showcase` is intentionally not selectable through the generic probe

@@ -949,9 +949,14 @@ GET  /api/cluster/workflows/{task_id}/topology/nodes
 GET  /api/cluster/workflows/{task_id}/topology/edges
 GET  /api/cluster/workflows/{task_id}/nodes
 GET  /api/cluster/workflows/{task_id}/node-detail?node_id={node_id}
-GET  /api/cluster/workflows/{task_id}/nodes/{node_id}
-GET  /api/cluster/workflows/{task_id}/nodes/{node_id}?include_logs=true&tail=200
 ```
+
+The pre-0.4.0 live-node test route at
+`/api/cluster/workflows/{task_id}/nodes/{node_id}` is removed. Use the durable indexed
+`node-detail` route after the same callable authorization as every other workflow read.
+Applications that need live Ray state or logs can build a separately authorized surface
+around the package `get_workflow_node_snapshot()` helper; the testproject does not imply
+a tenant or task-owner policy for that data.
 
 The complex example runs this nested shape:
 
@@ -966,12 +971,25 @@ chain(
 )
 ```
 
-The complex-workflow polling endpoint retains live schema-v2 progress while the outer
-Django task runs. The bundled testproject enables
-`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` by default, so an admitted terminal run becomes
-available through the bounded summary, topology-node, topology-edge, and node-detail
-routes above. The guarded local KubeRay gate exercises those routes against the real
-producer path and requires non-empty, mutually consistent topology and detail.
+Every workflow poller above exposes only a bounded aggregate progress-summary envelope.
+A published schema-v3 summary is preferred. Supported older stored progress may
+contribute sanitized aggregate counts, but the poller never returns its complete
+schema-v2 graph. Its exact database projection
+excludes task input, RuntimeEnv snapshots, workflow plans, completion envelopes, and
+other unrelated payloads. Current inline result and error diagnostics are each guarded
+at 16,384 bytes before transfer, external result storage is never loaded, and the
+complete response is at most 65,536 bytes. The fixed result omission
+vocabulary is `external_result_not_loaded`, `stored_result_exceeds_poll_limit`,
+`malformed_inline_result`, and `encoded_response_limit`; the error vocabulary is
+`stored_error_exceeds_poll_limit` and `encoded_response_limit`. A `null` reason means
+the corresponding value is available. Included values still pass through the normal
+presentation-redaction policy.
+
+The bundled testproject enables `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` by default, so an
+admitted terminal run becomes available through the bounded summary, topology-node,
+topology-edge, and node-detail routes above. The guarded local KubeRay gate exercises
+those routes against the real producer path and requires non-empty, mutually consistent
+topology and detail.
 It runs both the small successful shape and a deterministic slow-branch failure,
 requires the failed task to remain on its first attempt, and verifies the authenticated
 Admin graph against the same bounded publication. Open either terminal
@@ -1062,8 +1080,12 @@ The bundled testproject allows three durable attempts. Attempt 1 fails at
 `build_order_batch`, reruns its upstream work, and fails at `join_order_inputs`.
 Attempt 3 starts from the entry again and completes the full workflow. The polling
 response exposes the ordered `FAILED`, `FAILED`, `SUCCEEDED` attempt history and the
-successful outer result, whose `recovery` field identifies attempt 3. Callers cannot
-choose the failure stage through the API, so the example remains deterministic.
+bounded successful outer result, whose `recovery` field identifies attempt 3. It reads
+at most four ordered attempt rows and guards each archived attempt error at 4,096 bytes;
+`stored_error_exceeds_attempt_limit` and `encoded_response_limit` distinguish omitted
+errors. Current result and error values keep the common 16,384-byte diagnostic guard,
+and the complete recovery response remains under 65,536 bytes. Callers cannot choose
+the failure stage through the API, so the example remains deterministic.
 
 The endpoint binds this task to the testproject's `recovery-showcase` task backend
 and returns `runtime_env_profile="recovery-showcase"` while polling. Local and

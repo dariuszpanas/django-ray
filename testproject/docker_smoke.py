@@ -20,6 +20,31 @@ from uuid import UUID
 
 _MAX_RESPONSE_BYTES = 1_048_576
 _REQUEST_TIMEOUT_SECONDS = 5.0
+_TASK_STATUS_INPUT_MAX_BYTES = 16 * 1024
+_TASK_STATUS_RESPONSE_MAX_BYTES = 64 * 1024
+_TASK_STATUS_INPUT_OMISSION_REASONS = frozenset(
+    {
+        None,
+        "external_input_not_loaded",
+        "stored_input_exceeds_status_limit",
+        "malformed_inline_input",
+        "encoded_response_limit",
+    }
+)
+_TASK_STATUS_BY_STATE = {
+    "QUEUED": "READY",
+    "RUNNING": "RUNNING",
+    "SUCCEEDED": "SUCCESSFUL",
+    "FAILED": "FAILED",
+    "CANCELLED": "FAILED",
+    "CANCELLING": "RUNNING",
+    "LOST": "FAILED",
+    "EXPIRED": "FAILED",
+}
+_TASK_STATUS_REQUIRED_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+}
 # One complete smoke page covers the 25-node/36-edge showcase while
 # remaining below the Admin graph's package-enforced limits.
 _WORKFLOW_PAGE_LIMIT = 64
@@ -193,9 +218,13 @@ def _normalize_stored_terminal_diagnostic(value: object, *, field_name: str) -> 
     return normalized
 
 
-def _response_json(response: Any) -> dict[str, Any]:
-    body = response.read(_MAX_RESPONSE_BYTES + 1)
-    if len(body) > _MAX_RESPONSE_BYTES:
+def _response_json(
+    response: Any,
+    *,
+    max_bytes: int = _MAX_RESPONSE_BYTES,
+) -> dict[str, Any]:
+    body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
         raise DockerSmokeError("HTTP response exceeded the smoke byte limit")
     try:
         payload = json.loads(body)
@@ -280,6 +309,8 @@ def _request_json(
     method: str = "GET",
     token: str | None = None,
     expected_status: int = 200,
+    response_max_bytes: int = _MAX_RESPONSE_BYTES,
+    required_response_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     headers = {"Accept": "application/json"}
     if token is not None:
@@ -302,7 +333,57 @@ def _request_json(
                 f"request to {path} returned HTTP {response.status}; "
                 f"expected HTTP {expected_status}"
             )
-        return _response_json(response)
+        if required_response_headers is not None:
+            response_headers = getattr(response, "headers", None)
+            if not hasattr(response_headers, "get"):
+                raise DockerSmokeError(f"request to {path} returned no response headers")
+            for header_name, expected_value in required_response_headers.items():
+                if response_headers.get(header_name) != expected_value:
+                    raise DockerSmokeError(
+                        f"request to {path} returned an invalid {header_name} header"
+                    )
+        return _response_json(response, max_bytes=response_max_bytes)
+
+
+def _validate_task_status_payload(
+    payload: dict[str, Any],
+    *,
+    task_id: str,
+) -> str:
+    """Validate the exact bounded status vocabulary and return its durable state."""
+    if payload.get("task_id") != task_id:
+        raise DockerSmokeError("task result endpoint returned a mismatched task ID")
+    state = payload.get("state")
+    expected_status = _TASK_STATUS_BY_STATE.get(state)
+    if expected_status is None or payload.get("status") != expected_status:
+        raise DockerSmokeError("task result endpoint returned an inconsistent state/status pair")
+    attempt_number = payload.get("attempt_number")
+    if type(attempt_number) is not int or attempt_number < 1:
+        raise DockerSmokeError("task result endpoint returned an invalid attempt number")
+    execution_generation = payload.get("execution_generation")
+    if type(execution_generation) is not int or execution_generation < 0:
+        raise DockerSmokeError("task result endpoint returned an invalid execution generation")
+    if payload.get("input_max_bytes") != _TASK_STATUS_INPUT_MAX_BYTES:
+        raise DockerSmokeError("task result endpoint changed its input byte limit")
+    if payload.get("response_max_bytes") != _TASK_STATUS_RESPONSE_MAX_BYTES:
+        raise DockerSmokeError("task result endpoint changed its response byte limit")
+
+    if "input_omission_reason" not in payload:
+        raise DockerSmokeError("task result endpoint omitted its input omission reason")
+    omission_reason = payload.get("input_omission_reason")
+    if omission_reason is not None and (
+        not isinstance(omission_reason, str)
+        or omission_reason not in _TASK_STATUS_INPUT_OMISSION_REASONS
+    ):
+        raise DockerSmokeError("task result endpoint returned an unknown input omission reason")
+    args = payload.get("args")
+    kwargs = payload.get("kwargs")
+    if omission_reason is None:
+        if not isinstance(args, list) or not isinstance(kwargs, dict):
+            raise DockerSmokeError("task result endpoint omitted input without a reason")
+    elif args is not None or kwargs is not None:
+        raise DockerSmokeError("task result endpoint mixed input with an omission reason")
+    return cast(str, state)
 
 
 def _request_admin_json(
@@ -1841,17 +1922,22 @@ def _run_smoke(*, base_url: str, token: str, timeout_seconds: float) -> dict[str
         raise DockerSmokeError("authenticated enqueue returned no task ID")
 
     terminal_status: str | None = None
+    terminal_state: str | None = None
 
     def task_succeeded() -> bool:
-        nonlocal terminal_status
-        payload = _request_json(base_url, f"/api/tasks/{task_id}", token=token)
-        status = payload.get("status")
-        if not isinstance(status, str):
-            raise DockerSmokeError("task result endpoint returned no status")
-        terminal_status = status
-        if status in {"FAILED", "CANCELLED"}:
-            raise DockerSmokeError(f"worker execution reached terminal status {status}")
-        return status == "SUCCESSFUL"
+        nonlocal terminal_state, terminal_status
+        payload = _request_json(
+            base_url,
+            f"/api/tasks/{task_id}",
+            token=token,
+            response_max_bytes=_TASK_STATUS_RESPONSE_MAX_BYTES,
+            required_response_headers=_TASK_STATUS_REQUIRED_HEADERS,
+        )
+        terminal_state = _validate_task_status_payload(payload, task_id=task_id)
+        terminal_status = cast(str, payload["status"])
+        if terminal_state in {"FAILED", "CANCELLED", "LOST", "EXPIRED"}:
+            raise DockerSmokeError(f"worker execution reached terminal state {terminal_state}")
+        return terminal_state == "SUCCEEDED"
 
     _wait_until("worker execution and API result refresh", deadline, task_succeeded)
 
@@ -1905,6 +1991,8 @@ def _run_smoke(*, base_url: str, token: str, timeout_seconds: float) -> dict[str
         "worker_lease": "observed",
         "task_id": task_id,
         "task_status": terminal_status,
+        "task_state": terminal_state,
+        "task_status_bounded": True,
         "result": database_result,
     }
 

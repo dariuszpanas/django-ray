@@ -180,6 +180,32 @@ their tenant or ownership policy. The pre-0.4.0 `/graph` complete-graph example 
 removed. Existing schema-v1/v2 rows remain aggregate-readable through the summary
 route, while topology and node detail require the bounded page routes.
 
+The testproject's `GET /api/tasks/{task_id}` is a narrower status surface than the
+package Python `TaskResult`. One unlocked projection returns status and durable attempt
+identity without loading a callable, external input, result, or result backend. Its
+nullable `args` and `kwargs` share a 16,384-byte inline-input guard, the whole response is
+at most 65,536 bytes, and `input_omission_reason` is limited to
+`external_input_not_loaded`, `stored_input_exceeds_status_limit`,
+`malformed_inline_input`, and `encoded_response_limit`. Package `TaskResult` remains the
+application-data interface for full arguments, keyword arguments, and successful return
+values under the application's own trust boundary. The testproject's database-side byte
+guard supports SQLite and PostgreSQL; other database semantics fail configuration
+explicitly.
+
+The workflow example pollers and `GET /api/cluster/runtime-env/{task_id}` likewise use
+exact projections. Current inline result and error values are guarded at 16,384 bytes
+each, external results are never loaded, and each complete response is at most 65,536
+bytes. The fixed result omission reasons are `external_result_not_loaded`,
+`stored_result_exceeds_poll_limit`, `malformed_inline_result`, and
+`encoded_response_limit`; errors use `stored_error_exceeds_poll_limit` or
+`encoded_response_limit`. Workflow progress is exposed only through a bounded aggregate
+summary envelope. A published schema-v3 summary is preferred; supported older stored
+progress may contribute sanitized aggregate counts, but never its complete graph.
+Recovery history additionally guards each
+of at most four archived attempt errors at 4,096 bytes and reports
+`stored_error_exceeds_attempt_limit` or `encoded_response_limit` when one is omitted.
+These polling byte guards have the same explicit SQLite/PostgreSQL support boundary.
+
 The separate testproject `GET /api/executions` example has its own proven bounds: a
 1-to-100 page size (50 by default), database-side 4,096-byte guards for inline result
 and error values, and a 256 KiB encoded-response ceiling. Fixed omission and
@@ -230,9 +256,11 @@ If the Ray State API is unavailable, the response keeps the durable node and rep
 stable unavailable status. It does not turn a live-data outage into loss of durable task
 visibility.
 
-The testproject keeps its pre-existing `/nodes/{node_id}` adapter for this live snapshot
-contract, including `include_logs` and `tail`. It is separate from the normalized
-indexed `node-detail` route.
+The pre-existing testproject `/nodes/{node_id}` live adapter is removed in 0.4.0. Its
+HTTP replacement is the durable indexed `/node-detail?node_id=...` reader after the
+same callable authorization as other workflow reads. Applications can still use
+`get_workflow_node_snapshot()` behind a separately authorized, application-owned live
+diagnostic surface; the sample callable allowlist is not a tenant or task-owner policy.
 
 Ray logs are bounded independently by line count and UTF-8 byte size, then redacted.
 The byte bound applies to each returned stream. Logs are live operational data, not a
