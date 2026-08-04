@@ -10,6 +10,12 @@ import django
 import pytest
 from django.conf import settings
 
+from tests.real_ray_ownership import (
+    RealRayOwnershipLock,
+    RealRayOwnershipUnavailableError,
+    build_owner_metadata,
+)
+
 pytest_plugins = ("scripts.pytest_taxonomy",)
 
 # Locust's process-wide gevent patching is appropriate for the CLI but unsafe
@@ -28,6 +34,7 @@ EXTERNAL_RESOURCE_FIXTURE_MARKERS = {
 MARKER_IMPLICATIONS = {
     "compiled_graph_opt_in": "real_ray",
 }
+_REAL_RAY_OWNERSHIP_KEY: pytest.StashKey[RealRayOwnershipLock] = pytest.StashKey()
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -51,6 +58,51 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 raise pytest.UsageError(
                     f"{item.nodeid} uses {fixture_name!r} but is not marked {marker_name!r}"
                 )
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Own the host only when final collection will execute local-Ray tests."""
+    if session.config.option.collectonly or session.testsfailed:
+        return
+    selected_count = sum(item.get_closest_marker("real_ray") is not None for item in session.items)
+    if selected_count == 0:
+        return
+
+    ownership = RealRayOwnershipLock()
+    owner = build_owner_metadata(
+        rootpath=Path(str(session.config.rootpath)).resolve(),
+        selected_count=selected_count,
+    )
+    try:
+        ownership.acquire(owner)
+    except RealRayOwnershipUnavailableError as error:
+        raise pytest.UsageError(str(error)) from error
+    try:
+        session.config.stash[_REAL_RAY_OWNERSHIP_KEY] = ownership
+    except BaseException:
+        ownership.release()
+        raise
+
+
+def _release_real_ray_ownership(config: pytest.Config) -> None:
+    ownership = config.stash.get(_REAL_RAY_OWNERSHIP_KEY, None)
+    if ownership is None:
+        return
+    del config.stash[_REAL_RAY_OWNERSHIP_KEY]
+    ownership.release()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Release local-Ray ownership after the selected session finishes."""
+    del exitstatus
+    _release_real_ray_ownership(session.config)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Release ownership on pytest exits that bypass normal session finish."""
+    _release_real_ray_ownership(config)
 
 
 def pytest_configure(config: object) -> None:

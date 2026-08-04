@@ -96,6 +96,12 @@ For a logic-only check without Ray, use `--sync`. See
 [Choosing an execution model](performance.md#choose-an-execution-model) before
 selecting a production mode.
 
+Linux is the production target. Native Windows local Ray is a best-effort development
+path because Ray's Windows support is beta; prefer WSL2 or the
+[Docker walkthrough](deployment/docker.md) for repeatable evaluation, and keep one native
+local-Ray owner on a Windows host at a time. See [Compatibility](compatibility.md#platforms)
+for the tracked upstream startup limitation.
+
 ## Enqueue and Read the Result
 
 Open `python manage.py shell`:
