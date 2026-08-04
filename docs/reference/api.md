@@ -35,26 +35,55 @@ If you need a REST API for task management in your project, you can use the test
 | `GET /api/readyz` | Readiness check with database reachability |
 | `GET /api/health` | Health check |
 | `GET /api/metrics` | Prometheus metrics |
-| `GET /api/tasks/{task_id}` | Get status, timestamps, and redacted arguments by task ID; return values and failure diagnostics are omitted |
+| `GET /api/tasks/{task_id}` | Get one bounded task-status projection; return values and failure diagnostics are omitted |
 | `GET /api/executions` | Page through bounded, redacted task-execution projections |
 | `GET /api/executions/stats` | Get statistics |
 | `GET /api/executions/{id}` | Get one bounded, redacted execution-detail projection |
-| `POST /api/executions/{id}/cancel` | Cancel or request cancellation for an execution |
+| `POST /api/executions/{id}/cancel` | Request cancellation with a bounded `202`, `404`, or `409` outcome |
 | `POST /api/executions/{id}/retry` | Request retry with bounded `202`, `404`, or `409` outcome |
-| `POST /api/executions/reset` | Retry matching `FAILED`, `CANCELLED`, `LOST`, or `EXPIRED` executions |
+| `GET /api/cluster/workflow-benchmark/{task_id}` | Poll bounded workflow state, aggregate summary, and current diagnostics |
+| `GET /api/cluster/complex-workflow/{task_id}` | Poll bounded workflow state, aggregate summary, and current diagnostics |
 | `POST /api/cluster/workflow-showcase` | Enqueue the bounded full-reporting order-fulfillment showcase |
-| `GET /api/cluster/workflow-showcase/{task_id}` | Poll its bounded summary and compact result or failure |
+| `GET /api/cluster/workflow-showcase/{task_id}` | Poll its bounded aggregate summary and current diagnostics |
+| `GET /api/cluster/workflow-recovery-showcase/{task_id}` | Poll its bounded current diagnostics and archived attempt errors |
+| `GET /api/cluster/runtime-env/{task_id}` | Poll bounded RuntimeEnv identity and current diagnostics |
 | `GET /api/cluster/workflows/{task_id}` | Get the bounded compatible workflow summary |
 | `GET /api/cluster/workflows/{task_id}/topology/nodes` | Page through immutable topology nodes |
 | `GET /api/cluster/workflows/{task_id}/topology/edges` | Page through immutable topology edges |
 | `GET /api/cluster/workflows/{task_id}/nodes` | Page through normalized node detail, optionally by state |
 | `GET /api/cluster/workflows/{task_id}/node-detail?node_id={node_id}` | Get one indexed durable node record without scanning the graph |
-| `GET /api/cluster/workflows/{task_id}/nodes/{node_id}` | Get legacy durable node metadata and live Ray state |
-| `GET /api/cluster/workflows/{task_id}/nodes/{node_id}?include_logs=true` | Include bounded Ray stdout/stderr tails |
 
 `/api/executions` exposes only its ordinary redacted result/error fields. The 0.4.0
 testproject has no pattern-unredacted diagnostics HTTP endpoint; privileged failure
 inspection is deliberately confined to the separately authorized Django Admin view.
+
+### Bounded task-status example
+
+`GET /api/tasks/{task_id}` is a monitoring projection, not a serialized Django
+`TaskResult`. One unlocked database snapshot selects only its public fields. It keeps
+the Django-style `status` and adds the exact durable `state`, `attempt_number`, and
+`execution_generation`. The combined inline `args` and `kwargs` source is limited to
+16,384 bytes before transfer. Both fields are nullable, and an external input is never
+loaded by this route. The path accepts the backend's task identifier up to 255
+characters; it does not impose a UUID-only format.
+
+`input_omission_reason` is either `null` or one of the fixed values
+`external_input_not_loaded`, `stored_input_exceeds_status_limit`,
+`malformed_inline_input`, and `encoded_response_limit`. An included value still passes
+through configured presentation redaction; `[REDACTED]` therefore remains an available
+bounded value rather than an authorization decision. The complete response is at most
+65,536 bytes and advertises both `input_max_bytes=16384` and
+`response_max_bytes=65536`. Responses disable caching and MIME sniffing, and a missing
+task uses one fixed `404` body. The route does not import the callable, retrieve durable
+external input, or access result storage. Its database byte expression is supported on
+the testproject's SQLite and PostgreSQL paths; another database fails configuration
+clearly instead of inheriting the bound.
+
+The package-level Python `TaskResult` contract is intentionally different. Application
+code can use it to retrieve the task's full arguments, keyword arguments, and successful
+return value under that application's own trust boundary. The testproject HTTP status
+adapter is deliberately narrower and must not be used as evidence that package results
+are truncated to these limits.
 
 ### Bounded execution-list example
 
@@ -114,7 +143,7 @@ configuration clearly. The example keeps global bearer authentication for
 walkthroughs. Production adapters should add their tenant, ownership, or object policy
 before exposing an exact lookup.
 
-### 0.4.0 workflow graph migration
+### 0.4.0 testproject endpoint migration
 
 The pre-1.0 complete-graph route
 `GET /api/cluster/workflows/{task_id}/graph` was removed without an alias or
@@ -134,6 +163,49 @@ response. Existing schema-v1/v2 database snapshots are not rewritten or deleted;
 summary route can still expose their sanitized aggregate counts. It never returns the
 stored complete graph. The private Django Admin visualization remains available to
 authorized staff and builds its display from bounded readers.
+
+The pre-0.4.0 live-node adapter
+`GET /api/cluster/workflows/{task_id}/nodes/{node_id}` was also removed without an
+alias. Use the indexed durable
+`GET /api/cluster/workflows/{task_id}/node-detail?node_id={node_id}` read after the
+same object authorization as the other workflow routes. Applications that truly need
+live Ray state or logs can call the package `get_workflow_node_snapshot()` helper from
+an application-owned, separately authorized surface; the testproject no longer exposes
+that data over HTTP.
+
+The arbitrary bulk-reset example `POST /api/executions/reset` was removed as well. Use
+the exact `POST /api/executions/{id}/retry` route when an application has authorized one
+observed execution, attempt, and generation. Operators can continue to use the bounded,
+signed Django Admin confirmation for eligible single or multi-row retry. Neither
+replacement treats workflow progress as a checkpoint or bypasses the warning that a
+retry can repeat external effects.
+
+### Bounded workflow and RuntimeEnv polling examples
+
+The workflow benchmark, complex-workflow, workflow-showcase, recovery-showcase, and
+RuntimeEnv `GET` pollers listed above use exact database projections. They do not import
+task callables or transfer task input, RuntimeEnv snapshots, workflow plans, completion
+envelopes, or unrelated payload columns. Current inline `result` and `error` values are
+guarded at 16,384 bytes each before transfer, external result storage is never resolved,
+and the complete encoded response is at most 65,536 bytes. These byte projections have
+the same explicit SQLite/PostgreSQL support boundary as the task-status and execution
+examples.
+
+Current `result_omission_reason` is either `null` or
+`external_result_not_loaded`, `stored_result_exceeds_poll_limit`,
+`malformed_inline_result`, or `encoded_response_limit`. Current
+`error_omission_reason` is either `null`, `stored_error_exceeds_poll_limit`, or
+`encoded_response_limit`. The response advertises `diagnostic_max_bytes=16384` and
+`response_max_bytes=65536`. Workflow `progress` is exposed only through a bounded
+aggregate summary envelope. A published schema-v3 summary is preferred; supported older
+stored progress may contribute sanitized aggregate counts, but the pollers never return
+its complete legacy graph.
+
+The recovery poller additionally selects at most its four expected ordered attempt
+rows. Each archived attempt error is guarded at 4,096 bytes and uses either
+`stored_error_exceeds_attempt_limit` or `encoded_response_limit` when omitted. Its
+response advertises `attempt_error_max_bytes=4096` and remains under the same 65,536-byte
+ceiling.
 
 When the testproject server is running:
 - **Swagger UI**: http://localhost:8000/api/docs
@@ -240,6 +312,14 @@ to consume the terminal envelope. Otherwise a worker requests backend interrupti
 and finalizes the durable state. That interruption is best effort: cancellation
 cannot guarantee that already-running synchronous Python code stops immediately.
 
+The bundled testproject cancellation endpoint returns `202` only for `ACCEPTED`, `404`
+for `NOT_FOUND`, and `409` for every other service outcome. Its response contains only
+`code`, `message`, `execution_id`, `state`, `attempt_number`,
+`execution_generation`, `next_action`, and `response_max_bytes=4096`; the complete body
+is at most 4,096 bytes. It does not broadly refresh or serialize the execution model,
+and no task input, result, error, traceback, workflow, RuntimeEnv, or cancellation
+diagnostic is returned.
+
 Do not expose `RayTaskExecution.delete()` as a cancellation or cleanup shortcut.
 Deleting an active row can leave Ray work running without its durable lifecycle owner,
 and deleting a terminal row does not by itself reclaim externally stored results or
@@ -260,8 +340,8 @@ operational metadata as sensitive.
 
 The indexed example accepts `node_id` as a query parameter so URL encoding round-trips
 the full bounded UTF-8 identifier, including values such as `namespace/apply`. The
-older `/nodes/{node_id}` route retains its live-Ray and optional-log behavior for
-testproject compatibility; it is not the normalized indexed read facade.
+testproject exposes only this durable indexed facade; package live-node helpers remain
+available for application-owned, separately authorized integrations.
 
 See [Observability Services](../observability.md) for the supported Python schemas,
 metrics, degradation behavior, and security boundary.

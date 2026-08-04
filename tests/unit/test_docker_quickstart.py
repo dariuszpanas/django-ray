@@ -22,8 +22,15 @@ WORKFLOW_TASK_ID = "25200000-0000-4000-8000-000000000002"
 
 
 class _Response:
-    def __init__(self, payload: object, *, status: int = 200) -> None:
+    def __init__(
+        self,
+        payload: object,
+        *,
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status = status
+        self.headers = headers or {}
         self._body = io.BytesIO(json.dumps(payload).encode())
 
     def read(self, size: int = -1) -> bytes:
@@ -51,6 +58,26 @@ class _TextResponse(_Response):
 
 def _compose() -> dict[str, Any]:
     return yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+
+
+def _task_status_payload(
+    *,
+    state: str = "SUCCEEDED",
+    task_id: str = WORKFLOW_TASK_ID,
+    omission_reason: str | None = None,
+) -> dict[str, object]:
+    return {
+        "task_id": task_id,
+        "status": docker_smoke._TASK_STATUS_BY_STATE[state],
+        "state": state,
+        "attempt_number": 1,
+        "execution_generation": 1,
+        "args": [2, 3] if omission_reason is None else None,
+        "kwargs": {} if omission_reason is None else None,
+        "input_omission_reason": omission_reason,
+        "input_max_bytes": docker_smoke._TASK_STATUS_INPUT_MAX_BYTES,
+        "response_max_bytes": docker_smoke._TASK_STATUS_RESPONSE_MAX_BYTES,
+    }
 
 
 def test_application_services_share_required_postgresql_configuration() -> None:
@@ -182,6 +209,63 @@ def test_request_json_sends_bearer_token_without_putting_it_in_url(
     assert captured_request.full_url == "http://web:8000/api/executions"
     assert captured_request.get_header("Authorization") == "Bearer private-token"
     assert "private-token" not in captured_request.full_url
+
+
+def test_request_json_enforces_task_status_headers_and_read_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _Response(
+        _task_status_payload(),
+        headers=docker_smoke._TASK_STATUS_REQUIRED_HEADERS,
+    )
+    read_sizes: list[int] = []
+    original_read = response.read
+
+    def read(size: int = -1) -> bytes:
+        read_sizes.append(size)
+        return original_read(size)
+
+    response.read = read  # type: ignore[method-assign]
+    monkeypatch.setattr(docker_smoke.urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+
+    payload = docker_smoke._request_json(
+        "http://web:8000",
+        f"/api/tasks/{WORKFLOW_TASK_ID}",
+        token="private-token",
+        response_max_bytes=docker_smoke._TASK_STATUS_RESPONSE_MAX_BYTES,
+        required_response_headers=docker_smoke._TASK_STATUS_REQUIRED_HEADERS,
+    )
+
+    assert payload == _task_status_payload()
+    assert read_sizes == [docker_smoke._TASK_STATUS_RESPONSE_MAX_BYTES + 1]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Cache-Control": "public", "X-Content-Type-Options": "nosniff"},
+        {"Cache-Control": "no-store", "X-Content-Type-Options": "sniff"},
+    ],
+)
+def test_request_json_rejects_missing_or_unsafe_task_status_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+) -> None:
+    monkeypatch.setattr(
+        docker_smoke.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(_task_status_payload(), headers=headers),
+    )
+
+    with pytest.raises(docker_smoke.DockerSmokeError, match="header"):
+        docker_smoke._request_json(
+            "http://web:8000",
+            f"/api/tasks/{WORKFLOW_TASK_ID}",
+            token="private-token",
+            response_max_bytes=docker_smoke._TASK_STATUS_RESPONSE_MAX_BYTES,
+            required_response_headers=docker_smoke._TASK_STATUS_REQUIRED_HEADERS,
+        )
 
 
 def test_admin_text_request_keeps_session_cookie_out_of_url(
@@ -2069,3 +2153,54 @@ def test_response_json_rejects_oversized_payload() -> None:
 
     with pytest.raises(docker_smoke.DockerSmokeError, match="byte limit"):
         docker_smoke._response_json(response)
+
+
+def test_response_json_honors_a_smaller_endpoint_limit() -> None:
+    response = _Response({"value": "bounded-status"})
+
+    with pytest.raises(docker_smoke.DockerSmokeError, match="byte limit"):
+        docker_smoke._response_json(response, max_bytes=8)
+
+
+@pytest.mark.parametrize(
+    "omission_reason",
+    [
+        None,
+        "external_input_not_loaded",
+        "stored_input_exceeds_status_limit",
+        "malformed_inline_input",
+        "encoded_response_limit",
+    ],
+)
+def test_task_status_validator_accepts_the_fixed_omission_vocabulary(
+    omission_reason: str | None,
+) -> None:
+    payload = _task_status_payload(omission_reason=omission_reason)
+
+    assert (
+        docker_smoke._validate_task_status_payload(payload, task_id=WORKFLOW_TASK_ID) == "SUCCEEDED"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("task_id", "different-task", "mismatched task ID"),
+        ("status", "SUCCEEDED", "state/status pair"),
+        ("attempt_number", True, "attempt number"),
+        ("execution_generation", -1, "execution generation"),
+        ("input_max_bytes", 1, "input byte limit"),
+        ("response_max_bytes", 1, "response byte limit"),
+        ("input_omission_reason", "invented", "omission reason"),
+    ],
+)
+def test_task_status_validator_rejects_contract_drift(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    payload = _task_status_payload()
+    payload[field] = value
+
+    with pytest.raises(docker_smoke.DockerSmokeError, match=message):
+        docker_smoke._validate_task_status_payload(payload, task_id=WORKFLOW_TASK_ID)

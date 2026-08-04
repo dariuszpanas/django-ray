@@ -59,9 +59,30 @@ from locust.exception import StopTest
 _API_TOKEN_ENV = "DJANGO_API_TOKEN"
 _LOGGER = logging.getLogger(__name__)
 _INCOMPLETE_DEMO_TOUR_MESSAGE = "Observability demo ended before one complete task-family tour."
-_TERMINAL_SUCCESS_STATES = frozenset({"SUCCESSFUL", "SUCCEEDED"})
-_TERMINAL_FAILURE_STATES = frozenset({"FAILED", "CANCELLED", "LOST", "EXPIRED"})
-_ACTIVE_STATES = frozenset({"READY", "QUEUED", "RUNNING", "CANCELLING"})
+_TERMINAL_SUCCESS_STATES = frozenset({"SUCCESSFUL"})
+_TASK_STATUS_TERMINAL_FAILURE_STATES = frozenset({"FAILED", "CANCELLED", "LOST", "EXPIRED"})
+_TASK_STATUS_ACTIVE_STATES = frozenset({"QUEUED", "RUNNING", "CANCELLING"})
+_TASK_STATUS_BY_STATE = {
+    "QUEUED": "READY",
+    "RUNNING": "RUNNING",
+    "SUCCEEDED": "SUCCESSFUL",
+    "FAILED": "FAILED",
+    "CANCELLED": "FAILED",
+    "CANCELLING": "RUNNING",
+    "LOST": "FAILED",
+    "EXPIRED": "FAILED",
+}
+_TASK_STATUS_INPUT_MAX_BYTES = 16 * 1024
+_TASK_STATUS_RESPONSE_MAX_BYTES = 64 * 1024
+_TASK_STATUS_INPUT_OMISSION_REASONS = frozenset(
+    {
+        None,
+        "external_input_not_loaded",
+        "stored_input_exceeds_status_limit",
+        "malformed_inline_input",
+        "encoded_response_limit",
+    }
+)
 _REQUEST_TIMEOUT_SECONDS = 10.0
 _WorkflowReportingPolicy = Literal["full", "terminal_only", "disabled"]
 _WORKFLOW_POLICY_DETAIL_EXPECTATIONS: dict[
@@ -100,6 +121,62 @@ _EXPLICIT_ONLY_USER_CLASSES = frozenset(
         "WorkflowShowcaseUser",
     }
 )
+
+
+def _task_status_contract_error(
+    response: Any,
+    payload: dict[str, Any],
+    *,
+    task_id: str,
+) -> str | None:
+    """Return a fixed error when one status response violates its bounded contract."""
+    content = getattr(response, "content", None)
+    if not isinstance(content, bytes | bytearray):
+        return "status response did not expose bounded response bytes"
+    if len(content) > _TASK_STATUS_RESPONSE_MAX_BYTES:
+        return "status response exceeded its 64 KiB byte limit"
+
+    headers = getattr(response, "headers", None)
+    if not hasattr(headers, "get"):
+        return "status response did not expose its cache-safety headers"
+    if headers.get("Cache-Control") != "no-store":
+        return "status response did not disable caching"
+    if headers.get("X-Content-Type-Options") != "nosniff":
+        return "status response did not advertise nosniff"
+
+    if payload.get("task_id") != task_id:
+        return "status response returned a mismatched task ID"
+    state = payload.get("state")
+    expected_status = _TASK_STATUS_BY_STATE.get(state)
+    if expected_status is None or payload.get("status") != expected_status:
+        return "status response returned an inconsistent state/status pair"
+    attempt_number = payload.get("attempt_number")
+    if type(attempt_number) is not int or attempt_number < 1:
+        return "status response returned an invalid attempt number"
+    execution_generation = payload.get("execution_generation")
+    if type(execution_generation) is not int or execution_generation < 0:
+        return "status response returned an invalid execution generation"
+    if payload.get("input_max_bytes") != _TASK_STATUS_INPUT_MAX_BYTES:
+        return "status response changed its input byte limit"
+    if payload.get("response_max_bytes") != _TASK_STATUS_RESPONSE_MAX_BYTES:
+        return "status response changed its encoded byte limit"
+
+    if "input_omission_reason" not in payload:
+        return "status response omitted its input omission reason"
+    omission_reason = payload.get("input_omission_reason")
+    if omission_reason is not None and (
+        not isinstance(omission_reason, str)
+        or omission_reason not in _TASK_STATUS_INPUT_OMISSION_REASONS
+    ):
+        return "status response returned an unknown input omission reason"
+    args = payload.get("args")
+    kwargs = payload.get("kwargs")
+    if omission_reason is None:
+        if not isinstance(args, list) or not isinstance(kwargs, dict):
+            return "status response omitted inline input without a reason"
+    elif args is not None or kwargs is not None:
+        return "status response returned input together with an omission reason"
+    return None
 
 
 @events.init_command_line_parser.add_listener
@@ -327,20 +404,23 @@ class TaskCreationMixin:
                     response.failure(f"{scenario_name} status response was not an object")
                     return None
 
-                if data.get("task_id") != task_id:
-                    response.failure(
-                        f"{scenario_name} status response returned a mismatched task ID"
-                    )
+                contract_error = _task_status_contract_error(
+                    response,
+                    data,
+                    task_id=task_id,
+                )
+                if contract_error is not None:
+                    response.failure(f"{scenario_name} {contract_error}")
                     return None
 
-                status = str(data.get("status", "")).upper()
-                if status in _TERMINAL_SUCCESS_STATES:
+                state = data["state"]
+                if state == "SUCCEEDED":
                     response.success()
                     return data
-                if status in _TERMINAL_FAILURE_STATES:
-                    response.failure(f"{scenario_name} reached terminal state {status}")
+                if state in _TASK_STATUS_TERMINAL_FAILURE_STATES:
+                    response.failure(f"{scenario_name} reached terminal state {state}")
                     return data
-                if status not in _ACTIVE_STATES:
+                if state not in _TASK_STATUS_ACTIVE_STATES:
                     response.failure(f"{scenario_name} returned unknown task state")
                     return None
                 if time.monotonic() >= deadline:

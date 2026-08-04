@@ -18,7 +18,12 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 
 from django_ray import __version__ as django_ray_version
-from django_ray.lifecycle import TaskRetryRequestResult, TaskRetryRequestStatus
+from django_ray.lifecycle import (
+    TaskCancellationRequestResult,
+    TaskCancellationRequestStatus,
+    TaskRetryRequestResult,
+    TaskRetryRequestStatus,
+)
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.redaction import REDACTED, redact_text
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
@@ -69,6 +74,36 @@ def test_retry_outcome_supports_django_ninja_without_status_wrapper(
             "next_action": "Verify the execution identifier and object authorization.",
         },
     )
+
+
+def test_cancellation_outcome_is_a_fixed_bounded_http_response() -> None:
+    request = SimpleNamespace()
+    response = testproject_api._cancellation_execution_outcome(
+        request,
+        TaskCancellationRequestResult(
+            status=TaskCancellationRequestStatus.STALE_GENERATION,
+            execution_id=321,
+            state=TaskState.QUEUED,
+            attempt_number=2,
+            execution_generation=4,
+        ),
+        status_code=409,
+    )
+
+    assert response.status_code == 409
+    assert response["Cache-Control"] == "no-store"
+    assert response["X-Content-Type-Options"] == "nosniff"
+    assert len(response.content) <= testproject_api._CANCELLATION_RESPONSE_MAX_BYTES
+    assert json.loads(response.content) == {
+        "code": "STALE_GENERATION",
+        "message": "The execution generation changed before cancellation could be applied.",
+        "execution_id": 321,
+        "state": TaskState.QUEUED,
+        "attempt_number": 2,
+        "execution_generation": 4,
+        "next_action": "Refresh and re-authorize the current attempt before cancelling.",
+        "response_max_bytes": testproject_api._CANCELLATION_RESPONSE_MAX_BYTES,
+    }
 
 
 def test_browser_auth_javascript_executes_credentialed_actions() -> None:
@@ -832,18 +867,243 @@ class TestTasksAPI:
     """Test the /api/tasks/{task_id} endpoint for retrieving task results."""
 
     def test_get_task_by_uuid(self, client):
-        """Test getting a task by its UUID."""
-        # First enqueue a task
+        """A compatible inline input stays visible in the bounded status shape."""
         response = client.post("/api/enqueue/add/1/1")
         assert response.status_code == 200
         task_id = response.json()["task_id"]
 
-        # Now retrieve it
         response = client.get(f"/api/tasks/{task_id}")
         assert response.status_code == 200
         data = response.json()
         assert data["task_id"] == task_id
+        assert data["status"] == "READY"
+        assert data["state"] == TaskState.QUEUED
+        assert data["attempt_number"] == 1
+        assert data["execution_generation"] == 0
         assert data["args"] == [1, 1]
+        assert data["kwargs"] == {}
+        assert data["input_omission_reason"] is None
+        assert data["input_max_bytes"] == testproject_api._TASK_STATUS_INPUT_MAX_BYTES
+        assert data["response_max_bytes"] == testproject_api._TASK_STATUS_RESPONSE_MAX_BYTES
+        assert len(response.content) <= testproject_api._TASK_STATUS_RESPONSE_MAX_BYTES
+        assert response["Cache-Control"] == "no-store"
+        assert response["X-Content-Type-Options"] == "nosniff"
+
+    @pytest.mark.parametrize(
+        ("state", "status"),
+        [
+            (TaskState.QUEUED, "READY"),
+            (TaskState.RUNNING, "RUNNING"),
+            (TaskState.SUCCEEDED, "SUCCESSFUL"),
+            (TaskState.FAILED, "FAILED"),
+            (TaskState.CANCELLED, "FAILED"),
+            (TaskState.CANCELLING, "RUNNING"),
+            (TaskState.LOST, "FAILED"),
+            (TaskState.EXPIRED, "FAILED"),
+        ],
+    )
+    def test_task_status_preserves_django_status_and_exact_execution_identity(
+        self,
+        client,
+        state,
+        status,
+    ):
+        task = RayTaskExecution.objects.create(
+            task_id=f"custom-status-{state.lower()}",
+            callable_path="missing.module.callable",
+            state=state,
+            attempt_number=3,
+            execution_generation=7,
+            args_json='["visible"]',
+            kwargs_json='{"key":"value"}',
+            result_data='{"must":"not-load"}',
+            error_traceback="must-not-load",
+        )
+
+        response = client.get(f"/api/tasks/{task.task_id}")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == status
+        assert payload["state"] == state
+        assert payload["attempt_number"] == 3
+        assert payload["execution_generation"] == 7
+        assert payload["args"] == ["visible"]
+        assert payload["kwargs"] == {"key": "value"}
+        assert "must-not-load" not in response.content.decode()
+
+    def test_task_status_missing_is_fixed_and_task_id_is_length_bounded(self, client):
+        maximum_task_id = "x" * 255
+        RayTaskExecution.objects.create(
+            task_id=maximum_task_id,
+            callable_path="missing.module.callable",
+        )
+
+        missing = client.get("/api/tasks/custom-historical-id")
+        maximum = client.get(f"/api/tasks/{maximum_task_id}")
+
+        assert missing.status_code == 404
+        assert missing.json() == {
+            "code": "task_status_not_found",
+            "message": "Task status was not found.",
+            "response_max_bytes": testproject_api._TASK_STATUS_RESPONSE_MAX_BYTES,
+        }
+        assert missing["Cache-Control"] == "no-store"
+        assert maximum.status_code == 200
+        assert maximum.json()["task_id"] == maximum_task_id
+        assert client.get(f"/api/tasks/{'x' * 256}").status_code == 422
+
+    def test_task_status_never_loads_external_or_unrelated_task_data(
+        self,
+        client,
+        monkeypatch,
+    ):
+        protected = "status-protected-reference-marker"
+        task = RayTaskExecution.objects.create(
+            task_id="bounded-status-external-input",
+            callable_path="missing.module.callable",
+            state=TaskState.SUCCEEDED,
+            input_reference=f"digest:{protected}",
+            args_json='["external-placeholder"]',
+            kwargs_json='{"external":"placeholder"}',
+            result_data=f'{{"protected":"{protected}"}}',
+            result_reference=f"digest:{protected}",
+            error_message=protected,
+            error_traceback=protected,
+            runtime_env_json=f'{{"protected":"{protected}"}}',
+            progress_data=protected,
+            workflow_progress_summary_json=protected,
+        )
+
+        def fail(*args, **kwargs):
+            pytest.fail("bounded status polling must not call application-data loaders")
+
+        monkeypatch.setattr("django_ray.runtime.import_utils.import_callable", fail)
+        monkeypatch.setattr("django_ray.input_storage.load_task_input", fail)
+        monkeypatch.setattr("django_ray.result_storage.load_result_reference", fail)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get(f"/api/tasks/{task.task_id}")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["args"] is None
+        assert payload["kwargs"] is None
+        assert payload["input_omission_reason"] == "external_input_not_loaded"
+        assert protected not in response.content.decode()
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(task_selects) == 1
+        sql = task_selects[0]
+        assert "LENGTH(CAST(" in sql or "OCTET_LENGTH(" in sql
+        for excluded in (
+            "callable_path",
+            "result_data",
+            "result_reference",
+            "error_message",
+            "error_traceback",
+            "runtime_env_json",
+            "progress_data",
+            "workflow_progress_summary_json",
+        ):
+            assert excluded not in sql
+        assert "FOR UPDATE" not in sql.upper()
+
+    def test_task_status_classifies_oversized_and_malformed_inline_inputs(self, client):
+        oversized_args = json.dumps(
+            ["\u00e9" * testproject_api._TASK_STATUS_INPUT_MAX_BYTES],
+            ensure_ascii=False,
+        )
+        oversized = RayTaskExecution.objects.create(
+            task_id="bounded-status-oversized-input",
+            callable_path="test.task",
+            args_json=oversized_args,
+            kwargs_json="{}",
+        )
+        malformed = RayTaskExecution.objects.create(
+            task_id="bounded-status-malformed-input",
+            callable_path="test.task",
+            args_json='{"not":"a-list"}',
+            kwargs_json="{}",
+        )
+
+        oversized_response = client.get(f"/api/tasks/{oversized.task_id}")
+        malformed_response = client.get(f"/api/tasks/{malformed.task_id}")
+
+        assert oversized_response.status_code == 200
+        assert oversized_response.json()["input_omission_reason"] == (
+            "stored_input_exceeds_status_limit"
+        )
+        assert oversized_response.json()["args"] is None
+        assert oversized_args not in oversized_response.content.decode()
+        assert malformed_response.status_code == 200
+        assert malformed_response.json()["input_omission_reason"] == "malformed_inline_input"
+        assert malformed_response.json()["args"] is None
+
+    @pytest.mark.parametrize(
+        "args_json",
+        [
+            "[NaN,Infinity,-Infinity]",
+            "[1e999]",
+        ],
+    )
+    def test_task_status_rejects_non_finite_json_numbers(self, client, args_json):
+        task = RayTaskExecution.objects.create(
+            task_id=f"bounded-status-non-finite-{len(args_json)}",
+            callable_path="test.task",
+            args_json=args_json,
+            kwargs_json="{}",
+        )
+
+        response = client.get(f"/api/tasks/{task.task_id}")
+
+        assert response.status_code == 200
+        assert response.json()["args"] is None
+        assert response.json()["input_omission_reason"] == "malformed_inline_input"
+        json.loads(
+            response.content,
+            parse_constant=lambda value: pytest.fail(
+                f"strict client received non-finite JSON constant {value}"
+            ),
+        )
+
+    def test_task_status_enforces_the_encoded_response_ceiling(self, client, monkeypatch):
+        task = RayTaskExecution.objects.create(
+            task_id="bounded-status-render-limit",
+            callable_path="test.task",
+            args_json='["visible"]',
+            kwargs_json="{}",
+        )
+        real_encoder = testproject_api._encode_api_schema_response
+
+        def force_first_render_over_limit(request, response, *, status_code):
+            if isinstance(response, testproject_api.TaskStatusSchema) and response.args is not None:
+                return b"x" * (testproject_api._TASK_STATUS_RESPONSE_MAX_BYTES + 1)
+            return real_encoder(request, response, status_code=status_code)
+
+        monkeypatch.setattr(
+            testproject_api,
+            "_encode_api_schema_response",
+            force_first_render_over_limit,
+        )
+
+        response = client.get(f"/api/tasks/{task.task_id}")
+
+        assert response.status_code == 200
+        assert response.json()["args"] is None
+        assert response.json()["kwargs"] is None
+        assert response.json()["input_omission_reason"] == "encoded_response_limit"
+        assert len(response.content) <= testproject_api._TASK_STATUS_RESPONSE_MAX_BYTES
+
+    def test_task_status_fails_clearly_on_an_unsupported_database(self, monkeypatch):
+        monkeypatch.setattr(connection, "vendor", "oracle")
+
+        with pytest.raises(ImproperlyConfigured, match="task status supports only"):
+            testproject_api._bounded_task_status_row("task-id")
 
     def test_get_workflow_benchmark_result(self, client):
         execution = RayTaskExecution.objects.create(
@@ -867,8 +1127,15 @@ class TestTasksAPI:
         assert data["state"] == TaskState.SUCCEEDED
         assert data["result"]["leaf_tasks"] == 4
         assert data["result"]["effective_parallelism"] == 3.5
-        assert data["progress"]["completed_nodes"] == 7
-        assert data["progress"]["progress_percent"] == 100.0
+        assert data["progress"]["source_schema_version"] == 1
+        assert data["progress"]["summary"]["node_counts"]["succeeded"] == 7
+        assert data["progress"]["summary"]["progress_percent"] == 100.0
+        assert "graph" not in data["progress"]["summary"]
+        assert data["result_omission_reason"] is None
+        assert data["error_omission_reason"] is None
+        assert data["diagnostic_max_bytes"] == testproject_api._POLL_DIAGNOSTIC_MAX_BYTES
+        assert data["response_max_bytes"] == testproject_api._POLL_RESPONSE_MAX_BYTES
+        assert response["Cache-Control"] == "no-store"
 
     def test_get_workflow_showcase_result(self, client):
         result = {
@@ -905,6 +1172,8 @@ class TestTasksAPI:
         assert data["state"] == TaskState.SUCCEEDED
         assert data["result"] == result
         assert data["error"] is None
+        assert data["result_omission_reason"] is None
+        assert data["error_omission_reason"] is None
         assert data["progress"]["schema"] == "django-ray.workflow-progress-summary"
         assert data["progress"]["availability"] == "NOT_REPORTED"
         assert data["progress"]["complete"] is False
@@ -931,6 +1200,8 @@ class TestTasksAPI:
         assert data["error"] == (
             "Intentional workflow showcase\nreserve_inventory failure at item 0"
         )
+        assert data["result_omission_reason"] is None
+        assert data["error_omission_reason"] is None
         assert data["progress"]["schema"] == "django-ray.workflow-progress-summary"
         assert data["progress"]["availability"] == "NOT_REPORTED"
         assert data["progress"]["complete"] is False
@@ -1002,6 +1273,7 @@ class TestTasksAPI:
                     "Intentional workflow recovery failure at build_order_batch "
                     "on durable attempt 1"
                 ),
+                "error_omission_reason": None,
             },
             {
                 "attempt_number": 2,
@@ -1010,13 +1282,16 @@ class TestTasksAPI:
                     "Intentional workflow recovery failure at join_order_inputs "
                     "on durable attempt 2"
                 ),
+                "error_omission_reason": None,
             },
             {
                 "attempt_number": 3,
                 "state": TaskState.SUCCEEDED,
                 "error": None,
+                "error_omission_reason": None,
             },
         ]
+        assert data["attempt_error_max_bytes"] == testproject_api._POLL_ATTEMPT_ERROR_MAX_BYTES
         assert data["progress"]["availability"] == "NOT_REPORTED"
 
     def test_get_runtime_env_result_includes_environment_identity(self, client):
@@ -1041,6 +1316,10 @@ class TestTasksAPI:
         assert data["runtime_env_profile"] == "numpy-2-3"
         assert data["runtime_env_hash"] == "a" * 64
         assert data["result"]["package_version"] == "2.3.5"
+        assert data["result_omission_reason"] is None
+        assert data["error_omission_reason"] is None
+        assert data["diagnostic_max_bytes"] == testproject_api._POLL_DIAGNOSTIC_MAX_BYTES
+        assert data["response_max_bytes"] == testproject_api._POLL_RESPONSE_MAX_BYTES
         task_selects = [
             query["sql"]
             for query in queries.captured_queries
@@ -1050,69 +1329,95 @@ class TestTasksAPI:
         assert task_selects
         assert all("runtime_env_json" not in query for query in task_selects)
 
-    def test_get_workflow_benchmark_resolves_backend_result(self, client, monkeypatch):
+    @pytest.mark.parametrize(
+        ("task_id", "callable_path", "endpoint"),
+        [
+            (
+                "workflow-result-external-002",
+                "testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark",
+                "/api/cluster/workflow-benchmark/{task_id}",
+            ),
+            (
+                "complex-workflow-result-external-002",
+                "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
+                "/api/cluster/complex-workflow/{task_id}",
+            ),
+            (
+                "workflow-showcase-result-external-002",
+                "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task",
+                "/api/cluster/workflow-showcase/{task_id}",
+            ),
+            (
+                "workflow-recovery-result-external-002",
+                ("testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"),
+                "/api/cluster/workflow-recovery-showcase/{task_id}",
+            ),
+            (
+                "runtime-env-result-external-002",
+                "testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+                "/api/cluster/runtime-env/{task_id}",
+            ),
+        ],
+    )
+    def test_pollers_never_resolve_external_results_or_task_application_data(
+        self,
+        client,
+        monkeypatch,
+        task_id,
+        callable_path,
+        endpoint,
+    ):
+        protected = "polling-external-result-marker"
         execution = RayTaskExecution.objects.create(
-            task_id="workflow-result-002",
-            callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
-            queue_name="default",
-            state=TaskState.SUCCEEDED,
-            runtime_env_profile="project",
-            runtime_env_hash="b" * 64,
-            result_data=None,
-            progress_data='{"state": "SUCCEEDED", "total_nodes": 1, "completed_nodes": 1}',
-        )
-
-        class _Backend:
-            def __init__(self, value):
-                self.value = value
-
-            def get_result(self, task_id):
-                assert task_id == "workflow-result-002"
-                return SimpleNamespace(return_value=self.value)
-
-        monkeypatch.setattr(
-            "testproject.api.task_backends",
-            {"default": _Backend({"leaf_tasks": 99})},
-        )
-
-        response = client.get(f"/api/cluster/workflow-benchmark/{execution.task_id}")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["result"]["leaf_tasks"] == 99
-
-    def test_get_runtime_env_result_resolves_profile_backend_result(self, client, monkeypatch):
-        execution = RayTaskExecution.objects.create(
-            task_id="runtime-env-result-002",
-            callable_path=("testproject.apps.cluster_tasks.tasks.runtime_env_probe"),
+            task_id=task_id,
+            callable_path=callable_path,
             queue_name="default",
             state=TaskState.SUCCEEDED,
             runtime_env_profile="numpy-2-3",
             runtime_env_hash="c" * 64,
             result_data=None,
+            result_reference=f"digest:{protected}",
+            args_json=f'["{protected}"]',
+            kwargs_json=f'{{"protected":"{protected}"}}',
+            input_reference=f"digest:{protected}",
+            error_traceback=protected,
+            runtime_env_json=f'{{"protected":"{protected}"}}',
+            completion_data=protected,
         )
 
-        class _Backend:
-            def __init__(self, value):
-                self.value = value
+        def fail(*args, **kwargs):
+            pytest.fail("bounded polling must not load task application data")
 
-            def get_result(self, task_id):
-                assert task_id == "runtime-env-result-002"
-                return SimpleNamespace(return_value=self.value)
+        monkeypatch.setattr("django_ray.runtime.import_utils.import_callable", fail)
+        monkeypatch.setattr("django_ray.input_storage.load_task_input", fail)
+        monkeypatch.setattr("django_ray.result_storage.load_result_reference", fail)
 
-        monkeypatch.setattr(
-            "testproject.api.task_backends",
-            {
-                "default": _Backend({"source": "default"}),
-                "numpy-2-3": _Backend({"source": "numpy-2-3"}),
-            },
-        )
-
-        response = client.get(f"/api/cluster/runtime-env/{execution.task_id}")
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get(endpoint.format(task_id=execution.task_id))
 
         assert response.status_code == 200
         data = response.json()
-        assert data["result"]["source"] == "numpy-2-3"
+        assert data["result"] is None
+        assert data["result_omission_reason"] == "external_result_not_loaded"
+        assert protected not in response.content.decode()
+        assert len(response.content) <= testproject_api._POLL_RESPONSE_MAX_BYTES
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert task_selects
+        for sql in task_selects:
+            for excluded in (
+                "args_json",
+                "kwargs_json",
+                "input_reference",
+                "error_traceback",
+                "runtime_env_json",
+                "completion_data",
+            ):
+                assert excluded not in sql
 
     def test_bounded_v3_summary_is_public_without_loading_legacy_graph(self, client):
         execution = RayTaskExecution.objects.create(
@@ -1133,9 +1438,10 @@ class TestTasksAPI:
 
         assert progress_response.status_code == 200
         progress = progress_response.json()["progress"]
-        assert progress["schema_version"] == 3
+        assert progress["schema_version"] == 1
+        assert progress["source_schema_version"] == 3
         assert "task_execution_pk" not in progress["run_identity"]
-        assert progress["storage"]["manifest_id"] is None
+        assert progress["summary"]["storage"]["manifest_id"] is None
         task_selects = [
             query["sql"]
             for query in queries.captured_queries
@@ -1143,10 +1449,10 @@ class TestTasksAPI:
             and "django_ray_raytaskexecution" in query["sql"]
         ]
         assert len(task_selects) == 2
-        assert "progress_data" not in task_selects[0]
+        assert all("progress_data" not in query for query in task_selects)
         assert "workflow_progress_summary_json" not in task_selects[0]
 
-    def test_get_workflow_node_returns_durable_metadata_without_ray_id(self, client):
+    def test_legacy_live_workflow_node_route_is_removed(self, client):
         execution = RayTaskExecution.objects.create(
             task_id="workflow-node-001",
             callable_path=("testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark"),
@@ -1171,11 +1477,11 @@ class TestTasksAPI:
 
         response = client.get(f"/api/cluster/workflows/{execution.task_id}/nodes/0.0")
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["node"]["label"] == "prepare"
-        assert data["ray_state"] is None
-        assert data["logs"] is None
+        assert response.status_code == 404
+        schema = client.get("/api/openapi.json").json()
+        assert "/api/cluster/workflows/{task_id}/nodes/{node_id}" not in schema["paths"]
+        assert "WorkflowNodeSchema" not in schema["components"]["schemas"]
+        assert set(schema["paths"]["/api/cluster/workflows/{task_id}/node-detail"]) == {"get"}
 
     def test_indexed_workflow_node_does_not_scan_legacy_graph(self, client):
         execution = RayTaskExecution.objects.create(
@@ -1219,6 +1525,203 @@ class TestTasksAPI:
         ]
         assert task_selects
         assert all("progress_data" not in query for query in task_selects)
+
+    def test_pollers_classify_oversized_and_malformed_inline_diagnostics(self, client):
+        oversized_value = "\u00e9" * testproject_api._POLL_DIAGNOSTIC_MAX_BYTES
+        oversized = RayTaskExecution.objects.create(
+            task_id="runtime-env-poll-oversized",
+            callable_path="testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+            state=TaskState.FAILED,
+            runtime_env_hash="d" * 64,
+            result_data=json.dumps({"value": oversized_value}, ensure_ascii=False),
+            error_message=oversized_value,
+        )
+        malformed = RayTaskExecution.objects.create(
+            task_id="runtime-env-poll-malformed",
+            callable_path="testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+            state=TaskState.SUCCEEDED,
+            runtime_env_hash="e" * 64,
+            result_data='["not-a-result-object"]',
+        )
+
+        oversized_response = client.get(f"/api/cluster/runtime-env/{oversized.task_id}")
+        malformed_response = client.get(f"/api/cluster/runtime-env/{malformed.task_id}")
+
+        assert oversized_response.status_code == 200
+        oversized_payload = oversized_response.json()
+        assert oversized_payload["result"] is None
+        assert oversized_payload["error"] is None
+        assert oversized_payload["result_omission_reason"] == ("stored_result_exceeds_poll_limit")
+        assert oversized_payload["error_omission_reason"] == "stored_error_exceeds_poll_limit"
+        assert oversized_value not in oversized_response.content.decode()
+        assert malformed_response.status_code == 200
+        assert malformed_response.json()["result"] is None
+        assert malformed_response.json()["result_omission_reason"] == ("malformed_inline_result")
+
+    @pytest.mark.parametrize(
+        "result_data",
+        [
+            '{"value":NaN}',
+            '{"value":Infinity}',
+            '{"value":-Infinity}',
+            '{"value":1e999}',
+        ],
+    )
+    def test_pollers_reject_non_finite_json_numbers(self, client, result_data):
+        execution = RayTaskExecution.objects.create(
+            task_id=f"runtime-env-poll-non-finite-{len(result_data)}",
+            callable_path="testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+            state=TaskState.SUCCEEDED,
+            runtime_env_hash="9" * 64,
+            result_data=result_data,
+        )
+
+        response = client.get(f"/api/cluster/runtime-env/{execution.task_id}")
+
+        assert response.status_code == 200
+        assert response.json()["result"] is None
+        assert response.json()["result_omission_reason"] == "malformed_inline_result"
+        json.loads(
+            response.content,
+            parse_constant=lambda value: pytest.fail(
+                f"strict client received non-finite JSON constant {value}"
+            ),
+        )
+
+    def test_recovery_attempt_errors_are_byte_guarded_and_attempt_fenced(self, client):
+        protected = "r" * (testproject_api._POLL_ATTEMPT_ERROR_MAX_BYTES + 1)
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-recovery-bounded-attempt-errors",
+            callable_path=(
+                "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"
+            ),
+            state=TaskState.SUCCEEDED,
+            attempt_number=3,
+            execution_generation=3,
+            runtime_env_profile="recovery-showcase",
+            result_data='{"status":"FULFILLED"}',
+        )
+        TaskAttempt.objects.bulk_create(
+            [
+                TaskAttempt(
+                    execution=execution,
+                    attempt_number=1,
+                    state=TaskState.FAILED,
+                    error_message=protected,
+                ),
+                TaskAttempt(
+                    execution=execution,
+                    attempt_number=2,
+                    state=TaskState.FAILED,
+                    error_message="bounded",
+                ),
+                TaskAttempt(
+                    execution=execution,
+                    attempt_number=4,
+                    state=TaskState.FAILED,
+                    error_message="newer-attempt-must-not-mix",
+                ),
+            ]
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get(f"/api/cluster/workflow-recovery-showcase/{execution.task_id}")
+
+        assert response.status_code == 200
+        attempts = response.json()["attempts"]
+        assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+        assert attempts[0]["error"] is None
+        assert attempts[0]["error_omission_reason"] == "stored_error_exceeds_attempt_limit"
+        assert attempts[1]["error"] == "bounded"
+        assert attempts[1]["error_omission_reason"] is None
+        assert protected not in response.content.decode()
+        assert "newer-attempt-must-not-mix" not in response.content.decode()
+        attempt_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_taskattempt" in query["sql"]
+        ]
+        assert len(attempt_selects) == 1
+        assert "LENGTH(CAST(" in attempt_selects[0] or "OCTET_LENGTH(" in attempt_selects[0]
+        assert "result_data" not in attempt_selects[0]
+        assert "error_traceback" not in attempt_selects[0]
+
+    def test_workflow_poll_rejects_a_mixed_generation_summary(self, client, monkeypatch):
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-poll-raced-summary",
+            callable_path="testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark",
+            state=TaskState.RUNNING,
+            attempt_number=2,
+            execution_generation=3,
+        )
+
+        observed: dict[str, object] = {}
+
+        def raced_summary(*args, **kwargs):
+            observed.update(kwargs)
+            return {
+                "run_identity": {
+                    "run_id": "00000000-0000-0000-0000-000000000999",
+                    "attempt_number": 3,
+                    "execution_generation": 4,
+                }
+            }
+
+        monkeypatch.setattr(
+            testproject_api,
+            "get_workflow_progress_summary",
+            raced_summary,
+        )
+
+        response = client.get(f"/api/cluster/workflow-benchmark/{execution.task_id}")
+
+        assert response.status_code == 200
+        assert response.json()["progress"] is None
+        assert observed["attempt_number"] == 2
+
+    def test_poll_response_enforces_the_encoded_response_ceiling(self, client, monkeypatch):
+        execution = RayTaskExecution.objects.create(
+            task_id="runtime-env-poll-render-limit",
+            callable_path="testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+            state=TaskState.SUCCEEDED,
+            runtime_env_hash="f" * 64,
+            result_data='{"value":"visible"}',
+            error_message="visible error",
+        )
+        real_encoder = testproject_api._encode_api_schema_response
+
+        def force_diagnostics_over_limit(request, response, *, status_code):
+            if isinstance(response, testproject_api.RuntimeEnvResultSchema) and (
+                response.result is not None or response.error is not None
+            ):
+                return b"x" * (testproject_api._POLL_RESPONSE_MAX_BYTES + 1)
+            return real_encoder(request, response, status_code=status_code)
+
+        monkeypatch.setattr(
+            testproject_api,
+            "_encode_api_schema_response",
+            force_diagnostics_over_limit,
+        )
+
+        response = client.get(f"/api/cluster/runtime-env/{execution.task_id}")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["result"] is None
+        assert payload["error"] is None
+        assert payload["result_omission_reason"] == "encoded_response_limit"
+        assert payload["error_omission_reason"] == "encoded_response_limit"
+        assert len(response.content) <= testproject_api._POLL_RESPONSE_MAX_BYTES
+
+    def test_poll_projection_fails_clearly_on_an_unsupported_database(self, monkeypatch):
+        monkeypatch.setattr(connection, "vendor", "oracle")
+
+        with pytest.raises(ImproperlyConfigured, match="polling supports only"):
+            testproject_api._bounded_poll_execution_row(
+                "task-id",
+                callable_paths=("test.task",),
+            )
 
 
 @pytest.mark.django_db
@@ -2183,7 +2686,7 @@ class TestExecutionsAPI:
         assert RayTaskExecution.objects.filter(pk=task.pk, state=TaskState.RUNNING).exists()
 
     def test_openapi_does_not_advertise_execution_deletion(self, client):
-        """The reusable sample contract exposes only the lifecycle-safe detail read."""
+        """The reusable sample advertises only bounded lifecycle operations."""
         schema_response = client.get("/api/openapi.json")
         assert schema_response.status_code == 200
         schema = schema_response.json()
@@ -2214,9 +2717,32 @@ class TestExecutionsAPI:
             "external_result_not_loaded",
             "response_size_limit",
         ]
+        assert "/api/executions/reset" not in schema["paths"]
+        assert "/api/cluster/workflows/{task_id}/nodes/{node_id}" not in schema["paths"]
+        assert "MessageSchema" not in schema["components"]["schemas"]
+        assert "WorkflowNodeSchema" not in schema["components"]["schemas"]
+        assert set(schema["paths"]["/api/executions/{execution_id}/retry"]) == {"post"}
+        assert set(schema["paths"]["/api/executions/{execution_id}/cancel"]) == {"post"}
+        assert set(schema["paths"]["/api/cluster/workflows/{task_id}/node-detail"]) == {"get"}
+        status_properties = schema["components"]["schemas"]["TaskStatusSchema"]["properties"]
+        assert status_properties["input_max_bytes"]["const"] == (
+            testproject_api._TASK_STATUS_INPUT_MAX_BYTES
+        )
+        assert status_properties["response_max_bytes"]["const"] == (
+            testproject_api._TASK_STATUS_RESPONSE_MAX_BYTES
+        )
+        status_reason = next(
+            item for item in status_properties["input_omission_reason"]["anyOf"] if "enum" in item
+        )
+        assert status_reason["enum"] == [
+            "external_input_not_loaded",
+            "stored_input_exceeds_status_limit",
+            "malformed_inline_input",
+            "encoded_response_limit",
+        ]
 
     def test_cancel_queued_execution(self, client):
-        """Test cancelling a queued execution."""
+        """Queued cancellation returns a small accepted outcome and archives once."""
         task = RayTaskExecution.objects.create(
             task_id="test-cancel",
             callable_path="test.task",
@@ -2224,10 +2750,24 @@ class TestExecutionsAPI:
         )
 
         response = client.post(f"/api/executions/{task.pk}/cancel")
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
-        assert data["state"] == "CANCELLED"
-        assert data["finished_at"] is not None
+        assert data == {
+            "code": "ACCEPTED",
+            "message": "Cancellation was accepted.",
+            "execution_id": task.pk,
+            "state": "CANCELLED",
+            "attempt_number": 1,
+            "execution_generation": 0,
+            "next_action": "The queued attempt is cancelled; retain its archived history.",
+            "response_max_bytes": testproject_api._CANCELLATION_RESPONSE_MAX_BYTES,
+        }
+        assert len(response.content) <= testproject_api._CANCELLATION_RESPONSE_MAX_BYTES
+        assert response["Cache-Control"] == "no-store"
+        assert response["X-Content-Type-Options"] == "nosniff"
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLED
+        assert task.finished_at is not None
         assert TaskAttempt.objects.get(execution=task).state == TaskState.CANCELLED
 
     def test_cancel_running_execution_requests_worker_cancellation(self, client):
@@ -2240,13 +2780,18 @@ class TestExecutionsAPI:
 
         response = client.post(f"/api/executions/{task.pk}/cancel")
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
+        assert data["code"] == "ACCEPTED"
         assert data["state"] == "CANCELLING"
         assert data["execution_generation"] == 4
-        assert data["finished_at"] is None
+        assert data["next_action"] == (
+            "Poll until the worker records a terminal cancellation outcome."
+        )
+        assert "finished_at" not in data
+        assert "cancellation_error" not in data
 
-    def test_cancel_terminal_execution_is_a_bounded_noop(self, client):
+    def test_cancel_terminal_execution_is_an_explicit_conflict(self, client):
         task = RayTaskExecution.objects.create(
             task_id="test-cancel-terminal",
             callable_path="test.task",
@@ -2257,26 +2802,109 @@ class TestExecutionsAPI:
         first = client.post(f"/api/executions/{task.pk}/cancel")
         second = client.post(f"/api/executions/{task.pk}/cancel")
 
-        assert first.status_code == 200
-        assert second.status_code == 200
+        assert first.status_code == 409
+        assert second.status_code == 409
+        assert first.json()["code"] == "ALREADY_TERMINAL"
+        assert second.json()["code"] == "ALREADY_TERMINAL"
         assert first.json()["state"] == "SUCCEEDED"
         assert second.json()["state"] == "SUCCEEDED"
 
-    def test_cancel_terminal_execution_fails_wide_inline_result_closed(self, client):
+    def test_cancel_terminal_execution_never_selects_or_returns_diagnostics(self, client):
+        protected = "cancel-response-protected-marker"
         task = RayTaskExecution.objects.create(
             task_id="test-cancel-terminal-wide-result",
             callable_path="test.task",
             state=TaskState.SUCCEEDED,
-            result_data=json.dumps(
-                [0] * (testproject_api._EXECUTION_RESULT_JSON_DEPTH_SCAN_MAX_ITEMS + 1)
-            ),
+            result_data=json.dumps({"protected": protected}),
+            result_reference=f"digest:{protected}",
+            error_message=protected,
+            error_traceback=protected,
+            cancellation_error=protected,
         )
 
-        response = client.post(f"/api/executions/{task.pk}/cancel")
+        with CaptureQueriesContext(connection) as queries:
+            response = client.post(f"/api/executions/{task.pk}/cancel")
 
-        assert response.status_code == 200
+        assert response.status_code == 409
+        assert response.json()["code"] == "ALREADY_TERMINAL"
         assert response.json()["state"] == "SUCCEEDED"
-        assert response.json()["result_data"] == REDACTED
+        assert protected not in response.content.decode()
+        assert set(response.json()) == {
+            "code",
+            "message",
+            "execution_id",
+            "state",
+            "attempt_number",
+            "execution_generation",
+            "next_action",
+            "response_max_bytes",
+        }
+        task_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(task_selects) == 2
+        for sql in task_selects:
+            for excluded in (
+                "result_data",
+                "result_reference",
+                "error_message",
+                "error_traceback",
+                "cancellation_error",
+                "runtime_env_json",
+                "progress_data",
+            ):
+                assert excluded not in sql
+
+    def test_cancel_duplicate_missing_and_post_preflight_race_are_distinct(
+        self,
+        client,
+        monkeypatch,
+    ):
+        duplicate = RayTaskExecution.objects.create(
+            task_id="test-cancel-duplicate",
+            callable_path="test.task",
+            state=TaskState.CANCELLING,
+            attempt_number=2,
+            execution_generation=3,
+        )
+
+        duplicate_response = client.post(f"/api/executions/{duplicate.pk}/cancel")
+        missing_response = client.post("/api/executions/999999/cancel")
+
+        assert duplicate_response.status_code == 409
+        assert duplicate_response.json()["code"] == "ALREADY_REQUESTED"
+        assert missing_response.status_code == 404
+        assert missing_response.json()["code"] == "NOT_FOUND"
+
+        observed: dict[str, int] = {}
+
+        def raced(execution_id, *, expected_attempt_number, expected_execution_generation):
+            observed.update(
+                execution_id=execution_id,
+                attempt_number=expected_attempt_number,
+                execution_generation=expected_execution_generation,
+            )
+            return TaskCancellationRequestResult(
+                status=TaskCancellationRequestStatus.STALE_ATTEMPT,
+                execution_id=execution_id,
+                state=TaskState.RUNNING,
+                attempt_number=3,
+                execution_generation=4,
+            )
+
+        monkeypatch.setattr(testproject_api, "request_task_cancellation", raced)
+        raced_response = client.post(f"/api/executions/{duplicate.pk}/cancel")
+
+        assert raced_response.status_code == 409
+        assert raced_response.json()["code"] == "STALE_ATTEMPT"
+        assert observed == {
+            "execution_id": duplicate.pk,
+            "attempt_number": 2,
+            "execution_generation": 3,
+        }
 
     def test_retry_failed_execution(self, client):
         """Test retrying a failed execution."""
@@ -2505,140 +3133,32 @@ class TestExecutionsAPI:
         assert task.error_message == "original failure"
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
-    def test_reset_executions(self, client):
-        """Reset only terminal retryable executions and preserve active work."""
-        running = RayTaskExecution.objects.create(
-            task_id="test-running",
-            callable_path="test.task",
-            state=TaskState.RUNNING,
-            progress_data='{"revision":9}',
-            workflow_run_id="00000000-0000-0000-0000-000000000125",
-        )
-        running_summary = serialize_workflow_progress_summary(workflow_progress_summary(running))
-        running.workflow_progress_summary_json = running_summary
-        running.save(update_fields=["workflow_progress_summary_json"])
+    def test_bulk_reset_route_is_removed_without_mutating_retryable_rows(self, client):
         failed = RayTaskExecution.objects.create(
-            task_id="test-failed",
+            task_id="test-retired-bulk-reset",
             callable_path="test.task",
             state=TaskState.FAILED,
             progress_data='{"revision":4}',
             workflow_run_id="00000000-0000-0000-0000-000000000126",
             error_message="retryable",
+            attempt_number=2,
+            execution_generation=4,
         )
         terminal = serialize_workflow_progress_summary(
             workflow_progress_summary(failed, state="FAILED")
         )
         failed.workflow_progress_summary_json = terminal
         failed.save(update_fields=["workflow_progress_summary_json"])
-        lost = RayTaskExecution.objects.create(
-            task_id="test-lost",
-            callable_path="test.task",
-            state=TaskState.LOST,
-            error_message="worker disappeared",
-        )
-        expired = RayTaskExecution.objects.create(
-            task_id="test-expired",
-            callable_path="test.task",
-            state=TaskState.EXPIRED,
-            queue_timeout_seconds=60,
-            queue_deadline_at=datetime.now(UTC) - timedelta(seconds=1),
-            error_message="queue deadline elapsed",
-        )
-
-        response = client.post("/api/executions/reset")
-        assert response.status_code == 200
-        data = response.json()
-        assert "3" in data["message"]
-
-        # Terminal retryable rows are queued through retry_task().
-        assert RayTaskExecution.objects.filter(state=TaskState.QUEUED).count() == 3
-        failed.refresh_from_db()
-        assert failed.state == TaskState.QUEUED
-        assert failed.progress_data is None
-        assert failed.workflow_progress_summary_json is None
-        assert failed.attempt_number == 2
-        assert failed.execution_generation == 1
-        assert (
-            TaskAttempt.objects.get(
-                execution=failed,
-                attempt_number=1,
-            ).workflow_progress_summary_json
-            == terminal
-        )
-        lost.refresh_from_db()
-        assert lost.state == TaskState.QUEUED
-        assert lost.attempt_number == 2
-        assert TaskAttempt.objects.get(execution=lost, attempt_number=1).state == TaskState.LOST
-        expired.refresh_from_db()
-        assert expired.state == TaskState.QUEUED
-        assert expired.attempt_number == 2
-        assert expired.queue_deadline_at is not None
-        assert expired.queue_deadline_at > datetime.now(UTC)
-        assert (
-            TaskAttempt.objects.get(execution=expired, attempt_number=1).state == TaskState.EXPIRED
-        )
-
-        # Active work is never converted into a retry by the bulk endpoint.
-        running.refresh_from_db()
-        assert running.state == TaskState.RUNNING
-        assert running.progress_data == '{"revision":9}'
-        assert running.workflow_progress_summary_json == running_summary
-        assert running.attempt_number == 1
-        assert not TaskAttempt.objects.filter(execution=running).exists()
-
-    def test_reset_executions_skips_corrupt_runtime_env_and_continues(self, client):
-        corrupt = RayTaskExecution.objects.create(
-            task_id="test-reset-runtime-env-corrupt",
-            callable_path="test.task",
-            state=TaskState.FAILED,
-            error_message="original failure",
-            attempt_number=2,
-            execution_generation=4,
-            runtime_env_json=('{"env_vars":{"VALUE":"arbitrary-customer-marker-7cf3"}}'),
-            runtime_env_hash="0" * 64,
-        )
-        valid = RayTaskExecution.objects.create(
-            task_id="test-reset-runtime-env-valid",
-            callable_path="test.task",
-            state=TaskState.LOST,
-            error_message="worker lost",
-            attempt_number=2,
-            execution_generation=4,
-        )
+        before = RayTaskExecution.objects.filter(pk=failed.pk).values().get()
 
         response = client.post("/api/executions/reset")
 
-        assert response.status_code == 200
-        assert response.json() == {
-            "message": (
-                "Reset 1 execution(s) to QUEUED state; blocked 1 execution(s) "
-                "because their persisted RuntimeEnv snapshots failed validation"
-            )
-        }
-        assert "arbitrary-customer-marker-7cf3" not in response.content.decode()
-        corrupt.refresh_from_db()
-        valid.refresh_from_db()
-        assert corrupt.state == TaskState.FAILED
-        assert corrupt.attempt_number == 2
-        assert corrupt.execution_generation == 4
-        assert corrupt.error_message == "original failure"
-        assert not TaskAttempt.objects.filter(execution=corrupt).exists()
-        assert valid.state == TaskState.QUEUED
-        assert valid.attempt_number == 3
-
-    def test_reset_executions_rejects_active_state_filter(self, client):
-        """The bulk reset endpoint accepts only terminal retryable states."""
-        running = RayTaskExecution.objects.create(
-            task_id="test-reset-running-rejected",
-            callable_path="test.task",
-            state=TaskState.RUNNING,
-        )
-
-        response = client.post("/api/executions/reset?state=RUNNING")
-
-        assert response.status_code == 422
-        running.refresh_from_db()
-        assert running.state == TaskState.RUNNING
+        assert response.status_code in {404, 405}
+        assert RayTaskExecution.objects.filter(pk=failed.pk).values().get() == before
+        assert not TaskAttempt.objects.filter(execution=failed).exists()
+        schema = client.get("/api/openapi.json").json()
+        assert "/api/executions/reset" not in schema["paths"]
+        assert set(schema["paths"]["/api/executions/{execution_id}/retry"]) == {"post"}
 
     def test_get_stats(self, client):
         """Test getting execution statistics."""

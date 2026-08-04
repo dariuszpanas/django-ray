@@ -355,6 +355,13 @@ therefore cannot grant privileged diagnostic access. Authorized incident respond
 use the separate [pattern-unredacted Admin view](reference/settings.md#unredacted-task-diagnostics),
 which still applies terminal normalization and hard response bounds.
 
+The bundled testproject's `GET /api/tasks/{task_id}` endpoint is intentionally not this
+full Python result contract. It is a 65,536-byte monitoring projection with nullable
+`args` and `kwargs`, a 16,384-byte combined inline-input guard, and fixed omission
+metadata. It never loads an external input or a task result. Application code using
+`TaskResult` can still retrieve full application arguments, keyword arguments, and a
+successful return value under its own authorization and data-handling policy.
+
 For operations, graph progress, attempts, and Ray identifiers, query
 `RayTaskExecution` or use the observability helpers described in
 [API and UI integration](reference/api.md).

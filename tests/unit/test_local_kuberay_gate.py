@@ -24,9 +24,14 @@ from scripts.local_kuberay_gate import (
     DOCKER_CONTEXT_ALLOWLISTS,
     EVIDENCE_LINE_LIMIT,
     EXPECTED_NAMESPACE,
+    EXPECTED_POLL_ATTEMPT_ERROR_MAX_BYTES,
+    EXPECTED_POLL_DIAGNOSTIC_MAX_BYTES,
+    EXPECTED_POLL_RESPONSE_MAX_BYTES,
     EXPECTED_PROBE_HOST,
     EXPECTED_PROBE_PATH,
     EXPECTED_RESOURCE_IDENTITIES,
+    EXPECTED_TASK_STATUS_INPUT_MAX_BYTES,
+    EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES,
     MAX_HTTP_RESPONSE_BYTES,
     MAX_OUTPUT_CHARACTERS,
     RAY_CLUSTER_LABEL,
@@ -70,11 +75,13 @@ from scripts.local_kuberay_gate import (
     secret_data_sha256,
     source_bound_tag,
     split_apply_resources,
+    validate_bounded_poll_projection,
     validate_local_context,
     validate_local_docker_endpoint,
     validate_local_http_url,
     validate_namespace,
     validate_runtime_env_encryption_envelope,
+    validate_task_status_payload,
     validate_terminal_diagnostic_text,
 )
 
@@ -109,6 +116,35 @@ RUNTIME_ENV_TAMPER_TASK_ID = "b5200000-0000-4000-8000-000000000011"
 RUNTIME_ENV_UNKNOWN_KEY_TASK_ID = "c5200000-0000-4000-8000-000000000012"
 
 
+def _task_status_payload(
+    *,
+    state: str = "SUCCEEDED",
+    task_id: str = TASK_ID,
+    omission_reason: str | None = None,
+) -> dict[str, object]:
+    return {
+        "task_id": task_id,
+        "status": gate_module.TASK_STATUS_BY_STATE[state],
+        "state": state,
+        "attempt_number": 1,
+        "execution_generation": 1,
+        "args": [2, 3] if omission_reason is None else None,
+        "kwargs": {} if omission_reason is None else None,
+        "input_omission_reason": omission_reason,
+        "input_max_bytes": EXPECTED_TASK_STATUS_INPUT_MAX_BYTES,
+        "response_max_bytes": EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES,
+    }
+
+
+def _bounded_poll_metadata() -> dict[str, object]:
+    return {
+        "result_omission_reason": None,
+        "error_omission_reason": None,
+        "diagnostic_max_bytes": EXPECTED_POLL_DIAGNOSTIC_MAX_BYTES,
+        "response_max_bytes": EXPECTED_POLL_RESPONSE_MAX_BYTES,
+    }
+
+
 def test_expired_is_a_terminal_failure_in_all_gate_task_vocabularies() -> None:
     assert "EXPIRED" in gate_module.TASK_FAILURE_STATES
     assert "EXPIRED" in gate_module.WORKFLOW_PROGRESS_TASK_STATES
@@ -122,6 +158,182 @@ def test_terminal_diagnostic_gate_accepts_inert_lines_and_rejects_controls() -> 
     for unsafe in ("\x1b[31mfailed", "progress\rfailed", "bad\x00text", "bad\x9b31mtext"):
         with pytest.raises(ValueError, match="terminal control"):
             validate_terminal_diagnostic_text(unsafe, field_name="traceback")
+
+
+@pytest.mark.parametrize(
+    "omission_reason",
+    [
+        None,
+        "external_input_not_loaded",
+        "stored_input_exceeds_status_limit",
+        "malformed_inline_input",
+        "encoded_response_limit",
+    ],
+)
+def test_task_status_gate_accepts_the_fixed_omission_vocabulary(
+    omission_reason: str | None,
+) -> None:
+    payload = _task_status_payload(omission_reason=omission_reason)
+
+    assert validate_task_status_payload(payload, task_id=TASK_ID) == "SUCCEEDED"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("task_id", "different-task", "wrong task"),
+        ("status", "SUCCEEDED", "state/status pair"),
+        ("attempt_number", True, "attempt number"),
+        ("execution_generation", -1, "execution generation"),
+        ("input_max_bytes", 1, "input byte limit"),
+        ("response_max_bytes", 1, "response byte limit"),
+        ("input_omission_reason", "invented", "omission reason"),
+    ],
+)
+def test_task_status_gate_rejects_contract_drift(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    payload = _task_status_payload()
+    payload[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        validate_task_status_payload(payload, task_id=TASK_ID)
+
+
+@pytest.mark.parametrize(
+    "result_reason",
+    [
+        None,
+        "external_result_not_loaded",
+        "stored_result_exceeds_poll_limit",
+        "malformed_inline_result",
+        "encoded_response_limit",
+    ],
+)
+def test_bounded_poll_gate_accepts_the_fixed_result_omission_vocabulary(
+    result_reason: str | None,
+) -> None:
+    payload = {
+        "task_id": TASK_ID,
+        "result": None,
+        "error": None,
+        **_bounded_poll_metadata(),
+    }
+    payload["result_omission_reason"] = result_reason
+
+    validate_bounded_poll_projection(payload, surface="workflow poll", task_id=TASK_ID)
+
+
+@pytest.mark.parametrize(
+    "error_reason",
+    [None, "stored_error_exceeds_poll_limit", "encoded_response_limit"],
+)
+def test_bounded_poll_gate_accepts_the_fixed_error_omission_vocabulary(
+    error_reason: str | None,
+) -> None:
+    payload = {
+        "task_id": TASK_ID,
+        "result": None,
+        "error": None,
+        **_bounded_poll_metadata(),
+    }
+    payload["error_omission_reason"] = error_reason
+
+    validate_bounded_poll_projection(payload, surface="RuntimeEnv poll", task_id=TASK_ID)
+
+
+@pytest.mark.parametrize(
+    "attempt_reason",
+    [None, "stored_error_exceeds_attempt_limit", "encoded_response_limit"],
+)
+def test_bounded_poll_gate_accepts_recovery_attempt_omission_vocabulary(
+    attempt_reason: str | None,
+) -> None:
+    payload = {
+        "task_id": TASK_ID,
+        "result": None,
+        "error": None,
+        "attempts": [{"error": None, "error_omission_reason": attempt_reason}],
+        "attempt_error_max_bytes": EXPECTED_POLL_ATTEMPT_ERROR_MAX_BYTES,
+        **_bounded_poll_metadata(),
+    }
+
+    validate_bounded_poll_projection(payload, surface="recovery poll", task_id=TASK_ID)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"diagnostic_max_bytes": 1}, "diagnostic byte limit"),
+        ({"response_max_bytes": 1}, "response byte limit"),
+        ({"result_omission_reason": "invented"}, "result omission reason"),
+        ({"error_omission_reason": "invented"}, "error omission reason"),
+        (
+            {"result": {"value": 1}, "result_omission_reason": "encoded_response_limit"},
+            "mixed a result",
+        ),
+        (
+            {"error": "failed", "error_omission_reason": "encoded_response_limit"},
+            "mixed an error",
+        ),
+    ],
+)
+def test_bounded_poll_gate_rejects_projection_drift(
+    mutation: dict[str, object],
+    message: str,
+) -> None:
+    payload = {
+        "task_id": TASK_ID,
+        "result": None,
+        "error": None,
+        **_bounded_poll_metadata(),
+        **mutation,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        validate_bounded_poll_projection(payload, surface="workflow poll", task_id=TASK_ID)
+
+
+def test_bounded_poll_gate_rejects_recovery_attempt_limit_drift() -> None:
+    payload = {
+        "task_id": TASK_ID,
+        "result": None,
+        "error": None,
+        "attempts": [{"error": None, "error_omission_reason": None}],
+        "attempt_error_max_bytes": 1,
+        **_bounded_poll_metadata(),
+    }
+
+    with pytest.raises(ValueError, match="attempt error byte limit"):
+        validate_bounded_poll_projection(payload, surface="recovery poll", task_id=TASK_ID)
+
+
+def test_poll_projection_evidence_requires_workflow_and_runtime_env_families() -> None:
+    gate = LocalKubeRayGate(_config())
+    payload = {
+        "task_id": TASK_ID,
+        "result": None,
+        "error": None,
+        **_bounded_poll_metadata(),
+    }
+
+    gate._observe_bounded_poll_projection(
+        payload,
+        family="runtime_env",
+        surface="RuntimeEnv poll",
+        task_id=TASK_ID,
+    )
+    assert gate.evidence.api_workflow_runtime_polls_bounded is False
+
+    gate._observe_bounded_poll_projection(
+        payload,
+        family="workflow",
+        surface="workflow poll",
+        task_id=TASK_ID,
+    )
+    assert gate.evidence.api_workflow_runtime_polls_bounded is True
 
 
 def _token_representations(token: str) -> tuple[str, ...]:
@@ -888,9 +1100,16 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
     token = "local-token-that-must-never-be-printed-123456"
 
     class Response:
-        def __init__(self, status: int, body: object) -> None:
+        def __init__(
+            self,
+            status: int,
+            body: object,
+            *,
+            headers: dict[str, str] | None = None,
+        ) -> None:
             self.status = status
             self.body = json.dumps(body).encode()
+            self.headers = headers or {}
 
         def __enter__(self) -> Response:
             return self
@@ -917,7 +1136,9 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
                         "paths": {
                             "/api/executions/{execution_id}": {
                                 "get": {"operationId": "get_execution"}
-                            }
+                            },
+                            "/api/executions/{execution_id}/retry": {"post": {}},
+                            "/api/cluster/workflows/{task_id}/node-detail": {"get": {}},
                         },
                         "components": {
                             "schemas": {
@@ -930,6 +1151,15 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
                 return Response(401, {})
             if path == "/api/enqueue/add/2/3":
                 return Response(200, {"task_id": TASK_ID})
+            if path == f"/api/tasks/{TASK_ID}":
+                return Response(
+                    200,
+                    _task_status_payload(),
+                    headers={
+                        "Cache-Control": "no-store",
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
             if path == f"/api/executions?task_id={TASK_ID}&limit=1":
                 return Response(
                     200,
@@ -976,8 +1206,55 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
     ) in opener.requests
     assert gate.evidence.task_state == "SUCCEEDED"
     assert gate.evidence.task_result == 5
+    assert gate.evidence.api_task_status_bounded is True
+    assert gate.evidence.api_bulk_reset_absent is True
+    assert gate.evidence.api_legacy_workflow_node_absent is True
     assert gate.evidence.api_execution_delete_rejected is True
     assert gate.evidence.api_legacy_workflow_graph_absent is True
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Cache-Control": "public", "X-Content-Type-Options": "nosniff"},
+        {"Cache-Control": "no-store", "X-Content-Type-Options": "sniff"},
+    ],
+)
+def test_http_reader_rejects_missing_or_unsafe_required_headers(
+    headers: dict[str, str],
+) -> None:
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, limit: int) -> bytes:
+            return b"{}"[:limit]
+
+    response = Response()
+    response.headers = headers  # type: ignore[attr-defined]
+
+    class Opener:
+        def open(self, request: Any, *, timeout: float) -> Response:
+            return response
+
+    gate = LocalKubeRayGate(_config())
+    gate.http_opener = cast(Any, Opener())
+
+    with pytest.raises(ValueError, match="header"):
+        gate._http(
+            "/api/tasks/task-id",
+            method="GET",
+            required_response_headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
 
 def test_http_reader_accepts_workflow_pages_larger_than_diagnostic_output() -> None:
@@ -3281,6 +3558,10 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.ray_worker_count = cast(Any, token)
     evidence.web_restart_count = cast(Any, token)
     evidence.task_result = token
+    evidence.api_task_status_bounded = cast(Any, token)
+    evidence.api_workflow_runtime_polls_bounded = cast(Any, token)
+    evidence.api_bulk_reset_absent = cast(Any, token)
+    evidence.api_legacy_workflow_node_absent = cast(Any, token)
     evidence.api_execution_delete_rejected = cast(Any, token)
     evidence.api_legacy_workflow_graph_absent = cast(Any, token)
     evidence.runtime_env_encryption_overlay = cast(Any, token)
@@ -3695,6 +3976,7 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
         "diagnostic_max_bytes": 65_536,
         "response_max_bytes": 262_144,
     }
+    task_status_response = _task_status_payload()
     monkeypatch.setattr(gate, "_secret_token", lambda: token)
 
     def request(
@@ -3703,6 +3985,7 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
         method: str,
         headers: dict[str, str] | None = None,
         response_limit: int = MAX_OUTPUT_CHARACTERS,
+        required_response_headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
         authenticated = headers == {"Authorization": f"Bearer {token}"}
         calls.append((path, method, authenticated))
@@ -3711,7 +3994,9 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
             return 200, json.dumps(
                 {
                     "paths": {
-                        "/api/executions/{execution_id}": {"get": {"operationId": "get_execution"}}
+                        "/api/executions/{execution_id}": {"get": {"operationId": "get_execution"}},
+                        "/api/executions/{execution_id}/retry": {"post": {}},
+                        "/api/cluster/workflows/{task_id}/node-detail": {"get": {}},
                     }
                 }
             ).encode()
@@ -3719,6 +4004,13 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
             return 401, b"{}"
         if path == "/api/enqueue/add/2/3":
             return 200, json.dumps({"task_id": TASK_ID}).encode()
+        if path == f"/api/tasks/{TASK_ID}":
+            assert response_limit == EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES
+            assert required_response_headers == {
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            }
+            return 200, json.dumps(task_status_response).encode()
         if path == f"/api/executions?task_id={TASK_ID}&limit=1":
             return 200, json.dumps(
                 {
@@ -3745,13 +4037,17 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
     assert gate.evidence.task_id == TASK_ID
     assert gate.evidence.task_state == "SUCCEEDED"
     assert gate.evidence.task_result == 5
+    assert gate.evidence.api_task_status_bounded is True
+    assert gate.evidence.api_bulk_reset_absent is True
+    assert gate.evidence.api_legacy_workflow_node_absent is True
     assert gate.evidence.api_execution_delete_rejected is True
     assert gate.evidence.api_legacy_workflow_graph_absent is True
-    assert calls[:4] == [
+    assert calls[:5] == [
         ("/api/enqueue/add/2/3", "POST", False),
         ("/api/executions/stats", "GET", False),
         ("/api/metrics", "GET", False),
         ("/api/executions?limit=1", "GET", False),
+        ("/api/tasks/00000000-0000-4000-8000-000000000000", "GET", False),
     ]
     assert calls[-2:] == [
         ("/api/executions/17", "DELETE", True),
@@ -3760,6 +4056,11 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
 
     detail_response["response_max_bytes"] = None
     with pytest.raises(ValueError, match="lost its bounded projection contract"):
+        gate._verify_api()
+
+    detail_response["response_max_bytes"] = 262_144
+    task_status_response["input_omission_reason"] = "invented"
+    with pytest.raises(ValueError, match="unknown input omission reason"):
         gate._verify_api()
 
 
@@ -3821,6 +4122,88 @@ def test_api_smoke_rejects_the_legacy_workflow_graph_in_openapi() -> None:
         gate._verify_api()
 
 
+@pytest.mark.parametrize(
+    ("retired_path", "message"),
+    [
+        ("/api/executions/reset", "removed bulk execution reset"),
+        (
+            "/api/cluster/workflows/{task_id}/nodes/{node_id}",
+            "removed legacy workflow node route",
+        ),
+    ],
+)
+def test_api_smoke_rejects_retired_routes_in_openapi(
+    retired_path: str,
+    message: str,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+
+    def request(
+        path: str,
+        *,
+        method: str,
+        headers: dict[str, str] | None = None,
+        response_limit: int = MAX_OUTPUT_CHARACTERS,
+    ) -> tuple[int, bytes]:
+        if path == "/api/openapi.json":
+            return 200, json.dumps(
+                {
+                    "paths": {
+                        "/api/executions/{execution_id}": {"get": {}},
+                        retired_path: {"post": {}},
+                    }
+                }
+            ).encode()
+        return 401, b"{}"
+
+    gate._http = request  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match=message):
+        gate._verify_api()
+
+
+@pytest.mark.parametrize(
+    ("missing_path", "message"),
+    [
+        (
+            "/api/executions/{execution_id}/retry",
+            "OpenAPI execution retry path must be an object",
+        ),
+        (
+            "/api/cluster/workflows/{task_id}/node-detail",
+            "OpenAPI workflow node-detail path must be an object",
+        ),
+    ],
+)
+def test_api_smoke_requires_supported_exact_routes_in_openapi(
+    missing_path: str,
+    message: str,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    paths = {
+        "/api/executions/{execution_id}": {"get": {}},
+        "/api/executions/{execution_id}/retry": {"post": {}},
+        "/api/cluster/workflows/{task_id}/node-detail": {"get": {}},
+    }
+    paths.pop(missing_path)
+
+    def request(
+        path: str,
+        *,
+        method: str,
+        headers: dict[str, str] | None = None,
+        response_limit: int = MAX_OUTPUT_CHARACTERS,
+    ) -> tuple[int, bytes]:
+        if path == "/api/openapi.json":
+            return 200, json.dumps({"paths": paths}).encode()
+        return 401, b"{}"
+
+    gate._http = request  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match=message):
+        gate._verify_api()
+
+
 def test_api_smoke_rejects_task_id_evidence_injection(monkeypatch: pytest.MonkeyPatch) -> None:
     gate = LocalKubeRayGate(_config())
     token = "local-token-that-must-never-be-printed-123456"
@@ -3836,7 +4219,13 @@ def test_api_smoke_rejects_task_id_evidence_injection(monkeypatch: pytest.Monkey
         if path == "/api/openapi.json":
             assert response_limit > MAX_OUTPUT_CHARACTERS
             return 200, json.dumps(
-                {"paths": {"/api/executions/{execution_id}": {"get": {}}}}
+                {
+                    "paths": {
+                        "/api/executions/{execution_id}": {"get": {}},
+                        "/api/executions/{execution_id}/retry": {"post": {}},
+                        "/api/cluster/workflows/{task_id}/node-detail": {"get": {}},
+                    }
+                }
             ).encode()
         if headers is None:
             return 401, b"{}"
@@ -4066,6 +4455,7 @@ def test_runtime_env_encryption_layer_proves_canary_corruption_and_retry_fences(
                     "runtime_env_hash": digest,
                     "result": {"storage_encryption_verified": True},
                     "error": None,
+                    **_bounded_poll_metadata(),
                 }
             ).encode()
         for execution_id, task_id in fixtures.values():
@@ -4271,6 +4661,7 @@ def _complex_workflow_gate_responses() -> dict[str, dict[str, Any]]:
                 "state": state,
                 "result": poll_result,
                 "error": poll_error,
+                **_bounded_poll_metadata(),
             },
             f"/api/executions?{execution_query}": {
                 "tasks": [
@@ -4413,6 +4804,7 @@ def _complex_workflow_gate_responses() -> dict[str, dict[str, Any]]:
                 "state": state,
                 "result": poll_result,
                 "error": poll_error,
+                **_bounded_poll_metadata(),
             },
             f"/api/executions?{execution_query}": {
                 "tasks": [
@@ -4886,6 +5278,7 @@ def _workflow_showcase_gate_responses() -> dict[str, dict[str, Any]]:
                 "state": state,
                 "result": poll_result,
                 "error": poll_error,
+                **_bounded_poll_metadata(),
             },
             f"/api/executions?{execution_query}": {
                 "tasks": [
@@ -5173,16 +5566,25 @@ def _workflow_recovery_gate_responses() -> dict[str, dict[str, Any]]:
                     "attempt_number": 1,
                     "state": "FAILED",
                     "error": gate_module.WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE,
+                    "error_omission_reason": None,
                 },
                 {
                     "attempt_number": 2,
                     "state": "FAILED",
                     "error": gate_module.WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE,
+                    "error_omission_reason": None,
                 },
-                {"attempt_number": 3, "state": "SUCCEEDED", "error": None},
+                {
+                    "attempt_number": 3,
+                    "state": "SUCCEEDED",
+                    "error": None,
+                    "error_omission_reason": None,
+                },
             ],
+            "attempt_error_max_bytes": EXPECTED_POLL_ATTEMPT_ERROR_MAX_BYTES,
             "result": json.loads(json.dumps(gate_module.WORKFLOW_RECOVERY_SUCCESS_RESULT)),
             "error": None,
+            **_bounded_poll_metadata(),
         },
         ("/api/executions?" + urlencode({"task_id": WORKFLOW_RECOVERY_TASK_ID, "limit": 1})): {
             "tasks": [
@@ -6010,6 +6412,10 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.task_id = TASK_ID
     gate.evidence.task_state = "SUCCEEDED"
     gate.evidence.task_result = 5
+    gate.evidence.api_task_status_bounded = True
+    gate.evidence.api_workflow_runtime_polls_bounded = True
+    gate.evidence.api_bulk_reset_absent = True
+    gate.evidence.api_legacy_workflow_node_absent = True
     gate.evidence.api_execution_delete_rejected = True
     gate.evidence.api_legacy_workflow_graph_absent = True
     gate.evidence.runtime_env_encryption_overlay = True
@@ -6088,6 +6494,10 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.task_id = TASK_ID
     gate.evidence.task_state = "SUCCEEDED"
     gate.evidence.task_result = 5
+    gate.evidence.api_task_status_bounded = True
+    gate.evidence.api_workflow_runtime_polls_bounded = True
+    gate.evidence.api_bulk_reset_absent = True
+    gate.evidence.api_legacy_workflow_node_absent = True
     gate.evidence.api_execution_delete_rejected = True
     gate.evidence.api_legacy_workflow_graph_absent = True
     gate.evidence.runtime_env_encryption_overlay = True
@@ -6161,6 +6571,10 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("docker_host") == gate.evidence.docker_host
     assert reconstructed("app_image_id") == IMAGE_ID
     assert reconstructed("recovery_runtime_env_bytes") == "20000000"
+    assert reconstructed("api_task_status_bounded") == "True"
+    assert reconstructed("api_workflow_runtime_polls_bounded") == "True"
+    assert reconstructed("api_bulk_reset_absent") == "True"
+    assert reconstructed("api_legacy_workflow_node_absent") == "True"
     assert reconstructed("api_execution_delete_rejected") == "True"
     assert reconstructed("api_legacy_workflow_graph_absent") == "True"
     assert reconstructed("runtime_env_encryption_canary") == "True"

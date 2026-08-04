@@ -51,7 +51,8 @@ not race migrations during startup. The smoke is bounded to three minutes and pr
 - missing and invalid bearer tokens fail closed;
 - the documented bearer token can enqueue a task;
 - an active task-manager worker lease is visible through the same database;
-- the worker executes the task and both the result API and PostgreSQL return `42`.
+- the worker executes the task, the bounded status API reaches `SUCCESSFUL`, and the
+  separately bounded execution projection plus PostgreSQL return `42`.
 
 Inspect startup state without printing container environments:
 
@@ -69,8 +70,9 @@ current tab's `sessionStorage`.
 For Swagger, open [the API docs](http://127.0.0.1:8000/api/docs), select **Authorize**, and paste the
 token value. Swagger adds the `Bearer` scheme; do not paste the word `Bearer` into that dialog.
 
-The following direct requests enqueue `20 + 22`, refresh the Django task result, and read the durable
-execution record. The token is carried in the authorization header, never in the URL.
+The following direct requests enqueue `20 + 22`, poll the bounded task-status adapter,
+and read the durable execution record. The token is carried in the authorization header,
+never in the URL.
 
 ### POSIX
 
@@ -87,14 +89,36 @@ task_id="$(
 )"
 
 for attempt in $(seq 1 60); do
-  result_json="$(
+  status_json="$(
     curl --fail --silent --show-error \
       --header "Authorization: Bearer ${DJANGO_API_TOKEN}" \
       "http://127.0.0.1:8000/api/tasks/${task_id}"
   )"
   status="$(
-    printf '%s' "$result_json" |
-      uv run python -c 'import json, sys; print(json.load(sys.stdin)["status"])'
+    printf '%s' "$status_json" |
+      uv run python -c '
+import json
+import sys
+
+raw = sys.stdin.buffer.read()
+if len(raw) > 65_536:
+    raise SystemExit("Task status response exceeded 65,536 bytes")
+payload = json.loads(raw)
+allowed = {
+    None,
+    "external_input_not_loaded",
+    "stored_input_exceeds_status_limit",
+    "malformed_inline_input",
+    "encoded_response_limit",
+}
+if payload.get("input_omission_reason") not in allowed:
+    raise SystemExit("Task status returned an unknown input omission reason")
+if payload.get("input_max_bytes") != 16_384:
+    raise SystemExit("Task status changed its input bound")
+if payload.get("response_max_bytes") != 65_536:
+    raise SystemExit("Task status changed its response bound")
+print(payload["status"])
+'
   )"
   printf 'Task status: %s\n' "$status"
   [ "$status" = "SUCCESSFUL" ] && break
@@ -118,15 +142,36 @@ $task = Invoke-RestMethod `
   -Uri "http://127.0.0.1:8000/api/enqueue/add/20/22"
 
 foreach ($attempt in 1..60) {
-    $result = Invoke-RestMethod `
+    $response = Invoke-WebRequest `
+      -UseBasicParsing `
       -Headers $headers `
       -Uri "http://127.0.0.1:8000/api/tasks/$($task.task_id)"
-    Write-Host "Task status: $($result.status)"
-    if ($result.status -eq "SUCCESSFUL") { break }
-    if ($result.status -eq "FAILED") { throw "Task execution failed" }
+    if ([Text.Encoding]::UTF8.GetByteCount($response.Content) -gt 65536) {
+        throw "Task status response exceeded 65,536 bytes"
+    }
+    $taskStatus = $response.Content | ConvertFrom-Json
+    $allowedOmissionReasons = @(
+        $null,
+        "external_input_not_loaded",
+        "stored_input_exceeds_status_limit",
+        "malformed_inline_input",
+        "encoded_response_limit"
+    )
+    if ($taskStatus.input_omission_reason -notin $allowedOmissionReasons) {
+        throw "Task status returned an unknown input omission reason"
+    }
+    if ($taskStatus.input_max_bytes -ne 16384) {
+        throw "Task status changed its input bound"
+    }
+    if ($taskStatus.response_max_bytes -ne 65536) {
+        throw "Task status changed its response bound"
+    }
+    Write-Host "Task status: $($taskStatus.status)"
+    if ($taskStatus.status -eq "SUCCESSFUL") { break }
+    if ($taskStatus.status -eq "FAILED") { throw "Task execution failed" }
     Start-Sleep -Seconds 2
 }
-if ($result.status -ne "SUCCESSFUL") { throw "Task execution timed out" }
+if ($taskStatus.status -ne "SUCCESSFUL") { throw "Task execution timed out" }
 
 Invoke-RestMethod `
   -Headers $headers `
@@ -134,8 +179,16 @@ Invoke-RestMethod `
 ```
 
 The automated smoke fails if the success state is not reached by its deadline. When using the manual
-commands, confirm the final status is `SUCCESSFUL`; a result still in progress after the bounded loop
+commands, confirm the final status is `SUCCESSFUL`; a task still in progress after the bounded loop
 needs investigation.
+
+`GET /api/tasks/{task_id}` is deliberately a monitoring projection, not the package's
+full Python `TaskResult`. It returns exact durable state and attempt identity, guards the
+combined inline `args` and `kwargs` at 16,384 bytes, never loads external input or result
+storage, and caps the full response at 65,536 bytes. Nullable inputs carry one of the
+fixed omission reasons validated above. Application code can still use `TaskResult` for
+full arguments, keyword arguments, and successful return data under its own trust
+boundary.
 
 ## Observe a low-resource mixed workload
 
@@ -164,7 +217,14 @@ The three workflow scenarios use separate stable Locust labels for enqueue, term
 polling, and bounded-summary reads. Full reporting must expose complete pilot detail,
 terminal-only must expose its one summary with detail omitted by policy, and disabled
 must report `DISABLED` without fabricating a summary. The demo stops instead of moving
-to another task when any of those contracts is missing or malformed.
+to another task when any of those contracts is missing or malformed. The workflow and
+RuntimeEnv poll endpoints are capped at 65,536 bytes, guard current inline result and
+error values at 16,384 bytes each without loading external result storage, and expose
+the documented fixed omission vocabulary. Workflow progress in those pollers uses a
+bounded aggregate summary envelope rather than a legacy complete progress graph. A
+published schema-v3 summary is preferred; supported older stored progress can supply
+only sanitized aggregate counts through that envelope. The
+tour uses ordinary small diagnostics; focused adapter tests cover the omission branches.
 
 Load the current Kubernetes secret into the Locust process without printing it, run the five-minute
 one-user demo, and remove the shell variable afterwards. At five minutes Locust stops scheduling

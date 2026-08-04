@@ -393,6 +393,45 @@ MAX_OUTPUT_CHARACTERS = 16_000
 MAX_GATE_ERROR_CHARACTERS = MAX_OUTPUT_CHARACTERS - 256
 MAX_HTTP_RESPONSE_BYTES = 64 * 1024
 MAX_OPENAPI_SCHEMA_BYTES = 128_000
+EXPECTED_TASK_STATUS_INPUT_MAX_BYTES = 16 * 1024
+EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES = 64 * 1024
+TASK_STATUS_INPUT_OMISSION_REASONS = frozenset(
+    {
+        None,
+        "external_input_not_loaded",
+        "stored_input_exceeds_status_limit",
+        "malformed_inline_input",
+        "encoded_response_limit",
+    }
+)
+TASK_STATUS_BY_STATE = {
+    "QUEUED": "READY",
+    "RUNNING": "RUNNING",
+    "SUCCEEDED": "SUCCESSFUL",
+    "FAILED": "FAILED",
+    "CANCELLED": "FAILED",
+    "CANCELLING": "RUNNING",
+    "LOST": "FAILED",
+    "EXPIRED": "FAILED",
+}
+EXPECTED_POLL_DIAGNOSTIC_MAX_BYTES = 16 * 1024
+EXPECTED_POLL_RESPONSE_MAX_BYTES = 64 * 1024
+EXPECTED_POLL_ATTEMPT_ERROR_MAX_BYTES = 4 * 1024
+POLL_RESULT_OMISSION_REASONS = frozenset(
+    {
+        None,
+        "external_result_not_loaded",
+        "stored_result_exceeds_poll_limit",
+        "malformed_inline_result",
+        "encoded_response_limit",
+    }
+)
+POLL_ERROR_OMISSION_REASONS = frozenset(
+    {None, "stored_error_exceeds_poll_limit", "encoded_response_limit"}
+)
+POLL_ATTEMPT_ERROR_OMISSION_REASONS = frozenset(
+    {None, "stored_error_exceeds_attempt_limit", "encoded_response_limit"}
+)
 EXPECTED_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES = 64 * 1024
 EXPECTED_EXECUTION_DETAIL_RESPONSE_MAX_BYTES = 256 * 1024
 MAX_FAILURE_CONTEXT_CHARACTERS = 4_000
@@ -900,6 +939,10 @@ class GateEvidence:
     task_id: str = ""
     task_state: str = ""
     task_result: object = None
+    api_task_status_bounded: bool = False
+    api_workflow_runtime_polls_bounded: bool = False
+    api_bulk_reset_absent: bool = False
+    api_legacy_workflow_node_absent: bool = False
     api_execution_delete_rejected: bool = False
     api_legacy_workflow_graph_absent: bool = False
     runtime_env_encryption_overlay: bool = False
@@ -2383,6 +2426,109 @@ def parse_task_result(value: object) -> object:
         raise ValueError("durable task result_data is not valid JSON") from error
 
 
+def validate_task_status_payload(
+    payload: Mapping[str, Any],
+    *,
+    task_id: str,
+) -> str:
+    """Validate one bounded task-status response and return its durable state."""
+    if payload.get("task_id") != task_id:
+        raise ValueError("task status polling returned the wrong task")
+    state = payload.get("state")
+    expected_status = TASK_STATUS_BY_STATE.get(state)
+    if expected_status is None or payload.get("status") != expected_status:
+        raise ValueError("task status polling returned an inconsistent state/status pair")
+    attempt_number = payload.get("attempt_number")
+    if type(attempt_number) is not int or attempt_number < 1:
+        raise ValueError("task status polling returned an invalid attempt number")
+    execution_generation = payload.get("execution_generation")
+    if type(execution_generation) is not int or execution_generation < 0:
+        raise ValueError("task status polling returned an invalid execution generation")
+    if payload.get("input_max_bytes") != EXPECTED_TASK_STATUS_INPUT_MAX_BYTES:
+        raise ValueError("task status polling changed its input byte limit")
+    if payload.get("response_max_bytes") != EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES:
+        raise ValueError("task status polling changed its response byte limit")
+
+    if "input_omission_reason" not in payload:
+        raise ValueError("task status polling omitted its input omission reason")
+    omission_reason = payload.get("input_omission_reason")
+    if omission_reason is not None and (
+        not isinstance(omission_reason, str)
+        or omission_reason not in TASK_STATUS_INPUT_OMISSION_REASONS
+    ):
+        raise ValueError("task status polling returned an unknown input omission reason")
+    args = payload.get("args")
+    kwargs = payload.get("kwargs")
+    if omission_reason is None:
+        if not isinstance(args, list) or not isinstance(kwargs, dict):
+            raise ValueError("task status polling omitted inline input without a reason")
+    elif args is not None or kwargs is not None:
+        raise ValueError("task status polling mixed input with an omission reason")
+    return cast(str, state)
+
+
+def validate_bounded_poll_projection(
+    payload: Mapping[str, Any],
+    *,
+    surface: str,
+    task_id: str,
+) -> None:
+    """Validate shared Workflow and RuntimeEnv poll bounds and omission fields."""
+    if payload.get("task_id") != task_id:
+        raise ValueError(f"{surface} returned the wrong task")
+    if payload.get("diagnostic_max_bytes") != EXPECTED_POLL_DIAGNOSTIC_MAX_BYTES:
+        raise ValueError(f"{surface} changed its diagnostic byte limit")
+    if payload.get("response_max_bytes") != EXPECTED_POLL_RESPONSE_MAX_BYTES:
+        raise ValueError(f"{surface} changed its response byte limit")
+
+    if "result_omission_reason" not in payload:
+        raise ValueError(f"{surface} omitted its result omission reason")
+    result_reason = payload.get("result_omission_reason")
+    if result_reason is not None and (
+        not isinstance(result_reason, str) or result_reason not in POLL_RESULT_OMISSION_REASONS
+    ):
+        raise ValueError(f"{surface} returned an unknown result omission reason")
+    result = payload.get("result")
+    if result is not None and not isinstance(result, Mapping):
+        raise ValueError(f"{surface} returned a non-object result")
+    if result_reason is not None and result is not None:
+        raise ValueError(f"{surface} mixed a result with its omission reason")
+
+    if "error_omission_reason" not in payload:
+        raise ValueError(f"{surface} omitted its error omission reason")
+    error_reason = payload.get("error_omission_reason")
+    if error_reason is not None and (
+        not isinstance(error_reason, str) or error_reason not in POLL_ERROR_OMISSION_REASONS
+    ):
+        raise ValueError(f"{surface} returned an unknown error omission reason")
+    error = payload.get("error")
+    if error is not None and not isinstance(error, str):
+        raise ValueError(f"{surface} returned a non-string error")
+    if error_reason is not None and error is not None:
+        raise ValueError(f"{surface} mixed an error with its omission reason")
+
+    if "attempts" not in payload:
+        return
+    if payload.get("attempt_error_max_bytes") != EXPECTED_POLL_ATTEMPT_ERROR_MAX_BYTES:
+        raise ValueError(f"{surface} changed its attempt error byte limit")
+    attempts = _sequence(payload.get("attempts"), field_name=f"{surface} attempts")
+    for value in attempts:
+        attempt = _mapping(value, field_name=f"{surface} attempt")
+        if "error_omission_reason" not in attempt:
+            raise ValueError(f"{surface} attempt omitted its error omission reason")
+        attempt_reason = attempt.get("error_omission_reason")
+        if attempt_reason is not None and (
+            not isinstance(attempt_reason, str)
+            or attempt_reason not in POLL_ATTEMPT_ERROR_OMISSION_REASONS
+        ):
+            raise ValueError(f"{surface} attempt returned an unknown error omission reason")
+        attempt_error = attempt.get("error")
+        if attempt_error is not None and not isinstance(attempt_error, str):
+            raise ValueError(f"{surface} attempt returned a non-string error")
+        if attempt_reason is not None and attempt_error is not None:
+            raise ValueError(f"{surface} attempt mixed an error with its omission reason")
+
+
 class LocalKubeRayGate:
     """Orchestrate the guarded gate and retain only secret-free evidence."""
 
@@ -2420,6 +2566,7 @@ class LocalKubeRayGate:
             RUNTIME_ENV_FAILURE_UNKNOWN_KEY_ID,
         ]
         self._runtime_env_fixture_values_registered = False
+        self._bounded_poll_projection_families: set[str] = set()
         self.redactor.register(RUNTIME_ENV_STORAGE_PROBE_MARKER)
         self.redactor.register(RUNTIME_ENV_FAILURE_UNKNOWN_KEY_ID)
         if self.runner.redactor is not self.redactor:
@@ -4362,11 +4509,21 @@ class LocalKubeRayGate:
         method: str,
         headers: Mapping[str, str] | None = None,
         response_limit: int = MAX_HTTP_RESPONSE_BYTES,
+        required_response_headers: Mapping[str, str] | None = None,
     ) -> tuple[int, bytes]:
         url = build_local_http_request_url(base_url=self.config.web_url, path=path)
         request = Request(url, method=method, headers=dict(headers or {}))
         try:
             with self.http_opener.open(request, timeout=10) as response:
+                if required_response_headers is not None:
+                    response_headers = getattr(response, "headers", None)
+                    if not hasattr(response_headers, "get"):
+                        raise ValueError("local HTTP response did not expose headers")
+                    for header_name, expected_value in required_response_headers.items():
+                        if response_headers.get(header_name) != expected_value:
+                            raise ValueError(
+                                f"local HTTP response returned an invalid {header_name} header"
+                            )
                 body = response.read(response_limit + 1)
                 if len(body) > response_limit:
                     raise ValueError("local HTTP response exceeded its bounded read limit")
@@ -4383,12 +4540,34 @@ class LocalKubeRayGate:
         )
         return _mapping(payload, field_name=f"{endpoint} response")
 
+    def _observe_bounded_poll_projection(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        family: str,
+        surface: str,
+        task_id: str,
+    ) -> None:
+        """Record one valid bounded Workflow or RuntimeEnv polling projection."""
+        if family not in {"runtime_env", "workflow"}:
+            raise ValueError("bounded poll projection family is invalid")
+        validate_bounded_poll_projection(
+            payload,
+            surface=surface,
+            task_id=task_id,
+        )
+        self._bounded_poll_projection_families.add(family)
+        self.evidence.api_workflow_runtime_polls_bounded = (
+            self._bounded_poll_projection_families == {"runtime_env", "workflow"}
+        )
+
     def _verify_api(self) -> None:
         unauthenticated = (
             ("/api/enqueue/add/2/3", "POST"),
             ("/api/executions/stats", "GET"),
             ("/api/metrics", "GET"),
             ("/api/executions?limit=1", "GET"),
+            ("/api/tasks/00000000-0000-4000-8000-000000000000", "GET"),
         )
         for endpoint, method in unauthenticated:
             status, _ = self._http(endpoint, method=method)
@@ -4415,6 +4594,24 @@ class LocalKubeRayGate:
         if "/api/cluster/workflows/{task_id}/graph" in paths:
             raise ValueError("OpenAPI advertises the removed legacy workflow graph")
         self.evidence.api_legacy_workflow_graph_absent = True
+        if "/api/executions/reset" in paths:
+            raise ValueError("OpenAPI advertises the removed bulk execution reset")
+        self.evidence.api_bulk_reset_absent = True
+        if "/api/cluster/workflows/{task_id}/nodes/{node_id}" in paths:
+            raise ValueError("OpenAPI advertises the removed legacy workflow node route")
+        self.evidence.api_legacy_workflow_node_absent = True
+        retry_path = _mapping(
+            paths.get("/api/executions/{execution_id}/retry"),
+            field_name="OpenAPI execution retry path",
+        )
+        if "post" not in retry_path:
+            raise ValueError("OpenAPI execution retry path does not advertise POST")
+        node_detail_path = _mapping(
+            paths.get("/api/cluster/workflows/{task_id}/node-detail"),
+            field_name="OpenAPI workflow node-detail path",
+        )
+        if "get" not in node_detail_path:
+            raise ValueError("OpenAPI workflow node-detail path does not advertise GET")
 
         token = self._secret_token()
         headers = {"Authorization": f"Bearer {token}"}
@@ -4445,76 +4642,86 @@ class LocalKubeRayGate:
 
         deadline = time.monotonic() + self.config.task_timeout
         last_state = "missing"
-        execution_query = urlencode({"task_id": task_id, "limit": 1})
         while True:
             status, body = self._http(
-                f"/api/executions?{execution_query}", method="GET", headers=headers
+                f"/api/tasks/{task_id}",
+                method="GET",
+                headers=headers,
+                response_limit=EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES,
+                required_response_headers={
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                },
             )
             if status != 200:
-                raise ValueError(f"execution polling returned {status}, expected 200")
-            listing = self._json_body(body, endpoint="execution polling")
-            tasks = _sequence(listing.get("tasks"), field_name="execution polling tasks")
-            execution = next(
-                (
-                    _mapping(value, field_name="execution")
-                    for value in tasks
-                    if isinstance(value, Mapping) and value.get("task_id") == task_id
-                ),
-                None,
-            )
-            if execution is not None:
-                last_state = str(execution.get("state"))
-                if last_state == "SUCCEEDED":
-                    execution_id = execution.get("id")
-                    if (
-                        not isinstance(execution_id, int)
-                        or isinstance(execution_id, bool)
-                        or execution_id < 1
-                    ):
-                        raise ValueError("add_numbers execution has no positive integer id")
-                    result = parse_task_result(execution.get("result_data"))
-                    if result != 5:
-                        raise ValueError(f"add_numbers durable result is {result!r}, expected 5")
-                    detail_path = f"/api/executions/{execution_id}"
-                    status, _ = self._http(detail_path, method="DELETE", headers=headers)
-                    if status != 405:
-                        raise ValueError(
-                            f"authenticated execution DELETE returned {status}, expected 405"
-                        )
-                    status, body = self._http(detail_path, method="GET", headers=headers)
-                    if status != 200:
-                        raise ValueError(
-                            f"execution detail after rejected DELETE returned {status}, expected 200"
-                        )
-                    detail = self._json_body(body, endpoint="execution detail")
-                    detail_result = parse_task_result(detail.get("result_data"))
-                    if (
-                        detail.get("id") != execution_id
-                        or detail.get("task_id") != task_id
-                        or detail.get("state") != "SUCCEEDED"
-                        or detail_result != 5
-                        or detail.get("result_data_omission_reason") is not None
-                        or detail.get("error_message_omission_reason") is not None
-                        or detail.get("diagnostic_max_bytes")
-                        != EXPECTED_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
-                        or detail.get("response_max_bytes")
-                        != EXPECTED_EXECUTION_DETAIL_RESPONSE_MAX_BYTES
-                    ):
-                        raise ValueError(
-                            "execution detail changed or lost its bounded projection contract"
-                        )
-                    self.evidence.task_state = last_state
-                    self.evidence.task_result = result
-                    self.evidence.api_execution_delete_rejected = True
-                    return
-                if last_state in TASK_FAILURE_STATES:
-                    raise ValueError(f"add_numbers reached terminal state {last_state}")
+                raise ValueError(f"task status polling returned {status}, expected 200")
+            task_status = self._json_body(body, endpoint="task status polling")
+            last_state = validate_task_status_payload(task_status, task_id=task_id)
+            if task_status.get("input_omission_reason") is not None:
+                raise ValueError("add_numbers task status unexpectedly omitted inline input")
+            if task_status.get("args") != [2, 3] or task_status.get("kwargs") != {}:
+                raise ValueError("add_numbers task status changed its exact inline input")
+            if last_state == "SUCCEEDED":
+                self.evidence.api_task_status_bounded = True
+                break
+            if last_state in TASK_FAILURE_STATES:
+                raise ValueError(f"add_numbers reached terminal state {last_state}")
             if time.monotonic() >= deadline:
                 raise ValueError(
                     f"add_numbers did not reach SUCCEEDED within {self.config.task_timeout}s "
                     f"(last state: {last_state})"
                 )
             time.sleep(2)
+
+        execution_query = urlencode({"task_id": task_id, "limit": 1})
+        status, body = self._http(
+            f"/api/executions?{execution_query}", method="GET", headers=headers
+        )
+        if status != 200:
+            raise ValueError(f"execution lookup returned {status}, expected 200")
+        listing = self._json_body(body, endpoint="execution lookup")
+        tasks = _sequence(listing.get("tasks"), field_name="execution lookup tasks")
+        execution = next(
+            (
+                _mapping(value, field_name="execution")
+                for value in tasks
+                if isinstance(value, Mapping) and value.get("task_id") == task_id
+            ),
+            None,
+        )
+        if execution is None or execution.get("state") != "SUCCEEDED":
+            raise ValueError("add_numbers durable execution lookup did not return SUCCEEDED")
+        execution_id = execution.get("id")
+        if not isinstance(execution_id, int) or isinstance(execution_id, bool) or execution_id < 1:
+            raise ValueError("add_numbers execution has no positive integer id")
+        result = parse_task_result(execution.get("result_data"))
+        if result != 5:
+            raise ValueError(f"add_numbers durable result is {result!r}, expected 5")
+        detail_path = f"/api/executions/{execution_id}"
+        status, _ = self._http(detail_path, method="DELETE", headers=headers)
+        if status != 405:
+            raise ValueError(f"authenticated execution DELETE returned {status}, expected 405")
+        status, body = self._http(detail_path, method="GET", headers=headers)
+        if status != 200:
+            raise ValueError(
+                f"execution detail after rejected DELETE returned {status}, expected 200"
+            )
+        detail = self._json_body(body, endpoint="execution detail")
+        detail_result = parse_task_result(detail.get("result_data"))
+        if (
+            detail.get("id") != execution_id
+            or detail.get("task_id") != task_id
+            or detail.get("state") != "SUCCEEDED"
+            or detail_result != 5
+            or detail.get("result_data_omission_reason") is not None
+            or detail.get("error_message_omission_reason") is not None
+            or detail.get("diagnostic_max_bytes") != EXPECTED_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
+            or detail.get("response_max_bytes") != EXPECTED_EXECUTION_DETAIL_RESPONSE_MAX_BYTES
+        ):
+            raise ValueError("execution detail changed or lost its bounded projection contract")
+        self.evidence.task_state = last_state
+        self.evidence.task_result = result
+        self.evidence.api_execution_delete_rejected = True
 
     def _register_runtime_env_protected_value(self, value: str) -> None:
         """Register one gate-only storage value before any later diagnostics."""
@@ -4595,6 +4802,12 @@ class LocalKubeRayGate:
                     f"RuntimeEnv encryption canary polling returned {status}, expected 200"
                 )
             execution = self._json_body(body, endpoint="RuntimeEnv encryption canary polling")
+            self._observe_bounded_poll_projection(
+                execution,
+                family="runtime_env",
+                surface="RuntimeEnv encryption canary polling",
+                task_id=task_id,
+            )
             if execution.get("task_id") != task_id:
                 raise ValueError("RuntimeEnv encryption canary polling returned the wrong task")
             last_state = str(execution.get("state"))
@@ -5402,6 +5615,12 @@ class LocalKubeRayGate:
             if status != 200:
                 raise ValueError(f"{workflow_label} polling returned a non-success status")
             execution = self._json_body(body, endpoint=f"{workflow_label} polling")
+            self._observe_bounded_poll_projection(
+                execution,
+                family="workflow",
+                surface=f"{workflow_label} polling",
+                task_id=task_id,
+            )
             state = execution.get("state")
             if not isinstance(state, str) or state not in WORKFLOW_PROGRESS_TASK_STATES:
                 raise ValueError(f"{workflow_label} polling returned an invalid task state")
@@ -5797,6 +6016,12 @@ class LocalKubeRayGate:
             if status != 200:
                 raise ValueError("terminal-only workflow polling returned a non-success status")
             execution = self._json_body(body, endpoint="terminal-only workflow polling")
+            self._observe_bounded_poll_projection(
+                execution,
+                family="workflow",
+                surface="terminal-only workflow polling",
+                task_id=task_id,
+            )
             state = execution.get("state")
             if not isinstance(state, str) or state not in WORKFLOW_PROGRESS_TASK_STATES:
                 raise ValueError("terminal-only workflow polling returned an invalid task state")
@@ -6434,6 +6659,12 @@ class LocalKubeRayGate:
             if status != 200:
                 raise ValueError("workflow recovery polling returned a non-success status")
             execution = self._json_body(body, endpoint="workflow recovery polling")
+            self._observe_bounded_poll_projection(
+                execution,
+                family="workflow",
+                surface="workflow recovery polling",
+                task_id=task_id,
+            )
             state = execution.get("state")
             if state == "SUCCEEDED":
                 break
@@ -6453,13 +6684,20 @@ class LocalKubeRayGate:
                 "attempt_number": 1,
                 "state": "FAILED",
                 "error": WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE,
+                "error_omission_reason": None,
             },
             {
                 "attempt_number": 2,
                 "state": "FAILED",
                 "error": WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE,
+                "error_omission_reason": None,
             },
-            {"attempt_number": 3, "state": "SUCCEEDED", "error": None},
+            {
+                "attempt_number": 3,
+                "state": "SUCCEEDED",
+                "error": None,
+                "error_omission_reason": None,
+            },
         ]
         if (
             execution.get("attempt_number") != 3
@@ -7166,6 +7404,16 @@ class LocalKubeRayGate:
             ("task_id", self.evidence.task_id),
             ("task_state", self.evidence.task_state),
             ("task_result", self.evidence.task_result),
+            ("api_task_status_bounded", self.evidence.api_task_status_bounded),
+            (
+                "api_workflow_runtime_polls_bounded",
+                self.evidence.api_workflow_runtime_polls_bounded,
+            ),
+            ("api_bulk_reset_absent", self.evidence.api_bulk_reset_absent),
+            (
+                "api_legacy_workflow_node_absent",
+                self.evidence.api_legacy_workflow_node_absent,
+            ),
             (
                 "api_execution_delete_rejected",
                 self.evidence.api_execution_delete_rejected,

@@ -152,7 +152,13 @@ Invoke-RestMethod `
   -Uri "http://127.0.0.1:8000/api/executions?task_id=$($task.task_id)&limit=1"
 ```
 
-The first result refresh may still report an in-progress state. The
+The task-status response is a monitoring projection rather than a full Django
+`TaskResult`. It is capped at 65,536 bytes; `args` and `kwargs` are nullable and share a
+16,384-byte inline-input guard. When input is unavailable, clients receive one fixed
+`input_omission_reason` instead of an external-input fetch. Query the separately bounded
+execution projection when operator-facing result or error data is needed.
+
+The first status read may still report an in-progress state. The
 [bundled testproject quickstart](https://github.com/dariuszpanas/django-ray/blob/main/testproject/README.md)
 contains bounded POSIX and PowerShell polling loops, plus the complete admin verification flow.
 

@@ -450,6 +450,21 @@ and the detailed [migration notes](#migration) before enabling their opt-in writ
   or external inputs remain unchanged, result references still move into attempt
   history, and the compatibility retry model defers unrelated columns until after the
   transaction.
+- The testproject task-status route now uses one bounded public database projection
+  instead of hydrating a Django `TaskResult`. Its nullable inline arguments share a
+  16 KiB pre-transfer guard, external input and result storage are never loaded, and the
+  complete response is capped at 64 KiB with fixed omission metadata. Workflow and
+  RuntimeEnv pollers now apply 16 KiB current result/error guards, return only bounded
+  workflow-summary envelopes, and share the same 64 KiB response ceiling. Published
+  schema-v3 summaries are preferred; older progress contributes sanitized aggregate
+  counts without returning its complete graph. Recovery
+  polling additionally guards each of at most four archived attempt errors at 4 KiB.
+  These are testproject HTTP-adapter bounds; package `TaskResult` continues to return
+  full application arguments, keyword arguments, and successful result data.
+- The testproject cancellation route now maps only `ACCEPTED` to `202`, `NOT_FOUND` to
+  `404`, and every other fixed lifecycle outcome to `409`. Its response projects only
+  bounded control metadata, advertises a 4 KiB ceiling, and does not serialize task
+  payloads or diagnostics.
 - Admin task retry now requires an explicit signed confirmation before any selected
   row is mutated. The page warns that workflows replay from their entry node and can
   repeat external effects, distinguishes diagnostic progress/output from checkpoints,
@@ -556,6 +571,12 @@ and the detailed [migration notes](#migration) before enabling their opt-in writ
   topology-node, topology-edge, node-detail-page, and indexed-node routes. Existing
   schema-v1/v2 database rows remain unchanged and aggregate-readable, and the private
   bounded Admin graph remains available.
+- The pre-1.0 testproject live-node adapter at
+  `GET /api/cluster/workflows/{task_id}/nodes/{node_id}` and arbitrary bulk retry adapter
+  at `POST /api/executions/reset` have been removed without aliases. Use the authorized
+  durable indexed `node-detail` read, exact-ID retry endpoint, or bounded signed Django
+  Admin retry confirmation. The package live-node helper remains available for
+  separately authorized application integrations.
 - The manual paired/aggregate pytest-xdist retention experiment and its phased
   coverage, fixed-topology taxonomy extensions, residue checks, timing aggregation,
   and artifact tooling have been removed. `make test-xdist` remains one configurable

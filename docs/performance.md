@@ -141,6 +141,15 @@ nested workflow at a time under full, terminal-only, and disabled reporting, wai
 durable completion, and validates the bounded summary contract before continuing.
 Stable per-policy Locust labels separate enqueue, terminal polling, and summary-read
 latency. The one-user, one-user-per-second defaults remain intentionally conservative.
+Each workflow terminal-poll endpoint is limited to a 65,536-byte response, returns a
+bounded aggregate summary envelope, and guards current inline result and error
+diagnostics at 16,384 bytes each without resolving external result storage. Its fixed
+result omission vocabulary is `external_result_not_loaded`,
+`stored_result_exceeds_poll_limit`, `malformed_inline_result`,
+`encoded_response_limit`; errors use `stored_error_exceeds_poll_limit` or
+`encoded_response_limit`. The one-user tour exercises ordinary small-value responses;
+the focused adapter tests, rather than Locust timings, prove the limit and omission
+branches.
 After the five-minute active window, Locust schedules no new scenario and grants the
 current one a bounded 150-second drain window. That covers the client-bounded enqueue,
 the longest 120-second poll, the final detail read, and scheduling margin, so an
