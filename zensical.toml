@@ -20,6 +20,7 @@ nav = [
     { "Observability" = "observability.md" },
     { "Compatibility" = "compatibility.md" },
     { "Ray Ecosystem Support" = "ray-ecosystem.md" },
+    { "Django to Private Ray Serve" = "ray-serve-gateway.md" },
     { "Migrating from Celery" = "celery-migration.md" },
     { "Compiled Graph Compatibility" = "compiled-graph-compatibility.md" },
     { "Tasks" = "tasks.md" },

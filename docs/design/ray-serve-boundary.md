@@ -7,6 +7,10 @@
 For the package-wide install and durable-object boundary, see the
 [Ray Ecosystem Support and Install Matrix](../ray-ecosystem.md).
 
+For a copyable public-Django-to-private-Serve request path, see the
+[Django gateway to private Ray Serve](../ray-serve-gateway.md). The gateway preserves
+this lifecycle decision; it does not add package orchestration.
+
 django-ray will not add Serve fields to `RayTaskExecution`, a `django-ray[serve]`
 Django app, deployment APIs, or a Serve reconciler at this time. Applications can call
 an independently operated Serve endpoint as they would any other authenticated service.

@@ -29,6 +29,8 @@ project resources, task stats, and a smoke-task trigger:
 - [Compatibility](compatibility.md) - Supported versions, CI policy, and platform limits
 - [Ray Ecosystem Support](ray-ecosystem.md) - Component installs, durable exchange,
   lifecycle ownership, evidence, and adoption gates
+- [Django Gateway to Private Ray Serve](ray-serve-gateway.md) - Authenticated,
+  bounded online inference through the private Serve data plane
 - [Migrating from Celery](celery-migration.md) - Workload classification,
   coexistence, semantic rewrites, and safe Celery drain
 - [Compiled Graph Compatibility](compiled-graph-compatibility.md) - Candidate and

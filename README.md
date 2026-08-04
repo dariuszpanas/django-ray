@@ -202,6 +202,9 @@ connection. See Ray's
 
 See [Ray-Native Workflows](https://django-ray.readthedocs.io/en/latest/workflows/) for low-latency `chain`, `group`,
 and `map_step` execution.
+See [Django Gateway to Private Ray Serve](https://django-ray.readthedocs.io/en/latest/ray-serve-gateway/)
+for bounded authenticated online inference without writing a FastAPI ingress or adding
+package-owned Serve orchestration.
 See [Runtime Environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/) for per-task profiles,
 workflow overrides, and generic KubeRay images.
 See [Performance](https://django-ray.readthedocs.io/en/latest/performance/) for choosing durable task boundaries,
