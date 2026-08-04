@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-03
+
 ### Upgrade from 0.3.1
 
 Before starting 0.4.0 task managers:
@@ -1162,7 +1164,8 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dariuszpanas/django-ray/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dariuszpanas/django-ray/compare/v0.1.1...v0.2.0
