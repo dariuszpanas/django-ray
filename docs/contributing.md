@@ -2,6 +2,14 @@
 
 Thank you for your interest in contributing to django-ray!
 
+Changes to an adopter-facing import, setting, command, metric, lifecycle status, or
+persisted-format reader must follow the candidate
+[Stability and Deprecation Policy](stability.md). Check
+`tests/contracts/public_api_v1.json` before renaming or removing a Python symbol. An
+intentional incompatibility needs a migration path, changelog entry, and an explicit
+contract decision; changing the inventory alone is not evidence that the change is
+compatible.
+
 ## Development Setup
 
 ### Prerequisites
@@ -868,4 +876,3 @@ the exact authorized commit before it builds.
 ## License
 
 By contributing, you agree that your contributions will be licensed under the BSD 3-Clause License.
-

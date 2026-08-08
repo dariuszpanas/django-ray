@@ -1,5 +1,9 @@
 # Compatibility and Version Policy
 
+This page defines the tested dependency and platform matrix. The separate
+[Stability and Deprecation Policy](stability.md) defines the proposed 1.0 public
+contract, experimental boundary, and removal process while django-ray remains Beta.
+
 ## Supported Versions
 
 | Component | Supported |

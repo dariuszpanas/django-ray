@@ -20,6 +20,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   versioned task services, bounded metrics, live admin updates, and optional Ray data.
 - [Compatibility](https://django-ray.readthedocs.io/en/latest/compatibility/):
   supported Python, Django, Ray, CI, and platform policy.
+- [Stability and deprecation](https://django-ray.readthedocs.io/en/latest/stability/):
+  candidate 1.0 public contract, experimental boundary, and deprecation policy.
 - [Ray ecosystem support](https://django-ray.readthedocs.io/en/latest/ray-ecosystem/):
   component installs, base-import evidence, finite workload ownership, durable
   artifact contracts, and explicit non-guarantees.
