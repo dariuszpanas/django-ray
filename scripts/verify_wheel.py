@@ -15,6 +15,7 @@ EXPECTED_FILES = {
     "django_ray/__init__.py",
     "django_ray/admin.py",
     "django_ray/execution_protocol.py",
+    "django_ray/protocol_coordination.py",
     "django_ray/models.py",
     "django_ray/runtime/runtime_env_encryption.py",
     "django_ray/static/django_ray/admin/diagnostics.css",
@@ -34,11 +35,12 @@ EXPECTED_FILES = {
     "django_ray/migrations/0017_raytaskexecution_sensitive_data_permission.py",
     "django_ray/migrations/0018_workflow_run_allocation.py",
     "django_ray/migrations/0019_execution_protocol_schema.py",
+    "django_ray/migrations/0020_legacy_open_rollback_fence.py",
     "django_ray/management/commands/django_ray_worker.py",
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0019_execution_protocol_schema",
+    "0020_legacy_open_rollback_fence",
 )
 
 

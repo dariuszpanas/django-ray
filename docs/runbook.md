@@ -131,6 +131,41 @@ Package-owned producers insert `QUEUED` rows and acquire ownership through the f
 update path. Directly inserting an already-`RUNNING` or `CANCELLING` row is unsupported
 and bypasses that ownership-transition check.
 
+The package now contains a private coordination primitive for a later supported
+operator adapter. It is not an operator API: do not import or call it directly, and do
+not use SQL, model updates, Admin mutation, or manual token deletion as a substitute.
+Keep legacy admission open in this slice. The future adapter must compare-and-set the
+exact policy revision the operator reviewed within the database positive-bigint range
+and collect an explicit assertion that every capability-unaware web, API, and other
+enqueue producer has stopped. The database can serialize old inserts after that
+assertion, but it cannot
+discover those producer processes itself. Every active legacy lease blocks closure
+even when its heartbeat is stale; a later lifecycle operation must durably retire it
+rather than letting activation infer that it is dead.
+
+The tested primitive serializes PostgreSQL coordination calls with a transaction-scoped
+advisory mutex, then uses lease-first ordered locks followed by the policy and token for
+closure; SQLite obtains a no-op policy write fence before reading blockers. Its
+successful close preserves inactive lease rows with a null token, removes the singleton
+token, closes policy, and increments revision atomically. A stale or malformed revision,
+active legacy lease, inconsistent policy/token state, or database failure leaves the
+prior state intact. A transition must own the outermost database transaction with
+autocommit enabled before entry; a future adapter must not wrap it in another atomic
+block, disable autocommit first, or acquire rollout locks beforehand.
+
+Reopening requires the current revision, active write protocol `1`, and no nonterminal
+work with another execution protocol. It recreates the token but does not reactivate or
+relink an inactive legacy lease; an exact-0.4 task manager must acquire a new identity.
+On PostgreSQL, a changing reopen fences execution-table writers before it locks and
+evaluates the policy, while an already-open idempotent check avoids that table lock;
+SQLite uses its database-wide writer fence. Migration `0020` then rejects
+new non-protocol-`1` nonterminal inserts and terminal-to-nonterminal transitions for as
+long as legacy admission remains open, so the rollback precondition cannot become stale
+immediately after the transition. Applying `0020` fails closed if an already-open policy
+already contains incompatible nonterminal work.
+Reopening is not by itself a rollback-readiness result: stop and reconcile upgraded
+task managers and verify the remaining artifacts and remote work separately.
+
 The supported migration source is the exact published 0.4.0 baseline at migration
 `0018`. Before applying `0019`, confirm every producer and task manager that may have
 written retained nonterminal work was running 0.4.0. If any live row was written directly
@@ -138,11 +173,11 @@ by pre-0.4 code, drain or cancel it, or complete an application-specific audit; 
 columns cannot reconstruct its original execution contract. Do not treat an `0018`
 migration record alone as proof of the writer version.
 
-For a code-only rollback, keep `0019` applied, keep policy protocol `1` and legacy
-admission open, verify all nonterminal work is protocol `1`, and stop and reconcile
-upgraded task managers before starting exact 0.4.0 code. Reverse `0019` only as a
-separate stopped-writer maintenance operation after accepting the loss of its protocol,
-provenance, capability, policy, token, and fencing data.
+For a code-only rollback, keep both `0019` and `0020` applied, keep policy protocol `1`
+and legacy admission open, verify all nonterminal work is protocol `1`, and stop and
+reconcile upgraded task managers before starting exact 0.4.0 code. Reverse `0020` and
+then `0019` only as a separate stopped-writer maintenance operation after accepting the
+loss of their protocol, provenance, capability, policy, token, and fencing data.
 
 ## Useful Queries
 

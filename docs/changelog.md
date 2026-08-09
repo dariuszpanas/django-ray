@@ -15,10 +15,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-0.4 code. Drain, cancel, or audit that work before applying `0019`; the migration
   number alone does not prove which writer created a row.
 - The seeded rollout policy remains dormant at active write protocol `1`, with legacy
-  worker admission open. A code-only rollback to exact 0.4.0 retains `0019` and its
-  legacy database defaults after upgraded task managers are stopped and reconciled.
-  Reverse `0019` only in a separate stopped-writer maintenance window; reversal drops
-  the protocol, provenance, capability, policy, token, and database-fence metadata.
+  worker admission open. A code-only rollback to exact 0.4.0 retains `0019`, `0020`,
+  and the legacy database defaults after upgraded task managers are stopped and
+  reconciled. Reverse `0020` and then `0019` only in a separate stopped-writer
+  maintenance window; reversal drops the protocol, provenance, capability, policy,
+  token, and database-fence metadata.
+- A preparatory private revision-checked coordination primitive now proves the database
+  transition needed by a later operator adapter. It accepts closure only after its
+  caller asserts that capability-unaware producers are retired and every legacy worker
+  lease is durably inactive. Closing detaches inactive lease history before deleting
+  the admission token; reopening never revives those identities and refuses while any
+  nonterminal execution uses a protocol other than `1`. Operators must keep legacy
+  admission open in this slice: it adds no supported command, mutable Admin action, or
+  protocol `2` activation surface.
+- Migration `0020` makes that rollback boundary persistent: while legacy admission is
+  open, PostgreSQL and SQLite reject non-protocol-`1` nonterminal inserts and
+  terminal-to-nonterminal transitions. PostgreSQL reopening fences execution writers
+  before policy evaluation; installation refuses an already-open policy containing
+  incompatible nonterminal work.
 
 ### Added
 
@@ -29,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execution and attempt provenance, and worker capability ranges. Integer protocol
   versions are normative; package Semantic Versions remain diagnostic provenance only,
   and no protocol `2` writer or policy activation surface is enabled.
+- PostgreSQL and SQLite rollout coordination now serializes exact-0.4 execution and
+  lease inserts, legacy heartbeats, and concurrent policy transitions without using
+  package Semantic Versions as compatibility evidence. Callers must provide the
+  policy revision they reviewed; stale revisions fail without partial mutation. A
+  PostgreSQL advisory mutex serializes coordination calls, and redundant reopen checks
+  avoid an execution-table lock while legacy workers remain admitted.
 
 ## [0.4.0] - 2026-08-03
 
