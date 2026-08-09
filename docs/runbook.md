@@ -131,6 +131,18 @@ Package-owned producers insert `QUEUED` rows and acquire ownership through the f
 update path. Directly inserting an already-`RUNNING` or `CANCELLING` row is unsupported
 and bypasses that ownership-transition check.
 
+Upgraded task managers read the supported protocol range from their exact locked and
+fresh schema-`1` lease. The worker applies that range before the bounded queued-expiry
+and claim limits, then rechecks it after locking an exact execution before adoption or
+mutation. An unsupported row remains unchanged and does not cause the worker to give up
+its lease. Global discovery may still observe such a row, but the authoritative boundary
+does not grant mutation authority to an incompatible manager in this slice.
+
+Do not interpret the lease's informational `queue_name` text as a durable per-queue
+capability, or its protocol range as proof that Ray is ready. Ray/Python version and
+cluster-instance attestation, normalized target capacity, and supported blue/green drain
+status are separate rollout requirements.
+
 The package now contains a private coordination primitive for a later supported
 operator adapter. It is not an operator API: do not import or call it directly, and do
 not use SQL, model updates, Admin mutation, or manual token deletion as a substitute.

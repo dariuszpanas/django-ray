@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from django.db import transaction
 
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.runtime.runtime_env import runtime_env_for_execution
@@ -899,21 +900,24 @@ def expire_queued_tasks(
     *,
     now: datetime,
     limit: int = 100,
+    supported_protocols: ExecutionProtocolRange | None = None,
 ) -> tuple[int, ...]:
     """Terminalize one bounded locked batch whose queue deadline is due."""
     if limit <= 0:
         return ()
     with transaction.atomic():
-        rows = list(
-            RayTaskExecution.objects.select_for_update(skip_locked=True)
-            .filter(
-                state=TaskState.QUEUED,
-                queue_name__in=tuple(queue_names),
-                queue_deadline_at__isnull=False,
-                queue_deadline_at__lte=now,
-            )
-            .order_by("queue_deadline_at", "pk")[:limit]
+        candidates = RayTaskExecution.objects.select_for_update(skip_locked=True).filter(
+            state=TaskState.QUEUED,
+            queue_name__in=tuple(queue_names),
+            queue_deadline_at__isnull=False,
+            queue_deadline_at__lte=now,
         )
+        if supported_protocols is not None:
+            candidates = candidates.filter(
+                execution_protocol_version__gte=supported_protocols.minimum,
+                execution_protocol_version__lte=supported_protocols.maximum,
+            )
+        rows = list(candidates.order_by("queue_deadline_at", "pk")[:limit])
         expired: list[int] = []
         for current in rows:
             current.state = TaskState.EXPIRED

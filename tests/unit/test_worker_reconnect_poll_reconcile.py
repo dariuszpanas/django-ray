@@ -13,6 +13,11 @@ from urllib.parse import quote
 import pytest
 from django.db import transaction
 
+from django_ray.execution_protocol import (
+    MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    WORKER_CAPABILITY_SCHEMA_VERSION,
+)
 from django_ray.lifecycle import record_lost, retry_task
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import (
@@ -58,6 +63,15 @@ def _make_command(
                 "hostname": "worker-coverage-host",
                 "pid": 12345,
                 "queue_name": "default",
+                "capability_schema_version": WORKER_CAPABILITY_SCHEMA_VERSION,
+                "django_ray_version": "test",
+                "min_supported_execution_protocol_version": (
+                    MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION
+                ),
+                "max_supported_execution_protocol_version": (
+                    MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION
+                ),
+                "legacy_admission_token": None,
                 "started_at": now,
                 "last_heartbeat_at": now,
                 "is_active": True,

@@ -22,6 +22,8 @@ from django_ray.execution_protocol import (
     MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     WORKER_CAPABILITY_SCHEMA_VERSION,
+    ExecutionProtocolRange,
+    explicit_worker_protocol_range,
 )
 from django_ray.lifecycle import (
     cancel_task,
@@ -1329,15 +1331,24 @@ class Command(BaseCommand):
         from django.db.models import Q
 
         with transaction.atomic():
-            if not self._lock_authoritative_leases(
+            lease = self._lock_authoritative_leases(
                 source_worker_id=self.worker_id,
                 allow_takeover=False,
                 renew_heartbeat=False,
-            ):
+            )
+            if lease is None:
+                return 0
+            supported_protocols = self._explicit_protocol_range(lease)
+            if supported_protocols is None:
                 return 0
 
             sweep_now = datetime.now(UTC)
-            expired = expire_queued_tasks(queues, now=sweep_now, limit=100)
+            expired = expire_queued_tasks(
+                queues,
+                now=sweep_now,
+                limit=100,
+                supported_protocols=supported_protocols,
+            )
             if expired:
                 self.stdout.write(
                     self.style.WARNING(f"  Expired {len(expired)} stale queued task(s)")
@@ -1357,6 +1368,8 @@ class Command(BaseCommand):
                 .filter(
                     state=TaskState.QUEUED,
                     queue_name__in=queues,
+                    execution_protocol_version__gte=supported_protocols.minimum,
+                    execution_protocol_version__lte=supported_protocols.maximum,
                 )
                 .filter(Q(run_after__isnull=True) | Q(run_after__lte=claim_now))
                 .filter(Q(queue_deadline_at__isnull=True) | Q(queue_deadline_at__gt=claim_now))
@@ -2776,7 +2789,7 @@ class Command(BaseCommand):
         source_worker_id: str | None,
         allow_takeover: bool,
         renew_heartbeat: bool = True,
-    ) -> bool:
+    ) -> TaskWorkerLease | None:
         """Lock involved leases and prove this process still owns its identity.
 
         The caller must already be inside ``transaction.atomic()`` and must
@@ -2787,7 +2800,7 @@ class Command(BaseCommand):
         identity = self.lease_identity
         if identity is None:
             self._request_shutdown_for_lease_loss("worker lease was never acquired")
-            return False
+            return None
 
         lease_worker_ids = sorted(
             worker_id
@@ -2831,21 +2844,28 @@ class Command(BaseCommand):
             self._request_shutdown_for_lease_loss(
                 "worker lease expired, became inactive, or disappeared before task mutation"
             )
-            return False
+            return None
         if renew_heartbeat and self.lease is not None:
             self.lease.last_heartbeat_at = validation_time
 
+        live_lease = TaskWorkerLease.objects.filter(**lease_filters).first()
+        if live_lease is None:
+            self._request_shutdown_for_lease_loss(
+                "worker lease changed before its capabilities could be read"
+            )
+            return None
+
         if source_worker_id is None or source_worker_id == self.worker_id:
-            return True
+            return live_lease
         if not allow_takeover:
-            return False
+            return None
 
         if TaskWorkerLease.objects.filter(
             worker_id=source_worker_id,
             is_active=True,
             last_heartbeat_at__gte=cutoff,
         ).exists():
-            return False
+            return None
 
         TaskWorkerLease.objects.filter(
             worker_id=source_worker_id,
@@ -2857,10 +2877,21 @@ class Command(BaseCommand):
         )
         # A boundary-value heartbeat or a concurrently recreated row is not
         # proof that the observed execution owner is stale.
-        return not TaskWorkerLease.objects.filter(
+        takeover_allowed = not TaskWorkerLease.objects.filter(
             worker_id=source_worker_id,
             is_active=True,
         ).exists()
+        return live_lease if takeover_allowed else None
+
+    @staticmethod
+    def _explicit_protocol_range(lease: TaskWorkerLease) -> ExecutionProtocolRange | None:
+        """Read the immutable protocol range from one locked explicit lease."""
+        return explicit_worker_protocol_range(
+            capability_schema_version=int(lease.capability_schema_version),
+            legacy_admission_token_present=lease.legacy_admission_token_id is not None,
+            minimum=lease.min_supported_execution_protocol_version,
+            maximum=lease.max_supported_execution_protocol_version,
+        )
 
     @contextmanager
     def _authoritative_task_owner(
@@ -2880,10 +2911,11 @@ class Command(BaseCommand):
         source_worker_id = str(snapshot.claimed_by_worker) if snapshot.claimed_by_worker else None
 
         with transaction.atomic():
-            if not self._lock_authoritative_leases(
+            lease = self._lock_authoritative_leases(
                 source_worker_id=source_worker_id,
                 allow_takeover=allow_takeover,
-            ):
+            )
+            if lease is None:
                 yield None
                 return
 
@@ -2898,6 +2930,7 @@ class Command(BaseCommand):
                 "ray_address": snapshot.ray_address,
                 "attempt_number": snapshot.attempt_number,
                 "execution_generation": snapshot.execution_generation,
+                "execution_protocol_version": snapshot.execution_protocol_version,
                 "started_at": snapshot.started_at,
                 "last_heartbeat_at": snapshot.last_heartbeat_at,
             }
@@ -2910,6 +2943,13 @@ class Command(BaseCommand):
 
             current = RayTaskExecution.objects.select_for_update().filter(**task_filters).first()
             if current is None:
+                yield None
+                return
+
+            supported_protocols = self._explicit_protocol_range(lease)
+            if supported_protocols is None or not supported_protocols.supports(
+                int(current.execution_protocol_version)
+            ):
                 yield None
                 return
 
