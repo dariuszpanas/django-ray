@@ -1,0 +1,283 @@
+{
+  "schema_version": 1,
+  "contract": "django-ray-1.0-readiness-v1",
+  "target_version": "1.0.0",
+  "decision": {
+    "status": "tracking",
+    "accepted_on": null,
+    "accepted_by": null
+  },
+  "criteria": [
+    {
+      "id": "adoption.documentation-review",
+      "category": "adoption",
+      "required": true,
+      "owner": "external",
+      "status": "pending",
+      "evidence": [],
+      "disposition": "Record one documentation-only installation review by somebody other than the primary implementation author."
+    },
+    {
+      "id": "adoption.external-applications",
+      "category": "adoption",
+      "required": true,
+      "owner": "external",
+      "status": "pending",
+      "evidence": [],
+      "disposition": "Record sanitized evidence from at least two applications outside the bundled test project."
+    },
+    {
+      "id": "adoption.kuberay-deployment",
+      "category": "adoption",
+      "required": true,
+      "owner": "external",
+      "status": "pending",
+      "evidence": [],
+      "disposition": "Record at least one sustained Linux Kubernetes and KubeRay deployment outside the bundled test project."
+    },
+    {
+      "id": "adoption.observation-window",
+      "category": "adoption",
+      "required": true,
+      "owner": "maintainer",
+      "status": "pending",
+      "evidence": [],
+      "disposition": "Accept a sanitized 60 to 90 day observation record, or document an explicit maintainer decision with equivalent evidence."
+    },
+    {
+      "id": "adoption.preserved-state-upgrade",
+      "category": "adoption",
+      "required": true,
+      "owner": "external",
+      "status": "pending",
+      "evidence": [],
+      "disposition": "Record one adopter upgrade that retains compatible queued state rather than discarding the backlog."
+    },
+    {
+      "id": "operations.operator-controls",
+      "category": "operations",
+      "required": true,
+      "owner": "repository",
+      "status": "pending",
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/368"
+        }
+      ],
+      "disposition": "Issue 368 owns bounded diagnostics, drain, retirement, quarantine, and their race evidence."
+    },
+    {
+      "id": "operations.preserved-data-upgrade",
+      "category": "operations",
+      "required": true,
+      "owner": "repository",
+      "status": "pending",
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/361"
+        }
+      ],
+      "disposition": "Retain a repository-owned 0.4.x to release-candidate rehearsal with database and queued-state evidence."
+    },
+    {
+      "id": "operations.protocol-fencing",
+      "category": "operations",
+      "required": true,
+      "owner": "repository",
+      "status": "pending",
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/361"
+        }
+      ],
+      "disposition": "Issue 361 owns execution-protocol versioning, mixed-worker fencing, rolling handoff, and rollback boundaries."
+    },
+    {
+      "id": "operations.soak-certification",
+      "category": "operations",
+      "required": true,
+      "owner": "repository",
+      "status": "pending",
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/370"
+        }
+      ],
+      "disposition": "Issue 370 owns the sustained bounded soak, failure injection, cleanup, and retained report contract."
+    },
+    {
+      "id": "product.compatibility-matrix",
+      "category": "product",
+      "required": true,
+      "owner": "repository",
+      "status": "pending",
+      "evidence": [
+        {
+          "kind": "path",
+          "value": "docs/compatibility.md"
+        }
+      ],
+      "disposition": "The current matrix is published; accept its final 1.0 dependency and platform boundaries during release-candidate review."
+    },
+    {
+      "id": "product.experimental-boundary",
+      "category": "product",
+      "required": true,
+      "owner": "repository",
+      "status": "satisfied",
+      "evidence": [
+        {
+          "kind": "path",
+          "value": "docs/stability.md"
+        },
+        {
+          "kind": "path",
+          "value": "tests/contracts/public_api_v1.json"
+        },
+        {
+          "kind": "path",
+          "value": "tests/unit/test_stability_contract.py"
+        }
+      ],
+      "disposition": "The candidate contract explicitly separates stable, experimental, private, and example surfaces and checks that boundary in CI."
+    },
+    {
+      "id": "product.no-severe-defects",
+      "category": "product",
+      "required": true,
+      "owner": "maintainer",
+      "status": "pending",
+      "evidence": [],
+      "disposition": "Perform a release-blocker triage and record that no known critical or high-severity core defect remains open."
+    },
+    {
+      "id": "product.stable-api",
+      "category": "product",
+      "required": true,
+      "owner": "repository",
+      "status": "pending",
+      "evidence": [
+        {
+          "kind": "path",
+          "value": "docs/stability.md"
+        },
+        {
+          "kind": "path",
+          "value": "tests/contracts/public_api_v1.json"
+        }
+      ],
+      "disposition": "The checked public API is still a candidate and must be explicitly accepted before 1.0."
+    },
+    {
+      "id": "release.final-evidence",
+      "category": "release",
+      "required": true,
+      "owner": "repository",
+      "status": "pending",
+      "evidence": [
+        {
+          "kind": "path",
+          "value": ".github/workflows/ci.yml"
+        },
+        {
+          "kind": "path",
+          "value": ".github/workflows/release.yml"
+        },
+        {
+          "kind": "path",
+          "value": "docs/deployment/local-kuberay-gate.md"
+        }
+      ],
+      "disposition": "Retain passing Linux and KubeRay, PostgreSQL, upgrade, soak, security, documentation, wheel, and sdist evidence for the exact final candidate."
+    },
+    {
+      "id": "support.contributor-triage",
+      "category": "support",
+      "required": true,
+      "owner": "repository",
+      "status": "satisfied",
+      "evidence": [
+        {
+          "kind": "path",
+          "value": "CONTRIBUTING.md"
+        },
+        {
+          "kind": "path",
+          "value": ".github/ISSUE_TEMPLATE/config.yml"
+        },
+        {
+          "kind": "path",
+          "value": ".github/ISSUE_TEMPLATE/bug-report.yml"
+        }
+      ],
+      "disposition": "Contribution, pull-request, security-routing, and issue-intake expectations are repository-owned and checked."
+    },
+    {
+      "id": "support.maintainer-capacity",
+      "category": "support",
+      "required": true,
+      "owner": "maintainer",
+      "status": "pending",
+      "evidence": [],
+      "disposition": "Publish a realistic maintainer-capacity statement with non-guaranteed response and support times."
+    },
+    {
+      "id": "support.release-and-rollback",
+      "category": "support",
+      "required": true,
+      "owner": "repository",
+      "status": "pending",
+      "evidence": [
+        {
+          "kind": "path",
+          "value": ".github/workflows/release.yml"
+        },
+        {
+          "kind": "path",
+          "value": "docs/changelog.md"
+        }
+      ],
+      "disposition": "Promote the existing release automation and version-specific migration notes into an accepted 1.x release and rollback procedure."
+    },
+    {
+      "id": "support.security-fix-policy",
+      "category": "support",
+      "required": true,
+      "owner": "maintainer",
+      "status": "pending",
+      "evidence": [
+        {
+          "kind": "path",
+          "value": "SECURITY.md"
+        }
+      ],
+      "disposition": "The pre-1.0 latest-release policy exists; define the supported 1.x security-fix and backport boundary before acceptance."
+    },
+    {
+      "id": "support.vulnerability-reporting",
+      "category": "support",
+      "required": true,
+      "owner": "repository",
+      "status": "satisfied",
+      "evidence": [
+        {
+          "kind": "path",
+          "value": "SECURITY.md"
+        },
+        {
+          "kind": "path",
+          "value": ".github/ISSUE_TEMPLATE/security-contact.yml"
+        },
+        {
+          "kind": "path",
+          "value": "tests/unit/test_docs_integrity.py"
+        }
+      ],
+      "disposition": "Private vulnerability reporting and safe public fallback guidance are published and checked."
+    }
+  ]
+}

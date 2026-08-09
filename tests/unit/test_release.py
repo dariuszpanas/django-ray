@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +14,65 @@ import scripts.verify_release_source as release_source
 from scripts.validate_release import (
     normalize_version,
     validate_compiled_graph_capability_review,
+    validate_one_zero_readiness,
     validate_release_version,
     validate_testpypi_candidate,
 )
 
 ROOT = Path(__file__).parents[2]
+
+
+def _write_readiness_fixture(
+    root: Path,
+    *,
+    version: str = "0.9.0",
+    decision_status: str = "tracking",
+    criterion_status: str = "pending",
+    classifiers: tuple[str, ...] = ("Development Status :: 4 - Beta",),
+) -> None:
+    classifier_lines = "\n".join(f'    "{classifier}",' for classifier in classifiers)
+    (root / "pyproject.toml").write_text(
+        f'[project]\nversion = "{version}"\nclassifiers = [\n{classifier_lines}\n]\n',
+        encoding="utf-8",
+    )
+    docs = root / "docs"
+    docs.mkdir(exist_ok=True)
+    (docs / "stability.md").write_text("candidate policy\n", encoding="utf-8")
+    (docs / "one-zero-readiness.md").write_text(
+        "# Readiness\n\n<!-- readiness-criterion: product.stable-api -->\n",
+        encoding="utf-8",
+    )
+    contracts = root / "tests" / "contracts"
+    contracts.mkdir(parents=True)
+    accepted = decision_status == "accepted"
+    (contracts / "one_zero_readiness_v1.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "contract": "django-ray-1.0-readiness-v1",
+                "target_version": "1.0.0",
+                "decision": {
+                    "status": decision_status,
+                    "accepted_on": date.today().isoformat() if accepted else None,
+                    "accepted_by": "maintainer" if accepted else None,
+                },
+                "criteria": [
+                    {
+                        "id": "product.stable-api",
+                        "category": "product",
+                        "required": True,
+                        "owner": "repository",
+                        "status": criterion_status,
+                        "evidence": [{"kind": "path", "value": "docs/stability.md"}],
+                        "disposition": (
+                            "Accept the checked stable API contract before publishing version one."
+                        ),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_local_python_version_allows_patch_updates() -> None:
@@ -55,6 +109,101 @@ def test_release_versions_match_repository_sources() -> None:
     assert release._read_pyproject_version(ROOT) == "0.4.0"
     assert release._read_module_version(ROOT) == "0.4.0"
     assert release._read_lock_version(ROOT) == "0.4.0"
+
+
+def test_repository_one_zero_readiness_registry_is_valid_and_tracking() -> None:
+    record = validate_one_zero_readiness(ROOT)
+
+    assert record["decision"] == {
+        "status": "tracking",
+        "accepted_on": None,
+        "accepted_by": None,
+    }
+    assert {criterion["status"] for criterion in record["criteria"]} == {
+        "pending",
+        "satisfied",
+    }
+
+
+def test_readiness_registry_latches_the_beta_classifier(tmp_path: Path) -> None:
+    _write_readiness_fixture(tmp_path, classifiers=())
+
+    with pytest.raises(ValueError, match="Beta classifier cannot be removed"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_accepted_readiness_rejects_incomplete_required_criteria(tmp_path: Path) -> None:
+    _write_readiness_fixture(tmp_path, decision_status="accepted")
+
+    with pytest.raises(ValueError, match="incomplete required criteria"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_one_x_requires_accepted_readiness_and_production_classifier(tmp_path: Path) -> None:
+    _write_readiness_fixture(
+        tmp_path,
+        version="1.0.0",
+        decision_status="accepted",
+        criterion_status="satisfied",
+        classifiers=("Development Status :: 5 - Production/Stable",),
+    )
+
+    record = validate_one_zero_readiness(tmp_path, require_accepted=True)
+
+    assert record["decision"]["status"] == "accepted"
+
+
+def test_accepted_readiness_rejects_satisfied_criterion_without_evidence(
+    tmp_path: Path,
+) -> None:
+    _write_readiness_fixture(
+        tmp_path,
+        decision_status="accepted",
+        criterion_status="satisfied",
+        classifiers=("Development Status :: 5 - Production/Stable",),
+    )
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["criteria"][0]["owner"] = "external"
+    record["criteria"][0]["evidence"] = []
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="needs evidence"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_accepted_readiness_rejects_future_acceptance_date(tmp_path: Path) -> None:
+    _write_readiness_fixture(
+        tmp_path,
+        decision_status="accepted",
+        criterion_status="satisfied",
+        classifiers=("Development Status :: 5 - Production/Stable",),
+    )
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["decision"]["accepted_on"] = (date.today() + timedelta(days=1)).isoformat()
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="cannot be in the future"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_category_must_match_criterion_id(tmp_path: Path) -> None:
+    _write_readiness_fixture(tmp_path)
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["criteria"][0]["category"] = "adoption"
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="category must match its id"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_one_x_rejects_tracking_readiness_even_with_beta_metadata(tmp_path: Path) -> None:
+    _write_readiness_fixture(tmp_path, version="1.0.0")
+
+    with pytest.raises(ValueError, match="requires an accepted 1.0 readiness decision"):
+        validate_one_zero_readiness(tmp_path)
 
 
 def test_release_version_mismatch_is_actionable(tmp_path: Path) -> None:
@@ -406,6 +555,7 @@ def _write_testpypi_candidate_fixture(root: Path, *, lock_version: str = "0.4.0"
         "[0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1\n",
         encoding="utf-8",
     )
+    _write_readiness_fixture(root, version="0.4.0")
 
 
 def _mock_testpypi_candidate_dependencies(
@@ -438,6 +588,21 @@ def test_testpypi_candidate_accepts_unreleased_tree_while_production_rejects(
     assert validate_testpypi_candidate(tmp_path, "v0.4.0") == "0.4.0"
     with pytest.raises(ValueError, match=r"one dated \[0\.4\.0\] release heading"):
         validate_release_version(tmp_path, "v0.4.0")
+
+
+def test_testpypi_candidate_requires_the_readiness_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_testpypi_candidate_fixture(tmp_path)
+    (tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json").unlink()
+    _mock_testpypi_candidate_dependencies(
+        monkeypatch,
+        released_versions={"0.3.1"},
+    )
+
+    with pytest.raises(ValueError, match="readiness registry is unavailable"):
+        validate_testpypi_candidate(tmp_path, "v0.4.0")
 
 
 def test_testpypi_candidate_rejects_mismatched_version_source(
@@ -535,6 +700,7 @@ def test_release_candidate_validation_accepts_consistent_fixture(
         "validate_compiled_graph_capability_review",
         lambda _root: tmp_path / "review.json",
     )
+    _write_readiness_fixture(tmp_path, version="0.4.0")
 
     assert validate_release_version(tmp_path, "v0.4.0") == "0.4.0"
 

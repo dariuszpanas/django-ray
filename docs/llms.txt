@@ -22,6 +22,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   supported Python, Django, Ray, CI, and platform policy.
 - [Stability and deprecation](https://django-ray.readthedocs.io/en/latest/stability/):
   candidate 1.0 public contract, experimental boundary, and deprecation policy.
+- [1.0 readiness](https://django-ray.readthedocs.io/en/latest/one-zero-readiness/):
+  checked graduation criteria, evidence ownership, privacy rules, and the Beta
+  classifier latch.
 - [Ray ecosystem support](https://django-ray.readthedocs.io/en/latest/ray-ecosystem/):
   component installs, base-import evidence, finite workload ownership, durable
   artifact contracts, and explicit non-guarantees.
