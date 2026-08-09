@@ -14,6 +14,7 @@ from django_ray.models import (
     WorkflowProgressTopologyManifestPage,
     WorkflowProgressTopologyPage,
 )
+from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ITEMS
 from django_ray.workflow_progress_storage import (
     persist_workflow_progress_publication,
     prepare_workflow_progress_node_detail,
@@ -26,8 +27,9 @@ from tests.workflow_progress_storage_helpers import (
 )
 
 
-def _measure_one_node_update(node_count: int) -> tuple[int, float, str]:
+def _measure_one_node_update(node_count: int) -> tuple[int, float, str, int]:
     workflow = publish_initial_workflow(node_count)
+    topology_page_count = len(workflow.topology.pages)
     changed = prepare_workflow_progress_node_detail(
         workflow_detail(workflow_node_id(node_count // 2), state="RUNNING"),
         identity=workflow.identity,
@@ -50,17 +52,29 @@ def _measure_one_node_update(node_count: int) -> tuple[int, float, str]:
     assert result.accepted
     assert result.changed_node_count == 1
     assert result.removed_node_count == 0
-    return len(queries), elapsed_ms, "\n".join(query["sql"].upper() for query in queries)
+    return (
+        len(queries),
+        elapsed_ms,
+        "\n".join(query["sql"].upper() for query in queries),
+        topology_page_count,
+    )
 
 
 @pytest.mark.django_db
 def test_sparse_publication_round_trips_are_independent_of_retained_workflow_size(
     record_property: Callable[[str, object], None],
 ) -> None:
-    small_queries, small_ms, small_sql = _measure_one_node_update(32)
-    large_queries, large_ms, large_sql = _measure_one_node_update(2_048)
+    small_retained_nodes = 32
+    large_retained_nodes = WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ITEMS + 1
+    small_queries, small_ms, small_sql, small_topology_pages = _measure_one_node_update(
+        small_retained_nodes
+    )
+    large_queries, large_ms, large_sql, large_topology_pages = _measure_one_node_update(
+        large_retained_nodes
+    )
 
     assert large_queries == small_queries
+    assert (small_topology_pages, large_topology_pages) == (1, 2)
     assert "COUNT(" not in large_sql
     assert "SUM(" not in large_sql
     large_selects = "\n".join(
@@ -83,14 +97,16 @@ def test_sparse_publication_round_trips_are_independent_of_retained_workflow_siz
     assert large_sql.count('UPDATE "DJANGO_RAY_WORKFLOWPROGRESSNODEDETAIL"') == 1
     assert (
         WorkflowProgressNodeDetail.objects.filter(
-            run_storage__execution__task_id="workflow-storage-2048-0",
+            run_storage__execution__task_id=f"workflow-storage-{large_retained_nodes}-0",
             state="RUNNING",
         ).count()
         == 1
     )
 
-    record_property("small_retained_nodes", 32)
-    record_property("large_retained_nodes", 2_048)
+    record_property("small_retained_nodes", small_retained_nodes)
+    record_property("large_retained_nodes", large_retained_nodes)
+    record_property("small_topology_pages", small_topology_pages)
+    record_property("large_topology_pages", large_topology_pages)
     record_property("small_sparse_round_trips", small_queries)
     record_property("large_sparse_round_trips", large_queries)
     record_property("small_sparse_elapsed_ms", round(small_ms, 3))
