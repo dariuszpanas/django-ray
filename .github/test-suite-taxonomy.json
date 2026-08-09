@@ -237,6 +237,7 @@
       },
       "selection": {
         "paths": [
+          "tests/integration/test_execution_protocol_schema_migration.py",
           "tests/integration/test_input_payload_migration.py",
           "tests/integration/test_priority_migration.py",
           "tests/integration/test_queue_expiration_migration.py",
@@ -377,6 +378,7 @@
       "django_settings_modules": ["tests.postgres_settings"],
       "selection": {
         "paths": [
+          "tests/integration/test_execution_protocol_schema_migration.py",
           "tests/integration/test_postgresql_coordination.py",
           "tests/integration/test_postgresql_metrics.py",
           "tests/integration/test_postgresql_polling.py",

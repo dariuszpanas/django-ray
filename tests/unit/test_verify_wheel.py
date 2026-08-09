@@ -16,11 +16,12 @@ from scripts.verify_wheel import (
 )
 
 
-def test_release_boundary_tracks_workflow_run_allocation_migration() -> None:
-    assert "django_ray/migrations/0018_workflow_run_allocation.py" in EXPECTED_FILES
+def test_release_boundary_tracks_execution_protocol_schema_migration() -> None:
+    assert "django_ray/execution_protocol.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0019_execution_protocol_schema.py" in EXPECTED_FILES
     assert EXPECTED_MIGRATION_LEAF == (
         "django_ray",
-        "0018_workflow_run_allocation",
+        "0019_execution_protocol_schema",
     )
 
 

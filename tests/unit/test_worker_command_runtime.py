@@ -14,7 +14,13 @@ from django.conf import settings as django_settings
 from django.core.management import CommandError
 from django.core.management.base import CommandParser
 
+import django_ray
 from django_ray.backends import RayTaskBackend
+from django_ray.execution_protocol import (
+    MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    WORKER_CAPABILITY_SCHEMA_VERSION,
+)
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
@@ -1276,6 +1282,17 @@ class TestWorkerCommandRuntimeDb:
         assert cmd.lease.pk == first_pk
         assert cmd.lease.queue_name == "low-priority"
         assert cmd.lease.is_active is True
+        assert cmd.lease.capability_schema_version == WORKER_CAPABILITY_SCHEMA_VERSION
+        assert cmd.lease.django_ray_version == django_ray.__version__
+        assert (
+            cmd.lease.min_supported_execution_protocol_version
+            == MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION
+        )
+        assert (
+            cmd.lease.max_supported_execution_protocol_version
+            == MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION
+        )
+        assert cmd.lease.legacy_admission_token_id is None
         assert cmd.lease_queue_name == "low-priority"
         assert any("Lease restored" in message for message in cmd.stdout.messages)
 
