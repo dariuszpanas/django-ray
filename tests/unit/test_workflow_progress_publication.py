@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -184,7 +185,13 @@ def _make_zero_delivery_samples_with_nonzero_timing(
     delivery["max_us"] = 1
 
 
-def _snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
+def _snapshot(
+    identity: WorkflowRunIdentity,
+    *,
+    timestamp_origin: float | None = None,
+) -> dict[str, Any]:
+    if timestamp_origin is None:
+        timestamp_origin = datetime.now(UTC).timestamp() - 5.0
     accepted_by_kind = _accepted_by_kind()
     accepted = sum(accepted_by_kind.values())
     fanout = {
@@ -216,8 +223,8 @@ def _snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
         "running_nodes": 0,
         "pending_nodes": 0,
         "progress_percent": 100.0,
-        "started_at": 1_785_365_100.0,
-        "updated_at": 1_785_365_104.0,
+        "started_at": timestamp_origin,
+        "updated_at": timestamp_origin + 4.0,
         "graph": {
             "nodes": [
                 {
@@ -235,7 +242,7 @@ def _snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
                         "percent": 100.0,
                         "message": "Prepared items",
                         "metrics": {"items": 2},
-                        "updated_at": 1_785_365_103.0,
+                        "updated_at": timestamp_origin + 3.0,
                     },
                     "execution": {
                         "ray_task_id": "task-1",
@@ -244,8 +251,8 @@ def _snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
                         "ray_worker_id": "worker-1",
                         "assigned_resources": {"CPU": 1.0},
                     },
-                    "started_at": 1_785_365_101.0,
-                    "finished_at": 1_785_365_103.0,
+                    "started_at": timestamp_origin + 1.0,
+                    "finished_at": timestamp_origin + 3.0,
                     "error": None,
                     "output_preview": {
                         "schema_version": 1,
@@ -268,11 +275,11 @@ def _snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
                         "percent": 100.0,
                         "message": "Collecting bounded map results",
                         "metrics": fanout,
-                        "updated_at": 1_785_365_103.5,
+                        "updated_at": timestamp_origin + 3.5,
                     },
                     "execution": {},
-                    "started_at": 1_785_365_101.5,
-                    "finished_at": 1_785_365_103.5,
+                    "started_at": timestamp_origin + 1.5,
+                    "finished_at": timestamp_origin + 3.5,
                     "error": None,
                     "output_preview": {
                         "schema_version": 1,
@@ -290,28 +297,28 @@ def _snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
                 "event": "STARTED",
                 "state": "RUNNING",
                 "label": "prepare_items",
-                "timestamp": 1_785_365_101.0,
+                "timestamp": timestamp_origin + 1.0,
             },
             {
                 "node_id": "0.0",
                 "event": "COMPLETED",
                 "state": "SUCCEEDED",
                 "label": "prepare_items",
-                "timestamp": 1_785_365_103.0,
+                "timestamp": timestamp_origin + 3.0,
             },
             {
                 "node_id": "0.1",
                 "event": "STARTED",
                 "state": "RUNNING",
                 "label": "bounded-map:increment",
-                "timestamp": 1_785_365_101.5,
+                "timestamp": timestamp_origin + 1.5,
             },
             {
                 "node_id": "0.1",
                 "event": "COMPLETED",
                 "state": "SUCCEEDED",
                 "label": "bounded-map:increment",
-                "timestamp": 1_785_365_103.5,
+                "timestamp": timestamp_origin + 3.5,
             },
         ],
         "ingress": {

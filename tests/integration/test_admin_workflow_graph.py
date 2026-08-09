@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from django.db import connection
 from django.test import RequestFactory
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.utils import timezone
 
 from django_ray.admin import RayTaskExecutionAdmin
 from django_ray.admin_workflow_graph import (
@@ -860,6 +862,10 @@ def test_graph_response_byte_ceiling_degrades_atomically(
 
 @pytest.mark.django_db
 def test_graph_endpoint_reads_real_terminal_schema_v3_storage(settings) -> None:
+    terminal_time = timezone.now()
+    started_at = (terminal_time - timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
+    detail_finished_at = (terminal_time - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    finished_at = terminal_time.isoformat().replace("+00:00", "Z")
     execution = _execution(
         task_id="graph-real-schema-v3",
         state=TaskState.RUNNING,
@@ -893,8 +899,8 @@ def test_graph_endpoint_reads_real_terminal_schema_v3_storage(settings) -> None:
         detail = workflow_detail(node_id)
         detail.update(
             state="SUCCEEDED",
-            started_at="2026-07-29T12:00:00Z",
-            finished_at="2026-07-29T12:00:01Z",
+            started_at=started_at,
+            finished_at=detail_finished_at,
         )
         if node_id == "real-a":
             detail.update(
@@ -920,12 +926,13 @@ def test_graph_endpoint_reads_real_terminal_schema_v3_storage(settings) -> None:
     summary["edge_counts"].update(declared=1, discovered=1)
     summary["progress_percent"] = 100.0
     summary["timestamps"].update(
-        updated_at="2026-07-29T12:00:02Z",
-        finished_at="2026-07-29T12:00:02Z",
+        started_at=started_at,
+        updated_at=finished_at,
+        finished_at=finished_at,
     )
     summary["terminal"].update(
         outcome="SUCCEEDED",
-        finished_at="2026-07-29T12:00:02Z",
+        finished_at=finished_at,
     )
     publication = persist_workflow_progress_publication(
         identity,
