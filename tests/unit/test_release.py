@@ -167,9 +167,9 @@ def test_semantic_version_order_places_final_after_prereleases() -> None:
 
 
 def test_release_versions_match_repository_sources() -> None:
-    assert release._read_pyproject_version(ROOT) == "0.4.0"
-    assert release._read_module_version(ROOT) == "0.4.0"
-    assert release._read_lock_version(ROOT) == "0.4.0"
+    assert release._read_pyproject_version(ROOT) == "0.5.0"
+    assert release._read_module_version(ROOT) == "0.5.0"
+    assert release._read_lock_version(ROOT) == "0.5.0"
 
 
 def test_readiness_v1_contract_latches_criterion_ownership() -> None:

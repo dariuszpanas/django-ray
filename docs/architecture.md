@@ -532,7 +532,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0018_workflow_run_allocation` before starting upgraded workers:
+`0019_execution_protocol_schema` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -630,6 +630,47 @@ allocator can create fresh workflow ownership under the strengthened guarantee. 
 code rollback, stop new coordinators and drain active workflows first, retain migration
 `0018`, and then start the old code; reversing `0018` separately drops the allocation
 metadata and requires a stopped-writer maintenance window.
+
+Migration `0019` establishes the schema-first execution-protocol boundary. It records
+protocol `1` on every existing execution and archived attempt, classifies existing and
+old-writer execution rows as metadata schema `0`, and leaves their package provenance
+null. New model writers use metadata schema `1`. Existing and pre-capability worker
+leases use capability schema `0`, a null protocol range, and the singleton legacy
+admission token; upgraded workers advertise capability schema `1` and the explicit
+supported range `1` through `1`. Database fences keep execution, attempt, and lease
+capability identity immutable. While protocol `1` and legacy admission remain open,
+the ownership fence is deliberately dormant so existing recovery behavior is unchanged.
+For a future protocol, or after legacy admission closes, a new ownership transition is
+rejected unless the active lease advertises a range containing the execution's protocol.
+Package-owned producers always insert executions as `QUEUED`; the ownership fence is an
+update boundary and does not validate unsupported direct insertion of an already-active
+row. Custom SQLite migrations that rebuild an execution, attempt, or lease table must
+reinstall the protocol triggers, and the current-schema migration test verifies that the
+latest leaf still retains them.
+
+The protocol-`1` backfill is supported only when the database comes from the exact
+published 0.4.0 baseline at migration `0018`. A database whose nonterminal rows were
+written directly by pre-0.4 code does not contain enough evidence to prove that those
+rows implement protocol `1`; drain or cancel them, or complete an application-specific
+audit, before applying `0019`. A migration number alone is not evidence that every
+writer followed the 0.4.0 execution contract.
+
+The seeded singleton policy has schema `1`, active write protocol `1`, legacy admission
+open, and revision `1`. This is a deliberately dormant rollout boundary: `0019` does
+not introduce a protocol-`2` writer, change the execution wire format, close legacy
+admission, or expose policy mutation through Admin. Admin displays the policy and the
+bounded lease capability as read-only operational evidence. The integer execution
+protocol is the normative compatibility decision; `django-ray` package versions are
+diagnostic provenance only and must not be used to infer admission or routing.
+
+A code-only rollback and a schema reversal are different operations. To return to exact
+0.4.0 code, first keep the policy at protocol `1` with legacy admission open, verify
+that nonterminal work is protocol `1`, stop upgraded task managers, and reconcile their
+in-flight work; retain migration `0019` so old writers receive its legacy database
+defaults and token. Reverse `0019` only in a separate stopped-writer maintenance window
+after confirming no retained diagnostics require its fields. Reversal removes the
+protocol and provenance columns, worker capability metadata, singleton policy and token,
+and database fences; it is not required for a code rollback.
 
 RuntimeEnv encryption has no schema migration. Its rollout is nevertheless
 reader-first: deploy the dual plaintext/encrypted reader everywhere while writes remain

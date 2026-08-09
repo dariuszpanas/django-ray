@@ -39,12 +39,21 @@ from django_ray.admin import (
     ADMIN_WORKFLOW_PLAN_DOWNLOAD_MAX_BYTES,
     ADMIN_WORKFLOW_PLAN_SELECTION_DOWNLOAD_MAX_BYTES,
     ActiveWorkerFilter,
+    ExecutionProtocolFilter,
     RayTaskExecutionAdmin,
     TaskAttemptAdmin,
     TaskAttemptInline,
+    TaskExecutionProtocolPolicyAdmin,
     TaskWorkerLeaseAdmin,
 )
-from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.models import (
+    LegacyWorkerAdmissionToken,
+    RayTaskExecution,
+    TaskAttempt,
+    TaskExecutionProtocolPolicy,
+    TaskState,
+    TaskWorkerLease,
+)
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.workflow_plans import (
     MAX_PLAN_BYTES,
@@ -157,6 +166,10 @@ def _attempt_admin() -> TaskAttemptAdmin:
     return TaskAttemptAdmin(TaskAttempt, admin.site)
 
 
+def _protocol_policy_admin() -> TaskExecutionProtocolPolicyAdmin:
+    return TaskExecutionProtocolPolicyAdmin(TaskExecutionProtocolPolicy, admin.site)
+
+
 def _admin_diagnostic_increment(value: int) -> int:
     return value + 1
 
@@ -257,6 +270,24 @@ class TestRayTaskExecutionAdmin:
             method = getattr(admin_obj, method_name)
             assert method.short_description == description
             assert getattr(method, "admin_order_field", None) == ordering
+
+    def test_execution_protocol_metadata_is_read_only_and_filterable(self) -> None:
+        admin_obj = _task_admin()
+        fieldset_fields = {
+            field for _, options in admin_obj.fieldsets for field in options.get("fields", ())
+        }
+        protocol_fields = {
+            "metadata_schema_version",
+            "execution_protocol_version",
+            "created_with_django_ray_version",
+            "managed_with_django_ray_version",
+            "executor_django_ray_version",
+        }
+
+        assert protocol_fields <= fieldset_fields
+        assert protocol_fields <= set(admin_obj.readonly_fields)
+        assert protocol_fields <= set(admin_obj.observability_fields)
+        assert ExecutionProtocolFilter in admin_obj.list_filter
 
     @override_settings(TIME_ZONE="UTC")
     def test_compact_changelist_values_preserve_full_context(self) -> None:
@@ -3920,10 +3951,18 @@ class TestTaskAttemptAdmin:
         admin_obj = _attempt_admin()
         request = _request()
         inline = TaskAttemptInline(TaskAttempt, admin.site)
+        protocol_fields = {
+            "execution_protocol_version",
+            "managed_with_django_ray_version",
+            "executor_django_ray_version",
+        }
 
         assert admin_obj.has_add_permission(request) is False
         assert admin_obj.has_change_permission(request) is False
         assert admin_obj.has_delete_permission(request) is False
+        assert protocol_fields <= set(admin_obj.fields)
+        assert protocol_fields <= set(admin_obj.readonly_fields)
+        assert ExecutionProtocolFilter in admin_obj.list_filter
         assert inline.has_add_permission(request) is False
         assert inline.has_change_permission(request) is False
         assert inline.has_delete_permission(request) is False
@@ -4684,6 +4723,52 @@ class TestTaskAttemptAdmin:
 class TestTaskWorkerLeaseAdmin:
     """Tests for worker lease admin helper behavior."""
 
+    def test_execution_protocol_capability_is_read_only_and_bounded(self) -> None:
+        admin_obj = _lease_admin()
+        protocol_fields = {
+            "capability_schema_version",
+            "django_ray_version",
+            "min_supported_execution_protocol_version",
+            "max_supported_execution_protocol_version",
+            "legacy_admission_token",
+        }
+        fieldset_fields = {
+            field for _, options in admin_obj.fieldsets for field in options.get("fields", ())
+        }
+
+        assert protocol_fields <= fieldset_fields
+        assert protocol_fields <= set(admin_obj.readonly_fields)
+        assert "capability_schema_version" in admin_obj.list_display
+        assert "supported_execution_protocols" in admin_obj.list_display
+        assert "django_ray_version" in admin_obj.list_display
+        assert (
+            admin_obj.supported_execution_protocols(
+                SimpleNamespace(
+                    min_supported_execution_protocol_version=None,
+                    max_supported_execution_protocol_version=None,
+                )
+            )
+            == "Legacy (policy-controlled)"
+        )
+        assert (
+            admin_obj.supported_execution_protocols(
+                SimpleNamespace(
+                    min_supported_execution_protocol_version=1,
+                    max_supported_execution_protocol_version=1,
+                )
+            )
+            == "1"
+        )
+        assert (
+            admin_obj.supported_execution_protocols(
+                SimpleNamespace(
+                    min_supported_execution_protocol_version=1,
+                    max_supported_execution_protocol_version=2,
+                )
+            )
+            == "1-2"
+        )
+
     def test_worker_id_short_and_time_since_heartbeat(self) -> None:
         admin_obj = _lease_admin()
         lease = TaskWorkerLease.objects.create(
@@ -4859,3 +4944,25 @@ class TestTaskWorkerLeaseAdmin:
         choices = list(filter_obj.choices(ChangeList()))
         assert choices[0]["selected"] is True
         assert choices[0]["query_string"] == "?is_active=active"
+
+
+@pytest.mark.django_db
+class TestTaskExecutionProtocolPolicyAdmin:
+    def test_policy_is_registered_read_only_and_not_an_activation_surface(self) -> None:
+        admin_obj = _protocol_policy_admin()
+        request = _request()
+
+        assert admin.site.is_registered(TaskExecutionProtocolPolicy)
+        assert not admin.site.is_registered(LegacyWorkerAdmissionToken)
+        assert admin_obj.readonly_fields == admin_obj.fields
+        assert set(admin_obj.fields) == {
+            "singleton_key",
+            "schema_version",
+            "active_write_protocol_version",
+            "legacy_worker_admission_enabled",
+            "revision",
+            "updated_at",
+        }
+        assert admin_obj.has_add_permission(request) is False
+        assert admin_obj.has_change_permission(request) is False
+        assert admin_obj.has_delete_permission(request) is False

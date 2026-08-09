@@ -16,7 +16,13 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import IntegrityError, connection, transaction
 
+from django_ray import __version__ as django_ray_version
 from django_ray.conf.settings import get_settings
+from django_ray.execution_protocol import (
+    MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    WORKER_CAPABILITY_SCHEMA_VERSION,
+)
 from django_ray.lifecycle import (
     cancel_task,
     expire_queued_tasks,
@@ -744,6 +750,15 @@ class Command(BaseCommand):
                     lease = TaskWorkerLease.objects.create(
                         **identity.database_filters(),
                         queue_name=queue,
+                        capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
+                        django_ray_version=django_ray_version,
+                        min_supported_execution_protocol_version=(
+                            MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION
+                        ),
+                        max_supported_execution_protocol_version=(
+                            MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION
+                        ),
+                        legacy_admission_token=None,
                         last_heartbeat_at=started_at,
                         is_active=True,
                         stopped_at=None,

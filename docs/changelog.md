@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade from 0.4.0
+
+- The `0019_execution_protocol_schema` migration supports the exact published 0.4.0
+  baseline at migration `0018`. It records existing executions and attempts as protocol
+  `1`, but cannot prove the contract of retained nonterminal work written directly by
+  pre-0.4 code. Drain, cancel, or audit that work before applying `0019`; the migration
+  number alone does not prove which writer created a row.
+- The seeded rollout policy remains dormant at active write protocol `1`, with legacy
+  worker admission open. A code-only rollback to exact 0.4.0 retains `0019` and its
+  legacy database defaults after upgraded task managers are stopped and reconciled.
+  Reverse `0019` only in a separate stopped-writer maintenance window; reversal drops
+  the protocol, provenance, capability, policy, token, and database-fence metadata.
+
+### Added
+
+- A schema-first durable execution-protocol boundary records immutable protocol `1` on
+  executions and attempts, advertises upgraded worker support as the bounded range
+  `1` through `1`, and installs a dormant ownership fence for future protocols and the
+  post-legacy boundary. Read-only Admin surfaces expose the singleton rollout policy,
+  execution and attempt provenance, and worker capability ranges. Integer protocol
+  versions are normative; package Semantic Versions remain diagnostic provenance only,
+  and no protocol `2` writer or policy activation surface is enabled.
+
 ## [0.4.0] - 2026-08-03
 
 ### Upgrade from 0.3.1

@@ -186,6 +186,40 @@ def pytest_configure(config: object) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> None:
+    """Restore migration-seeded protocol rows after transactional test flushes."""
+    database_fixtures = {
+        "db",
+        "django_db_reset_sequences",
+        "django_db_serialized_rollback",
+        "live_server",
+        "transactional_db",
+    }
+    has_database_marker = request.node.get_closest_marker("django_db") is not None
+    has_database_fixture = not database_fixtures.isdisjoint(request.fixturenames)
+    if not has_database_marker and not has_database_fixture:
+        return
+
+    request.getfixturevalue("django_db_setup")
+    django_db_blocker = request.getfixturevalue("django_db_blocker")
+
+    from django_ray.models import LegacyWorkerAdmissionToken, TaskExecutionProtocolPolicy
+
+    with django_db_blocker.unblock():
+        policy, _ = TaskExecutionProtocolPolicy.objects.get_or_create(
+            singleton_key=1,
+            defaults={
+                "schema_version": 1,
+                "active_write_protocol_version": 1,
+                "legacy_worker_admission_enabled": True,
+                "revision": 1,
+            },
+        )
+        if policy.legacy_worker_admission_enabled:
+            LegacyWorkerAdmissionToken.objects.get_or_create(singleton_key=1)
+
+
+@pytest.fixture(autouse=True)
 def _clear_django_ray_remote_caches():
     try:
         import django_ray.runner.ray_core as ray_core

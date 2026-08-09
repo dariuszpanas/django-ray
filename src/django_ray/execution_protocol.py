@@ -1,0 +1,19 @@
+"""Version constants for django-ray's durable task execution contract.
+
+Package versions are diagnostic provenance.  These integer epochs are the
+normative compatibility boundary for persisted task execution and worker
+capabilities.
+"""
+
+from __future__ import annotations
+
+LEGACY_EXECUTION_METADATA_SCHEMA_VERSION = 0
+EXECUTION_METADATA_SCHEMA_VERSION = 1
+EXECUTION_PROTOCOL_VERSION = 1
+
+LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION = 0
+WORKER_CAPABILITY_SCHEMA_VERSION = 1
+MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION = EXECUTION_PROTOCOL_VERSION
+MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION = EXECUTION_PROTOCOL_VERSION
+
+PROTOCOL_POLICY_SCHEMA_VERSION = 1

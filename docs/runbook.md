@@ -105,6 +105,45 @@ Before enabling automatic retries on side-effecting callables, confirm the task 
 key or operation table that makes duplicate execution harmless. For payments, emails, webhooks, or
 external writes, prefer a deduplicated commit record over relying on task attempt counts.
 
+## Execution Protocol Rollout Boundary
+
+Migration `0019_execution_protocol_schema` creates a read-only protocol policy and
+records bounded execution and worker capabilities. Its initial expected state is policy
+schema `1`, active write protocol `1`, legacy worker admission enabled, and revision `1`.
+This is an observation and fencing boundary, not activation of a new execution format:
+only protocol `1` is supported, and upgraded workers advertise the range `1` through
+`1`. The Task Execution Protocol Policy Admin does not permit adding, changing, or
+deleting policy rows. Execution, archived-attempt, and worker-lease Admin pages likewise
+show their protocol and provenance fields read-only.
+
+Use the integer protocol fields for compatibility decisions. The displayed
+`django_ray_version` and execution or attempt package versions are diagnostic provenance
+only; a matching Semantic Version does not admit a worker, and a different Semantic
+Version does not by itself reject one. A lease with no explicit range is a legacy,
+policy-controlled lease. While legacy admission is open, only the singleton admission
+token lets such a lease remain active for protocol-`1` work. The initial protocol-`1`
+ownership fence remains behaviorally dormant for compatibility with existing recovery
+paths; future-protocol and post-legacy ownership transitions require an explicitly
+compatible active lease. Do not update the policy, token, protocol, or capability
+columns directly.
+
+Package-owned producers insert `QUEUED` rows and acquire ownership through the fenced
+update path. Directly inserting an already-`RUNNING` or `CANCELLING` row is unsupported
+and bypasses that ownership-transition check.
+
+The supported migration source is the exact published 0.4.0 baseline at migration
+`0018`. Before applying `0019`, confirm every producer and task manager that may have
+written retained nonterminal work was running 0.4.0. If any live row was written directly
+by pre-0.4 code, drain or cancel it, or complete an application-specific audit; the new
+columns cannot reconstruct its original execution contract. Do not treat an `0018`
+migration record alone as proof of the writer version.
+
+For a code-only rollback, keep `0019` applied, keep policy protocol `1` and legacy
+admission open, verify all nonterminal work is protocol `1`, and stop and reconcile
+upgraded task managers before starting exact 0.4.0 code. Reverse `0019` only as a
+separate stopped-writer maintenance operation after accepting the loss of its protocol,
+provenance, capability, policy, token, and fencing data.
+
 ## Useful Queries
 
 ```sql
@@ -136,9 +175,38 @@ ORDER BY started_at ASC;
 
 ```sql
 -- Worker leases ordered by oldest heartbeat
-SELECT worker_id, hostname, pid, queue_name, is_active, last_heartbeat_at
+SELECT worker_id,
+       hostname,
+       pid,
+       queue_name,
+       is_active,
+       capability_schema_version,
+       min_supported_execution_protocol_version,
+       max_supported_execution_protocol_version,
+       django_ray_version,
+       last_heartbeat_at
 FROM django_ray_taskworkerlease
 ORDER BY last_heartbeat_at ASC;
+```
+
+```sql
+-- Singleton execution-protocol rollout policy (expected initial state: 1, 1, true, 1)
+SELECT schema_version,
+       active_write_protocol_version,
+       legacy_worker_admission_enabled,
+       revision,
+       updated_at
+FROM django_ray_taskexecutionprotocolpolicy
+WHERE singleton_key = 1;
+```
+
+```sql
+-- Nonterminal executions grouped by the normative protocol and metadata schema
+SELECT execution_protocol_version, metadata_schema_version, state, COUNT(*) AS count
+FROM django_ray_raytaskexecution
+WHERE state IN ('QUEUED', 'RUNNING', 'CANCELLING')
+GROUP BY execution_protocol_version, metadata_schema_version, state
+ORDER BY execution_protocol_version, metadata_schema_version, state;
 ```
 
 ## Incident Playbooks

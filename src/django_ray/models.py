@@ -12,6 +12,15 @@ from django.core.validators import (
 from django.db import models
 from django.utils import timezone
 
+from django_ray.execution_protocol import (
+    EXECUTION_METADATA_SCHEMA_VERSION,
+    EXECUTION_PROTOCOL_VERSION,
+    LEGACY_EXECUTION_METADATA_SCHEMA_VERSION,
+    LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
+    PROTOCOL_POLICY_SCHEMA_VERSION,
+    WORKER_CAPABILITY_SCHEMA_VERSION,
+)
+
 _SHA256_HEX_VALIDATOR = RegexValidator(
     regex=r"^[0-9a-f]{64}$",
     message="Value must be a lowercase hexadecimal SHA-256 digest.",
@@ -105,6 +114,42 @@ class RayTaskExecution(models.Model):
     callable_path = models.CharField(
         max_length=500,
         help_text="Dotted path to the task callable",
+    )
+    metadata_schema_version = models.PositiveSmallIntegerField(
+        default=EXECUTION_METADATA_SCHEMA_VERSION,
+        db_default=LEGACY_EXECUTION_METADATA_SCHEMA_VERSION,
+        editable=False,
+        validators=[MaxValueValidator(EXECUTION_METADATA_SCHEMA_VERSION)],
+        help_text="Schema version for execution metadata stored on this row",
+    )
+    execution_protocol_version = models.PositiveSmallIntegerField(
+        default=EXECUTION_PROTOCOL_VERSION,
+        db_default=EXECUTION_PROTOCOL_VERSION,
+        db_index=True,
+        editable=False,
+        validators=[MinValueValidator(1)],
+        help_text="Immutable durable execution protocol selected when the task was created",
+    )
+    created_with_django_ray_version = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Diagnostic django-ray package version that created this task",
+    )
+    managed_with_django_ray_version = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Diagnostic django-ray package version managing the current attempt",
+    )
+    executor_django_ray_version = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Diagnostic django-ray package version that executed the current attempt",
     )
     queue_name = models.CharField(
         max_length=100,
@@ -356,6 +401,19 @@ class RayTaskExecution(models.Model):
             ),
         ]
         constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    metadata_schema_version__in=(
+                        LEGACY_EXECUTION_METADATA_SCHEMA_VERSION,
+                        EXECUTION_METADATA_SCHEMA_VERSION,
+                    )
+                ),
+                name="ray_task_metadata_schema_known",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(execution_protocol_version__gte=1),
+                name="ray_task_protocol_positive",
+            ),
             models.UniqueConstraint(
                 fields=["task_id"],
                 name="ray_task_id_unique",
@@ -983,6 +1041,27 @@ class TaskAttempt(models.Model):
         related_name="attempts",
     )
     attempt_number = models.PositiveIntegerField()
+    execution_protocol_version = models.PositiveSmallIntegerField(
+        default=EXECUTION_PROTOCOL_VERSION,
+        db_default=EXECUTION_PROTOCOL_VERSION,
+        editable=False,
+        validators=[MinValueValidator(1)],
+        help_text="Durable execution protocol archived for this attempt",
+    )
+    managed_with_django_ray_version = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Diagnostic django-ray package version that managed this attempt",
+    )
+    executor_django_ray_version = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Diagnostic django-ray package version that executed this attempt",
+    )
     state = models.CharField(max_length=20, choices=TaskState.choices)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
@@ -1001,15 +1080,43 @@ class TaskAttempt(models.Model):
     class Meta:
         ordering = ["attempt_number"]
         constraints = [
+            models.CheckConstraint(
+                condition=models.Q(execution_protocol_version__gte=1),
+                name="ray_attempt_protocol_positive",
+            ),
             models.UniqueConstraint(
                 fields=["execution", "attempt_number"],
                 name="ray_task_attempt_unique_number",
-            )
+            ),
         ]
         indexes = [models.Index(fields=["execution", "attempt_number"])]
 
     def __str__(self) -> str:
         return f"{self.execution_id} attempt {self.attempt_number} ({self.state})"
+
+
+class LegacyWorkerAdmissionToken(models.Model):
+    """Database token required for an unaware pre-capability worker lease."""
+
+    singleton_key = models.PositiveSmallIntegerField(
+        primary_key=True,
+        default=1,
+        db_default=1,
+        editable=False,
+    )
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(singleton_key=1),
+                name="ray_legacy_admission_singleton",
+            )
+        ]
+        verbose_name = "Legacy Worker Admission Token"
+        verbose_name_plural = "Legacy Worker Admission Tokens"
+
+    def __str__(self) -> str:
+        return "Legacy worker admission is available"
 
 
 class TaskWorkerLease(models.Model):
@@ -1043,6 +1150,44 @@ class TaskWorkerLease(models.Model):
         db_index=True,
         help_text="Queue(s) this worker is processing (informational only)",
     )
+    capability_schema_version = models.PositiveSmallIntegerField(
+        default=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
+        db_default=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
+        editable=False,
+        help_text="Worker capability advertisement schema; zero identifies a legacy lease",
+    )
+    django_ray_version = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Diagnostic django-ray package version advertised by this worker",
+    )
+    min_supported_execution_protocol_version = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[MinValueValidator(1)],
+        help_text="Lowest durable execution protocol explicitly supported by this worker",
+    )
+    max_supported_execution_protocol_version = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[MinValueValidator(1)],
+        help_text="Highest durable execution protocol explicitly supported by this worker",
+    )
+    legacy_admission_token = models.ForeignKey(
+        LegacyWorkerAdmissionToken,
+        on_delete=models.PROTECT,
+        related_name="worker_leases",
+        null=True,
+        blank=True,
+        default=1,
+        db_default=1,
+        editable=False,
+        help_text="Admission token held only by a legacy capability-unaware worker lease",
+    )
     started_at = models.DateTimeField(
         default=timezone.now,
         help_text="When the worker started",
@@ -1063,6 +1208,41 @@ class TaskWorkerLease(models.Model):
     )
 
     class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
+                        django_ray_version__isnull=True,
+                        min_supported_execution_protocol_version__isnull=True,
+                        max_supported_execution_protocol_version__isnull=True,
+                    )
+                    & (models.Q(is_active=False) | models.Q(legacy_admission_token__isnull=False))
+                    | models.Q(
+                        capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
+                        legacy_admission_token__isnull=True,
+                        min_supported_execution_protocol_version__isnull=False,
+                        max_supported_execution_protocol_version__isnull=False,
+                        min_supported_execution_protocol_version__gte=1,
+                        max_supported_execution_protocol_version__gte=models.F(
+                            "min_supported_execution_protocol_version"
+                        ),
+                    )
+                ),
+                name="ray_worker_capability_valid",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=[
+                    "is_active",
+                    "capability_schema_version",
+                    "min_supported_execution_protocol_version",
+                    "max_supported_execution_protocol_version",
+                ],
+                name="ray_worker_protocol_idx",
+            )
+        ]
         verbose_name = "Task Worker Lease"
         verbose_name_plural = "Task Worker Leases"
 
@@ -1070,3 +1250,75 @@ class TaskWorkerLease(models.Model):
         status = "active" if self.is_active else "inactive"
         worker_id = str(self.worker_id)
         return f"Worker {worker_id[:8]}... on {self.hostname} ({status})"
+
+
+class TaskExecutionProtocolPolicy(models.Model):
+    """Singleton rollout policy for the durable execution protocol.
+
+    The first schema migration seeds protocol v1 with legacy worker admission
+    open.  Mutation and activation are intentionally reserved for the later
+    fenced rollout service rather than ordinary model or Admin writes.
+    """
+
+    singleton_key = models.PositiveSmallIntegerField(
+        primary_key=True,
+        default=1,
+        db_default=1,
+        editable=False,
+    )
+    schema_version = models.PositiveSmallIntegerField(
+        default=PROTOCOL_POLICY_SCHEMA_VERSION,
+        db_default=PROTOCOL_POLICY_SCHEMA_VERSION,
+        editable=False,
+        validators=[MinValueValidator(1)],
+    )
+    active_write_protocol_version = models.PositiveSmallIntegerField(
+        default=EXECUTION_PROTOCOL_VERSION,
+        db_default=EXECUTION_PROTOCOL_VERSION,
+        editable=False,
+        validators=[MinValueValidator(1)],
+    )
+    legacy_worker_admission_enabled = models.BooleanField(
+        default=True,
+        db_default=True,
+        editable=False,
+    )
+    revision = models.PositiveBigIntegerField(
+        default=1,
+        db_default=1,
+        editable=False,
+        validators=[MinValueValidator(1)],
+    )
+    updated_at = models.DateTimeField(
+        default=timezone.now,
+        editable=False,
+    )
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(singleton_key=1),
+                name="ray_protocol_policy_singleton",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(schema_version=PROTOCOL_POLICY_SCHEMA_VERSION),
+                name="ray_protocol_policy_schema",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(active_write_protocol_version__gte=1),
+                name="ray_protocol_policy_active",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(revision__gte=1),
+                name="ray_protocol_policy_revision",
+            ),
+        ]
+        verbose_name = "Task Execution Protocol Policy"
+        verbose_name_plural = "Task Execution Protocol Policies"
+
+    def __str__(self) -> str:
+        legacy = "open" if self.legacy_worker_admission_enabled else "closed"
+        return (
+            f"Execution protocol v{self.active_write_protocol_version} "
+            f"(legacy admission {legacy}, revision {self.revision})"
+        )
