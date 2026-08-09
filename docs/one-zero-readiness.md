@@ -10,6 +10,12 @@ shape, its evidence paths, the criterion identifiers on this page, and the
 relationship between its decision and the package classifier. The registry is
 the status record; this page defines how the evidence is interpreted.
 
+The v1 criterion identities, categories, required flags, and owners are also
+fixed in the release validator. Changing a status, evidence reference, or
+disposition updates readiness state; removing, renaming, re-owning, or making a
+v1 criterion optional requires an explicit versioned contract change and cannot
+be accomplished by editing the registry and documentation together.
+
 ## Decision states
 
 The registry-level decision has two states:
@@ -130,6 +136,14 @@ cluster identifiers, or raw logs. Private evidence may be reviewed out of band;
 the registry should cite only a sanitized repository record or an explicit
 maintainer disposition.
 
+A satisfied externally owned criterion must cite its sanitized record as a
+tracked repository path. Every path reference must resolve inside the checkout
+without using a symlink and name a regular file committed in, and unchanged
+from, the candidate tree. Generated, ignored, staged-only, locally modified,
+and linked content therefore cannot become release evidence. The validator
+proves that durability boundary; the accepting maintainer is responsible for
+reviewing the record against the minimum contents and privacy rules above.
+
 ## Project support
 
 <!-- readiness-criterion: support.security-fix-policy -->
@@ -175,4 +189,6 @@ Before accepting the registry:
 
 The release validator fails closed if Beta is removed while the registry is
 still tracking, if an accepted decision retains an incomplete required
-criterion, or if a 1.0 release lacks the Production classifier.
+criterion, or if a 1.0 release lacks the sole Production/Stable development
+classifier. Acceptance dates use canonical `YYYY-MM-DD` form and are evaluated
+against one date captured for the complete validation run.
