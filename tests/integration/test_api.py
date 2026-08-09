@@ -2007,7 +2007,11 @@ class TestExecutionsAPI:
         ):
             testproject_api._bounded_execution_detail_row(1)
 
-    def test_list_executions_enforces_the_aggregate_encoded_response_bound(self, client):
+    def test_list_executions_enforces_the_aggregate_encoded_response_bound(
+        self,
+        client,
+        monkeypatch,
+    ):
         diagnostic = "x" * (testproject_api._EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES - 102)
         serialized_result = json.dumps(diagnostic)
         assert len(serialized_result.encode()) == (
@@ -2025,6 +2029,30 @@ class TestExecutionsAPI:
                 for index in range(40)
             ]
         )
+        validation_calls = {"item": 0, "result": 0, "error": 0}
+        real_execution_list_item = testproject_api._execution_list_item
+        real_safe_json_dumps = testproject_api.safe_json_dumps
+        real_redact_text = testproject_api.redact_text
+
+        def counted_execution_list_item(row):
+            validation_calls["item"] += 1
+            return real_execution_list_item(row)
+
+        def counted_safe_json_dumps(value, **kwargs):
+            validation_calls["result"] += 1
+            return real_safe_json_dumps(value, **kwargs)
+
+        def counted_redact_text(value, **kwargs):
+            validation_calls["error"] += 1
+            return real_redact_text(value, **kwargs)
+
+        monkeypatch.setattr(
+            testproject_api,
+            "_execution_list_item",
+            counted_execution_list_item,
+        )
+        monkeypatch.setattr(testproject_api, "safe_json_dumps", counted_safe_json_dumps)
+        monkeypatch.setattr(testproject_api, "redact_text", counted_redact_text)
 
         first = client.get(
             "/api/executions",
@@ -2064,6 +2092,9 @@ class TestExecutionsAPI:
         second_ids = {item["id"] for item in second_data["tasks"]}
         assert first_ids.isdisjoint(second_ids)
         assert first_ids | second_ids == {task.pk for task in tasks}
+        assert validation_calls["item"] > 0
+        assert validation_calls["result"] == validation_calls["item"]
+        assert validation_calls["error"] == validation_calls["item"]
 
     def test_get_execution(self, client):
         """Test getting a specific execution by internal ID."""
