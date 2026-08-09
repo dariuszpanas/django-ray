@@ -119,7 +119,9 @@ without a deprecation cycle unless documentation promises an exact string.
 
 The public inventory is a candidate while django-ray remains below 1.0. Contract tests
 ensure every listed import and parameter remains available during the stabilization
-cycle. Before publishing 1.0, release validation must additionally require this policy,
-the accepted inventory, the final compatibility matrix, and the 1.0 graduation
-evidence. That release-gate activation belongs to the final 1.0 release-candidate work;
-this policy does not remove the Beta classifier by itself.
+cycle. The canonical [1.0 readiness checklist](one-zero-readiness.md) and its
+machine-readable registry identify the final compatibility, operational, adoption, and
+support evidence. Release validation prevents removal of the Beta classifier while
+that decision remains unaccepted and rejects a 1.x release until every required
+criterion is satisfied. This policy and the candidate inventory do not remove the Beta
+classifier by themselves.

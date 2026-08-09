@@ -27,6 +27,8 @@ project resources, task stats, and a smoke-task trigger:
 - [Performance](performance.md) - Choosing task boundaries, batching, and RuntimeEnv strategy
 - [Observability](observability.md) - Versioned services, metrics, and live admin updates
 - [Compatibility](compatibility.md) - Supported versions, CI policy, and platform limits
+- [Stability and Deprecation](stability.md) - Candidate 1.0 contract and removal policy
+- [1.0 Readiness](one-zero-readiness.md) - Checked graduation criteria and evidence rules
 - [Ray Ecosystem Support](ray-ecosystem.md) - Component installs, durable exchange,
   lifecycle ownership, evidence, and adoption gates
 - [Django Gateway to Private Ray Serve](ray-serve-gateway.md) - Authenticated,

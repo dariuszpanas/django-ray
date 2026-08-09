@@ -51,6 +51,18 @@ _CAPABILITY_FIELDS = frozenset(
     }
 )
 _EVIDENCE_FILES = frozenset({"environment.json", "packages.txt", "probe.json"})
+_READINESS_PATH = Path("tests/contracts/one_zero_readiness_v1.json")
+_READINESS_DOC_PATH = Path("docs/one-zero-readiness.md")
+_READINESS_MARKER_RE = re.compile(
+    r"<!--\s+readiness-criterion:\s+(?P<identifier>[a-z][a-z0-9.-]+)\s+-->"
+)
+_READINESS_CRITERION_ID_RE = re.compile(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$")
+_READINESS_CATEGORIES = frozenset({"adoption", "operations", "product", "release", "support"})
+_READINESS_OWNERS = frozenset({"external", "maintainer", "repository"})
+_READINESS_STATUSES = frozenset({"blocked", "deferred", "pending", "satisfied"})
+_READINESS_INTRODUCED_VERSION = "0.4.0"
+_BETA_CLASSIFIER = "Development Status :: 4 - Beta"
+_PRODUCTION_CLASSIFIER = "Development Status :: 5 - Production/Stable"
 
 
 def _semantic_version_key(version: str) -> tuple[Any, ...]:
@@ -65,6 +77,10 @@ def _semantic_version_key(version: str) -> tuple[Any, ...]:
             for identifier in prerelease.split(".")
         )
     return major, minor, patch, int(not separator), prerelease_key
+
+
+def _readiness_registry_required(version: str) -> bool:
+    return _semantic_version_key(version) >= _semantic_version_key(_READINESS_INTRODUCED_VERSION)
 
 
 def _read_pyproject_version(root: Path) -> str:
@@ -101,6 +117,186 @@ def _read_lock_version(root: Path) -> str:
     if len(matches) != 1 or not isinstance(matches[0].get("version"), str):
         raise ValueError("uv.lock must contain one editable django-ray package version")
     return str(matches[0]["version"])
+
+
+def _read_project_classifiers(root: Path) -> set[str]:
+    with (root / "pyproject.toml").open("rb") as handle:
+        classifiers = tomllib.load(handle)["project"].get("classifiers")
+    if not isinstance(classifiers, list) or not all(
+        isinstance(classifier, str) for classifier in classifiers
+    ):
+        raise ValueError("pyproject.toml project classifiers must be a list of strings")
+    return {classifier for classifier in classifiers if isinstance(classifier, str)}
+
+
+def _validate_readiness_evidence(root: Path, criterion_id: str, value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {"kind", "value"}:
+        raise ValueError(f"readiness criterion {criterion_id} evidence must contain kind and value")
+    kind = value["kind"]
+    reference = value["value"]
+    if kind not in {"issue", "path"} or not isinstance(reference, str) or not reference:
+        raise ValueError(
+            f"readiness criterion {criterion_id} evidence must be a non-empty issue or path"
+        )
+    if kind == "issue":
+        if (
+            re.fullmatch(
+                r"https://github\.com/dariuszpanas/django-ray/issues/[1-9][0-9]*",
+                reference,
+            )
+            is None
+        ):
+            raise ValueError(f"readiness criterion {criterion_id} has an invalid issue reference")
+        return
+
+    path = Path(reference)
+    if path.is_absolute() or ".." in path.parts or not (root / path).is_file():
+        raise ValueError(
+            f"readiness criterion {criterion_id} references missing repository path {reference}"
+        )
+
+
+def validate_one_zero_readiness(
+    root: Path,
+    *,
+    require_accepted: bool = False,
+    as_of: date | None = None,
+) -> dict[str, Any]:
+    """Validate the checked 1.0 graduation registry and classifier latch."""
+    path = root / _READINESS_PATH
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"1.0 readiness registry is unavailable or invalid: {exc}") from exc
+    if not isinstance(record, dict) or set(record) != {
+        "contract",
+        "criteria",
+        "decision",
+        "schema_version",
+        "target_version",
+    }:
+        raise ValueError("1.0 readiness registry has an unsupported top-level shape")
+    if record["schema_version"] != 1:
+        raise ValueError("1.0 readiness registry schema_version must be 1")
+    if record["contract"] != "django-ray-1.0-readiness-v1":
+        raise ValueError("1.0 readiness registry contract identity is invalid")
+    if record["target_version"] != "1.0.0":
+        raise ValueError("1.0 readiness registry target_version must be 1.0.0")
+
+    decision = record["decision"]
+    if not isinstance(decision, dict) or set(decision) != {
+        "accepted_by",
+        "accepted_on",
+        "status",
+    }:
+        raise ValueError("1.0 readiness decision has an unsupported shape")
+    decision_status = decision["status"]
+    if decision_status not in {"accepted", "tracking"}:
+        raise ValueError("1.0 readiness decision status must be accepted or tracking")
+    if decision_status == "tracking":
+        if decision["accepted_on"] is not None or decision["accepted_by"] is not None:
+            raise ValueError("a tracking 1.0 readiness decision cannot carry acceptance metadata")
+    else:
+        accepted_on = _parse_date(decision["accepted_on"], field="1.0 readiness accepted_on")
+        if accepted_on > (as_of or date.today()):
+            raise ValueError("1.0 readiness accepted_on cannot be in the future")
+        if not isinstance(decision["accepted_by"], str) or not decision["accepted_by"].strip():
+            raise ValueError("an accepted 1.0 readiness decision needs accepted_by")
+
+    criteria = record["criteria"]
+    if not isinstance(criteria, list) or not criteria:
+        raise ValueError("1.0 readiness registry must contain criteria")
+    expected_fields = {
+        "category",
+        "disposition",
+        "evidence",
+        "id",
+        "owner",
+        "required",
+        "status",
+    }
+    identifiers: list[str] = []
+    for criterion in criteria:
+        if not isinstance(criterion, dict) or set(criterion) != expected_fields:
+            raise ValueError("1.0 readiness criterion has an unsupported shape")
+        identifier = criterion["id"]
+        if (
+            not isinstance(identifier, str)
+            or _READINESS_CRITERION_ID_RE.fullmatch(identifier) is None
+        ):
+            raise ValueError("1.0 readiness criterion id is invalid")
+        identifiers.append(identifier)
+        if criterion["category"] not in _READINESS_CATEGORIES:
+            raise ValueError(f"readiness criterion {identifier} has an invalid category")
+        if identifier.partition(".")[0] != criterion["category"]:
+            raise ValueError(f"readiness criterion {identifier} category must match its id")
+        if criterion["owner"] not in _READINESS_OWNERS:
+            raise ValueError(f"readiness criterion {identifier} has an invalid owner")
+        if type(criterion["required"]) is not bool:
+            raise ValueError(f"readiness criterion {identifier} required must be boolean")
+        if criterion["status"] not in _READINESS_STATUSES:
+            raise ValueError(f"readiness criterion {identifier} has an invalid status")
+        disposition = criterion["disposition"]
+        if not isinstance(disposition, str) or len(disposition.split()) < 8:
+            raise ValueError(
+                f"readiness criterion {identifier} needs a specific maintainer disposition"
+            )
+        evidence = criterion["evidence"]
+        if not isinstance(evidence, list):
+            raise ValueError(f"readiness criterion {identifier} evidence must be a list")
+        for evidence_item in evidence:
+            _validate_readiness_evidence(root, identifier, evidence_item)
+        if criterion["status"] == "satisfied" and not evidence:
+            raise ValueError(f"satisfied readiness criterion {identifier} needs evidence")
+        if (
+            criterion["status"] == "satisfied"
+            and criterion["owner"] == "repository"
+            and not any(item.get("kind") == "path" for item in evidence)
+        ):
+            raise ValueError(
+                f"satisfied repository criterion {identifier} needs repository-path evidence"
+            )
+
+    if identifiers != sorted(identifiers) or len(identifiers) != len(set(identifiers)):
+        raise ValueError("1.0 readiness criterion ids must be unique and sorted")
+
+    try:
+        readiness_document = (root / _READINESS_DOC_PATH).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"canonical 1.0 readiness document is unavailable: {exc}") from exc
+    markers = _READINESS_MARKER_RE.findall(readiness_document)
+    if sorted(markers) != identifiers or len(markers) != len(set(markers)):
+        raise ValueError(
+            "canonical 1.0 readiness document markers must exactly match the registry criteria"
+        )
+
+    classifiers = _read_project_classifiers(root)
+    if _BETA_CLASSIFIER in classifiers and _PRODUCTION_CLASSIFIER in classifiers:
+        raise ValueError("django-ray cannot be classified as both Beta and Production")
+    if decision_status != "accepted" and _BETA_CLASSIFIER not in classifiers:
+        raise ValueError("the Beta classifier cannot be removed before 1.0 readiness is accepted")
+
+    requested_major = int(_read_pyproject_version(root).split(".", 1)[0])
+    acceptance_required = require_accepted or requested_major >= 1
+    if decision_status == "accepted":
+        incomplete = [
+            criterion["id"]
+            for criterion in criteria
+            if criterion["required"] and criterion["status"] != "satisfied"
+        ]
+        if incomplete:
+            raise ValueError(
+                "accepted 1.0 readiness has incomplete required criteria: " + ", ".join(incomplete)
+            )
+    elif acceptance_required:
+        raise ValueError("django-ray 1.x requires an accepted 1.0 readiness decision")
+
+    if acceptance_required:
+        if _BETA_CLASSIFIER in classifiers:
+            raise ValueError("django-ray 1.x cannot retain the Beta classifier")
+        if _PRODUCTION_CLASSIFIER not in classifiers:
+            raise ValueError("django-ray 1.x requires the Production classifier")
+    return record
 
 
 def _validate_changelog_release(root: Path, version: str) -> None:
@@ -306,6 +502,8 @@ def validate_development_changelog(
     allow_release_candidate: bool = False,
 ) -> None:
     """Validate the in-development changelog and any available release tags."""
+    if _readiness_registry_required(_read_pyproject_version(root)):
+        validate_one_zero_readiness(root)
     released_versions = _read_git_release_versions(
         root,
         require_complete=require_git_tags,
@@ -683,6 +881,11 @@ def validate_release_version(root: Path, requested: str) -> str:
     _validate_changelog_development(root)
     _validate_changelog_release(root, requested_version)
     validate_compiled_graph_capability_review(root)
+    if _readiness_registry_required(requested_version):
+        validate_one_zero_readiness(
+            root,
+            require_accepted=int(requested_version.split(".", 1)[0]) >= 1,
+        )
     return requested_version
 
 
@@ -700,6 +903,11 @@ def validate_testpypi_candidate(root: Path, requested: str) -> str:
         pending_release_version=requested_version,
     )
     validate_compiled_graph_capability_review(root)
+    if _readiness_registry_required(requested_version):
+        validate_one_zero_readiness(
+            root,
+            require_accepted=int(requested_version.split(".", 1)[0]) >= 1,
+        )
     return requested_version
 
 
