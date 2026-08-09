@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,27 @@ from scripts.validate_release import (
 )
 
 ROOT = Path(__file__).parents[2]
+_EXPECTED_READINESS_CRITERIA_V1_OWNERS = {
+    "adoption.documentation-review": "external",
+    "adoption.external-applications": "external",
+    "adoption.kuberay-deployment": "external",
+    "adoption.observation-window": "maintainer",
+    "adoption.preserved-state-upgrade": "external",
+    "operations.operator-controls": "repository",
+    "operations.preserved-data-upgrade": "repository",
+    "operations.protocol-fencing": "repository",
+    "operations.soak-certification": "repository",
+    "product.compatibility-matrix": "repository",
+    "product.experimental-boundary": "repository",
+    "product.no-severe-defects": "maintainer",
+    "product.stable-api": "repository",
+    "release.final-evidence": "repository",
+    "support.contributor-triage": "repository",
+    "support.maintainer-capacity": "maintainer",
+    "support.release-and-rollback": "repository",
+    "support.security-fix-policy": "maintainer",
+    "support.vulnerability-reporting": "repository",
+}
 
 
 def _write_readiness_fixture(
@@ -29,7 +51,11 @@ def _write_readiness_fixture(
     decision_status: str = "tracking",
     criterion_status: str = "pending",
     classifiers: tuple[str, ...] = ("Development Status :: 4 - Beta",),
+    accepted_on: date | None = None,
 ) -> None:
+    accepted = decision_status == "accepted"
+    if accepted != (accepted_on is not None):
+        raise ValueError("accepted readiness fixtures need exactly one injected acceptance date")
     classifier_lines = "\n".join(f'    "{classifier}",' for classifier in classifiers)
     (root / "pyproject.toml").write_text(
         f'[project]\nversion = "{version}"\nclassifiers = [\n{classifier_lines}\n]\n',
@@ -39,12 +65,16 @@ def _write_readiness_fixture(
     docs.mkdir(exist_ok=True)
     (docs / "stability.md").write_text("candidate policy\n", encoding="utf-8")
     (docs / "one-zero-readiness.md").write_text(
-        "# Readiness\n\n<!-- readiness-criterion: product.stable-api -->\n",
+        "# Readiness\n\n"
+        + "\n".join(
+            f"<!-- readiness-criterion: {identifier} -->"
+            for identifier in _EXPECTED_READINESS_CRITERIA_V1_OWNERS
+        )
+        + "\n",
         encoding="utf-8",
     )
     contracts = root / "tests" / "contracts"
     contracts.mkdir(parents=True)
-    accepted = decision_status == "accepted"
     (contracts / "one_zero_readiness_v1.json").write_text(
         json.dumps(
             {
@@ -53,25 +83,56 @@ def _write_readiness_fixture(
                 "target_version": "1.0.0",
                 "decision": {
                     "status": decision_status,
-                    "accepted_on": date.today().isoformat() if accepted else None,
+                    "accepted_on": accepted_on.isoformat() if accepted_on is not None else None,
                     "accepted_by": "maintainer" if accepted else None,
                 },
                 "criteria": [
                     {
-                        "id": "product.stable-api",
-                        "category": "product",
+                        "id": identifier,
+                        "category": identifier.partition(".")[0],
                         "required": True,
-                        "owner": "repository",
+                        "owner": owner,
                         "status": criterion_status,
                         "evidence": [{"kind": "path", "value": "docs/stability.md"}],
                         "disposition": (
-                            "Accept the checked stable API contract before publishing version one."
+                            f"Accept the checked {identifier} criterion before publishing version one."
                         ),
                     }
+                    for identifier, owner in _EXPECTED_READINESS_CRITERIA_V1_OWNERS.items()
                 ],
             }
         ),
         encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "init", "--quiet", str(root)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "add", "--", "docs/stability.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=django-ray tests",
+            "-c",
+            "user.email=tests@django-ray.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "test: retain readiness evidence",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -111,6 +172,10 @@ def test_release_versions_match_repository_sources() -> None:
     assert release._read_lock_version(ROOT) == "0.4.0"
 
 
+def test_readiness_v1_contract_latches_criterion_ownership() -> None:
+    assert release._READINESS_CRITERIA_V1_OWNERS == (_EXPECTED_READINESS_CRITERIA_V1_OWNERS)
+
+
 def test_repository_one_zero_readiness_registry_is_valid_and_tracking() -> None:
     record = validate_one_zero_readiness(ROOT)
 
@@ -133,34 +198,40 @@ def test_readiness_registry_latches_the_beta_classifier(tmp_path: Path) -> None:
 
 
 def test_accepted_readiness_rejects_incomplete_required_criteria(tmp_path: Path) -> None:
-    _write_readiness_fixture(tmp_path, decision_status="accepted")
+    as_of = date.today()
+    _write_readiness_fixture(tmp_path, decision_status="accepted", accepted_on=as_of)
 
     with pytest.raises(ValueError, match="incomplete required criteria"):
-        validate_one_zero_readiness(tmp_path)
+        validate_one_zero_readiness(tmp_path, as_of=as_of)
 
 
 def test_one_x_requires_accepted_readiness_and_production_classifier(tmp_path: Path) -> None:
+    as_of = date.today()
     _write_readiness_fixture(
         tmp_path,
         version="1.0.0",
         decision_status="accepted",
         criterion_status="satisfied",
         classifiers=("Development Status :: 5 - Production/Stable",),
+        accepted_on=as_of,
     )
 
-    record = validate_one_zero_readiness(tmp_path, require_accepted=True)
+    record = validate_one_zero_readiness(tmp_path, require_accepted=True, as_of=as_of)
 
     assert record["decision"]["status"] == "accepted"
+    assert record["decision"]["accepted_on"] == as_of.isoformat()
 
 
 def test_accepted_readiness_rejects_satisfied_criterion_without_evidence(
     tmp_path: Path,
 ) -> None:
+    as_of = date.today()
     _write_readiness_fixture(
         tmp_path,
         decision_status="accepted",
         criterion_status="satisfied",
         classifiers=("Development Status :: 5 - Production/Stable",),
+        accepted_on=as_of,
     )
     registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
     record = json.loads(registry.read_text(encoding="utf-8"))
@@ -169,34 +240,276 @@ def test_accepted_readiness_rejects_satisfied_criterion_without_evidence(
     registry.write_text(json.dumps(record), encoding="utf-8")
 
     with pytest.raises(ValueError, match="needs evidence"):
-        validate_one_zero_readiness(tmp_path)
+        validate_one_zero_readiness(tmp_path, as_of=as_of)
 
 
 def test_accepted_readiness_rejects_future_acceptance_date(tmp_path: Path) -> None:
+    as_of = date.today()
+    accepted_on = as_of + timedelta(days=1)
     _write_readiness_fixture(
         tmp_path,
         decision_status="accepted",
         criterion_status="satisfied",
         classifiers=("Development Status :: 5 - Production/Stable",),
+        accepted_on=accepted_on,
     )
-    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
-    record = json.loads(registry.read_text(encoding="utf-8"))
-    record["decision"]["accepted_on"] = (date.today() + timedelta(days=1)).isoformat()
-    registry.write_text(json.dumps(record), encoding="utf-8")
 
     with pytest.raises(ValueError, match="cannot be in the future"):
-        validate_one_zero_readiness(tmp_path)
+        validate_one_zero_readiness(tmp_path, as_of=as_of)
+
+    record = validate_one_zero_readiness(tmp_path, as_of=accepted_on)
+    assert record["decision"]["accepted_on"] == accepted_on.isoformat()
 
 
 def test_readiness_category_must_match_criterion_id(tmp_path: Path) -> None:
     _write_readiness_fixture(tmp_path)
     registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
     record = json.loads(registry.read_text(encoding="utf-8"))
-    record["criteria"][0]["category"] = "adoption"
+    record["criteria"][0]["category"] = "product"
     registry.write_text(json.dumps(record), encoding="utf-8")
 
     with pytest.raises(ValueError, match="category must match its id"):
         validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_v1_rejects_removed_criterion_and_matching_doc_marker(
+    tmp_path: Path,
+) -> None:
+    _write_readiness_fixture(tmp_path)
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    removed = record["criteria"].pop(0)
+    registry.write_text(json.dumps(record), encoding="utf-8")
+    readiness_doc = tmp_path / "docs" / "one-zero-readiness.md"
+    marker = f"<!-- readiness-criterion: {removed['id']} -->\n"
+    readiness_doc.write_text(
+        readiness_doc.read_text(encoding="utf-8").replace(marker, ""),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="exactly match the v1 contract"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_v1_rejects_optional_or_reowned_criterion(tmp_path: Path) -> None:
+    _write_readiness_fixture(tmp_path)
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["criteria"][0]["required"] = False
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must remain required in v1"):
+        validate_one_zero_readiness(tmp_path)
+
+    record["criteria"][0]["required"] = True
+    record["criteria"][0]["owner"] = "maintainer"
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="owner must match the v1 contract"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_satisfied_external_readiness_requires_repository_path_evidence(
+    tmp_path: Path,
+) -> None:
+    _write_readiness_fixture(tmp_path)
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["criteria"][0]["status"] = "satisfied"
+    record["criteria"][0]["evidence"] = [
+        {
+            "kind": "issue",
+            "value": "https://github.com/dariuszpanas/django-ray/issues/999999999",
+        }
+    ]
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="needs repository-path evidence"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_path_evidence_must_be_tracked(tmp_path: Path) -> None:
+    _write_readiness_fixture(tmp_path)
+    untracked = tmp_path / "docs" / "generated-evidence.md"
+    untracked.write_text("generated after checkout\n", encoding="utf-8")
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["criteria"][0]["evidence"] = [{"kind": "path", "value": "docs/generated-evidence.md"}]
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="untracked repository path"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_path_evidence_must_be_committed(tmp_path: Path) -> None:
+    _write_readiness_fixture(tmp_path)
+    staged = tmp_path / "docs" / "staged-evidence.md"
+    staged.write_text("staged after the candidate commit\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "--", "docs/staged-evidence.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["criteria"][0]["evidence"] = [{"kind": "path", "value": "docs/staged-evidence.md"}]
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="committed in the candidate tree"):
+        validate_one_zero_readiness(tmp_path)
+
+
+@pytest.mark.parametrize("stage_change", [False, True], ids=["worktree", "index"])
+def test_readiness_path_evidence_must_match_candidate_tree(
+    tmp_path: Path,
+    *,
+    stage_change: bool,
+) -> None:
+    _write_readiness_fixture(tmp_path)
+    (tmp_path / "docs" / "stability.md").write_text(
+        "modified after the candidate commit\n",
+        encoding="utf-8",
+    )
+    if stage_change:
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "--", "docs/stability.md"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    with pytest.raises(ValueError, match="does not match the candidate tree"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_path_evidence_uses_literal_git_paths(tmp_path: Path) -> None:
+    _write_readiness_fixture(tmp_path)
+    untracked = tmp_path / "docs" / "stabilit[y].md"
+    untracked.write_text("literal wildcard evidence\n", encoding="utf-8")
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["criteria"][0]["evidence"] = [{"kind": "path", "value": "docs/stabilit[y].md"}]
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="untracked repository path"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_path_evidence_cannot_escape_repository(tmp_path: Path) -> None:
+    _write_readiness_fixture(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-evidence.md"
+    outside.write_text("outside repository\n", encoding="utf-8")
+    escaped = tmp_path / "docs" / "escaped-evidence.md"
+    try:
+        escaped.symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - platform capability
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "--", "docs/escaped-evidence.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["criteria"][0]["evidence"] = [{"kind": "path", "value": "docs/escaped-evidence.md"}]
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must remain inside the repository"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_path_evidence_cannot_link_to_untracked_repository_file(
+    tmp_path: Path,
+) -> None:
+    _write_readiness_fixture(tmp_path)
+    generated = tmp_path / "docs" / "generated-evidence.md"
+    generated.write_text("generated inside repository\n", encoding="utf-8")
+    linked = tmp_path / "docs" / "linked-evidence.md"
+    try:
+        linked.symlink_to(generated.name)
+    except OSError as exc:  # pragma: no cover - platform capability
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "--", "docs/linked-evidence.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["criteria"][0]["evidence"] = [{"kind": "path", "value": "docs/linked-evidence.md"}]
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="path must not use symlinks"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_registry_rejects_duplicate_keys_and_boolean_schema(
+    tmp_path: Path,
+) -> None:
+    _write_readiness_fixture(tmp_path)
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    original = registry.read_text(encoding="utf-8")
+    registry.write_text(
+        original.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1', 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate JSON object key 'schema_version'"):
+        validate_one_zero_readiness(tmp_path)
+
+    record = json.loads(original)
+    record["schema_version"] = True
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema_version must be 1"):
+        validate_one_zero_readiness(tmp_path)
+
+
+def test_readiness_acceptance_date_requires_canonical_injected_boundary(
+    tmp_path: Path,
+) -> None:
+    as_of = date.today()
+    _write_readiness_fixture(
+        tmp_path,
+        version="1.0.0",
+        decision_status="accepted",
+        criterion_status="satisfied",
+        classifiers=("Development Status :: 5 - Production/Stable",),
+        accepted_on=as_of,
+    )
+    registry = tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json"
+    record = json.loads(registry.read_text(encoding="utf-8"))
+    record["decision"]["accepted_on"] = as_of.strftime("%Y%m%d")
+    registry.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must use YYYY-MM-DD"):
+        validate_one_zero_readiness(tmp_path, as_of=as_of)
+
+
+def test_one_x_rejects_additional_development_classifier(tmp_path: Path) -> None:
+    as_of = date.today()
+    _write_readiness_fixture(
+        tmp_path,
+        version="1.0.0",
+        decision_status="accepted",
+        criterion_status="satisfied",
+        classifiers=(
+            "Development Status :: 3 - Alpha",
+            "Development Status :: 5 - Production/Stable",
+        ),
+        accepted_on=as_of,
+    )
+
+    with pytest.raises(ValueError, match="only the Production/Stable"):
+        validate_one_zero_readiness(tmp_path, as_of=as_of)
+
+
+def test_readiness_introduction_includes_prerelease_candidates() -> None:
+    assert release._readiness_registry_required("0.4.0-rc.1")
+    assert not release._readiness_registry_required("0.3.9")
 
 
 def test_one_x_rejects_tracking_readiness_even_with_beta_metadata(tmp_path: Path) -> None:
@@ -534,6 +847,60 @@ def test_repository_development_changelog_is_consistent() -> None:
     release._validate_changelog_development(ROOT)
 
 
+def test_development_validator_threads_one_injected_evaluation_date(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluation_date = date.today()
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nversion = "0.4.0"\n',
+        encoding="utf-8",
+    )
+    observed: list[date] = []
+
+    def validate_readiness(
+        _root: Path,
+        *,
+        require_accepted: bool = False,
+        as_of: date | None = None,
+    ) -> dict[str, Any]:
+        assert require_accepted is False
+        assert as_of is not None
+        observed.append(as_of)
+        return {}
+
+    def validate_changelog(
+        _root: Path,
+        *,
+        as_of: date | None = None,
+        released_versions: set[str] | None = None,
+        pending_release_version: str | None = None,
+    ) -> bool:
+        assert released_versions is None
+        assert pending_release_version is None
+        assert as_of is not None
+        observed.append(as_of)
+        return False
+
+    monkeypatch.setattr(release, "validate_one_zero_readiness", validate_readiness)
+    monkeypatch.setattr(release, "_read_git_release_versions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(release, "_validate_changelog_development", validate_changelog)
+
+    release.validate_development_changelog(tmp_path, as_of=evaluation_date)
+
+    assert observed == [evaluation_date, evaluation_date]
+
+
+def test_development_validator_requires_the_readiness_registry(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nversion = "0.4.0"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="readiness registry is unavailable"):
+        release.validate_development_changelog(tmp_path, as_of=date.today())
+
+
 def _write_testpypi_candidate_fixture(root: Path, *, lock_version: str = "0.4.0") -> None:
     (root / "pyproject.toml").write_text('[project]\nversion = "0.4.0"\n', encoding="utf-8")
     (root / "uv.lock").write_text(
@@ -558,11 +925,36 @@ def _write_testpypi_candidate_fixture(root: Path, *, lock_version: str = "0.4.0"
     _write_readiness_fixture(root, version="0.4.0")
 
 
+def _expect_readiness_evaluation_date(
+    monkeypatch: pytest.MonkeyPatch,
+    expected: date,
+) -> None:
+    validate_readiness = release.validate_one_zero_readiness
+
+    def validate_with_expected_date(
+        root: Path,
+        *,
+        require_accepted: bool = False,
+        as_of: date | None = None,
+    ) -> dict[str, Any]:
+        assert as_of == expected
+        return validate_readiness(root, require_accepted=require_accepted, as_of=as_of)
+
+    monkeypatch.setattr(release, "validate_one_zero_readiness", validate_with_expected_date)
+
+
 def _mock_testpypi_candidate_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     *,
     released_versions: set[str],
+    expected_as_of: date | None = None,
 ) -> None:
+    def accept_compiled_graph_review(_root: Path, *, as_of: date | None) -> Path:
+        assert isinstance(as_of, date)
+        if expected_as_of is not None:
+            assert as_of == expected_as_of
+        return Path("review.json")
+
     monkeypatch.setattr(
         release,
         "_read_git_release_versions",
@@ -571,23 +963,27 @@ def _mock_testpypi_candidate_dependencies(
     monkeypatch.setattr(
         release,
         "validate_compiled_graph_capability_review",
-        lambda _root: Path("review.json"),
+        accept_compiled_graph_review,
     )
+    if expected_as_of is not None:
+        _expect_readiness_evaluation_date(monkeypatch, expected_as_of)
 
 
 def test_testpypi_candidate_accepts_unreleased_tree_while_production_rejects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    as_of = date.today()
     _write_testpypi_candidate_fixture(tmp_path)
     _mock_testpypi_candidate_dependencies(
         monkeypatch,
         released_versions={"0.3.1"},
+        expected_as_of=as_of,
     )
 
-    assert validate_testpypi_candidate(tmp_path, "v0.4.0") == "0.4.0"
+    assert validate_testpypi_candidate(tmp_path, "v0.4.0", as_of=as_of) == "0.4.0"
     with pytest.raises(ValueError, match=r"one dated \[0\.4\.0\] release heading"):
-        validate_release_version(tmp_path, "v0.4.0")
+        validate_release_version(tmp_path, "v0.4.0", as_of=as_of)
 
 
 def test_testpypi_candidate_requires_the_readiness_registry(
@@ -651,13 +1047,15 @@ def test_testpypi_candidate_also_accepts_strict_ready_untagged_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    evaluation_date = date.today()
+    previous_release_date = evaluation_date - timedelta(days=1)
     _write_testpypi_candidate_fixture(tmp_path)
     changelog = tmp_path / "docs" / "changelog.md"
     changelog.write_text(
         (
             "## [Unreleased]\n\n"
-            "## [0.4.0] - 2026-07-30\n\n- ready\n\n"
-            "## [0.3.1] - 2026-07-18\n\n- released\n\n"
+            f"## [0.4.0] - {evaluation_date.isoformat()}\n\n- ready\n\n"
+            f"## [0.3.1] - {previous_release_date.isoformat()}\n\n- released\n\n"
             "[Unreleased]: "
             "https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
             "[0.4.0]: "
@@ -670,14 +1068,16 @@ def test_testpypi_candidate_also_accepts_strict_ready_untagged_tree(
     _mock_testpypi_candidate_dependencies(
         monkeypatch,
         released_versions={"0.3.1"},
+        expected_as_of=evaluation_date,
     )
 
-    assert validate_testpypi_candidate(tmp_path, "0.4.0") == "0.4.0"
+    assert validate_testpypi_candidate(tmp_path, "0.4.0", as_of=evaluation_date) == "0.4.0"
 
 
 def test_release_candidate_validation_accepts_consistent_fixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    evaluation_date = date.today()
     (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.4.0"\n', encoding="utf-8")
     (tmp_path / "uv.lock").write_text(
         '[[package]]\nname = "django-ray"\nversion = "0.4.0"\nsource = { editable = "." }\n',
@@ -690,19 +1090,55 @@ def test_release_candidate_validation_accepts_consistent_fixture(
     changelog.parent.mkdir()
     changelog.write_text(
         "## [Unreleased]\n\n"
-        "## [0.4.0] - 2026-07-28\n\n- ready\n\n"
+        f"## [0.4.0] - {evaluation_date.isoformat()}\n\n- ready\n\n"
         "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
         "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n",
         encoding="utf-8",
     )
+
+    def accept_compiled_graph_review(_root: Path, *, as_of: date | None) -> Path:
+        assert as_of == evaluation_date
+        return tmp_path / "review.json"
+
     monkeypatch.setattr(
         release,
         "validate_compiled_graph_capability_review",
-        lambda _root: tmp_path / "review.json",
+        accept_compiled_graph_review,
     )
     _write_readiness_fixture(tmp_path, version="0.4.0")
+    _expect_readiness_evaluation_date(monkeypatch, evaluation_date)
 
-    assert validate_release_version(tmp_path, "v0.4.0") == "0.4.0"
+    assert validate_release_version(tmp_path, "v0.4.0", as_of=evaluation_date) == "0.4.0"
+
+
+def test_release_validator_requires_the_readiness_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluation_date = date.today()
+    _write_testpypi_candidate_fixture(tmp_path)
+    changelog = tmp_path / "docs" / "changelog.md"
+    changelog.write_text(
+        "## [Unreleased]\n\n"
+        f"## [0.4.0] - {evaluation_date.isoformat()}\n\n- ready\n\n"
+        "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
+        "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "contracts" / "one_zero_readiness_v1.json").unlink()
+
+    def accept_compiled_graph_review(_root: Path, *, as_of: date | None) -> Path:
+        assert as_of == evaluation_date
+        return tmp_path / "review.json"
+
+    monkeypatch.setattr(
+        release,
+        "validate_compiled_graph_capability_review",
+        accept_compiled_graph_review,
+    )
+
+    with pytest.raises(ValueError, match="readiness registry is unavailable"):
+        validate_release_version(tmp_path, "v0.4.0", as_of=evaluation_date)
 
 
 def test_manual_release_source_requires_all_identities_to_match(

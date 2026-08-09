@@ -63,6 +63,28 @@ _READINESS_STATUSES = frozenset({"blocked", "deferred", "pending", "satisfied"})
 _READINESS_INTRODUCED_VERSION = "0.4.0"
 _BETA_CLASSIFIER = "Development Status :: 4 - Beta"
 _PRODUCTION_CLASSIFIER = "Development Status :: 5 - Production/Stable"
+_DEVELOPMENT_CLASSIFIER_PREFIX = "Development Status :: "
+_READINESS_CRITERIA_V1_OWNERS = {
+    "adoption.documentation-review": "external",
+    "adoption.external-applications": "external",
+    "adoption.kuberay-deployment": "external",
+    "adoption.observation-window": "maintainer",
+    "adoption.preserved-state-upgrade": "external",
+    "operations.operator-controls": "repository",
+    "operations.preserved-data-upgrade": "repository",
+    "operations.protocol-fencing": "repository",
+    "operations.soak-certification": "repository",
+    "product.compatibility-matrix": "repository",
+    "product.experimental-boundary": "repository",
+    "product.no-severe-defects": "maintainer",
+    "product.stable-api": "repository",
+    "release.final-evidence": "repository",
+    "support.contributor-triage": "repository",
+    "support.maintainer-capacity": "maintainer",
+    "support.release-and-rollback": "repository",
+    "support.security-fix-policy": "maintainer",
+    "support.vulnerability-reporting": "repository",
+}
 
 
 def _semantic_version_key(version: str) -> tuple[Any, ...]:
@@ -80,7 +102,10 @@ def _semantic_version_key(version: str) -> tuple[Any, ...]:
 
 
 def _readiness_registry_required(version: str) -> bool:
-    return _semantic_version_key(version) >= _semantic_version_key(_READINESS_INTRODUCED_VERSION)
+    return (
+        _semantic_version_key(version)[:3]
+        >= _semantic_version_key(_READINESS_INTRODUCED_VERSION)[:3]
+    )
 
 
 def _read_pyproject_version(root: Path) -> str:
@@ -129,6 +154,15 @@ def _read_project_classifiers(root: Path) -> set[str]:
     return {classifier for classifier in classifiers if isinstance(classifier, str)}
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    record: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        record[key] = value
+    return record
+
+
 def _validate_readiness_evidence(root: Path, criterion_id: str, value: object) -> None:
     if not isinstance(value, dict) or set(value) != {"kind", "value"}:
         raise ValueError(f"readiness criterion {criterion_id} evidence must contain kind and value")
@@ -150,9 +184,82 @@ def _validate_readiness_evidence(root: Path, criterion_id: str, value: object) -
         return
 
     path = Path(reference)
-    if path.is_absolute() or ".." in path.parts or not (root / path).is_file():
+    if path.is_absolute() or ".." in path.parts:
         raise ValueError(
             f"readiness criterion {criterion_id} references missing repository path {reference}"
+        )
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved_path = (root / path).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(
+            f"readiness criterion {criterion_id} references missing repository path {reference}"
+        ) from exc
+    if not resolved_path.is_relative_to(resolved_root) or not resolved_path.is_file():
+        raise ValueError(
+            f"readiness criterion {criterion_id} path must remain inside the repository"
+        )
+    if resolved_root / path != resolved_path:
+        raise ValueError(f"readiness criterion {criterion_id} path must not use symlinks")
+    candidate_entry = subprocess.run(
+        [
+            "git",
+            "--literal-pathspecs",
+            "-C",
+            str(root),
+            "ls-tree",
+            "--full-tree",
+            "-z",
+            "HEAD",
+            "--",
+            path.as_posix(),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    entries = [entry for entry in candidate_entry.stdout.split("\0") if entry]
+    if candidate_entry.returncode != 0 or len(entries) != 1:
+        raise ValueError(
+            f"readiness criterion {criterion_id} references untracked repository path {reference}; "
+            "evidence must be committed in the candidate tree"
+        )
+    metadata, separator, candidate_path = entries[0].partition("\t")
+    metadata_parts = metadata.split()
+    if (
+        separator != "\t"
+        or candidate_path != path.as_posix()
+        or len(metadata_parts) != 3
+        or metadata_parts[0] not in {"100644", "100755"}
+        or metadata_parts[1] != "blob"
+    ):
+        raise ValueError(
+            f"readiness criterion {criterion_id} path must be a regular file in the candidate tree"
+        )
+    candidate_match = subprocess.run(
+        [
+            "git",
+            "--literal-pathspecs",
+            "-C",
+            str(root),
+            "diff",
+            "--no-ext-diff",
+            "--quiet",
+            "HEAD",
+            "--",
+            path.as_posix(),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if candidate_match.returncode == 1:
+        raise ValueError(
+            f"readiness criterion {criterion_id} path does not match the candidate tree"
+        )
+    if candidate_match.returncode != 0:
+        raise ValueError(
+            f"readiness criterion {criterion_id} candidate-tree evidence could not be verified"
         )
 
 
@@ -163,10 +270,14 @@ def validate_one_zero_readiness(
     as_of: date | None = None,
 ) -> dict[str, Any]:
     """Validate the checked 1.0 graduation registry and classifier latch."""
+    evaluation_date = as_of or date.today()
     path = root / _READINESS_PATH
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        record = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"1.0 readiness registry is unavailable or invalid: {exc}") from exc
     if not isinstance(record, dict) or set(record) != {
         "contract",
@@ -176,7 +287,7 @@ def validate_one_zero_readiness(
         "target_version",
     }:
         raise ValueError("1.0 readiness registry has an unsupported top-level shape")
-    if record["schema_version"] != 1:
+    if type(record["schema_version"]) is not int or record["schema_version"] != 1:
         raise ValueError("1.0 readiness registry schema_version must be 1")
     if record["contract"] != "django-ray-1.0-readiness-v1":
         raise ValueError("1.0 readiness registry contract identity is invalid")
@@ -191,14 +302,17 @@ def validate_one_zero_readiness(
     }:
         raise ValueError("1.0 readiness decision has an unsupported shape")
     decision_status = decision["status"]
-    if decision_status not in {"accepted", "tracking"}:
+    if not isinstance(decision_status, str) or decision_status not in {"accepted", "tracking"}:
         raise ValueError("1.0 readiness decision status must be accepted or tracking")
     if decision_status == "tracking":
         if decision["accepted_on"] is not None or decision["accepted_by"] is not None:
             raise ValueError("a tracking 1.0 readiness decision cannot carry acceptance metadata")
     else:
-        accepted_on = _parse_date(decision["accepted_on"], field="1.0 readiness accepted_on")
-        if accepted_on > (as_of or date.today()):
+        accepted_on_value = decision["accepted_on"]
+        accepted_on = _parse_date(accepted_on_value, field="1.0 readiness accepted_on")
+        if accepted_on.isoformat() != accepted_on_value:
+            raise ValueError("1.0 readiness accepted_on must use YYYY-MM-DD")
+        if accepted_on > evaluation_date:
             raise ValueError("1.0 readiness accepted_on cannot be in the future")
         if not isinstance(decision["accepted_by"], str) or not decision["accepted_by"].strip():
             raise ValueError("an accepted 1.0 readiness decision needs accepted_by")
@@ -226,15 +340,28 @@ def validate_one_zero_readiness(
         ):
             raise ValueError("1.0 readiness criterion id is invalid")
         identifiers.append(identifier)
-        if criterion["category"] not in _READINESS_CATEGORIES:
+        expected_owner = _READINESS_CRITERIA_V1_OWNERS.get(identifier)
+        if expected_owner is None:
+            raise ValueError(f"readiness criterion {identifier} is not part of the v1 contract")
+        if (
+            not isinstance(criterion["category"], str)
+            or criterion["category"] not in _READINESS_CATEGORIES
+        ):
             raise ValueError(f"readiness criterion {identifier} has an invalid category")
         if identifier.partition(".")[0] != criterion["category"]:
             raise ValueError(f"readiness criterion {identifier} category must match its id")
-        if criterion["owner"] not in _READINESS_OWNERS:
+        if not isinstance(criterion["owner"], str) or criterion["owner"] not in _READINESS_OWNERS:
             raise ValueError(f"readiness criterion {identifier} has an invalid owner")
+        if criterion["owner"] != expected_owner:
+            raise ValueError(f"readiness criterion {identifier} owner must match the v1 contract")
         if type(criterion["required"]) is not bool:
             raise ValueError(f"readiness criterion {identifier} required must be boolean")
-        if criterion["status"] not in _READINESS_STATUSES:
+        if criterion["required"] is not True:
+            raise ValueError(f"readiness criterion {identifier} must remain required in v1")
+        if (
+            not isinstance(criterion["status"], str)
+            or criterion["status"] not in _READINESS_STATUSES
+        ):
             raise ValueError(f"readiness criterion {identifier} has an invalid status")
         disposition = criterion["disposition"]
         if not isinstance(disposition, str) or len(disposition.split()) < 8:
@@ -250,6 +377,14 @@ def validate_one_zero_readiness(
             raise ValueError(f"satisfied readiness criterion {identifier} needs evidence")
         if (
             criterion["status"] == "satisfied"
+            and criterion["owner"] == "external"
+            and not any(item.get("kind") == "path" for item in evidence)
+        ):
+            raise ValueError(
+                f"satisfied external criterion {identifier} needs repository-path evidence"
+            )
+        if (
+            criterion["status"] == "satisfied"
             and criterion["owner"] == "repository"
             and not any(item.get("kind") == "path" for item in evidence)
         ):
@@ -257,8 +392,20 @@ def validate_one_zero_readiness(
                 f"satisfied repository criterion {identifier} needs repository-path evidence"
             )
 
-    if identifiers != sorted(identifiers) or len(identifiers) != len(set(identifiers)):
-        raise ValueError("1.0 readiness criterion ids must be unique and sorted")
+    expected_identifiers = sorted(_READINESS_CRITERIA_V1_OWNERS)
+    if identifiers != expected_identifiers or len(identifiers) != len(set(identifiers)):
+        missing = sorted(set(expected_identifiers) - set(identifiers))
+        unexpected = sorted(set(identifiers) - set(expected_identifiers))
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected " + ", ".join(unexpected))
+        if not details:
+            details.append("order or duplicate identifiers")
+        raise ValueError(
+            "1.0 readiness criterion ids must exactly match the v1 contract: " + "; ".join(details)
+        )
 
     try:
         readiness_document = (root / _READINESS_DOC_PATH).read_text(encoding="utf-8")
@@ -271,10 +418,17 @@ def validate_one_zero_readiness(
         )
 
     classifiers = _read_project_classifiers(root)
+    development_classifiers = {
+        classifier
+        for classifier in classifiers
+        if classifier.startswith(_DEVELOPMENT_CLASSIFIER_PREFIX)
+    }
     if _BETA_CLASSIFIER in classifiers and _PRODUCTION_CLASSIFIER in classifiers:
         raise ValueError("django-ray cannot be classified as both Beta and Production")
     if decision_status != "accepted" and _BETA_CLASSIFIER not in classifiers:
         raise ValueError("the Beta classifier cannot be removed before 1.0 readiness is accepted")
+    if decision_status != "accepted" and development_classifiers != {_BETA_CLASSIFIER}:
+        raise ValueError("tracking readiness requires only the Beta development classifier")
 
     requested_major = int(_read_pyproject_version(root).split(".", 1)[0])
     acceptance_required = require_accepted or requested_major >= 1
@@ -296,6 +450,10 @@ def validate_one_zero_readiness(
             raise ValueError("django-ray 1.x cannot retain the Beta classifier")
         if _PRODUCTION_CLASSIFIER not in classifiers:
             raise ValueError("django-ray 1.x requires the Production classifier")
+        if development_classifiers != {_PRODUCTION_CLASSIFIER}:
+            raise ValueError(
+                "django-ray 1.x requires only the Production/Stable development classifier"
+            )
     return record
 
 
@@ -498,12 +656,14 @@ def _validate_changelog_development(
 def validate_development_changelog(
     root: Path,
     *,
+    as_of: date | None = None,
     require_git_tags: bool = False,
     allow_release_candidate: bool = False,
 ) -> None:
     """Validate the in-development changelog and any available release tags."""
+    evaluation_date = as_of or date.today()
     if _readiness_registry_required(_read_pyproject_version(root)):
-        validate_one_zero_readiness(root)
+        validate_one_zero_readiness(root, as_of=evaluation_date)
     released_versions = _read_git_release_versions(
         root,
         require_complete=require_git_tags,
@@ -511,11 +671,12 @@ def validate_development_changelog(
     pending_release_version = _read_pyproject_version(root) if allow_release_candidate else None
     pending_release_accepted = _validate_changelog_development(
         root,
+        as_of=evaluation_date,
         released_versions=released_versions,
         pending_release_version=pending_release_version,
     )
     if pending_release_accepted and pending_release_version is not None:
-        validate_release_version(root, pending_release_version)
+        validate_release_version(root, pending_release_version, as_of=evaluation_date)
 
 
 def normalize_version(value: str) -> str:
@@ -875,22 +1036,35 @@ def validate_compiled_graph_capability_review(root: Path, *, as_of: date | None 
     return path
 
 
-def validate_release_version(root: Path, requested: str) -> str:
+def validate_release_version(
+    root: Path,
+    requested: str,
+    *,
+    as_of: date | None = None,
+) -> str:
     """Validate a tag/manual input against every release version source."""
+    evaluation_date = as_of or date.today()
     requested_version = _validate_version_sources(root, requested)
-    _validate_changelog_development(root)
+    _validate_changelog_development(root, as_of=evaluation_date)
     _validate_changelog_release(root, requested_version)
-    validate_compiled_graph_capability_review(root)
+    validate_compiled_graph_capability_review(root, as_of=evaluation_date)
     if _readiness_registry_required(requested_version):
         validate_one_zero_readiness(
             root,
             require_accepted=int(requested_version.split(".", 1)[0]) >= 1,
+            as_of=evaluation_date,
         )
     return requested_version
 
 
-def validate_testpypi_candidate(root: Path, requested: str) -> str:
+def validate_testpypi_candidate(
+    root: Path,
+    requested: str,
+    *,
+    as_of: date | None = None,
+) -> str:
     """Validate an Unreleased, pre-tag candidate for a TestPyPI rehearsal."""
+    evaluation_date = as_of or date.today()
     requested_version = _validate_version_sources(root, requested)
     released_versions = _read_git_release_versions(root, require_complete=True)
     if released_versions is None:  # pragma: no cover - require_complete raises instead
@@ -899,14 +1073,16 @@ def validate_testpypi_candidate(root: Path, requested: str) -> str:
         raise ValueError(f"TestPyPI candidate v{requested_version} is already tagged")
     _validate_changelog_development(
         root,
+        as_of=evaluation_date,
         released_versions=released_versions,
         pending_release_version=requested_version,
     )
-    validate_compiled_graph_capability_review(root)
+    validate_compiled_graph_capability_review(root, as_of=evaluation_date)
     if _readiness_registry_required(requested_version):
         validate_one_zero_readiness(
             root,
             require_accepted=int(requested_version.split(".", 1)[0]) >= 1,
+            as_of=evaluation_date,
         )
     return requested_version
 
