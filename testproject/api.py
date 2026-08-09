@@ -1324,9 +1324,12 @@ def _execution_list_payload(
     returned_count = len(tasks)
     if has_more and continuation_row is None:
         raise ImproperlyConfigured("Execution list cannot advance past an omitted first row")
-    return TaskListResponseSchema.model_validate(
+    metadata = TaskListResponseSchema.model_validate(
         {
-            "tasks": tasks,
+            # Every item is validated and redacted by _execution_list_item().
+            # Keeping the list empty here prevents Pydantic from repeating those
+            # security-sensitive validators for every candidate response prefix.
+            "tasks": [],
             "total": sum(task_counts.values()),
             "queued": task_counts.get(TaskState.QUEUED, 0),
             "running": task_counts.get(TaskState.RUNNING, 0),
@@ -1350,6 +1353,9 @@ def _execution_list_payload(
             "response_max_bytes": _EXECUTION_LIST_RESPONSE_MAX_BYTES,
         }
     )
+    # Only bypass nested validation for this private list of item models produced
+    # by _execution_list_item(); all response metadata remains schema-validated.
+    return metadata.model_copy(update={"tasks": list(tasks)})
 
 
 def _encode_api_schema_response(
