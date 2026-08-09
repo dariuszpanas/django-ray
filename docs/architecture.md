@@ -702,6 +702,24 @@ artifacts, or remote work have been retired safely. This service remains interna
 this slice: operators must not import or invoke it directly, and there is no mutable
 Admin action, HTTP endpoint, public API export, or operator command yet.
 
+An upgraded task manager now derives its claim capability from the exact schema-`1`,
+token-free worker lease after that lease has been locked and proven live. Queued expiry
+and claim selection apply the lease's inclusive protocol range before ordering and
+limiting rows, so unsupported work cannot consume the bounded batch or be terminalized
+by the wrong cohort. The authoritative lease-then-execution lock boundary binds the
+snapshot protocol to the final row lock and refuses adoption or mutation when the
+candidate lease does not support it. A protocol mismatch leaves the worker lease live
+and the execution unchanged; it is not treated as lease loss. The database ownership
+trigger remains the independent backstop for writers that do not use this application
+path.
+
+`TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
+capability. Likewise, an execution-protocol-capable lease proves only task-manager
+compatibility: it does not attest Ray connectivity, the Ray or Python version, or the
+identity and membership of a target cluster. Those target-readiness and blue/green
+drain guarantees require their separate compatibility boundary before a future status
+surface can report end-to-end capacity.
+
 A code-only rollback and a schema reversal are different operations. To return to exact
 0.4.0 code, first keep the policy at protocol `1` with legacy admission open, verify
 that nonterminal work is protocol `1`, stop upgraded task managers, and reconcile their

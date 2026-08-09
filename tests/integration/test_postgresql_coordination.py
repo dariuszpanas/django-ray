@@ -1574,6 +1574,11 @@ def test_stale_unknown_stop_holds_execution_lock_until_outcome_is_durable(
         hostname="unknown-worker-host",
         pid=1401,
         queue_name="default",
+        capability_schema_version=1,
+        django_ray_version="test",
+        min_supported_execution_protocol_version=1,
+        max_supported_execution_protocol_version=1,
+        legacy_admission_token=None,
         last_heartbeat_at=datetime.now(UTC),
     )
     lease_identity = WorkerLeaseIdentity(

@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execution and attempt provenance, and worker capability ranges. Integer protocol
   versions are normative; package Semantic Versions remain diagnostic provenance only,
   and no protocol `2` writer or policy activation surface is enabled.
+- Upgraded task managers now filter queued expiry and claim selection by the inclusive
+  range on their exact locked worker lease, then recheck the locked execution before
+  adoption or mutation. Unsupported rows remain unchanged without being mistaken for
+  lease loss. The informational lease queue text and protocol capability do not attest
+  per-queue capacity, Ray/Python compatibility, or target-cluster readiness.
 - PostgreSQL and SQLite rollout coordination now serializes exact-0.4 execution and
   lease inserts, legacy heartbeats, and concurrent policy transitions without using
   package Semantic Versions as compatibility evidence. Callers must provide the

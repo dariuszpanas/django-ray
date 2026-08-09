@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from io import StringIO
 from threading import Barrier, Event
 from typing import Any, cast
 
@@ -17,9 +18,12 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 import django_ray.protocol_coordination as protocol_coordination
+from django_ray.execution_protocol import ExecutionProtocolRange, explicit_worker_protocol_range
+from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import (
     LegacyWorkerAdmissionToken,
     RayTaskExecution,
+    TaskAttempt,
     TaskExecutionProtocolPolicy,
     TaskState,
     TaskWorkerLease,
@@ -93,6 +97,183 @@ def _close(expected_revision: int = 1):
 
 def _reopen(expected_revision: int = 2):
     return reopen_legacy_worker_admission(expected_revision=expected_revision)
+
+
+def _explicit_v1_worker(worker_id: str) -> Command:
+    worker = Command()
+    worker.stdout = StringIO()
+    worker._set_worker_id(worker_id)
+    worker._create_lease("default")
+    return worker
+
+
+def test_explicit_worker_protocol_range_is_bounded_and_fail_closed() -> None:
+    supported = explicit_worker_protocol_range(
+        capability_schema_version=1,
+        legacy_admission_token_present=False,
+        minimum=1,
+        maximum=2,
+    )
+
+    assert supported == ExecutionProtocolRange(minimum=1, maximum=2)
+    assert supported.supports(1) is True
+    assert supported.supports(2) is True
+    assert supported.supports(3) is False
+
+    invalid_advertisements: tuple[tuple[int, bool, int | None, int | None], ...] = (
+        (0, True, None, None),
+        (1, True, 1, 1),
+        (1, False, None, 1),
+        (1, False, 0, 1),
+        (1, False, 2, 1),
+    )
+    for schema, token_present, minimum, maximum in invalid_advertisements:
+        assert (
+            explicit_worker_protocol_range(
+                capability_schema_version=schema,
+                legacy_admission_token_present=token_present,
+                minimum=minimum,
+                maximum=maximum,
+            )
+            is None
+        )
+
+
+def _assert_worker_claim_and_expiry_use_exact_explicit_protocol_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _close()
+    now = timezone.now()
+    overdue_v2 = RayTaskExecution.objects.create(
+        task_id="coordination-worker-overdue-v2",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        queue_deadline_at=now - timedelta(seconds=2),
+    )
+    overdue_v1 = RayTaskExecution.objects.create(
+        task_id="coordination-worker-overdue-v1",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=1,
+        queue_deadline_at=now - timedelta(seconds=1),
+    )
+    queued_v2 = RayTaskExecution.objects.create(
+        task_id="coordination-worker-queued-v2",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+    )
+    queued_v1 = RayTaskExecution.objects.create(
+        task_id="coordination-worker-queued-v1",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=1,
+    )
+    worker = _explicit_v1_worker("coordination-v1-claim-worker")
+    processed: list[int] = []
+    monkeypatch.setattr(worker, "process_task", lambda task: processed.append(int(task.pk)))
+
+    assert worker.claim_and_process_tasks(["default"], concurrency=1) == 2
+
+    for row in (overdue_v1, overdue_v2, queued_v1, queued_v2):
+        row.refresh_from_db()
+    assert overdue_v1.state == TaskState.EXPIRED
+    assert TaskAttempt.objects.filter(execution=overdue_v1, state=TaskState.EXPIRED).exists()
+    assert queued_v1.state == TaskState.RUNNING
+    assert queued_v1.claimed_by_worker == worker.worker_id
+    assert processed == [queued_v1.pk]
+    for unsupported in (overdue_v2, queued_v2):
+        assert unsupported.state == TaskState.QUEUED
+        assert unsupported.started_at is None
+        assert unsupported.claimed_by_worker is None
+        assert not TaskAttempt.objects.filter(execution=unsupported).exists()
+
+
+def test_worker_claim_and_expiry_use_its_exact_explicit_protocol_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_worker_claim_and_expiry_use_exact_explicit_protocol_range(monkeypatch)
+
+
+@pytest.mark.postgresql
+def test_postgresql_worker_claim_and_expiry_use_exact_explicit_protocol_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _require_postgresql()
+    _assert_worker_claim_and_expiry_use_exact_explicit_protocol_range(monkeypatch)
+
+
+def _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> None:
+    _close()
+    stale_at = timezone.now() - timedelta(hours=1)
+    old_owner = TaskWorkerLease.objects.create(
+        worker_id="coordination-v2-old-owner",
+        hostname="v2-host",
+        pid=2001,
+        capability_schema_version=1,
+        django_ray_version="0.5.0",
+        min_supported_execution_protocol_version=2,
+        max_supported_execution_protocol_version=2,
+        legacy_admission_token=None,
+        last_heartbeat_at=stale_at,
+    )
+    reconcile = RayTaskExecution.objects.create(
+        task_id="coordination-v2-reconcile",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=old_owner.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+        ray_job_id="raysubmit_coordination_v2_reconcile",
+    )
+    stuck = RayTaskExecution.objects.create(
+        task_id="coordination-v2-stuck",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=old_owner.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+    )
+    cancelling = RayTaskExecution.objects.create(
+        task_id="coordination-v2-cancelling",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.CANCELLING,
+        claimed_by_worker=old_owner.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+    )
+    TaskWorkerLease.objects.filter(pk=old_owner.pk).update(
+        is_active=False,
+        stopped_at=timezone.now(),
+    )
+    worker = _explicit_v1_worker("coordination-v1-recovery-worker")
+
+    assert worker.reconcile_tasks() == 0
+    assert worker.detect_stuck_tasks() == 0
+    assert worker.process_cancellations() == 0
+
+    for row in (reconcile, stuck, cancelling):
+        row.refresh_from_db()
+        assert row.execution_protocol_version == 2
+        assert row.claimed_by_worker == old_owner.worker_id
+        assert row.finished_at is None
+        assert not TaskAttempt.objects.filter(execution=row).exists()
+    assert reconcile.state == TaskState.RUNNING
+    assert stuck.state == TaskState.RUNNING
+    assert cancelling.state == TaskState.CANCELLING
+    assert worker.active_tasks == {}
+    assert worker.shutdown_requested is False
+    assert worker.lease_ownership_lost is False
+
+
+def test_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> None:
+    _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched()
+
+
+@pytest.mark.postgresql
+def test_postgresql_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> None:
+    _require_postgresql()
+    _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched()
 
 
 def test_close_detaches_inactive_legacy_rows_and_rejects_historical_writers() -> None:
