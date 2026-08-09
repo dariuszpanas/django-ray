@@ -532,7 +532,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0019_execution_protocol_schema` before starting upgraded workers:
+`0020_legacy_open_rollback_fence` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -663,12 +663,52 @@ bounded lease capability as read-only operational evidence. The integer executio
 protocol is the normative compatibility decision; `django-ray` package versions are
 diagnostic provenance only and must not be used to infer admission or routing.
 
+The private protocol-coordination primitive is implementation infrastructure for the
+later supported operator adapter; it is not itself an adopter-facing mutation API. A
+changing call supplies the exact policy revision its caller reviewed, bounded to the
+database positive-bigint range; an exhausted revision refuses mutation explicitly.
+Closing also carries a caller assertion intended for the later operator adapter that
+every capability-unaware enqueue producer has been retired because task-worker leases
+cannot discover old web or API processes. Every active capability-schema-`0` lease blocks
+closure, including a lease whose heartbeat appears stale; retirement remains an
+explicit lifecycle operation rather than an inference made by activation.
+
+PostgreSQL coordination calls first take one transaction-scoped advisory mutex.
+Closure then locks existing token-linked legacy lease rows in worker-ID order, followed
+by the singleton policy and admission token. This matches a heartbeat's lease-first
+lock order and avoids a policy-to-lease deadlock. The policy lock serializes unaware
+execution and active-lease inserts through the `0019` triggers, and the token lock also
+serializes an unusual inactive historical lease insert. SQLite instead begins with an
+exact no-op policy update so its database-wide writer fence is held before any rollout
+state is read. Each transition must own the outermost database transaction, with
+autocommit enabled before entry, so a caller cannot acquire locks before this ordering
+begins. Both paths update the flag and revision, detach only inactive legacy lease
+history, and delete the token in one transaction. A failure or stale expected
+revision rolls back every change.
+
+Reopening is also revision checked. It requires active write protocol `1` and no
+`QUEUED`, `RUNNING`, or `CANCELLING` execution with another protocol, recreates the
+singleton token before reopening the policy in the same transaction, and deliberately
+does not relink inactive historical leases. A changing PostgreSQL reopen takes the
+execution-table writer fence before the policy lock; an already-open idempotent check
+locks only the policy so it cannot form a table-policy cycle with an admitted 0.4
+worker. SQLite begins with its database writer fence.
+Migration `0020` persists the resulting invariant by rejecting a non-protocol-`1`
+nonterminal insert or terminal-to-nonterminal transition whenever legacy admission is
+open. Installation fails closed if an already-open policy contains such work. It is a
+prerequisite for a possible code-only rollback, not proof that upgraded producers,
+task managers, RuntimeEnv
+artifacts, or remote work have been retired safely. This service remains internal in
+this slice: operators must not import or invoke it directly, and there is no mutable
+Admin action, HTTP endpoint, public API export, or operator command yet.
+
 A code-only rollback and a schema reversal are different operations. To return to exact
 0.4.0 code, first keep the policy at protocol `1` with legacy admission open, verify
 that nonterminal work is protocol `1`, stop upgraded task managers, and reconcile their
 in-flight work; retain migration `0019` so old writers receive its legacy database
-defaults and token. Reverse `0019` only in a separate stopped-writer maintenance window
-after confirming no retained diagnostics require its fields. Reversal removes the
+defaults and token, and retain `0020` so reopening cannot race incompatible work.
+Reverse `0020` and then `0019` only in a separate stopped-writer maintenance window
+after confirming no retained diagnostics require their fields. Reversal removes the
 protocol and provenance columns, worker capability metadata, singleton policy and token,
 and database fences; it is not required for a code rollback.
 
