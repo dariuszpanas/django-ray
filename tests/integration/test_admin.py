@@ -279,15 +279,106 @@ class TestRayTaskExecutionAdmin:
         protocol_fields = {
             "metadata_schema_version",
             "execution_protocol_version",
-            "created_with_django_ray_version",
-            "managed_with_django_ray_version",
-            "executor_django_ray_version",
+            "created_with_django_ray_version_display",
+            "managed_with_django_ray_version_display",
+            "executor_django_ray_version_display",
+            "protocol_compatible_worker_available_display",
         }
 
         assert protocol_fields <= fieldset_fields
         assert protocol_fields <= set(admin_obj.readonly_fields)
-        assert protocol_fields <= set(admin_obj.observability_fields)
+        assert {
+            "created_with_django_ray_version",
+            "managed_with_django_ray_version",
+            "executor_django_ray_version",
+        }.isdisjoint(fieldset_fields)
+        assert {"metadata_schema_version", "execution_protocol_version"} <= set(
+            admin_obj.observability_fields
+        )
         assert ExecutionProtocolFilter in admin_obj.list_filter
+
+    def test_protocol_availability_is_annotated_once_for_admin_reads(self) -> None:
+        TaskWorkerLease.objects.create(
+            worker_id="protocol-admin-reader",
+            hostname="protocol-admin-host",
+            pid=4102,
+            queue_name="informational-only",
+            capability_schema_version=1,
+            django_ray_version="0.5.0-reader",
+            min_supported_execution_protocol_version=1,
+            max_supported_execution_protocol_version=1,
+            legacy_admission_token=None,
+        )
+        execution = RayTaskExecution.objects.create(
+            task_id="protocol-admin-visible",
+            callable_path="test.task",
+            queue_name="different-queue",
+        )
+        admin_obj = _task_admin()
+        request = _request()
+        request._django_ray_bounded_execution_detail = True
+
+        with CaptureQueriesContext(connection) as queries:
+            annotated = admin_obj.get_queryset(request).get(pk=execution.pk)
+
+        assert admin_obj.protocol_compatible_worker_available_display(annotated) is True
+        execution_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(execution_selects) == 1
+        assert "django_ray_taskworkerlease" in execution_selects[0]
+
+    def test_admin_protocol_provenance_is_sql_bounded_on_sqlite(self) -> None:
+        if connection.vendor != "sqlite":
+            pytest.skip("SQLite corruption guard is specific to unenforced VARCHAR lengths")
+        exact = "m" * 128
+        execution = RayTaskExecution.objects.create(
+            task_id="protocol-admin-oversized",
+            callable_path="test.task",
+            created_with_django_ray_version="CANARY_ADMIN_DETAIL_" + "x" * 256,
+            managed_with_django_ray_version=exact,
+            executor_django_ray_version="CANARY_ADMIN_DETAIL_NUL\x00" + "y" * 256,
+        )
+        request = _request()
+        request._django_ray_bounded_execution_detail = True
+        admin_obj = _task_admin()
+
+        with CaptureQueriesContext(connection) as queries:
+            guarded = admin_obj.get_queryset(request).get(pk=execution.pk)
+
+        assert "created_with_django_ray_version" not in guarded.__dict__
+        assert "managed_with_django_ray_version" not in guarded.__dict__
+        assert "executor_django_ray_version" not in guarded.__dict__
+        assert (
+            admin_obj.created_with_django_ray_version_display(guarded)
+            == "Stored diagnostic omitted because it exceeds the ordinary Admin read limit."
+        )
+        assert admin_obj.managed_with_django_ray_version_display(guarded) == exact
+        assert (
+            admin_obj.executor_django_ray_version_display(guarded)
+            == "Stored diagnostic omitted because it exceeds the ordinary Admin read limit."
+        )
+        execution_selects = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and "django_ray_raytaskexecution" in query["sql"]
+        ]
+        assert len(execution_selects) == 1
+
+        live_request = RequestFactory().get("/admin/live/")
+        live_request.user = get_user_model().objects.create_superuser(
+            username="protocol-corruption-admin"
+        )
+        live_response = admin_obj.observability_view(live_request, str(execution.pk))
+        live_payload = json.loads(live_response.content)
+        assert live_payload["created_with_django_ray_version"] is None
+        assert live_payload["managed_with_django_ray_version"] == exact
+        assert live_payload["executor_django_ray_version"] is None
+        assert "CANARY_ADMIN_DETAIL" not in live_response.content.decode("utf-8")
 
     @override_settings(TIME_ZONE="UTC")
     def test_compact_changelist_values_preserve_full_context(self) -> None:
@@ -758,7 +849,21 @@ class TestRayTaskExecutionAdmin:
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.SUCCEEDED,
             attempt_number=2,
+            created_with_django_ray_version="password=producer-secret",
+            managed_with_django_ray_version="0.5.0-manager",
+            executor_django_ray_version="password=executor-secret",
             error_message="password=admin-live-secret",
+        )
+        TaskWorkerLease.objects.create(
+            worker_id="protocol-live-summary-reader",
+            hostname="protocol-live-summary-host",
+            pid=4103,
+            queue_name="another-queue",
+            capability_schema_version=1,
+            django_ray_version="0.5.0-reader",
+            min_supported_execution_protocol_version=1,
+            max_supported_execution_protocol_version=1,
+            legacy_admission_token=None,
         )
         user_model = get_user_model()
         staff_user = user_model.objects.create_user(
@@ -791,9 +896,17 @@ class TestRayTaskExecutionAdmin:
         assert payload["id"] == execution.pk
         assert payload["state"] == TaskState.SUCCEEDED
         assert payload["attempt_number"] == 2
+        assert payload["execution_protocol_version"] == 1
+        assert payload["created_with_django_ray_version"] == "[REDACTED]"
+        assert payload["managed_with_django_ray_version"] == "0.5.0-manager"
+        assert payload["executor_django_ray_version"] == "[REDACTED]"
+        assert payload["protocol_compatible_worker_available"] is True
+        assert payload["queue_capacity_attested"] is False
         assert payload["error_message"] == "[REDACTED]"
         assert payload["workflow"] is None
         assert "admin-live-secret" not in response.content.decode("utf-8")
+        assert "producer-secret" not in response.content.decode("utf-8")
+        assert "executor-secret" not in response.content.decode("utf-8")
         post_request = RequestFactory().post(endpoint)
         post_request.user = staff_user
         assert admin_obj.observability_view(post_request, str(execution.pk)).status_code == 405

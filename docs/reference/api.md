@@ -57,12 +57,31 @@ If you need a REST API for task management in your project, you can use the test
 testproject has no pattern-unredacted diagnostics HTTP endpoint; privileged failure
 inspection is deliberately confined to the separately authorized Django Admin view.
 
+The task-status response and every execution list/detail item include
+`execution_protocol_version`, `created_with_django_ray_version`,
+`managed_with_django_ray_version`, `executor_django_ray_version`,
+`protocol_compatible_worker_available`, and `queue_capacity_attested=false`. Package
+versions are nullable diagnostic provenance, never a compatibility switch. Each is
+limited to 128 UTF-8 bytes in the database projection, so an oversized SQLite value
+becomes `null` before transfer; included values pass through configured presentation
+redaction. Availability uses one frozen heartbeat cutoff for
+the query and accepts only valid policy-controlled legacy protocol-`1` capacity or a
+valid explicit lease range containing the row protocol. It ignores informational lease
+queue text; true does not prove queue capacity, free concurrency, Ray/Python
+compatibility, Ray readiness, or cluster identity. Global bearer authentication still
+runs before any of these execution queries.
+
+False is fail-closed: it can mean no matching heartbeat-live lease, an invalid
+policy/token relationship, or any malformed lease advertisement. It must not be
+interpreted as proof that the queue is empty or that adding an arbitrary worker is safe.
+
 ### Bounded task-status example
 
 `GET /api/tasks/{task_id}` is a monitoring projection, not a serialized Django
 `TaskResult`. One unlocked database snapshot selects only its public fields. It keeps
 the Django-style `status` and adds the exact durable `state`, `attempt_number`, and
-`execution_generation`. The combined inline `args` and `kwargs` source is limited to
+`execution_generation` plus the common protocol visibility fields above. The combined
+inline `args` and `kwargs` source is limited to
 16,384 bytes before transfer. Both fields are nullable, and an external input is never
 loaded by this route. The path accepts the backend's task identifier up to 255
 characters; it does not impose a UUID-only format.
@@ -111,6 +130,9 @@ are bounded. The complete encoded response is at most 256 KiB, and only complete
 that fit that ceiling are returned. Continue with the unchanged filters and
 `next_cursor` rather than increasing `limit`.
 
+Protocol compatibility is an `EXISTS` annotation in that same bounded page query; it
+does not issue one worker-lease query per returned execution.
+
 ### Bounded execution-detail example
 
 `GET /api/executions/{id}` is the separate exact operator lookup used for focused
@@ -120,6 +142,9 @@ workflow plans and progress, and completion envelopes are not selected. The quer
 measures inline `result_data` and `error_message` before transfer and returns either
 value only when it is at most 65,536 bytes. A larger stored value is `null` with the
 fixed `stored_value_exceeds_detail_limit` reason.
+
+The same statement carries the common protocol visibility annotation and SQL-guarded
+provenance; it does not hydrate a worker lease or issue a follow-up capacity query.
 
 An external result reference is never returned or resolved by this route. When a row
 has only an external result, `result_data` is `null` and

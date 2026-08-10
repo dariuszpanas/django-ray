@@ -24,7 +24,7 @@ from django_ray.lifecycle import (
     TaskRetryRequestResult,
     TaskRetryRequestStatus,
 )
-from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.protocol_coordination import close_legacy_worker_admission
 from django_ray.redaction import REDACTED, redact_text
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
@@ -931,6 +931,12 @@ class TestTasksAPI:
         assert data["state"] == TaskState.QUEUED
         assert data["attempt_number"] == 1
         assert data["execution_generation"] == 0
+        assert data["execution_protocol_version"] == 1
+        assert data["created_with_django_ray_version"] == django_ray_version
+        assert data["managed_with_django_ray_version"] is None
+        assert data["executor_django_ray_version"] is None
+        assert data["protocol_compatible_worker_available"] is False
+        assert data["queue_capacity_attested"] is False
         assert data["args"] == [1, 1]
         assert data["kwargs"] == {}
         assert data["input_omission_reason"] is None
@@ -1833,6 +1839,118 @@ class TestExecutionsAPI:
         assert abs(datetime.fromisoformat(expired["queue_deadline_at"]) - deadline) < timedelta(
             milliseconds=1
         )
+
+    def test_protocol_visibility_is_consistent_across_bounded_surfaces(self, client):
+        """All execution reads expose one fixed protocol-capacity projection."""
+        TaskWorkerLease.objects.create(
+            worker_id="protocol-api-reader",
+            hostname="protocol-api-host",
+            pid=4101,
+            queue_name="another-queue",
+            capability_schema_version=1,
+            django_ray_version="0.5.0-reader",
+            min_supported_execution_protocol_version=1,
+            max_supported_execution_protocol_version=1,
+            legacy_admission_token=None,
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="protocol-visible-api-task",
+            callable_path="test.task",
+            queue_name="target-queue",
+            created_with_django_ray_version="0.5.0-producer",
+            managed_with_django_ray_version="0.5.0-manager",
+            executor_django_ray_version="0.5.0-executor",
+        )
+
+        status = client.get(f"/api/tasks/{task.task_id}")
+        listing = client.get("/api/executions", {"task_id": task.task_id})
+        detail = client.get(f"/api/executions/{task.pk}")
+
+        assert status.status_code == listing.status_code == detail.status_code == 200
+        list_item = listing.json()["tasks"][0]
+        for payload in (status.json(), list_item, detail.json()):
+            assert payload["execution_protocol_version"] == 1
+            assert payload["created_with_django_ray_version"] == "0.5.0-producer"
+            assert payload["managed_with_django_ray_version"] == "0.5.0-manager"
+            assert payload["executor_django_ray_version"] == "0.5.0-executor"
+            assert payload["protocol_compatible_worker_available"] is True
+            assert payload["queue_capacity_attested"] is False
+        assert len(status.content) <= testproject_api._TASK_STATUS_RESPONSE_MAX_BYTES
+        assert len(listing.content) <= testproject_api._EXECUTION_LIST_RESPONSE_MAX_BYTES
+        assert len(detail.content) <= testproject_api._EXECUTION_DETAIL_RESPONSE_MAX_BYTES
+
+    def test_protocol_provenance_is_sql_bounded_before_sqlite_transfer(self, client):
+        if connection.vendor != "sqlite":
+            pytest.skip("SQLite corruption guard is specific to unenforced VARCHAR lengths")
+        oversized = "CANARY_OVERSIZED_PROVENANCE_" + "x" * 256
+        embedded_nul = "CANARY_NUL_PROVENANCE\x00" + "y" * 256
+        exact = "m" * testproject_api._EXECUTION_PROVENANCE_MAX_BYTES
+        task = RayTaskExecution.objects.create(
+            task_id="protocol-oversized-provenance",
+            callable_path="test.task",
+            created_with_django_ray_version=oversized,
+            managed_with_django_ray_version=exact,
+            executor_django_ray_version=embedded_nul,
+        )
+
+        status = client.get(f"/api/tasks/{task.task_id}")
+        listing = client.get("/api/executions", {"task_id": task.task_id})
+        detail = client.get(f"/api/executions/{task.pk}")
+
+        assert status.status_code == listing.status_code == detail.status_code == 200
+        for response, payload in (
+            (status, status.json()),
+            (listing, listing.json()["tasks"][0]),
+            (detail, detail.json()),
+        ):
+            assert payload["created_with_django_ray_version"] is None
+            assert payload["managed_with_django_ray_version"] == exact
+            assert payload["executor_django_ray_version"] is None
+            assert "CANARY_" not in response.content.decode()
+
+    def test_protocol_provenance_uses_configured_redaction_on_every_surface(
+        self,
+        client,
+        settings,
+    ):
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"password"]}
+        task = RayTaskExecution.objects.create(
+            task_id="protocol-redacted-provenance",
+            callable_path="test.task",
+            created_with_django_ray_version="password=producer-secret",
+            managed_with_django_ray_version="password=manager-secret",
+            executor_django_ray_version="password=executor-secret",
+        )
+
+        status = client.get(f"/api/tasks/{task.task_id}")
+        listing = client.get("/api/executions", {"task_id": task.task_id})
+        detail = client.get(f"/api/executions/{task.pk}")
+
+        for response, payload in (
+            (status, status.json()),
+            (listing, listing.json()["tasks"][0]),
+            (detail, detail.json()),
+        ):
+            assert payload["created_with_django_ray_version"] == REDACTED
+            assert payload["managed_with_django_ray_version"] == REDACTED
+            assert payload["executor_django_ray_version"] == REDACTED
+            assert "secret" not in response.content.decode()
+
+    def test_execution_counts_ignore_unknown_database_states(self):
+        RayTaskExecution.objects.create(
+            task_id="known-count-state",
+            callable_path="test.task",
+            state=TaskState.QUEUED,
+        )
+        RayTaskExecution.objects.create(
+            task_id="unknown-count-state",
+            callable_path="test.task",
+            state="CANARY_UNKNOWN_STATE_" + "x" * 256,
+        )
+
+        counts = testproject_api._task_state_counts()
+
+        assert counts == {TaskState.QUEUED: 1}
 
     def test_list_executions_filter_by_state(self, client):
         """Test filtering executions by state."""
@@ -2822,6 +2940,14 @@ class TestExecutionsAPI:
             "malformed_inline_input",
             "encoded_response_limit",
         ]
+        assert status_properties["queue_capacity_attested"]["const"] is False
+        provenance_string = next(
+            item
+            for item in status_properties["created_with_django_ray_version"]["anyOf"]
+            if item.get("type") == "string"
+        )
+        assert provenance_string["maxLength"] == 128
+        assert detail_properties["queue_capacity_attested"]["const"] is False
 
     def test_cancel_queued_execution(self, client):
         """Queued cancellation returns a small accepted outcome and archives once."""

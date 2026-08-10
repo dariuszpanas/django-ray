@@ -218,6 +218,13 @@ or conversion-failing result becomes the fixed `[REDACTED]` marker with a `null`
 omission reason because the field was redacted rather than omitted. The list byte guard
 is supported on the testproject's SQLite and PostgreSQL paths; other database LOB
 semantics fail configuration explicitly rather than inheriting this bounded claim.
+Each item also reports the durable execution protocol, nullable creator/manager/executor
+package provenance, and a single-query heartbeat-live protocol compatibility
+annotation. Provenance is guarded at 128 UTF-8 bytes in SQL and passes through the
+configured presentation redaction policy. The fixed
+`queue_capacity_attested=false` field prevents that annotation from being mistaken for
+queue routing, free concurrency, Ray readiness, Ray/Python compatibility, or target
+identity evidence.
 
 The separate `GET /api/executions/{id}` exact operator lookup has its own bounded
 contract. A single values projection selects only public response fields and applies
@@ -237,6 +244,11 @@ caching and MIME sniffing. This byte projection has the same explicit
 SQLite/PostgreSQL support boundary as the list. Global bearer authentication remains
 a testproject convenience; an application must impose its own tenant, ownership, or
 object policy on the exact lookup.
+
+The bounded task-status adapter exposes the same protocol fields and availability
+semantics without loading results or external input. All three adapters freeze one
+heartbeat cutoff per query and keep the compatibility test inside the execution SQL,
+so list cardinality does not create worker-lease N+1 reads.
 
 `get_workflow_node_snapshot()` always returns durable node data first. Live Ray state
 and logs are opt-in:
@@ -377,12 +389,20 @@ text.
 The renderer includes:
 
 - `django_ray_tasks_total{state=...}`, queued, and running gauges;
+- `django_ray_tasks_by_execution_protocol_total{protocol=...,state=...}` with exactly
+  the fixed protocol buckets `1` and `other` crossed with every fixed `TaskState`;
 - `django_ray_queue_depth{queue=...}` for explicitly allowed queues;
 - count, sum, average, and maximum gauges for queue wait, claim latency, and execution
   duration;
 - durable retry, failure, and timeout observations;
 - `django_ray_worker_leases{status=...}` for healthy, stale, and inactive leases;
 - an observability schema information metric.
+
+The execution-protocol family always emits all 16 bucket/state combinations, including
+zero-valued series. Protocol `1` is the released compatibility epoch; `other` combines
+every non-`1` integer without creating one label per future or corrupt value. Unknown
+database states are excluded before grouping. Package versions, worker IDs, and raw
+queue names never become labels.
 
 Timing definitions are:
 
@@ -445,6 +465,12 @@ an active requested-but-not-reported full run, and a terminal requested-but-miss
 snapshot. A terminal-only summary shows its outcome and omitted-by-policy detail without
 offering graph or collection actions. Compatibility tools may still opt into the
 separately capped schema-v1/v2 reader.
+
+The live summary also returns the execution protocol, SQL-guarded nullable package
+provenance, `protocol_compatible_worker_available`, and
+`queue_capacity_attested=false`. The ordinary change form uses the same bounded
+provenance display and read-only availability annotation. These are database
+compatibility observations only and never query Ray or infer per-queue capacity.
 
 The initially collapsed **Workflow execution** section performs a separate authorized
 read only when an operator opens it. The compact view verifies the persisted plan
