@@ -1,13 +1,14 @@
 """Bounded execution request and completion codecs for worker trust boundaries.
 
-Both versioned schemas remain flat.  Completion fields stay readable by a
-protocol-v1 manager, while request fields stay readable by the released Ray Job
-entrypoint during rolling deployment.  New header markers always select strict
-versioned decoding and can never fall back to a legacy adapter.
+Versioned headers remain flat. Completion fields stay readable by a protocol-v1
+manager, while top-level request fields stay readable at cold remote boundaries
+during rolling deployment. New header markers always select strict versioned
+decoding and can never fall back to a legacy adapter.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -15,7 +16,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from io import StringIO
-from typing import Any
+from typing import Any, cast
 
 from django_ray.execution_protocol import (
     LEGACY_EXECUTION_PROTOCOL_VERSION,
@@ -37,6 +38,13 @@ EXECUTION_REQUEST_MAX_DEPTH = EXECUTION_COMPLETION_MAX_DEPTH
 EXECUTION_REQUEST_MAX_NODES = EXECUTION_COMPLETION_MAX_NODES
 EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES = 16 * 1024
 
+NESTED_EXECUTION_REQUEST_SCHEMA = "django-ray.nested-execution-request"
+NESTED_EXECUTION_REQUEST_SCHEMA_VERSION = 1
+NESTED_EXECUTION_REQUEST_MAX_BYTES = 32 * 1024
+NESTED_EXECUTION_REQUEST_MAX_DEPTH = 16
+NESTED_EXECUTION_REQUEST_MAX_NODES = 1024
+NESTED_EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES = 16 * 1024
+
 _TASK_ID_MAX_CHARS = 255
 _EXECUTOR_VERSION_MAX_CHARS = 128
 _RESULT_REFERENCE_MAX_CHARS = 500
@@ -48,7 +56,9 @@ _MAX_COUNTER = (1 << 63) - 1
 _UTF8_CHUNK_CHARS = 64 * 1024
 _RUNTIME_ENV_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
 _RUNTIME_ENV_HASH = re.compile(r"[0-9a-f]{64}")
+_SHA256_IDENTITY = re.compile(r"sha256:[0-9a-f]{64}")
 _COMPILED_GRAPH_SUBMISSION_TRANSPORTS = frozenset({"direct-ray-core", "ray-client", "ray-job"})
+_NESTED_REJECTION_CAUSE_MAX_HOPS = 8
 
 _RESERVED_HEADER_KEYS = frozenset(
     {
@@ -100,6 +110,38 @@ _REQUEST_KEYS = frozenset(
         "runtime_env_hash",
         "runtime_env_plan_identity",
         "compiled_graph_submission_transport",
+    }
+)
+
+_NESTED_REQUEST_RESERVED_MARKER_KEYS = frozenset(
+    {
+        "nested_request_schema",
+        "nested_request_schema_version",
+        "strict_execution_request",
+        "execution_protocol_version",
+    }
+)
+_NESTED_REQUEST_KEYS = frozenset(
+    {
+        "nested_request_schema",
+        "nested_request_schema_version",
+        "strict_execution_request",
+        "execution_protocol_version",
+        "task_execution_pk",
+        "task_id",
+        "attempt_number",
+        "execution_generation",
+        "boundary_kind",
+        "workflow_run_id",
+        "node_id",
+        "operation_id",
+        "item_index",
+        "callable_binding_kind",
+        "callable_binding",
+        "output_preview_callable_path",
+        "runtime_env_plan_identity",
+        "runtime_env_plan_digest",
+        "runtime_env_transport_digest",
     }
 )
 
@@ -195,6 +237,55 @@ class ExecutionRequest:
     compiled_graph_submission_transport: str | None
 
 
+class NestedExecutionBoundaryKind(StrEnum):
+    """Fixed remote boundaries that inherit one durable execution contract."""
+
+    WORKFLOW_STEP = "workflow_step"
+    RESULT_FOLD = "result_fold"
+    DISTRIBUTED_MAP = "distributed_map"
+    DISTRIBUTED_STARMAP = "distributed_starmap"
+    DISTRIBUTED_SCATTER = "distributed_scatter"
+
+
+class NestedCallableBindingKind(StrEnum):
+    """How a nested leaf binds the callable it will invoke."""
+
+    PATH = "path"
+    DIGEST = "digest"
+
+
+@dataclass(frozen=True, slots=True)
+class NestedWorkflowBoundaryIdentity:
+    """Exact workflow-run and node identity for a workflow-owned leaf."""
+
+    workflow_run_id: str
+    node_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class NestedDistributedBoundaryIdentity:
+    """Exact operation and item identity for a distributed helper leaf."""
+
+    operation_id: str
+    item_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class NestedExecutionRequest:
+    """Bounded context inherited by one nested remote execution boundary."""
+
+    outer_identity: ExecutionIdentity
+    execution_protocol_version: int
+    boundary_kind: NestedExecutionBoundaryKind
+    boundary_identity: NestedWorkflowBoundaryIdentity | NestedDistributedBoundaryIdentity
+    callable_binding_kind: NestedCallableBindingKind
+    callable_binding: str
+    runtime_env_plan_identity: dict[str, Any]
+    runtime_env_plan_digest: str
+    runtime_env_transport_digest: str
+    output_preview_callable_path: str | None = None
+
+
 class ExecutionRequestRejection(StrEnum):
     """Stable, secret-safe rejection classifications for request policy."""
 
@@ -248,6 +339,70 @@ class ExecutionRequestEncodeError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("execution request is invalid")
+
+
+class NestedExecutionRequestRejection(StrEnum):
+    """Stable, secret-safe rejection classifications for nested work."""
+
+    LEGACY_REQUEST = "legacy_request"
+    MISSING_CONTEXT = "missing_context"
+    INVALID_VERSIONED = "invalid_versioned"
+    UNSUPPORTED_SCHEMA = "unsupported_schema"
+    UNSUPPORTED_PROTOCOL = "unsupported_protocol"
+    PROTOCOL_MISMATCH = "protocol_mismatch"
+    IDENTITY_MISMATCH = "identity_mismatch"
+    UNSUPPORTED_BOUNDARY = "unsupported_boundary"
+    BOUNDARY_MISMATCH = "boundary_mismatch"
+    CALLABLE_MISMATCH = "callable_mismatch"
+    RUNTIME_ENV_MISMATCH = "runtime_env_mismatch"
+    RESOURCE_LIMIT = "resource_limit"
+
+
+class NestedExecutionRequestRejected(RuntimeError):  # noqa: N818
+    """Fixed non-retryable failure safe to unwrap through a Ray cause chain."""
+
+    retryable = False
+    requires_nonretryable_disposition = True
+
+    def __init__(self, classification: NestedExecutionRequestRejection) -> None:
+        if type(classification) is not NestedExecutionRequestRejection:
+            classification = NestedExecutionRequestRejection.INVALID_VERSIONED
+        self.classification = classification
+        super().__init__(classification)
+
+    def __str__(self) -> str:
+        """Return only fixed classifier text across process boundaries."""
+        return f"nested execution request rejected: {self.classification.value}"
+
+
+class NestedExecutionRequestDecodeError(NestedExecutionRequestRejected):
+    """Reject a nested request without retaining executor-facing input data."""
+
+    def __init__(
+        self,
+        classification: NestedExecutionRequestRejection,
+        attempted_versioned: bool,
+    ) -> None:
+        if type(classification) is not NestedExecutionRequestRejection:
+            classification = NestedExecutionRequestRejection.INVALID_VERSIONED
+        self.classification = classification
+        self.attempted_versioned = attempted_versioned is True
+        RuntimeError.__init__(self, classification, self.attempted_versioned)
+
+    @property
+    def allows_legacy_fallback(self) -> bool:
+        """Allow only a marker-free direct-API call to use its legacy adapter."""
+        return (
+            self.classification is NestedExecutionRequestRejection.LEGACY_REQUEST
+            and not self.attempted_versioned
+        )
+
+
+class NestedExecutionRequestEncodeError(ValueError):
+    """Report deterministic construction failure without retaining field data."""
+
+    def __init__(self) -> None:
+        super().__init__("nested execution request is invalid")
 
 
 class _DuplicateKeyError(ValueError):
@@ -1412,6 +1567,682 @@ def encode_execution_request(request: ExecutionRequest) -> str:
     return canonical
 
 
+def _reject_nested_request(
+    classification: NestedExecutionRequestRejection,
+    *,
+    attempted_versioned: bool,
+) -> None:
+    raise NestedExecutionRequestDecodeError(
+        classification,
+        attempted_versioned=attempted_versioned,
+    ) from None
+
+
+def _bounded_nested_request_json_loads(serialized: object) -> tuple[Any, bool]:
+    """Parse a nested request only after bounded strict-marker detection."""
+    if not isinstance(serialized, str):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.LEGACY_REQUEST,
+            attempted_versioned=False,
+        )
+    if len(serialized) > NESTED_EXECUTION_REQUEST_MAX_BYTES:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.RESOURCE_LIMIT,
+            attempted_versioned=False,
+        )
+    try:
+        attempted_versioned = _preparse_json_scan(
+            serialized,
+            reserved_marker_keys=_NESTED_REQUEST_RESERVED_MARKER_KEYS,
+            max_depth=NESTED_EXECUTION_REQUEST_MAX_DEPTH,
+            max_nodes=NESTED_EXECUTION_REQUEST_MAX_NODES,
+        )
+    except _ResourceLimitError:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.RESOURCE_LIMIT,
+            attempted_versioned=False,
+        )
+    try:
+        _bounded_utf8_size(serialized, max_bytes=NESTED_EXECUTION_REQUEST_MAX_BYTES)
+    except _ResourceLimitError:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.RESOURCE_LIMIT,
+            attempted_versioned=attempted_versioned,
+        )
+    except UnicodeEncodeError:
+        _reject_nested_request(
+            (
+                NestedExecutionRequestRejection.INVALID_VERSIONED
+                if attempted_versioned
+                else NestedExecutionRequestRejection.LEGACY_REQUEST
+            ),
+            attempted_versioned=attempted_versioned,
+        )
+    if not attempted_versioned:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.LEGACY_REQUEST,
+            attempted_versioned=False,
+        )
+    try:
+        value = json.loads(
+            serialized,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+            parse_float=_finite_float,
+        )
+    except (_DuplicateKeyError, _NonFiniteNumberError, ValueError, RecursionError):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+            attempted_versioned=True,
+        )
+    try:
+        _validate_json_tree(
+            value,
+            allow_nonfinite=False,
+            allow_nul=False,
+            max_depth=NESTED_EXECUTION_REQUEST_MAX_DEPTH,
+            max_nodes=NESTED_EXECUTION_REQUEST_MAX_NODES,
+            max_string_bytes=NESTED_EXECUTION_REQUEST_MAX_BYTES,
+        )
+    except _ResourceLimitError:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.RESOURCE_LIMIT,
+            attempted_versioned=True,
+        )
+    except _InvalidJsonTreeError:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+            attempted_versioned=True,
+        )
+    return value, attempted_versioned
+
+
+def _nested_text(value: Any, *, max_chars: int) -> str:
+    if type(value) is not str or not value or len(value) > max_chars or "\x00" in value:
+        raise ValueError
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError from error
+    return value
+
+
+def _normalize_nested_boundary_identity(
+    value: dict[str, Any],
+    boundary_kind: NestedExecutionBoundaryKind,
+) -> NestedWorkflowBoundaryIdentity | NestedDistributedBoundaryIdentity:
+    if boundary_kind in {
+        NestedExecutionBoundaryKind.WORKFLOW_STEP,
+        NestedExecutionBoundaryKind.RESULT_FOLD,
+    }:
+        if value["operation_id"] is not None or value["item_index"] is not None:
+            raise ValueError
+        return NestedWorkflowBoundaryIdentity(
+            workflow_run_id=_nested_text(value["workflow_run_id"], max_chars=255),
+            node_id=_nested_text(value["node_id"], max_chars=2048),
+        )
+    if value["workflow_run_id"] is not None or value["node_id"] is not None:
+        raise ValueError
+    operation_id = _nested_text(value["operation_id"], max_chars=255)
+    item_index = value["item_index"]
+    if type(item_index) is not int or not 0 <= item_index <= _MAX_COUNTER:
+        raise ValueError
+    return NestedDistributedBoundaryIdentity(
+        operation_id=operation_id,
+        item_index=item_index,
+    )
+
+
+def is_valid_execution_identity(identity: object) -> bool:
+    """Return whether a value is one exact bounded durable execution identity."""
+    return isinstance(identity, ExecutionIdentity) and _valid_identity_shape(identity)
+
+
+def _nested_boundary_wire_fields(
+    boundary_kind: NestedExecutionBoundaryKind,
+    boundary_identity: NestedWorkflowBoundaryIdentity | NestedDistributedBoundaryIdentity,
+) -> dict[str, Any]:
+    if boundary_kind in {
+        NestedExecutionBoundaryKind.WORKFLOW_STEP,
+        NestedExecutionBoundaryKind.RESULT_FOLD,
+    }:
+        if not isinstance(boundary_identity, NestedWorkflowBoundaryIdentity):
+            raise ValueError
+        fields = {
+            "workflow_run_id": boundary_identity.workflow_run_id,
+            "node_id": boundary_identity.node_id,
+            "operation_id": None,
+            "item_index": None,
+        }
+    else:
+        if not isinstance(boundary_identity, NestedDistributedBoundaryIdentity):
+            raise ValueError
+        fields = {
+            "workflow_run_id": None,
+            "node_id": None,
+            "operation_id": boundary_identity.operation_id,
+            "item_index": boundary_identity.item_index,
+        }
+    _normalize_nested_boundary_identity(fields, boundary_kind)
+    return fields
+
+
+def _normalize_nested_runtime_env(
+    identity: Any,
+    plan_digest: Any,
+    transport_digest: Any,
+) -> dict[str, Any]:
+    if type(identity) is not dict:
+        raise ValueError
+    _bounded_json_dumps(
+        identity,
+        sort_keys=False,
+        max_bytes=NESTED_EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES,
+    )
+    from django_ray.workflow_plans import runtime_env_plan_identity_from_transport
+
+    normalized = runtime_env_plan_identity_from_transport(
+        identity,
+        require_trust_match=False,
+    ).as_transport_dict()
+    if (
+        type(plan_digest) is not str
+        or _SHA256_IDENTITY.fullmatch(plan_digest) is None
+        or type(transport_digest) is not str
+        or _SHA256_IDENTITY.fullmatch(transport_digest) is None
+        or normalized.get("digest") != plan_digest
+        or normalized.get("transport_digest") != transport_digest
+    ):
+        raise ValueError
+    return normalized
+
+
+def _normalize_nested_callable_binding(
+    kind: Any,
+    binding: Any,
+) -> tuple[NestedCallableBindingKind, str]:
+    try:
+        normalized_kind = NestedCallableBindingKind(kind)
+    except (TypeError, ValueError):
+        raise ValueError from None
+    normalized_binding = _nested_text(binding, max_chars=_CALLABLE_PATH_MAX_CHARS)
+    if normalized_kind is NestedCallableBindingKind.PATH:
+        if "." not in normalized_binding:
+            raise ValueError
+    elif _SHA256_IDENTITY.fullmatch(normalized_binding) is None:
+        raise ValueError
+    return normalized_kind, normalized_binding
+
+
+def _normalize_nested_output_preview_callable_path(
+    boundary_kind: NestedExecutionBoundaryKind,
+    value: Any,
+) -> str | None:
+    if value is None:
+        return None
+    if boundary_kind is not NestedExecutionBoundaryKind.WORKFLOW_STEP:
+        raise ValueError
+    normalized = _nested_text(value, max_chars=_CALLABLE_PATH_MAX_CHARS)
+    if "." not in normalized:
+        raise ValueError
+    return normalized
+
+
+def nested_callable_digest(serialized_callable: bytes) -> str:
+    """Return the exact bounded-request binding for serialized callable bytes."""
+    if type(serialized_callable) is not bytes:
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.CALLABLE_MISMATCH
+        ) from None
+    return f"sha256:{hashlib.sha256(serialized_callable).hexdigest()}"
+
+
+def assert_nested_callable_binding(
+    request: NestedExecutionRequest,
+    *,
+    callable_path: str | None = None,
+    serialized_callable: bytes | None = None,
+) -> None:
+    """Verify the exact callable before importing a path or unpickling bytes."""
+    valid = isinstance(request, NestedExecutionRequest)
+    if valid and request.callable_binding_kind is NestedCallableBindingKind.PATH:
+        valid = serialized_callable is None and callable_path == request.callable_binding
+    elif valid and request.callable_binding_kind is NestedCallableBindingKind.DIGEST:
+        valid = callable_path is None and serialized_callable is not None
+        if valid:
+            try:
+                valid = nested_callable_digest(serialized_callable) == request.callable_binding
+            except NestedExecutionRequestRejected:
+                valid = False
+    else:
+        valid = False
+    if not valid:
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.CALLABLE_MISMATCH
+        ) from None
+
+
+def nested_runtime_env_digests(identity: object) -> tuple[str, str]:
+    """Return validated plan and transport digests from a detached identity."""
+    try:
+        if not isinstance(identity, dict):
+            raise ValueError
+        plan_digest = identity.get("digest")
+        transport_digest = identity.get("transport_digest")
+        _normalize_nested_runtime_env(identity, plan_digest, transport_digest)
+    except (
+        _InvalidJsonTreeError,
+        _ResourceLimitError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        UnicodeError,
+    ):
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
+        ) from None
+    return cast(str, plan_digest), cast(str, transport_digest)
+
+
+def find_nested_execution_request_rejection(
+    error: BaseException,
+) -> NestedExecutionRequestRejected | None:
+    """Find a typed nested rejection through a bounded Ray cause chain."""
+    if not isinstance(error, BaseException):
+        return None
+    try:
+        from ray.exceptions import RayTaskError
+    except ImportError:  # pragma: no cover - Ray is a required runtime dependency
+        if isinstance(error, NestedExecutionRequestRejected):
+            return error
+        return None
+
+    current = error
+    seen: set[int] = set()
+    cause_hops = 0
+    while True:
+        marker = id(current)
+        if marker in seen:
+            return None
+        seen.add(marker)
+
+        # Ray dynamically exposes some wrappers as both RayTaskError and the
+        # cause type. Follow the typed cause first so wrapper text never wins.
+        if isinstance(current, RayTaskError):
+            if cause_hops >= _NESTED_REJECTION_CAUSE_MAX_HOPS:
+                return None
+            try:
+                cause = getattr(current, "cause", None)
+            except Exception:
+                return None
+            if not isinstance(cause, BaseException):
+                return None
+            current = cause
+            cause_hops += 1
+            continue
+        if isinstance(current, NestedExecutionRequestRejected):
+            return current
+        return None
+
+
+_EXPECTED_OUTPUT_PREVIEW_CALLABLE_PATH_UNSET = object()
+
+
+def _decode_versioned_nested_execution_request(
+    value: Any,
+    serialized: str,
+    *,
+    supported_protocols: ExecutionProtocolRange,
+    expected_outer_identity: ExecutionIdentity | None,
+    expected_execution_protocol_version: int | None,
+    expected_boundary_kind: NestedExecutionBoundaryKind | None,
+    expected_boundary_identity: (
+        NestedWorkflowBoundaryIdentity | NestedDistributedBoundaryIdentity | None
+    ),
+    expected_callable_binding_kind: NestedCallableBindingKind | None,
+    expected_callable_binding: str | None,
+    expected_output_preview_callable_path: str | None | object,
+    expected_runtime_env_plan_digest: str | None,
+    expected_runtime_env_transport_digest: str | None,
+) -> NestedExecutionRequest:
+    if not isinstance(value, dict) or set(value) != _NESTED_REQUEST_KEYS:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+            attempted_versioned=True,
+        )
+    if (
+        value["nested_request_schema"] != NESTED_EXECUTION_REQUEST_SCHEMA
+        or type(value["nested_request_schema_version"]) is not int
+        or value["nested_request_schema_version"] != NESTED_EXECUTION_REQUEST_SCHEMA_VERSION
+    ):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.UNSUPPORTED_SCHEMA,
+            attempted_versioned=True,
+        )
+    if value["strict_execution_request"] is not True:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+            attempted_versioned=True,
+        )
+
+    outer_identity = ExecutionIdentity(
+        task_execution_pk=value["task_execution_pk"],
+        task_id=value["task_id"],
+        attempt_number=value["attempt_number"],
+        execution_generation=value["execution_generation"],
+    )
+    if not _valid_identity_shape(outer_identity):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+            attempted_versioned=True,
+        )
+    if expected_outer_identity is not None and (
+        not _valid_identity_shape(expected_outer_identity)
+        or outer_identity != expected_outer_identity
+    ):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.IDENTITY_MISMATCH,
+            attempted_versioned=True,
+        )
+
+    protocol = value["execution_protocol_version"]
+    if type(protocol) is not int or not 0 < protocol <= _MAX_COUNTER:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.UNSUPPORTED_PROTOCOL,
+            attempted_versioned=True,
+        )
+    if expected_execution_protocol_version is not None and (
+        type(expected_execution_protocol_version) is not int
+        or not 0 < expected_execution_protocol_version <= _MAX_COUNTER
+        or protocol != expected_execution_protocol_version
+    ):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.PROTOCOL_MISMATCH,
+            attempted_versioned=True,
+        )
+    if not supported_protocols.supports(protocol):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.UNSUPPORTED_PROTOCOL,
+            attempted_versioned=True,
+        )
+
+    try:
+        boundary_kind = NestedExecutionBoundaryKind(value["boundary_kind"])
+    except (TypeError, ValueError):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.UNSUPPORTED_BOUNDARY,
+            attempted_versioned=True,
+        )
+    try:
+        boundary_identity = _normalize_nested_boundary_identity(value, boundary_kind)
+    except (TypeError, ValueError, UnicodeError):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+            attempted_versioned=True,
+        )
+    if expected_boundary_kind is not None and (
+        type(expected_boundary_kind) is not NestedExecutionBoundaryKind
+        or boundary_kind is not expected_boundary_kind
+    ):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.BOUNDARY_MISMATCH,
+            attempted_versioned=True,
+        )
+    if expected_boundary_identity is not None:
+        try:
+            expected_boundary_fields = _nested_boundary_wire_fields(
+                boundary_kind,
+                expected_boundary_identity,
+            )
+            normalized_expected_boundary = _normalize_nested_boundary_identity(
+                expected_boundary_fields,
+                boundary_kind,
+            )
+        except (TypeError, ValueError, UnicodeError):
+            _reject_nested_request(
+                NestedExecutionRequestRejection.BOUNDARY_MISMATCH,
+                attempted_versioned=True,
+            )
+        if boundary_identity != normalized_expected_boundary:
+            _reject_nested_request(
+                NestedExecutionRequestRejection.BOUNDARY_MISMATCH,
+                attempted_versioned=True,
+            )
+
+    try:
+        callable_kind, callable_binding = _normalize_nested_callable_binding(
+            value["callable_binding_kind"],
+            value["callable_binding"],
+        )
+    except (TypeError, ValueError, UnicodeError):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+            attempted_versioned=True,
+        )
+    if (expected_callable_binding_kind is None) != (expected_callable_binding is None):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.CALLABLE_MISMATCH,
+            attempted_versioned=True,
+        )
+    if expected_callable_binding_kind is not None:
+        try:
+            expected_kind, expected_binding = _normalize_nested_callable_binding(
+                expected_callable_binding_kind,
+                expected_callable_binding,
+            )
+        except (TypeError, ValueError, UnicodeError):
+            _reject_nested_request(
+                NestedExecutionRequestRejection.CALLABLE_MISMATCH,
+                attempted_versioned=True,
+            )
+        if callable_kind is not expected_kind or callable_binding != expected_binding:
+            _reject_nested_request(
+                NestedExecutionRequestRejection.CALLABLE_MISMATCH,
+                attempted_versioned=True,
+            )
+
+    try:
+        output_preview_callable_path = _normalize_nested_output_preview_callable_path(
+            boundary_kind,
+            value["output_preview_callable_path"],
+        )
+    except (TypeError, ValueError, UnicodeError):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+            attempted_versioned=True,
+        )
+    if expected_output_preview_callable_path is not _EXPECTED_OUTPUT_PREVIEW_CALLABLE_PATH_UNSET:
+        try:
+            normalized_expected_output_preview = _normalize_nested_output_preview_callable_path(
+                boundary_kind,
+                expected_output_preview_callable_path,
+            )
+        except (TypeError, ValueError, UnicodeError):
+            _reject_nested_request(
+                NestedExecutionRequestRejection.CALLABLE_MISMATCH,
+                attempted_versioned=True,
+            )
+        if output_preview_callable_path != normalized_expected_output_preview:
+            _reject_nested_request(
+                NestedExecutionRequestRejection.CALLABLE_MISMATCH,
+                attempted_versioned=True,
+            )
+
+    try:
+        runtime_env_identity = _normalize_nested_runtime_env(
+            value["runtime_env_plan_identity"],
+            value["runtime_env_plan_digest"],
+            value["runtime_env_transport_digest"],
+        )
+        canonical = _bounded_json_dumps(
+            value,
+            sort_keys=True,
+            max_bytes=NESTED_EXECUTION_REQUEST_MAX_BYTES,
+        )
+    except _ResourceLimitError:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.RESOURCE_LIMIT,
+            attempted_versioned=True,
+        )
+    except (
+        _InvalidJsonTreeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        UnicodeError,
+    ):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH,
+            attempted_versioned=True,
+        )
+    if (
+        expected_runtime_env_plan_digest is not None
+        and value["runtime_env_plan_digest"] != expected_runtime_env_plan_digest
+    ) or (
+        expected_runtime_env_transport_digest is not None
+        and value["runtime_env_transport_digest"] != expected_runtime_env_transport_digest
+    ):
+        _reject_nested_request(
+            NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH,
+            attempted_versioned=True,
+        )
+    if serialized != canonical:
+        _reject_nested_request(
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+            attempted_versioned=True,
+        )
+    return NestedExecutionRequest(
+        outer_identity=outer_identity,
+        execution_protocol_version=protocol,
+        boundary_kind=boundary_kind,
+        boundary_identity=boundary_identity,
+        callable_binding_kind=callable_kind,
+        callable_binding=callable_binding,
+        output_preview_callable_path=output_preview_callable_path,
+        runtime_env_plan_identity=runtime_env_identity,
+        runtime_env_plan_digest=value["runtime_env_plan_digest"],
+        runtime_env_transport_digest=value["runtime_env_transport_digest"],
+    )
+
+
+def decode_nested_execution_request(
+    serialized: object,
+    *,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    expected_outer_identity: ExecutionIdentity | None = None,
+    expected_execution_protocol_version: int | None = None,
+    expected_boundary_kind: NestedExecutionBoundaryKind | None = None,
+    expected_boundary_identity: (
+        NestedWorkflowBoundaryIdentity | NestedDistributedBoundaryIdentity | None
+    ) = None,
+    expected_callable_binding_kind: NestedCallableBindingKind | None = None,
+    expected_callable_binding: str | None = None,
+    expected_output_preview_callable_path: str | None = cast(
+        str | None,
+        _EXPECTED_OUTPUT_PREVIEW_CALLABLE_PATH_UNSET,
+    ),
+    expected_runtime_env_plan_digest: str | None = None,
+    expected_runtime_env_transport_digest: str | None = None,
+) -> NestedExecutionRequest:
+    """Decode and fence one strict nested request before setup or deserialization."""
+    value, attempted_versioned = _bounded_nested_request_json_loads(serialized)
+    if not attempted_versioned:  # pragma: no cover - loader rejects this path
+        _reject_nested_request(
+            NestedExecutionRequestRejection.LEGACY_REQUEST,
+            attempted_versioned=False,
+        )
+    return _decode_versioned_nested_execution_request(
+        value,
+        serialized,
+        supported_protocols=supported_protocols,
+        expected_outer_identity=expected_outer_identity,
+        expected_execution_protocol_version=expected_execution_protocol_version,
+        expected_boundary_kind=expected_boundary_kind,
+        expected_boundary_identity=expected_boundary_identity,
+        expected_callable_binding_kind=expected_callable_binding_kind,
+        expected_callable_binding=expected_callable_binding,
+        expected_output_preview_callable_path=expected_output_preview_callable_path,
+        expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
+    )
+
+
+def encode_nested_execution_request(request: NestedExecutionRequest) -> str:
+    """Encode one exact canonical strict nested execution request."""
+    try:
+        if not isinstance(request, NestedExecutionRequest):
+            raise ValueError
+        if (
+            not _valid_identity_shape(request.outer_identity)
+            or type(request.execution_protocol_version) is not int
+            or not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(request.execution_protocol_version)
+            or type(request.boundary_kind) is not NestedExecutionBoundaryKind
+            or type(request.callable_binding_kind) is not NestedCallableBindingKind
+        ):
+            raise ValueError
+        callable_kind, callable_binding = _normalize_nested_callable_binding(
+            request.callable_binding_kind,
+            request.callable_binding,
+        )
+        output_preview_callable_path = _normalize_nested_output_preview_callable_path(
+            request.boundary_kind,
+            request.output_preview_callable_path,
+        )
+        boundary_fields = _nested_boundary_wire_fields(
+            request.boundary_kind,
+            request.boundary_identity,
+        )
+        runtime_env_identity = _normalize_nested_runtime_env(
+            request.runtime_env_plan_identity,
+            request.runtime_env_plan_digest,
+            request.runtime_env_transport_digest,
+        )
+        identity = request.outer_identity
+        value = {
+            "nested_request_schema": NESTED_EXECUTION_REQUEST_SCHEMA,
+            "nested_request_schema_version": NESTED_EXECUTION_REQUEST_SCHEMA_VERSION,
+            "strict_execution_request": True,
+            "execution_protocol_version": request.execution_protocol_version,
+            "task_execution_pk": identity.task_execution_pk,
+            "task_id": identity.task_id,
+            "attempt_number": identity.attempt_number,
+            "execution_generation": identity.execution_generation,
+            "boundary_kind": request.boundary_kind.value,
+            **boundary_fields,
+            "callable_binding_kind": callable_kind.value,
+            "callable_binding": callable_binding,
+            "output_preview_callable_path": output_preview_callable_path,
+            "runtime_env_plan_identity": runtime_env_identity,
+            "runtime_env_plan_digest": request.runtime_env_plan_digest,
+            "runtime_env_transport_digest": request.runtime_env_transport_digest,
+        }
+        detached = _bounded_json_dumps(
+            value,
+            sort_keys=False,
+            max_bytes=NESTED_EXECUTION_REQUEST_MAX_BYTES,
+        )
+        normalized, attempted_versioned = _bounded_nested_request_json_loads(detached)
+        if not attempted_versioned or not isinstance(normalized, dict):
+            raise ValueError
+        canonical = _bounded_json_dumps(
+            normalized,
+            sort_keys=True,
+            max_bytes=NESTED_EXECUTION_REQUEST_MAX_BYTES,
+        )
+        decode_nested_execution_request(canonical)
+    except (
+        NestedExecutionRequestRejected,
+        _InvalidJsonTreeError,
+        _ResourceLimitError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        UnicodeError,
+    ):
+        raise NestedExecutionRequestEncodeError from None
+    return canonical
+
+
 __all__ = [
     "EXECUTION_COMPLETION_DIAGNOSTIC_MAX_BYTES",
     "EXECUTION_COMPLETION_MAX_BYTES",
@@ -1425,6 +2256,12 @@ __all__ = [
     "EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES",
     "EXECUTION_REQUEST_SCHEMA",
     "EXECUTION_REQUEST_SCHEMA_VERSION",
+    "NESTED_EXECUTION_REQUEST_MAX_BYTES",
+    "NESTED_EXECUTION_REQUEST_MAX_DEPTH",
+    "NESTED_EXECUTION_REQUEST_MAX_NODES",
+    "NESTED_EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES",
+    "NESTED_EXECUTION_REQUEST_SCHEMA",
+    "NESTED_EXECUTION_REQUEST_SCHEMA_VERSION",
     "DecodedExecutionCompletion",
     "ExecutionCompletion",
     "ExecutionCompletionDecodeError",
@@ -1435,10 +2272,26 @@ __all__ = [
     "ExecutionRequestDecodeError",
     "ExecutionRequestEncodeError",
     "ExecutionRequestRejection",
+    "NestedCallableBindingKind",
+    "NestedDistributedBoundaryIdentity",
+    "NestedExecutionBoundaryKind",
+    "NestedExecutionRequest",
+    "NestedExecutionRequestDecodeError",
+    "NestedExecutionRequestEncodeError",
+    "NestedExecutionRequestRejected",
+    "NestedExecutionRequestRejection",
+    "NestedWorkflowBoundaryIdentity",
+    "assert_nested_callable_binding",
     "decode_execution_completion",
     "decode_execution_request",
+    "decode_nested_execution_request",
     "decode_legacy_v1_completion",
     "encode_execution_completion",
     "encode_execution_request",
     "encode_execution_request_rejection",
+    "encode_nested_execution_request",
+    "find_nested_execution_request_rejection",
+    "is_valid_execution_identity",
+    "nested_callable_digest",
+    "nested_runtime_env_digests",
 ]

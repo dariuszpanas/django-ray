@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import django
@@ -183,6 +184,19 @@ def pytest_configure(config: object) -> None:
         )
 
     django.setup()
+
+
+@pytest.fixture()
+def ray_cluster() -> Iterator[object]:
+    """Provide one bounded local Ray runtime to an explicitly marked test."""
+    import ray
+
+    assert not ray.is_initialized()
+    ray.init(address="local", include_dashboard=False, num_cpus=2)
+    try:
+        yield ray
+    finally:
+        ray.shutdown()
 
 
 @pytest.fixture(autouse=True)

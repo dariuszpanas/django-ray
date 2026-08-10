@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import pickle
 import tracemalloc
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
@@ -15,6 +18,8 @@ from django_ray.execution_codec import (
     EXECUTION_COMPLETION_SCHEMA_VERSION,
     EXECUTION_REQUEST_SCHEMA,
     EXECUTION_REQUEST_SCHEMA_VERSION,
+    NESTED_EXECUTION_REQUEST_SCHEMA,
+    NESTED_EXECUTION_REQUEST_SCHEMA_VERSION,
     DecodedExecutionCompletion,
     ExecutionCompletion,
     ExecutionCompletionDecodeError,
@@ -25,12 +30,27 @@ from django_ray.execution_codec import (
     ExecutionRequestDecodeError,
     ExecutionRequestEncodeError,
     ExecutionRequestRejection,
+    NestedCallableBindingKind,
+    NestedDistributedBoundaryIdentity,
+    NestedExecutionBoundaryKind,
+    NestedExecutionRequest,
+    NestedExecutionRequestDecodeError,
+    NestedExecutionRequestEncodeError,
+    NestedExecutionRequestRejected,
+    NestedExecutionRequestRejection,
+    NestedWorkflowBoundaryIdentity,
+    assert_nested_callable_binding,
     decode_execution_completion,
     decode_execution_request,
     decode_legacy_v1_completion,
+    decode_nested_execution_request,
     encode_execution_completion,
     encode_execution_request,
     encode_execution_request_rejection,
+    encode_nested_execution_request,
+    find_nested_execution_request_rejection,
+    nested_callable_digest,
+    nested_runtime_env_digests,
 )
 from django_ray.execution_protocol import ExecutionProtocolRange
 
@@ -1793,3 +1813,743 @@ def test_reserved_key_in_malformed_json_still_suppresses_legacy_grace(
         ExecutionCompletionRejection.INVALID_VERSIONED,
         attempted_versioned=True,
     )
+
+
+def _nested_runtime_identity() -> dict[str, object]:
+    identity: dict[str, object] = {
+        "plan_format": "django-ray.runtime-env-plan",
+        "plan_format_version": 1,
+        "profile": None,
+        "digest": "sha256:" + "a" * 64,
+        "reusable": True,
+        "unresolved_paths": [],
+        "total_unresolved_paths": 0,
+        "unresolved_paths_truncated": False,
+        "retry_safe": True,
+        "retry_unsafe_paths": [],
+        "total_retry_unsafe_paths": 0,
+        "retry_unsafe_paths_truncated": False,
+        "trust_digest": "sha256:" + "b" * 64,
+    }
+    payload = _canonical(identity).encode()
+    identity["transport_digest"] = (
+        "sha256:"
+        + hashlib.sha256(b"django-ray.runtime-env-plan-transport-v1\0" + payload).hexdigest()
+    )
+    return identity
+
+
+def _workflow_nested_request(identity: ExecutionIdentity) -> NestedExecutionRequest:
+    runtime_env_identity = _nested_runtime_identity()
+    return NestedExecutionRequest(
+        outer_identity=identity,
+        execution_protocol_version=1,
+        boundary_kind=NestedExecutionBoundaryKind.WORKFLOW_STEP,
+        boundary_identity=NestedWorkflowBoundaryIdentity(
+            workflow_run_id="run-41",
+            node_id="0.m3.step",
+        ),
+        callable_binding_kind=NestedCallableBindingKind.PATH,
+        callable_binding="testproject.tasks.add_numbers",
+        runtime_env_plan_identity=runtime_env_identity,
+        runtime_env_plan_digest=str(runtime_env_identity["digest"]),
+        runtime_env_transport_digest=str(runtime_env_identity["transport_digest"]),
+    )
+
+
+def test_nested_workflow_request_round_trips_as_canonical_strict_schema(
+    identity: ExecutionIdentity,
+) -> None:
+    request = _workflow_nested_request(identity)
+    serialized = encode_nested_execution_request(request)
+    value = json.loads(serialized)
+
+    decoded = decode_nested_execution_request(
+        serialized,
+        expected_outer_identity=identity,
+        expected_execution_protocol_version=1,
+        expected_boundary_kind=NestedExecutionBoundaryKind.WORKFLOW_STEP,
+        expected_boundary_identity=request.boundary_identity,
+        expected_callable_binding_kind=NestedCallableBindingKind.PATH,
+        expected_callable_binding=request.callable_binding,
+        expected_output_preview_callable_path=None,
+        expected_runtime_env_plan_digest=request.runtime_env_plan_digest,
+        expected_runtime_env_transport_digest=request.runtime_env_transport_digest,
+    )
+
+    assert serialized == _canonical(value)
+    assert decoded == request
+    assert value["nested_request_schema"] == NESTED_EXECUTION_REQUEST_SCHEMA
+    assert value["nested_request_schema_version"] == NESTED_EXECUTION_REQUEST_SCHEMA_VERSION
+    assert value["strict_execution_request"] is True
+    assert value["workflow_run_id"] == "run-41"
+    assert value["node_id"] == "0.m3.step"
+    assert value["operation_id"] is None
+    assert value["item_index"] is None
+    assert value["output_preview_callable_path"] is None
+    assert not {
+        "ray_version",
+        "python_version",
+        "cluster_id",
+        "target_id",
+    }.intersection(value)
+
+
+def test_nested_workflow_output_preview_path_is_canonical_and_exactly_bound(
+    identity: ExecutionIdentity,
+) -> None:
+    request = replace(
+        _workflow_nested_request(identity),
+        output_preview_callable_path="testproject.tasks.preview_add_numbers",
+    )
+    serialized = encode_nested_execution_request(request)
+
+    decoded = decode_nested_execution_request(
+        serialized,
+        expected_output_preview_callable_path=request.output_preview_callable_path,
+    )
+
+    assert decoded == request
+    assert json.loads(serialized)["output_preview_callable_path"] == (
+        "testproject.tasks.preview_add_numbers"
+    )
+
+
+@pytest.mark.parametrize("mutation", ["tamper", "missing", "extra"])
+def test_nested_output_preview_wire_tamper_missing_and_extra_are_classified(
+    identity: ExecutionIdentity,
+    mutation: str,
+) -> None:
+    expected_path = "testproject.tasks.preview_add_numbers"
+    request = replace(
+        _workflow_nested_request(identity),
+        output_preview_callable_path=expected_path,
+    )
+    payload = json.loads(encode_nested_execution_request(request))
+    if mutation == "tamper":
+        payload["output_preview_callable_path"] = "testproject.tasks.other_preview"
+        expected = NestedExecutionRequestRejection.CALLABLE_MISMATCH
+    elif mutation == "missing":
+        del payload["output_preview_callable_path"]
+        expected = NestedExecutionRequestRejection.INVALID_VERSIONED
+    else:
+        payload["unexpected_output_preview_path"] = expected_path
+        expected = NestedExecutionRequestRejection.INVALID_VERSIONED
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(
+            _canonical(payload),
+            expected_output_preview_callable_path=expected_path,
+        )
+
+    assert caught.value.classification is expected
+
+
+def test_nested_expected_null_output_preview_rejects_an_added_callable(
+    identity: ExecutionIdentity,
+) -> None:
+    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload["output_preview_callable_path"] = "testproject.tasks.unexpected_preview"
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(
+            _canonical(payload),
+            expected_output_preview_callable_path=None,
+        )
+
+    assert caught.value.classification is NestedExecutionRequestRejection.CALLABLE_MISMATCH
+
+
+def test_nested_output_preview_is_null_outside_workflow_steps(
+    identity: ExecutionIdentity,
+) -> None:
+    serialized_callable = b"callable"
+    runtime_env_identity = _nested_runtime_identity()
+    request = NestedExecutionRequest(
+        outer_identity=identity,
+        execution_protocol_version=1,
+        boundary_kind=NestedExecutionBoundaryKind.DISTRIBUTED_MAP,
+        boundary_identity=NestedDistributedBoundaryIdentity("operation", 0),
+        callable_binding_kind=NestedCallableBindingKind.DIGEST,
+        callable_binding=nested_callable_digest(serialized_callable),
+        runtime_env_plan_identity=runtime_env_identity,
+        runtime_env_plan_digest=str(runtime_env_identity["digest"]),
+        runtime_env_transport_digest=str(runtime_env_identity["transport_digest"]),
+    )
+    serialized = encode_nested_execution_request(request)
+    assert json.loads(serialized)["output_preview_callable_path"] is None
+
+    with pytest.raises(NestedExecutionRequestEncodeError):
+        encode_nested_execution_request(
+            replace(
+                request,
+                output_preview_callable_path="testproject.tasks.preview_add_numbers",
+            )
+        )
+
+    payload = json.loads(serialized)
+    payload["output_preview_callable_path"] = "testproject.tasks.preview_add_numbers"
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(_canonical(payload))
+    assert caught.value.classification is NestedExecutionRequestRejection.INVALID_VERSIONED
+
+
+def test_nested_distributed_digest_binding_round_trips_and_verifies_bytes(
+    identity: ExecutionIdentity,
+) -> None:
+    serialized_callable = b"bounded-cloudpickle-placeholder"
+    runtime_env_identity = _nested_runtime_identity()
+    request = NestedExecutionRequest(
+        outer_identity=identity,
+        execution_protocol_version=1,
+        boundary_kind=NestedExecutionBoundaryKind.DISTRIBUTED_STARMAP,
+        boundary_identity=NestedDistributedBoundaryIdentity(
+            operation_id="operation-8",
+            item_index=17,
+        ),
+        callable_binding_kind=NestedCallableBindingKind.DIGEST,
+        callable_binding=nested_callable_digest(serialized_callable),
+        runtime_env_plan_identity=runtime_env_identity,
+        runtime_env_plan_digest=str(runtime_env_identity["digest"]),
+        runtime_env_transport_digest=str(runtime_env_identity["transport_digest"]),
+    )
+
+    decoded = decode_nested_execution_request(encode_nested_execution_request(request))
+
+    assert decoded == request
+    assert_nested_callable_binding(decoded, serialized_callable=serialized_callable)
+    with pytest.raises(NestedExecutionRequestRejected) as caught:
+        assert_nested_callable_binding(decoded, serialized_callable=b"different")
+    assert caught.value.classification is NestedExecutionRequestRejection.CALLABLE_MISMATCH
+    assert str(caught.value) == "nested execution request rejected: callable_mismatch"
+    assert caught.value.retryable is False
+
+
+def test_nested_expected_distributed_item_identity_rejects_boolean_alias(
+    identity: ExecutionIdentity,
+) -> None:
+    serialized_callable = b"callable"
+    runtime_env_identity = _nested_runtime_identity()
+    request = NestedExecutionRequest(
+        outer_identity=identity,
+        execution_protocol_version=1,
+        boundary_kind=NestedExecutionBoundaryKind.DISTRIBUTED_MAP,
+        boundary_identity=NestedDistributedBoundaryIdentity("operation", 1),
+        callable_binding_kind=NestedCallableBindingKind.DIGEST,
+        callable_binding=nested_callable_digest(serialized_callable),
+        runtime_env_plan_identity=runtime_env_identity,
+        runtime_env_plan_digest=str(runtime_env_identity["digest"]),
+        runtime_env_transport_digest=str(runtime_env_identity["transport_digest"]),
+    )
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(
+            encode_nested_execution_request(request),
+            expected_boundary_identity=NestedDistributedBoundaryIdentity(
+                "operation",
+                True,
+            ),
+        )
+
+    assert caught.value.classification is NestedExecutionRequestRejection.BOUNDARY_MISMATCH
+
+
+def test_nested_path_binding_is_checked_before_import(identity: ExecutionIdentity) -> None:
+    request = _workflow_nested_request(identity)
+
+    assert_nested_callable_binding(request, callable_path=request.callable_binding)
+    with pytest.raises(NestedExecutionRequestRejected) as caught:
+        assert_nested_callable_binding(request, callable_path="password.secret.callable")
+
+    assert caught.value.classification is NestedExecutionRequestRejection.CALLABLE_MISMATCH
+    assert "password" not in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+def test_nested_callable_and_runtime_helpers_fail_closed_for_invalid_local_values(
+    identity: ExecutionIdentity,
+) -> None:
+    request = _workflow_nested_request(identity)
+
+    with pytest.raises(NestedExecutionRequestRejected) as digest_error:
+        nested_callable_digest(cast(bytes, bytearray(b"not-immutable")))
+    assert digest_error.value.classification is (NestedExecutionRequestRejection.CALLABLE_MISMATCH)
+
+    with pytest.raises(NestedExecutionRequestRejected) as binding_error:
+        assert_nested_callable_binding(cast(NestedExecutionRequest, object()))
+    assert binding_error.value.classification is (NestedExecutionRequestRejection.CALLABLE_MISMATCH)
+
+    with pytest.raises(NestedExecutionRequestRejected) as runtime_env_error:
+        nested_runtime_env_digests(None)
+    assert runtime_env_error.value.classification is (
+        NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
+    )
+
+    assert find_nested_execution_request_rejection(cast(BaseException, object())) is None
+    assert_nested_callable_binding(request, callable_path=request.callable_binding)
+
+
+@pytest.mark.parametrize(
+    "serialized",
+    [
+        "testproject.tasks.add_numbers",
+        '"testproject.tasks.add_numbers"',
+        '{"legacy":"direct"}',
+        None,
+    ],
+)
+def test_marker_free_nested_requests_are_the_only_legacy_fallback(
+    serialized: object,
+) -> None:
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(serialized)
+
+    error = caught.value
+    assert error.classification is NestedExecutionRequestRejection.LEGACY_REQUEST
+    assert error.attempted_versioned is False
+    assert error.allows_legacy_fallback is True
+
+
+@pytest.mark.parametrize(
+    "serialized",
+    [
+        '{"strict_execution_request":true',
+        '{"strict_execution_request":false}',
+        '{"nested_request_schema":"forged"}',
+        '{"execution_protocol_version":1}',
+    ],
+)
+def test_any_nested_strict_marker_permanently_suppresses_legacy_fallback(
+    serialized: str,
+) -> None:
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(serialized)
+
+    error = caught.value
+    assert error.classification is NestedExecutionRequestRejection.INVALID_VERSIONED
+    assert error.attempted_versioned is True
+    assert error.allows_legacy_fallback is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "classification"),
+    [
+        (
+            "nested_request_schema",
+            "other",
+            NestedExecutionRequestRejection.UNSUPPORTED_SCHEMA,
+        ),
+        (
+            "nested_request_schema_version",
+            2,
+            NestedExecutionRequestRejection.UNSUPPORTED_SCHEMA,
+        ),
+        (
+            "strict_execution_request",
+            False,
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+        ),
+        (
+            "boundary_kind",
+            "unknown",
+            NestedExecutionRequestRejection.UNSUPPORTED_BOUNDARY,
+        ),
+        (
+            "runtime_env_plan_digest",
+            "sha256:" + "c" * 64,
+            NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH,
+        ),
+    ],
+)
+def test_nested_decode_rejections_are_fixed_and_classified(
+    identity: ExecutionIdentity,
+    field: str,
+    value: object,
+    classification: NestedExecutionRequestRejection,
+) -> None:
+    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload[field] = value
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(_canonical(payload))
+
+    error = caught.value
+    assert error.classification is classification
+    assert error.attempted_versioned is True
+    assert error.allows_legacy_fallback is False
+    assert str(error) == f"nested execution request rejected: {classification.value}"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "classification"),
+    [
+        (
+            "task_execution_pk",
+            True,
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+        ),
+        (
+            "execution_protocol_version",
+            0,
+            NestedExecutionRequestRejection.UNSUPPORTED_PROTOCOL,
+        ),
+        (
+            "operation_id",
+            "mixed-workflow-operation",
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+        ),
+        (
+            "callable_binding_kind",
+            "unknown",
+            NestedExecutionRequestRejection.INVALID_VERSIONED,
+        ),
+    ],
+)
+def test_nested_decoder_rejects_invalid_exact_union_shapes(
+    identity: ExecutionIdentity,
+    field: str,
+    value: object,
+    classification: NestedExecutionRequestRejection,
+) -> None:
+    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload[field] = value
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(_canonical(payload))
+
+    assert caught.value.classification is classification
+    assert caught.value.allows_legacy_fallback is False
+
+
+def test_nested_decoder_rejects_partial_or_invalid_expected_callable_controls(
+    identity: ExecutionIdentity,
+) -> None:
+    request = _workflow_nested_request(identity)
+    serialized = encode_nested_execution_request(request)
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as partial:
+        decode_nested_execution_request(
+            serialized,
+            expected_callable_binding_kind=NestedCallableBindingKind.PATH,
+        )
+    assert partial.value.classification is NestedExecutionRequestRejection.CALLABLE_MISMATCH
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as invalid:
+        decode_nested_execution_request(
+            serialized,
+            expected_callable_binding_kind=cast(
+                NestedCallableBindingKind,
+                "unknown",
+            ),
+            expected_callable_binding=request.callable_binding,
+        )
+    assert invalid.value.classification is NestedExecutionRequestRejection.CALLABLE_MISMATCH
+
+
+def test_nested_decode_fences_every_independent_expected_value(
+    identity: ExecutionIdentity,
+) -> None:
+    request = _workflow_nested_request(identity)
+    serialized = encode_nested_execution_request(request)
+    cases = (
+        (
+            {"expected_outer_identity": replace(identity, execution_generation=4)},
+            NestedExecutionRequestRejection.IDENTITY_MISMATCH,
+        ),
+        (
+            {"expected_execution_protocol_version": 2},
+            NestedExecutionRequestRejection.PROTOCOL_MISMATCH,
+        ),
+        (
+            {"expected_boundary_kind": NestedExecutionBoundaryKind.RESULT_FOLD},
+            NestedExecutionRequestRejection.BOUNDARY_MISMATCH,
+        ),
+        (
+            {"expected_boundary_identity": NestedWorkflowBoundaryIdentity("run-41", "other-node")},
+            NestedExecutionRequestRejection.BOUNDARY_MISMATCH,
+        ),
+        (
+            {
+                "expected_callable_binding_kind": NestedCallableBindingKind.PATH,
+                "expected_callable_binding": "testproject.tasks.other",
+            },
+            NestedExecutionRequestRejection.CALLABLE_MISMATCH,
+        ),
+        (
+            {"expected_runtime_env_plan_digest": "sha256:" + "c" * 64},
+            NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH,
+        ),
+        (
+            {"expected_runtime_env_transport_digest": "sha256:" + "c" * 64},
+            NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH,
+        ),
+    )
+    for kwargs, classification in cases:
+        with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+            decode_nested_execution_request(serialized, **kwargs)
+        assert caught.value.classification is classification
+
+
+def test_nested_protocol_is_checked_before_callable_or_runtime_env(
+    identity: ExecutionIdentity,
+) -> None:
+    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload["execution_protocol_version"] = 2
+    payload["callable_binding"] = "password.secret"
+    payload["runtime_env_plan_identity"] = {"secret": "credential"}
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(
+            _canonical(payload),
+            supported_protocols=ExecutionProtocolRange(1, 1),
+        )
+
+    assert caught.value.classification is NestedExecutionRequestRejection.UNSUPPORTED_PROTOCOL
+    assert "password" not in str(caught.value)
+    assert "credential" not in str(caught.value)
+
+
+def test_nested_request_requires_canonical_wire_bytes(identity: ExecutionIdentity) -> None:
+    serialized = encode_nested_execution_request(_workflow_nested_request(identity))
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(" " + serialized)
+
+    assert caught.value.classification is NestedExecutionRequestRejection.INVALID_VERSIONED
+
+
+def test_nested_request_has_independent_aggregate_and_runtime_identity_budgets(
+    identity: ExecutionIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _workflow_nested_request(identity)
+    serialized = encode_nested_execution_request(request)
+    aggregate_bytes = len(serialized.encode())
+    identity_bytes = len(_canonical(request.runtime_env_plan_identity).encode())
+
+    monkeypatch.setattr(codec_module, "NESTED_EXECUTION_REQUEST_MAX_BYTES", aggregate_bytes)
+    assert decode_nested_execution_request(serialized) == request
+    monkeypatch.setattr(
+        codec_module,
+        "NESTED_EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES",
+        identity_bytes,
+    )
+    assert encode_nested_execution_request(request) == serialized
+
+    monkeypatch.setattr(codec_module, "NESTED_EXECUTION_REQUEST_MAX_BYTES", aggregate_bytes - 1)
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(serialized)
+    assert caught.value.classification is NestedExecutionRequestRejection.RESOURCE_LIMIT
+    assert caught.value.allows_legacy_fallback is False
+
+    monkeypatch.setattr(codec_module, "NESTED_EXECUTION_REQUEST_MAX_BYTES", aggregate_bytes)
+    monkeypatch.setattr(
+        codec_module,
+        "NESTED_EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES",
+        identity_bytes - 1,
+    )
+    with pytest.raises(NestedExecutionRequestEncodeError):
+        encode_nested_execution_request(request)
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(serialized)
+    assert caught.value.classification is NestedExecutionRequestRejection.RESOURCE_LIMIT
+
+
+def test_nested_preparse_depth_limit_cannot_fall_back_to_legacy() -> None:
+    nested: object = "leaf"
+    for _ in range(codec_module.NESTED_EXECUTION_REQUEST_MAX_DEPTH + 1):
+        nested = [nested]
+    serialized = _canonical(
+        {
+            "nested_request_schema": NESTED_EXECUTION_REQUEST_SCHEMA,
+            "strict_execution_request": True,
+            "nested": nested,
+        }
+    )
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(serialized)
+
+    assert caught.value.classification is NestedExecutionRequestRejection.RESOURCE_LIMIT
+    assert caught.value.allows_legacy_fallback is False
+
+
+def test_nested_runtime_env_duplicate_digests_are_strictly_validated() -> None:
+    identity = _nested_runtime_identity()
+    assert nested_runtime_env_digests(identity) == (
+        identity["digest"],
+        identity["transport_digest"],
+    )
+
+    identity["transport_digest"] = "password=secret"
+    with pytest.raises(NestedExecutionRequestRejected) as caught:
+        nested_runtime_env_digests(identity)
+
+    assert caught.value.classification is NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
+    assert "password" not in str(caught.value)
+
+
+def test_nested_runtime_env_rejects_minimal_or_checksum_forged_identity(
+    identity: ExecutionIdentity,
+) -> None:
+    request = _workflow_nested_request(identity)
+    minimal = {
+        "digest": request.runtime_env_plan_digest,
+        "transport_digest": request.runtime_env_transport_digest,
+    }
+    with pytest.raises(NestedExecutionRequestEncodeError):
+        encode_nested_execution_request(replace(request, runtime_env_plan_identity=minimal))
+
+    payload = json.loads(encode_nested_execution_request(request))
+    payload["runtime_env_plan_identity"]["profile"] = "forged-profile"
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(_canonical(payload))
+
+    assert caught.value.classification is NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
+
+
+def test_nested_runtime_env_rejects_unknown_identity_fields(
+    identity: ExecutionIdentity,
+) -> None:
+    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload["runtime_env_plan_identity"]["python_version"] = "3.99"
+
+    with pytest.raises(NestedExecutionRequestDecodeError) as caught:
+        decode_nested_execution_request(_canonical(payload))
+
+    assert caught.value.classification is NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        NestedExecutionRequestRejected(NestedExecutionRequestRejection.CALLABLE_MISMATCH),
+        NestedExecutionRequestDecodeError(
+            NestedExecutionRequestRejection.PROTOCOL_MISMATCH,
+            True,
+        ),
+        NestedExecutionRequestDecodeError(
+            NestedExecutionRequestRejection.LEGACY_REQUEST,
+            False,
+        ),
+    ],
+)
+def test_nested_rejection_pickling_preserves_typed_fixed_cause(
+    error: NestedExecutionRequestRejected,
+) -> None:
+    restored = pickle.loads(pickle.dumps(error))
+
+    assert type(restored) is type(error)
+    assert restored.classification is error.classification
+    assert str(restored) == str(error)
+    assert restored.retryable is False
+    if isinstance(error, NestedExecutionRequestDecodeError):
+        assert restored.attempted_versioned is error.attempted_versioned
+        assert restored.allows_legacy_fallback is error.allows_legacy_fallback
+
+
+def test_nested_decode_rejection_survives_ray_cloudpickle() -> None:
+    import ray.cloudpickle as cloudpickle
+
+    error = NestedExecutionRequestDecodeError(
+        NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH,
+        True,
+    )
+    restored = cloudpickle.loads(cloudpickle.dumps(error))
+
+    assert type(restored) is NestedExecutionRequestDecodeError
+    assert restored.classification is NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
+    assert restored.attempted_versioned is True
+    assert str(restored) == "nested execution request rejected: runtime_env_mismatch"
+
+
+def _ray_task_error(cause: BaseException, traceback_text: str = "remote traceback"):
+    from ray.exceptions import RayTaskError
+
+    return RayTaskError(
+        "nested_leaf",
+        traceback_text,
+        cause,
+        proctitle="ray::nested_leaf",
+        pid=123,
+        ip="127.0.0.1",
+    )
+
+
+def test_find_nested_rejection_returns_a_direct_typed_rejection() -> None:
+    rejection = NestedExecutionRequestRejected(NestedExecutionRequestRejection.PROTOCOL_MISMATCH)
+
+    assert find_nested_execution_request_rejection(rejection) is rejection
+    assert find_nested_execution_request_rejection(RuntimeError("ordinary")) is None
+
+
+def test_find_nested_rejection_ignores_minimal_ray_fakes_without_a_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ray.exceptions
+
+    monkeypatch.setattr(ray.exceptions, "RayTaskError", RuntimeError)
+
+    assert find_nested_execution_request_rejection(RuntimeError("ordinary")) is None
+
+
+def test_find_nested_rejection_follows_dynamic_ray_wrapper_without_its_text() -> None:
+    rejection = NestedExecutionRequestRejected(NestedExecutionRequestRejection.CALLABLE_MISMATCH)
+    dynamic_wrapper = _ray_task_error(
+        rejection,
+        "password=secret remote traceback",
+    ).as_instanceof_cause()
+
+    found = find_nested_execution_request_rejection(dynamic_wrapper)
+
+    assert found is rejection
+    assert str(found) == "nested execution request rejected: callable_mismatch"
+    assert "password" not in str(found)
+    assert "secret" not in str(found)
+
+
+def test_find_nested_rejection_is_cycle_safe() -> None:
+    wrapped = _ray_task_error(RuntimeError("ordinary"))
+    wrapped.cause = wrapped
+
+    assert find_nested_execution_request_rejection(wrapped) is None
+
+
+def test_find_nested_rejection_has_an_exact_cause_depth_bound() -> None:
+    rejection = NestedExecutionRequestRejected(NestedExecutionRequestRejection.IDENTITY_MISMATCH)
+    wrapped: BaseException = rejection
+    for _ in range(codec_module._NESTED_REJECTION_CAUSE_MAX_HOPS):
+        wrapped = _ray_task_error(wrapped)
+
+    assert find_nested_execution_request_rejection(wrapped) is rejection
+    assert find_nested_execution_request_rejection(_ray_task_error(wrapped)) is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"execution_protocol_version": 2},
+        {"boundary_kind": "workflow_step"},
+        {"callable_binding_kind": "path"},
+        {"callable_binding": "not-an-import-path"},
+        {"output_preview_callable_path": "not-an-import-path"},
+        {"runtime_env_plan_digest": "sha256:" + "c" * 64},
+        {
+            "boundary_identity": NestedDistributedBoundaryIdentity(
+                operation_id="operation-1",
+                item_index=0,
+            )
+        },
+    ],
+)
+def test_nested_encoder_rejects_noncanonical_or_mismatched_values(
+    identity: ExecutionIdentity,
+    changes: dict[str, object],
+) -> None:
+    request = replace(_workflow_nested_request(identity), **changes)
+
+    with pytest.raises(
+        NestedExecutionRequestEncodeError,
+        match="nested execution request is invalid",
+    ):
+        encode_nested_execution_request(request)

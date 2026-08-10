@@ -756,6 +756,92 @@ class _RayExecutor(_Executor):
                 {"edges": edge_batch},
             )
 
+    def _strict_nested_request_kwargs(
+        self,
+        *,
+        boundary_kind: Any,
+        node_id: str,
+        callable_path: str,
+        binding: Any | None,
+        output_preview_callable_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Build one exact nested request only for an explicitly strict parent."""
+        task_context = getattr(self, "task_context", None)
+        if task_context is None or task_context.strict_execution_request is False:
+            return {}
+
+        from django_ray.execution_codec import (
+            NestedCallableBindingKind,
+            NestedExecutionRequest,
+            NestedExecutionRequestRejected,
+            NestedExecutionRequestRejection,
+            NestedWorkflowBoundaryIdentity,
+            encode_nested_execution_request,
+            nested_runtime_env_digests,
+        )
+        from django_ray.runtime.context import (
+            nested_execution_identity,
+            require_strict_task_execution_context,
+        )
+
+        strict_context = require_strict_task_execution_context(task_context)
+        outer_identity, execution_protocol_version = nested_execution_identity(strict_context)
+        workflow_identity = self.workflow_run_identity
+        if workflow_identity is None:
+            raise NestedExecutionRequestRejected(
+                NestedExecutionRequestRejection.MISSING_CONTEXT
+            ) from None
+
+        if binding is not None:
+            runtime_env_plan_identity = _thaw_definition_value(binding.runtime_env_plan_identity)
+        else:
+            if getattr(self, "materialized_plan", None) is not None:
+                raise NestedExecutionRequestRejected(
+                    NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
+                ) from None
+            runtime_env_plan_identity = deepcopy(strict_context.runtime_env_plan_identity)
+        runtime_env_plan_digest, runtime_env_transport_digest = nested_runtime_env_digests(
+            runtime_env_plan_identity
+        )
+        if binding is not None and (
+            runtime_env_plan_digest != binding.runtime_env_plan_digest
+            or runtime_env_transport_digest != binding.runtime_env_transport_digest
+        ):
+            raise NestedExecutionRequestRejected(
+                NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
+            ) from None
+
+        boundary_identity = NestedWorkflowBoundaryIdentity(
+            workflow_run_id=workflow_identity.run_id,
+            node_id=node_id,
+        )
+        serialized = encode_nested_execution_request(
+            NestedExecutionRequest(
+                outer_identity=outer_identity,
+                execution_protocol_version=execution_protocol_version,
+                boundary_kind=boundary_kind,
+                boundary_identity=boundary_identity,
+                callable_binding_kind=NestedCallableBindingKind.PATH,
+                callable_binding=callable_path,
+                output_preview_callable_path=output_preview_callable_path,
+                runtime_env_plan_identity=runtime_env_plan_identity,
+                runtime_env_plan_digest=runtime_env_plan_digest,
+                runtime_env_transport_digest=runtime_env_transport_digest,
+            )
+        )
+        return {
+            "nested_execution_request": serialized,
+            "expected_outer_task_execution_pk": outer_identity.task_execution_pk,
+            "expected_outer_task_id": outer_identity.task_id,
+            "expected_outer_attempt_number": outer_identity.attempt_number,
+            "expected_outer_execution_generation": outer_identity.execution_generation,
+            "expected_execution_protocol_version": execution_protocol_version,
+            "expected_workflow_run_id": workflow_identity.run_id,
+            "expected_node_id": node_id,
+            "expected_runtime_env_plan_digest": runtime_env_plan_digest,
+            "expected_runtime_env_transport_digest": runtime_env_transport_digest,
+        }
+
     def submit_step(
         self,
         signature: Step,
@@ -876,8 +962,22 @@ class _RayExecutor(_Executor):
             and self.workflow_progress_limits != WORKFLOW_PROGRESS_LIMITS_V1
         ):
             remote_progress_kwargs["workflow_progress_limits"] = self.workflow_progress_limits
-        if progress_actor is not None and signature.output_preview_path is not None:
-            remote_progress_kwargs["output_preview_path"] = signature.output_preview_path
+        output_preview_callable_path = (
+            signature.output_preview_path if progress_actor is not None else None
+        )
+        if output_preview_callable_path is not None:
+            remote_progress_kwargs["output_preview_path"] = output_preview_callable_path
+        from django_ray.execution_codec import NestedExecutionBoundaryKind
+
+        remote_progress_kwargs.update(
+            self._strict_nested_request_kwargs(
+                boundary_kind=NestedExecutionBoundaryKind.WORKFLOW_STEP,
+                node_id=node_id,
+                callable_path=signature.callable_path,
+                output_preview_callable_path=output_preview_callable_path,
+                binding=binding,
+            )
+        )
         object_ref = self.remote_step.options(**options).remote(
             signature.callable_path,
             signature.bootstrap_django,
@@ -1211,6 +1311,20 @@ class _RayExecutor(_Executor):
         runtime_env = self._result_fold_runtime_env(reducer, reducer_node_id)
         if runtime_env is not None:
             ray_options["runtime_env"] = runtime_env
+        materialized_plan = getattr(self, "materialized_plan", None)
+        binding = (
+            materialized_plan.binding_for_node(reducer_node_id)
+            if materialized_plan is not None
+            else None
+        )
+        from django_ray.execution_codec import NestedExecutionBoundaryKind
+
+        nested_request_kwargs = self._strict_nested_request_kwargs(
+            boundary_kind=NestedExecutionBoundaryKind.RESULT_FOLD,
+            node_id=reducer_node_id,
+            callable_path=reducer.callable_path,
+            binding=binding,
+        )
         actor_cls = _get_cached_result_fold_actor()
         actor = actor_cls.options(**ray_options).remote(
             max_items,
@@ -1221,6 +1335,7 @@ class _RayExecutor(_Executor):
             reducer.bound_args,
             dict(reducer.bound_kwargs),
             initial,
+            **nested_request_kwargs,
         )
         session = _RayResultFoldSession(
             actor=actor,
@@ -2398,6 +2513,13 @@ class Map(WorkflowSignature):
                 assert ordered_results is not None
                 value = executor.store(ordered_results)
         except BaseException as error:
+            nested_rejection = None
+            if isinstance(error, Exception):
+                from django_ray.execution_codec import (
+                    find_nested_execution_request_rejection,
+                )
+
+                nested_rejection = find_nested_execution_request_rejection(error)
             _close_iterator(iterator)
             cleanup_values = list(reversed(admitting_cleanup or ()))
             cleanup_values.extend(resolving_cleanup)
@@ -2439,10 +2561,12 @@ class Map(WorkflowSignature):
                     completed=completed,
                     input_exhausted=input_exhausted,
                     failed=True,
-                    error=str(error),
+                    error=str(nested_rejection or error),
                 )
             except BaseException:
                 pass
+            if nested_rejection is not None:
+                raise nested_rejection from None
             raise
 
         executor.map_finished(

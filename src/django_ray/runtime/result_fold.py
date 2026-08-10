@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any
 
 from django_ray.runtime.import_utils import import_callable
@@ -206,6 +207,77 @@ def validate_result_fold_ack(
     return value
 
 
+def _decode_result_fold_request(
+    serialized: str | None,
+    *,
+    callable_path: str,
+    expected_outer_task_execution_pk: int | None,
+    expected_outer_task_id: str | None,
+    expected_outer_attempt_number: int | None,
+    expected_outer_execution_generation: int | None,
+    expected_execution_protocol_version: int | None,
+    expected_workflow_run_id: str | None,
+    expected_node_id: str | None,
+    expected_runtime_env_plan_digest: str | None,
+    expected_runtime_env_transport_digest: str | None,
+) -> Any | None:
+    """Decode a fold boundary before bootstrap, import, or initialization."""
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        NestedCallableBindingKind,
+        NestedExecutionBoundaryKind,
+        NestedExecutionRequestRejected,
+        NestedExecutionRequestRejection,
+        NestedWorkflowBoundaryIdentity,
+        assert_nested_callable_binding,
+        decode_nested_execution_request,
+    )
+
+    expectations = (
+        expected_outer_task_execution_pk,
+        expected_outer_task_id,
+        expected_outer_attempt_number,
+        expected_outer_execution_generation,
+        expected_execution_protocol_version,
+        expected_workflow_run_id,
+        expected_node_id,
+        expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest,
+    )
+    if serialized is None:
+        if any(value is not None for value in expectations):
+            raise NestedExecutionRequestRejected(
+                NestedExecutionRequestRejection.MISSING_CONTEXT
+            ) from None
+        return None
+    if any(value is None for value in expectations):
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.MISSING_CONTEXT
+        ) from None
+
+    request = decode_nested_execution_request(
+        serialized,
+        expected_outer_identity=ExecutionIdentity(
+            task_execution_pk=expected_outer_task_execution_pk,
+            task_id=expected_outer_task_id,
+            attempt_number=expected_outer_attempt_number,
+            execution_generation=expected_outer_execution_generation,
+        ),
+        expected_execution_protocol_version=expected_execution_protocol_version,
+        expected_boundary_kind=NestedExecutionBoundaryKind.RESULT_FOLD,
+        expected_boundary_identity=NestedWorkflowBoundaryIdentity(
+            workflow_run_id=expected_workflow_run_id,
+            node_id=expected_node_id,
+        ),
+        expected_callable_binding_kind=NestedCallableBindingKind.PATH,
+        expected_callable_binding=callable_path,
+        expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
+    )
+    assert_nested_callable_binding(request, callable_path=callable_path)
+    return request
+
+
 class WorkflowMapResultFold:
     """One non-detached actor retaining a serialized ordered-fold accumulator."""
 
@@ -219,7 +291,49 @@ class WorkflowMapResultFold:
         reducer_bound_args: tuple[Any, ...],
         reducer_bound_kwargs: Mapping[str, Any],
         initial: Any,
+        *,
+        nested_execution_request: str | None = None,
+        expected_outer_task_execution_pk: int | None = None,
+        expected_outer_task_id: str | None = None,
+        expected_outer_attempt_number: int | None = None,
+        expected_outer_execution_generation: int | None = None,
+        expected_execution_protocol_version: int | None = None,
+        expected_workflow_run_id: str | None = None,
+        expected_node_id: str | None = None,
+        expected_runtime_env_plan_digest: str | None = None,
+        expected_runtime_env_transport_digest: str | None = None,
     ) -> None:
+        self._nested_request = None
+        self._nested_rejection = None
+        try:
+            self._nested_request = _decode_result_fold_request(
+                nested_execution_request,
+                callable_path=reducer_callable_path,
+                expected_outer_task_execution_pk=expected_outer_task_execution_pk,
+                expected_outer_task_id=expected_outer_task_id,
+                expected_outer_attempt_number=expected_outer_attempt_number,
+                expected_outer_execution_generation=expected_outer_execution_generation,
+                expected_execution_protocol_version=expected_execution_protocol_version,
+                expected_workflow_run_id=expected_workflow_run_id,
+                expected_node_id=expected_node_id,
+                expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
+                expected_runtime_env_transport_digest=(expected_runtime_env_transport_digest),
+            )
+        except Exception as error:
+            from django_ray.execution_codec import NestedExecutionRequestRejected
+
+            if not isinstance(error, NestedExecutionRequestRejected):
+                raise
+            # Actor construction succeeds so the coordinator receives one fixed,
+            # trusted rejection from ready() before it admits any mapper effects.
+            self._nested_rejection = error
+            self._finalized = True
+            self._serialized_accumulator = b""
+            self._out_of_order = {}
+            self._out_of_order_bytes = 0
+            self._next_index = 0
+            return
+
         if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
             raise ValueError("max_items must be a positive integer")
         if (
@@ -243,31 +357,32 @@ class WorkflowMapResultFold:
         if not isinstance(reducer_bound_kwargs, Mapping):
             raise TypeError("reducer_bound_kwargs must be a mapping")
 
-        if reducer_bootstrap_django:
-            from django_ray.runtime.entrypoint import bootstrap_django
+        with self._execution_context():
+            if reducer_bootstrap_django:
+                from django_ray.runtime.entrypoint import bootstrap_django
 
-            bootstrap_django()
+                bootstrap_django()
 
-        import ray.cloudpickle as cloudpickle
+            import ray.cloudpickle as cloudpickle
 
-        serialized_initial = cloudpickle.dumps(initial, protocol=RESULT_FOLD_PICKLE_PROTOCOL)
-        if len(serialized_initial) > max_serialized_bytes:
-            raise ResultFoldOverflowError(
-                "Result-fold initial accumulator serialization exceeds "
-                f"max_serialized_bytes={max_serialized_bytes}"
-            )
+            serialized_initial = cloudpickle.dumps(initial, protocol=RESULT_FOLD_PICKLE_PROTOCOL)
+            if len(serialized_initial) > max_serialized_bytes:
+                raise ResultFoldOverflowError(
+                    "Result-fold initial accumulator serialization exceeds "
+                    f"max_serialized_bytes={max_serialized_bytes}"
+                )
 
-        reducer = import_callable(reducer_callable_path)
-        import inspect
+            reducer = import_callable(reducer_callable_path)
+            import inspect
 
-        if (
-            inspect.iscoroutinefunction(reducer)
-            or inspect.isgeneratorfunction(reducer)
-            or inspect.isasyncgenfunction(reducer)
-        ):
-            raise ResultFoldProtocolError(
-                "Result-fold reducer must be synchronous and non-generator"
-            )
+            if (
+                inspect.iscoroutinefunction(reducer)
+                or inspect.isgeneratorfunction(reducer)
+                or inspect.isasyncgenfunction(reducer)
+            ):
+                raise ResultFoldProtocolError(
+                    "Result-fold reducer must be synchronous and non-generator"
+                )
 
         self.max_items = max_items
         self.max_concurrency = max_concurrency
@@ -283,6 +398,29 @@ class WorkflowMapResultFold:
         self.peak_retained_bytes = len(serialized_initial)
         self.peak_out_of_order_items = 0
 
+    def _execution_context(self) -> Any:
+        request = self._nested_request
+        if request is None:
+            return nullcontext()
+        from django_ray.runtime.compiled_graph import CompiledGraphSubmissionTransport
+        from django_ray.runtime.context import durable_task_execution
+
+        profile = request.runtime_env_plan_identity.get("profile")
+        return durable_task_execution(
+            request.outer_identity.task_execution_pk,
+            task_id=request.outer_identity.task_id,
+            execution_protocol_version=request.execution_protocol_version,
+            attempt_number=request.outer_identity.attempt_number,
+            execution_generation=request.outer_identity.execution_generation,
+            runtime_env_profile=profile if isinstance(profile, str) else None,
+            runtime_env_hash="",
+            runtime_env_plan_identity=request.runtime_env_plan_identity,
+            compiled_graph_submission_transport=(
+                CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value
+            ),
+            strict_execution_request=True,
+        )
+
     @property
     def retained_bytes(self) -> int:
         return len(self._serialized_accumulator) + self._out_of_order_bytes
@@ -293,6 +431,8 @@ class WorkflowMapResultFold:
 
     def ready(self) -> dict[str, Any]:
         """Confirm initial serialization and actor scheduling before leaf effects."""
+        if self._nested_rejection is not None:
+            raise self._nested_rejection
         return self._ack("ready")
 
     def append(self, index: int, value: Any) -> dict[str, Any]:
@@ -310,7 +450,8 @@ class WorkflowMapResultFold:
 
         import ray.cloudpickle as cloudpickle
 
-        serialized_item = cloudpickle.dumps(value, protocol=RESULT_FOLD_PICKLE_PROTOCOL)
+        with self._execution_context():
+            serialized_item = cloudpickle.dumps(value, protocol=RESULT_FOLD_PICKLE_PROTOCOL)
         if len(serialized_item) > self.max_serialized_bytes:
             raise ResultFoldOverflowError(
                 f"Result-fold item serialization at index {index} exceeds "
@@ -346,6 +487,10 @@ class WorkflowMapResultFold:
         }
 
     def _fold_contiguous(self, index: int, serialized_item: bytes) -> None:
+        with self._execution_context():
+            self._fold_contiguous_in_context(index, serialized_item)
+
+    def _fold_contiguous_in_context(self, index: int, serialized_item: bytes) -> None:
         import ray.cloudpickle as cloudpickle
 
         candidate_accumulator = self._serialized_accumulator
@@ -413,7 +558,8 @@ class WorkflowMapResultFold:
         import ray.cloudpickle as cloudpickle
 
         retained_bytes = self.retained_bytes
-        accumulator = cloudpickle.loads(self._serialized_accumulator)
+        with self._execution_context():
+            accumulator = cloudpickle.loads(self._serialized_accumulator)
         self._serialized_accumulator = b""
         self._out_of_order.clear()
         self._out_of_order_bytes = 0

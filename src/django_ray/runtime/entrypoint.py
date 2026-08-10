@@ -37,7 +37,10 @@ from django_ray.ray_job_protocol import (
 from django_ray.redaction import redact_text
 
 if TYPE_CHECKING:
-    from django_ray.execution_codec import ExecutionIdentity, ExecutionRequestRejection
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        ExecutionRequestRejection,
+    )
 
 logger = get_logger(__name__)
 
@@ -123,7 +126,28 @@ def _serialize_error(
     execution_protocol_version: int | None = None,
 ) -> str:
     """Serialize an exception as a task result JSON string."""
+    from django_ray.execution_codec import (
+        NestedExecutionRequestRejected,
+        find_nested_execution_request_rejection,
+    )
     from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+    nested_rejection = find_nested_execution_request_rejection(e)
+    if nested_rejection is not None:
+        return _serialize_completion(
+            success=False,
+            result=None,
+            result_reference=None,
+            error=str(nested_rejection),
+            error_traceback=None,
+            exception_type=(
+                f"{NestedExecutionRequestRejected.__module__}."
+                f"{NestedExecutionRequestRejected.__name__}"
+            ),
+            retryable=False,
+            completion_identity=completion_identity,
+            execution_protocol_version=execution_protocol_version,
+        )
 
     return _serialize_completion(
         success=False,
@@ -264,6 +288,7 @@ def execute_task(
     ray_job_driver: bool | None = None,
     _completion_identity: ExecutionIdentity | None = None,
     _execution_protocol_version: int | None = None,
+    _strict_execution_request: bool = False,
 ) -> str:
     """Execute a Django Task and return JSON result.
 
@@ -308,6 +333,7 @@ def execute_task(
             execution_context = durable_task_execution(
                 task_execution_pk,
                 task_id=task_id,
+                execution_protocol_version=_execution_protocol_version,
                 attempt_number=attempt_number,
                 execution_generation=execution_generation,
                 runtime_env_profile=runtime_env_profile,
@@ -319,6 +345,7 @@ def execute_task(
                     if effective_ray_job_driver
                     else None
                 ),
+                strict_execution_request=_strict_execution_request,
             )
 
         with execution_context:
@@ -562,6 +589,7 @@ def execute_task_from_payload(payload_b64: str) -> str:
         ray_job_driver=True,
         _completion_identity=request.identity,
         _execution_protocol_version=request.execution_protocol_version,
+        _strict_execution_request=True,
     )
 
 

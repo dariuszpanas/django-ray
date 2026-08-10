@@ -11,6 +11,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from django_ray.execution_codec import (
+    ExecutionIdentity,
+    NestedExecutionRequestRejected,
+    NestedExecutionRequestRejection,
+)
 from django_ray.lifecycle import record_failure
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.observability import get_task_summary, get_workflow_plan
@@ -28,6 +33,8 @@ from django_ray.runtime.context import (
     WorkflowRunIdentity,
     durable_task_execution,
     get_current_task_context,
+    nested_execution_identity,
+    require_strict_task_execution_context,
 )
 from django_ray.runtime.runtime_env import normalize_runtime_env
 from django_ray.workflow_plans import (
@@ -38,6 +45,7 @@ from django_ray.workflow_plans import (
     PLAN_FORMAT_VERSION,
     PLAN_SELECTION_FORMAT_VERSION,
     PLAN_SELECTION_LEGACY_FORMAT_VERSION,
+    StepExecutionBinding,
     WorkflowPlanBuildContext,
     WorkflowPlanMismatchError,
     WorkflowPlanValidationError,
@@ -223,6 +231,108 @@ def _materialize(signature, *args, context=BASE_CONTEXT, **kwargs):
         invocation_kwargs=kwargs,
         build_context=context,
     )
+
+
+def test_nested_execution_identity_requires_an_explicit_strict_marker() -> None:
+    runtime_identity = runtime_env_plan_identity(normalize_runtime_env({})).as_transport_dict()
+    unmarked = DurableTaskContext(
+        task_pk=41,
+        task_id="task-41",
+        attempt_number=2,
+        execution_generation=3,
+        execution_protocol_version=1,
+        runtime_env_plan_identity=runtime_identity,
+    )
+
+    with pytest.raises(NestedExecutionRequestRejected) as caught:
+        nested_execution_identity(unmarked)
+
+    assert caught.value.classification is NestedExecutionRequestRejection.MISSING_CONTEXT
+    assert str(caught.value) == "nested execution request rejected: missing_context"
+
+
+def test_nested_execution_identity_returns_the_exact_outer_fence_and_protocol() -> None:
+    runtime_identity = runtime_env_plan_identity(normalize_runtime_env({})).as_transport_dict()
+    context = DurableTaskContext(
+        task_pk=41,
+        task_id="task-41",
+        attempt_number=2,
+        execution_generation=3,
+        execution_protocol_version=1,
+        runtime_env_plan_identity=runtime_identity,
+        strict_execution_request=True,
+    )
+
+    assert require_strict_task_execution_context(context) is context
+    assert nested_execution_identity(context) == (
+        ExecutionIdentity(41, "task-41", 2, 3),
+        1,
+    )
+
+
+def test_durable_task_execution_never_infers_the_strict_marker() -> None:
+    runtime_identity = runtime_env_plan_identity(normalize_runtime_env({})).as_transport_dict()
+    kwargs = {
+        "task_id": "task-41",
+        "attempt_number": 2,
+        "execution_generation": 3,
+        "execution_protocol_version": 1,
+        "runtime_env_plan_identity": runtime_identity,
+    }
+
+    with durable_task_execution(41, **kwargs):
+        context = get_current_task_context()
+        assert context is not None
+        assert context.strict_execution_request is False
+        with pytest.raises(NestedExecutionRequestRejected):
+            nested_execution_identity()
+
+    with durable_task_execution(41, strict_execution_request=True, **kwargs):
+        context = get_current_task_context()
+        assert context is not None
+        assert context.strict_execution_request is True
+        assert nested_execution_identity() == (ExecutionIdentity(41, "task-41", 2, 3), 1)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"task_id": None},
+        {"attempt_number": None},
+        {"execution_generation": None},
+        {"execution_protocol_version": None},
+        {"execution_protocol_version": 2},
+        {"runtime_env_plan_identity": None},
+        {
+            "runtime_env_plan_identity": {
+                "digest": "sha256:" + "a" * 64,
+                "transport_digest": "sha256:" + "b" * 64,
+            }
+        },
+    ],
+)
+def test_strict_context_rejects_every_incomplete_outer_contract(
+    changes: dict[str, object],
+) -> None:
+    context = replace(
+        DurableTaskContext(
+            task_pk=41,
+            task_id="task-41",
+            attempt_number=2,
+            execution_generation=3,
+            execution_protocol_version=1,
+            runtime_env_plan_identity=runtime_env_plan_identity(
+                normalize_runtime_env({})
+            ).as_transport_dict(),
+            strict_execution_request=True,
+        ),
+        **changes,
+    )
+
+    with pytest.raises(NestedExecutionRequestRejected) as caught:
+        require_strict_task_execution_context(context)
+
+    assert caught.value.classification is NestedExecutionRequestRejection.MISSING_CONTEXT
 
 
 def _task_context(execution: RayTaskExecution) -> DurableTaskContext:
@@ -1234,6 +1344,36 @@ def test_runtime_env_transport_is_bounded_and_strictly_revalidated() -> None:
         runtime_env_plan_identity_from_transport(inconsistent)
 
 
+def test_runtime_env_transport_can_validate_structure_without_local_trust_match() -> None:
+    identity = runtime_env_plan_identity(
+        normalize_runtime_env({"env_vars": {"MODE": "test"}}),
+        trust_identity={"trust_domain": "remote-worker-domain"},
+    )
+    transported = identity.as_transport_dict()
+
+    with pytest.raises(WorkflowPlanValidationError, match="worker trust identity"):
+        runtime_env_plan_identity_from_transport(transported)
+    assert (
+        runtime_env_plan_identity_from_transport(
+            transported,
+            require_trust_match=False,
+        ).as_transport_dict()
+        == transported
+    )
+
+    forged = {**transported, "trust_digest": "sha256:" + "f" * 64}
+    with pytest.raises(WorkflowPlanValidationError, match="checksum"):
+        runtime_env_plan_identity_from_transport(
+            forged,
+            require_trust_match=False,
+        )
+    with pytest.raises(WorkflowPlanValidationError, match="must be a boolean"):
+        runtime_env_plan_identity_from_transport(
+            transported,
+            require_trust_match=1,
+        )
+
+
 def test_runtime_env_transport_accepts_retry_paths_beyond_unresolved_diagnostic_window(
     tmp_path,
 ) -> None:
@@ -1613,6 +1753,39 @@ def test_workflow_signatures_remain_pickle_and_deepcopy_compatible() -> None:
     assert deepcopy(signature) == signature
 
 
+def test_step_execution_binding_retains_original_constructor_compatibility() -> None:
+    ray_options = {"num_cpus": 1}
+    runtime_env_metadata = {"mode": "override"}
+    trust_identity = {"environment_revision": "revision-1"}
+    digest = "sha256:" + "a" * 64
+    positional = StepExecutionBinding(
+        ray_options,
+        "profile",
+        "{}",
+        runtime_env_metadata,
+        digest,
+        trust_identity,
+    )
+    keyword = StepExecutionBinding(
+        ray_options=ray_options,
+        runtime_env_profile="profile",
+        runtime_env_serialized="{}",
+        runtime_env_metadata=runtime_env_metadata,
+        runtime_env_plan_digest=digest,
+        runtime_env_trust_identity=trust_identity,
+    )
+
+    assert positional == keyword
+    assert positional.ray_options is ray_options
+    assert positional.runtime_env_profile == "profile"
+    assert positional.runtime_env_serialized == "{}"
+    assert positional.runtime_env_metadata is runtime_env_metadata
+    assert positional.runtime_env_plan_digest == digest
+    assert positional.runtime_env_trust_identity is trust_identity
+    assert positional.runtime_env_plan_identity is None
+    assert positional.runtime_env_transport_digest is None
+
+
 def test_local_runtime_env_mutation_fails_before_leaf_submission(tmp_path, monkeypatch) -> None:
     source = tmp_path / "code"
     source.mkdir()
@@ -1658,6 +1831,23 @@ def test_repeated_step_runtime_env_identity_and_preparation_are_cached(monkeypat
     # One outer identity plus one shared per-step identity.
     assert identity_calls == 2
 
+    def transitive_identity(binding: StepExecutionBinding):
+        identity = binding.runtime_env_plan_identity
+        assert identity is not None
+        return (
+            dict(identity),
+            binding.runtime_env_plan_digest,
+            binding.runtime_env_transport_digest,
+        )
+
+    original_bindings = {
+        node_id: transitive_identity(binding)
+        for node_id, binding in materialized.step_bindings.items()
+    }
+    for identity, plan_digest, transport_digest in original_bindings.values():
+        assert identity["digest"] == plan_digest
+        assert identity["transport_digest"] == transport_digest
+
     preparation_calls = 0
 
     def count_preparation(resolved):
@@ -1669,8 +1859,11 @@ def test_repeated_step_runtime_env_identity_and_preparation_are_cached(monkeypat
         "django_ray.runtime.runtime_env.prepare_runtime_env_for_ray_core",
         count_preparation,
     )
-    prepare_materialized_plan_for_ray(materialized)
+    prepared = prepare_materialized_plan_for_ray(materialized)
     assert preparation_calls == 1
+    assert {
+        node_id: transitive_identity(binding) for node_id, binding in prepared.step_bindings.items()
+    } == original_bindings
 
 
 def test_plan_and_builder_metadata_are_deeply_immutable() -> None:

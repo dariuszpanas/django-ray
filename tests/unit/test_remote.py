@@ -18,8 +18,15 @@ from django_ray.execution_codec import (
     ExecutionIdentity,
     ExecutionRequest,
     ExecutionRequestRejection,
+    NestedCallableBindingKind,
+    NestedExecutionBoundaryKind,
+    NestedExecutionRequest,
+    NestedExecutionRequestRejected,
+    NestedExecutionRequestRejection,
+    NestedWorkflowBoundaryIdentity,
     decode_execution_completion,
     encode_execution_request,
+    encode_nested_execution_request,
 )
 from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.runtime.remote import (
@@ -108,6 +115,60 @@ def _execute_strict_request(
         expected_execution_generation=identity.execution_generation,
         expected_execution_protocol_version=expected_protocol,
     )
+
+
+def _strict_nested_workflow_request(
+    *,
+    callable_path: str,
+    workflow_run_id: str,
+    node_id: str,
+    output_preview_path: str | None = None,
+) -> tuple[str, dict[str, object]]:
+    from django_ray.runtime.runtime_env import normalize_runtime_env
+    from django_ray.workflow_plans import runtime_env_plan_identity
+
+    runtime_identity = runtime_env_plan_identity(
+        normalize_runtime_env({"env_vars": {"NESTED_TEST": "1"}})
+    ).as_transport_dict()
+    serialized = encode_nested_execution_request(
+        NestedExecutionRequest(
+            outer_identity=_STRICT_IDENTITY,
+            execution_protocol_version=1,
+            boundary_kind=NestedExecutionBoundaryKind.WORKFLOW_STEP,
+            boundary_identity=NestedWorkflowBoundaryIdentity(
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            ),
+            callable_binding_kind=NestedCallableBindingKind.PATH,
+            callable_binding=callable_path,
+            output_preview_callable_path=output_preview_path,
+            runtime_env_plan_identity=runtime_identity,
+            runtime_env_plan_digest=str(runtime_identity["digest"]),
+            runtime_env_transport_digest=str(runtime_identity["transport_digest"]),
+        )
+    )
+    return serialized, runtime_identity
+
+
+def _strict_nested_workflow_kwargs(
+    serialized: str,
+    runtime_identity: dict[str, object],
+    *,
+    workflow_run_id: str,
+    node_id: str,
+) -> dict[str, object]:
+    return {
+        "nested_execution_request": serialized,
+        "expected_outer_task_execution_pk": _STRICT_IDENTITY.task_execution_pk,
+        "expected_outer_task_id": _STRICT_IDENTITY.task_id,
+        "expected_outer_attempt_number": _STRICT_IDENTITY.attempt_number,
+        "expected_outer_execution_generation": _STRICT_IDENTITY.execution_generation,
+        "expected_execution_protocol_version": 1,
+        "expected_workflow_run_id": workflow_run_id,
+        "expected_node_id": node_id,
+        "expected_runtime_env_plan_digest": runtime_identity["digest"],
+        "expected_runtime_env_transport_digest": runtime_identity["transport_digest"],
+    }
 
 
 def _progress_wire(
@@ -213,6 +274,36 @@ def workflow_context_target() -> dict[str, object] | None:
     from django_ray.runtime.context import get_current_workflow_run_identity
 
     return get_current_workflow_run_identity()
+
+
+def strict_workflow_context_target() -> dict[str, object]:
+    from django_ray.runtime.context import get_current_task_context
+
+    context = get_current_task_context()
+    assert context is not None
+    return {
+        "task_pk": context.task_pk,
+        "task_id": context.task_id,
+        "attempt_number": context.attempt_number,
+        "execution_generation": context.execution_generation,
+        "execution_protocol_version": context.execution_protocol_version,
+        "strict_execution_request": context.strict_execution_request,
+        "compiled_graph_submission_transport": (context.compiled_graph_submission_transport),
+        "runtime_env_hash": context.runtime_env_hash,
+        "runtime_env_plan_identity": context.runtime_env_plan_identity,
+    }
+
+
+def strict_workflow_full_context_target(expected: dict[str, object]) -> str:
+    """Assert the complete strict context inside a real Ray workflow leaf."""
+    from dataclasses import asdict
+
+    from django_ray.runtime.context import get_current_task_context
+
+    context = get_current_task_context()
+    assert context is not None
+    assert asdict(context) == expected
+    return "strict-context-ready"
 
 
 def workflow_progress_target(value: int, *, fail: bool = False) -> int:
@@ -338,6 +429,7 @@ def test_execute_django_task_remote_executes_strict_request_with_bound_context(
             "runtime_env_hash": context.runtime_env_hash,
             "runtime_env_plan_identity": context.runtime_env_plan_identity,
             "compiled_graph_submission_transport": (context.compiled_graph_submission_transport),
+            "strict_execution_request": context.strict_execution_request,
         }
         return {"increment": increment, "value": value}
 
@@ -375,6 +467,7 @@ def test_execute_django_task_remote_executes_strict_request_with_bound_context(
             "runtime_env_hash": "a" * 64,
             "runtime_env_plan_identity": {"profile": "thin", "schema_version": 1},
             "compiled_graph_submission_transport": "direct-ray-core",
+            "strict_execution_request": True,
         },
     }
     assert get_current_task_context() is None
@@ -584,6 +677,239 @@ def test_execute_workflow_step_exposes_run_identity_to_leaf(monkeypatch) -> None
     assert get_current_workflow_run_identity() is None
 
 
+def test_strict_workflow_step_installs_exact_nested_context() -> None:
+    callable_path = f"{__name__}.strict_workflow_context_target"
+    workflow_run_id = "00000000-0000-4000-8000-000000000511"
+    node_id = "0.strict"
+    serialized, runtime_identity = _strict_nested_workflow_request(
+        callable_path=callable_path,
+        workflow_run_id=workflow_run_id,
+        node_id=node_id,
+    )
+    run_identity = {
+        "schema_version": 1,
+        "run_id": workflow_run_id,
+        "task_execution_pk": _STRICT_IDENTITY.task_execution_pk,
+        "attempt_number": _STRICT_IDENTITY.attempt_number,
+        "execution_generation": _STRICT_IDENTITY.execution_generation,
+    }
+
+    result = execute_workflow_step_remote(
+        callable_path,
+        False,
+        (),
+        {},
+        {},
+        _STRICT_IDENTITY.task_execution_pk,
+        None,
+        node_id,
+        workflow_run_identity=run_identity,
+        **_strict_nested_workflow_kwargs(
+            serialized,
+            runtime_identity,
+            workflow_run_id=workflow_run_id,
+            node_id=node_id,
+        ),
+    )
+
+    assert result == {
+        "task_pk": _STRICT_IDENTITY.task_execution_pk,
+        "task_id": _STRICT_IDENTITY.task_id,
+        "attempt_number": _STRICT_IDENTITY.attempt_number,
+        "execution_generation": _STRICT_IDENTITY.execution_generation,
+        "execution_protocol_version": 1,
+        "strict_execution_request": True,
+        "compiled_graph_submission_transport": "direct-ray-core",
+        "runtime_env_hash": "",
+        "runtime_env_plan_identity": runtime_identity,
+    }
+
+
+@pytest.mark.real_ray
+def test_real_ray_strict_workflow_step_round_trip_has_full_context(
+    ray_cluster: Any,
+) -> None:
+    callable_path = f"{__name__}.strict_workflow_full_context_target"
+    workflow_run_id = "00000000-0000-4000-8000-000000000514"
+    node_id = "0.strict-real-ray"
+    serialized, runtime_identity = _strict_nested_workflow_request(
+        callable_path=callable_path,
+        workflow_run_id=workflow_run_id,
+        node_id=node_id,
+    )
+    expected_context = {
+        "task_pk": _STRICT_IDENTITY.task_execution_pk,
+        "attempt_number": _STRICT_IDENTITY.attempt_number,
+        "execution_generation": _STRICT_IDENTITY.execution_generation,
+        "runtime_env_profile": None,
+        "runtime_env_hash": "",
+        "runtime_env_plan_identity": runtime_identity,
+        "ray_job_driver": False,
+        "compiled_graph_submission_transport": "direct-ray-core",
+        "task_id": _STRICT_IDENTITY.task_id,
+        "execution_protocol_version": 1,
+        "strict_execution_request": True,
+    }
+    run_identity = {
+        "schema_version": 1,
+        "run_id": workflow_run_id,
+        "task_execution_pk": _STRICT_IDENTITY.task_execution_pk,
+        "attempt_number": _STRICT_IDENTITY.attempt_number,
+        "execution_generation": _STRICT_IDENTITY.execution_generation,
+    }
+    remote = ray_cluster.remote(num_cpus=0.25)(execute_workflow_step_remote)
+
+    result = ray_cluster.get(
+        remote.remote(
+            callable_path,
+            False,
+            (expected_context,),
+            {},
+            {},
+            _STRICT_IDENTITY.task_execution_pk,
+            None,
+            node_id,
+            workflow_run_identity=run_identity,
+            **_strict_nested_workflow_kwargs(
+                serialized,
+                runtime_identity,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            ),
+        )
+    )
+
+    assert result == "strict-context-ready"
+
+
+def test_strict_workflow_step_rejects_mixed_progress_identity_before_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callable_path = f"{__name__}.strict_workflow_context_target"
+    workflow_run_id = "00000000-0000-4000-8000-000000000512"
+    node_id = "0.strict"
+    serialized, runtime_identity = _strict_nested_workflow_request(
+        callable_path=callable_path,
+        workflow_run_id=workflow_run_id,
+        node_id=node_id,
+    )
+    bootstrapped: list[bool] = []
+    monkeypatch.setattr(
+        "django_ray.runtime.entrypoint.bootstrap_django",
+        lambda: bootstrapped.append(True),
+    )
+
+    with pytest.raises(NestedExecutionRequestRejected) as captured:
+        execute_workflow_step_remote(
+            callable_path,
+            True,
+            (),
+            {},
+            {},
+            _STRICT_IDENTITY.task_execution_pk,
+            None,
+            node_id,
+            workflow_run_identity={
+                "schema_version": 1,
+                "run_id": "mixed-secret-run",
+                "task_execution_pk": _STRICT_IDENTITY.task_execution_pk,
+                "attempt_number": _STRICT_IDENTITY.attempt_number,
+                "execution_generation": _STRICT_IDENTITY.execution_generation,
+            },
+            **_strict_nested_workflow_kwargs(
+                serialized,
+                runtime_identity,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            ),
+        )
+
+    assert captured.value.classification is NestedExecutionRequestRejection.BOUNDARY_MISMATCH
+    assert str(captured.value) == "nested execution request rejected: boundary_mismatch"
+    assert "mixed-secret-run" not in str(captured.value)
+    assert bootstrapped == []
+
+
+def test_strict_workflow_step_rejects_mixed_positional_node_before_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callable_path = f"{__name__}.strict_workflow_context_target"
+    workflow_run_id = "00000000-0000-4000-8000-000000000513"
+    node_id = "0.strict"
+    serialized, runtime_identity = _strict_nested_workflow_request(
+        callable_path=callable_path,
+        workflow_run_id=workflow_run_id,
+        node_id=node_id,
+    )
+    monkeypatch.setattr(
+        "django_ray.runtime.import_utils.import_callable",
+        lambda _path: pytest.fail("callable imported before node binding rejection"),
+    )
+
+    with pytest.raises(NestedExecutionRequestRejected) as captured:
+        execute_workflow_step_remote(
+            callable_path,
+            False,
+            (),
+            {},
+            {},
+            _STRICT_IDENTITY.task_execution_pk,
+            None,
+            "mixed-secret-node",
+            **_strict_nested_workflow_kwargs(
+                serialized,
+                runtime_identity,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            ),
+        )
+
+    assert captured.value.classification is NestedExecutionRequestRejection.BOUNDARY_MISMATCH
+    assert "mixed-secret-node" not in str(captured.value)
+
+
+def test_strict_workflow_step_rejects_mixed_output_preview_before_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callable_path = f"{__name__}.strict_workflow_context_target"
+    output_preview_path = f"{__name__}.preview_workflow_target"
+    workflow_run_id = "00000000-0000-4000-8000-000000000515"
+    node_id = "0.strict"
+    serialized, runtime_identity = _strict_nested_workflow_request(
+        callable_path=callable_path,
+        workflow_run_id=workflow_run_id,
+        node_id=node_id,
+        output_preview_path=output_preview_path,
+    )
+    monkeypatch.setattr(
+        "django_ray.runtime.import_utils.import_callable",
+        lambda _path: pytest.fail("callable imported before preview binding rejection"),
+    )
+
+    with pytest.raises(NestedExecutionRequestRejected) as captured:
+        execute_workflow_step_remote(
+            callable_path,
+            False,
+            (),
+            {},
+            {},
+            _STRICT_IDENTITY.task_execution_pk,
+            None,
+            node_id,
+            output_preview_path="mixed-secret-preview",
+            **_strict_nested_workflow_kwargs(
+                serialized,
+                runtime_identity,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            ),
+        )
+
+    assert captured.value.classification is NestedExecutionRequestRejection.CALLABLE_MISMATCH
+    assert str(captured.value) == "nested execution request rejected: callable_mismatch"
+    assert "mixed-secret-preview" not in str(captured.value)
+
+
 def test_execute_workflow_step_reports_failure() -> None:
     import ray
 
@@ -622,6 +948,74 @@ def test_execute_workflow_step_reports_failure() -> None:
         "node_id": "0.1",
     }
     assert not ray.is_initialized()
+
+
+def test_workflow_step_sanitizes_nested_rejection_before_progress_and_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ray.exceptions import RayTaskError
+
+    cause = NestedExecutionRequestRejected(NestedExecutionRequestRejection.IDENTITY_MISMATCH)
+    wrapped = RayTaskError(
+        "nested_leaf",
+        "secret-bearing nested traceback",
+        cause,
+        proctitle="ray::nested_leaf",
+        pid=123,
+        ip="127.0.0.1",
+    )
+
+    def reject() -> None:
+        raise wrapped
+
+    safe_logs: list[str] = []
+    monkeypatch.setattr(
+        "django_ray.runtime.import_utils.import_callable",
+        lambda _path: reject,
+    )
+    monkeypatch.setattr("django_ray.logging.configure_default_logging", lambda: None)
+    monkeypatch.setattr(
+        "django_ray.logging.get_logger",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            info=lambda *_args, **_kwargs: None,
+            error=lambda message, **_kwargs: safe_logs.append(message),
+            exception=lambda *_args, **_kwargs: pytest.fail(
+                "nested rejection emitted raw exception logging"
+            ),
+        ),
+    )
+    monkeypatch.setattr(remote_module, "_ray_execution_metadata", dict)
+    actor = _ProgressActor()
+    run_identity = dict(_WORKFLOW_RUN_IDENTITY)
+
+    with pytest.raises(NestedExecutionRequestRejected) as caught:
+        execute_workflow_step_remote(
+            "tests.unit.test_remote.nested_rejection_target",
+            False,
+            (),
+            {},
+            {},
+            None,
+            actor,
+            "0.nested",
+            workflow_run_identity=run_identity,
+        )
+
+    assert caught.value is cause
+    events = [
+        decode_workflow_progress_event(
+            call[0],
+            expected_run_identity=run_identity,
+        )
+        for call in actor.ingest.calls
+    ]
+    assert [event.kind for event in events] == [
+        WorkflowProgressEventKind.STARTED,
+        WorkflowProgressEventKind.FAILED,
+    ]
+    assert events[-1].payload["error"] == ("nested execution request rejected: identity_mismatch")
+    assert safe_logs == ["Workflow step rejected nested execution request"]
+    assert "secret-bearing" not in b"".join(call[0] for call in actor.ingest.calls).decode()
 
 
 def test_execute_workflow_step_ignores_progress_reporting_failures() -> None:
