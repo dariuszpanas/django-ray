@@ -48,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adoption or mutation. Unsupported rows remain unchanged without being mistaken for
   lease loss. The informational lease queue text and protocol capability do not attest
   per-queue capacity, Ray/Python compatibility, or target-cluster readiness.
+- Ray Job reconciliation, stuck/timeout recovery, and cancellation processing now
+  capture the exact live lease range before global execution scans. Unsupported active
+  tracking is retired locally before a status, log, or stop call, while the durable
+  execution and its source lease remain available to a compatible worker cohort.
 - PostgreSQL and SQLite rollout coordination now serializes exact-0.4 execution and
   lease inserts, legacy heartbeats, and concurrent policy transitions without using
   package Semantic Versions as compatibility evidence. Callers must provide the

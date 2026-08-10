@@ -135,8 +135,16 @@ Upgraded task managers read the supported protocol range from their exact locked
 fresh schema-`1` lease. The worker applies that range before the bounded queued-expiry
 and claim limits, then rechecks it after locking an exact execution before adoption or
 mutation. An unsupported row remains unchanged and does not cause the worker to give up
-its lease. Global discovery may still observe such a row, but the authoritative boundary
-does not grant mutation authority to an incompatible manager in this slice.
+its lease. Reconciliation, stuck/timeout recovery, and cancellation processing refresh
+the exact lease range before their global scans and filter active lookups plus
+`RUNNING`/`CANCELLING` discovery before contacting Ray. Unsupported in-memory Ray Job
+tracking is dropped locally without changing the task or its source lease; a compatible
+cohort can recover it later. Every resulting effect still crosses the authoritative
+lease-then-execution boundary.
+
+This does not yet fence Ray Core handle polling and bulk monitor heartbeats, direct
+lifecycle APIs, or the remote completion transport. Do not use the scan filter as
+proof that an executor can deserialize or run the task.
 
 Do not interpret the lease's informational `queue_name` text as a durable per-queue
 capability, or its protocol range as proof that Ray is ready. Ray/Python version and
