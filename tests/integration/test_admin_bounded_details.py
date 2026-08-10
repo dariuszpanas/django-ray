@@ -326,6 +326,7 @@ def test_execution_detail_projection_never_lazy_loads_huge_diagnostics(admin_use
         args_json=sentinel,
         kwargs_json=sentinel,
         input_reference=sentinel,
+        ray_job_request_reference=sentinel,
         result_data=sentinel,
         result_reference=sentinel,
         progress_data=sentinel,
@@ -366,6 +367,7 @@ def test_execution_detail_projection_never_lazy_loads_huge_diagnostics(admin_use
     )
     assert {
         "progress_data",
+        "ray_job_request_reference",
         "runtime_env_json",
         "workflow_progress_summary_json",
         "workflow_plan_json",

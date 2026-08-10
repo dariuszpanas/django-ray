@@ -41,6 +41,7 @@ EXPECTED_FILES = {
     "django_ray/migrations/0018_workflow_run_allocation.py",
     "django_ray/migrations/0019_execution_protocol_schema.py",
     "django_ray/migrations/0020_legacy_open_rollback_fence.py",
+    "django_ray/migrations/0021_ray_job_request_reference.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
     "django_ray/runner/ray_job.py",
@@ -48,7 +49,7 @@ EXPECTED_FILES = {
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0020_legacy_open_rollback_fence",
+    "0021_ray_job_request_reference",
 )
 
 

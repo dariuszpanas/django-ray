@@ -750,6 +750,7 @@ def _request_task_retry(
         current.executor_django_ray_version = None
         promote_legacy_ray_target(current)
         current.ray_job_id = None
+        current.ray_job_request_reference = None
         current.ray_address = None
         current.cancellation_status = None
         current.cancellation_error = None
@@ -776,6 +777,7 @@ def _request_task_retry(
                 "managed_with_django_ray_version",
                 "executor_django_ray_version",
                 "ray_job_id",
+                "ray_job_request_reference",
                 "ray_target_address",
                 "ray_address",
                 "cancellation_status",

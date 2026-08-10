@@ -86,6 +86,7 @@ _REJECTED_PATH_PAYLOAD_COLUMNS = {
     "args_json",
     "kwargs_json",
     "input_reference",
+    "ray_job_request_reference",
     "result_data",
     "result_reference",
     "error_message",
@@ -134,6 +135,8 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
         managed_with_django_ray_version="0.4.0-manager",
         executor_django_ray_version="0.4.0-executor",
         input_reference="s3://inputs/django-ray/inputs/immutable.json?bytes=42",
+        ray_job_id="raysubmit_previous_attempt",
+        ray_job_request_reference="inputfs://sha256/previous-request?bytes=128",
         workflow_plan_selection='{"selected_strategy":"dynamic_tasks"}',
         error_message="boom",
         error_traceback="RuntimeError: boom",
@@ -154,6 +157,8 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     assert task.managed_with_django_ray_version is None
     assert task.executor_django_ray_version is None
     assert task.input_reference == "s3://inputs/django-ray/inputs/immutable.json?bytes=42"
+    assert task.ray_job_id is None
+    assert task.ray_job_request_reference is None
     assert task.workflow_plan_selection is None
     assert task.error_message is None
     assert task.ray_target_address == "ray://target:10001"
@@ -219,6 +224,9 @@ def test_attempt_archival_copies_exact_protocol_and_provenance(
         queue_deadline_at=now - timedelta(seconds=1),
         started_at=now - timedelta(minutes=5),
         last_heartbeat_at=now - timedelta(minutes=1),
+        ray_job_id="raysubmit_retained_attempt",
+        ray_job_request_reference="inputfs://sha256/retained-request?bytes=128",
+        ray_address="ray://retained:10001",
         error_message="previous diagnostic",
     )
 
@@ -289,6 +297,14 @@ def test_attempt_archival_copies_exact_protocol_and_provenance(
     assert task.metadata_schema_version == 1
     assert task.execution_protocol_version == 2
     assert task.created_with_django_ray_version == "0.4.0-creator"
+    if transition == "manual_retry":
+        assert task.ray_job_id is None
+        assert task.ray_job_request_reference is None
+        assert task.ray_address is None
+    else:
+        assert task.ray_job_id == "raysubmit_retained_attempt"
+        assert task.ray_job_request_reference == ("inputfs://sha256/retained-request?bytes=128")
+        assert task.ray_address == "ray://retained:10001"
     if transition in {"manual_retry", "automatic_retry"}:
         assert task.state == TaskState.QUEUED
         assert task.managed_with_django_ray_version is None
@@ -684,6 +700,8 @@ def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
         workflow_plan_selection=unrelated_marker,
         completion_data=unrelated_marker,
         cancellation_error=unrelated_marker,
+        ray_job_id="raysubmit_projected_retry",
+        ray_job_request_reference="inputfs://sha256/projected-request?bytes=128",
         error_message="retryable failure",
         error_traceback="RetryError: retryable failure",
     )
@@ -714,6 +732,8 @@ def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
     assert current.args_json == args_json
     assert current.kwargs_json == kwargs_json
     assert current.input_reference == input_reference
+    assert current.ray_job_id is None
+    assert current.ray_job_request_reference is None
     assert current.result_data is None
     assert current.result_reference is None
     archived = TaskAttempt.objects.get(execution=task, attempt_number=2)

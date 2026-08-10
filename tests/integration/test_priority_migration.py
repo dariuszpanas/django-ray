@@ -162,7 +162,7 @@ def _assert_priority_migration_round_trip() -> None:
             .values_list("task_id", flat=True)
         ) == ["priority-migration-older", "priority-migration-newer"]
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0020_legacy_open_rollback_fence")])
+        MigrationExecutor(connection).migrate([("django_ray", "0021_ray_job_request_reference")])
 
 
 @pytest.mark.django_db(transaction=True)

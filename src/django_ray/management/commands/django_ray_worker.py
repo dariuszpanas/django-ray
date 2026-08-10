@@ -1651,6 +1651,7 @@ class Command(BaseCommand):
                 task.workflow_plan_selection = None
                 promote_legacy_ray_target(task)
                 task.ray_job_id = None
+                task.ray_job_request_reference = None
                 task.ray_address = None
                 task.save(
                     update_fields=[
@@ -1666,6 +1667,7 @@ class Command(BaseCommand):
                         "workflow_run_id",
                         "workflow_plan_selection",
                         "ray_job_id",
+                        "ray_job_request_reference",
                         "ray_target_address",
                         "ray_address",
                     ]

@@ -91,4 +91,4 @@ def test_summary_fields_are_additive_nullable_and_reversible() -> None:
             == legacy_progress
         )
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0020_legacy_open_rollback_fence")])
+        MigrationExecutor(connection).migrate([("django_ray", "0021_ray_job_request_reference")])

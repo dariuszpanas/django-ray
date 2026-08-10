@@ -148,8 +148,10 @@ registry references, change the setting, and exercise reads before upgrading.
 
 Automatic and manual retries reuse the execution row's immutable `input_reference`;
 they do not upload a replacement payload. `TaskInputPayload` records content metadata,
-last use, cleanup state, and cleanup errors. Multiple execution rows may safely share
-one content-addressed object.
+last use, cleanup state, cleanup errors, and whether the object is a task-input envelope
+or a Ray Job execution request. Multiple execution rows may safely share one
+content-addressed object. The two payload kinds use separate execution columns;
+wrong-kind or dual-column references remain retained rather than being guessed.
 
 Inspect eligible payloads with the dry-run command:
 
@@ -163,11 +165,15 @@ Delete only after reviewing the report:
 python manage.py django_ray_purge_inputs --retention-days=30 --delete
 ```
 
-A payload is eligible only when its registry entry is old enough and every referencing
-execution is terminal with an old enough `finished_at`. Cleanup locks the registry and
-execution rows so a concurrent enqueue cannot lose a shared payload. Successful cleanup
-keeps execution references and a `PURGED` tombstone for audit. A future enqueue of the
-same content reactivates the object.
+A payload is eligible only when its registry entry is old enough and every execution
+referencing the kind's exact column is terminal with an old enough `finished_at`.
+Cleanup locks the registry first and then all executions referencing either payload
+column, so a concurrent writer cannot lose a shared payload and a cross-kind collision
+fails closed. Successful cleanup keeps execution references and a `PURGED` tombstone for
+audit. A future writer of the same kind and content may reactivate the object.
+Every attachment/reactivation path must lock or register the payload before it locks and
+updates the execution row. Cleanup safety depends on that common lock order; the dormant
+`0021` schema does not authorize a request writer that bypasses it.
 
 Command output identifies a reference only by a 16-character SHA-256 fingerprint. It
 does not print the bucket, prefix, digest locator, provider exception text, or full
@@ -180,7 +186,12 @@ recovery requirements. The command never runs automatically.
 
 ## Rolling Upgrade
 
-1. Apply the additive migration while `MAX_INLINE_INPUT_SIZE_BYTES` remains `None`.
+Migration `0021_ray_job_request_reference` is additive preparation for the bounded Ray
+Job request transport. It gives `payload_kind` the Python and database default
+`task_input`, so released writers that omit the column remain compatible. Applying it
+does not enable request-reference submissions.
+
+1. Apply the additive migrations while `MAX_INLINE_INPUT_SIZE_BYTES` remains `None`.
 2. Deploy the new code to every web, worker, and Ray runtime environment.
 3. Drain or finish jobs started by old Ray Job drivers.
 4. Enable a retrievable input backend and then set the threshold.

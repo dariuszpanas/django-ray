@@ -355,7 +355,7 @@ def register_task_input(
     ):
         raise InputPayloadValidationError("Prepared external task input is incomplete")
 
-    from django_ray.models import InputPayloadState, TaskInputPayload
+    from django_ray.models import InputPayloadKind, InputPayloadState, TaskInputPayload
 
     resolved_config = config if config is not None else get_settings()
     metadata = _validated_reference(prepared.input_reference, resolved_config)
@@ -372,6 +372,7 @@ def register_task_input(
     payload, created = TaskInputPayload.objects.select_for_update().get_or_create(
         reference=prepared.input_reference,
         defaults={
+            "payload_kind": InputPayloadKind.TASK_INPUT,
             "backend": prepared.backend,
             "digest": prepared.digest,
             "size_bytes": prepared.size_bytes,
@@ -382,12 +383,14 @@ def register_task_input(
     )
     if not created:
         persisted_metadata = (
+            payload.payload_kind,
             payload.backend,
             payload.digest,
             payload.size_bytes,
             payload.envelope_version,
         )
         supplied_metadata = (
+            InputPayloadKind.TASK_INPUT,
             prepared.backend,
             prepared.digest,
             prepared.size_bytes,

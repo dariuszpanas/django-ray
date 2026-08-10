@@ -1743,7 +1743,7 @@ def test_model_diagnostics_have_stable_human_readable_labels() -> None:
         envelope_version=1,
         state=InputPayloadState.ACTIVE,
     )
-    assert str(payload) == "database input abcdef012345 (ACTIVE)"
+    assert str(payload) == "database Task input abcdef012345 (ACTIVE)"
     lease = TaskWorkerLease(
         worker_id="12345678-worker",
         hostname="worker.example",

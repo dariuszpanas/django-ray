@@ -16,7 +16,7 @@ from scripts.verify_wheel import (
 )
 
 
-def test_release_boundary_tracks_execution_protocol_schema_migration() -> None:
+def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/execution_codec.py" in EXPECTED_FILES
     assert "django_ray/execution_protocol.py" in EXPECTED_FILES
     assert "django_ray/ray_job_protocol.py" in EXPECTED_FILES
@@ -27,9 +27,10 @@ def test_release_boundary_tracks_execution_protocol_schema_migration() -> None:
     assert "django_ray/runtime/entrypoint.py" in EXPECTED_FILES
     assert "django_ray/migrations/0019_execution_protocol_schema.py" in EXPECTED_FILES
     assert "django_ray/migrations/0020_legacy_open_rollback_fence.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0021_ray_job_request_reference.py" in EXPECTED_FILES
     assert EXPECTED_MIGRATION_LEAF == (
         "django_ray",
-        "0020_legacy_open_rollback_fence",
+        "0021_ray_job_request_reference",
     )
 
 

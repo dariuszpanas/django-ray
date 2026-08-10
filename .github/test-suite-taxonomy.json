@@ -245,6 +245,7 @@
           "tests/integration/test_input_payload_migration.py",
           "tests/integration/test_priority_migration.py",
           "tests/integration/test_queue_expiration_migration.py",
+          "tests/integration/test_request_reference_schema_migration.py",
           "tests/integration/test_task_id_uniqueness_migration.py",
           "tests/integration/test_workflow_plan_migration.py",
           "tests/integration/test_workflow_progress_detail_storage_migration.py",
@@ -392,6 +393,7 @@
           "tests/integration/test_postgresql_workflow_progress_storage.py",
           "tests/integration/test_priority_migration.py",
           "tests/integration/test_queue_expiration_migration.py",
+          "tests/integration/test_request_reference_schema_migration.py",
           "tests/integration/test_task_id_uniqueness_migration.py",
           "tests/integration/test_workflow_run_allocation_migration.py"
         ],
