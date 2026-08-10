@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -60,6 +61,7 @@ from django_ray.runner.cancellation import (
     finalize_cancellation,
 )
 from django_ray.runner.leasing import WorkerLeaseIdentity, get_active_workers
+from django_ray.runner.ray_core import RayCoreHandle, RayCoreRunner
 from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
 from django_ray.runtime.context import DurableTaskContext, WorkflowRunIdentity
 from django_ray.workflow_progress import (
@@ -219,6 +221,13 @@ def _execution(task_id: str, **overrides: object) -> RayTaskExecution:
     }
     values.update(overrides)
     return RayTaskExecution.objects.create(**values)
+
+
+def _ray_core_runner_with_handle(handle: RayCoreHandle) -> RayCoreRunner:
+    """Build a real runner around one already-submitted ObjectRef capability."""
+    runner = object.__new__(RayCoreRunner)
+    runner._pending_tasks = {handle.task_pk: handle}
+    return runner
 
 
 def test_incompatible_candidate_does_not_wait_for_locked_source_lease() -> None:
@@ -735,6 +744,214 @@ def test_external_result_storage_and_cancellation_share_the_execution_lock(
     stored_result = load_result_reference(task.result_reference)
     assert stored_result is not None
     assert json.loads(stored_result) == {"message": "x" * 128}
+
+
+def test_ray_core_cancellation_committed_after_ready_result_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _claim_command("postgres-ray-core-cancellation-owner", [])
+    command.last_task_monitor_heartbeat = time.monotonic()
+    command.task_monitor_heartbeat_interval = 3600
+    observed_at = datetime.now(UTC)
+    task = _execution(
+        "postgres-ray-core-cancellation-after-ready-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker=command.worker_id,
+        attempt_number=2,
+        execution_generation=5,
+        started_at=observed_at,
+        last_heartbeat_at=observed_at,
+    )
+    object_ref = object()
+    handle = RayCoreHandle(
+        task_pk=int(task.pk),
+        object_ref=object_ref,
+        submitted_at=observed_at,
+        task_name="postgres cancellation race",
+        attempt_number=2,
+        execution_generation=5,
+    )
+    runner = _ray_core_runner_with_handle(handle)
+    command.ray_core_runner = runner
+
+    cancellation_locked = Event()
+    release_cancellation = Event()
+    result_returned = Event()
+    poll_connected = Event()
+    poll_backend_pid: list[int] = []
+
+    def ready_wait(refs, *, num_returns: int, timeout: int):
+        assert refs == [object_ref]
+        assert num_returns == 1
+        assert timeout == 0
+        return [object_ref], []
+
+    def ready_get(ref):
+        assert ref is object_ref
+        result_returned.set()
+        return '{"success": true, "result": 3}'
+
+    monkeypatch.setattr("ray.is_initialized", lambda: True)
+    monkeypatch.setattr("ray.wait", ready_wait)
+    monkeypatch.setattr("ray.get", ready_get)
+    monkeypatch.setattr(
+        command,
+        "_store_task_result",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a committed cancellation must prevent Ray Core result storage"
+        ),
+    )
+
+    def hold_accepted_cancellation() -> object:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                cancellation = request_task_cancellation(
+                    task.pk,
+                    expected_attempt_number=2,
+                    expected_execution_generation=5,
+                )
+                assert cancellation.status is TaskCancellationRequestStatus.ACCEPTED
+                cancellation_locked.set()
+                if not release_cancellation.wait(timeout=10):
+                    raise TimeoutError("test did not release the cancellation transaction")
+                return cancellation
+        finally:
+            close_old_connections()
+
+    def poll_ready_result() -> int:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                poll_backend_pid.append(int(cursor.fetchone()[0]))
+            poll_connected.set()
+            return command.poll_ray_core_tasks()
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cancellation_future = executor.submit(hold_accepted_cancellation)
+        assert cancellation_locked.wait(timeout=10)
+        poll_future = executor.submit(poll_ready_result)
+        try:
+            assert poll_connected.wait(timeout=10)
+            assert result_returned.wait(timeout=10)
+            _wait_for_postgresql_lock(poll_backend_pid[0])
+        finally:
+            release_cancellation.set()
+        cancellation = cancellation_future.result(timeout=20)
+        assert poll_future.result(timeout=20) == 1
+
+    assert cancellation.status is TaskCancellationRequestStatus.ACCEPTED
+    task.refresh_from_db()
+    assert task.state == TaskState.CANCELLED
+    assert task.result_data is None
+    assert task.result_reference is None
+    assert task.finished_at is not None
+    attempt = TaskAttempt.objects.get(execution=task, attempt_number=2)
+    assert attempt.state == TaskState.CANCELLED
+    assert attempt.result_data is None
+    assert attempt.result_reference is None
+    assert runner.pending_count == 0
+
+
+@pytest.mark.parametrize(
+    "result_json",
+    [
+        '{"success": true, "result": 3}',
+        (
+            '{"success": false, "result": null, "error": "boom", '
+            '"traceback": "tb", "exception_type": "RuntimeError", "retryable": true}'
+        ),
+    ],
+    ids=("success", "failure"),
+)
+def test_ray_core_exact_lease_loss_after_get_is_a_durable_noop(
+    monkeypatch: pytest.MonkeyPatch,
+    result_json: str,
+) -> None:
+    command = _claim_command("postgres-ray-core-post-get-lease-owner", [])
+    command.last_task_monitor_heartbeat = time.monotonic()
+    command.task_monitor_heartbeat_interval = 3600
+    observed_at = datetime.now(UTC)
+    task = _execution(
+        f"postgres-ray-core-post-get-lease-loss-{json.loads(result_json)['success']}",
+        state=TaskState.RUNNING,
+        claimed_by_worker=command.worker_id,
+        attempt_number=3,
+        execution_generation=7,
+        started_at=observed_at,
+        last_heartbeat_at=observed_at,
+    )
+    task_before = RayTaskExecution.objects.values().get(pk=task.pk)
+    object_ref = object()
+    handle = RayCoreHandle(
+        task_pk=int(task.pk),
+        object_ref=object_ref,
+        submitted_at=observed_at,
+        task_name="postgres post-get lease loss",
+        attempt_number=3,
+        execution_generation=7,
+    )
+    runner = _ray_core_runner_with_handle(handle)
+    command.ray_core_runner = runner
+    get_entered = Event()
+    release_get = Event()
+
+    def ready_wait(refs, *, num_returns: int, timeout: int):
+        assert refs == [object_ref]
+        assert num_returns == 1
+        assert timeout == 0
+        return [object_ref], []
+
+    def blocking_get(ref):
+        assert ref is object_ref
+        get_entered.set()
+        if not release_get.wait(timeout=10):
+            raise TimeoutError("test did not release Ray result retrieval")
+        return result_json
+
+    def forbidden_lifecycle_effect(*_args, **_kwargs):
+        pytest.fail("post-get lease loss must fence every durable lifecycle effect")
+
+    monkeypatch.setattr("ray.is_initialized", lambda: True)
+    monkeypatch.setattr("ray.wait", ready_wait)
+    monkeypatch.setattr("ray.get", blocking_get)
+    monkeypatch.setattr(command, "_store_task_result", forbidden_lifecycle_effect)
+    monkeypatch.setattr(command, "_handle_task_failure", forbidden_lifecycle_effect)
+
+    def poll_ready_result() -> int:
+        close_old_connections()
+        try:
+            return command.poll_ray_core_tasks()
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        poll_future = executor.submit(poll_ready_result)
+        try:
+            assert get_entered.wait(timeout=10)
+            assert command.lease_identity is not None
+            TaskWorkerLease.objects.filter(**command.lease_identity.database_filters()).delete()
+            replacement = TaskWorkerLease.objects.create(
+                worker_id=command.worker_id,
+                hostname="postgres-ray-core-replacement-host",
+                pid=9876,
+                queue_name="default",
+            )
+        finally:
+            release_get.set()
+        assert poll_future.result(timeout=20) == 1
+
+    assert RayTaskExecution.objects.values().get(pk=task.pk) == task_before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+    replacement.refresh_from_db()
+    assert replacement.is_active is True
+    assert replacement.hostname == "postgres-ray-core-replacement-host"
+    assert command.shutdown_requested is True
+    assert command.lease_ownership_lost is True
+    assert runner.pending_count == 0
 
 
 def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:

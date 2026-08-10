@@ -57,12 +57,19 @@ class TestFailureInjection:
                 execution_generation=task.execution_generation,
             )
         }
+
+        def retire_pending_handle(handle: RayCoreHandle) -> bool:
+            if pending.get(handle.task_pk) is not handle:
+                return False
+            pending.pop(handle.task_pk)
+            return True
+
         runner = SimpleNamespace(
             _pending_tasks=pending,
             pending_count=len(pending),
             pending_task_ids=tuple(pending),
             pending_task_handles=tuple(pending.values()),
-            clear_pending_tasks=pending.clear,
+            retire_pending_handle=retire_pending_handle,
         )
 
         cmd.ray_core_runner = runner
@@ -163,7 +170,7 @@ class TestFailureInjection:
                     ),
                 )
 
-            def poll_completed(self):
+            def poll_completed(self, handles=None):
                 self._pending_tasks.clear()
                 return [
                     RayCoreCompletion(

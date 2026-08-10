@@ -634,6 +634,8 @@ class TestWorkerCommandCoverage:
     def test_polling_terminal_write_rejects_replacement_after_result_storage(
         self, monkeypatch
     ) -> None:
+        cmd = _make_command()
+        cmd._create_lease("default")
         task = RayTaskExecution.objects.create(
             task_id="coverage-poll-stale-success-001",
             callable_path="testproject.tasks.add_numbers",
@@ -649,7 +651,10 @@ class TestWorkerCommandCoverage:
             pending_task_ids = (task.pk,)
             pending_task_handles = (_pending_handle(task),)
 
-            def poll_completed(self) -> list[RayCoreCompletion]:
+            def retire_pending_handle(self, handle) -> bool:
+                return handle is self.pending_task_handles[0]
+
+            def poll_completed(self, handles=None) -> list[RayCoreCompletion]:
                 return [
                     RayCoreCompletion(
                         task_pk=task.pk,
@@ -659,7 +664,6 @@ class TestWorkerCommandCoverage:
                     )
                 ]
 
-        cmd = _make_command()
         cmd.ray_core_runner = cast(Any, RayCoreRunner())
         monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
 
@@ -680,7 +684,7 @@ class TestWorkerCommandCoverage:
         assert task.claimed_by_worker == "replacement-worker"
         assert task.result_data is None
         assert "completed:" not in cmd.stdout.getvalue()
-        assert "changed while its Ray Core result was being stored" in cmd.stdout.getvalue()
+        assert "changed while its Ray Core result was being applied" in cmd.stdout.getvalue()
 
     @pytest.mark.django_db
     def test_reconciliation_skips_healthy_owners_and_logs_orphan_errors(self, monkeypatch) -> None:

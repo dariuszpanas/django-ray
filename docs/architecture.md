@@ -754,9 +754,27 @@ transition paths may receive an explicit range from an already-proven worker coh
 but lifecycle code does not lock the rollout policy or a worker lease and therefore
 does not change the lease-first ownership protocol.
 
-This scan boundary does not make protocol capability a remote-runtime attestation and
-does not yet version the Ray Core completion transport. Ray Core handle polling and
-bulk monitor heartbeats and remote pre-import protocol rejection remain separate
+Ray Core monitoring applies a second, driver-local boundary because its `ObjectRef`
+handles cannot be transferred to another task manager. Before a task-specific
+`ray.wait` or `ray.get`, the manager proves its exact live lease, compares the pending
+handle with the durable owner, attempt, generation, state, and protocol, and retires
+unsupported, missing, terminal, stale, or transferred handles locally. Only exact
+compatible `RUNNING` or `CANCELLING` handles cross the Ray polling API. Unsupported
+durable rows receive no heartbeat, result-storage call, retry, archive, or state change.
+The monitor heartbeat holds the lease lock while updating only those exact compatible
+rows with the same protocol predicate.
+
+Ray polling itself occurs without database locks. A returned completion must then
+re-enter the authoritative lease-then-execution boundary before cancellation,
+result storage, success, failure, or retry. Disconnect and reconnect cleanup use the
+same classification and authority check before routing a compatible handle through
+loss handling. Retiring a local handle is not handoff or replay: another process cannot
+recover its `ObjectRef`, so an unsupported or uncertain Ray Core row remains an explicit
+drain or operator-decision boundary.
+
+This manager-side fence does not make protocol capability a remote-runtime attestation
+or version the Ray Core completion transport. Remote pre-import protocol rejection,
+executor-reported provenance, and completion-envelope identity remain separate
 compatibility work.
 
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue

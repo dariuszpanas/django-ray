@@ -1190,6 +1190,7 @@ class TestWorkerCommandRuntimeDb:
 
     def test_mark_stale_ray_core_tasks_routes_rows_through_retry_handling(self) -> None:
         cmd = _make_command(worker_id="stale-worker")
+        cmd._create_lease("default")
         task = RayTaskExecution.objects.create(
             task_id="stale-001",
             callable_path="testproject.tasks.add_numbers",
@@ -1209,6 +1210,13 @@ class TestWorkerCommandRuntimeDb:
                 execution_generation=task.execution_generation,
             )
         }
+
+        def retire_pending_handle(handle: RayCoreHandle) -> bool:
+            if pending.get(handle.task_pk) is not handle:
+                return False
+            pending.pop(handle.task_pk)
+            return True
+
         cmd.ray_core_runner = cast(
             Any,
             SimpleNamespace(
@@ -1216,7 +1224,7 @@ class TestWorkerCommandRuntimeDb:
                 pending_count=1,
                 pending_task_ids=tuple(pending),
                 pending_task_handles=tuple(pending.values()),
-                clear_pending_tasks=pending.clear,
+                retire_pending_handle=retire_pending_handle,
             ),
         )
 
@@ -1231,6 +1239,7 @@ class TestWorkerCommandRuntimeDb:
 
     def test_mark_stale_ray_core_tasks_does_not_fail_replacement_attempt(self) -> None:
         cmd = _make_command(worker_id="stale-worker")
+        cmd._create_lease("default")
         task = RayTaskExecution.objects.create(
             task_id="stale-replacement-001",
             callable_path="testproject.tasks.add_numbers",
@@ -1251,13 +1260,20 @@ class TestWorkerCommandRuntimeDb:
             execution_generation=7,
         )
         pending = {task.pk: stale_handle}
+
+        def retire_pending_handle(handle: RayCoreHandle) -> bool:
+            if pending.get(handle.task_pk) is not handle:
+                return False
+            pending.pop(handle.task_pk)
+            return True
+
         cmd.ray_core_runner = cast(
             Any,
             SimpleNamespace(
                 _pending_tasks=pending,
                 pending_count=1,
                 pending_task_handles=tuple(pending.values()),
-                clear_pending_tasks=pending.clear,
+                retire_pending_handle=retire_pending_handle,
             ),
         )
 

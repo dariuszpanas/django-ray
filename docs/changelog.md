@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempt archival, cancellation effects, or durable mutation.
   Unsupported cancellation/retry requests return a distinct bounded status, Admin
   reports them separately, and other transitions leave the row unchanged.
+- Ray Core monitoring now admits only exact pending handles whose durable owner,
+  attempt, generation, state, and protocol match the manager's live locked lease.
+  Unsupported or stale handles retire locally before task-specific Ray polling, bulk
+  monitor heartbeats include the protocol fence, and completions plus reconnect loss
+  handling re-enter the lease-then-execution boundary before storage or lifecycle
+  effects. This does not make driver-owned `ObjectRef` handles transferable.
 - PostgreSQL and SQLite rollout coordination now serializes exact-0.4 execution and
   lease inserts, legacy heartbeats, and concurrent policy transitions without using
   package Semantic Versions as compatibility evidence. Callers must provide the

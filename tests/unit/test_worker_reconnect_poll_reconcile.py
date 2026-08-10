@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from django_ray.models import (
     TaskState,
     TaskWorkerLease,
 )
+from django_ray.protocol_coordination import close_legacy_worker_admission
 from django_ray.redaction import normalize_terminal_text
 from django_ray.runner import RayJobSubmissionUncertainError
 from django_ray.runner.base import JobInfo, JobStatus, SubmissionHandle
@@ -408,6 +410,146 @@ class TestWorkerReconnectPollReconcile:
 
         cmd._mark_stale_ray_core_tasks_as_lost()
 
+    def test_ray_core_callers_fail_closed_without_authoritative_capability(
+        self, monkeypatch
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="ray-core-authority-unavailable-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="ray-core-authority-unavailable-worker")
+        task.refresh_from_db()
+        task_before = RayTaskExecution.objects.values().get(pk=task.pk)
+        handle = _pending_handle(task)
+
+        class Runner:
+            def __init__(self) -> None:
+                self._pending_tasks = {task.pk: handle}
+
+            @property
+            def pending_count(self) -> int:
+                return len(self._pending_tasks)
+
+            @property
+            def pending_task_handles(self) -> tuple[RayCoreHandle, ...]:
+                return tuple(self._pending_tasks.values())
+
+            def retire_pending_handle(self, _handle: RayCoreHandle) -> bool:
+                pytest.fail("authority loss must not retire an unreviewed local handle")
+
+            def poll_completed(self, _handles=None):
+                pytest.fail("authority loss must be rejected before the Ray boundary")
+
+        runner = Runner()
+        cmd.ray_core_runner = cast(Any, runner)
+
+        assert cmd._partition_ray_core_handles(cast(Any, runner), ()) == ()
+
+        TaskWorkerLease.objects.filter(pk=cmd.lease.pk).update(is_active=False)
+        cmd._mark_stale_ray_core_tasks_as_lost()
+        monkeypatch.setitem(
+            sys.modules,
+            "ray",
+            SimpleNamespace(
+                is_initialized=lambda: pytest.fail(
+                    "authority loss must be rejected before Ray initialization checks"
+                )
+            ),
+        )
+        assert cmd.poll_ray_core_tasks() == 0
+
+        implicit_cmd = _make_command(worker_id="ray-core-implicit-capability-worker")
+        monkeypatch.setattr(implicit_cmd, "_explicit_protocol_range", lambda _lease: None)
+        assert implicit_cmd._partition_ray_core_handles(cast(Any, runner), (handle,)) is None
+
+        assert runner.pending_task_handles == (handle,)
+        assert RayTaskExecution.objects.values().get(pk=task.pk) == task_before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    def test_lost_handle_terminalization_ignores_superseded_and_missing_rows(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="ray-core-lost-handle-toctou-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="ray-core-lost-handle-toctou-worker")
+        task.refresh_from_db()
+        task_before = RayTaskExecution.objects.values().get(pk=task.pk)
+        superseded_handle = _pending_handle(task)
+        replacement_handle = _pending_handle(task)
+        missing_handle = RayCoreHandle(
+            task_pk=999_998,
+            object_ref=object(),
+            submitted_at=datetime.now(UTC),
+            task_name="missing-after-partition",
+            attempt_number=1,
+            execution_generation=0,
+        )
+
+        class Runner:
+            def __init__(self) -> None:
+                self._pending_tasks = {
+                    task.pk: replacement_handle,
+                    missing_handle.task_pk: missing_handle,
+                }
+
+            @property
+            def pending_task_handles(self) -> tuple[RayCoreHandle, ...]:
+                return tuple(self._pending_tasks.values())
+
+            def retire_pending_handle(self, handle: RayCoreHandle) -> bool:
+                if self._pending_tasks.get(handle.task_pk) is not handle:
+                    return False
+                self._pending_tasks.pop(handle.task_pk)
+                return True
+
+        runner = Runner()
+        assert (
+            cmd._terminalize_lost_ray_core_handles(
+                cast(Any, runner),
+                (superseded_handle, missing_handle),
+                error_message="Ray connection lost",
+            )
+            == 0
+        )
+
+        assert runner.pending_task_handles == (replacement_handle,)
+        assert RayTaskExecution.objects.values().get(pk=task.pk) == task_before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    def test_ray_core_cancellation_authority_loss_is_a_noop(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="ray-core-cancellation-authority-loss-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.CANCELLING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="ray-core-cancellation-authority-loss-worker")
+        task.refresh_from_db()
+        task_before = RayTaskExecution.objects.values().get(pk=task.pk)
+        TaskWorkerLease.objects.filter(pk=cmd.lease.pk).update(is_active=False)
+
+        assert (
+            cmd._finalize_ray_core_cancellation(
+                task_pk=task.pk,
+                attempt_number=task.attempt_number,
+                execution_generation=task.execution_generation,
+            )
+            is False
+        )
+
+        assert RayTaskExecution.objects.values().get(pk=task.pk) == task_before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
     def test_submit_task_to_ray_core_handles_unavailable_cluster(self, monkeypatch) -> None:
         task = RayTaskExecution.objects.create(
             task_id="reconnect-core-unavailable-001",
@@ -762,7 +904,13 @@ class TestWorkerReconnectPollReconcile:
             def pending_task_handles(self):
                 return tuple(self._pending_tasks.values())
 
-            def poll_completed(self):
+            def retire_pending_handle(self, handle):
+                if self._pending_tasks.get(handle.task_pk) is not handle:
+                    return False
+                self._pending_tasks.pop(handle.task_pk)
+                return True
+
+            def poll_completed(self, handles=None):
                 return []
 
         cmd = _make_command()
@@ -812,8 +960,11 @@ class TestWorkerReconnectPollReconcile:
             pending_count = 1
             pending_task_handles = (stale_handle,)
 
-            def poll_completed(self):
-                return []
+            def retire_pending_handle(self, handle):
+                return handle is stale_handle
+
+            def poll_completed(self, handles=None):
+                pytest.fail("a stale replacement handle must not cross the Ray boundary")
 
         cmd = _make_command()
         cmd.ray_core_runner = cast(Any, Runner())
@@ -823,6 +974,288 @@ class TestWorkerReconnectPollReconcile:
 
         task.refresh_from_db()
         assert task.last_heartbeat_at is None
+
+    @pytest.mark.django_db(transaction=True)
+    def test_poll_ray_core_tasks_retires_unsupported_protocol_before_ray_boundary(
+        self, monkeypatch
+    ) -> None:
+        close_legacy_worker_admission(
+            expected_revision=1,
+            legacy_producers_retired=True,
+        )
+        cmd = _make_command(
+            worker_id="poll-v1-worker",
+            claim_ownerless_tasks=False,
+        )
+        supported = RayTaskExecution.objects.create(
+            task_id="poll-supported-protocol-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            execution_protocol_version=1,
+            claimed_by_worker=cmd.worker_id,
+        )
+        unsupported = RayTaskExecution.objects.create(
+            task_id="poll-unsupported-protocol-002",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[3, 4]",
+            kwargs_json="{}",
+            execution_protocol_version=2,
+            claimed_by_worker=cmd.worker_id,
+        )
+        supported_handle = _pending_handle(supported)
+        unsupported_handle = _pending_handle(unsupported)
+
+        class Runner:
+            def __init__(self) -> None:
+                self._pending_tasks = {
+                    supported.pk: supported_handle,
+                    unsupported.pk: unsupported_handle,
+                }
+                self.polled: tuple[RayCoreHandle, ...] | None = None
+
+            @property
+            def pending_count(self) -> int:
+                return len(self._pending_tasks)
+
+            @property
+            def pending_task_handles(self):
+                return tuple(self._pending_tasks.values())
+
+            def retire_pending_handle(self, handle) -> bool:
+                if self._pending_tasks.get(handle.task_pk) is not handle:
+                    return False
+                self._pending_tasks.pop(handle.task_pk)
+                return True
+
+            def poll_completed(self, handles=None):
+                self.polled = handles
+                return []
+
+        runner = Runner()
+        cmd.ray_core_runner = cast(Any, runner)
+        unsupported_before = RayTaskExecution.objects.values().get(pk=unsupported.pk)
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "unsupported execution must not reach result storage"
+            ),
+        )
+
+        assert cmd.poll_ray_core_tasks() == 1
+
+        assert runner.polled == (supported_handle,)
+        assert runner.pending_task_handles == (supported_handle,)
+        assert RayTaskExecution.objects.values().get(pk=unsupported.pk) == unsupported_before
+        assert not TaskAttempt.objects.filter(execution=unsupported).exists()
+
+    @pytest.mark.django_db(transaction=True)
+    def test_store_and_succeed_rejects_protocol_before_external_storage(self, monkeypatch) -> None:
+        close_legacy_worker_admission(
+            expected_revision=1,
+            legacy_producers_retired=True,
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="store-success-unsupported-protocol-002",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            execution_protocol_version=2,
+        )
+        task_before = RayTaskExecution.objects.values().get(pk=task.pk)
+        cmd = _make_command(
+            worker_id="store-v1-worker",
+            claim_ownerless_tasks=False,
+        )
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "unsupported success must be rejected before external storage"
+            ),
+        )
+
+        assert cmd._store_and_succeed_task(task, {"value": 3}) is False
+
+        assert RayTaskExecution.objects.values().get(pk=task.pk) == task_before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    def test_completion_losing_lease_after_poll_cannot_store_or_terminalize(
+        self, monkeypatch
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="poll-completion-lease-loss-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="poll-lease-loss-worker")
+        task.refresh_from_db()
+        task_before = RayTaskExecution.objects.values().get(pk=task.pk)
+        handle = _pending_handle(task)
+
+        class Runner:
+            def __init__(self) -> None:
+                self._pending_tasks = {task.pk: handle}
+
+            @property
+            def pending_count(self) -> int:
+                return len(self._pending_tasks)
+
+            @property
+            def pending_task_handles(self):
+                return tuple(self._pending_tasks.values())
+
+            def retire_pending_handle(self, candidate) -> bool:
+                if self._pending_tasks.get(candidate.task_pk) is not candidate:
+                    return False
+                self._pending_tasks.pop(candidate.task_pk)
+                return True
+
+            def poll_completed(self, handles=None):
+                assert handles == (handle,)
+                TaskWorkerLease.objects.filter(pk=cmd.lease.pk).update(is_active=False)
+                self.retire_pending_handle(handle)
+                return [_completion(task, '{"success": true, "result": 3}')]
+
+        cmd.ray_core_runner = cast(Any, Runner())
+        cmd.last_task_monitor_heartbeat = time.monotonic()
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail("lease loss must fence result storage"),
+        )
+
+        cmd.poll_ray_core_tasks()
+
+        assert RayTaskExecution.objects.values().get(pk=task.pk) == task_before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        assert cmd.shutdown_requested is True
+
+    def test_cancellation_committing_after_poll_read_wins_over_success(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="poll-completion-cancellation-race-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="poll-cancellation-race-worker")
+        task.refresh_from_db()
+        handle = _pending_handle(task)
+
+        class Runner:
+            def __init__(self) -> None:
+                self._pending_tasks = {task.pk: handle}
+
+            @property
+            def pending_count(self) -> int:
+                return len(self._pending_tasks)
+
+            @property
+            def pending_task_handles(self):
+                return tuple(self._pending_tasks.values())
+
+            def retire_pending_handle(self, candidate) -> bool:
+                if self._pending_tasks.get(candidate.task_pk) is not candidate:
+                    return False
+                self._pending_tasks.pop(candidate.task_pk)
+                return True
+
+            def poll_completed(self, handles=None):
+                assert handles == (handle,)
+                self.retire_pending_handle(handle)
+                return [_completion(task, '{"success": true, "result": 3}')]
+
+        cmd.ray_core_runner = cast(Any, Runner())
+        cmd.last_task_monitor_heartbeat = time.monotonic()
+        original_authority = cmd._authoritative_task_owner
+        injected = False
+
+        def cancellation_race(snapshot, **kwargs):
+            nonlocal injected
+            if not injected and kwargs["expected_state"] == TaskState.RUNNING:
+                injected = True
+                RayTaskExecution.objects.filter(pk=task.pk).update(state=TaskState.CANCELLING)
+            return original_authority(snapshot, **kwargs)
+
+        monkeypatch.setattr(cmd, "_authoritative_task_owner", cancellation_race)
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "a committed cancellation must fence result storage"
+            ),
+        )
+
+        cmd.poll_ray_core_tasks()
+
+        task.refresh_from_db()
+        assert injected is True
+        assert task.state == TaskState.CANCELLED
+        assert task.result_data is None
+        assert TaskAttempt.objects.filter(
+            execution=task,
+            attempt_number=task.attempt_number,
+            state=TaskState.CANCELLED,
+        ).exists()
+
+    def test_disconnect_retires_cancelling_handle_without_claiming_cancellation(
+        self, monkeypatch
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="poll-disconnect-cancelling-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.CANCELLING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="poll-cancelling-worker")
+        task.refresh_from_db()
+        task_before = RayTaskExecution.objects.values().get(pk=task.pk)
+        handle = _pending_handle(task)
+
+        class Runner:
+            def __init__(self) -> None:
+                self._pending_tasks = {task.pk: handle}
+
+            @property
+            def pending_count(self) -> int:
+                return len(self._pending_tasks)
+
+            @property
+            def pending_task_handles(self):
+                return tuple(self._pending_tasks.values())
+
+            def retire_pending_handle(self, candidate) -> bool:
+                if self._pending_tasks.get(candidate.task_pk) is not candidate:
+                    return False
+                self._pending_tasks.pop(candidate.task_pk)
+                return True
+
+        runner = Runner()
+        cmd.ray_core_runner = cast(Any, runner)
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: False))
+
+        assert cmd.poll_ray_core_tasks() == 1
+
+        assert runner.pending_count == 0
+        assert RayTaskExecution.objects.values().get(pk=task.pk) == task_before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_poll_ray_core_tasks_handles_disconnected_and_missing_tasks(self, monkeypatch) -> None:
         existing = RayTaskExecution.objects.create(
@@ -857,8 +1290,11 @@ class TestWorkerReconnectPollReconcile:
             def pending_task_handles(self):
                 return tuple(self._pending_tasks.values())
 
-            def clear_pending_tasks(self) -> None:
-                self._pending_tasks.clear()
+            def retire_pending_handle(self, handle) -> bool:
+                if self._pending_tasks.get(handle.task_pk) is not handle:
+                    return False
+                self._pending_tasks.pop(handle.task_pk)
+                return True
 
             @property
             def pending_count(self) -> int:
@@ -906,8 +1342,11 @@ class TestWorkerReconnectPollReconcile:
             def pending_task_handles(self):
                 return tuple(self._pending_tasks.values())
 
-            def clear_pending_tasks(self) -> None:
-                self._pending_tasks.clear()
+            def retire_pending_handle(self, handle) -> bool:
+                if self._pending_tasks.get(handle.task_pk) is not handle:
+                    return False
+                self._pending_tasks.pop(handle.task_pk)
+                return True
 
             @property
             def pending_count(self) -> int:
@@ -927,17 +1366,17 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.ray_core_runner._pending_tasks == {}
 
     def test_poll_ray_core_tasks_handles_poll_exception(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="poll-exception-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+
         class Runner:
-            _pending_tasks = {
-                1: RayCoreHandle(
-                    task_pk=1,
-                    object_ref=object(),
-                    submitted_at=datetime.now(UTC),
-                    task_name="missing",
-                    attempt_number=1,
-                    execution_generation=0,
-                )
-            }
+            _pending_tasks = {task.pk: _pending_handle(task)}
             pending_count = 1
 
             @property
@@ -948,7 +1387,7 @@ class TestWorkerReconnectPollReconcile:
             def pending_task_handles(self):
                 return tuple(self._pending_tasks.values())
 
-            def poll_completed(self):
+            def poll_completed(self, handles=None):
                 raise RuntimeError("poll exploded")
 
         cmd = _make_command()
@@ -1007,7 +1446,7 @@ class TestWorkerReconnectPollReconcile:
             def pending_task_handles(self):
                 return tuple(self._pending_tasks.values())
 
-            def poll_completed(self):
+            def poll_completed(self, handles=None):
                 return [
                     _completion(success_task, '{"success": true, "result": 3}'),
                     _completion(
@@ -1106,19 +1545,16 @@ class TestWorkerReconnectPollReconcile:
             attempt_number=stale_attempt,
             execution_generation=stale_generation,
         )
-        stale_completion = _completion(
-            task,
-            result_json,
-            attempt_number=stale_attempt,
-            execution_generation=stale_generation,
-        )
 
         class Runner:
             pending_count = 1
             pending_task_handles = (stale_handle,)
 
-            def poll_completed(self):
-                return [stale_completion]
+            def retire_pending_handle(self, handle):
+                return handle is stale_handle
+
+            def poll_completed(self, handles=None):
+                pytest.fail("a stale replacement handle must not cross the Ray boundary")
 
         cmd = _make_command()
         cmd.ray_core_runner = cast(Any, Runner())
@@ -1147,7 +1583,7 @@ class TestWorkerReconnectPollReconcile:
             execution=task,
             attempt_number=stale_attempt + 1,
         ).exists()
-        assert "Ignoring stale Ray Core result" in cmd.stdout.getvalue()
+        assert "Retired 1 stale or unsupported Ray Core handle" in cmd.stdout.getvalue()
 
     def test_submit_task_to_ray_success_tracks_active_task(self, monkeypatch) -> None:
         task = RayTaskExecution.objects.create(

@@ -1144,6 +1144,71 @@ class TestRayCoreRunnerRuntime:
         assert "task crashed" in completed_by_pk[20].result_json
         assert runner.pending_count == 0
 
+    def test_poll_completed_only_crosses_selected_exact_handles(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        selected_ref = _FakeObjectRef("selected")
+        retained_ref = _FakeObjectRef("retained")
+        fake.values[selected_ref] = '{"success": true, "result": 1}'
+        fake.values[retained_ref] = '{"success": true, "result": 2}'
+        fake.ready_refs.update({selected_ref, retained_ref})
+        selected = RayCoreHandle(
+            task_pk=10,
+            object_ref=selected_ref,
+            submitted_at=datetime.now(UTC),
+            task_name="selected",
+            attempt_number=1,
+            execution_generation=2,
+        )
+        retained = RayCoreHandle(
+            task_pk=20,
+            object_ref=retained_ref,
+            submitted_at=datetime.now(UTC),
+            task_name="retained",
+            attempt_number=3,
+            execution_generation=4,
+        )
+        runner._pending_tasks = {10: selected, 20: retained}
+
+        completed = runner.poll_completed((selected,))
+
+        assert [completion.task_pk for completion in completed] == [10]
+        assert runner.pending_task_handles == (retained,)
+
+    def test_selected_stale_handle_cannot_poll_or_retire_replacement(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        stale = RayCoreHandle(
+            task_pk=10,
+            object_ref=_FakeObjectRef("stale"),
+            submitted_at=datetime.now(UTC),
+            task_name="stale",
+            attempt_number=1,
+            execution_generation=2,
+        )
+        replacement = RayCoreHandle(
+            task_pk=10,
+            object_ref=_FakeObjectRef("replacement"),
+            submitted_at=datetime.now(UTC),
+            task_name="replacement",
+            attempt_number=2,
+            execution_generation=3,
+        )
+        runner._pending_tasks = {10: replacement}
+        monkeypatch.setattr(
+            fake,
+            "wait",
+            lambda *_args, **_kwargs: pytest.fail(
+                "a stale exact handle must not cross the Ray boundary"
+            ),
+        )
+
+        assert runner.poll_completed((stale,)) == []
+        assert runner.retire_pending_handle(stale) is False
+        assert runner.pending_task_handles == (replacement,)
+        assert runner.retire_pending_handle(replacement) is True
+        assert runner.pending_task_handles == ()
+
     def test_pending_tracking_api_returns_snapshot_and_clears(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
         runner = RayCoreRunner()
