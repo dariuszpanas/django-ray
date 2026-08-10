@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -14,14 +15,22 @@ from unittest.mock import Mock
 
 import pytest
 from django.core.management.base import CommandError, CommandParser
+from django.db import IntegrityError
 
 import django_ray.management.commands.django_ray_benchmark_polling as benchmark
 from django_ray.management.commands.django_ray_benchmark_polling import (
     BenchmarkResult,
     Command,
+    ProtocolPredicateEvidence,
+    ProtocolPredicatePlanSummary,
+    ProtocolPredicateVariantResult,
     _cross_worker_overlap_metrics,
+    _has_inclusive_protocol_predicates,
     _is_claim_query,
+    _is_expiry_sweep_query,
+    _is_production_claim_query,
     _percentile,
+    _summarize_explain,
     _ThreadMetrics,
     _WorkerGroup,
 )
@@ -68,6 +77,51 @@ def _result(policy: str) -> BenchmarkResult:
         claim_latency_p50_ms=50.0,
         claim_latency_p95_ms=100.0,
         burst_claim_throughput_per_second=20.0,
+    )
+
+
+def _protocol_evidence() -> ProtocolPredicateEvidence:
+    plan = ProtocolPredicatePlanSummary(
+        node_shape=("0:limit", "1:lock_rows", "2:sort", "3:index_scan"),
+        index_categories=("claimable",),
+        estimated_rows=5,
+        actual_rows=5,
+        actual_loops=1,
+        estimated_total_cost=12.5,
+    )
+    production = ProtocolPredicateVariantResult(
+        name="production_protocol_predicate",
+        protocol_predicate=True,
+        duration_samples_ms=(1.0, 1.2),
+        duration_p50_ms=1.1,
+        duration_p95_ms=1.19,
+        plan=plan,
+    )
+    control = ProtocolPredicateVariantResult(
+        name="control_without_protocol_predicate",
+        protocol_predicate=False,
+        duration_samples_ms=(0.9, 1.1),
+        duration_p50_ms=1.0,
+        duration_p95_ms=1.09,
+        plan=plan,
+    )
+    return ProtocolPredicateEvidence(
+        schema_version=1,
+        method="paired_counterbalanced_production_claim",
+        seeded_rows=5,
+        query_limit=5,
+        timed_pairs=2,
+        production_first_pairs=1,
+        control_first_pairs=1,
+        seeded_protocol_version=1,
+        protocol_minimum=1,
+        protocol_maximum=1,
+        production_claim_sql_shape_verified=True,
+        variant_selection_verified=True,
+        paired_delta_samples_ms=(0.1, 0.1),
+        paired_delta_p50_ms=0.1,
+        paired_delta_p95_ms=0.1,
+        variants=(production, control),
     )
 
 
@@ -124,6 +178,214 @@ def test_claim_query_detection_matches_production_select_only() -> None:
     assert _is_claim_query(f'UPDATE "{table}" SET state = 2') is False
     assert _is_claim_query("SELECT 1 FOR UPDATE") is False
 
+    production = (
+        f'SELECT * FROM "{table}" WHERE run_after IS NULL '
+        'AND queue_deadline_at IS NULL ORDER BY "priority" DESC, '
+        '"created_at" ASC FOR UPDATE SKIP LOCKED'
+    )
+    expiry = (
+        f'SELECT * FROM "{table}" WHERE "queue_deadline_at" IS NOT NULL '
+        'AND "queue_deadline_at" <= %s ORDER BY "queue_deadline_at" ASC '
+        "FOR UPDATE SKIP LOCKED"
+    )
+    assert _is_production_claim_query(production) is True
+    assert _is_production_claim_query(expiry) is False
+    assert _is_expiry_sweep_query(expiry) is True
+    assert _is_expiry_sweep_query(production) is False
+
+
+def test_explain_summary_uses_bounded_fixed_vocabulary() -> None:
+    raw = json.dumps(
+        [
+            {
+                "Plan": {
+                    "Node Type": "Limit",
+                    "Plan Rows": 5,
+                    "Actual Rows": 5,
+                    "Actual Loops": 1,
+                    "Total Cost": 12.5,
+                    "Plans": [
+                        {
+                            "Node Type": "Index Scan",
+                            "Index Name": "ray_task_claimable_idx",
+                            "Plan Rows": 5,
+                            "Actual Rows": 5,
+                            "Actual Loops": 1,
+                            "Total Cost": 10.0,
+                        },
+                        {
+                            "Node Type": "Bitmap Index Scan",
+                            "Index Name": "generated_execution_protocol_version_idx",
+                        },
+                        {
+                            "Node Type": "Index Scan",
+                            "Index Name": "owned_table_pkey",
+                        },
+                        {
+                            "Node Type": "Index Only Scan",
+                            "Index Name": "tenant-specific-index-name",
+                        },
+                    ],
+                }
+            }
+        ]
+    )
+
+    summary = _summarize_explain(raw)
+
+    assert summary.node_shape == (
+        "0:limit",
+        "1:index_scan",
+        "1:bitmap_index_scan",
+        "1:index_scan",
+        "1:index_only_scan",
+    )
+    assert summary.index_categories == ("claimable", "other", "primary_key", "protocol")
+    assert summary.estimated_rows == 5
+    assert summary.actual_rows == 5
+    assert summary.actual_loops == 1
+    assert summary.estimated_total_cost == 12.5
+    assert "tenant-specific-index-name" not in repr(summary)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not-json",
+        "{}",
+        "[]",
+        '[{"Plan": []}]',
+        '[{"Plan":{"Node Type":"Limit","Plans":{}}}]',
+        '[{"Plan":{"Node Type":"Limit","Plans":[1]}}]',
+        '[{"Plan":{"Node Type":"Limit","Plan Rows":"many"}}]',
+        '[{"Plan":{"Node Type":"Limit","Plan Rows":1,"Actual Rows":1,'
+        '"Actual Loops":1,"Total Cost":-1}}]',
+    ],
+)
+def test_explain_summary_rejects_malformed_shapes(raw: str) -> None:
+    with pytest.raises(CommandError, match="unsupported EXPLAIN JSON shape"):
+        _summarize_explain(raw)
+
+
+@pytest.mark.django_db
+def test_claim_query_variants_select_identical_rows_and_verify_shape() -> None:
+    first = Command._create_execution(task_id="predicate-query-1", queue_name="predicate-queue")
+    second = Command._create_execution(task_id="predicate-query-2", queue_name="predicate-queue")
+    claim_now = datetime.now(UTC)
+
+    with benchmark.transaction.atomic():
+        production = Command._claim_queryset(
+            queue_name="predicate-queue",
+            claim_now=claim_now,
+            query_limit=2,
+            protocol_predicate=True,
+        )
+        control = Command._claim_queryset(
+            queue_name="predicate-queue",
+            claim_now=claim_now,
+            query_limit=2,
+            protocol_predicate=False,
+        )
+        production_sql, _ = production.query.sql_with_params()
+        control_sql, _ = control.query.sql_with_params()
+        assert [row.pk for row in production] == [first.pk, second.pk]
+        assert [row.pk for row in control] == [first.pk, second.pk]
+
+    def lookup_field_name(lookup: object) -> object:
+        return getattr(getattr(getattr(lookup, "lhs", None), "target", None), "name", None)
+
+    production_protocol_lookups = [
+        lookup
+        for lookup in production.query.where.children
+        if lookup_field_name(lookup) == "execution_protocol_version"
+    ]
+    control_protocol_lookups = [
+        lookup
+        for lookup in control.query.where.children
+        if lookup_field_name(lookup) == "execution_protocol_version"
+    ]
+    assert [getattr(lookup, "lookup_name", None) for lookup in production_protocol_lookups] == [
+        "gte",
+        "lte",
+    ]
+    assert control_protocol_lookups == []
+    assert [
+        str(lookup)
+        for lookup in production.query.where.children
+        if lookup_field_name(lookup) != "execution_protocol_version"
+    ] == [str(lookup) for lookup in control.query.where.children]
+
+    production_where = production_sql.split(" WHERE ", 1)[1]
+    control_where = control_sql.split(" WHERE ", 1)[1]
+    assert "execution_protocol_version" in production_where
+    assert "execution_protocol_version" not in control_where
+    assert _has_inclusive_protocol_predicates(production_sql) is True
+    assert _has_inclusive_protocol_predicates(control_sql) is False
+    Command._verify_production_claim_sql_shape(
+        captured_sql=production_sql.lower(),
+        queue_name="predicate-queue",
+        claim_now=claim_now,
+        query_limit=2,
+    )
+    with pytest.raises(CommandError, match="missing the inclusive"):
+        Command._verify_production_claim_sql_shape(
+            captured_sql=control_sql,
+            queue_name="predicate-queue",
+            claim_now=claim_now,
+            query_limit=2,
+        )
+    with pytest.raises(CommandError, match="shape does not match"):
+        Command._verify_production_claim_sql_shape(
+            captured_sql=f"{production_sql} OFFSET 0",
+            queue_name="predicate-queue",
+            claim_now=claim_now,
+            query_limit=2,
+        )
+
+    duration_ms, selected_pks = Command._time_claim_query(
+        queue_name="predicate-queue",
+        claim_now=claim_now,
+        query_limit=2,
+        protocol_predicate=True,
+    )
+    assert math.isfinite(duration_ms) and duration_ms >= 0
+    assert selected_pks == [first.pk, second.pk]
+    with pytest.raises(CommandError, match="selected different task rows"):
+        Command._assert_protocol_selection(
+            selected_pks=selected_pks,
+            expected_pks=list(reversed(selected_pks)),
+        )
+
+
+def test_explain_summary_rejects_unbounded_node_count() -> None:
+    children = [
+        {
+            "Node Type": "Result",
+            "Plan Rows": 1,
+            "Actual Rows": 1,
+            "Actual Loops": 1,
+            "Total Cost": 1.0,
+        }
+        for _ in range(benchmark._MAX_PLAN_NODES)
+    ]
+    raw = json.dumps(
+        [
+            {
+                "Plan": {
+                    "Node Type": "Append",
+                    "Plan Rows": 1,
+                    "Actual Rows": 1,
+                    "Actual Loops": 1,
+                    "Total Cost": 1.0,
+                    "Plans": children,
+                }
+            }
+        ]
+    )
+
+    with pytest.raises(CommandError, match="bounded node limit"):
+        _summarize_explain(raw)
+
 
 def test_add_arguments_exposes_repeatable_phase_controls() -> None:
     parser = CommandParser(prog="django_ray_benchmark_polling")
@@ -148,6 +410,11 @@ def test_handle_emits_json_with_environment_metadata(monkeypatch) -> None:
     monkeypatch.setattr(
         Command, "_run_policy", lambda _self, **kwargs: _result(kwargs["policy_name"])
     )
+    monkeypatch.setattr(
+        Command,
+        "_run_protocol_predicate_evidence",
+        lambda _self, **_kwargs: _protocol_evidence(),
+    )
     command = Command()
     command.stdout = StringIO()
 
@@ -158,6 +425,14 @@ def test_handle_emits_json_with_environment_metadata(monkeypatch) -> None:
     assert payload["environment"]["database_server_version"] == "170002"
     assert payload["environment"]["seed"] == 53
     assert [result["policy"] for result in payload["results"]] == ["fixed", "adaptive"]
+    evidence = payload["protocol_predicate_evidence"]
+    assert evidence["schema_version"] == 1
+    assert evidence["production_claim_sql_shape_verified"] is True
+    assert evidence["variant_selection_verified"] is True
+    assert [variant["name"] for variant in evidence["variants"]] == [
+        "production_protocol_predicate",
+        "control_without_protocol_predicate",
+    ]
 
 
 def test_handle_emits_human_readable_metrics(monkeypatch) -> None:
@@ -165,6 +440,11 @@ def test_handle_emits_human_readable_metrics(monkeypatch) -> None:
     monkeypatch.setattr(Command, "_schema_version", lambda: "0008_priority")
     monkeypatch.setattr(
         Command, "_run_policy", lambda _self, **kwargs: _result(kwargs["policy_name"])
+    )
+    monkeypatch.setattr(
+        Command,
+        "_run_protocol_predicate_evidence",
+        lambda _self, **_kwargs: _protocol_evidence(),
     )
     command = Command()
     command.stdout = StringIO()
@@ -177,6 +457,9 @@ def test_handle_emits_human_readable_metrics(monkeypatch) -> None:
     assert "peak_overlapping_workers=2" in output
     assert "cross_worker_overlap_ratio=0.250" in output
     assert "burst_throughput=20.00 tasks/s" in output
+    assert "protocol_predicate: production_p50=1.100ms" in output
+    assert "paired_delta_p50=0.100ms" in output
+    assert "production_claim_sql_shape_verified=true" in output
 
 
 def test_handle_rejects_maximum_below_base(monkeypatch) -> None:
@@ -540,6 +823,71 @@ def test_start_workers_runs_production_claim_under_sql_wrapper(monkeypatch) -> N
     assert heartbeat_calls
 
 
+@pytest.mark.django_db
+def test_capture_production_claim_sql_uses_real_worker_boundary(monkeypatch) -> None:
+    table = benchmark.RayTaskExecution._meta.db_table
+    expiry_sql = (
+        f'SELECT * FROM "{table}" WHERE "queue_deadline_at" IS NOT NULL '
+        'AND "queue_deadline_at" <= %s ORDER BY "queue_deadline_at" ASC '
+        "FOR UPDATE SKIP LOCKED"
+    )
+    production_sql = (
+        f'SELECT * FROM "{table}" WHERE run_after IS NULL '
+        'AND queue_deadline_at IS NULL ORDER BY "priority" DESC, '
+        '"created_at" ASC FOR UPDATE SKIP LOCKED'
+    )
+
+    class FakeConnection:
+        observer: Callable[..., object] | None = None
+
+        @contextmanager
+        def execute_wrapper(self, observer):
+            self.observer = observer
+            yield
+
+    fake_connection = FakeConnection()
+
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.lease_identity = None
+
+        def _set_worker_id(self, _worker_id: str) -> None:
+            return
+
+        def _create_lease(self, queue_name: str) -> None:
+            assert queue_name == "owned-queue"
+            self.lease_identity = _lease_identity("capture-worker")
+
+        def claim_and_process_tasks(self, queues, concurrency):
+            assert queues == ["owned-queue"]
+            assert concurrency == 5
+            observer = cast(Callable[..., object], fake_connection.observer)
+            executed_sql: list[str] = []
+
+            def execute(sql, _params, _many, _context):
+                executed_sql.append(sql)
+                return None
+
+            observer(execute, expiry_sql, (), False, {})
+            assert executed_sql == [benchmark._CAPTURE_EMPTY_SELECT]
+            observer(execute, production_sql, (), False, {})
+            pytest.fail("the production query must be intercepted before execution")
+
+    delete_leases = Mock()
+    monkeypatch.setattr(benchmark, "connection", fake_connection)
+    monkeypatch.setattr(benchmark, "WorkerCommand", FakeWorker)
+    monkeypatch.setattr(Command, "_delete_exact_leases", delete_leases)
+
+    captured = Command._capture_production_claim_sql(
+        queue_name="owned-queue",
+        query_limit=5,
+    )
+
+    assert captured == production_sql
+    delete_leases.assert_called_once()
+    assert delete_leases.call_args.args[0][0].worker_id == "capture-worker"
+
+
 def test_benchmark_worker_fails_closed_before_claim_after_lease_loss(monkeypatch) -> None:
     command = Command()
 
@@ -821,6 +1169,133 @@ def test_cleanup_deletes_only_exact_acquired_lease_identity() -> None:
     replacement.refresh_from_db()
     assert replacement.hostname == "replacement-host"
     assert replacement.is_active is True
+
+
+@pytest.mark.django_db
+def test_protocol_predicate_evidence_is_counterbalanced_and_exactly_cleans(
+    monkeypatch,
+) -> None:
+    foreign = benchmark.RayTaskExecution.objects.create(
+        task_id="poll-protocol-foreign-sentinel",
+        callable_path="django_ray.benchmarks.polling_probe",
+        queue_name="foreign-queue",
+        state=benchmark.TaskState.QUEUED,
+        args_json="[]",
+        kwargs_json="{}",
+    )
+    plan = _protocol_evidence().variants[0].plan
+    calls: list[bool] = []
+
+    monkeypatch.setattr(
+        Command,
+        "_capture_production_claim_sql",
+        staticmethod(lambda **_kwargs: "SELECT production shape"),
+    )
+    verify = Mock()
+    monkeypatch.setattr(Command, "_verify_production_claim_sql_shape", staticmethod(verify))
+    monkeypatch.setattr(
+        Command,
+        "_explain_claim_query",
+        staticmethod(lambda **_kwargs: plan),
+    )
+
+    def time_query(**kwargs):
+        protocol_predicate = bool(kwargs["protocol_predicate"])
+        calls.append(protocol_predicate)
+        rows = list(
+            benchmark.RayTaskExecution.objects.filter(queue_name=kwargs["queue_name"])
+            .order_by("created_at", "pk")
+            .values_list("pk", "execution_protocol_version")
+        )
+        assert {protocol for _pk, protocol in rows} == {1}
+        return (2.0 if protocol_predicate else 1.0), [int(pk) for pk, _protocol in rows]
+
+    monkeypatch.setattr(Command, "_time_claim_query", staticmethod(time_query))
+
+    evidence = Command()._run_protocol_predicate_evidence(task_count=5, seed=53)
+
+    assert evidence.schema_version == 1
+    assert evidence.seeded_rows == 5
+    assert evidence.query_limit == 5
+    assert evidence.timed_pairs == 12
+    assert evidence.production_first_pairs == 6
+    assert evidence.control_first_pairs == 6
+    assert evidence.seeded_protocol_version == 1
+    assert evidence.protocol_minimum == 1
+    assert evidence.protocol_maximum == 1
+    assert evidence.variant_selection_verified is True
+    assert evidence.paired_delta_samples_ms == (1.0,) * 12
+    assert evidence.paired_delta_p50_ms == 1.0
+    assert calls[:6] == [True, False, True, False, False, True]
+    assert len(calls) == 2 + 2 * evidence.timed_pairs
+    verify.assert_called_once()
+    assert benchmark.RayTaskExecution.objects.filter(pk=foreign.pk).exists()
+    assert (
+        benchmark.RayTaskExecution.objects.filter(task_id__startswith="poll-protocol-").count() == 1
+    )
+
+
+@pytest.mark.django_db
+def test_protocol_predicate_evidence_cleans_owned_rows_after_failure(monkeypatch) -> None:
+    foreign = benchmark.RayTaskExecution.objects.create(
+        task_id="poll-protocol-foreign-after-failure",
+        callable_path="django_ray.benchmarks.polling_probe",
+        queue_name="foreign-queue",
+        state=benchmark.TaskState.QUEUED,
+        args_json="[]",
+        kwargs_json="{}",
+    )
+
+    def fail_capture(**kwargs):
+        assert kwargs["query_limit"] == benchmark._PROTOCOL_PREDICATE_MAX_ROWS
+        assert (
+            benchmark.RayTaskExecution.objects.filter(queue_name=kwargs["queue_name"]).count()
+            == benchmark._PROTOCOL_PREDICATE_MAX_ROWS
+        )
+        raise CommandError("injected capture failure")
+
+    monkeypatch.setattr(
+        Command,
+        "_capture_production_claim_sql",
+        staticmethod(fail_capture),
+    )
+
+    with pytest.raises(CommandError, match="injected capture failure"):
+        Command()._run_protocol_predicate_evidence(task_count=300, seed=53)
+
+    assert benchmark.RayTaskExecution.objects.filter(pk=foreign.pk).exists()
+    assert (
+        benchmark.RayTaskExecution.objects.filter(task_id__startswith="poll-protocol-").count() == 1
+    )
+
+
+@pytest.mark.django_db
+def test_protocol_predicate_task_id_collision_preserves_foreign_row(monkeypatch) -> None:
+    foreign = benchmark.RayTaskExecution.objects.create(
+        task_id="poll-protocol-fixed-run-0",
+        callable_path="foreign.module.callable",
+        queue_name="foreign-queue",
+        state=benchmark.TaskState.QUEUED,
+        args_json="[]",
+        kwargs_json="{}",
+    )
+    capture = Mock()
+    monkeypatch.setattr(
+        benchmark.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="fixed-run"),
+    )
+    monkeypatch.setattr(Command, "_capture_production_claim_sql", staticmethod(capture))
+
+    with pytest.raises(IntegrityError):
+        Command()._run_protocol_predicate_evidence(task_count=1, seed=53)
+
+    foreign.refresh_from_db()
+    assert foreign.callable_path == "foreign.module.callable"
+    assert foreign.queue_name == "foreign-queue"
+    assert foreign.state == benchmark.TaskState.QUEUED
+    capture.assert_not_called()
+    assert benchmark.RayTaskExecution.objects.filter(pk=foreign.pk).exists()
 
 
 def test_claim_integrity_reports_exact_counts(monkeypatch) -> None:

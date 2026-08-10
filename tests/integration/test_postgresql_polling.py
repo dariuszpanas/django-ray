@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import math
 from io import StringIO
+from unittest.mock import Mock
 
 import pytest
+from django.core.management.base import CommandError
 from django.db import connection
 from django.db.models import Q
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
 
+import django_ray.management.commands.django_ray_benchmark_polling as benchmark
 from django_ray.management.commands.django_ray_benchmark_polling import Command
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 from testproject import api as testproject_api
@@ -97,8 +100,54 @@ def test_postgresql_workflow_poll_guards_diagnostics_before_transfer(
     assert "error_traceback" not in task_selects[0]
 
 
+@pytest.mark.parametrize(
+    ("disable_broad_interceptor", "message"),
+    [
+        (False, "unrecognized task-row locking SELECT"),
+        (True, "protected application processing boundary"),
+    ],
+)
+def test_production_claim_capture_drift_cannot_mutate_or_process(
+    monkeypatch,
+    disable_broad_interceptor: bool,
+    message: str,
+) -> None:
+    queue_name = f"capture-drift-{disable_broad_interceptor}"
+    execution = RayTaskExecution.objects.create(
+        task_id=f"capture-drift-task-{disable_broad_interceptor}",
+        callable_path="django_ray.benchmarks.polling_probe",
+        queue_name=queue_name,
+        state=TaskState.QUEUED,
+        args_json="[]",
+        kwargs_json="{}",
+    )
+    process_mock = Mock()
+    monkeypatch.setattr(benchmark, "_is_production_claim_query", lambda _sql: False)
+    if disable_broad_interceptor:
+        monkeypatch.setattr(benchmark, "_is_claim_query", lambda _sql: False)
+    monkeypatch.setattr(benchmark.WorkerCommand, "process_task", process_mock)
+
+    with pytest.raises(CommandError, match=message):
+        Command._capture_production_claim_sql(queue_name=queue_name, query_limit=1)
+
+    execution.refresh_from_db()
+    assert execution.state == TaskState.QUEUED
+    assert execution.claimed_by_worker is None
+    assert execution.execution_generation == 0
+    process_mock.assert_not_called()
+    assert not TaskWorkerLease.objects.filter(queue_name=queue_name).exists()
+
+
 def test_production_claim_benchmark_records_repeatable_metrics_and_cleans_up() -> None:
     """Exercise real worker claims, row locks, thread connections, and JSON evidence."""
+    foreign_protocol_row = RayTaskExecution.objects.create(
+        task_id="poll-protocol-foreign-sentinel",
+        callable_path="django_ray.benchmarks.polling_probe",
+        queue_name="foreign-protocol-evidence-queue",
+        state=TaskState.QUEUED,
+        args_json="[]",
+        kwargs_json="{}",
+    )
     command = Command()
     command.stdout = StringIO()
 
@@ -137,7 +186,49 @@ def test_production_claim_benchmark_records_repeatable_metrics_and_cleans_up() -
         assert result["burst_claim_throughput_per_second"] > 0
         assert all(math.isfinite(value) for key, value in result.items() if key not in {"policy"})
 
+    evidence = payload["protocol_predicate_evidence"]
+    assert evidence["schema_version"] == 1
+    assert evidence["method"] == "paired_counterbalanced_production_claim"
+    assert evidence["seeded_rows"] == 8
+    assert evidence["query_limit"] == 8
+    assert evidence["timed_pairs"] == 12
+    assert evidence["production_first_pairs"] == 6
+    assert evidence["control_first_pairs"] == 6
+    assert evidence["seeded_protocol_version"] == 1
+    assert evidence["protocol_minimum"] == 1
+    assert evidence["protocol_maximum"] == 1
+    assert evidence["production_claim_sql_shape_verified"] is True
+    assert evidence["variant_selection_verified"] is True
+    assert len(evidence["paired_delta_samples_ms"]) == evidence["timed_pairs"]
+    assert all(math.isfinite(value) for value in evidence["paired_delta_samples_ms"])
+    assert math.isfinite(evidence["paired_delta_p50_ms"])
+    assert math.isfinite(evidence["paired_delta_p95_ms"])
+    assert [variant["name"] for variant in evidence["variants"]] == [
+        "production_protocol_predicate",
+        "control_without_protocol_predicate",
+    ]
+    for variant in evidence["variants"]:
+        assert len(variant["duration_samples_ms"]) == evidence["timed_pairs"]
+        assert all(math.isfinite(value) and value >= 0 for value in variant["duration_samples_ms"])
+        assert math.isfinite(variant["duration_p50_ms"])
+        assert math.isfinite(variant["duration_p95_ms"])
+        assert "0:limit" in variant["plan"]["node_shape"]
+        assert any(node.endswith(":lock_rows") for node in variant["plan"]["node_shape"])
+        assert variant["plan"]["actual_rows"] == evidence["query_limit"]
+        assert variant["plan"]["actual_loops"] == 1
+        assert all(
+            category in {"claimable", "protocol", "primary_key", "other"}
+            for category in variant["plan"]["index_categories"]
+        )
+
+    serialized_evidence = json.dumps(evidence, sort_keys=True)
+    assert "SELECT " not in serialized_evidence.upper()
+    assert "POLL-PROTOCOL-" not in serialized_evidence.upper()
+
     assert not RayTaskExecution.objects.filter(
-        Q(task_id__startswith="poll-latency-") | Q(task_id__startswith="poll-throughput-")
+        Q(task_id__startswith="poll-latency-")
+        | Q(task_id__startswith="poll-throughput-")
+        | (Q(task_id__startswith="poll-protocol-") & ~Q(pk=foreign_protocol_row.pk))
     ).exists()
+    assert RayTaskExecution.objects.filter(pk=foreign_protocol_row.pk).exists()
     assert not TaskWorkerLease.objects.filter(worker_id__startswith="benchmark-").exists()

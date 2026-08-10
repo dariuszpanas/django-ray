@@ -249,6 +249,135 @@ def test_postgresql_worker_claim_and_expiry_use_exact_explicit_protocol_range(
     _assert_worker_claim_and_expiry_use_exact_explicit_protocol_range(monkeypatch)
 
 
+def _assert_v1_and_v1_v2_workers_obey_their_exact_protocol_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _close()
+    stale_at = timezone.now() - timedelta(hours=1)
+    old_v2_owner = TaskWorkerLease.objects.create(
+        worker_id="coordination-dual-cohort-old-v2-owner",
+        hostname="v2-host",
+        pid=2001,
+        capability_schema_version=1,
+        django_ray_version="0.5.0-test",
+        min_supported_execution_protocol_version=2,
+        max_supported_execution_protocol_version=2,
+        legacy_admission_token=None,
+        last_heartbeat_at=stale_at,
+    )
+    orphaned_v2 = RayTaskExecution.objects.create(
+        task_id="coordination-dual-cohort-orphaned-v2",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=old_v2_owner.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+        ray_job_id="raysubmit_coordination_dual_cohort_v2",
+        ray_address="ray://v2-cluster:10001",
+        managed_with_django_ray_version="0.5.0-v2-manager",
+    )
+    queued_v2 = RayTaskExecution.objects.create(
+        task_id="coordination-dual-cohort-queued-v2",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+    )
+    queued_v1 = RayTaskExecution.objects.create(
+        task_id="coordination-dual-cohort-queued-v1",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=1,
+    )
+    status_calls: list[str] = []
+
+    class PendingRunner:
+        def get_status(self, handle: SubmissionHandle) -> JobInfo:
+            status_calls.append(str(handle.ray_job_id))
+            return JobInfo(job_id=str(handle.ray_job_id), status=JobStatus.PENDING)
+
+    monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", PendingRunner)
+
+    v1_worker = _explicit_range_worker(
+        "coordination-dual-cohort-v1-worker",
+        minimum=1,
+        maximum=1,
+    )
+    v1_processed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        v1_worker,
+        "process_task",
+        lambda task: v1_processed.append((int(task.pk), int(task.execution_protocol_version))),
+    )
+
+    assert v1_worker.claim_and_process_tasks(["default"], concurrency=2) == 1
+    assert v1_worker.reconcile_tasks() == 0
+
+    queued_v1.refresh_from_db()
+    queued_v2.refresh_from_db()
+    orphaned_v2.refresh_from_db()
+    old_v2_owner.refresh_from_db()
+    assert v1_processed == [(queued_v1.pk, 1)]
+    assert queued_v1.state == TaskState.RUNNING
+    assert queued_v1.claimed_by_worker == v1_worker.worker_id
+    assert queued_v2.state == TaskState.QUEUED
+    assert queued_v2.started_at is None
+    assert queued_v2.claimed_by_worker is None
+    assert orphaned_v2.state == TaskState.RUNNING
+    assert orphaned_v2.claimed_by_worker == old_v2_owner.worker_id
+    assert orphaned_v2.managed_with_django_ray_version == "0.5.0-v2-manager"
+    assert old_v2_owner.is_active is True
+    assert status_calls == []
+
+    second_queued_v1 = RayTaskExecution.objects.create(
+        task_id="coordination-dual-cohort-second-queued-v1",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=1,
+    )
+    v1_v2_worker = _explicit_range_worker(
+        "coordination-dual-cohort-v1-v2-worker",
+        minimum=1,
+        maximum=2,
+    )
+    v1_v2_processed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        v1_v2_worker,
+        "process_task",
+        lambda task: v1_v2_processed.append((int(task.pk), int(task.execution_protocol_version))),
+    )
+
+    assert v1_v2_worker.claim_and_process_tasks(["default"], concurrency=2) == 2
+    assert v1_v2_processed == [(queued_v2.pk, 2), (second_queued_v1.pk, 1)]
+    assert v1_v2_worker.reconcile_tasks() == 1
+
+    queued_v2.refresh_from_db()
+    second_queued_v1.refresh_from_db()
+    orphaned_v2.refresh_from_db()
+    old_v2_owner.refresh_from_db()
+    for claimed in (queued_v2, second_queued_v1):
+        assert claimed.state == TaskState.RUNNING
+        assert claimed.claimed_by_worker == v1_v2_worker.worker_id
+        assert claimed.managed_with_django_ray_version == django_ray_version
+    assert status_calls == ["raysubmit_coordination_dual_cohort_v2"]
+    assert orphaned_v2.state == TaskState.RUNNING
+    assert orphaned_v2.claimed_by_worker == v1_v2_worker.worker_id
+    assert orphaned_v2.managed_with_django_ray_version == django_ray_version
+    assert orphaned_v2.pk in v1_v2_worker.active_tasks
+    assert old_v2_owner.is_active is False
+
+
+def test_v1_and_v1_v2_workers_obey_their_exact_protocol_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_v1_and_v1_v2_workers_obey_their_exact_protocol_ranges(monkeypatch)
+
+
+@pytest.mark.postgresql
+def test_postgresql_v1_and_v1_v2_workers_obey_their_exact_protocol_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _require_postgresql()
+    _assert_v1_and_v1_v2_workers_obey_their_exact_protocol_ranges(monkeypatch)
+
+
 def _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> None:
     _close()
     stale_at = timezone.now() - timedelta(hours=1)

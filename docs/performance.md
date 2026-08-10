@@ -739,6 +739,25 @@ Generated rows are validated for exact, unique ownership before deletion. The co
 refuses non-PostgreSQL databases because SQLite cannot represent the multi-worker locking
 behavior being measured.
 
+The additive `protocol_predicate_evidence` block measures the execution-protocol filter
+separately from those polling-policy phases. It creates at most 256 exact owned rows
+at the package's active write protocol (currently protocol `1`) on a private queue,
+intercepts the real production priority claim
+`SELECT` before execution, and verifies that the measured production variant has the
+same normalized SQL shape. A control removes only the inclusive protocol-range
+predicates. Both variants must return the same rows in the same order. One warm-up pair
+is followed by 12 deterministic AB/BA timing pairs; the report retains each bounded
+sample, p50/p95, and signed production-minus-control deltas, plus fixed-vocabulary
+bounded `EXPLAIN ANALYZE` plan summaries. Raw SQL, parameters, queue/task/row identities,
+and arbitrary index names are not retained.
+
+Do not turn one shared-runner delta into a latency threshold. Compare repeated artifacts
+from the same PostgreSQL version and task shape, confirm
+`production_claim_sql_shape_verified=true`, inspect both plan shapes, and interpret a positive
+delta only alongside run-to-run variance. A persistently different or regressed plan is
+evidence for a focused index investigation; this benchmark does not by itself authorize
+a model or migration change.
+
 For a scaling series, keep the database and task shape fixed and run `--workers=1`,
 `4`, and `8`. Repeat each case at least five times after a warm-up run. Record PostgreSQL
 version, host resources, connection-pool settings, database distance, worker count,
@@ -752,7 +771,8 @@ its operating environment changes, then download the `polling-benchmark-json` ar
 for exact environment metadata and individual measurements. Normal pull-request CI keeps
 the PostgreSQL coordination and polling correctness tests but does not run this
 time-based matrix. Performance varies with shared runner capacity, so the benchmark
-checks claim integrity and finite metrics rather than imposing noisy latency or
+checks claim integrity, exact protocol-variant row parity, verified production SQL
+shape, bounded plan summaries, and finite metrics rather than imposing noisy latency or
 throughput thresholds. Do not substitute SQLite or simulated timings.
 
 The following values are medians from five repetitions after warm-up in

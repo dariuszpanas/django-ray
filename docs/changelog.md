@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The PostgreSQL polling benchmark now emits additive, bounded schema-v1 evidence for
+  the execution-protocol claim predicate. It intercepts and shape-verifies the actual
+  production priority claim SQL, compares it with a control that removes only the
+  protocol range over the same exact active-write-protocol rows, counterbalances 12 timing pairs,
+  and retains fixed-vocabulary `EXPLAIN ANALYZE` summaries plus signed p50/p95 deltas.
+  Raw SQL and durable identifiers are omitted, existing polling result keys remain
+  unchanged, and timings remain evidence rather than a flaky threshold. Portable and
+  PostgreSQL coordination tests also prove that a `1..1` worker excludes protocol `2`
+  claims and Ray Job reconciliation while a synthetic `1..2` worker processes both;
+  production still advertises only protocol `1`.
+
 - Bounded task-status, execution-list, execution-detail, and Django Admin reads now
   expose the immutable execution protocol, nullable creator/manager/executor package
   provenance, and whether a valid heartbeat-live lease can read that protocol. One
