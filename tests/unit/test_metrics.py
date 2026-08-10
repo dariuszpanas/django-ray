@@ -39,6 +39,55 @@ def test_queue_allowlist_requires_string_sequence(db, queue_names) -> None:
         render_prometheus_metrics(queue_names=queue_names)
 
 
+def test_protocol_state_metrics_have_fixed_buckets_and_ignore_corrupt_states(db) -> None:
+    RayTaskExecution.objects.create(
+        task_id="metrics-protocol-v1",
+        callable_path="tasks.echo",
+        execution_protocol_version=1,
+        state=TaskState.QUEUED,
+    )
+    RayTaskExecution.objects.create(
+        task_id="metrics-protocol-v2",
+        callable_path="tasks.echo",
+        execution_protocol_version=2,
+        state=TaskState.SUCCEEDED,
+    )
+    RayTaskExecution.objects.create(
+        task_id="metrics-protocol-v99",
+        callable_path="tasks.echo",
+        execution_protocol_version=99,
+        state=TaskState.LOST,
+    )
+    RayTaskExecution.objects.create(
+        task_id="metrics-corrupt-state",
+        callable_path="tasks.echo",
+        execution_protocol_version=99,
+        state="UNBOUNDED-CORRUPT-STATE",
+    )
+
+    metrics = render_prometheus_metrics()
+    protocol_samples = [
+        sample
+        for family in text_string_to_metric_families(metrics)
+        for sample in family.samples
+        if sample.name == "django_ray_tasks_by_execution_protocol_total"
+    ]
+
+    assert len(protocol_samples) == 2 * len(TaskState)
+    assert {sample.labels["protocol"] for sample in protocol_samples} == {"1", "other"}
+    assert {sample.labels["state"] for sample in protocol_samples} == {
+        str(state) for state in TaskState
+    }
+    values = {
+        (sample.labels["protocol"], sample.labels["state"]): sample.value
+        for sample in protocol_samples
+    }
+    assert values[("1", TaskState.QUEUED)] == 1
+    assert values[("other", TaskState.SUCCEEDED)] == 1
+    assert values[("other", TaskState.LOST)] == 1
+    assert "UNBOUNDED-CORRUPT-STATE" not in metrics
+
+
 def test_metrics_use_durable_state_and_bounded_labels(db, settings) -> None:
     settings.DJANGO_RAY = {"WORKER_LEASE_SECONDS": 60}
     now = datetime(2026, 7, 19, 12, tzinfo=UTC)

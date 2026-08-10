@@ -23,6 +23,7 @@ from django.db.models import (
     When,
 )
 
+from django_ray.execution_protocol import LEGACY_EXECUTION_PROTOCOL_VERSION
 from django_ray.observability import OBSERVABILITY_SCHEMA_VERSION
 from django_ray.runner.leasing import get_lease_duration
 
@@ -309,9 +310,26 @@ def render_prometheus_metrics(
     allowed_queues = sorted(set(queue_names))
     now = observed_at or datetime.now(UTC)
 
-    task_counts = {
-        row["state"]: row["count"]
-        for row in RayTaskExecution.objects.values("state").annotate(count=Count("pk"))
+    task_rows = list(
+        RayTaskExecution.objects.filter(state__in=tuple(TaskState))
+        .values("state")
+        .annotate(
+            count=Count("pk"),
+            protocol_1=Count(
+                "pk",
+                filter=Q(execution_protocol_version=LEGACY_EXECUTION_PROTOCOL_VERSION),
+            ),
+            protocol_other=Count(
+                "pk",
+                filter=~Q(execution_protocol_version=LEGACY_EXECUTION_PROTOCOL_VERSION),
+            ),
+        )
+    )
+    task_counts = {row["state"]: row["count"] for row in task_rows}
+    protocol_task_counts = {
+        (row["state"], protocol): row[f"protocol_{protocol}"]
+        for row in task_rows
+        for protocol in ("1", "other")
     }
     queue_counts = {
         row["queue_name"]: row["count"]
@@ -343,6 +361,20 @@ def render_prometheus_metrics(
         name="django_ray_tasks_total",
         help_text="Total tasks by state",
         values=[({"state": str(state)}, task_counts.get(state, 0)) for state in TaskState],
+    )
+    lines.append("")
+    _metric_family(
+        lines,
+        name="django_ray_tasks_by_execution_protocol_total",
+        help_text="Total tasks by bounded execution-protocol bucket and state",
+        values=[
+            (
+                {"protocol": protocol, "state": str(state)},
+                protocol_task_counts.get((state, protocol), 0),
+            )
+            for protocol in ("1", "other")
+            for state in TaskState
+        ],
     )
     lines.append("")
     _metric(

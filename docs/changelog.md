@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bounded task-status, execution-list, execution-detail, and Django Admin reads now
+  expose the immutable execution protocol, nullable creator/manager/executor package
+  provenance, and whether a valid heartbeat-live lease can read that protocol. One
+  frozen cutoff and SQL `EXISTS` annotation avoid per-row lease reads; package
+  provenance is guarded at 128 UTF-8 bytes before transfer and presentation-redacted.
+  Every public example marks `queue_capacity_attested=false` because lease queue text,
+  available concurrency, Ray/Python compatibility, Ray readiness, and cluster identity
+  remain unattested. Prometheus adds exactly 16 fixed
+  `django_ray_tasks_by_execution_protocol_total{protocol=1|other,state=...}` series,
+  including zeros, without package-version labels.
+
 - New Ray Job submissions now reuse the canonical bounded execution request sourced
   from durable JSON or an opaque input reference and bind its full identity, protocol,
   and digest independently in Ray Job metadata. Upgraded drivers reject malformed,

@@ -10,7 +10,18 @@ from typing import Any
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, transaction
-from django.db.models import Case, CharField, Count, Exists, F, OuterRef, Q, Value, When
+from django.db.models import (
+    Case,
+    CharField,
+    Count,
+    Exists,
+    F,
+    OuterRef,
+    Q,
+    QuerySet,
+    Value,
+    When,
+)
 from django.db.models.functions import Length
 from django.db.utils import ConnectionDoesNotExist
 from django.utils import timezone
@@ -190,6 +201,111 @@ def _safe_queue_name(value: object) -> str:
     return normalize_terminal_text(redact_text(value))
 
 
+def _valid_worker_lease_shape() -> Q:
+    valid_legacy = Q(
+        capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
+        django_ray_version__isnull=True,
+        min_supported_execution_protocol_version__isnull=True,
+        max_supported_execution_protocol_version__isnull=True,
+    ) & (Q(is_active=False) | Q(legacy_admission_token_id=_LEGACY_TOKEN_KEY))
+    valid_explicit = Q(
+        capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
+        legacy_admission_token__isnull=True,
+        min_supported_execution_protocol_version__isnull=False,
+        max_supported_execution_protocol_version__isnull=False,
+        min_supported_execution_protocol_version__gte=1,
+        max_supported_execution_protocol_version__gte=F("min_supported_execution_protocol_version"),
+    )
+    return valid_legacy | valid_explicit
+
+
+def _valid_protocol_policy(*, using: str, legacy_open: bool | None = None) -> QuerySet:
+    tokens = LegacyWorkerAdmissionToken.objects.using(using)
+    policies = TaskExecutionProtocolPolicy.objects.using(using)
+    policy = (
+        policies.filter(
+            singleton_key=_POLICY_KEY,
+            schema_version=PROTOCOL_POLICY_SCHEMA_VERSION,
+            active_write_protocol_version=LEGACY_EXECUTION_PROTOCOL_VERSION,
+            revision__gte=1,
+            revision__lte=_MAX_POLICY_REVISION,
+        )
+        .annotate(
+            _expected_token_present=Exists(tokens.filter(singleton_key=_LEGACY_TOKEN_KEY)),
+            _unexpected_token_present=Exists(tokens.exclude(singleton_key=_LEGACY_TOKEN_KEY)),
+            _unexpected_policy_present=Exists(policies.exclude(singleton_key=_POLICY_KEY)),
+        )
+        .filter(
+            _unexpected_token_present=False,
+            _unexpected_policy_present=False,
+        )
+        .filter(
+            Q(
+                legacy_worker_admission_enabled=True,
+                _expected_token_present=True,
+            )
+            | Q(
+                legacy_worker_admission_enabled=False,
+                _expected_token_present=False,
+            )
+        )
+    )
+    if legacy_open is not None:
+        policy = policy.filter(legacy_worker_admission_enabled=legacy_open)
+    return policy
+
+
+def annotate_execution_protocol_availability(
+    queryset: QuerySet,
+    *,
+    observed_at: datetime | None = None,
+    field_name: str = "protocol_compatible_worker_available",
+) -> QuerySet:
+    """Annotate whether each execution has heartbeat-live compatible capacity.
+
+    The policy, legacy-admission token, and candidate lease must all have a
+    recognized shape. Package versions and informational worker queues do not
+    participate in this compatibility decision.
+    """
+    observed = _utc_datetime(observed_at or datetime.now(UTC))
+    cutoff = observed - get_lease_duration()
+    using = queryset.db
+
+    valid_policy = _valid_protocol_policy(using=using)
+    invalid_lease = TaskWorkerLease.objects.using(using).exclude(_valid_worker_lease_shape())
+    explicit_capacity = Q(
+        capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
+        legacy_admission_token__isnull=True,
+        min_supported_execution_protocol_version__isnull=False,
+        max_supported_execution_protocol_version__isnull=False,
+        min_supported_execution_protocol_version__gte=1,
+        max_supported_execution_protocol_version__gte=F("min_supported_execution_protocol_version"),
+        min_supported_execution_protocol_version__lte=OuterRef("execution_protocol_version"),
+    ) & Q(max_supported_execution_protocol_version__gte=OuterRef("execution_protocol_version"))
+    legacy_capacity = Q(
+        capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
+        django_ray_version__isnull=True,
+        min_supported_execution_protocol_version__isnull=True,
+        max_supported_execution_protocol_version__isnull=True,
+        legacy_admission_token_id=_LEGACY_TOKEN_KEY,
+        _legacy_admission_open=True,
+        _legacy_execution_protocol=OuterRef("execution_protocol_version"),
+    )
+    live_capacity = (
+        TaskWorkerLease.objects.using(using)
+        .filter(is_active=True, last_heartbeat_at__gte=cutoff)
+        .alias(
+            _policy_valid=Exists(valid_policy),
+            _lease_shapes_valid=~Exists(invalid_lease),
+            _legacy_admission_open=Exists(_valid_protocol_policy(using=using, legacy_open=True)),
+            _legacy_execution_protocol=Value(LEGACY_EXECUTION_PROTOCOL_VERSION),
+        )
+        .filter(_lease_shapes_valid=True, _policy_valid=True)
+        .filter(explicit_capacity | legacy_capacity)
+    )
+    return queryset.annotate(**{field_name: Exists(live_capacity)})
+
+
 def _load_policy(*, using: str) -> ProtocolPolicyStatus:
     policy_rows = list(
         TaskExecutionProtocolPolicy.objects.using(using)
@@ -242,21 +358,7 @@ def _load_policy(*, using: str) -> ProtocolPolicyStatus:
 
 
 def _validate_lease_shapes(*, using: str) -> None:
-    valid_legacy = Q(
-        capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
-        django_ray_version__isnull=True,
-        min_supported_execution_protocol_version__isnull=True,
-        max_supported_execution_protocol_version__isnull=True,
-    ) & (Q(is_active=False) | Q(legacy_admission_token_id=_LEGACY_TOKEN_KEY))
-    valid_explicit = Q(
-        capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
-        legacy_admission_token__isnull=True,
-        min_supported_execution_protocol_version__isnull=False,
-        max_supported_execution_protocol_version__isnull=False,
-        min_supported_execution_protocol_version__gte=1,
-        max_supported_execution_protocol_version__gte=F("min_supported_execution_protocol_version"),
-    )
-    if TaskWorkerLease.objects.using(using).exclude(valid_legacy | valid_explicit).exists():
+    if TaskWorkerLease.objects.using(using).exclude(_valid_worker_lease_shape()).exists():
         raise ProtocolStatusError("a worker capability advertisement is invalid")
 
 
@@ -809,11 +911,11 @@ def _build_protocol_status_observation(
         _has_explicit_protocol_capacity=Exists(explicit_capacity)
     ).filter(_has_explicit_protocol_capacity=False)
     no_upgraded_reader_count = no_explicit_capacity.count()
-    unsupported = no_explicit_capacity
-    if policy.legacy_worker_admission_enabled and leases.heartbeat_live_legacy > 0:
-        unsupported = unsupported.exclude(
-            execution_protocol_version=LEGACY_EXECUTION_PROTOCOL_VERSION
-        )
+    unsupported = annotate_execution_protocol_availability(
+        no_explicit_capacity,
+        observed_at=observed,
+        field_name="_protocol_compatible_worker_available",
+    ).filter(_protocol_compatible_worker_available=False)
 
     nonterminal_section = _work_section(nonterminal)
     unsupported_section = _work_section(unsupported)

@@ -395,6 +395,9 @@ MAX_HTTP_RESPONSE_BYTES = 64 * 1024
 MAX_OPENAPI_SCHEMA_BYTES = 128_000
 EXPECTED_TASK_STATUS_INPUT_MAX_BYTES = 16 * 1024
 EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES = 64 * 1024
+EXPECTED_EXECUTION_PROTOCOL_VERSION = 1
+EXPECTED_EXECUTION_PROVENANCE_MAX_BYTES = 128
+EXPECTED_EXECUTION_PROTOCOL_METRIC = "django_ray_tasks_by_execution_protocol_total"
 TASK_STATUS_INPUT_OMISSION_REASONS = frozenset(
     {
         None,
@@ -414,6 +417,13 @@ TASK_STATUS_BY_STATE = {
     "LOST": "FAILED",
     "EXPIRED": "FAILED",
 }
+EXPECTED_EXECUTION_PROTOCOL_METRIC_PROTOCOLS = frozenset({"1", "other"})
+EXPECTED_EXECUTION_PROTOCOL_METRIC_STATES = frozenset(TASK_STATUS_BY_STATE)
+EXECUTION_PROTOCOL_METRIC_SAMPLE_PATTERN = re.compile(
+    rf"{EXPECTED_EXECUTION_PROTOCOL_METRIC}"
+    r'\{protocol="(1|other)",state="([A-Z]+)"\} '
+    r"(?:0|[1-9][0-9]{0,18})\Z"
+)
 EXPECTED_POLL_DIAGNOSTIC_MAX_BYTES = 16 * 1024
 EXPECTED_POLL_RESPONSE_MAX_BYTES = 64 * 1024
 EXPECTED_POLL_ATTEMPT_ERROR_MAX_BYTES = 4 * 1024
@@ -2465,6 +2475,78 @@ def validate_task_status_payload(
     elif args is not None or kwargs is not None:
         raise ValueError("task status polling mixed input with an omission reason")
     return cast(str, state)
+
+
+def validate_execution_protocol_visibility(
+    payload: Mapping[str, Any],
+    *,
+    surface: str,
+) -> None:
+    """Validate the fixed protocol and bounded provenance API projection."""
+    if type(payload.get("execution_protocol_version")) is not int or (
+        payload.get("execution_protocol_version") != EXPECTED_EXECUTION_PROTOCOL_VERSION
+    ):
+        raise ValueError(f"{surface} did not report execution protocol version 1")
+
+    state = payload.get("state")
+    required_provenance = {
+        "created_with_django_ray_version": True,
+        "managed_with_django_ray_version": state in {"RUNNING", "SUCCEEDED"},
+        "executor_django_ray_version": state == "SUCCEEDED",
+    }
+    for field_name, required in required_provenance.items():
+        value = payload.get(field_name)
+        if value is None:
+            if required:
+                raise ValueError(f"{surface} omitted applicable package provenance")
+            continue
+        if not isinstance(value, str) or not value or "\x00" in value:
+            raise ValueError(f"{surface} returned invalid package provenance")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError(f"{surface} returned invalid package provenance") from error
+        if len(encoded) > EXPECTED_EXECUTION_PROVENANCE_MAX_BYTES:
+            raise ValueError(f"{surface} returned unbounded package provenance")
+
+    if payload.get("protocol_compatible_worker_available") is not True:
+        raise ValueError(f"{surface} has no protocol-compatible worker capacity")
+    if payload.get("queue_capacity_attested") is not False:
+        raise ValueError(f"{surface} unexpectedly attested queue-specific capacity")
+
+
+def validate_execution_protocol_metrics(body: bytes) -> None:
+    """Require the complete fixed-bucket execution-protocol metric family."""
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("authenticated metrics were not valid UTF-8") from error
+
+    help_line = (
+        f"# HELP {EXPECTED_EXECUTION_PROTOCOL_METRIC} "
+        "Total tasks by bounded execution-protocol bucket and state"
+    )
+    type_line = f"# TYPE {EXPECTED_EXECUTION_PROTOCOL_METRIC} gauge"
+    lines = text.splitlines()
+    if lines.count(help_line) != 1 or lines.count(type_line) != 1:
+        raise ValueError("authenticated metrics omitted the bounded protocol metric family")
+
+    samples: list[tuple[str, str]] = []
+    for line in lines:
+        if not line.startswith(EXPECTED_EXECUTION_PROTOCOL_METRIC):
+            continue
+        match = EXECUTION_PROTOCOL_METRIC_SAMPLE_PATTERN.fullmatch(line)
+        if match is None:
+            raise ValueError("authenticated metrics changed the protocol metric label contract")
+        samples.append((match.group(1), match.group(2)))
+
+    expected = {
+        (protocol, state)
+        for protocol in EXPECTED_EXECUTION_PROTOCOL_METRIC_PROTOCOLS
+        for state in EXPECTED_EXECUTION_PROTOCOL_METRIC_STATES
+    }
+    if len(samples) != len(expected) or set(samples) != expected:
+        raise ValueError("authenticated metrics returned incomplete protocol metric buckets")
 
 
 def validate_bounded_poll_projection(
@@ -4615,10 +4697,14 @@ class LocalKubeRayGate:
 
         token = self._secret_token()
         headers = {"Authorization": f"Bearer {token}"}
-        for endpoint in ("/api/executions/stats", "/api/metrics", "/api/executions?limit=1"):
+        for endpoint in ("/api/executions/stats", "/api/executions?limit=1"):
             status, _ = self._http(endpoint, method="GET", headers=headers)
             if status != 200:
                 raise ValueError(f"authenticated {endpoint} returned {status}, expected 200")
+        status, body = self._http("/api/metrics", method="GET", headers=headers)
+        if status != 200:
+            raise ValueError(f"authenticated /api/metrics returned {status}, expected 200")
+        validate_execution_protocol_metrics(body)
 
         status, body = self._http(
             "/api/enqueue/add/2/3",
@@ -4657,6 +4743,10 @@ class LocalKubeRayGate:
                 raise ValueError(f"task status polling returned {status}, expected 200")
             task_status = self._json_body(body, endpoint="task status polling")
             last_state = validate_task_status_payload(task_status, task_id=task_id)
+            validate_execution_protocol_visibility(
+                task_status,
+                surface="task status polling",
+            )
             if task_status.get("input_omission_reason") is not None:
                 raise ValueError("add_numbers task status unexpectedly omitted inline input")
             if task_status.get("args") != [2, 3] or task_status.get("kwargs") != {}:
@@ -4691,6 +4781,10 @@ class LocalKubeRayGate:
         )
         if execution is None or execution.get("state") != "SUCCEEDED":
             raise ValueError("add_numbers durable execution lookup did not return SUCCEEDED")
+        validate_execution_protocol_visibility(
+            execution,
+            surface="execution lookup",
+        )
         execution_id = execution.get("id")
         if not isinstance(execution_id, int) or isinstance(execution_id, bool) or execution_id < 1:
             raise ValueError("add_numbers execution has no positive integer id")
@@ -4707,6 +4801,10 @@ class LocalKubeRayGate:
                 f"execution detail after rejected DELETE returned {status}, expected 200"
             )
         detail = self._json_body(body, endpoint="execution detail")
+        validate_execution_protocol_visibility(
+            detail,
+            surface="execution detail",
+        )
         detail_result = parse_task_result(detail.get("result_data"))
         if (
             detail.get("id") != execution_id

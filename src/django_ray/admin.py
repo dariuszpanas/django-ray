@@ -72,6 +72,7 @@ from django_ray.models import (
     TaskState,
     TaskWorkerLease,
 )
+from django_ray.protocol_status import annotate_execution_protocol_availability
 from django_ray.redaction import normalize_terminal_text, redact_text, safe_json_dumps
 from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError
 from django_ray.workflow_plans import (
@@ -147,6 +148,13 @@ _ADMIN_DETAIL_INVALID_JSON_MESSAGE = (
     "Stored JSON omitted because it could not be parsed and redacted safely."
 )
 _ADMIN_DETAIL_RENDER_FAILURE_BODY = b"Task detail could not be rendered safely."
+_ADMIN_PROTOCOL_PROVENANCE_MAX_BYTES = 128
+_ADMIN_PROTOCOL_PROVENANCE_MAX_CHARS = 128
+_ADMIN_PROTOCOL_PROVENANCE_FIELDS = (
+    "created_with_django_ray_version",
+    "managed_with_django_ray_version",
+    "executor_django_ray_version",
+)
 _ADMIN_EXECUTION_DETAIL_DIAGNOSTIC_FIELDS = (
     "args_json",
     "kwargs_json",
@@ -169,9 +177,6 @@ _ADMIN_EXECUTION_DETAIL_FIELDS = (
     "execution_generation",
     "metadata_schema_version",
     "execution_protocol_version",
-    "created_with_django_ray_version",
-    "managed_with_django_ray_version",
-    "executor_django_ray_version",
     "ray_job_id",
     "ray_target_address",
     "ray_address",
@@ -1230,9 +1235,6 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         "execution_generation",
         "metadata_schema_version",
         "execution_protocol_version",
-        "created_with_django_ray_version",
-        "managed_with_django_ray_version",
-        "executor_django_ray_version",
         "workflow_run_id",
         "created_at",
         "run_after",
@@ -1292,9 +1294,10 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         "execution_generation",
         "metadata_schema_version",
         "execution_protocol_version",
-        "created_with_django_ray_version",
-        "managed_with_django_ray_version",
-        "executor_django_ray_version",
+        "created_with_django_ray_version_display",
+        "managed_with_django_ray_version_display",
+        "executor_django_ray_version_display",
+        "protocol_compatible_worker_available_display",
         "ray_job_id_display",
         "ray_target_address",
         "ray_address",
@@ -1350,9 +1353,10 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 "fields": (
                     "metadata_schema_version",
                     "execution_protocol_version",
-                    "created_with_django_ray_version",
-                    "managed_with_django_ray_version",
-                    "executor_django_ray_version",
+                    "created_with_django_ray_version_display",
+                    "managed_with_django_ray_version_display",
+                    "executor_django_ray_version_display",
+                    "protocol_compatible_worker_available_display",
                 ),
                 "description": (
                     "The integer execution protocol is the compatibility boundary. "
@@ -1438,12 +1442,22 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         if request.__dict__.get("_django_ray_bounded_execution_detail") is True or url_name == (
             f"{self.opts.app_label}_{self.opts.model_name}_change"
         ):
-            return _annotate_bounded_admin_text(
-                queryset.only(*_ADMIN_EXECUTION_DETAIL_FIELDS),
+            queryset = annotate_execution_protocol_availability(
+                queryset.only(*_ADMIN_EXECUTION_DETAIL_FIELDS)
+            )
+            queryset = _annotate_bounded_admin_text(
+                queryset,
                 field_names=_ADMIN_EXECUTION_DETAIL_DIAGNOSTIC_FIELDS,
                 max_bytes=ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES,
                 max_chars=ADMIN_DIAGNOSTIC_MAX_CHARS,
                 namespace="detail",
+            )
+            return _annotate_bounded_admin_text(
+                queryset,
+                field_names=_ADMIN_PROTOCOL_PROVENANCE_FIELDS,
+                max_bytes=_ADMIN_PROTOCOL_PROVENANCE_MAX_BYTES,
+                max_chars=_ADMIN_PROTOCOL_PROVENANCE_MAX_CHARS,
+                namespace="protocol",
             )
         if url_name == f"{self.opts.app_label}_{self.opts.model_name}_changelist":
             queryset = queryset.defer(
@@ -1887,7 +1901,16 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         try:
             execution_id = self.model._meta.pk.to_python(unquote(object_id))
             queryset = _annotate_bounded_admin_text(
-                self.get_queryset(request).only(*self.observability_fields),
+                annotate_execution_protocol_availability(
+                    self.get_queryset(request).only(*self.observability_fields)
+                ),
+                field_names=_ADMIN_PROTOCOL_PROVENANCE_FIELDS,
+                max_bytes=_ADMIN_PROTOCOL_PROVENANCE_MAX_BYTES,
+                max_chars=_ADMIN_PROTOCOL_PROVENANCE_MAX_CHARS,
+                namespace="protocol",
+            )
+            queryset = _annotate_bounded_admin_text(
+                queryset,
                 field_names=("error_message",),
                 max_bytes=ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES,
                 max_chars=ADMIN_DIAGNOSTIC_MAX_CHARS,
@@ -2565,6 +2588,26 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             include_workflow_plan_selection=False,
             workflow_progress=progress,
         )
+        provenance: dict[str, str | None] = {}
+        for field_name in _ADMIN_PROTOCOL_PROVENANCE_FIELDS:
+            value, value_status = _bounded_admin_text_value(
+                execution,
+                field_name,
+                max_bytes=_ADMIN_PROTOCOL_PROVENANCE_MAX_BYTES,
+                max_chars=_ADMIN_PROTOCOL_PROVENANCE_MAX_CHARS,
+                namespace="protocol",
+            )
+            provenance[field_name] = (
+                redact_text(value) if value_status == "value" and value is not None else None
+            )
+        summary.update(
+            execution_protocol_version=execution.execution_protocol_version,
+            **provenance,
+            protocol_compatible_worker_available=bool(
+                execution.protocol_compatible_worker_available
+            ),
+            queue_capacity_attested=False,
+        )
         if summary.get("error_message") is not None:
             summary["error_message"] = _bounded_redacted_text(summary["error_message"])
         if error_status != "value":
@@ -2946,6 +2989,45 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             '{} <a href="{}" target="_blank" rel="noopener noreferrer">[Open in Dashboard]</a>',
             job_id,
             url,
+        )
+
+    @admin.display(boolean=True, description="Compatible worker available")
+    def protocol_compatible_worker_available_display(
+        self,
+        obj: RayTaskExecution,
+    ) -> bool | None:
+        """Show heartbeat-live protocol compatibility without implying queue capacity."""
+        value = obj.__dict__.get("protocol_compatible_worker_available")
+        return value if isinstance(value, bool) else None
+
+    @admin.display(description="Created with django-ray")
+    def created_with_django_ray_version_display(self, obj: RayTaskExecution) -> str:
+        return _ordinary_admin_text_display(
+            obj,
+            "created_with_django_ray_version",
+            max_chars=_ADMIN_PROTOCOL_PROVENANCE_MAX_CHARS,
+            max_bytes=_ADMIN_PROTOCOL_PROVENANCE_MAX_BYTES,
+            namespace="protocol",
+        )
+
+    @admin.display(description="Managed with django-ray")
+    def managed_with_django_ray_version_display(self, obj: RayTaskExecution) -> str:
+        return _ordinary_admin_text_display(
+            obj,
+            "managed_with_django_ray_version",
+            max_chars=_ADMIN_PROTOCOL_PROVENANCE_MAX_CHARS,
+            max_bytes=_ADMIN_PROTOCOL_PROVENANCE_MAX_BYTES,
+            namespace="protocol",
+        )
+
+    @admin.display(description="Executed with django-ray")
+    def executor_django_ray_version_display(self, obj: RayTaskExecution) -> str:
+        return _ordinary_admin_text_display(
+            obj,
+            "executor_django_ray_version",
+            max_chars=_ADMIN_PROTOCOL_PROVENANCE_MAX_CHARS,
+            max_bytes=_ADMIN_PROTOCOL_PROVENANCE_MAX_BYTES,
+            namespace="protocol",
         )
 
     @admin.display(description="State", ordering="state")

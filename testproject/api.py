@@ -53,6 +53,7 @@ from django_ray.lifecycle import (
 )
 from django_ray.metrics import render_prometheus_metrics
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.protocol_status import annotate_execution_protocol_availability
 from django_ray.redaction import REDACTED, redact_text, redact_value, safe_json_dumps
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
@@ -109,6 +110,12 @@ _POLL_ATTEMPT_ERROR_MAX_BYTES = 4 * 1024
 _POLL_ATTEMPT_MAX_COUNT = 4
 _POLL_RESPONSE_MAX_BYTES = 64 * 1024
 _CANCELLATION_RESPONSE_MAX_BYTES = 4 * 1024
+_EXECUTION_PROVENANCE_MAX_BYTES = 128
+_EXECUTION_PROVENANCE_FIELDS = (
+    "created_with_django_ray_version",
+    "managed_with_django_ray_version",
+    "executor_django_ray_version",
+)
 
 _TASK_STATUS_BY_STATE = {
     TaskState.QUEUED: TaskResultStatus.READY.value,
@@ -152,6 +159,11 @@ _EXECUTION_LIST_VALUE_FIELDS = (
     "state",
     "attempt_number",
     "execution_generation",
+    "execution_protocol_version",
+    "_list_created_with_django_ray_version",
+    "_list_managed_with_django_ray_version",
+    "_list_executor_django_ray_version",
+    "protocol_compatible_worker_available",
     "workflow_run_id",
     "created_at",
     "started_at",
@@ -174,6 +186,11 @@ _EXECUTION_DETAIL_VALUE_FIELDS = (
     "state",
     "attempt_number",
     "execution_generation",
+    "execution_protocol_version",
+    "_detail_created_with_django_ray_version",
+    "_detail_managed_with_django_ray_version",
+    "_detail_executor_django_ray_version",
+    "protocol_compatible_worker_available",
     "workflow_run_id",
     "created_at",
     "started_at",
@@ -194,6 +211,11 @@ _TASK_STATUS_VALUE_FIELDS = (
     "state",
     "attempt_number",
     "execution_generation",
+    "execution_protocol_version",
+    "_status_created_with_django_ray_version",
+    "_status_managed_with_django_ray_version",
+    "_status_executor_django_ray_version",
+    "protocol_compatible_worker_available",
     "created_at",
     "started_at",
     "finished_at",
@@ -307,7 +329,9 @@ def _task_state_counts() -> dict[str, int]:
     """Return task counts grouped by state with a single query."""
     return {
         row["state"]: row["count"]
-        for row in RayTaskExecution.objects.values("state").annotate(count=Count("id"))
+        for row in RayTaskExecution.objects.filter(state__in=TaskState.values)
+        .values("state")
+        .annotate(count=Count("id"))
     }
 
 
@@ -359,6 +383,12 @@ class TaskStatusSchema(Schema):
     state: str
     attempt_number: int
     execution_generation: int
+    execution_protocol_version: int
+    created_with_django_ray_version: Annotated[str | None, Field(max_length=128)]
+    managed_with_django_ray_version: Annotated[str | None, Field(max_length=128)]
+    executor_django_ray_version: Annotated[str | None, Field(max_length=128)]
+    protocol_compatible_worker_available: bool
+    queue_capacity_attested: Literal[False]
     enqueued_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
@@ -380,6 +410,16 @@ class TaskStatusSchema(Schema):
     @classmethod
     def redact_inputs(cls, value):
         return redact_value(value) if value is not None else None
+
+    @field_validator(
+        "created_with_django_ray_version",
+        "managed_with_django_ray_version",
+        "executor_django_ray_version",
+        mode="before",
+    )
+    @classmethod
+    def redact_provenance(cls, value):
+        return redact_text(value) if value is not None else None
 
 
 class TaskStatusNotFoundSchema(Schema):
@@ -423,6 +463,12 @@ class TaskExecutionSchema(Schema):
     state: str
     attempt_number: int
     execution_generation: int
+    execution_protocol_version: int
+    created_with_django_ray_version: Annotated[str | None, Field(max_length=128)]
+    managed_with_django_ray_version: Annotated[str | None, Field(max_length=128)]
+    executor_django_ray_version: Annotated[str | None, Field(max_length=128)]
+    protocol_compatible_worker_available: bool
+    queue_capacity_attested: Literal[False]
     workflow_run_id: UUID | None
     created_at: datetime
     started_at: datetime | None
@@ -451,6 +497,16 @@ class TaskExecutionSchema(Schema):
     @field_validator("error_message", mode="before")
     @classmethod
     def redact_error(cls, value):
+        return redact_text(value) if value is not None else None
+
+    @field_validator(
+        "created_with_django_ray_version",
+        "managed_with_django_ray_version",
+        "executor_django_ray_version",
+        mode="before",
+    )
+    @classmethod
+    def redact_provenance(cls, value):
         return redact_text(value) if value is not None else None
 
 
@@ -1287,6 +1343,45 @@ def _guarded_execution_diagnostics(
     )
 
 
+def _guarded_execution_provenance(
+    queryset: QuerySet,
+    *,
+    annotation_prefix: str,
+) -> QuerySet:
+    """Project package provenance only after SQL proves its stored byte bound."""
+    byte_lengths = {
+        f"_{annotation_prefix}_{field_name}_bytes": _DatabaseByteLength(field_name)
+        for field_name in _EXECUTION_PROVENANCE_FIELDS
+    }
+    queryset = queryset.annotate(**byte_lengths)
+    values = {
+        f"_{annotation_prefix}_{field_name}": Case(
+            When(
+                **{
+                    f"_{annotation_prefix}_{field_name}_bytes__lte": (
+                        _EXECUTION_PROVENANCE_MAX_BYTES
+                    )
+                },
+                then=F(field_name),
+            ),
+            default=Value(None),
+            output_field=TextField(),
+        )
+        for field_name in _EXECUTION_PROVENANCE_FIELDS
+    }
+    return queryset.annotate(**values)
+
+
+def _public_execution_provenance(
+    values: dict[str, Any],
+    *,
+    annotation_prefix: str,
+) -> None:
+    """Move guarded private aliases into the nullable public provenance fields."""
+    for field_name in _EXECUTION_PROVENANCE_FIELDS:
+        values[field_name] = values.pop(f"_{annotation_prefix}_{field_name}")
+
+
 def _bounded_execution_list_rows(
     queryset: QuerySet,
     *,
@@ -1294,7 +1389,10 @@ def _bounded_execution_list_rows(
 ) -> list[dict[str, Any]]:
     """Load one bounded page without transferring oversized diagnostics."""
     guarded = _guarded_execution_diagnostics(
-        queryset,
+        _guarded_execution_provenance(
+            annotate_execution_protocol_availability(queryset),
+            annotation_prefix="list",
+        ),
         annotation_prefix="list",
         max_bytes=_EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES,
         surface="list",
@@ -1321,6 +1419,8 @@ def _execution_list_item(row: dict[str, Any]) -> TaskExecutionListItemSchema:
         if error_bytes is not None and error_bytes > _EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES
         else None
     )
+    _public_execution_provenance(values, annotation_prefix="list")
+    values["queue_capacity_attested"] = False
     return TaskExecutionListItemSchema.model_validate(values)
 
 
@@ -1419,7 +1519,11 @@ def _bounded_task_status_row(task_id: str) -> dict[str, Any] | None:
     """Read one task status through an unlocked, byte-guarded SQL projection."""
     _require_projection_database(surface="task status")
     guarded = (
-        RayTaskExecution.objects.annotate(
+        _guarded_execution_provenance(
+            annotate_execution_protocol_availability(RayTaskExecution.objects.all()),
+            annotation_prefix="status",
+        )
+        .annotate(
             _status_args_bytes=_DatabaseByteLength("args_json"),
             _status_kwargs_bytes=_DatabaseByteLength("kwargs_json"),
         )
@@ -1494,6 +1598,12 @@ def _task_status_item(row: dict[str, Any]) -> TaskStatusSchema:
             "state": state,
             "attempt_number": row["attempt_number"],
             "execution_generation": row["execution_generation"],
+            "execution_protocol_version": row["execution_protocol_version"],
+            "created_with_django_ray_version": row["_status_created_with_django_ray_version"],
+            "managed_with_django_ray_version": row["_status_managed_with_django_ray_version"],
+            "executor_django_ray_version": row["_status_executor_django_ray_version"],
+            "protocol_compatible_worker_available": row["protocol_compatible_worker_available"],
+            "queue_capacity_attested": False,
             "enqueued_at": row["created_at"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
@@ -1598,7 +1708,10 @@ def _bounded_execution_list_response(
 def _bounded_execution_detail_row(execution_id: int) -> dict[str, Any]:
     """Read one exact execution through a single guarded values projection."""
     guarded = _guarded_execution_diagnostics(
-        RayTaskExecution.objects.all(),
+        _guarded_execution_provenance(
+            annotate_execution_protocol_availability(RayTaskExecution.objects.all()),
+            annotation_prefix="detail",
+        ),
         annotation_prefix="detail",
         max_bytes=_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES,
         surface="detail",
@@ -1652,6 +1765,8 @@ def _execution_detail_item(row: dict[str, Any]) -> TaskExecutionDetailSchema:
     )
     values["diagnostic_max_bytes"] = _EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES
     values["response_max_bytes"] = _EXECUTION_DETAIL_RESPONSE_MAX_BYTES
+    _public_execution_provenance(values, annotation_prefix="detail")
+    values["queue_capacity_attested"] = False
     return TaskExecutionDetailSchema.model_validate(values)
 
 

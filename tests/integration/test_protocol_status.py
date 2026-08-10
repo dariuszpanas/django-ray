@@ -37,6 +37,7 @@ from django_ray.protocol_status import (
     ProtocolStatusBlockerCode,
     ProtocolStatusError,
     ProtocolStatusReport,
+    annotate_execution_protocol_availability,
     build_protocol_status,
     protocol_status_to_dict,
     render_protocol_status_json,
@@ -145,6 +146,143 @@ def _assert_read_only(queries: list[dict[str, str]]) -> list[dict[str, str]]:
         assert "PG_ADVISORY" not in sql
         data_queries.append(query)
     return data_queries
+
+
+def test_protocol_availability_annotation_correlates_ranges_at_one_frozen_cutoff() -> None:
+    observed_at = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+    cutoff = observed_at - get_lease_duration()
+    _close_legacy_admission()
+    _explicit_lease(
+        "availability-live",
+        minimum=2,
+        maximum=3,
+        heartbeat_at=cutoff,
+        package_version="not-a-semver",
+        queue="worker-only-queue",
+    )
+    _explicit_lease(
+        "availability-stale",
+        minimum=4,
+        maximum=4,
+        heartbeat_at=cutoff - timedelta(microseconds=1),
+    )
+    for protocol in (1, 2, 3, 4):
+        _execution(
+            f"availability-v{protocol}",
+            protocol=protocol,
+            queue="task-only-queue",
+        )
+
+    with CaptureQueriesContext(connection) as captured:
+        rows = dict(
+            annotate_execution_protocol_availability(
+                RayTaskExecution.objects.order_by("task_id"),
+                observed_at=observed_at,
+                field_name="_compatible",
+            ).values_list("task_id", "_compatible")
+        )
+
+    assert len(_assert_read_only(captured.captured_queries)) == 1
+    assert rows == {
+        "availability-v1": False,
+        "availability-v2": True,
+        "availability-v3": True,
+        "availability-v4": False,
+    }
+    sql = captured.captured_queries[0]["sql"].lower()
+    assert "exists" in sql
+    assert "queue_name" not in sql
+    assert "not-a-semver" not in sql
+
+
+def test_protocol_availability_legacy_and_policy_corruption_fail_closed() -> None:
+    observed_at = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+    cutoff = observed_at - get_lease_duration()
+    _legacy_lease("availability-legacy", heartbeat_at=cutoff)
+    _execution("availability-policy-v1", protocol=1, queue="default")
+    _execution(
+        "availability-policy-v2",
+        protocol=2,
+        queue="default",
+        state=TaskState.SUCCEEDED,
+    )
+
+    def availability() -> dict[str, bool]:
+        return dict(
+            annotate_execution_protocol_availability(
+                RayTaskExecution.objects.order_by("task_id"),
+                observed_at=observed_at,
+            ).values_list("task_id", "protocol_compatible_worker_available")
+        )
+
+    assert availability() == {
+        "availability-policy-v1": True,
+        "availability-policy-v2": False,
+    }
+
+    TaskWorkerLease.objects.all().delete()
+    LegacyWorkerAdmissionToken.objects.get(singleton_key=1).delete()
+    _explicit_lease(
+        "availability-explicit",
+        minimum=1,
+        maximum=2,
+        heartbeat_at=cutoff,
+    )
+    assert set(availability().values()) == {False}
+
+    TaskExecutionProtocolPolicy.objects.filter(singleton_key=1).update(
+        legacy_worker_admission_enabled=False,
+        revision=2,
+    )
+    assert set(availability().values()) == {True}
+
+    TaskExecutionProtocolPolicy.objects.get(singleton_key=1).delete()
+    assert set(availability().values()) == {False}
+
+
+def test_protocol_availability_fails_closed_for_any_malformed_lease_shape() -> None:
+    if connection.vendor != "sqlite":
+        pytest.skip("SQLite corruption probe uses ignore_check_constraints")
+    observed_at = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+    _close_legacy_admission()
+    _explicit_lease(
+        "availability-valid",
+        minimum=2,
+        maximum=2,
+        heartbeat_at=observed_at,
+    )
+    execution = _execution("availability-malformed-v2", protocol=2, queue="default")
+
+    with connection.cursor() as cursor:
+        cursor.execute("PRAGMA ignore_check_constraints = ON")
+    try:
+        malformed = TaskWorkerLease.objects.create(
+            worker_id="availability-malformed",
+            hostname="malformed-host",
+            pid=1003,
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=2,
+            max_supported_execution_protocol_version=1,
+            legacy_admission_token=None,
+            last_heartbeat_at=observed_at,
+        )
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("PRAGMA ignore_check_constraints = OFF")
+
+    annotated = annotate_execution_protocol_availability(
+        RayTaskExecution.objects.filter(pk=execution.pk),
+        observed_at=observed_at,
+    ).get()
+    assert annotated.protocol_compatible_worker_available is False
+
+    TaskWorkerLease.objects.filter(pk=malformed.pk).delete()
+    annotated = annotate_execution_protocol_availability(
+        RayTaskExecution.objects.filter(pk=execution.pk),
+        observed_at=observed_at,
+    ).get()
+    assert annotated.protocol_compatible_worker_available is True
 
 
 def _seed_open_status(observed_at: datetime) -> None:

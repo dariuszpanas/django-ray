@@ -42,6 +42,12 @@ def test_prometheus_duration_aggregates_execute_on_postgresql(settings) -> None:
         started_at=now - timedelta(seconds=8),
         finished_at=now - timedelta(seconds=6),
     )
+    RayTaskExecution.objects.create(
+        task_id="postgres-metrics-protocol-v2",
+        callable_path="tasks.echo",
+        execution_protocol_version=2,
+        state=TaskState.LOST,
+    )
 
     metrics = render_prometheus_metrics(queue_names=("default",), observed_at=now)
 
@@ -51,3 +57,9 @@ def test_prometheus_duration_aggregates_execute_on_postgresql(settings) -> None:
     assert "django_ray_execution_duration_seconds_sum 6" in metrics
     assert "django_ray_retries_recorded 1" in metrics
     assert "django_ray_failures_recorded 1" in metrics
+    assert (
+        'django_ray_tasks_by_execution_protocol_total{protocol="1",state="SUCCEEDED"} 1' in metrics
+    )
+    assert (
+        'django_ray_tasks_by_execution_protocol_total{protocol="other",state="LOST"} 1' in metrics
+    )

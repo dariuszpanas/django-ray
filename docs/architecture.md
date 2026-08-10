@@ -700,6 +700,20 @@ attempt. Executor provenance is accepted only from a strictly validated versione
 completion and is written under that same lock before archival. It is never inferred
 from the manager. A legacy or unversioned executor therefore remains null.
 
+Routine execution reads annotate whether at least one heartbeat-live worker lease can
+read the row's integer protocol. One observation freezes a single heartbeat cutoff and
+accepts only a valid rollout policy plus valid explicit ranges, or the policy-controlled
+legacy protocol-`1` capability while legacy admission is open. The annotation remains a
+protocol-reader signal, not a routing or readiness claim: worker queue text is
+informational, and `queue_capacity_attested` is always false. Ray/Python compatibility,
+cluster identity, Ray connectivity, and free concurrency remain separate deployment
+evidence. The bounded testproject status/list/detail projections and the Admin detail
+and live summary expose this signal with creator, manager, and executor provenance.
+Those HTTP and live-Admin reads guard each provenance value at 128 UTF-8 bytes in SQL
+and apply configured presentation redaction. Historical or unreported provenance stays
+null; an oversized stored value becomes null or the Admin's fixed unavailable display
+instead of being transferred as an unbounded value.
+
 The private protocol-coordination primitive is implementation infrastructure for the
 later supported operator adapter; it is not itself an adopter-facing mutation API. A
 changing call supplies the exact policy revision its caller reviewed, bounded to the

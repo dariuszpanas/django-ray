@@ -76,6 +76,8 @@ from scripts.local_kuberay_gate import (
     source_bound_tag,
     split_apply_resources,
     validate_bounded_poll_projection,
+    validate_execution_protocol_metrics,
+    validate_execution_protocol_visibility,
     validate_local_context,
     validate_local_docker_endpoint,
     validate_local_http_url,
@@ -128,12 +130,32 @@ def _task_status_payload(
         "state": state,
         "attempt_number": 1,
         "execution_generation": 1,
+        "execution_protocol_version": 1,
+        "created_with_django_ray_version": "0.5.0-producer",
+        "managed_with_django_ray_version": "0.5.0-manager",
+        "executor_django_ray_version": "0.5.0-executor",
+        "protocol_compatible_worker_available": True,
+        "queue_capacity_attested": False,
         "args": [2, 3] if omission_reason is None else None,
         "kwargs": {} if omission_reason is None else None,
         "input_omission_reason": omission_reason,
         "input_max_bytes": EXPECTED_TASK_STATUS_INPUT_MAX_BYTES,
         "response_max_bytes": EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES,
     }
+
+
+def _execution_protocol_metrics() -> bytes:
+    name = gate_module.EXPECTED_EXECUTION_PROTOCOL_METRIC
+    lines = [
+        f"# HELP {name} Total tasks by bounded execution-protocol bucket and state",
+        f"# TYPE {name} gauge",
+    ]
+    lines.extend(
+        f'{name}{{protocol="{protocol}",state="{state}"}} 0'
+        for protocol in ("1", "other")
+        for state in gate_module.TASK_STATUS_BY_STATE
+    )
+    return ("\n".join(lines) + "\n").encode()
 
 
 def _bounded_poll_metadata() -> dict[str, object]:
@@ -200,6 +222,56 @@ def test_task_status_gate_rejects_contract_drift(
 
     with pytest.raises(ValueError, match=message):
         validate_task_status_payload(payload, task_id=TASK_ID)
+
+
+def test_protocol_visibility_gate_accepts_queued_and_succeeded_lifecycle_fields() -> None:
+    succeeded = _task_status_payload()
+    queued = _task_status_payload(state="QUEUED")
+    queued["managed_with_django_ray_version"] = None
+    queued["executor_django_ray_version"] = None
+
+    validate_execution_protocol_visibility(succeeded, surface="task status")
+    validate_execution_protocol_visibility(queued, surface="task status")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("execution_protocol_version", 2, "protocol version"),
+        ("created_with_django_ray_version", None, "package provenance"),
+        ("managed_with_django_ray_version", "", "package provenance"),
+        ("executor_django_ray_version", "x" * 129, "unbounded"),
+        ("protocol_compatible_worker_available", False, "compatible worker"),
+        ("queue_capacity_attested", True, "queue-specific"),
+    ],
+)
+def test_protocol_visibility_gate_rejects_contract_drift(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    payload = _task_status_payload()
+    payload[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        validate_execution_protocol_visibility(payload, surface="task status")
+
+
+def test_protocol_metrics_gate_requires_every_fixed_bucket() -> None:
+    body = _execution_protocol_metrics()
+
+    validate_execution_protocol_metrics(body)
+
+    missing = body.replace(
+        b'django_ray_tasks_by_execution_protocol_total{protocol="other",state="LOST"} 0\n',
+        b"",
+    )
+    with pytest.raises(ValueError, match="incomplete protocol metric buckets"):
+        validate_execution_protocol_metrics(missing)
+
+    unbounded = body.replace(b'protocol="other"', b'protocol="99"', 1)
+    with pytest.raises(ValueError, match="label contract"):
+        validate_execution_protocol_metrics(unbounded)
 
 
 @pytest.mark.parametrize(
@@ -1108,7 +1180,7 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
             headers: dict[str, str] | None = None,
         ) -> None:
             self.status = status
-            self.body = json.dumps(body).encode()
+            self.body = body if isinstance(body, bytes) else json.dumps(body).encode()
             self.headers = headers or {}
 
         def __enter__(self) -> Response:
@@ -1151,6 +1223,8 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
                 return Response(401, {})
             if path == "/api/enqueue/add/2/3":
                 return Response(200, {"task_id": TASK_ID})
+            if path == "/api/metrics":
+                return Response(200, _execution_protocol_metrics())
             if path == f"/api/tasks/{TASK_ID}":
                 return Response(
                     200,
@@ -1170,6 +1244,12 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
                                 "task_id": TASK_ID,
                                 "state": "SUCCEEDED",
                                 "result_data": "5",
+                                "execution_protocol_version": 1,
+                                "created_with_django_ray_version": "0.5.0-producer",
+                                "managed_with_django_ray_version": "0.5.0-manager",
+                                "executor_django_ray_version": "0.5.0-executor",
+                                "protocol_compatible_worker_available": True,
+                                "queue_capacity_attested": False,
                             }
                         ]
                     },
@@ -1184,6 +1264,12 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
                         "task_id": TASK_ID,
                         "state": "SUCCEEDED",
                         "result_data": "5",
+                        "execution_protocol_version": 1,
+                        "created_with_django_ray_version": "0.5.0-producer",
+                        "managed_with_django_ray_version": "0.5.0-manager",
+                        "executor_django_ray_version": "0.5.0-executor",
+                        "protocol_compatible_worker_available": True,
+                        "queue_capacity_attested": False,
                         "result_data_omission_reason": None,
                         "error_message_omission_reason": None,
                         "diagnostic_max_bytes": 65_536,
@@ -3971,6 +4057,12 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
         "task_id": TASK_ID,
         "state": "SUCCEEDED",
         "result_data": "5",
+        "execution_protocol_version": 1,
+        "created_with_django_ray_version": "0.5.0-producer",
+        "managed_with_django_ray_version": "0.5.0-manager",
+        "executor_django_ray_version": "0.5.0-executor",
+        "protocol_compatible_worker_available": True,
+        "queue_capacity_attested": False,
         "result_data_omission_reason": None,
         "error_message_omission_reason": None,
         "diagnostic_max_bytes": 65_536,
@@ -4004,6 +4096,8 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
             return 401, b"{}"
         if path == "/api/enqueue/add/2/3":
             return 200, json.dumps({"task_id": TASK_ID}).encode()
+        if path == "/api/metrics":
+            return 200, _execution_protocol_metrics()
         if path == f"/api/tasks/{TASK_ID}":
             assert response_limit == EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES
             assert required_response_headers == {
@@ -4020,6 +4114,12 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
                             "task_id": TASK_ID,
                             "state": "SUCCEEDED",
                             "result_data": "5",
+                            "execution_protocol_version": 1,
+                            "created_with_django_ray_version": "0.5.0-producer",
+                            "managed_with_django_ray_version": "0.5.0-manager",
+                            "executor_django_ray_version": "0.5.0-executor",
+                            "protocol_compatible_worker_available": True,
+                            "queue_capacity_attested": False,
                         }
                     ]
                 }
@@ -4229,6 +4329,8 @@ def test_api_smoke_rejects_task_id_evidence_injection(monkeypatch: pytest.Monkey
             ).encode()
         if headers is None:
             return 401, b"{}"
+        if path == "/api/metrics":
+            return 200, _execution_protocol_metrics()
         if path == "/api/enqueue/add/2/3":
             return 200, b'{"task_id":"forged\\npreserved=everything"}'
         return 200, b"{}"

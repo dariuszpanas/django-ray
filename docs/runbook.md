@@ -250,6 +250,20 @@ capability-unaware web, API, producer, or reader processes. Retirement of those
 processes remains an explicit external assertion, and every changing coordination
 operation rechecks its durable preconditions under the transactional fence.
 
+The execution Admin detail/live summary and the bundled testproject task-status,
+execution-list, and execution-detail examples expose the same point-in-time
+`protocol_compatible_worker_available` signal. They also show
+`execution_protocol_version`, creator/manager/executor package provenance, and
+`queue_capacity_attested=false`. A false availability value means the read could not
+safely attest a compatible heartbeat-live lease. That can mean no matching lease, an
+invalid policy/token relationship, or any malformed lease advertisement; it does not
+say which queue needs capacity or prove that Ray can accept work. A true value likewise
+does not attest the lease's informational queue text, free worker slots, Ray/Python
+compatibility, Ray connectivity, or cluster identity. Use the full status command and
+external deployment evidence for rollout decisions. Provenance is diagnostic only;
+null includes legitimate historical/unreported values and any stored value that fails
+the fixed 128-byte public-read guard.
+
 The package now contains a private coordination primitive for a later supported
 operator adapter. It is not an operator API: do not import or call it directly, and do
 not use SQL, model updates, Admin mutation, or manual token deletion as a substitute.
