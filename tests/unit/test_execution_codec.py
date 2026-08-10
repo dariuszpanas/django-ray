@@ -1,4 +1,4 @@
-"""Trust-boundary tests for execution-completion decoding."""
+"""Trust-boundary tests for execution request and completion codecs."""
 
 from __future__ import annotations
 
@@ -13,15 +13,24 @@ import django_ray.execution_codec as codec_module
 from django_ray.execution_codec import (
     EXECUTION_COMPLETION_SCHEMA,
     EXECUTION_COMPLETION_SCHEMA_VERSION,
+    EXECUTION_REQUEST_SCHEMA,
+    EXECUTION_REQUEST_SCHEMA_VERSION,
     DecodedExecutionCompletion,
     ExecutionCompletion,
     ExecutionCompletionDecodeError,
     ExecutionCompletionRejection,
     ExecutionCompletionSource,
     ExecutionIdentity,
+    ExecutionRequest,
+    ExecutionRequestDecodeError,
+    ExecutionRequestEncodeError,
+    ExecutionRequestRejection,
     decode_execution_completion,
+    decode_execution_request,
     decode_legacy_v1_completion,
     encode_execution_completion,
+    encode_execution_request,
+    encode_execution_request_rejection,
 )
 from django_ray.execution_protocol import ExecutionProtocolRange
 
@@ -65,6 +74,36 @@ def _failure(identity: ExecutionIdentity) -> ExecutionCompletion:
         traceback="trace",
         exception_type="ValueError",
         retryable=False,
+    )
+
+
+def _inline_request(identity: ExecutionIdentity) -> ExecutionRequest:
+    return ExecutionRequest(
+        identity=identity,
+        execution_protocol_version=1,
+        callable_path="testproject.tasks.add_numbers",
+        transport_version=1,
+        serialized_args="[20,22]",
+        serialized_kwargs='{"scale":1}',
+        input_reference=None,
+        runtime_env_profile="default",
+        runtime_env_hash="a" * 64,
+        runtime_env_plan_identity={
+            "plan_format": "django-ray.runtime-env-plan",
+            "plan_format_version": 1,
+        },
+        compiled_graph_submission_transport="direct-ray-core",
+    )
+
+
+def _referenced_request(identity: ExecutionIdentity) -> ExecutionRequest:
+    return replace(
+        _inline_request(identity),
+        transport_version=2,
+        serialized_args="null",
+        serialized_kwargs="null",
+        input_reference="resultfs://inputs/sha256/abc/42",
+        compiled_graph_submission_transport="ray-job",
     )
 
 
@@ -117,6 +156,767 @@ def _assert_rejection(
     )
     assert str(error) == f"execution completion rejected: {classification.value}"
     return error
+
+
+def _decode_request(
+    serialized: object,
+    *,
+    supported_protocols: ExecutionProtocolRange = _PROTOCOL_V1,
+    expected_identity: ExecutionIdentity | None = None,
+    expected_protocol: int | None = None,
+) -> ExecutionRequest:
+    return decode_execution_request(
+        serialized,
+        supported_protocols=supported_protocols,
+        expected_identity=expected_identity,
+        expected_execution_protocol_version=expected_protocol,
+    )
+
+
+def _assert_request_rejection(
+    serialized: object,
+    classification: ExecutionRequestRejection,
+    *,
+    attempted_versioned: bool,
+    supported_protocols: ExecutionProtocolRange = _PROTOCOL_V1,
+    expected_identity: ExecutionIdentity | None = None,
+    expected_protocol: int | None = None,
+) -> ExecutionRequestDecodeError:
+    with pytest.raises(ExecutionRequestDecodeError) as caught:
+        _decode_request(
+            serialized,
+            supported_protocols=supported_protocols,
+            expected_identity=expected_identity,
+            expected_protocol=expected_protocol,
+        )
+    error = caught.value
+    assert error.classification is classification
+    assert error.attempted_versioned is attempted_versioned
+    assert error.allows_legacy_fallback is (
+        classification is ExecutionRequestRejection.LEGACY_REQUEST and not attempted_versioned
+    )
+    assert str(error) == f"execution request rejected: {classification.value}"
+    return error
+
+
+def test_execution_request_round_trips_as_exact_canonical_flat_schema(
+    identity: ExecutionIdentity,
+) -> None:
+    request = _inline_request(identity)
+
+    serialized = encode_execution_request(request)
+    value = json.loads(serialized)
+    decoded = _decode_request(
+        serialized,
+        expected_identity=identity,
+        expected_protocol=1,
+    )
+
+    assert serialized == _canonical(value)
+    assert set(value) == {
+        "request_schema",
+        "request_schema_version",
+        "execution_protocol_version",
+        "task_execution_pk",
+        "task_id",
+        "attempt_number",
+        "execution_generation",
+        "callable_path",
+        "transport_version",
+        "serialized_args",
+        "serialized_kwargs",
+        "input_reference",
+        "runtime_env_profile",
+        "runtime_env_hash",
+        "runtime_env_plan_identity",
+        "compiled_graph_submission_transport",
+    }
+    assert value["request_schema"] == EXECUTION_REQUEST_SCHEMA
+    assert value["request_schema_version"] == EXECUTION_REQUEST_SCHEMA_VERSION
+    assert decoded == request
+
+
+def test_referenced_request_round_trips_without_hydrating_opaque_input(
+    identity: ExecutionIdentity,
+) -> None:
+    request = _referenced_request(identity)
+
+    serialized = encode_execution_request(request)
+    decoded = _decode_request(serialized)
+    value = json.loads(serialized)
+
+    assert decoded == request
+    assert decoded.input_reference == "resultfs://inputs/sha256/abc/42"
+    assert decoded.serialized_args == decoded.serialized_kwargs == "null"
+    assert value["transport_version"] == 2
+    assert value["callable_path"] == request.callable_path
+    assert value["task_execution_pk"] == identity.task_execution_pk
+
+
+def test_request_encoder_normalizes_numeric_mapping_keys(
+    identity: ExecutionIdentity,
+) -> None:
+    request = replace(
+        _inline_request(identity),
+        runtime_env_plan_identity={10: "ten", 2: "two"},
+    )
+
+    decoded = _decode_request(encode_execution_request(request))
+
+    assert decoded.runtime_env_plan_identity == {"10": "ten", "2": "two"}
+
+
+def test_request_encoder_rejects_post_stringification_key_collision(
+    identity: ExecutionIdentity,
+) -> None:
+    request = replace(
+        _inline_request(identity),
+        runtime_env_plan_identity={1: "numeric", "1": "text"},
+    )
+
+    with pytest.raises(ExecutionRequestEncodeError) as caught:
+        encode_execution_request(request)
+
+    assert str(caught.value) == "execution request is invalid"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"execution_protocol_version": 2},
+        {"execution_protocol_version": True},
+        {"callable_path": "not_dotted"},
+        {"callable_path": "tests.task\x00forged"},
+        {"callable_path": "x." + "y" * 499},
+        {"transport_version": True},
+        {"transport_version": 3},
+        {"serialized_args": 1},
+        {"serialized_args": "[1]\x00forged"},
+        {"serialized_kwargs": ""},
+        {"input_reference": "unexpected"},
+        {"runtime_env_profile": "invalid profile"},
+        {"runtime_env_profile": "profile\x00forged"},
+        {"runtime_env_hash": "A" * 64},
+        {"runtime_env_hash": "a" * 63},
+        {"runtime_env_plan_identity": []},
+        {"compiled_graph_submission_transport": "other"},
+    ],
+)
+def test_request_encoder_has_fixed_failure_for_invalid_fields(
+    identity: ExecutionIdentity,
+    changes: dict[str, object],
+) -> None:
+    request = replace(_inline_request(identity), **changes)
+
+    with pytest.raises(ExecutionRequestEncodeError) as caught:
+        encode_execution_request(request)
+
+    assert str(caught.value) == "execution request is invalid"
+    assert "forged" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"input_reference": None},
+        {"input_reference": "x" * 501},
+        {"serialized_args": "[]"},
+        {"serialized_kwargs": "{}"},
+    ],
+)
+def test_referenced_request_requires_reference_and_safety_placeholders(
+    identity: ExecutionIdentity,
+    changes: dict[str, object],
+) -> None:
+    request = replace(_referenced_request(identity), **changes)
+
+    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
+        encode_execution_request(request)
+
+
+def test_request_encoder_rejects_nonfinite_and_invalid_unicode_metadata(
+    identity: ExecutionIdentity,
+) -> None:
+    for value in (float("nan"), float("inf"), "\ud800"):
+        request = replace(
+            _inline_request(identity),
+            runtime_env_plan_identity={"value": value},
+        )
+        with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
+            encode_execution_request(request)
+
+
+def test_inline_serialized_payload_remains_an_opaque_subordinate_format(
+    identity: ExecutionIdentity,
+) -> None:
+    request = replace(
+        _inline_request(identity),
+        serialized_args="[NaN]",
+        serialized_kwargs='{"duplicate":1,"duplicate":2}',
+    )
+
+    decoded = _decode_request(encode_execution_request(request))
+
+    assert decoded.serialized_args == "[NaN]"
+    assert decoded.serialized_kwargs == '{"duplicate":1,"duplicate":2}'
+
+
+def test_request_requires_exact_keys(identity: ExecutionIdentity) -> None:
+    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value["extra"] = "ignored only by the legacy adapter"
+    _assert_request_rejection(
+        _canonical(value),
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+
+    del value["extra"]
+    del value["runtime_env_hash"]
+    _assert_request_rejection(
+        _canonical(value),
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "classification"),
+    [
+        ({"request_schema": "other"}, ExecutionRequestRejection.UNSUPPORTED_SCHEMA),
+        ({"request_schema_version": 2}, ExecutionRequestRejection.UNSUPPORTED_SCHEMA),
+        ({"request_schema_version": True}, ExecutionRequestRejection.UNSUPPORTED_SCHEMA),
+        ({"transport_version": 3}, ExecutionRequestRejection.UNSUPPORTED_TRANSPORT),
+        ({"transport_version": True}, ExecutionRequestRejection.UNSUPPORTED_TRANSPORT),
+        ({"callable_path": 1}, ExecutionRequestRejection.INVALID_VERSIONED),
+        ({"runtime_env_plan_identity": []}, ExecutionRequestRejection.INVALID_VERSIONED),
+    ],
+)
+def test_request_schema_and_body_types_fail_closed(
+    identity: ExecutionIdentity,
+    change: dict[str, object],
+    classification: ExecutionRequestRejection,
+) -> None:
+    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value.update(change)
+
+    _assert_request_rejection(
+        _canonical(value),
+        classification,
+        attempted_versioned=True,
+    )
+
+
+def test_invalid_identity_precedes_unsupported_protocol(
+    identity: ExecutionIdentity,
+) -> None:
+    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value["task_execution_pk"] = 0
+    value["execution_protocol_version"] = 2
+
+    error = _assert_request_rejection(
+        _canonical(value),
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+
+    assert error.validated_identity is None
+    assert error.requested_execution_protocol_version is None
+
+
+def test_unsupported_protocol_exposes_only_bounded_identity_and_epoch(
+    identity: ExecutionIdentity,
+) -> None:
+    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value["execution_protocol_version"] = 2
+    value["serialized_args"] = '"password=must-not-be-retained"'
+
+    error = _assert_request_rejection(
+        _canonical(value),
+        ExecutionRequestRejection.UNSUPPORTED_PROTOCOL,
+        attempted_versioned=True,
+    )
+
+    assert error.validated_identity == identity
+    assert error.requested_execution_protocol_version == 2
+    assert not hasattr(error, "request")
+    assert not hasattr(error, "serialized_args")
+    assert "must-not-be-retained" not in str(error)
+
+
+def test_invalid_protocol_type_exposes_no_identity_for_persistence(
+    identity: ExecutionIdentity,
+) -> None:
+    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value["execution_protocol_version"] = True
+
+    error = _assert_request_rejection(
+        _canonical(value),
+        ExecutionRequestRejection.UNSUPPORTED_PROTOCOL,
+        attempted_versioned=True,
+    )
+
+    assert error.validated_identity is None
+    assert error.requested_execution_protocol_version is None
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "classification"),
+    [
+        ("task_execution_pk", 42, ExecutionRequestRejection.IDENTITY_MISMATCH),
+        ("task_id", "other", ExecutionRequestRejection.IDENTITY_MISMATCH),
+        ("attempt_number", 3, ExecutionRequestRejection.IDENTITY_MISMATCH),
+        ("execution_generation", 4, ExecutionRequestRejection.IDENTITY_MISMATCH),
+        ("execution_protocol_version", 2, ExecutionRequestRejection.PROTOCOL_MISMATCH),
+    ],
+)
+def test_external_expected_header_proof_rejects_mismatch(
+    identity: ExecutionIdentity,
+    field: str,
+    replacement: object,
+    classification: ExecutionRequestRejection,
+) -> None:
+    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value[field] = replacement
+
+    _assert_request_rejection(
+        _canonical(value),
+        classification,
+        attempted_versioned=True,
+        supported_protocols=ExecutionProtocolRange(1, 2),
+        expected_identity=identity,
+        expected_protocol=1,
+    )
+
+
+def test_noncanonical_execution_request_is_rejected(identity: ExecutionIdentity) -> None:
+    value = json.loads(encode_execution_request(_inline_request(identity)))
+
+    _assert_request_rejection(
+        json.dumps(value),
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+
+
+def test_request_duplicate_keys_and_nonfinite_metadata_are_rejected(
+    identity: ExecutionIdentity,
+) -> None:
+    serialized = encode_execution_request(_inline_request(identity))
+    duplicate = serialized.replace(
+        '"request_schema":',
+        '"request_schema":"duplicate","request_schema":',
+        1,
+    )
+    _assert_request_rejection(
+        duplicate,
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+
+    value = json.loads(serialized)
+    value["runtime_env_plan_identity"] = {"value": float("nan")}
+    _assert_request_rejection(
+        json.dumps(value, sort_keys=True, separators=(",", ":")),
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "task_id",
+        "callable_path",
+        "serialized_args",
+        "serialized_kwargs",
+        "input_reference",
+        "runtime_env_profile",
+        "runtime_env_hash",
+        "compiled_graph_submission_transport",
+    ],
+)
+def test_request_decoder_rejects_nul_in_executor_facing_scalars(
+    identity: ExecutionIdentity,
+    field: str,
+) -> None:
+    request = (
+        _referenced_request(identity) if field == "input_reference" else _inline_request(identity)
+    )
+    value = json.loads(encode_execution_request(request))
+    value[field] = "value\x00forged"
+
+    _assert_request_rejection(
+        _canonical(value),
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "reserved_marker",
+    ["request_schema", "request_schema_version", "execution_protocol_version"],
+)
+def test_any_request_marker_prevents_legacy_fallback(reserved_marker: str) -> None:
+    error = _assert_request_rejection(
+        json.dumps({reserved_marker: None}),
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+
+    assert error.allows_legacy_fallback is False
+
+
+@pytest.mark.parametrize(
+    "legacy_payload",
+    [
+        {
+            "callable_path": "testproject.tasks.add_numbers",
+            "serialized_args": "[1,2]",
+            "serialized_kwargs": "{}",
+            "task_execution_pk": 1,
+            "task_id": "legacy-inline",
+            "attempt_number": 1,
+            "execution_generation": 0,
+        },
+        {
+            "callable_path": "testproject.tasks.add_numbers",
+            "transport_version": 2,
+            "input_reference": "resultfs://legacy/reference",
+            "task_execution_pk": 1,
+            "task_id": "legacy-reference",
+            "attempt_number": 1,
+            "execution_generation": 0,
+        },
+    ],
+)
+def test_released_job_payloads_are_left_for_explicit_legacy_adapter(
+    legacy_payload: dict[str, object],
+) -> None:
+    error = _assert_request_rejection(
+        json.dumps(legacy_payload),
+        ExecutionRequestRejection.LEGACY_REQUEST,
+        attempted_versioned=False,
+    )
+
+    assert error.allows_legacy_fallback is True
+
+
+def test_malformed_request_marker_still_suppresses_legacy_fallback() -> None:
+    _assert_request_rejection(
+        '{"request_schema":"django-ray.execution-request","secret":',
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+
+
+def test_request_raw_surrogate_classification_respects_marker() -> None:
+    _assert_request_rejection(
+        '{"request_schema":"django-ray.execution-request","value":"' + "\ud800" + '"}',
+        ExecutionRequestRejection.INVALID_VERSIONED,
+        attempted_versioned=True,
+    )
+    _assert_request_rejection(
+        '{"transport_version":2,"value":"' + "\ud800" + '"}',
+        ExecutionRequestRejection.LEGACY_REQUEST,
+        attempted_versioned=False,
+    )
+
+
+def test_request_encoded_byte_limit_is_checked_before_decoding(
+    identity: ExecutionIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serialized = encode_execution_request(_inline_request(identity))
+    byte_size = len(serialized.encode("utf-8"))
+    monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_BYTES", byte_size)
+    assert _decode_request(serialized).identity == identity
+
+    monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_BYTES", byte_size - 1)
+    error = _assert_request_rejection(
+        serialized,
+        ExecutionRequestRejection.RESOURCE_LIMIT,
+        attempted_versioned=False,
+    )
+    assert error.allows_legacy_fallback is False
+
+
+def test_oversized_request_never_reaches_reserved_marker_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_BYTES", 32)
+    serialized = '{"request_schema":' + "x" * 32
+
+    def fail_scan(*_args, **_kwargs):
+        pytest.fail("oversized request reached the reserved-key scanner")
+
+    monkeypatch.setattr(codec_module, "_preparse_json_scan", fail_scan)
+    _assert_request_rejection(
+        serialized,
+        ExecutionRequestRejection.RESOURCE_LIMIT,
+        attempted_versioned=False,
+    )
+
+
+def test_request_depth_and_node_budgets_precede_json_allocation(
+    identity: ExecutionIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serialized = encode_execution_request(_inline_request(identity))
+    monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_DEPTH", 1)
+    _assert_request_rejection(
+        serialized,
+        ExecutionRequestRejection.RESOURCE_LIMIT,
+        attempted_versioned=False,
+    )
+
+    monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_DEPTH", 64)
+    monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_NODES", 10)
+    original_loads = codec_module.json.loads
+
+    def fail_parse(value, *args, **kwargs):
+        if len(value) > len('"django-ray.execution-request"'):
+            pytest.fail("wide request reached full json.loads")
+        return original_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(codec_module.json, "loads", fail_parse)
+    _assert_request_rejection(
+        '{"request_schema":"django-ray.execution-request","wide":[0,0,0,0,0,0,0,0]}',
+        ExecutionRequestRejection.RESOURCE_LIMIT,
+        attempted_versioned=False,
+    )
+
+
+def test_request_runtime_identity_has_an_independent_byte_budget(
+    identity: ExecutionIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = replace(
+        _inline_request(identity),
+        runtime_env_plan_identity={"value": "abcdefghij"},
+    )
+    serialized_identity = _canonical(request.runtime_env_plan_identity)
+    identity_size = len(serialized_identity.encode("utf-8"))
+    monkeypatch.setattr(
+        codec_module,
+        "EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES",
+        identity_size,
+    )
+    serialized = encode_execution_request(request)
+    assert (
+        _decode_request(serialized).runtime_env_plan_identity == request.runtime_env_plan_identity
+    )
+
+    monkeypatch.setattr(
+        codec_module,
+        "EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES",
+        identity_size - 1,
+    )
+    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
+        encode_execution_request(request)
+    _assert_request_rejection(
+        serialized,
+        ExecutionRequestRejection.RESOURCE_LIMIT,
+        attempted_versioned=True,
+    )
+
+
+def test_request_encoder_stops_aggregate_json_before_detached_parse(
+    identity: ExecutionIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = replace(_inline_request(identity), serialized_args='["' + "x" * 200 + '"]')
+    serialized = encode_execution_request(request)
+    monkeypatch.setattr(
+        codec_module,
+        "EXECUTION_REQUEST_MAX_BYTES",
+        len(serialized.encode("utf-8")) - 1,
+    )
+
+    def fail_parse(*_args, **_kwargs):
+        pytest.fail("aggregate-over-cap request reached detached parsing")
+
+    monkeypatch.setattr(codec_module, "_bounded_request_json_loads", fail_parse)
+    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
+        encode_execution_request(request)
+
+
+@pytest.mark.parametrize(
+    ("protocol", "classification"),
+    [
+        (1, ExecutionRequestRejection.IDENTITY_MISMATCH),
+        (2, ExecutionRequestRejection.UNSUPPORTED_PROTOCOL),
+    ],
+)
+def test_request_rejection_encodes_a_canonical_enriched_failure(
+    identity: ExecutionIdentity,
+    protocol: int,
+    classification: ExecutionRequestRejection,
+) -> None:
+    serialized = encode_execution_request_rejection(
+        expected_identity=identity,
+        expected_execution_protocol_version=protocol,
+        executor_django_ray_version="0.5.0",
+        classification=classification,
+    )
+    value = json.loads(serialized)
+    decoded = _decode(
+        serialized,
+        identity,
+        expected_protocol=protocol,
+        supported_protocols=ExecutionProtocolRange(1, protocol),
+    )
+
+    assert serialized == _canonical(value)
+    assert set(value) == {
+        "completion_schema",
+        "completion_schema_version",
+        "execution_protocol_version",
+        "task_execution_pk",
+        "task_id",
+        "attempt_number",
+        "execution_generation",
+        "executor_django_ray_version",
+        "success",
+        "result",
+        "result_reference",
+        "error",
+        "traceback",
+        "exception_type",
+        "retryable",
+    }
+    assert decoded.completion == ExecutionCompletion(
+        identity=identity,
+        execution_protocol_version=protocol,
+        executor_django_ray_version="0.5.0",
+        success=False,
+        result=None,
+        result_reference=None,
+        error=f"execution request rejected: {classification.value}",
+        traceback=None,
+        exception_type="RayExecutionRequestIncompatible",
+        retryable=False,
+    )
+
+    if protocol == 2:
+        with pytest.raises(ValueError, match="execution completion is invalid"):
+            encode_execution_completion(decoded.completion)
+
+
+@pytest.mark.parametrize("classification", list(ExecutionRequestRejection))
+def test_request_rejection_uses_only_fixed_classification_text(
+    identity: ExecutionIdentity,
+    classification: ExecutionRequestRejection,
+) -> None:
+    secret = "password=must-not-be-reflected"
+
+    value = json.loads(
+        encode_execution_request_rejection(
+            expected_identity=identity,
+            expected_execution_protocol_version=1,
+            executor_django_ray_version="0.5.0",
+            classification=classification,
+        )
+    )
+
+    assert value["error"] == f"execution request rejected: {classification.value}"
+    assert value["success"] is False
+    assert value["result"] is None
+    assert value["result_reference"] is None
+    assert value["traceback"] is None
+    assert value["exception_type"] == "RayExecutionRequestIncompatible"
+    assert value["retryable"] is False
+    assert secret not in json.dumps(value)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        ExecutionIdentity(True, "task", 1, 0),
+        ExecutionIdentity(0, "task", 1, 0),
+        ExecutionIdentity(1, "", 1, 0),
+        ExecutionIdentity(1, "task\x00forged", 1, 0),
+        ExecutionIdentity(1, "task", True, 0),
+        ExecutionIdentity(1, "task", 0, 0),
+        ExecutionIdentity(1, "task", 1, True),
+        ExecutionIdentity(1, "task", 1, -1),
+    ],
+)
+def test_request_rejection_rejects_invalid_expected_identity(
+    identity: ExecutionIdentity,
+) -> None:
+    with pytest.raises(ExecutionRequestEncodeError) as caught:
+        encode_execution_request_rejection(
+            expected_identity=identity,
+            expected_execution_protocol_version=1,
+            executor_django_ray_version="0.5.0",
+            classification=ExecutionRequestRejection.INVALID_VERSIONED,
+        )
+
+    assert str(caught.value) == "execution request is invalid"
+    assert "forged" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("expected_execution_protocol_version", True),
+        ("expected_execution_protocol_version", 0),
+        ("expected_execution_protocol_version", -1),
+        ("expected_execution_protocol_version", 1 << 63),
+        ("expected_execution_protocol_version", "2"),
+        ("executor_django_ray_version", ""),
+        ("executor_django_ray_version", "x" * 129),
+        ("executor_django_ray_version", "0.5.0\x00password=secret"),
+        ("executor_django_ray_version", "\ud800"),
+        ("classification", "password=secret"),
+    ],
+)
+def test_request_rejection_invalid_inputs_have_a_fixed_safe_error(
+    identity: ExecutionIdentity,
+    field: str,
+    value: object,
+) -> None:
+    kwargs = {
+        "expected_identity": identity,
+        "expected_execution_protocol_version": 1,
+        "executor_django_ray_version": "0.5.0",
+        "classification": ExecutionRequestRejection.INVALID_VERSIONED,
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ExecutionRequestEncodeError) as caught:
+        encode_execution_request_rejection(**kwargs)
+
+    assert str(caught.value) == "execution request is invalid"
+    assert "password" not in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+def test_request_rejection_executor_version_and_resource_bounds_are_exact(
+    identity: ExecutionIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serialized = encode_execution_request_rejection(
+        expected_identity=identity,
+        expected_execution_protocol_version=1,
+        executor_django_ray_version="v" * 128,
+        classification=ExecutionRequestRejection.RESOURCE_LIMIT,
+    )
+    decoded = _decode(serialized, identity)
+    assert decoded.completion.executor_django_ray_version == "v" * 128
+
+    monkeypatch.setattr(
+        codec_module,
+        "EXECUTION_COMPLETION_MAX_BYTES",
+        len(serialized.encode("utf-8")) - 1,
+    )
+    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
+        encode_execution_request_rejection(
+            expected_identity=identity,
+            expected_execution_protocol_version=1,
+            executor_django_ray_version="v" * 128,
+            classification=ExecutionRequestRejection.RESOURCE_LIMIT,
+        )
 
 
 def test_enriched_success_round_trips_as_exact_canonical_flat_schema(

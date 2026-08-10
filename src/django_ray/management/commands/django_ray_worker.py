@@ -2576,8 +2576,6 @@ class Command(BaseCommand):
         """
         import ray
 
-        from django_ray.runtime.serialization import deserialize_args
-
         expected_worker_id = self.worker_id
         expected_attempt_number = int(task.attempt_number)
         expected_execution_generation = int(task.execution_generation)
@@ -2605,22 +2603,11 @@ class Command(BaseCommand):
         runner = self.ray_core_runner
 
         try:
-            if task.input_reference:
-                args: Any = ()
-                kwargs: Any = {}
-            else:
-                args = deserialize_args(task.args_json)
-                kwargs = deserialize_args(task.kwargs_json)
-
-            handle = runner.submit(
-                task_execution=task,
-                callable_path=task.callable_path,
-                args=tuple(args),
-                kwargs=kwargs,
-            )
+            handle = runner.submit_durable(task_execution=task)
         except Exception as e:
             import traceback
 
+            from django_ray.execution_codec import ExecutionRequestEncodeError
             from django_ray.workflow_plans import WorkflowPlanMismatchError
 
             self._handle_task_failure(
@@ -2632,7 +2619,14 @@ class Command(BaseCommand):
                 exception_type=safe_exception_type_name(e),
                 retryable=(
                     False
-                    if isinstance(e, (RuntimeEnvSnapshotError, WorkflowPlanMismatchError))
+                    if isinstance(
+                        e,
+                        (
+                            ExecutionRequestEncodeError,
+                            RuntimeEnvSnapshotError,
+                            WorkflowPlanMismatchError,
+                        ),
+                    )
                     else None
                 ),
                 expected_claimed_by_worker=expected_worker_id,

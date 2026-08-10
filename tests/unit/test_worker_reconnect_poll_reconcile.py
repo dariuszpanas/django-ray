@@ -637,7 +637,7 @@ class TestWorkerReconnectPollReconcile:
         fake_runner = cast(
             Any,
             SimpleNamespace(
-                submit=lambda **_kwargs: SubmissionHandle(
+                submit_durable=lambda **_kwargs: SubmissionHandle(
                     ray_job_id="ray_core:1",
                     ray_address="ray://cluster:10001",
                     submitted_at=datetime.now(UTC),
@@ -678,7 +678,7 @@ class TestWorkerReconnectPollReconcile:
         cmd.ray_core_runner = cast(
             Any,
             SimpleNamespace(
-                submit=lambda **_kwargs: SubmissionHandle(
+                submit_durable=lambda **_kwargs: SubmissionHandle(
                     ray_job_id="ray_core:attached",
                     ray_address="ray://cluster:10001",
                     submitted_at=datetime.now(UTC),
@@ -726,7 +726,7 @@ class TestWorkerReconnectPollReconcile:
         cancelled: list[SubmissionHandle] = []
 
         class FakeRunner:
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 RayTaskExecution.objects.filter(pk=task.pk).update(
                     attempt_number=2,
                     execution_generation=5,
@@ -780,7 +780,7 @@ class TestWorkerReconnectPollReconcile:
         cancelled: list[str] = []
 
         class FakeRunner:
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 return returned_handle
 
             def cancel(self, handle):
@@ -824,7 +824,7 @@ class TestWorkerReconnectPollReconcile:
         captured: dict[str, Any] = {}
         monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
 
-        def submit(**kwargs: Any) -> SubmissionHandle:
+        def submit_durable(**kwargs: Any) -> SubmissionHandle:
             captured.update(kwargs)
             return SubmissionHandle(
                 ray_job_id="ray_core:reference",
@@ -832,12 +832,10 @@ class TestWorkerReconnectPollReconcile:
                 submitted_at=datetime.now(UTC),
             )
 
-        cmd.ray_core_runner = cast(Any, SimpleNamespace(submit=submit))
+        cmd.ray_core_runner = cast(Any, SimpleNamespace(submit_durable=submit_durable))
 
         cmd.submit_task_to_ray_core(task)
 
-        assert captured["args"] == ()
-        assert captured["kwargs"] == {}
         assert captured["task_execution"].input_reference == reference
 
     def test_submit_task_to_ray_core_submit_exception_routes_failure(self, monkeypatch) -> None:
@@ -861,7 +859,9 @@ class TestWorkerReconnectPollReconcile:
         cmd.ray_core_runner = cast(
             Any,
             SimpleNamespace(
-                submit=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("core submit failed"))
+                submit_durable=lambda **_kwargs: (_ for _ in ()).throw(
+                    RuntimeError("core submit failed")
+                )
             ),
         )
         monkeypatch.setattr(
@@ -895,7 +895,7 @@ class TestWorkerReconnectPollReconcile:
         )
 
         class FakeRunner:
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 RayTaskExecution.objects.filter(pk=task.pk).update(
                     attempt_number=2,
                     claimed_by_worker="replacement-worker",
@@ -1537,6 +1537,60 @@ class TestWorkerReconnectPollReconcile:
         assert failures[1]["retryable"] is None
         assert bad_json_task.state == TaskState.RUNNING
         assert "Task 999999 not found in database" in cmd.stdout.getvalue()
+
+    def test_strict_ray_core_transport_failure_never_retries_completed_work(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="strict-ray-core-transport-failure-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="strict-ray-core-transport-worker")
+        task.refresh_from_db()
+        handle = _pending_handle(task)
+        fixed_failure = json.dumps(
+            {
+                "success": False,
+                "result": None,
+                "result_reference": None,
+                "error": "Ray Core execution transport failed",
+                "traceback": None,
+                "exception_type": "RayCoreExecutionTransportError",
+                "retryable": False,
+            }
+        )
+
+        class Runner:
+            _pending_tasks = {task.pk: handle}
+            pending_count = 1
+
+            @property
+            def pending_task_handles(self):
+                return tuple(self._pending_tasks.values())
+
+            def poll_completed(self, handles=None):
+                assert handles == (handle,)
+                self._pending_tasks.pop(task.pk)
+                return [_completion(task, fixed_failure)]
+
+        cmd.ray_core_runner = cast(Any, Runner())
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+
+        assert cmd.poll_ray_core_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.executor_django_ray_version is None
+        assert task.error_message == "Ray Core execution transport failed"
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=1)
+        assert archived.executor_django_ray_version is None
 
     def test_poll_ray_core_tasks_consumes_exact_versioned_completion_provenance(
         self,

@@ -800,12 +800,28 @@ the bound to prove its framing, and replaying the same completed work would crea
 retry storm. Within that boundary the legacy adapter retains released-v1 JSON behavior,
 including non-finite result numbers and long failure diagnostics.
 
-This completion boundary does not yet carry an execution request to the remote runtime.
-The next transport slice must decode and check the expected protocol before Django
-setup, input hydration, callable import, or invocation in Ray Core and Ray Job modes.
-Ray Core serializes Python work before remote code can run, so that executor-side check
-also cannot replace the separate exact Ray/Python and cluster-instance attestation
-required before submission.
+Ray Core now carries one canonical flat versioned-v1 execution request built from the
+durable input JSON or opaque input reference rather than manager-hydrated application
+values. The request includes the complete task identity, execution protocol, callable,
+input transport, and bounded RuntimeEnv identity. Independent expected identity and
+protocol primitives accompany the opaque request. The by-value Ray bootstrap compares
+them and validates the bounded request before importing Django setup, input-storage, or
+application-callable code. A malformed, unsupported, or mismatched request returns a
+fixed non-retryable enriched completion without inspecting its application input or
+invoking the callable. Released positional Ray Core calls remain a protocol-v1 legacy
+adapter for managers that already shipped their older bootstrap by value.
+
+If Ray returns no executor completion for a strict handle, the manager records a fixed
+non-retryable transport failure without remote exception text or executor provenance.
+The missing envelope cannot prove application quiescence or safe replay, so ordinary
+automatic retry policy must not reinterpret that transport loss as a task failure.
+
+This outer Ray Core check occurs after Ray has deserialized the trusted bootstrap and
+its plain request string. It cannot prove cross-version cloudpickle compatibility or
+replace the separate exact Ray/Python and cluster-instance attestation required before
+submission. Ray Job request transport and nested workflow, fold, and distributed
+callable boundaries remain later slices; neither may infer compatibility from this
+outer-task check.
 
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
 capability. Likewise, an execution-protocol-capable lease proves only task-manager

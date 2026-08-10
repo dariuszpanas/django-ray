@@ -12,6 +12,11 @@ from types import SimpleNamespace
 import pytest
 
 import django_ray.runtime.entrypoint as entrypoint
+from django_ray.execution_codec import (
+    ExecutionCompletionSource,
+    ExecutionIdentity,
+    decode_execution_completion,
+)
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.workflow_plans import WorkflowPlanMismatchError
 
@@ -195,6 +200,65 @@ class TestEntrypointPayload:
             "ray_job_driver": True,
             "compiled_graph_submission_transport": "ray-job",
         }
+
+    def test_execute_task_emits_enriched_completion_for_bound_strict_request(
+        self,
+        monkeypatch,
+    ) -> None:
+        identity = ExecutionIdentity(
+            task_execution_pk=81,
+            task_id="00000000-0000-4000-8000-000000000081",
+            attempt_number=2,
+            execution_generation=4,
+        )
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        monkeypatch.setattr(entrypoint, "load_task_input", lambda **_values: ([3], {}))
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: lambda value: {"value": value},
+        )
+
+        encoded = entrypoint.execute_task(
+            "tests.strict_result",
+            "[3]",
+            "{}",
+            _completion_identity=identity,
+            _execution_protocol_version=1,
+        )
+        decoded = decode_execution_completion(
+            encoded,
+            expected_identity=identity,
+            expected_execution_protocol_version=1,
+        )
+
+        assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+        assert decoded.completion.success is True
+        assert decoded.completion.result == {"value": 3}
+        assert decoded.completion.executor_django_ray_version
+
+    def test_execute_task_without_strict_binding_retains_legacy_completion(
+        self,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        monkeypatch.setattr(entrypoint, "load_task_input", lambda **_values: ([], {}))
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: lambda: "legacy",
+        )
+
+        result = json.loads(entrypoint.execute_task("tests.legacy_result", "[]", "{}"))
+
+        assert result == {
+            "success": True,
+            "result": "legacy",
+            "result_reference": None,
+            "error": None,
+            "traceback": None,
+            "exception_type": None,
+            "retryable": None,
+        }
+        assert "completion_schema" not in result
 
     def test_execute_task_awaits_coroutine_and_closes_event_loop(self, monkeypatch) -> None:
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)

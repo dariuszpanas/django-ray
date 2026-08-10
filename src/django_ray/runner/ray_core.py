@@ -29,6 +29,7 @@ class RayCoreHandle:
     ray_task_id: str = ""  # The task's Ray ID (e.g., "67a2e8cfa5a06db3ffff...")
     attempt_number: int = field(kw_only=True)
     execution_generation: int = field(kw_only=True)
+    strict_request: bool = field(default=False, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,46 @@ class RayCoreRunner(BaseRunner):
         Returns:
             SubmissionHandle for tracking the task.
         """
+        input_reference = getattr(task_execution, "input_reference", None)
+        if input_reference:
+            args_json = task_execution.args_json
+            kwargs_json = task_execution.kwargs_json
+        else:
+            from django_ray.runtime.serialization import serialize_args
+
+            args_json = serialize_args(list(args))
+            kwargs_json = serialize_args(kwargs)
+        return self._submit_serialized_request(
+            task_execution=task_execution,
+            callable_path=callable_path,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            input_reference=input_reference,
+        )
+
+    def submit_durable(
+        self,
+        task_execution: RayTaskExecution,
+    ) -> SubmissionHandle:
+        """Submit the task manager's already-persisted opaque input fields."""
+        return self._submit_serialized_request(
+            task_execution=task_execution,
+            callable_path=task_execution.callable_path,
+            args_json=task_execution.args_json,
+            kwargs_json=task_execution.kwargs_json,
+            input_reference=getattr(task_execution, "input_reference", None),
+        )
+
+    def _submit_serialized_request(
+        self,
+        *,
+        task_execution: RayTaskExecution,
+        callable_path: str,
+        args_json: str,
+        kwargs_json: str,
+        input_reference: str | None,
+    ) -> SubmissionHandle:
+        """Submit one strict request without hydrating its application input."""
         existing_handle = self._pending_tasks.get(task_execution.pk)
         if existing_handle is not None:
             raise RuntimeError(
@@ -165,16 +206,6 @@ class RayCoreRunner(BaseRunner):
             )
 
         import ray
-
-        from django_ray.runtime.serialization import serialize_args
-
-        input_reference = getattr(task_execution, "input_reference", None)
-        if input_reference:
-            args_json = task_execution.args_json
-            kwargs_json = task_execution.kwargs_json
-        else:
-            args_json = serialize_args(list(args))
-            kwargs_json = serialize_args(kwargs)
 
         # Extract task name for Ray dashboard visibility
         task_name = callable_path.split(".")[-1] if callable_path else "task"
@@ -243,19 +274,43 @@ class RayCoreRunner(BaseRunner):
         submitted_at = datetime.now(UTC)
         submitted_attempt_number = int(task_execution.attempt_number)
         submitted_execution_generation = int(task_execution.execution_generation)
+        submitted_execution_protocol_version = int(task_execution.execution_protocol_version)
+        from django_ray.execution_codec import (
+            ExecutionIdentity,
+            ExecutionRequest,
+            encode_execution_request,
+        )
+
+        request_identity = ExecutionIdentity(
+            task_execution_pk=int(task_execution.pk),
+            task_id=str(task_execution.task_id),
+            attempt_number=submitted_attempt_number,
+            execution_generation=submitted_execution_generation,
+        )
+        compiled_graph_submission_transport = _compiled_graph_submission_transport(ray)
+        execution_request = encode_execution_request(
+            ExecutionRequest(
+                identity=request_identity,
+                execution_protocol_version=submitted_execution_protocol_version,
+                callable_path=callable_path,
+                transport_version=2 if input_reference else 1,
+                serialized_args=args_json,
+                serialized_kwargs=kwargs_json,
+                input_reference=input_reference,
+                runtime_env_profile=runtime_env.profile,
+                runtime_env_hash=runtime_env.digest,
+                runtime_env_plan_identity=snapshot_runtime_env_identity.as_transport_dict(),
+                compiled_graph_submission_transport=compiled_graph_submission_transport,
+            )
+        )
         try:
             object_ref = execute_django_task.remote(
-                callable_path,
-                args_json,
-                kwargs_json,
-                task_execution.pk,
-                runtime_env.profile,
-                runtime_env.digest,
-                input_reference,
-                attempt_number=submitted_attempt_number,
-                execution_generation=submitted_execution_generation,
-                runtime_env_plan_identity=snapshot_runtime_env_identity.as_transport_dict(),
-                compiled_graph_submission_transport=_compiled_graph_submission_transport(ray),
+                execution_request,
+                expected_task_execution_pk=request_identity.task_execution_pk,
+                expected_task_id=request_identity.task_id,
+                expected_attempt_number=request_identity.attempt_number,
+                expected_execution_generation=request_identity.execution_generation,
+                expected_execution_protocol_version=submitted_execution_protocol_version,
             )
         except Exception:
             # Ray Client leaves a failed ClientRemoteFunc in an in-progress
@@ -286,6 +341,7 @@ class RayCoreRunner(BaseRunner):
             task_name=task_name,
             attempt_number=submitted_attempt_number,
             execution_generation=submitted_execution_generation,
+            strict_request=True,
             ray_job_id=ray_job_id,
             ray_task_id=ray_task_id,
         )
@@ -642,16 +698,34 @@ class RayCoreRunner(BaseRunner):
                     )
                 )
             except Exception as e:
-                # Return error as JSON
-                error_result = json.dumps(
-                    {
-                        "success": False,
-                        "result": None,
-                        "error": materialize_exception_message(e),
-                        "traceback": None,
-                        "exception_type": type(e).__module__ + "." + type(e).__name__,
-                    }
-                )
+                if handle.strict_request:
+                    # No executor completion was returned, so neither application
+                    # quiescence nor safe replay is proven. Keep the diagnostic
+                    # fixed and suppress automatic retry without claiming remote
+                    # executor provenance.
+                    error_result = json.dumps(
+                        {
+                            "success": False,
+                            "result": None,
+                            "result_reference": None,
+                            "error": "Ray Core execution transport failed",
+                            "traceback": None,
+                            "exception_type": "RayCoreExecutionTransportError",
+                            "retryable": False,
+                        }
+                    )
+                else:
+                    # Retain the released local-handle behavior for capabilities
+                    # created before strict request transport was introduced.
+                    error_result = json.dumps(
+                        {
+                            "success": False,
+                            "result": None,
+                            "error": materialize_exception_message(e),
+                            "traceback": None,
+                            "exception_type": type(e).__module__ + "." + type(e).__name__,
+                        }
+                    )
                 completed.append(
                     RayCoreCompletion(
                         task_pk=handle.task_pk,

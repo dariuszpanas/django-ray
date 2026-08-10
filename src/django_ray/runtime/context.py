@@ -33,6 +33,7 @@ class DurableTaskContext:
     ray_job_driver: bool = False
     compiled_graph_submission_transport: str | None = None
     task_id: str | None = None
+    execution_protocol_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,7 @@ def durable_task_execution(
     task_pk: int,
     *,
     task_id: str | None = None,
+    execution_protocol_version: int | None = None,
     attempt_number: int | None = None,
     execution_generation: int | None = None,
     runtime_env_profile: str | None = None,
@@ -173,6 +175,7 @@ def durable_task_execution(
         DurableTaskContext(
             task_pk=task_pk,
             task_id=task_id,
+            execution_protocol_version=execution_protocol_version,
             attempt_number=attempt_number,
             execution_generation=execution_generation,
             runtime_env_profile=runtime_env_profile,

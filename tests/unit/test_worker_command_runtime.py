@@ -16,13 +16,16 @@ from django.core.management.base import CommandParser
 
 import django_ray
 from django_ray.backends import RayTaskBackend
+from django_ray.execution_codec import ExecutionRequestEncodeError
 from django_ray.execution_protocol import (
     MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     WORKER_CAPABILITY_SCHEMA_VERSION,
 )
+from django_ray.input_storage import EXTERNAL_INPUT_PLACEHOLDER
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
 from django_ray.runner.leasing import WorkerLeaseIdentity
 from django_ray.runner.polling import AdaptivePollingPolicy
@@ -1187,6 +1190,162 @@ class TestWorkerCommandRuntime:
 @pytest.mark.django_db
 class TestWorkerCommandRuntimeDb:
     """DB-backed helper path tests."""
+
+    @pytest.mark.parametrize(
+        ("args_json", "kwargs_json", "input_reference"),
+        [
+            ("manager-must-not-decode-args", "manager-must-not-decode-kwargs", None),
+            (
+                EXTERNAL_INPUT_PLACEHOLDER,
+                EXTERNAL_INPUT_PLACEHOLDER,
+                "resultfs://sha256/" + "a" * 64 + "?rel=aa/aa/" + "a" * 64 + ".json&bytes=4",
+            ),
+        ],
+    )
+    def test_ray_core_claim_submits_durable_input_without_manager_hydration(
+        self,
+        monkeypatch,
+        args_json: str,
+        kwargs_json: str,
+        input_reference: str | None,
+    ) -> None:
+        cmd = _make_command(worker_id="request-transport-worker")
+        cmd.execution_mode = "local"
+        cmd._create_lease("default")
+        task = RayTaskExecution.objects.create(
+            task_id=f"request-transport-{input_reference is not None}",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            input_reference=input_reference,
+        )
+        submissions: list[dict[str, Any]] = []
+
+        class FakeRunner:
+            pending_count = 0
+
+            def submit_durable(
+                self,
+                *,
+                task_execution: RayTaskExecution,
+            ) -> SubmissionHandle:
+                submissions.append(
+                    {
+                        "task_pk": task_execution.pk,
+                        "callable_path": task_execution.callable_path,
+                        "args_json": task_execution.args_json,
+                        "kwargs_json": task_execution.kwargs_json,
+                        "input_reference": task_execution.input_reference,
+                    }
+                )
+                return SubmissionHandle(
+                    ray_job_id=f"ray_core:{task_execution.pk}",
+                    ray_address="local",
+                    submitted_at=datetime.now(UTC),
+                )
+
+        def reject_manager_hydration(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("the manager must not hydrate Ray Core task input")
+
+        cmd.ray_core_runner = cast(Any, FakeRunner())
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+        monkeypatch.setattr(
+            "django_ray.runtime.serialization.deserialize_args",
+            reject_manager_hydration,
+        )
+        monkeypatch.setattr(
+            "django_ray.input_storage.load_task_input",
+            reject_manager_hydration,
+        )
+
+        claimed = cmd.claim_and_process_tasks(["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert claimed == 1
+        assert submissions == [
+            {
+                "task_pk": task.pk,
+                "callable_path": task.callable_path,
+                "args_json": args_json,
+                "kwargs_json": kwargs_json,
+                "input_reference": input_reference,
+            }
+        ]
+        assert task.state == TaskState.RUNNING
+        assert task.ray_job_id == f"ray_core:{task.pk}"
+        assert task.ray_address == "local"
+
+    def test_ray_core_request_encode_failure_is_permanent_before_execution(
+        self, monkeypatch
+    ) -> None:
+        cmd = _make_command(worker_id="request-encode-worker")
+        task = RayTaskExecution.objects.create(
+            task_id="request-encode-failure",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            claimed_by_worker=cmd.worker_id,
+            execution_generation=1,
+        )
+        application_calls: list[bool] = []
+
+        class RejectingRunner:
+            def submit_durable(self, **_kwargs: Any) -> SubmissionHandle:
+                raise ExecutionRequestEncodeError
+
+        def invoke_application(*_args: Any, **_kwargs: Any) -> str:
+            application_calls.append(True)
+            return '{"success":true,"result":3}'
+
+        cmd.ray_core_runner = cast(Any, RejectingRunner())
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+        monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", invoke_application)
+
+        cmd.submit_task_to_ray_core(task)
+
+        task.refresh_from_db()
+        assert application_calls == []
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.ray_job_id is None
+        assert task.error_message == "Failed to submit to Ray Core: execution request is invalid"
+
+    def test_sync_execution_still_accepts_legacy_completion(self, monkeypatch) -> None:
+        cmd = _make_command(worker_id="legacy-sync-worker")
+        cmd._create_lease("default")
+        task = RayTaskExecution.objects.create(
+            task_id="legacy-sync-completion",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            claimed_by_worker=cmd.worker_id,
+        )
+        executor_calls: list[dict[str, Any]] = []
+
+        def execute_legacy_completion(**kwargs: Any) -> str:
+            executor_calls.append(kwargs)
+            return '{"success":true,"result":3}'
+
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            execute_legacy_completion,
+        )
+
+        cmd.execute_task_sync(task)
+
+        task.refresh_from_db()
+        assert len(executor_calls) == 1
+        assert executor_calls[0]["serialized_args"] == "[1, 2]"
+        assert executor_calls[0]["serialized_kwargs"] == "{}"
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data == "3"
 
     def test_mark_stale_ray_core_tasks_routes_rows_through_retry_handling(self) -> None:
         cmd = _make_command(worker_id="stale-worker")

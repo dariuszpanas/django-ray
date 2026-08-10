@@ -82,8 +82,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted executor provenance is archived atomically with the terminal attempt. A
   fixed byte/depth/node budget rejects deterministic resource-limit violations without
   replay while preserving released legacy non-finite results and long diagnostics
-  within that whole-envelope boundary. This slice does not yet transport the execution
-  request or enforce pre-import rejection.
+  within that whole-envelope boundary.
+- New Ray Core submissions now carry one canonical bounded request sourced from durable
+  JSON or an opaque input reference, plus independent expected task and protocol
+  primitives. The by-value executor bootstrap rejects malformed, unsupported, and
+  mismatched requests with a fixed non-retryable enriched completion before Django
+  setup, input hydration, or application callable import/invocation. Released
+  positional submissions remain the protocol-v1 compatibility path. A strict handle
+  that returns no executor envelope becomes a fixed non-retryable transport failure
+  without remote exception text or executor provenance. This does not attest Ray/Python
+  or cluster identity and does not yet cover Ray Job or nested workflow/distributed
+  callable transports.
 - PostgreSQL and SQLite rollout coordination now serializes exact-0.4 execution and
   lease inserts, legacy heartbeats, and concurrent policy transitions without using
   package Semantic Versions as compatibility evidence. Callers must provide the

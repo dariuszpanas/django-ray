@@ -14,6 +14,14 @@ from typing import Any
 import pytest
 
 import django_ray.runtime.remote as remote_module
+from django_ray.execution_codec import (
+    ExecutionIdentity,
+    ExecutionRequest,
+    ExecutionRequestRejection,
+    decode_execution_completion,
+    encode_execution_request,
+)
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.runtime.remote import (
     WorkflowProgressActor,
     execute_django_task_remote,
@@ -59,6 +67,47 @@ _WORKFLOW_PLAN = {
     "node_count": 2,
 }
 _OCCURRED_AT = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+_STRICT_IDENTITY = ExecutionIdentity(
+    task_execution_pk=217,
+    task_id="00000000-0000-4000-8000-000000000217",
+    attempt_number=3,
+    execution_generation=6,
+)
+
+
+def _strict_execution_request(
+    *,
+    identity: ExecutionIdentity = _STRICT_IDENTITY,
+) -> ExecutionRequest:
+    return ExecutionRequest(
+        identity=identity,
+        execution_protocol_version=1,
+        callable_path="tests.strict_task",
+        transport_version=1,
+        serialized_args='["value"]',
+        serialized_kwargs='{"increment":2}',
+        input_reference=None,
+        runtime_env_profile="thin",
+        runtime_env_hash="a" * 64,
+        runtime_env_plan_identity={"profile": "thin", "schema_version": 1},
+        compiled_graph_submission_transport="direct-ray-core",
+    )
+
+
+def _execute_strict_request(
+    serialized: str,
+    *,
+    identity: ExecutionIdentity = _STRICT_IDENTITY,
+    expected_protocol: int = 1,
+) -> str:
+    return execute_django_task_remote(
+        serialized,
+        expected_task_execution_pk=identity.task_execution_pk,
+        expected_task_id=identity.task_id,
+        expected_attempt_number=identity.attempt_number,
+        expected_execution_generation=identity.execution_generation,
+        expected_execution_protocol_version=expected_protocol,
+    )
 
 
 def _progress_wire(
@@ -232,6 +281,7 @@ def test_execute_django_task_remote_propagates_attempt_and_generation(monkeypatc
         assert context is not None
         captured.update(
             task_pk=context.task_pk,
+            execution_protocol_version=context.execution_protocol_version,
             attempt_number=context.attempt_number,
             execution_generation=context.execution_generation,
             compiled_graph_submission_transport=(context.compiled_graph_submission_transport),
@@ -252,10 +302,192 @@ def test_execute_django_task_remote_propagates_attempt_and_generation(monkeypatc
 
     assert captured == {
         "task_pk": 15,
+        "execution_protocol_version": 1,
         "attempt_number": 3,
         "execution_generation": 9,
         "compiled_graph_submission_transport": "ray-client",
     }
+
+
+def test_execute_django_task_remote_executes_strict_request_with_bound_context(
+    monkeypatch,
+    capsys,
+) -> None:
+    from django_ray.runtime.context import get_current_task_context
+
+    observed: dict[str, object] = {}
+    monkeypatch.setattr("django_ray.runtime.entrypoint.bootstrap_django", lambda: None)
+    monkeypatch.setattr(
+        "django_ray.runtime.entrypoint.load_task_input",
+        lambda **values: (
+            observed.update(input=values) or ["value"],
+            {"increment": 2},
+        ),
+    )
+
+    def strict_task(value: str, *, increment: int) -> dict[str, object]:
+        context = get_current_task_context()
+        assert context is not None
+        observed["context"] = {
+            "task_pk": context.task_pk,
+            "task_id": context.task_id,
+            "execution_protocol_version": context.execution_protocol_version,
+            "attempt_number": context.attempt_number,
+            "execution_generation": context.execution_generation,
+            "runtime_env_profile": context.runtime_env_profile,
+            "runtime_env_hash": context.runtime_env_hash,
+            "runtime_env_plan_identity": context.runtime_env_plan_identity,
+            "compiled_graph_submission_transport": (context.compiled_graph_submission_transport),
+        }
+        return {"increment": increment, "value": value}
+
+    monkeypatch.setattr(
+        "django_ray.runtime.import_utils.import_callable",
+        lambda path: observed.update(callable_path=path) or strict_task,
+    )
+
+    result = _execute_strict_request(encode_execution_request(_strict_execution_request()))
+    decoded = decode_execution_completion(
+        result,
+        expected_identity=_STRICT_IDENTITY,
+        expected_execution_protocol_version=1,
+    ).completion
+
+    assert decoded.success is True
+    assert decoded.result == {"increment": 2, "value": "value"}
+    assert decoded.identity == _STRICT_IDENTITY
+    assert decoded.execution_protocol_version == 1
+    assert decoded.executor_django_ray_version
+    assert observed == {
+        "input": {
+            "args_json": '["value"]',
+            "kwargs_json": '{"increment":2}',
+            "input_reference": None,
+        },
+        "callable_path": "tests.strict_task",
+        "context": {
+            "task_pk": 217,
+            "task_id": "00000000-0000-4000-8000-000000000217",
+            "execution_protocol_version": 1,
+            "attempt_number": 3,
+            "execution_generation": 6,
+            "runtime_env_profile": "thin",
+            "runtime_env_hash": "a" * 64,
+            "runtime_env_plan_identity": {"profile": "thin", "schema_version": 1},
+            "compiled_graph_submission_transport": "direct-ray-core",
+        },
+    }
+    assert get_current_task_context() is None
+    captured = capsys.readouterr()
+    assert "[Task 217] Starting: tests.strict_task" in captured.out
+    assert "[Task 217] SUCCESS" in captured.out
+
+
+def test_execute_django_task_remote_returns_enriched_strict_failure(
+    monkeypatch,
+    capsys,
+) -> None:
+    secret = "password=application-secret"
+    monkeypatch.setattr("django_ray.runtime.entrypoint.bootstrap_django", lambda: None)
+    monkeypatch.setattr(
+        "django_ray.runtime.entrypoint.load_task_input",
+        lambda **_values: ([], {}),
+    )
+
+    def fail() -> None:
+        raise ValueError(secret)
+
+    monkeypatch.setattr("django_ray.runtime.import_utils.import_callable", lambda _path: fail)
+
+    result = _execute_strict_request(encode_execution_request(_strict_execution_request()))
+    decoded = decode_execution_completion(
+        result,
+        expected_identity=_STRICT_IDENTITY,
+        expected_execution_protocol_version=1,
+    ).completion
+
+    assert decoded.success is False
+    assert decoded.result is None
+    assert decoded.error == secret
+    assert decoded.exception_type == "builtins.ValueError"
+    assert decoded.retryable is True
+    captured = capsys.readouterr()
+    assert secret not in captured.err
+    assert "[Task 217] FAILED: [REDACTED]" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("serialized", "identity", "expected_protocol", "classification"),
+    [
+        (
+            encode_execution_request(_strict_execution_request()),
+            replace(_STRICT_IDENTITY, task_id="00000000-0000-4000-8000-000000000999"),
+            1,
+            ExecutionRequestRejection.IDENTITY_MISMATCH,
+        ),
+        (
+            encode_execution_request(_strict_execution_request()),
+            _STRICT_IDENTITY,
+            2,
+            ExecutionRequestRejection.PROTOCOL_MISMATCH,
+        ),
+        (
+            '{"request_schema":"django-ray.execution-request","secret":"password=decoder-secret"}',
+            _STRICT_IDENTITY,
+            1,
+            ExecutionRequestRejection.INVALID_VERSIONED,
+        ),
+        (
+            json.dumps(
+                {
+                    **json.loads(encode_execution_request(_strict_execution_request())),
+                    "execution_protocol_version": 2,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            _STRICT_IDENTITY,
+            2,
+            ExecutionRequestRejection.UNSUPPORTED_PROTOCOL,
+        ),
+    ],
+)
+def test_strict_request_rejection_precedes_all_application_side_effects(
+    monkeypatch,
+    serialized: str,
+    identity: ExecutionIdentity,
+    expected_protocol: int,
+    classification: ExecutionRequestRejection,
+) -> None:
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("application execution started before strict request rejection")
+
+    monkeypatch.setattr("django_ray.runtime.entrypoint.bootstrap_django", unexpected)
+    monkeypatch.setattr("django_ray.runtime.entrypoint.load_task_input", unexpected)
+    monkeypatch.setattr("django_ray.runtime.import_utils.import_callable", unexpected)
+    monkeypatch.setattr("django_ray.runtime.entrypoint._invoke_task_callable", unexpected)
+    monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", unexpected)
+
+    result = _execute_strict_request(
+        serialized,
+        identity=identity,
+        expected_protocol=expected_protocol,
+    )
+    decoded = decode_execution_completion(
+        result,
+        expected_identity=identity,
+        expected_execution_protocol_version=expected_protocol,
+        supported_protocols=ExecutionProtocolRange(1, 2),
+    ).completion
+
+    assert decoded.success is False
+    assert decoded.result is None
+    assert decoded.result_reference is None
+    assert decoded.traceback is None
+    assert decoded.exception_type == "RayExecutionRequestIncompatible"
+    assert decoded.retryable is False
+    assert decoded.error == f"execution request rejected: {classification.value}"
+    assert "decoder-secret" not in result
 
 
 def test_execute_workflow_step_bootstraps_and_reports_completion(monkeypatch) -> None:

@@ -166,16 +166,27 @@ class TestLiveFailureInjection:
             runner._pending_tasks[task.pk].object_ref,
             timeout=120,
         )
+        from django_ray.execution_codec import (
+            ExecutionCompletionSource,
+            ExecutionIdentity,
+            decode_execution_completion,
+        )
 
-        assert json.loads(payload) == {
-            "success": True,
-            "result": 5,
-            "result_reference": None,
-            "error": None,
-            "traceback": None,
-            "exception_type": None,
-            "retryable": None,
-        }
+        decoded = decode_execution_completion(
+            payload,
+            expected_identity=ExecutionIdentity(
+                task_execution_pk=int(task.pk),
+                task_id=str(task.task_id),
+                attempt_number=int(task.attempt_number),
+                execution_generation=int(task.execution_generation),
+            ),
+            expected_execution_protocol_version=int(task.execution_protocol_version),
+        )
+
+        assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+        assert decoded.completion.success is True
+        assert decoded.completion.result == 5
+        assert decoded.completion.executor_django_ray_version
 
     def test_disconnect_retries_pending_ray_core_task(self, live_ray_cluster):
         """Client disconnect should trigger retry path for tracked pending tasks."""
