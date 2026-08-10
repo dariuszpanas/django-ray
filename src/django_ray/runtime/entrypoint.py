@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import binascii
 import json
 import os
 import sys
@@ -21,14 +22,38 @@ import django
 from django.apps import apps
 
 from django_ray.conf.settings import get_settings
+from django_ray.execution_codec import EXECUTION_REQUEST_MAX_BYTES
 from django_ray.input_storage import InputPayloadValidationError, load_task_input
 from django_ray.logging import get_logger
+from django_ray.ray_job_protocol import (
+    RAY_JOB_CONFIG_JSON_ENV_VAR,
+    RAY_JOB_REQUEST_REJECTED_EXIT_CODE,
+    RayJobRequestBindingError,
+    RayJobRequestBindingRejection,
+    RayJobRequestExpectation,
+    load_ray_job_request_expectation,
+    validate_ray_job_request_expectation,
+)
 from django_ray.redaction import redact_text
 
 if TYPE_CHECKING:
-    from django_ray.execution_codec import ExecutionIdentity
+    from django_ray.execution_codec import ExecutionIdentity, ExecutionRequestRejection
 
 logger = get_logger(__name__)
+
+_MAX_RAY_JOB_PAYLOAD_B64_BYTES = 4 * ((EXECUTION_REQUEST_MAX_BYTES + 2) // 3)
+
+
+class _StrictRequestRejectionResult(str):
+    """Mark one fixed preflight rejection for the CLI exit contract."""
+
+
+class _PayloadDecodeError(ValueError):
+    """Reject one bounded payload without retaining its command-line value."""
+
+    def __init__(self, *, resource_limit: bool) -> None:
+        self.resource_limit = resource_limit
+        super().__init__("Ray Job payload is invalid")
 
 
 @dataclass
@@ -333,24 +358,98 @@ def execute_task(
     return result_json
 
 
-def execute_task_from_payload(payload_b64: str) -> str:
-    """Decode payload and execute the task.
-
-    Args:
-        payload_b64: URL-safe base64 JSON payload containing:
-            - callable_path
-            - serialized_args
-            - serialized_kwargs
-            - task_execution_pk (optional)
-            - task_id (optional)
-            - attempt_number (optional)
-            - execution_generation (optional)
-
-    Returns:
-        JSON-serialized TaskResult.
-    """
+def _decode_payload_b64(payload_b64: str) -> str:
+    """Decode one bounded URL-safe payload without retaining rejected bytes."""
+    if type(payload_b64) is not str:
+        raise _PayloadDecodeError(resource_limit=False) from None
+    # Base64's decoder first creates an ASCII byte copy for ``str`` input.
+    # Reject by the allocation-free character count before crossing that
+    # boundary.  ASCII then makes the character and encoded-byte ceilings
+    # identical for every accepted candidate.
+    if len(payload_b64) > _MAX_RAY_JOB_PAYLOAD_B64_BYTES:
+        raise _PayloadDecodeError(resource_limit=True) from None
+    if not payload_b64.isascii():
+        raise _PayloadDecodeError(resource_limit=False) from None
     try:
-        payload_json = base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8")
+        decoded = base64.b64decode(payload_b64, altchars=b"-_", validate=True)
+    except (binascii.Error, ValueError):
+        raise _PayloadDecodeError(resource_limit=False) from None
+    if len(decoded) > EXECUTION_REQUEST_MAX_BYTES:
+        raise _PayloadDecodeError(resource_limit=True) from None
+    try:
+        return decoded.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _PayloadDecodeError(resource_limit=False) from None
+
+
+def _binding_rejection_classification(
+    classification: RayJobRequestBindingRejection,
+) -> ExecutionRequestRejection:
+    """Map control-plane failures to the fixed execution rejection vocabulary."""
+    from django_ray.execution_codec import ExecutionRequestRejection
+
+    mapping = {
+        RayJobRequestBindingRejection.RESOURCE_LIMIT: ExecutionRequestRejection.RESOURCE_LIMIT,
+        RayJobRequestBindingRejection.IDENTITY_MISMATCH: (
+            ExecutionRequestRejection.IDENTITY_MISMATCH
+        ),
+        RayJobRequestBindingRejection.PROTOCOL_MISMATCH: (
+            ExecutionRequestRejection.PROTOCOL_MISMATCH
+        ),
+        RayJobRequestBindingRejection.TRANSPORT_MISMATCH: (
+            ExecutionRequestRejection.UNSUPPORTED_TRANSPORT
+        ),
+    }
+    return mapping.get(classification, ExecutionRequestRejection.INVALID_VERSIONED)
+
+
+def _fixed_unbound_request_rejection(classification: ExecutionRequestRejection) -> str:
+    """Return a fixed legacy-shaped diagnostic when no identity is trusted."""
+    return json.dumps(
+        {
+            "success": False,
+            "result": None,
+            "result_reference": None,
+            "error": f"execution request rejected: {classification.value}",
+            "traceback": None,
+            "exception_type": "RayExecutionRequestIncompatible",
+            "retryable": False,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _strict_request_rejection(
+    expectation: RayJobRequestExpectation | None,
+    classification: ExecutionRequestRejection,
+) -> _StrictRequestRejectionResult:
+    """Encode one secret-free rejection before Django or application setup."""
+    if expectation is not None:
+        from django_ray import __version__
+        from django_ray.execution_codec import (
+            ExecutionRequestEncodeError,
+            encode_execution_request_rejection,
+        )
+
+        try:
+            return _StrictRequestRejectionResult(
+                encode_execution_request_rejection(
+                    expected_identity=expectation.identity,
+                    expected_execution_protocol_version=(expectation.execution_protocol_version),
+                    executor_django_ray_version=__version__,
+                    classification=classification,
+                )
+            )
+        except ExecutionRequestEncodeError:
+            pass
+    return _StrictRequestRejectionResult(_fixed_unbound_request_rejection(classification))
+
+
+def _execute_legacy_payload(payload_json: str) -> str:
+    """Retain the released unversioned protocol-v1 payload adapter."""
+    try:
         payload = json.loads(payload_json)
         transport_version = payload.get("transport_version", 1)
         if transport_version not in (1, 2):
@@ -374,8 +473,96 @@ def execute_task_from_payload(payload_b64: str) -> str:
             runtime_env_plan_identity=payload.get("runtime_env_plan_identity"),
             input_reference=payload.get("input_reference"),
         )
-    except Exception as e:
-        return _serialize_error(e)
+    except Exception as error:
+        return _serialize_error(error)
+
+
+def execute_task_from_payload(payload_b64: str) -> str:
+    """Fence a strict request or execute the released protocol-v1 payload."""
+    from django_ray.execution_codec import (
+        ExecutionRequestDecodeError,
+        ExecutionRequestRejection,
+        decode_execution_request,
+    )
+
+    try:
+        expectation = load_ray_job_request_expectation(os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR))
+    except RayJobRequestBindingError as error:
+        return _strict_request_rejection(
+            None,
+            _binding_rejection_classification(error.classification),
+        )
+
+    try:
+        payload_json = _decode_payload_b64(payload_b64)
+    except _PayloadDecodeError as error:
+        if expectation is None and not error.resource_limit:
+            return _serialize_error(error)
+        classification = (
+            ExecutionRequestRejection.RESOURCE_LIMIT
+            if error.resource_limit
+            else ExecutionRequestRejection.INVALID_VERSIONED
+        )
+        return _strict_request_rejection(expectation, classification)
+
+    try:
+        request = decode_execution_request(
+            payload_json,
+            expected_identity=(expectation.identity if expectation is not None else None),
+            expected_execution_protocol_version=(
+                expectation.execution_protocol_version if expectation is not None else None
+            ),
+        )
+    except ExecutionRequestDecodeError as error:
+        if expectation is not None or error.attempted_versioned:
+            return _strict_request_rejection(expectation, error.classification)
+        if not error.allows_legacy_fallback:
+            return _strict_request_rejection(expectation, error.classification)
+        return _execute_legacy_payload(payload_json)
+
+    # A versioned payload without an independent control-plane expectation is
+    # never allowed to make its own identity trustworthy.
+    if expectation is None:
+        return _strict_request_rejection(
+            None,
+            ExecutionRequestRejection.INVALID_VERSIONED,
+        )
+
+    if request.compiled_graph_submission_transport != "ray-job":
+        return _strict_request_rejection(
+            expectation,
+            ExecutionRequestRejection.UNSUPPORTED_TRANSPORT,
+        )
+    try:
+        validate_ray_job_request_expectation(
+            expectation,
+            expected_identity=request.identity,
+            expected_execution_protocol_version=request.execution_protocol_version,
+            serialized_request=payload_json,
+            expected_submission_transport="ray-job",
+        )
+    except RayJobRequestBindingError as error:
+        return _strict_request_rejection(
+            expectation,
+            _binding_rejection_classification(error.classification),
+        )
+
+    return execute_task(
+        callable_path=request.callable_path,
+        serialized_args=request.serialized_args,
+        serialized_kwargs=request.serialized_kwargs,
+        task_execution_pk=request.identity.task_execution_pk,
+        task_id=request.identity.task_id,
+        attempt_number=request.identity.attempt_number,
+        execution_generation=request.identity.execution_generation,
+        runtime_env_profile=request.runtime_env_profile,
+        runtime_env_hash=request.runtime_env_hash,
+        runtime_env_plan_identity=request.runtime_env_plan_identity,
+        input_reference=request.input_reference,
+        ray_job_driver=True,
+        _completion_identity=request.identity,
+        _execution_protocol_version=request.execution_protocol_version,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -406,6 +593,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"django-ray task failed: {redact_text(result.get('error'))}",
                 file=sys.stderr,
             )
+    if isinstance(result_json, _StrictRequestRejectionResult):
+        return RAY_JOB_REQUEST_REJECTED_EXIT_CODE
     return 0
 
 

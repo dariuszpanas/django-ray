@@ -187,6 +187,11 @@ def _load_ray_job_submission_evidence(
     *, ray_address: str, execution_pk: int
 ) -> dict[int, tuple[int, str]]:
     """Read retained terminal Job API metadata instead of a database polling race."""
+    from django_ray.ray_job_protocol import (
+        RayJobRequestBindingError,
+        is_valid_strict_ray_job_submission_id,
+        parse_ray_job_request_metadata,
+    )
     from django_ray.runner.ray_job import (
         _address_pinned_job_client,
         _bounded_control_requests,
@@ -202,20 +207,21 @@ def _load_ray_job_submission_evidence(
             jobs = client.list_jobs()
         for job in jobs:
             metadata = job.metadata
-            if not isinstance(metadata, dict) or metadata.get("django_ray_task_id") != str(
-                execution_pk
-            ):
-                continue
             try:
-                attempt_number = int(metadata["django_ray_attempt_number"])
-                execution_generation = int(metadata["django_ray_execution_generation"])
-            except (KeyError, TypeError, ValueError) as error:
+                expectation = parse_ray_job_request_metadata(metadata)
+            except RayJobRequestBindingError as error:
                 raise AssertionError(
-                    "Ray Job metadata did not contain durable retry identity"
+                    "Ray Job metadata contained an invalid strict binding"
                 ) from error
+            if expectation is None or expectation.identity.task_execution_pk != execution_pk:
+                continue
+            attempt_number = expectation.identity.attempt_number
+            execution_generation = expectation.identity.execution_generation
+            if expectation.execution_protocol_version != 1:
+                raise AssertionError("Ray Job metadata advertised an unexpected protocol")
             submission_id = job.submission_id
-            if not isinstance(submission_id, str) or not submission_id.startswith("raysubmit_"):
-                raise AssertionError("Ray Job metadata matched a non-submission job")
+            if not is_valid_strict_ray_job_submission_id(submission_id):
+                raise AssertionError("Ray Job metadata matched a non-strict submission job")
             identity = (execution_generation, submission_id)
             previous = submissions.setdefault(attempt_number, identity)
             if previous != identity:
@@ -408,10 +414,15 @@ def main() -> int:
             if (
                 not isinstance(completion_envelope, dict)
                 or completion_envelope.get("success") is not True
+                or completion_envelope.get("completion_schema") != "django-ray.execution-completion"
+                or completion_envelope.get("execution_protocol_version") != 1
+                or not completion_envelope.get("executor_django_ray_version")
             ):
                 raise AssertionError(
-                    "Ray Job driver did not persist a successful completion envelope"
+                    "Ray Job driver did not persist a strict successful completion envelope"
                 )
+            if not all(attempt.executor_django_ray_version for attempt in attempts):
+                raise AssertionError("archived Ray Job attempts lost executor provenance")
 
             first_generation = submissions[1][0]
             _, _, first_completion_path = _attempt_paths(
@@ -564,6 +575,9 @@ def main() -> int:
                 "attempts_completed": len(attempts),
                 "ray_jobs_submitted": len(submissions),
                 "ray_job_transports_succeeded": True,
+                "strict_ray_job_request_binding": True,
+                "versioned_completion_envelope": True,
+                "executor_provenance_archived": True,
                 "preinstalled_ray_data_environment": True,
                 "disposable_cluster_target_pinned": True,
                 "automatic_retry_recovered": True,

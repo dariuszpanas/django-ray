@@ -502,10 +502,18 @@ while running:
 ### Ray Job mode
 
 - Uses Ray Job Submission API.
-- Worker submits a payload transport command:
+- New task managers build the same canonical flat versioned execution request used by
+  Ray Core directly from the durable input JSON or opaque input reference. The worker
+  submits that request through the payload transport command:
   - `python -m django_ray.runtime.entrypoint --payload-b64 <...>`
-- Payload is URL-safe base64 JSON containing callable path, serialized args/kwargs,
-  attempt number, and execution generation.
+- The request carries the callable, input transport, complete task identity, execution
+  protocol, and bounded RuntimeEnv identity. Independently bound Ray Job metadata
+  carries the expected identity, protocol, and request digest so the driver can validate
+  the command. A replacement manager validates the persisted strict job ID plus bounded
+  identity and protocol metadata; it does not reconstruct the command to infer effects.
+- An upgraded driver validates the metadata and canonical request before Django setup,
+  input hydration, application callable import, or invocation. Any strict marker opts
+  the whole submission into this check and cannot fall back to the legacy adapter.
 - Applies the same persisted RuntimeEnv snapshot to the submitted Ray Job.
 - Carries durable task identity into the driver and initializes Ray lazily for
   nested workflows, giving Ray Job and Ray Core the same graph/progress protocol.
@@ -516,6 +524,16 @@ while running:
   only.
 - Workers can adopt orphaned persisted Ray Job handles from inactive workers and continue reconciliation
   instead of immediately retrying duplicate work.
+- A strict request rejection has one fixed driver exit classification, but an exit code
+  cannot prove how far the driver progressed or whether application effects occurred.
+  Every strict terminal driver with a verified binding but no exact completion envelope
+  therefore waits for the publication grace period and receives one generic fixed
+  non-retryable outcome. An unverifiable binding instead follows the exact-stop,
+  `LOST`, no-auto-retry quarantine. Reconciliation never fetches logs for authority or
+  automatically replays either class of work.
+- Released unversioned protocol-v1 payloads remain an explicit legacy adapter. The flat
+  strict request also retains the fields understood by the released entrypoint, so old
+  and new managers/drivers can drain protocol-v1 work in either deployment order.
 
 ## Entrypoint Contract
 
@@ -800,7 +818,7 @@ the bound to prove its framing, and replaying the same completed work would crea
 retry storm. Within that boundary the legacy adapter retains released-v1 JSON behavior,
 including non-finite result numbers and long failure diagnostics.
 
-Ray Core now carries one canonical flat versioned-v1 execution request built from the
+Ray Core carries one canonical flat versioned-v1 execution request built from the
 durable input JSON or opaque input reference rather than manager-hydrated application
 values. The request includes the complete task identity, execution protocol, callable,
 input transport, and bounded RuntimeEnv identity. Independent expected identity and
@@ -816,11 +834,32 @@ non-retryable transport failure without remote exception text or executor proven
 The missing envelope cannot prove application quiescence or safe replay, so ordinary
 automatic retry policy must not reinterpret that transport loss as a task failure.
 
-This outer Ray Core check occurs after Ray has deserialized the trusted bootstrap and
-its plain request string. It cannot prove cross-version cloudpickle compatibility or
-replace the separate exact Ray/Python and cluster-instance attestation required before
-submission. Ray Job request transport and nested workflow, fold, and distributed
-callable boundaries remain later slices; neither may infer compatibility from this
+Ray Job uses that canonical request through its persisted submission command and binds
+the expected identity, protocol, and request digest independently in bounded Ray Job
+metadata. The driver reads and validates both before Django setup, input hydration, or
+application callable import/invocation, then publishes the same enriched completion.
+The dedicated rejection exit classification is diagnostic only: without the exact
+completion, reconciliation cannot prove the phase or absence of application effects.
+Every strict terminal driver with a verified binding but missing that completion waits
+for publication grace and then receives a fixed generic non-retryable outcome. An
+unverifiable binding instead follows the exact-stop, `LOST`, no-auto-retry quarantine;
+Ray Job logs are not authority for either case. Persisted strict job IDs plus bounded
+identity and protocol metadata let a compatible replacement manager reconcile the same
+job without rewriting its task identity or generation. Unversioned released payloads
+remain protocol-v1 legacy input, and the flat versioned request remains readable by the
+released entrypoint during the drain window.
+
+The current shell transport still places inline request bytes in `--payload-b64`; its
+mandatory command-size and control-plane-confidentiality replacement is tracked
+separately. Operators should enable durable input references for large or sensitive
+inputs and must not interpret strict parsing as proof that arbitrary command length is
+portable.
+
+The outer Ray Core check still occurs after Ray has deserialized the trusted bootstrap
+and its plain request string. Neither outer transport proves cross-version cloudpickle
+compatibility or replaces the separate exact Ray/Python and cluster-instance
+attestation required before submission. Nested workflow, fold, and distributed
+callable boundaries remain later slices and may not infer compatibility from the
 outer-task check.
 
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue

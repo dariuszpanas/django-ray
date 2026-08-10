@@ -1132,6 +1132,224 @@ def test_enriched_ray_core_completion_blocked_by_task_replacement_is_a_durable_n
     assert runner.pending_count == 0
 
 
+def test_strict_ray_job_completion_blocked_by_task_replacement_is_a_durable_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.execution_codec import (
+        ExecutionCompletion,
+        ExecutionIdentity,
+        ExecutionRequest,
+        encode_execution_completion,
+        encode_execution_request,
+    )
+    from django_ray.ray_job_protocol import (
+        STRICT_RAY_JOB_SUBMISSION_ID_PREFIX,
+        build_ray_job_request_metadata,
+    )
+    from django_ray.runner.base import JobInfo, JobStatus
+
+    command = _claim_command("postgres-strict-ray-job-completion-owner", [])
+    replacement_command = _claim_command("postgres-strict-ray-job-replacement-owner", [])
+    observed_at = datetime.now(UTC)
+    ray_job_id = f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}{'a' * 64}"
+    replacement_ray_job_id = f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}{'b' * 64}"
+    task = _execution(
+        "postgres-strict-ray-job-completion-replacement-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker=command.worker_id,
+        attempt_number=3,
+        execution_generation=7,
+        started_at=observed_at,
+        last_heartbeat_at=observed_at,
+        ray_job_id=ray_job_id,
+        ray_address="http://ray-dashboard:8265",
+        managed_with_django_ray_version="0.5.0-stale-manager",
+    )
+    assert task.pk is not None
+    completion_identity = ExecutionIdentity(
+        task_execution_pk=int(task.pk),
+        task_id=str(task.task_id),
+        attempt_number=3,
+        execution_generation=7,
+    )
+    completion_data = encode_execution_completion(
+        ExecutionCompletion(
+            identity=completion_identity,
+            execution_protocol_version=int(task.execution_protocol_version),
+            executor_django_ray_version="0.5.0-stale-executor",
+            success=True,
+            result={"stale": "strict-ray-job-result"},
+            result_reference=None,
+            error=None,
+            traceback=None,
+            exception_type=None,
+            retryable=None,
+        )
+    )
+    request = ExecutionRequest(
+        identity=completion_identity,
+        execution_protocol_version=int(task.execution_protocol_version),
+        callable_path=task.callable_path,
+        transport_version=1,
+        serialized_args=task.args_json,
+        serialized_kwargs=task.kwargs_json,
+        input_reference=None,
+        runtime_env_profile=None,
+        runtime_env_hash="0" * 64,
+        runtime_env_plan_identity={},
+        compiled_graph_submission_transport="ray-job",
+    )
+    serialized_request = encode_execution_request(request)
+    metadata = build_ray_job_request_metadata(request, serialized_request)
+
+    completion_published = Event()
+    central_authority_entered = Event()
+    release_central_authority = Event()
+    replacement_locked = Event()
+    release_replacement = Event()
+    reconcile_connected = Event()
+    reconcile_backend_pid: list[int] = []
+    original_authority = command._authoritative_task_owner
+
+    class PublishingRunner:
+        def get_status(self, _handle) -> JobInfo:
+            updated = RayTaskExecution.objects.filter(
+                pk=task.pk,
+                state=TaskState.RUNNING,
+                claimed_by_worker=command.worker_id,
+                attempt_number=3,
+                execution_generation=7,
+                ray_job_id=ray_job_id,
+            ).update(completion_data=completion_data)
+            assert updated == 1
+            completion_published.set()
+            return JobInfo(
+                job_id=ray_job_id,
+                status=JobStatus.RUNNING,
+                metadata=metadata,
+            )
+
+        def cancel_with_status(self, _handle) -> CancellationOutcome:
+            pytest.fail("an accepted completion race must not stop the replacement Ray Job")
+
+        def get_logs(self, _handle) -> str | None:
+            pytest.fail("an accepted completion race must not retrieve Ray Job logs")
+
+    @contextmanager
+    def delayed_central_authority(snapshot, **kwargs):
+        central_authority_entered.set()
+        if not release_central_authority.wait(timeout=10):
+            raise TimeoutError("test did not release strict completion authority")
+        with original_authority(snapshot, **kwargs) as owned:
+            yield owned
+
+    monkeypatch.setattr(command, "_authoritative_task_owner", delayed_central_authority)
+    monkeypatch.setattr(
+        command,
+        "_store_task_result",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a stale strict Ray Job completion must not reach result storage"
+        ),
+    )
+
+    def replace_task_identity() -> dict[str, Any]:
+        close_old_connections()
+        try:
+            assert command.lease_identity is not None
+            assert replacement_command.lease_identity is not None
+            with transaction.atomic():
+                list(
+                    TaskWorkerLease.objects.select_for_update()
+                    .filter(worker_id__in=[command.worker_id, replacement_command.worker_id])
+                    .order_by("worker_id")
+                )
+                current = RayTaskExecution.objects.select_for_update().get(pk=task.pk)
+                assert current.completion_data == completion_data
+                current.claimed_by_worker = replacement_command.worker_id
+                current.attempt_number = 4
+                current.execution_generation = 8
+                current.ray_job_id = replacement_ray_job_id
+                current.completion_data = None
+                current.started_at = observed_at + timedelta(seconds=1)
+                current.last_heartbeat_at = observed_at + timedelta(seconds=1)
+                current.managed_with_django_ray_version = "0.6.0-replacement-manager"
+                current.executor_django_ray_version = "0.6.0-replacement-executor"
+                current.save(
+                    update_fields=[
+                        "claimed_by_worker",
+                        "attempt_number",
+                        "execution_generation",
+                        "ray_job_id",
+                        "completion_data",
+                        "started_at",
+                        "last_heartbeat_at",
+                        "managed_with_django_ray_version",
+                        "executor_django_ray_version",
+                    ]
+                )
+                replacement = RayTaskExecution.objects.values().get(pk=task.pk)
+                replacement_locked.set()
+                if not release_replacement.wait(timeout=10):
+                    raise TimeoutError("test did not release the strict replacement transaction")
+                return replacement
+        finally:
+            close_old_connections()
+
+    def reconcile_strict_completion() -> None:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                reconcile_backend_pid.append(int(cursor.fetchone()[0]))
+            reconcile_connected.set()
+            current = RayTaskExecution.objects.get(pk=task.pk)
+            command.active_tasks = {int(task.pk): ray_job_id}
+            command.active_task_identities = {int(task.pk): (3, 7)}
+            command._reconcile_ray_job_task(
+                current,
+                PublishingRunner(),
+                ray_job_id=ray_job_id,
+                completed_tasks=[],
+                orphaned=False,
+                tracked_identity=(3, 7),
+            )
+        finally:
+            close_old_connections()
+
+    replacement_future = None
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reconcile_future = executor.submit(reconcile_strict_completion)
+        try:
+            assert reconcile_connected.wait(timeout=10)
+            assert completion_published.wait(timeout=10)
+            assert central_authority_entered.wait(timeout=10)
+            replacement_future = executor.submit(replace_task_identity)
+            assert replacement_locked.wait(timeout=10)
+            release_central_authority.set()
+            _wait_for_postgresql_lock(reconcile_backend_pid[0])
+        finally:
+            release_central_authority.set()
+            release_replacement.set()
+
+        assert replacement_future is not None
+        replacement = replacement_future.result(timeout=20)
+        assert reconcile_future.result(timeout=20) is None
+
+    assert RayTaskExecution.objects.values().get(pk=task.pk) == replacement
+    task.refresh_from_db()
+    assert task.state == TaskState.RUNNING
+    assert task.claimed_by_worker == replacement_command.worker_id
+    assert task.attempt_number == 4
+    assert task.execution_generation == 8
+    assert task.ray_job_id == replacement_ray_job_id
+    assert task.completion_data is None
+    assert task.result_data is None
+    assert task.result_reference is None
+    assert task.managed_with_django_ray_version == "0.6.0-replacement-manager"
+    assert task.executor_django_ray_version == "0.6.0-replacement-executor"
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
 def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:
     now = datetime.now(UTC)
     TaskWorkerLease.objects.create(

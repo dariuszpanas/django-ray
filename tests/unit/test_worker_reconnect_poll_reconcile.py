@@ -18,6 +18,7 @@ from django_ray import __version__ as django_ray_version
 from django_ray.execution_codec import (
     ExecutionCompletion,
     ExecutionIdentity,
+    ExecutionRequest,
     encode_execution_completion,
 )
 from django_ray.execution_protocol import (
@@ -36,6 +37,11 @@ from django_ray.models import (
     TaskWorkerLease,
 )
 from django_ray.protocol_coordination import close_legacy_worker_admission
+from django_ray.ray_job_protocol import (
+    STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX,
+    STRICT_RAY_JOB_SUBMISSION_ID_PREFIX,
+    build_ray_job_request_metadata,
+)
 from django_ray.redaction import normalize_terminal_text
 from django_ray.runner import RayJobSubmissionUncertainError
 from django_ray.runner.base import JobInfo, JobStatus, SubmissionHandle
@@ -178,6 +184,45 @@ def _versioned_completion_json(
             retryable=retryable if not success else None,
         )
     )
+
+
+def _strict_ray_job_id(suffix: str = "a") -> str:
+    """Return one canonical strict submission ID for focused worker tests."""
+    assert len(suffix) == 1 and suffix in "0123456789abcdef"
+    return f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}{suffix * 64}"
+
+
+def _strict_ray_job_metadata(
+    task: RayTaskExecution,
+    *,
+    task_id: str | None = None,
+    execution_protocol_version: int | None = None,
+) -> dict[str, str]:
+    """Build an independently parseable strict request binding for ``task``."""
+    assert task.pk is not None
+    request = ExecutionRequest(
+        identity=ExecutionIdentity(
+            task_execution_pk=int(task.pk),
+            task_id=task_id or str(task.task_id),
+            attempt_number=int(task.attempt_number),
+            execution_generation=int(task.execution_generation),
+        ),
+        execution_protocol_version=(
+            int(task.execution_protocol_version)
+            if execution_protocol_version is None
+            else execution_protocol_version
+        ),
+        callable_path=task.callable_path,
+        transport_version=2 if task.input_reference else 1,
+        serialized_args=task.args_json,
+        serialized_kwargs=task.kwargs_json,
+        input_reference=task.input_reference,
+        runtime_env_profile=task.runtime_env_profile,
+        runtime_env_hash=task.runtime_env_hash,
+        runtime_env_plan_identity={},
+        compiled_graph_submission_transport="ray-job",
+    )
+    return build_ray_job_request_metadata(request, '{"bounded":"request"}')
 
 
 class TestWorkerDispatchAndReconnectHelpers:
@@ -1850,7 +1895,13 @@ class TestWorkerReconnectPollReconcile:
 
         monkeypatch.setattr(
             "django_ray.runtime.serialization.deserialize_args",
-            lambda payload: [1, 2] if payload == "[1, 2]" else {},
+            lambda _payload: pytest.fail(
+                "the task manager must not deserialize durable Ray Job input"
+            ),
+        )
+        monkeypatch.setattr(
+            "django_ray.input_storage.load_task_input",
+            lambda **_kwargs: pytest.fail("the task manager must not load durable Ray Job input"),
         )
 
         reserved_handle = _ray_job_handle(task, "raysubmit_coverage_001")
@@ -1859,7 +1910,8 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **_kwargs):
+            def submit_durable(self, **kwargs):
+                assert kwargs == {"task_execution": task}
                 return reserved_handle
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
@@ -1896,7 +1948,7 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 raise RayJobSubmissionUncertainError(
                     reserved_handle.ray_job_id,
                     "response timed out after acceptance",
@@ -1952,7 +2004,7 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 raise RayJobSubmissionUncertainError(
                     reserved_handle.ray_job_id,
                     "Ray returned another identity",
@@ -2451,7 +2503,7 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 RayTaskExecution.objects.filter(pk=task.pk).update(
                     claimed_by_worker="replacement-worker",
                     state=transferred_state,
@@ -2505,7 +2557,7 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 return reserved_handle
 
             def cancel(self, _handle):
@@ -2567,7 +2619,7 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 RayTaskExecution.objects.filter(pk=task.pk).update(
                     claimed_by_worker="replacement-worker"
                 )
@@ -2620,7 +2672,7 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 return reserved_handle
 
         cmd.stdout = cast(Any, BrokenStdout())
@@ -2669,7 +2721,7 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 RayTaskExecution.objects.filter(pk=task.pk).update(
                     attempt_number=2,
                     execution_generation=5,
@@ -2721,7 +2773,7 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **kwargs: Any) -> SubmissionHandle:
+            def submit_durable(self, **kwargs: Any) -> SubmissionHandle:
                 captured.update(kwargs)
                 return reserved_handle
 
@@ -2729,9 +2781,8 @@ class TestWorkerReconnectPollReconcile:
 
         cmd.submit_task_to_ray(task)
 
-        assert captured["args"] == ()
-        assert captured["kwargs"] == {}
-        assert captured["task_execution"].input_reference == reference
+        assert captured == {"task_execution": task}
+        assert task.input_reference == reference
 
     def test_ray_job_submit_exception_does_not_fail_replacement_attempt(self, monkeypatch) -> None:
         task = RayTaskExecution.objects.create(
@@ -2755,7 +2806,7 @@ class TestWorkerReconnectPollReconcile:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **_kwargs):
+            def submit_durable(self, **_kwargs):
                 RayTaskExecution.objects.filter(pk=task.pk).update(
                     attempt_number=2,
                     claimed_by_worker="replacement-worker",
@@ -2827,6 +2878,491 @@ class TestWorkerReconnectPollReconcile:
         assert task.state == TaskState.CANCELLED
         assert task.cancellation_status == CancellationOutcomeStatus.REQUESTED
         assert task.finished_at is not None
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_strict_completion_published_during_status_wins_over_binding(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="strict-completion-during-status-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id=_strict_ray_job_id("0"),
+            started_at=datetime.now(UTC),
+        )
+        completion_data = _versioned_completion_json(task, result={"value": 3})
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                RayTaskExecution.objects.filter(pk=task.pk).update(completion_data=completion_data)
+                return JobInfo(
+                    job_id=task.ray_job_id or "",
+                    status=JobStatus.FAILED,
+                    metadata=None,
+                    driver_exit_code=78,
+                )
+
+            def cancel(self, _handle):
+                pytest.fail("an exact durable completion must not be quarantined")
+
+            def get_logs(self, _handle):
+                pytest.fail("an exact durable completion must not retrieve logs")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert json.loads(task.result_data or "null") == {"value": 3}
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_strict_exit_78_waits_then_uses_generic_fixed_failure(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="strict-exit-78-generic-failure-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id=_strict_ray_job_id("1"),
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+        metadata = _strict_ray_job_metadata(task)
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=task.ray_job_id or "",
+                    status=JobStatus.FAILED,
+                    message="untrusted Ray failure detail",
+                    metadata=metadata,
+                    driver_exit_code=78,
+                )
+
+            def get_logs(self, _handle):
+                pytest.fail("a strict terminal failure must not retrieve logs")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.should_retry",
+            lambda *_args, **_kwargs: pytest.fail(
+                "fixed strict terminal policy must bypass available retries"
+            ),
+        )
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "a strict terminal failure must not reach result storage"
+            ),
+        )
+
+        cmd.reconcile_tasks()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.attempt_number == 1
+        assert task.pk in cmd.active_tasks
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+        stale_time = datetime.now(UTC) - timedelta(minutes=10)
+        RayTaskExecution.objects.filter(pk=task.pk).update(
+            started_at=stale_time,
+            last_heartbeat_at=stale_time,
+        )
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.error_message == (
+            "Strict Ray Job terminated without an exact completion envelope"
+        )
+        assert "untrusted Ray failure detail" not in (task.error_message or "")
+        rendered_output = cmd.stdout.getvalue().lower()
+        assert "pre-import" not in rendered_output
+        assert "django setup" not in rendered_output
+        assert "preflight" not in rendered_output
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=1)
+        assert archived.state == TaskState.FAILED
+        assert task.pk not in cmd.active_tasks
+
+    @pytest.mark.parametrize(
+        "status",
+        [JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.STOPPED],
+    )
+    def test_reconcile_strict_terminal_missing_completion_is_fixed_after_grace(
+        self,
+        monkeypatch,
+        status: JobStatus,
+    ) -> None:
+        stale_time = datetime.now(UTC) - timedelta(minutes=10)
+        task = RayTaskExecution.objects.create(
+            task_id=f"strict-missing-completion-{status.value.lower()}-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id=_strict_ray_job_id("2"),
+            started_at=stale_time,
+            last_heartbeat_at=stale_time,
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+        metadata = _strict_ray_job_metadata(task)
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=task.ray_job_id or "",
+                    status=status,
+                    message="untrusted terminal detail",
+                    metadata=metadata,
+                )
+
+            def get_logs(self, _handle):
+                pytest.fail("strict missing-completion policy must not retrieve logs")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "a missing strict completion must not reach result storage"
+            ),
+        )
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.error_message == (
+            "Strict Ray Job terminated without an exact completion envelope"
+        )
+        assert task.pk not in cmd.active_tasks
+
+    @pytest.mark.parametrize(
+        ("binding_kind", "expected_rejection"),
+        [
+            ("missing", "missing"),
+            ("identity_mismatch", "identity_mismatch"),
+            ("invalid_submission_id", "invalid_submission_id"),
+            ("future_request_family", "invalid_submission_id"),
+        ],
+    )
+    def test_reconcile_strict_binding_ambiguity_stops_exact_job_and_records_lost(
+        self,
+        monkeypatch,
+        binding_kind: str,
+        expected_rejection: str,
+    ) -> None:
+        if binding_kind == "invalid_submission_id":
+            ray_job_id = f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}not-canonical"
+        elif binding_kind == "future_request_family":
+            ray_job_id = f"{STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX}2_{'3' * 64}"
+        else:
+            ray_job_id = _strict_ray_job_id("3")
+        task = RayTaskExecution.objects.create(
+            task_id=f"strict-binding-{binding_kind}-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id=ray_job_id,
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: ray_job_id}
+        cancelled: list[str] = []
+        if binding_kind == "missing":
+            metadata = None
+        elif binding_kind == "identity_mismatch":
+            metadata = _strict_ray_job_metadata(task, task_id="another-public-task")
+        else:
+            metadata = _strict_ray_job_metadata(task)
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=ray_job_id,
+                    status=JobStatus.RUNNING,
+                    message="untrusted status detail",
+                    metadata=metadata,
+                )
+
+            def cancel_with_status(self, handle):
+                cancelled.append(handle.ray_job_id)
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+            def get_logs(self, _handle):
+                pytest.fail("an untrusted strict binding must not retrieve logs")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "an untrusted strict binding must not reach result storage"
+            ),
+        )
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert cancelled == [ray_job_id]
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.cancellation_status == CancellationStatus.REQUESTED
+        assert expected_rejection in (task.error_message or "")
+        assert "untrusted status detail" not in (task.error_message or "")
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_accepted_completion_wins_over_legacy_id_strict_marker(
+        self,
+        monkeypatch,
+    ) -> None:
+        ray_job_id = "raysubmit_django_ray_v1_strict-marker-conflict"
+        task = RayTaskExecution.objects.create(
+            task_id="legacy-id-strict-marker-conflict-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id=ray_job_id,
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: ray_job_id}
+        metadata = _strict_ray_job_metadata(task)
+        completion_data = _versioned_completion_json(task, result={"accepted": True})
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                RayTaskExecution.objects.filter(pk=task.pk).update(completion_data=completion_data)
+                return JobInfo(
+                    job_id=ray_job_id,
+                    status=JobStatus.RUNNING,
+                    metadata=metadata,
+                )
+
+            def cancel_with_status(self, _handle):
+                pytest.fail("an accepted durable completion must not be quarantined")
+
+            def get_logs(self, _handle):
+                pytest.fail("strict marker conflicts must not retrieve legacy logs")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert json.loads(task.result_data or "null") == {"accepted": True}
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_legacy_id_with_strict_marker_cannot_downgrade_without_completion(
+        self,
+        monkeypatch,
+    ) -> None:
+        ray_job_id = "raysubmit_django_ray_v1_strict-marker-no-completion"
+        task = RayTaskExecution.objects.create(
+            task_id="legacy-id-strict-marker-no-completion-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id=ray_job_id,
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: ray_job_id}
+        metadata = _strict_ray_job_metadata(task)
+        cancelled: list[str] = []
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=ray_job_id,
+                    status=JobStatus.RUNNING,
+                    metadata=metadata,
+                )
+
+            def cancel_with_status(self, handle):
+                cancelled.append(handle.ray_job_id)
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+            def get_logs(self, _handle):
+                pytest.fail("strict marker conflicts must not retrieve legacy logs")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "strict marker conflicts must not reach result storage"
+            ),
+        )
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert cancelled == [ray_job_id]
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.cancellation_status == CancellationStatus.REQUESTED
+        assert "unexpected_strict_metadata" in (task.error_message or "")
+        assert task.result_data is None
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_strict_running_job_allows_compatible_manager_handoff(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="strict-compatible-handoff-running-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id=_strict_ray_job_id("4"),
+            ray_address="ray://cluster:10001",
+            claimed_by_worker="dead-worker",
+            managed_with_django_ray_version="0.4.0-manager",
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command(worker_id="adopting-worker")
+        metadata = _strict_ray_job_metadata(task)
+
+        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=task.ray_job_id or "",
+                    status=JobStatus.RUNNING,
+                    metadata=metadata,
+                )
+
+            def get_logs(self, _handle):
+                pytest.fail("a compatible running handoff must not retrieve logs")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.claimed_by_worker == "adopting-worker"
+        assert task.managed_with_django_ray_version == django_ray_version
+        assert task.last_heartbeat_at is not None
+        assert cmd.active_tasks[task.pk] == task.ray_job_id
+
+    @pytest.mark.parametrize("completion_kind", ["legacy", "enriched_v1"])
+    def test_reconcile_strict_handoff_accepts_released_v1_completion_forms(
+        self,
+        monkeypatch,
+        completion_kind: str,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id=f"strict-compatible-handoff-{completion_kind}-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id=_strict_ray_job_id("5"),
+            ray_address="ray://cluster:10001",
+            claimed_by_worker="dead-worker",
+            managed_with_django_ray_version="0.4.0-manager",
+            started_at=datetime.now(UTC),
+        )
+        task.completion_data = (
+            json.dumps({"success": True, "result": 3})
+            if completion_kind == "legacy"
+            else _versioned_completion_json(task, result=3)
+        )
+        task.save(update_fields=["completion_data"])
+        cmd = _make_command(worker_id="adopting-worker")
+
+        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                pytest.fail("an exact durable completion must precede the status RPC")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert json.loads(task.result_data or "null") == 3
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_legacy_failed_job_still_uses_logs_and_retry_policy(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="legacy-failed-job-policy-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_django_ray_v1_legacy-failed-policy",
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+        log_calls: list[str] = []
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=task.ray_job_id or "",
+                    status=JobStatus.FAILED,
+                    message="legacy Ray job failed",
+                    metadata={
+                        "django_ray_attempt_number": "1",
+                        "django_ray_execution_generation": "0",
+                    },
+                )
+
+            def get_logs(self, handle):
+                log_calls.append(handle.ray_job_id)
+                return "legacy traceback"
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert log_calls == [task.ray_job_id]
+        assert task.state == TaskState.QUEUED
+        assert task.attempt_number == 2
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_success_with_non_json_logs_waits_for_completion_envelope(

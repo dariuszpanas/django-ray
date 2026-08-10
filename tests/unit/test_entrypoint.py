@@ -7,6 +7,7 @@ import base64
 import json
 import runpy
 import sys
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -15,10 +16,79 @@ import django_ray.runtime.entrypoint as entrypoint
 from django_ray.execution_codec import (
     ExecutionCompletionSource,
     ExecutionIdentity,
+    ExecutionRequest,
+    ExecutionRequestRejection,
     decode_execution_completion,
+    encode_execution_request,
 )
 from django_ray.models import RayTaskExecution, TaskState
+from django_ray.ray_job_protocol import (
+    RAY_JOB_CONFIG_JSON_ENV_VAR,
+    RAY_JOB_REQUEST_REJECTED_EXIT_CODE,
+    build_ray_job_request_metadata,
+)
 from django_ray.workflow_plans import WorkflowPlanMismatchError
+
+
+def _payload_b64(serialized: str) -> str:
+    return base64.urlsafe_b64encode(serialized.encode("utf-8")).decode("ascii")
+
+
+def _strict_request(
+    *,
+    identity: ExecutionIdentity | None = None,
+    transport_version: int = 1,
+    compiled_graph_submission_transport: str = "ray-job",
+) -> tuple[ExecutionRequest, str]:
+    identity = identity or ExecutionIdentity(
+        task_execution_pk=361,
+        task_id="00000000-0000-4000-8000-000000000361",
+        attempt_number=2,
+        execution_generation=7,
+    )
+    input_reference = None
+    serialized_args = '["value"]'
+    serialized_kwargs = '{"flag":true}'
+    if transport_version == 2:
+        input_reference = "s3://task-inputs/django-ray/strict-request.json"
+        serialized_args = "null"
+        serialized_kwargs = "null"
+    request = ExecutionRequest(
+        identity=identity,
+        execution_protocol_version=1,
+        callable_path="tests.strict_task",
+        transport_version=transport_version,
+        serialized_args=serialized_args,
+        serialized_kwargs=serialized_kwargs,
+        input_reference=input_reference,
+        runtime_env_profile="strict",
+        runtime_env_hash="a" * 64,
+        runtime_env_plan_identity={"manifest": "strict"},
+        compiled_graph_submission_transport=compiled_graph_submission_transport,
+    )
+    return request, encode_execution_request(request)
+
+
+def _strict_config(request: ExecutionRequest, serialized: str) -> str:
+    return json.dumps(
+        {
+            "runtime_env": {},
+            "metadata": build_ray_job_request_metadata(request, serialized),
+        }
+    )
+
+
+def _booby_trap_application_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("strict rejection crossed the application boundary")
+
+    monkeypatch.setattr(entrypoint, "execute_task", forbidden)
+    monkeypatch.setattr(entrypoint, "bootstrap_django", forbidden)
+    monkeypatch.setattr(entrypoint, "load_task_input", forbidden)
+    monkeypatch.setattr(entrypoint, "_invoke_task_callable", forbidden)
+    monkeypatch.setattr(entrypoint, "_persist_task_completion", forbidden)
+    monkeypatch.setattr("django_ray.runtime.import_utils.import_callable", forbidden)
+    monkeypatch.setattr("django_ray.runtime.context.durable_task_execution", forbidden)
 
 
 class TestEntrypointPayload:
@@ -64,6 +134,294 @@ class TestEntrypointPayload:
             "input_reference": None,
         }
 
+    @pytest.mark.parametrize("transport_version", [1, 2])
+    def test_strict_payload_validates_before_dispatch_and_enriches_completion(
+        self,
+        monkeypatch,
+        transport_version: int,
+    ) -> None:
+        request, serialized = _strict_request(transport_version=transport_version)
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _strict_config(request, serialized),
+        )
+        captured: dict[str, object] = {}
+
+        def fake_execute_task(
+            callable_path: str,
+            serialized_args: str,
+            serialized_kwargs: str,
+            **kwargs,
+        ) -> str:
+            captured.update(
+                callable_path=callable_path,
+                serialized_args=serialized_args,
+                serialized_kwargs=serialized_kwargs,
+                **kwargs,
+            )
+            return entrypoint._serialize_completion(
+                success=True,
+                result={"accepted": True},
+                result_reference=None,
+                error=None,
+                error_traceback=None,
+                exception_type=None,
+                retryable=None,
+                completion_identity=kwargs["_completion_identity"],
+                execution_protocol_version=kwargs["_execution_protocol_version"],
+            )
+
+        monkeypatch.setattr(entrypoint, "execute_task", fake_execute_task)
+
+        encoded = entrypoint.execute_task_from_payload(_payload_b64(serialized))
+        decoded = decode_execution_completion(
+            encoded,
+            expected_identity=request.identity,
+            expected_execution_protocol_version=request.execution_protocol_version,
+        )
+
+        assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+        assert decoded.completion.result == {"accepted": True}
+        assert captured == {
+            "callable_path": request.callable_path,
+            "serialized_args": request.serialized_args,
+            "serialized_kwargs": request.serialized_kwargs,
+            "task_execution_pk": request.identity.task_execution_pk,
+            "task_id": request.identity.task_id,
+            "attempt_number": request.identity.attempt_number,
+            "execution_generation": request.identity.execution_generation,
+            "runtime_env_profile": request.runtime_env_profile,
+            "runtime_env_hash": request.runtime_env_hash,
+            "runtime_env_plan_identity": request.runtime_env_plan_identity,
+            "input_reference": request.input_reference,
+            "ray_job_driver": True,
+            "_completion_identity": request.identity,
+            "_execution_protocol_version": request.execution_protocol_version,
+        }
+
+    def test_legacy_payload_accepts_released_ray_job_metadata(self, monkeypatch) -> None:
+        payload = {
+            "callable_path": "myapp.tasks.legacy",
+            "serialized_args": "[]",
+            "serialized_kwargs": "{}",
+            "task_execution_pk": 44,
+            "task_id": "legacy-task",
+            "attempt_number": 3,
+            "execution_generation": 9,
+        }
+        legacy_metadata = {
+            "django_ray_task_id": "44",
+            "django_ray_attempt_number": "3",
+            "django_ray_execution_generation": "9",
+            "callable_path": payload["callable_path"],
+            "runtime_env_profile": "",
+            "runtime_env_hash": "b" * 64,
+        }
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            json.dumps({"runtime_env": {}, "metadata": legacy_metadata}),
+        )
+        monkeypatch.setattr(entrypoint, "execute_task", lambda **_kwargs: '{"success":true}')
+
+        result = entrypoint.execute_task_from_payload(
+            _payload_b64(json.dumps(payload, separators=(",", ":")))
+        )
+
+        assert result == '{"success":true}'
+
+    @pytest.mark.parametrize(
+        ("mismatch", "classification"),
+        [
+            ("identity", ExecutionRequestRejection.IDENTITY_MISMATCH),
+            ("protocol", ExecutionRequestRejection.PROTOCOL_MISMATCH),
+            ("digest", ExecutionRequestRejection.INVALID_VERSIONED),
+            ("transport", ExecutionRequestRejection.UNSUPPORTED_TRANSPORT),
+        ],
+    )
+    def test_strict_request_mismatch_rejects_before_every_application_seam(
+        self,
+        monkeypatch,
+        mismatch: str,
+        classification: ExecutionRequestRejection,
+    ) -> None:
+        request, serialized = _strict_request()
+        submitted = serialized
+        if mismatch == "identity":
+            different_identity = replace(request.identity, task_execution_pk=999)
+            submitted = encode_execution_request(replace(request, identity=different_identity))
+        elif mismatch == "protocol":
+            payload = json.loads(serialized)
+            payload["execution_protocol_version"] = 2
+            submitted = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        elif mismatch == "digest":
+            submitted = encode_execution_request(
+                replace(request, callable_path="tests.strict_task_changed")
+            )
+        else:
+            submitted = encode_execution_request(
+                replace(request, compiled_graph_submission_transport="direct-ray-core")
+            )
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _strict_config(request, serialized),
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_payload(_payload_b64(submitted))
+        decoded = decode_execution_completion(
+            encoded,
+            expected_identity=request.identity,
+            expected_execution_protocol_version=request.execution_protocol_version,
+        )
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert decoded.completion.success is False
+        assert decoded.completion.retryable is False
+        assert decoded.completion.error == (f"execution request rejected: {classification.value}")
+        assert decoded.completion.exception_type == "RayExecutionRequestIncompatible"
+        assert decoded.completion.traceback is None
+
+    @pytest.mark.parametrize(
+        "failure",
+        ["invalid_alphabet", "invalid_padding", "resource_limit"],
+    )
+    def test_strict_payload_decode_failure_is_fixed_and_secret_free(
+        self,
+        monkeypatch,
+        failure: str,
+    ) -> None:
+        request, serialized = _strict_request()
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _strict_config(request, serialized),
+        )
+        _booby_trap_application_seams(monkeypatch)
+        secret = "RAY_JOB_PAYLOAD_SECRET"
+        if failure == "resource_limit":
+            monkeypatch.setattr(entrypoint, "_MAX_RAY_JOB_PAYLOAD_B64_BYTES", 8)
+            submitted = _payload_b64(json.dumps({"secret": secret}))
+            expected = ExecutionRequestRejection.RESOURCE_LIMIT
+        elif failure == "invalid_padding":
+            submitted = "e30"
+            expected = ExecutionRequestRejection.INVALID_VERSIONED
+        else:
+            submitted = f"%%%{secret}%%%"
+            expected = ExecutionRequestRejection.INVALID_VERSIONED
+
+        encoded = entrypoint.execute_task_from_payload(submitted)
+        decoded = decode_execution_completion(
+            encoded,
+            expected_identity=request.identity,
+            expected_execution_protocol_version=request.execution_protocol_version,
+        )
+
+        assert decoded.completion.error == f"execution request rejected: {expected.value}"
+        assert decoded.completion.retryable is False
+        assert secret not in encoded
+
+    def test_oversized_payload_rejects_before_base64_json_or_application(
+        self,
+        monkeypatch,
+    ) -> None:
+        import django_ray.execution_codec as execution_codec
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("oversized payload crossed its resource boundary")
+
+        monkeypatch.delenv(RAY_JOB_CONFIG_JSON_ENV_VAR, raising=False)
+        monkeypatch.setattr(entrypoint, "_MAX_RAY_JOB_PAYLOAD_B64_BYTES", 8)
+        monkeypatch.setattr(entrypoint.base64, "b64decode", forbidden)
+        monkeypatch.setattr(execution_codec, "decode_execution_request", forbidden)
+        monkeypatch.setattr(entrypoint, "_execute_legacy_payload", forbidden)
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_payload("A" * 9)
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert "execution request rejected: resource_limit" in encoded
+
+    def test_strict_payload_marker_without_metadata_never_falls_back(
+        self,
+        monkeypatch,
+    ) -> None:
+        _request, serialized = _strict_request()
+        monkeypatch.delenv(RAY_JOB_CONFIG_JSON_ENV_VAR, raising=False)
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_payload(_payload_b64(serialized))
+        result = json.loads(encoded)
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert result["success"] is False
+        assert result["error"] == "execution request rejected: invalid_versioned"
+        assert result["retryable"] is False
+        assert "completion_schema" not in result
+
+    def test_oversized_ray_job_config_rejects_before_application_setup(
+        self,
+        monkeypatch,
+    ) -> None:
+        import django_ray.ray_job_protocol as ray_job_protocol
+
+        parse_json = json.loads
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("oversized config crossed its resource boundary")
+
+        secret = "RAY_JOB_CONFIG_SECRET"
+        monkeypatch.setattr(ray_job_protocol, "RAY_JOB_CONFIG_JSON_MAX_BYTES", 32)
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            json.dumps(
+                {
+                    "metadata": {
+                        "django_ray_request_binding": ("django-ray.ray-job-request-binding/v1"),
+                        "secret": secret,
+                    }
+                }
+            ),
+        )
+        monkeypatch.setattr(ray_job_protocol.json, "loads", forbidden)
+        monkeypatch.setattr(entrypoint, "_decode_payload_b64", forbidden)
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_payload(_payload_b64("{}"))
+        result = parse_json(encoded)
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert result["error"] == "execution request rejected: resource_limit"
+        assert result["retryable"] is False
+        assert secret not in encoded
+
+    def test_strict_metadata_marker_never_falls_back_to_legacy_payload(
+        self,
+        monkeypatch,
+    ) -> None:
+        request, serialized = _strict_request()
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _strict_config(request, serialized),
+        )
+        _booby_trap_application_seams(monkeypatch)
+        legacy_payload = json.dumps(
+            {
+                "callable_path": "tests.must_not_run",
+                "serialized_args": "[]",
+                "serialized_kwargs": "{}",
+            },
+            separators=(",", ":"),
+        )
+
+        encoded = entrypoint.execute_task_from_payload(_payload_b64(legacy_payload))
+        decoded = decode_execution_completion(
+            encoded,
+            expected_identity=request.identity,
+            expected_execution_protocol_version=request.execution_protocol_version,
+        )
+
+        assert decoded.completion.error == "execution request rejected: legacy_request"
+        assert decoded.completion.retryable is False
+
     def test_execute_task_from_payload_invalid_payload_returns_error_result(self) -> None:
         """Invalid payload should produce a structured failure JSON result."""
         result_json = entrypoint.execute_task_from_payload("%%%not-base64%%%")
@@ -104,6 +462,53 @@ class TestEntrypointPayload:
         assert exit_code == 0
         assert output == "django-ray task completed successfully"
         assert "secret" not in output
+
+    def test_main_uses_dedicated_exit_for_fixed_strict_rejection(
+        self,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        request, serialized = _strict_request()
+        metadata = json.loads(_strict_config(request, serialized))
+        metadata["metadata"]["django_ray_request_sha256"] = "0" * 64
+        monkeypatch.setenv(RAY_JOB_CONFIG_JSON_ENV_VAR, json.dumps(metadata))
+        _booby_trap_application_seams(monkeypatch)
+
+        exit_code = entrypoint.main(["--payload-b64", _payload_b64(serialized)])
+        captured = capsys.readouterr()
+
+        assert exit_code == RAY_JOB_REQUEST_REJECTED_EXIT_CODE
+        assert captured.out == ""
+        assert captured.err.strip() == (
+            "django-ray task failed: execution request rejected: invalid_versioned"
+        )
+
+    def test_main_keeps_accepted_strict_application_failure_at_zero(
+        self,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        request, serialized = _strict_request()
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _strict_config(request, serialized),
+        )
+        monkeypatch.setattr(
+            entrypoint,
+            "execute_task",
+            lambda **_kwargs: json.dumps(
+                {
+                    "success": False,
+                    "error": "application failure",
+                    "retryable": True,
+                }
+            ),
+        )
+
+        exit_code = entrypoint.main(["--payload-b64", _payload_b64(serialized)])
+
+        assert exit_code == 0
+        assert capsys.readouterr().err.strip() == ("django-ray task failed: application failure")
 
     @pytest.mark.parametrize(
         "result_json",

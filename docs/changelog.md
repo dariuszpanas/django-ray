@@ -43,6 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New Ray Job submissions now reuse the canonical bounded execution request sourced
+  from durable JSON or an opaque input reference and bind its full identity, protocol,
+  and digest independently in Ray Job metadata. Upgraded drivers reject malformed,
+  unsupported, or mismatched requests before Django setup, input hydration, or
+  application callable import/invocation and publish enriched completions for accepted
+  work. Compatible replacement managers retain the persisted job ID during handoff;
+  every strict terminal job with a verified binding but no exact completion waits for
+  publication grace and receives a generic fixed non-retryable outcome, while an
+  unverifiable binding is exact-stopped and retained as `LOST`. Neither path trusts its
+  exit code or Ray logs as proof of execution phase. Released unversioned protocol-v1
+  payloads remain the rolling-drain adapter. This does not yet replace inline shell
+  payloads with mandatory bounded references, attest Ray/Python or cluster identity, or
+  cover nested workflow/distributed callable transports.
 - A read-only `django_ray_protocol_status` command now emits bounded text or canonical
   versioned JSON for the rollout policy/token relationship, live and stale-active lease
   capability aggregates, nonterminal protocol groups, protocol-only unsupported work,

@@ -1529,7 +1529,7 @@ class TestWorkerRayJobFailureHandling:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **kwargs):
+            def submit_durable(self, **kwargs):
                 raise RuntimeError("submission exploded")
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FailingRunner)
@@ -1572,7 +1572,7 @@ class TestWorkerRayJobFailureHandling:
             def submission_handle(self, _task):
                 return reserved_handle
 
-            def submit(self, **kwargs):
+            def submit_durable(self, **kwargs):
                 raise WorkflowPlanMismatchError("pinned plan changed")
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FailingRunner)

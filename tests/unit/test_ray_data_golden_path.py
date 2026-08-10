@@ -258,10 +258,40 @@ def test_real_probe_forces_one_disposable_local_ray_runtime() -> None:
     assert "_bounded_control_requests" in source
     assert 'statuses != {1: "SUCCEEDED", 2: "SUCCEEDED"}' in source
     assert '"ray_job_transports_succeeded": True' in source
+    assert '"strict_ray_job_request_binding": True' in source
+    assert '"versioned_completion_envelope": True' in source
+    assert '"executor_provenance_archived": True' in source
     assert '"preinstalled_ray_data_environment": True' in source
     assert '"disposable_cluster_target_pinned": True' in source
     assert '"failed_artifact_rejected": failed_artifact_rejected' in source
     assert '"idempotent_artifact_adoption": adopted_again == adopted' in source
+
+
+def _strict_job_metadata(*, execution_pk: int, attempt: int, generation: int) -> dict[str, str]:
+    from django_ray.execution_codec import ExecutionIdentity, ExecutionRequest
+    from django_ray.ray_job_protocol import build_ray_job_request_metadata
+
+    return build_ray_job_request_metadata(
+        ExecutionRequest(
+            identity=ExecutionIdentity(
+                task_execution_pk=execution_pk,
+                task_id=f"probe-task-{execution_pk}",
+                attempt_number=attempt,
+                execution_generation=generation,
+            ),
+            execution_protocol_version=1,
+            callable_path="testproject.tasks.add_numbers",
+            transport_version=1,
+            serialized_args="[]",
+            serialized_kwargs="{}",
+            input_reference=None,
+            runtime_env_profile=None,
+            runtime_env_hash="0" * 64,
+            runtime_env_plan_identity={},
+            compiled_graph_submission_transport="ray-job",
+        ),
+        "{}",
+    )
 
 
 def test_real_probe_reads_two_retained_job_api_identities(
@@ -275,21 +305,13 @@ def test_real_probe_reads_two_retained_job_api_identities(
     jobs = [
         SimpleNamespace(metadata={}, submission_id=None, status="RUNNING"),
         SimpleNamespace(
-            metadata={
-                "django_ray_task_id": "41",
-                "django_ray_attempt_number": "1",
-                "django_ray_execution_generation": "7",
-            },
-            submission_id="raysubmit_first",
+            metadata=_strict_job_metadata(execution_pk=41, attempt=1, generation=7),
+            submission_id="raysubmit_django_ray_rq1_" + "1" * 64,
             status=SimpleNamespace(value="SUCCEEDED"),
         ),
         SimpleNamespace(
-            metadata={
-                "django_ray_task_id": "41",
-                "django_ray_attempt_number": "2",
-                "django_ray_execution_generation": "8",
-            },
-            submission_id="raysubmit_second",
+            metadata=_strict_job_metadata(execution_pk=41, attempt=2, generation=8),
+            submission_id="raysubmit_django_ray_rq1_" + "2" * 64,
             status=SimpleNamespace(value="SUCCEEDED"),
         ),
     ]
@@ -307,8 +329,8 @@ def test_real_probe_reads_two_retained_job_api_identities(
     assert probe._load_ray_job_submission_evidence(
         ray_address="127.0.0.1:6379", execution_pk=41
     ) == {
-        1: (7, "raysubmit_first"),
-        2: (8, "raysubmit_second"),
+        1: (7, "raysubmit_django_ray_rq1_" + "1" * 64),
+        2: (8, "raysubmit_django_ray_rq1_" + "2" * 64),
     }
     assert addresses == ["127.0.0.1:6379"]
 
@@ -321,21 +343,13 @@ def test_real_probe_waits_for_both_ray_job_transports_to_be_terminal(
     def jobs(second_status: str) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(
-                metadata={
-                    "django_ray_task_id": "41",
-                    "django_ray_attempt_number": "1",
-                    "django_ray_execution_generation": "7",
-                },
-                submission_id="raysubmit_first",
+                metadata=_strict_job_metadata(execution_pk=41, attempt=1, generation=7),
+                submission_id="raysubmit_django_ray_rq1_" + "1" * 64,
                 status=SimpleNamespace(value="SUCCEEDED"),
             ),
             SimpleNamespace(
-                metadata={
-                    "django_ray_task_id": "41",
-                    "django_ray_attempt_number": "2",
-                    "django_ray_execution_generation": "8",
-                },
-                submission_id="raysubmit_second",
+                metadata=_strict_job_metadata(execution_pk=41, attempt=2, generation=8),
+                submission_id="raysubmit_django_ray_rq1_" + "2" * 64,
                 status=SimpleNamespace(value=second_status),
             ),
         ]
@@ -354,8 +368,8 @@ def test_real_probe_waits_for_both_ray_job_transports_to_be_terminal(
     assert probe._load_ray_job_submission_evidence(
         ray_address="127.0.0.1:6379", execution_pk=41
     ) == {
-        1: (7, "raysubmit_first"),
-        2: (8, "raysubmit_second"),
+        1: (7, "raysubmit_django_ray_rq1_" + "1" * 64),
+        2: (8, "raysubmit_django_ray_rq1_" + "2" * 64),
     }
     assert responses == []
 

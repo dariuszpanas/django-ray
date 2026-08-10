@@ -6,12 +6,38 @@ import base64
 import hashlib
 import json
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import django_ray.ray_job_protocol as ray_job_protocol_module
+from django_ray.execution_codec import (
+    ExecutionIdentity,
+    ExecutionRequest,
+    decode_execution_request,
+    encode_execution_request,
+)
+from django_ray.ray_job_protocol import (
+    LEGACY_RAY_JOB_SUBMISSION_ID_PREFIX,
+    RAY_JOB_CONFIG_JSON_ENV_VAR,
+    RAY_JOB_REQUEST_METADATA_MARKER_KEY,
+    RAY_JOB_REQUEST_METADATA_MARKER_VALUE,
+    STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX,
+    STRICT_RAY_JOB_SUBMISSION_ID_PREFIX,
+    RayJobRequestBindingError,
+    RayJobRequestBindingRejection,
+    build_ray_job_request_metadata,
+    fixed_safe_ray_job_metadata,
+    is_strict_ray_job_submission_id,
+    is_valid_strict_ray_job_submission_id,
+    load_ray_job_request_expectation,
+    parse_ray_job_request_metadata,
+    request_sha256,
+    validate_ray_job_request_expectation,
+)
 from django_ray.runner import RayJobSubmissionUncertainError
 from django_ray.runner.base import JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcomeStatus
@@ -147,6 +173,327 @@ class TestRayJobAddressResolution:
         assert inputs == [resolved_input]
 
 
+class TestRayJobRequestBinding:
+    """The Ray control plane must bind one exact canonical request."""
+
+    @staticmethod
+    def _request() -> tuple[ExecutionRequest, str, dict[str, str]]:
+        request = ExecutionRequest(
+            identity=ExecutionIdentity(7, "public-task-7", 2, 9),
+            execution_protocol_version=1,
+            callable_path="testproject.tasks.echo_task",
+            transport_version=1,
+            serialized_args="[]",
+            serialized_kwargs="{}",
+            input_reference=None,
+            runtime_env_profile=None,
+            runtime_env_hash="0" * 64,
+            runtime_env_plan_identity={},
+            compiled_graph_submission_transport="ray-job",
+        )
+        serialized = encode_execution_request(request)
+        return request, serialized, build_ray_job_request_metadata(request, serialized)
+
+    def test_loads_bounded_expectation_from_ray_job_config(self) -> None:
+        request, serialized, metadata = self._request()
+        config = json.dumps(
+            {
+                "runtime_env": {"env_vars": {"VALUE": "not retained"}},
+                "metadata": {
+                    "job_submission_id": "ray-internal-id",
+                    **metadata,
+                },
+            }
+        )
+
+        expectation = load_ray_job_request_expectation(config)
+
+        assert RAY_JOB_CONFIG_JSON_ENV_VAR == "RAY_JOB_CONFIG_JSON_ENV_VAR"
+        assert expectation is not None
+        validate_ray_job_request_expectation(
+            expectation,
+            expected_identity=request.identity,
+            expected_execution_protocol_version=1,
+            serialized_request=serialized,
+        )
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"django_ray_request_sha256": "0" * 64},
+            {RAY_JOB_REQUEST_METADATA_MARKER_KEY: RAY_JOB_REQUEST_METADATA_MARKER_VALUE},
+            {RAY_JOB_REQUEST_METADATA_MARKER_KEY: "unsupported"},
+        ],
+    )
+    def test_partial_or_invalid_strict_metadata_never_downgrades(self, metadata) -> None:
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            parse_ray_job_request_metadata(metadata)
+
+        assert exc_info.value.classification is RayJobRequestBindingRejection.INVALID
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            "\ud800",
+            '{"metadata":{},"metadata":{}}',
+            "[]",
+        ],
+    )
+    def test_config_errors_are_fixed_and_retain_no_raw_input(self, config) -> None:
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            load_ray_job_request_expectation(config)
+
+        assert exc_info.value.classification is RayJobRequestBindingRejection.INVALID
+        assert config not in str(exc_info.value)
+
+    def test_valid_config_without_strict_metadata_remains_legacy(self) -> None:
+        assert load_ray_job_request_expectation(None) is None
+        assert parse_ray_job_request_metadata(None) is None
+        assert fixed_safe_ray_job_metadata(None) is None
+        assert (
+            load_ray_job_request_expectation('{"metadata":{"job_submission_id":"legacy"}}') is None
+        )
+        released_metadata = {
+            "django_ray_task_id": "7",
+            "django_ray_attempt_number": "2",
+            "django_ray_execution_generation": "0",
+            "callable_path": "testproject.tasks.echo_task",
+            "runtime_env_profile": "",
+            "runtime_env_hash": "0" * 64,
+        }
+        assert parse_ray_job_request_metadata(released_metadata) is None
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            parse_ray_job_request_metadata({}, required=True)
+        assert exc_info.value.classification is RayJobRequestBindingRejection.MISSING
+
+    @pytest.mark.parametrize(
+        ("value", "classification"),
+        [
+            (object(), RayJobRequestBindingRejection.INVALID),
+            ("x" * (4 * 1024 * 1024 + 1), RayJobRequestBindingRejection.RESOURCE_LIMIT),
+        ],
+        ids=("wrong-type", "oversize"),
+    )
+    def test_config_type_and_size_are_bounded(self, value, classification) -> None:
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            load_ray_job_request_expectation(value)
+        assert exc_info.value.classification is classification
+
+    def test_metadata_size_and_unicode_are_bounded_before_field_use(self) -> None:
+        _request, _serialized, metadata = self._request()
+        oversized = metadata | {"django_ray_public_task_id": "x" * (16 * 1024)}
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            parse_ray_job_request_metadata(oversized)
+        assert exc_info.value.classification is RayJobRequestBindingRejection.RESOURCE_LIMIT
+
+        malformed = metadata | {"django_ray_public_task_id": "\ud800"}
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            parse_ray_job_request_metadata(malformed)
+        assert exc_info.value.classification is RayJobRequestBindingRejection.INVALID
+
+    def test_metadata_size_is_checked_before_canonical_json(
+        self,
+        monkeypatch,
+    ) -> None:
+        _request, _serialized, metadata = self._request()
+        oversized = metadata | {"django_ray_public_task_id": "x" * (16 * 1024 + 1)}
+        monkeypatch.setattr(
+            ray_job_protocol_module.json,
+            "dumps",
+            lambda *_args, **_kwargs: pytest.fail(
+                "metadata was serialized before its values were bounded"
+            ),
+        )
+
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            parse_ray_job_request_metadata(oversized)
+
+        assert exc_info.value.classification is RayJobRequestBindingRejection.RESOURCE_LIMIT
+
+    def test_utf8_bounds_and_request_hashing_do_not_encode_the_whole_input(
+        self,
+        monkeypatch,
+    ) -> None:
+        chunk_sizes: list[int] = []
+
+        class RecordingHash:
+            def update(self, value: bytes) -> None:
+                chunk_sizes.append(len(value))
+
+            @staticmethod
+            def hexdigest() -> str:
+                return "f" * 64
+
+        monkeypatch.setattr(
+            ray_job_protocol_module.hashlib,
+            "sha256",
+            lambda: RecordingHash(),
+        )
+        value = "é" * (64 * 1024 + 1)
+
+        assert request_sha256(value) == "f" * 64
+        assert chunk_sizes == [2 * 64 * 1024, 2]
+
+        monkeypatch.setattr(ray_job_protocol_module, "EXECUTION_REQUEST_MAX_BYTES", 8)
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            request_sha256("123456789")
+        assert exc_info.value.classification is RayJobRequestBindingRejection.RESOURCE_LIMIT
+
+        monkeypatch.setattr(ray_job_protocol_module, "RAY_JOB_CONFIG_JSON_MAX_BYTES", 8)
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            load_ray_job_request_expectation("é" * 5)
+        assert exc_info.value.classification is RayJobRequestBindingRejection.RESOURCE_LIMIT
+
+    def test_digest_and_builder_reject_invalid_unicode_or_identity(self) -> None:
+        request, serialized, _metadata = self._request()
+        with pytest.raises(RayJobRequestBindingError):
+            request_sha256("\ud800")
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            build_ray_job_request_metadata(
+                replace(
+                    request,
+                    identity=ExecutionIdentity(7, "public-task-7", 2, -1),
+                ),
+                serialized,
+            )
+        assert exc_info.value.classification is RayJobRequestBindingRejection.INVALID
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("django_ray_task_execution_pk", "not-a-number"),
+            ("django_ray_task_execution_pk", "9" * 20),
+            ("django_ray_attempt_number", "0"),
+        ],
+    )
+    def test_metadata_counters_reject_noncanonical_values(self, key, value) -> None:
+        _request, _serialized, metadata = self._request()
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            parse_ray_job_request_metadata(metadata | {key: value})
+        assert exc_info.value.classification is RayJobRequestBindingRejection.INVALID
+
+    def test_counter_conversion_error_stays_fixed(self, monkeypatch) -> None:
+        _request, _serialized, metadata = self._request()
+
+        def fail_conversion(_value: str) -> int:
+            raise ValueError("attacker-controlled conversion detail")
+
+        monkeypatch.setattr(
+            ray_job_protocol_module,
+            "int",
+            fail_conversion,
+            raising=False,
+        )
+
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            parse_ray_job_request_metadata(metadata)
+
+        assert exc_info.value.classification is RayJobRequestBindingRejection.INVALID
+        assert "attacker-controlled" not in str(exc_info.value)
+
+    def test_json_integer_parser_bounds_digits_before_conversion(self) -> None:
+        assert (
+            ray_job_protocol_module._bounded_json_int("9223372036854775807") == 9223372036854775807
+        )
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            ray_job_protocol_module._bounded_json_int("9" * 5000)
+        assert exc_info.value.classification is RayJobRequestBindingRejection.INVALID
+
+    def test_oversized_config_integer_is_fixed_at_the_entrypoint_boundary(
+        self,
+        monkeypatch,
+    ) -> None:
+        from django_ray.runtime.entrypoint import execute_task_from_payload
+
+        oversized_digits = "9" * 5000
+        config = f'{{"runtime_env":{{"value":{oversized_digits}}},"metadata":{{}}}}'
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            load_ray_job_request_expectation(config)
+        assert exc_info.value.classification is RayJobRequestBindingRejection.INVALID
+        assert oversized_digits not in str(exc_info.value)
+
+        monkeypatch.setenv(RAY_JOB_CONFIG_JSON_ENV_VAR, config)
+        result = json.loads(execute_task_from_payload("%%%invalid%%%"))
+
+        assert result["success"] is False
+        assert result["exception_type"] == "RayExecutionRequestIncompatible"
+        assert result["retryable"] is False
+        assert oversized_digits not in json.dumps(result)
+
+    @pytest.mark.parametrize(
+        ("change", "classification"),
+        [
+            (
+                {"expected_identity": ExecutionIdentity(8, "public-task-7", 2, 9)},
+                RayJobRequestBindingRejection.IDENTITY_MISMATCH,
+            ),
+            (
+                {"expected_execution_protocol_version": 2},
+                RayJobRequestBindingRejection.PROTOCOL_MISMATCH,
+            ),
+            (
+                {"serialized_request": "{}"},
+                RayJobRequestBindingRejection.DIGEST_MISMATCH,
+            ),
+            (
+                {"expected_submission_transport": "ray-client"},
+                RayJobRequestBindingRejection.TRANSPORT_MISMATCH,
+            ),
+        ],
+    )
+    def test_validation_classifies_each_independent_mismatch(
+        self,
+        change,
+        classification,
+    ) -> None:
+        request, serialized, metadata = self._request()
+        expectation = parse_ray_job_request_metadata(metadata, required=True)
+        assert expectation is not None
+        arguments = {
+            "expected_identity": request.identity,
+            "expected_execution_protocol_version": 1,
+            "serialized_request": serialized,
+        } | change
+
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            validate_ray_job_request_expectation(expectation, **arguments)
+
+        assert exc_info.value.classification is classification
+
+    def test_builder_rejects_non_ray_job_transport(self) -> None:
+        request, serialized, _metadata = self._request()
+        with pytest.raises(RayJobRequestBindingError) as exc_info:
+            build_ray_job_request_metadata(
+                replace(request, compiled_graph_submission_transport="ray-client"),
+                serialized,
+            )
+        assert exc_info.value.classification is (RayJobRequestBindingRejection.TRANSPORT_MISMATCH)
+
+    def test_safe_projection_discards_extras_and_invalid_values(self) -> None:
+        _request, _serialized, metadata = self._request()
+        metadata["secret"] = "do-not-retain"
+        metadata["django_ray_public_task_id"] = "\ud800"
+
+        projected = fixed_safe_ray_job_metadata(metadata)
+
+        assert projected is not None
+        assert "secret" not in projected
+        assert projected["django_ray_public_task_id"] == ""
+        with pytest.raises(RayJobRequestBindingError):
+            parse_ray_job_request_metadata(projected, required=True)
+
+    def test_strict_submission_id_marker_cannot_downgrade(self) -> None:
+        malformed = f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}not-a-digest"
+        assert is_strict_ray_job_submission_id(malformed)
+        assert not is_valid_strict_ray_job_submission_id(malformed)
+        for future_or_corrupt in (
+            f"{STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX}2_{'a' * 64}",
+            f"{STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX}-corrupt",
+        ):
+            assert is_strict_ray_job_submission_id(future_or_corrupt)
+            assert not is_valid_strict_ray_job_submission_id(future_or_corrupt)
+
+
 class TestRayJobRunnerSubmit:
     """Tests for RayJobRunner.submit."""
 
@@ -176,9 +523,12 @@ class TestRayJobRunnerSubmit:
 
         assert RayJobRunner.submission_id(SimpleNamespace(**values)) == baseline
         assert changed != baseline
-        digest = baseline.removeprefix("raysubmit_django_ray_v1_")
+        digest = baseline.removeprefix(STRICT_RAY_JOB_SUBMISSION_ID_PREFIX)
         assert len(digest) == 64
         assert set(digest) <= set("0123456789abcdef")
+        assert is_strict_ray_job_submission_id(baseline)
+        assert is_valid_strict_ray_job_submission_id(baseline)
+        assert not is_strict_ray_job_submission_id(f"{LEGACY_RAY_JOB_SUBMISSION_ID_PREFIX}{digest}")
 
     def test_submission_handle_exposes_the_identity_before_submit(self) -> None:
         runner = RayJobRunner()
@@ -211,6 +561,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash="",
             attempt_number=2,
             execution_generation=11,
+            execution_protocol_version=1,
         )
 
         handle = runner.submit(
@@ -221,8 +572,8 @@ class TestRayJobRunnerSubmit:
         )
 
         assert handle.ray_job_id == RayJobRunner.submission_id(task_execution)
-        assert handle.ray_job_id.startswith("raysubmit_django_ray_v1_")
-        assert len(handle.ray_job_id) == len("raysubmit_django_ray_v1_") + 64
+        assert handle.ray_job_id.startswith(STRICT_RAY_JOB_SUBMISSION_ID_PREFIX)
+        assert len(handle.ray_job_id) == len(STRICT_RAY_JOB_SUBMISSION_ID_PREFIX) + 64
         assert len(fake_client.submissions) == 1
 
         submission = fake_client.submissions[0]
@@ -245,6 +596,10 @@ class TestRayJobRunnerSubmit:
         assert payload["task_id"] == "django-task-123"
         assert payload["attempt_number"] == 2
         assert payload["execution_generation"] == 11
+        assert payload["request_schema"] == "django-ray.execution-request"
+        assert payload["request_schema_version"] == 1
+        assert payload["execution_protocol_version"] == 1
+        assert payload["compiled_graph_submission_transport"] == "ray-job"
         assert payload["runtime_env_profile"] is None
         assert len(payload["runtime_env_hash"]) == 64
         assert payload["runtime_env_plan_identity"]["plan_format"] == (
@@ -253,16 +608,17 @@ class TestRayJobRunnerSubmit:
         assert payload["runtime_env_plan_identity"]["plan_format_version"] == 1
         assert payload["runtime_env_plan_identity"]["reusable"] is True
         assert payload["runtime_env_plan_identity"]["unresolved_paths"] == []
-        assert submission["metadata"] == {
-            "django_ray_task_id": "123",
-            "django_ray_attempt_number": "2",
-            "django_ray_execution_generation": "11",
-            "callable_path": "testproject.tasks.echo_task",
-            "runtime_env_profile": "",
-            "runtime_env_hash": (
-                "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
-            ),
-        }
+        metadata = submission["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["django_ray_task_id"] == "123"
+        assert metadata["callable_path"] == "testproject.tasks.echo_task"
+        expectation = parse_ray_job_request_metadata(metadata, required=True)
+        assert expectation is not None
+        assert expectation.identity == ExecutionIdentity(123, "django-task-123", 2, 11)
+        assert expectation.execution_protocol_version == 1
+        assert expectation.request_sha256 == request_sha256(payload_json)
+        assert expectation.submission_transport == "ray-job"
+        assert decode_execution_request(payload_json).identity == expectation.identity
 
     def test_submit_rejects_a_returned_identity_mismatch(self, monkeypatch) -> None:
         class MismatchedJobClient(FakeJobClient):
@@ -281,6 +637,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash="",
             attempt_number=4,
             execution_generation=15,
+            execution_protocol_version=1,
         )
 
         with pytest.raises(
@@ -299,6 +656,45 @@ class TestRayJobRunnerSubmit:
         assert exc_info.value.observed_submission_id == "raysubmit_unexpected"
         assert exc_info.value.__cause__ is None
         assert fake_client.submissions[0]["submission_id"] == expected_id
+
+    def test_submit_durable_uses_persisted_opaque_inputs_without_hydration(
+        self,
+        monkeypatch,
+    ) -> None:
+        import django_ray.runner.ray_job as ray_job_module
+
+        fake_client = FakeJobClient()
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: fake_client)
+        monkeypatch.setattr(
+            ray_job_module,
+            "serialize_args",
+            lambda _value: pytest.fail("durable input was hydrated and reserialized"),
+        )
+        task_execution = SimpleNamespace(
+            pk=141,
+            task_id="django-task-141",
+            callable_path="testproject.tasks.persisted_callable",
+            args_json='["persisted"]',
+            kwargs_json='{"source":"row"}',
+            input_reference=None,
+            runtime_env_profile=None,
+            runtime_env_json="{}",
+            runtime_env_hash="",
+            attempt_number=3,
+            execution_generation=19,
+            execution_protocol_version=1,
+        )
+
+        runner.submit_durable(task_execution)
+
+        entrypoint = str(fake_client.submissions[0]["entrypoint"])
+        serialized = base64.urlsafe_b64decode(entrypoint.rsplit(" ", 1)[-1]).decode()
+        request = decode_execution_request(serialized)
+        assert request.callable_path == task_execution.callable_path
+        assert request.serialized_args == task_execution.args_json
+        assert request.serialized_kwargs == task_execution.kwargs_json
+        assert request.compiled_graph_submission_transport == "ray-job"
 
     def test_submit_wraps_only_the_submission_rpc_as_uncertain(self, monkeypatch) -> None:
         submission_error = TimeoutError("response timed out after acceptance")
@@ -319,6 +715,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash="",
             attempt_number=1,
             execution_generation=16,
+            execution_protocol_version=1,
         )
 
         with pytest.raises(RayJobSubmissionUncertainError) as exc_info:
@@ -361,6 +758,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash="",
             attempt_number=1,
             execution_generation=18,
+            execution_protocol_version=1,
         )
 
         with pytest.raises(RayJobSubmissionUncertainError) as exc_info:
@@ -392,6 +790,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash="",
             attempt_number=1,
             execution_generation=17,
+            execution_protocol_version=1,
         )
 
         with pytest.raises(ConnectionError) as exc_info:
@@ -423,6 +822,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash=runtime_env.digest,
             attempt_number=1,
             execution_generation=2,
+            execution_protocol_version=1,
         )
 
         runner.submit(
@@ -463,6 +863,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash="0" * 64,
             attempt_number=1,
             execution_generation=2,
+            execution_protocol_version=1,
         )
 
         with pytest.raises(RuntimeEnvSnapshotError, match="hash does not match") as exc_info:
@@ -490,6 +891,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash=runtime_env.digest,
             attempt_number=1,
             execution_generation=2,
+            execution_protocol_version=1,
         )
 
         runner.submit(
@@ -530,6 +932,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash=runtime_env.digest,
             attempt_number=1,
             execution_generation=2,
+            execution_protocol_version=1,
         )
 
         runner.submit(
@@ -575,6 +978,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash=runtime_env.digest,
             attempt_number=1,
             execution_generation=2,
+            execution_protocol_version=1,
         )
 
         with pytest.raises(WorkflowPlanMismatchError, match="changed"):
@@ -603,6 +1007,7 @@ class TestRayJobRunnerSubmit:
             runtime_env_hash="",
             attempt_number=1,
             execution_generation=2,
+            execution_protocol_version=1,
         )
 
         runner.submit(
@@ -617,8 +1022,9 @@ class TestRayJobRunnerSubmit:
         payload = json.loads(base64.urlsafe_b64decode(encoded).decode())
         assert payload["transport_version"] == 2
         assert payload["input_reference"] == reference
-        assert "serialized_args" not in payload
-        assert "serialized_kwargs" not in payload
+        assert payload["serialized_args"] == "null"
+        assert payload["serialized_kwargs"] == "null"
+        assert payload["compiled_graph_submission_transport"] == "ray-job"
 
     def test_submit_uses_runtime_env_and_configured_ray_address(self, monkeypatch) -> None:
         """Submit should pass configured runtime_env and keep configured ray_address."""
@@ -648,6 +1054,7 @@ class TestRayJobRunnerSubmit:
                 runtime_env_hash=runtime_env.digest,
                 attempt_number=1,
                 execution_generation=4,
+                execution_protocol_version=1,
             ),
             callable_path="testproject.tasks.add_numbers",
             args=(1, 2),
@@ -697,6 +1104,7 @@ class TestRayJobRunnerSubmit:
                 runtime_env_hash=stored.digest,
                 attempt_number=1,
                 execution_generation=4,
+                execution_protocol_version=1,
             ),
             callable_path="testproject.tasks.echo_task",
             args=(),
@@ -832,6 +1240,7 @@ class TestRayJobRunnerSubmit:
                     runtime_env_hash="",
                     attempt_number=1,
                     execution_generation=0,
+                    execution_protocol_version=1,
                 ),
                 callable_path="testproject.tasks.echo_task",
                 args=(),
@@ -861,6 +1270,7 @@ class TestRayJobRunnerSubmit:
                 runtime_env_hash="",
                 attempt_number=1,
                 execution_generation=0,
+                execution_protocol_version=1,
             ),
             callable_path="testproject.tasks.echo_task",
             args=(),
@@ -926,6 +1336,47 @@ class TestRayJobRunnerStatusAndControl:
 
         assert info.status == JobStatus.UNKNOWN
         assert info.message == "mystery"
+
+    def test_get_status_exposes_only_fixed_protocol_metadata_and_exit_code(
+        self,
+        monkeypatch,
+    ) -> None:
+        _request, _serialized, metadata = TestRayJobRequestBinding._request()
+        client = SimpleNamespace(
+            get_job_status=lambda _job_id: "FAILED",
+            get_job_info=lambda _job_id: SimpleNamespace(
+                message="driver failed",
+                metadata={"customer_secret": "do-not-retain", **metadata},
+                driver_exit_code=78,
+            ),
+        )
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: client)
+
+        info = runner.get_status(self._make_handle())
+
+        assert info.status is JobStatus.FAILED
+        assert info.driver_exit_code == 78
+        assert info.metadata is not None
+        assert "customer_secret" not in info.metadata
+        assert parse_ray_job_request_metadata(info.metadata, required=True) is not None
+
+    def test_get_status_discards_non_integer_driver_exit_code(self, monkeypatch) -> None:
+        client = SimpleNamespace(
+            get_job_status=lambda _job_id: "FAILED",
+            get_job_info=lambda _job_id: SimpleNamespace(
+                message="driver failed",
+                metadata=None,
+                driver_exit_code=True,
+            ),
+        )
+        runner = RayJobRunner()
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: client)
+
+        info = runner.get_status(self._make_handle())
+
+        assert info.driver_exit_code is None
+        assert info.metadata is None
 
     def test_get_status_returns_unknown_on_client_exception(self, monkeypatch) -> None:
         runner = RayJobRunner()
