@@ -921,7 +921,7 @@ def test_staging_maps_database_creation_races_to_protocol_errors(
     topology = _topology(_execution_identity(execution), node_ids=("node-a",), edges=())
     original_create = QuerySet.create
 
-    def raced_create(queryset: QuerySet[Any], **kwargs: Any) -> Any:
+    def raced_create(queryset: QuerySet, **kwargs: Any) -> Any:
         model = (
             storage.WorkflowProgressTopologyPage
             if raced_model == "page"

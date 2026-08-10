@@ -276,6 +276,19 @@ def test_minimum_dependency_lane_pins_local_xdist_dependency() -> None:
     assert '"pytest-xdist==3.8.0"' in minimum_install["run"]
 
 
+def test_minimum_dependency_lane_pins_sample_extra_dependencies() -> None:
+    minimum_install = next(
+        step
+        for step in _jobs()["dependency-compatibility"]["steps"]
+        if step.get("name") == "Install minimum supported dependencies"
+    )
+    install_command = minimum_install["run"]
+
+    assert '-e ".[sample]"' in install_command
+    assert install_command.count('"gunicorn==23.0"') == 1
+    assert '"django-unfold==' not in install_command
+
+
 def test_minimum_dependency_lane_pins_runtime_encryption_dependency() -> None:
     """The minimum lane must exercise the declared cryptography compatibility floor."""
     minimum_install = next(

@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before policy evaluation; installation refuses an already-open policy containing
   incompatible nonterminal work.
 
+### Fixed
+
+- Development checks remain compatible with the latest `ty`, and sample-only
+  `django-unfold` handling now keeps its exact sample/dev and lockfile pin synchronized
+  with the installed-version RuntimeEnv requirement and minimum-dependency CI, without
+  stale duplicate literals.
+
 ### Added
 
 - A schema-first durable execution-protocol boundary records immutable protocol `1` on

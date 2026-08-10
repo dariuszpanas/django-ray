@@ -273,7 +273,7 @@ _WORKFLOW_PROGRESS_MESSAGES = {
 
 
 def _admin_retry_snapshot(
-    queryset: QuerySet[RayTaskExecution],
+    queryset: QuerySet,
 ) -> list[dict[str, Any]]:
     rows = queryset.order_by("pk").values_list(
         "pk",
@@ -474,13 +474,13 @@ def _admin_bounded_annotation_name(namespace: str, field_name: str, suffix: str)
 
 
 def _annotate_bounded_admin_text(
-    queryset: QuerySet[Any],
+    queryset: QuerySet,
     *,
     field_names: tuple[str, ...],
     max_bytes: int,
     max_chars: int,
     namespace: str,
-) -> QuerySet[Any]:
+) -> QuerySet:
     """Project text only when the database proves its UTF-8 byte size is safe."""
     lengths = {
         _admin_bounded_annotation_name(namespace, field_name, "bytes"): _AdminOctetLength(
@@ -873,7 +873,7 @@ def _sensitive_annotation_name(field_name: str, suffix: str) -> str:
 
 
 def _bounded_sensitive_object(
-    queryset: QuerySet[Any],
+    queryset: QuerySet,
     *,
     pk: Any,
     field_names: tuple[str, ...],
@@ -1084,7 +1084,7 @@ class TaskAttemptInline(DjangoRayTabularInline):
     show_change_link = False
     verbose_name_plural = "Attempt history"
 
-    def get_queryset(self, request: HttpRequest) -> QuerySet[TaskAttempt]:
+    def get_queryset(self, request: HttpRequest) -> QuerySet:
         """Return only the newest fixed number of guarded attempt summaries."""
         queryset = (
             super()
@@ -1203,7 +1203,7 @@ class ExecutionProtocolFilter(admin.SimpleListFilter):
         value = str(EXECUTION_PROTOCOL_VERSION)
         return ((value, f"Protocol {value}"),)
 
-    def queryset(self, request: HttpRequest, queryset: QuerySet[Any]) -> QuerySet[Any]:
+    def queryset(self, request: HttpRequest, queryset: QuerySet) -> QuerySet:
         del request
         if self.value() == str(EXECUTION_PROTOCOL_VERSION):
             return queryset.filter(execution_protocol_version=EXECUTION_PROTOCOL_VERSION)
@@ -1420,7 +1420,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         ),
     )
 
-    def get_queryset(self, request: HttpRequest) -> QuerySet[RayTaskExecution]:
+    def get_queryset(self, request: HttpRequest) -> QuerySet:
         """Use allowlisted and SQL-guarded projections for routine Admin reads."""
         queryset = (
             super()
@@ -3051,7 +3051,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     def retry_tasks(
         self,
         request: HttpRequest,
-        queryset: QuerySet[RayTaskExecution],
+        queryset: QuerySet,
     ) -> HttpResponse | None:
         """Confirm, fence, and retry failed, lost, or expired executions."""
         return self._retry_tasks_with_confirmation(request, queryset)
@@ -3059,7 +3059,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     def _retry_tasks_with_confirmation(
         self,
         request: HttpRequest,
-        queryset: QuerySet[RayTaskExecution],
+        queryset: QuerySet,
         *,
         cancel_url: str | None = None,
     ) -> HttpResponse | None:
@@ -3205,7 +3205,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         )
 
     @admin.action(description="Cancel selected tasks")
-    def cancel_tasks(self, request: HttpRequest, queryset: QuerySet[RayTaskExecution]) -> None:
+    def cancel_tasks(self, request: HttpRequest, queryset: QuerySet) -> None:
         """Request package-owned cancellation for each authorized selection."""
         accepted_count = 0
         unsupported_count = 0
@@ -3446,7 +3446,7 @@ class TaskAttemptAdmin(DjangoRayModelAdmin):
             sections=sections,
         )
 
-    def get_queryset(self, request: HttpRequest) -> QuerySet[TaskAttempt]:
+    def get_queryset(self, request: HttpRequest) -> QuerySet:
         """Use allowlisted and SQL-guarded projections for routine Admin reads."""
         queryset = super().get_queryset(request).defer("workflow_progress_summary_json")
         resolver_match = request.resolver_match
@@ -3595,9 +3595,7 @@ class ActiveWorkerFilter(admin.SimpleListFilter):
             ("all", "All"),
         ]
 
-    def queryset(
-        self, request: HttpRequest, queryset: QuerySet[TaskWorkerLease]
-    ) -> QuerySet[TaskWorkerLease]:
+    def queryset(self, request: HttpRequest, queryset: QuerySet) -> QuerySet:
         if self.value() == "inactive":
             return queryset.filter(is_active=False)
         elif self.value() == "all":
@@ -3710,7 +3708,7 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
     )
     actions = ["mark_inactive", "delete_inactive"]
 
-    def get_queryset(self, request: HttpRequest) -> QuerySet[TaskWorkerLease]:
+    def get_queryset(self, request: HttpRequest) -> QuerySet:
         """Default queryset - filter applied via ActiveWorkerFilter."""
         return super().get_queryset(request)
 
@@ -3761,7 +3759,7 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
         description="Mark selected as inactive",
         permissions=["manage_worker_leases"],
     )
-    def mark_inactive(self, request: HttpRequest, queryset: QuerySet[TaskWorkerLease]) -> None:
+    def mark_inactive(self, request: HttpRequest, queryset: QuerySet) -> None:
         """Mark selected worker leases as inactive."""
         active = queryset.filter(is_active=True)
         with transaction.atomic():
@@ -3802,7 +3800,7 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
         description="Delete inactive worker leases",
         permissions=["manage_worker_leases"],
     )
-    def delete_inactive(self, request: HttpRequest, queryset: QuerySet[TaskWorkerLease]) -> None:
+    def delete_inactive(self, request: HttpRequest, queryset: QuerySet) -> None:
         """Delete inactive worker leases from selected."""
         inactive = queryset.filter(is_active=False)
         with transaction.atomic():
