@@ -15,7 +15,13 @@ from django.test import override_settings
 from django.utils import timezone
 
 from django_ray.management.commands.django_ray_purge_inputs import Command
-from django_ray.models import InputPayloadState, RayTaskExecution, TaskInputPayload, TaskState
+from django_ray.models import (
+    InputPayloadKind,
+    InputPayloadState,
+    RayTaskExecution,
+    TaskInputPayload,
+    TaskState,
+)
 
 
 def _reference(suffix: str) -> str:
@@ -26,7 +32,12 @@ def _fingerprint(reference: str) -> str:
     return hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16]
 
 
-def _payload(reference: str, *, age_days: int = 60) -> TaskInputPayload:
+def _payload(
+    reference: str,
+    *,
+    age_days: int = 60,
+    payload_kind: str = InputPayloadKind.TASK_INPUT,
+) -> TaskInputPayload:
     used_at = timezone.now() - timedelta(days=age_days)
     return TaskInputPayload.objects.create(
         reference=reference,
@@ -34,6 +45,7 @@ def _payload(reference: str, *, age_days: int = 60) -> TaskInputPayload:
         digest="a" * 64,
         size_bytes=128,
         envelope_version=1,
+        payload_kind=payload_kind,
         created_at=used_at,
         last_used_at=used_at,
     )
@@ -44,6 +56,7 @@ def _execution(
     *,
     state: str = TaskState.SUCCEEDED,
     age_days: int = 60,
+    reference_field: str = "input_reference",
 ) -> RayTaskExecution:
     timestamp = timezone.now() - timedelta(days=age_days)
     terminal_states = {
@@ -53,13 +66,16 @@ def _execution(
         TaskState.LOST,
         TaskState.EXPIRED,
     }
+    reference_fields = {reference_field: reference}
     return RayTaskExecution.objects.create(
-        task_id=f"purge-{state.lower()}-{age_days}",
+        task_id=(
+            f"purge-{state.lower()}-{age_days}-{hashlib.sha256(reference.encode()).hexdigest()[:8]}"
+        ),
         callable_path="testproject.tasks.add_numbers",
         state=state,
-        input_reference=reference,
         created_at=timestamp,
         finished_at=timestamp if state in terminal_states else None,
+        **reference_fields,
     )
 
 
@@ -89,14 +105,35 @@ def test_purge_inputs_is_dry_run_by_default() -> None:
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("payload_kind", "reference_field"),
+    [
+        (InputPayloadKind.TASK_INPUT, "input_reference"),
+        (InputPayloadKind.RAY_JOB_REQUEST, "ray_job_request_reference"),
+    ],
+)
 def test_delete_tombstones_registry_and_retains_execution_reference(
     monkeypatch: pytest.MonkeyPatch,
+    payload_kind: str,
+    reference_field: str,
 ) -> None:
     reference = _reference("b")
-    payload = _payload(reference)
-    first = _execution(reference, state=TaskState.FAILED)
-    second = _execution(reference, state=TaskState.CANCELLED)
-    third = _execution(reference, state=TaskState.EXPIRED)
+    payload = _payload(reference, payload_kind=payload_kind)
+    first = _execution(
+        reference,
+        state=TaskState.FAILED,
+        reference_field=reference_field,
+    )
+    second = _execution(
+        reference,
+        state=TaskState.CANCELLED,
+        reference_field=reference_field,
+    )
+    third = _execution(
+        reference,
+        state=TaskState.EXPIRED,
+        reference_field=reference_field,
+    )
     deleted: list[str] = []
     _install_input_storage(monkeypatch, deleted.append)
     stdout = StringIO()
@@ -116,25 +153,42 @@ def test_delete_tombstones_registry_and_retains_execution_reference(
     assert payload.state == InputPayloadState.PURGED
     assert payload.purged_at is not None
     assert payload.cleanup_error == ""
-    assert first.input_reference == reference
-    assert second.input_reference == reference
-    assert third.input_reference == reference
+    assert getattr(first, reference_field) == reference
+    assert getattr(second, reference_field) == reference
+    assert getattr(third, reference_field) == reference
     assert f"reference_sha256={_fingerprint(reference)}" in stdout.getvalue()
     assert reference not in stdout.getvalue()
     assert "1 eligible, 1 purged, 0 failed" in stdout.getvalue()
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("payload_kind", "reference_field"),
+    [
+        (InputPayloadKind.TASK_INPUT, "input_reference"),
+        (InputPayloadKind.RAY_JOB_REQUEST, "ray_job_request_reference"),
+    ],
+)
 def test_delete_skips_reference_with_active_recent_or_undated_terminal_execution(
     monkeypatch: pytest.MonkeyPatch,
+    payload_kind: str,
+    reference_field: str,
 ) -> None:
     references = [_reference("c"), _reference("d"), _reference("e")]
     for reference in references:
-        _payload(reference)
+        _payload(reference, payload_kind=payload_kind)
 
-    _execution(references[0], state=TaskState.RUNNING)
-    _execution(references[1], age_days=1)
-    undated = _execution(references[2], state=TaskState.LOST)
+    _execution(
+        references[0],
+        state=TaskState.RUNNING,
+        reference_field=reference_field,
+    )
+    _execution(references[1], age_days=1, reference_field=reference_field)
+    undated = _execution(
+        references[2],
+        state=TaskState.LOST,
+        reference_field=reference_field,
+    )
     undated.finished_at = None
     undated.save(update_fields=["finished_at"])
     deleted: list[str] = []
@@ -156,9 +210,16 @@ def test_delete_skips_reference_with_active_recent_or_undated_terminal_execution
 
 
 @pytest.mark.django_db
-def test_orphaned_old_registry_entry_is_eligible(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "payload_kind",
+    [InputPayloadKind.TASK_INPUT, InputPayloadKind.RAY_JOB_REQUEST],
+)
+def test_orphaned_old_registry_entry_is_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+    payload_kind: str,
+) -> None:
     reference = _reference("f")
-    payload = _payload(reference)
+    payload = _payload(reference, payload_kind=payload_kind)
     deleted: list[str] = []
     _install_input_storage(monkeypatch, deleted.append)
 
@@ -167,6 +228,68 @@ def test_orphaned_old_registry_entry_is_eligible(monkeypatch: pytest.MonkeyPatch
     payload.refresh_from_db()
     assert deleted == [reference]
     assert payload.state == InputPayloadState.PURGED
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("payload_kind", "wrong_reference_field"),
+    [
+        (InputPayloadKind.TASK_INPUT, "ray_job_request_reference"),
+        (InputPayloadKind.RAY_JOB_REQUEST, "input_reference"),
+    ],
+)
+def test_payload_kind_mismatch_retains_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    payload_kind: str,
+    wrong_reference_field: str,
+) -> None:
+    reference = _reference("6")
+    payload = _payload(reference, payload_kind=payload_kind)
+    _execution(reference, reference_field=wrong_reference_field)
+    deleted: list[str] = []
+    _install_input_storage(monkeypatch, deleted.append)
+
+    call_command("django_ray_purge_inputs", retention_days=30, delete=True)
+
+    payload.refresh_from_db()
+    assert deleted == []
+    assert payload.state == InputPayloadState.ACTIVE
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "payload_kind",
+    [InputPayloadKind.TASK_INPUT, InputPayloadKind.RAY_JOB_REQUEST],
+)
+def test_ambiguous_execution_reference_retains_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    payload_kind: str,
+) -> None:
+    reference = _reference("7")
+    payload = _payload(reference, payload_kind=payload_kind)
+    execution = _execution(reference)
+    execution.ray_job_request_reference = reference
+    execution.save(update_fields=["ray_job_request_reference"])
+    deleted: list[str] = []
+    _install_input_storage(monkeypatch, deleted.append)
+
+    call_command("django_ray_purge_inputs", retention_days=30, delete=True)
+
+    payload.refresh_from_db()
+    assert deleted == []
+    assert payload.state == InputPayloadState.ACTIVE
+
+
+def test_unknown_payload_kind_is_not_eligible_even_without_references() -> None:
+    assert (
+        Command._all_references_are_old_and_terminal(
+            [],
+            reference=_reference("8"),
+            payload_kind="unknown",
+            cutoff=timezone.now(),
+        )
+        is False
+    )
 
 
 @pytest.mark.django_db
@@ -257,4 +380,4 @@ def test_candidate_disappearing_before_lock_is_skipped() -> None:
 def test_input_payload_string_identifies_backend_digest_and_state() -> None:
     payload = _payload(_reference("4"))
 
-    assert str(payload) == f"filesystem input {'a' * 12} (ACTIVE)"
+    assert str(payload) == f"filesystem Task input {'a' * 12} (ACTIVE)"

@@ -1,4 +1,4 @@
-"""Safely purge retained external task-input payloads."""
+"""Safely purge retained external task-input and Ray Job request payloads."""
 
 from __future__ import annotations
 
@@ -8,10 +8,17 @@ from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from django_ray.management.diagnostics import render_exception_type_label
-from django_ray.models import InputPayloadState, RayTaskExecution, TaskInputPayload, TaskState
+from django_ray.models import (
+    InputPayloadKind,
+    InputPayloadState,
+    RayTaskExecution,
+    TaskInputPayload,
+    TaskState,
+)
 
 TERMINAL_STATES = (
     TaskState.SUCCEEDED,
@@ -23,9 +30,12 @@ TERMINAL_STATES = (
 
 
 class Command(BaseCommand):
-    """Report or delete input payloads beyond the operator-selected retention window."""
+    """Report or delete registered payloads beyond the selected retention window."""
 
-    help = "Report or purge external task inputs whose references are all old and terminal."
+    help = (
+        "Report or purge external task-input and Ray Job request payloads whose "
+        "references are all old and terminal."
+    )
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument(
@@ -91,10 +101,22 @@ class Command(BaseCommand):
 
             executions = list(
                 RayTaskExecution.objects.select_for_update()
-                .filter(input_reference=reference)
-                .only("pk", "state", "finished_at")
+                .filter(Q(input_reference=reference) | Q(ray_job_request_reference=reference))
+                .only(
+                    "pk",
+                    "state",
+                    "finished_at",
+                    "input_reference",
+                    "ray_job_request_reference",
+                )
+                .order_by("pk")
             )
-            if not self._all_references_are_old_and_terminal(executions, cutoff=cutoff):
+            if not self._all_references_are_old_and_terminal(
+                executions,
+                reference=reference,
+                payload_kind=str(payload.payload_kind),
+                cutoff=cutoff,
+            ):
                 return "skipped"
 
             if not delete:
@@ -134,14 +156,42 @@ class Command(BaseCommand):
     def _all_references_are_old_and_terminal(
         executions: list[RayTaskExecution],
         *,
+        reference: str,
+        payload_kind: str,
         cutoff: Any,
     ) -> bool:
+        if payload_kind not in InputPayloadKind.values:
+            return False
         return all(
-            execution.state in TERMINAL_STATES
+            Command._reference_matches_payload_kind(
+                execution,
+                reference=reference,
+                payload_kind=payload_kind,
+            )
+            and execution.state in TERMINAL_STATES
             and execution.finished_at is not None
             and execution.finished_at <= cutoff
             for execution in executions
         )
+
+    @staticmethod
+    def _reference_matches_payload_kind(
+        execution: RayTaskExecution,
+        *,
+        reference: str,
+        payload_kind: str,
+    ) -> bool:
+        input_matches = execution.input_reference == reference
+        request_matches = execution.ray_job_request_reference == reference
+        if input_matches == request_matches:
+            # Neither column should be possible after the filtered lock query;
+            # both columns indicate ambiguous ownership. Retain in either case.
+            return False
+        if payload_kind == InputPayloadKind.TASK_INPUT:
+            return input_matches
+        if payload_kind == InputPayloadKind.RAY_JOB_REQUEST:
+            return request_matches
+        return False
 
     @staticmethod
     def _format_cleanup_error(error: Exception) -> str:

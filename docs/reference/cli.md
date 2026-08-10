@@ -171,8 +171,9 @@ failure.
 
 ## django_ray_purge_inputs
 
-Report retained external input payloads whose references are all terminal and older
-than the selected retention window:
+Report retained external task-input and Ray Job request payloads whose references are
+all terminal and older than the selected retention window. The command name is retained
+for compatibility:
 
 ```bash
 python manage.py django_ray_purge_inputs --retention-days=30
@@ -190,7 +191,9 @@ python manage.py django_ray_purge_inputs --retention-days=30 --delete
 | `--retention-days=N` | Require registry use and every terminal finish to be at least `N` days old; default `30` |
 | `--delete` | Delete eligible objects after row-locking all references |
 
-Storage failures are recorded as a bounded exception class in
+The registry's payload kind selects the exact execution reference column. Unknown,
+wrong-kind, or dual-column references remain active for operator review. Storage
+failures are recorded as a bounded exception class in
 `TaskInputPayload.cleanup_error` and make the command exit with an error. Dry-run,
 success, and failure output use only a 16-character SHA-256 reference fingerprint; full
 storage references and provider exception messages are not printed. See

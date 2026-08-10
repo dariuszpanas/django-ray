@@ -62,6 +62,13 @@ class InputPayloadState(models.TextChoices):
     PURGED = "PURGED", "Purged"
 
 
+class InputPayloadKind(models.TextChoices):
+    """Purpose of one durable external payload."""
+
+    TASK_INPUT = "task_input", "Task input"
+    RAY_JOB_REQUEST = "ray_job_request", "Ray Job request"
+
+
 class CancellationStatus(models.TextChoices):
     """Outcome of a remote cancellation request."""
 
@@ -278,6 +285,13 @@ class RayTaskExecution(models.Model):
         blank=True,
         db_index=True,
         help_text="Reference to a durable external task-input envelope",
+    )
+    ray_job_request_reference = models.CharField(
+        max_length=500,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Reference to the durable Ray Job submission request",
     )
 
     # Results
@@ -997,6 +1011,12 @@ class TaskInputPayload(models.Model):
     """Durable registry and cleanup tombstone for a shared input payload."""
 
     reference = models.CharField(max_length=500, primary_key=True)
+    payload_kind = models.CharField(
+        max_length=32,
+        choices=InputPayloadKind.choices,
+        default=InputPayloadKind.TASK_INPUT,
+        db_default=InputPayloadKind.TASK_INPUT,
+    )
     backend = models.CharField(max_length=32)
     digest = models.CharField(max_length=64, db_index=True)
     size_bytes = models.PositiveBigIntegerField()
@@ -1020,11 +1040,25 @@ class TaskInputPayload(models.Model):
                 name="ray_input_cleanup_idx",
             )
         ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    payload_kind__in=(
+                        InputPayloadKind.TASK_INPUT,
+                        InputPayloadKind.RAY_JOB_REQUEST,
+                    )
+                ),
+                name="ray_input_payload_kind_valid",
+            )
+        ]
         verbose_name = "Task Input Payload"
         verbose_name_plural = "Task Input Payloads"
 
     def __str__(self) -> str:
-        return f"{self.backend} input {str(self.digest)[:12]} ({self.state})"
+        return (
+            f"{self.backend} {self.get_payload_kind_display()} "
+            f"{str(self.digest)[:12]} ({self.state})"
+        )
 
 
 class TaskAttempt(models.Model):

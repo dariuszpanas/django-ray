@@ -3803,6 +3803,7 @@ class TestWorkerReconnectPollReconcile:
             args_json="[1, 2]",
             kwargs_json="{}",
             ray_job_id="raysubmit_previous_001",
+            ray_job_request_reference="inputfs://sha256/previous-request?bytes=128",
             ray_address="ray://previous:10001",
             ray_target_address="ray://target:10001",
             execution_generation=4,
@@ -3819,6 +3820,7 @@ class TestWorkerReconnectPollReconcile:
         assert claimed and claimed[0].pk == task.pk
         assert task.execution_generation == 5
         assert task.ray_job_id is None
+        assert task.ray_job_request_reference is None
         assert task.ray_address is None
         assert task.ray_target_address == "ray://target:10001"
 

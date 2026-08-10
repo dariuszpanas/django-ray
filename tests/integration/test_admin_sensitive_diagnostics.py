@@ -843,6 +843,7 @@ def test_execution_changelist_does_not_select_payload_columns(client) -> None:
         "args_json",
         "kwargs_json",
         "input_reference",
+        "ray_job_request_reference",
         "result_data",
         "result_reference",
         "completion_data",

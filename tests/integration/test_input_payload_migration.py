@@ -69,4 +69,4 @@ def test_existing_inline_execution_round_trips_through_input_payload_migration()
         assert reverted.args_json == "[1, 2]"
         assert reverted.kwargs_json == '{"scale": 3}'
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0020_legacy_open_rollback_fence")])
+        MigrationExecutor(connection).migrate([("django_ray", "0021_ray_job_request_reference")])

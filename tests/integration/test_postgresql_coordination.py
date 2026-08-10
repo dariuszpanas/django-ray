@@ -2190,6 +2190,8 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
         workflow_plan_selection=unrelated_marker,
         completion_data=unrelated_marker,
         cancellation_error=unrelated_marker,
+        ray_job_id="raysubmit_postgres-projected-retry",
+        ray_job_request_reference=("inputfs://sha256/postgres-projected-request?bytes=131072"),
         error_message="retryable failure",
         error_traceback="RetryError: retryable failure",
         execution_protocol_version=2,
@@ -2244,6 +2246,7 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
         "args_json",
         "kwargs_json",
         "input_reference",
+        "ray_job_request_reference",
         "progress_data",
         "workflow_plan_json",
         "workflow_plan_selection",
@@ -2255,6 +2258,8 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
     assert task.args_json == EXTERNAL_INPUT_PLACEHOLDER
     assert task.kwargs_json == EXTERNAL_INPUT_PLACEHOLDER
     assert task.input_reference == input_reference
+    assert task.ray_job_id is None
+    assert task.ray_job_request_reference is None
     assert task.result_data is None
     assert task.result_reference is None
     assert task.execution_protocol_version == 2

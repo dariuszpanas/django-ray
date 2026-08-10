@@ -1431,6 +1431,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             .get_queryset(request)
             .defer(
                 "progress_data",
+                "ray_job_request_reference",
                 "runtime_env_json",
                 "workflow_plan_json",
                 "workflow_plan_selection",

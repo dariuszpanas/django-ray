@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal-to-nonterminal transitions. PostgreSQL reopening fences execution writers
   before policy evaluation; installation refuses an already-open policy containing
   incompatible nonterminal work.
+- Migration `0021` adds a dormant, attempt-scoped Ray Job request-reference column and
+  types the shared payload registry as `task_input` or `ray_job_request`. Its Python and
+  database default remains `task_input`, so released writers that omit the new column
+  continue to register task inputs. Applying the migration does not activate a new Ray
+  Job transport; new submissions remain unchanged until the later rq2 behavior slice.
 
 ### Fixed
 
@@ -42,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale duplicate literals.
 
 ### Added
+
+- External payload retention now distinguishes durable task-input envelopes from Ray
+  Job execution requests, follows the kind's exact execution-reference column, and
+  retains unknown, wrong-kind, or dual-column ambiguity. Explicit retry and fresh claim
+  clear the prior Ray Job tracking tuple; automatic retry retains its job ID, address,
+  and request reference together until that fresh claim. Terminal, cancellation, and
+  manager-loss state likewise retains the tuple for audit and cleanup. Ordinary Admin
+  projections keep the opaque request reference deferred and undisplayed.
 
 - The PostgreSQL polling benchmark now emits additive, bounded schema-v1 evidence for
   the execution-protocol claim predicate. It intercepts and shape-verifies the actual

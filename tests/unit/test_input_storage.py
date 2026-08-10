@@ -767,7 +767,7 @@ def test_delete_validates_reference_and_wraps_backend_error(
 def test_register_task_input_creates_and_reuses_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from django_ray.models import InputPayloadState, TaskInputPayload
+    from django_ray.models import InputPayloadKind, InputPayloadState, TaskInputPayload
 
     storage = FakePayloadStorage()
     _use_fake_storage(monkeypatch, storage)
@@ -776,6 +776,7 @@ def test_register_task_input_creates_and_reuses_registry(
     first = register_task_input(prepared, _s3_config())
     assert first is not None
     assert first.reference == prepared.input_reference
+    assert first.payload_kind == InputPayloadKind.TASK_INPUT
     assert first.backend == "s3"
     assert first.digest == prepared.digest
     assert first.size_bytes == prepared.size_bytes
@@ -874,6 +875,34 @@ def test_register_task_input_rejects_registry_metadata_mismatch(
 
     with pytest.raises(InputPayloadValidationError, match="registry metadata"):
         register_task_input(prepared, _s3_config())
+
+
+@pytest.mark.django_db
+def test_register_task_input_rejects_request_kind_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.models import InputPayloadKind, InputPayloadState
+
+    storage = FakePayloadStorage()
+    _use_fake_storage(monkeypatch, storage)
+    prepared = prepare_task_input((1,), {}, _s3_config())
+    payload = register_task_input(prepared, _s3_config())
+    assert payload is not None
+    payload.payload_kind = InputPayloadKind.RAY_JOB_REQUEST
+    payload.state = InputPayloadState.PURGED
+    payload.purged_at = input_storage.timezone.now()
+    payload.save(update_fields=["payload_kind", "state", "purged_at"])
+    original_last_used_at = payload.last_used_at
+    storage.payloads.clear()
+
+    with pytest.raises(InputPayloadValidationError, match="registry metadata"):
+        register_task_input(prepared, _s3_config())
+
+    payload.refresh_from_db()
+    assert payload.payload_kind == InputPayloadKind.RAY_JOB_REQUEST
+    assert payload.state == InputPayloadState.PURGED
+    assert payload.last_used_at == original_last_used_at
+    assert prepared.input_reference not in storage.payloads
 
 
 @pytest.mark.django_db

@@ -89,6 +89,7 @@ test-postgres:
 		tests/integration/test_execution_protocol_schema_migration.py \
 		tests/integration/test_priority_migration.py \
 		tests/integration/test_queue_expiration_migration.py \
+		tests/integration/test_request_reference_schema_migration.py \
 		tests/integration/test_task_id_uniqueness_migration.py \
 		tests/integration/test_workflow_run_allocation_migration.py \
 		-m postgresql -vv --durations=20

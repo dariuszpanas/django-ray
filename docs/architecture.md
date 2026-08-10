@@ -286,11 +286,24 @@ an existing lease row and therefore must not run in a mixed-version worker fleet
 
 ### `TaskInputPayload`
 
-Registry and cleanup tombstone for content-addressed external inputs. It records the
-reference, backend, digest, byte size, envelope version, last-use time, cleanup state,
-and cleanup error. Execution rows retain `input_reference` after cleanup for audit.
-Row locks on the registry and referencing executions prevent cleanup from deleting a
-payload while another enqueue is registering the same content.
+Typed registry and cleanup tombstone for content-addressed external payloads. It records
+whether a reference contains a task-input envelope or a Ray Job execution request, plus
+the backend, digest, byte size, envelope version, last-use time, cleanup state, and
+cleanup error. Execution rows use separate `input_reference` and
+`ray_job_request_reference` links so retry and retention cannot confuse the callable's
+durable arguments with the latest submitted Ray Job request. An automatic retry retains
+the prior job ID, address, and request reference as one audit/reconciliation tuple until
+the fresh claim clears all three; an explicit retry clears that tuple immediately. Row
+locks on the registry and both referencing columns prevent cleanup from deleting a
+payload while another writer is registering the same content. A kind mismatch or a
+reference present in both columns is ambiguous and remains retained. Every writer that
+attaches or reactivates either kind must use the same registry-then-execution lock order;
+the rq2 transport slice must prove that ordering under PostgreSQL before it can activate
+request-reference writes.
+
+Migration `0021` adds this typed registry and request-reference link as dormant schema.
+Existing and released writers omit the new kind and receive the database default
+`task_input`; no Ray Job changes transport merely because the migration is applied.
 
 ### `TaskAttempt`
 
@@ -557,7 +570,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0020_legacy_open_rollback_fence` before starting upgraded workers:
+`0021_ray_job_request_reference` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray

@@ -536,8 +536,10 @@ Symptoms:
 
 Checks:
 
-1. Inspect `input_reference` and the matching `TaskInputPayload` state without copying
-   the payload into tickets or logs.
+1. Inspect the registry `payload_kind` and its exact execution link (`input_reference`
+   for task inputs or `ray_job_request_reference` for Ray Job requests) without copying
+   the payload or reference into tickets or logs. A kind mismatch is ambiguous and must
+   be corrected through a reviewed data repair, not guessed by cleanup.
 2. Confirm every enqueueing and worker process uses the same input backend, filesystem
    root, bucket, prefix, and credentials.
 3. Verify the object exists and its access policy has not changed.
@@ -551,8 +553,9 @@ Recovery:
 3. Preview retention with `django_ray_purge_inputs --retention-days=30` before using
    `--delete`. Increase retention when historical manual retry or audit access is needed.
 
-Do not edit `input_reference`, digest metadata, or JSON placeholders by hand. Successful
-cleanup retains a `PURGED` tombstone and execution references for audit.
+Do not edit either reference column, the payload kind, digest metadata, or JSON
+placeholders by hand. Successful cleanup retains a `PURGED` tombstone and execution
+references for audit.
 
 ## 5) Workflow Progress Retention or Orphan Cleanup Failure
 
