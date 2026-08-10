@@ -26,6 +26,7 @@ from django.utils import timezone
 import django_ray.admin as django_ray_admin
 import django_ray.workflow_progress as workflow_progress_module
 from django_ray import __version__ as django_ray_version
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.input_storage import (
     EXTERNAL_INPUT_PLACEHOLDER,
     load_task_input,
@@ -34,6 +35,8 @@ from django_ray.input_storage import (
 )
 from django_ray.lifecycle import (
     TaskCancellationRequestStatus,
+    _request_task_cancellation,
+    _request_task_retry,
     record_failure,
     request_task_cancellation,
     retry_task,
@@ -74,6 +77,8 @@ from testproject import api as testproject_api
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.postgresql]
+
+_SYNTHETIC_V1_V2_PROTOCOLS = ExecutionProtocolRange(minimum=1, maximum=2)
 
 
 @pytest.fixture(autouse=True)
@@ -1581,10 +1586,11 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
     )
 
     with CaptureQueriesContext(connection) as retry_queries:
-        retried = retry_task(
+        _result, retried = _request_task_retry(
             task.pk,
             expected_attempt_number=3,
             expected_execution_generation=7,
+            supported_protocols=_SYNTHETIC_V1_V2_PROTOCOLS,
         )
 
     assert retried is not None
@@ -1595,6 +1601,7 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
             "state",
             "attempt_number",
             "execution_generation",
+            "execution_protocol_version",
             "workflow_run_id",
             "workflow_plan_fingerprint",
         },
@@ -1675,10 +1682,11 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
     )
 
     with CaptureQueriesContext(connection) as queued_cancellation_queries:
-        queued_cancellation = request_task_cancellation(
+        queued_cancellation = _request_task_cancellation(
             queued.pk,
             expected_attempt_number=4,
             expected_execution_generation=9,
+            supported_protocols=_SYNTHETIC_V1_V2_PROTOCOLS,
         )
 
     assert queued_cancellation.status is TaskCancellationRequestStatus.ACCEPTED
@@ -1689,6 +1697,7 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
             "state",
             "attempt_number",
             "execution_generation",
+            "execution_protocol_version",
         },
         {
             "started_at",
@@ -1742,6 +1751,7 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
             "state",
             "attempt_number",
             "execution_generation",
+            "execution_protocol_version",
         },
         set(),
     ]

@@ -741,10 +741,23 @@ compatible cohort. The final remote or durable effect still passes through the
 authoritative lease-then-execution lock, and candidate compatibility is checked before
 an inactive source lease can be retired during takeover.
 
+Package-owned lifecycle entry points also default to the package's supported execution-
+protocol range and compare that range with the immutable protocol under the execution-
+row lock. An unsupported cancellation or retry returns a distinct bounded status;
+legacy retry returns no replacement row, terminal boolean transitions return false, and
+queued expiry omits the row. Rejection happens before RuntimeEnv hydration, attempt
+archival, cancellation effects, or state and provenance mutation.
+Admin retry and cancellation report unsupported selections separately from stale or
+otherwise ineligible work. Public cancellation and retry services always bind this
+package build's supported range; application callers cannot widen it. Package-private
+transition paths may receive an explicit range from an already-proven worker cohort,
+but lifecycle code does not lock the rollout policy or a worker lease and therefore
+does not change the lease-first ownership protocol.
+
 This scan boundary does not make protocol capability a remote-runtime attestation and
 does not yet version the Ray Core completion transport. Ray Core handle polling and
-bulk monitor heartbeats, direct lifecycle APIs, and remote pre-import protocol
-rejection remain separate compatibility work.
+bulk monitor heartbeats and remote pre-import protocol rejection remain separate
+compatibility work.
 
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
 capability. Likewise, an execution-protocol-capable lease proves only task-manager

@@ -16,7 +16,8 @@ from django.db.migrations.executor import MigrationExecutor
 from django.utils import timezone
 
 import django_ray.protocol_coordination as protocol_coordination
-from django_ray.lifecycle import retry_task
+from django_ray.execution_protocol import ExecutionProtocolRange
+from django_ray.lifecycle import _request_task_retry
 from django_ray.models import (
     LegacyWorkerAdmissionToken,
     RayTaskExecution,
@@ -33,6 +34,7 @@ MIGRATE_FROM = [("django_ray", "0018_workflow_run_allocation")]
 MIGRATE_TO = [("django_ray", "0019_execution_protocol_schema")]
 ROLLBACK_FENCE_FROM = MIGRATE_TO
 ROLLBACK_FENCE_TO = [("django_ray", "0020_legacy_open_rollback_fence")]
+_SYNTHETIC_V1_V2_PROTOCOLS = ExecutionProtocolRange(minimum=1, maximum=2)
 
 EXPECTED_PROTOCOL_TRIGGERS = {
     "ray_attempt_immutable_0019",
@@ -1020,7 +1022,11 @@ def test_postgresql_incompatible_writer_first_blocks_reopen(write_kind: str) -> 
                     )
                 else:
                     assert terminal is not None
-                    assert retry_task(terminal.pk) is not None
+                    _result, retried = _request_task_retry(
+                        terminal.pk,
+                        supported_protocols=_SYNTHETIC_V1_V2_PROTOCOLS,
+                    )
+                    assert retried is not None
                 write_complete.set()
                 if not release_writer.wait(timeout=10):
                     raise TimeoutError("test did not release the incompatible writer")
@@ -1113,7 +1119,10 @@ def test_postgresql_reopen_first_rejects_incompatible_writer(
                     )
                 else:
                     assert terminal is not None
-                    retry_task(terminal.pk)
+                    _request_task_retry(
+                        terminal.pk,
+                        supported_protocols=_SYNTHETIC_V1_V2_PROTOCOLS,
+                    )
             except IntegrityError:
                 return "rejected"
             return "written"

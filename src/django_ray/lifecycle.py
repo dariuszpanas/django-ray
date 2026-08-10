@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from django.db import transaction
 
-from django_ray.execution_protocol import ExecutionProtocolRange
+from django_ray.execution_protocol import (
+    SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    ExecutionProtocolRange,
+)
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.runtime.runtime_env import runtime_env_for_execution
@@ -40,6 +43,7 @@ _LIFECYCLE_LOCK_FIELDS = (
     "state",
     "attempt_number",
     "execution_generation",
+    "execution_protocol_version",
 )
 _ATTEMPT_ARCHIVE_READ_FIELDS = (
     "execution_protocol_version",
@@ -150,6 +154,7 @@ class TaskCancellationRequestStatus(StrEnum):
     NOT_FOUND = "NOT_FOUND"
     STALE_ATTEMPT = "STALE_ATTEMPT"
     STALE_GENERATION = "STALE_GENERATION"
+    UNSUPPORTED_PROTOCOL = "UNSUPPORTED_PROTOCOL"
     INVALID_STATE = "INVALID_STATE"
 
 
@@ -178,6 +183,7 @@ class TaskRetryRequestStatus(StrEnum):
     STALE_ATTEMPT = "STALE_ATTEMPT"
     STALE_GENERATION = "STALE_GENERATION"
     STALE_WORKFLOW_IDENTITY = "STALE_WORKFLOW_IDENTITY"
+    UNSUPPORTED_PROTOCOL = "UNSUPPORTED_PROTOCOL"
 
 
 @dataclass(frozen=True)
@@ -466,11 +472,12 @@ def _record_attempt(execution: RayTaskExecution) -> None:
     )
 
 
-def request_task_cancellation(
+def _request_task_cancellation(
     execution_id: int,
     *,
     expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
+    supported_protocols: ExecutionProtocolRange,
 ) -> TaskCancellationRequestResult:
     """Request cancellation under the durable execution row lock.
 
@@ -510,6 +517,15 @@ def request_task_cancellation(
         ):
             return TaskCancellationRequestResult(
                 status=TaskCancellationRequestStatus.STALE_GENERATION,
+                execution_id=execution_id,
+                state=state,
+                attempt_number=attempt_number,
+                execution_generation=generation,
+            )
+
+        if not supported_protocols.supports(int(current.execution_protocol_version)):
+            return TaskCancellationRequestResult(
+                status=TaskCancellationRequestStatus.UNSUPPORTED_PROTOCOL,
                 execution_id=execution_id,
                 state=state,
                 attempt_number=attempt_number,
@@ -579,6 +595,21 @@ def request_task_cancellation(
         )
 
 
+def request_task_cancellation(
+    execution_id: int,
+    *,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
+) -> TaskCancellationRequestResult:
+    """Request cancellation under the package execution-protocol boundary."""
+    return _request_task_cancellation(
+        execution_id,
+        expected_attempt_number=expected_attempt_number,
+        expected_execution_generation=expected_execution_generation,
+        supported_protocols=SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    )
+
+
 def _request_task_retry(
     execution: RayTaskExecution | int,
     *,
@@ -592,6 +623,7 @@ def _request_task_retry(
     expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
     expected_workflow_identity: tuple[str | None, str | None] | None = None,
+    supported_protocols: ExecutionProtocolRange,
 ) -> tuple[TaskRetryRequestResult, RayTaskExecution | None]:
     """Apply one retry request and retain its bounded transition outcome."""
     execution_id = execution.pk if isinstance(execution, RayTaskExecution) else execution
@@ -651,6 +683,17 @@ def _request_task_retry(
             return (
                 TaskRetryRequestResult(
                     status=TaskRetryRequestStatus.STALE_WORKFLOW_IDENTITY,
+                    execution_id=execution_id,
+                    state=state,
+                    attempt_number=attempt_number,
+                    execution_generation=generation,
+                ),
+                None,
+            )
+        if not supported_protocols.supports(int(current.execution_protocol_version)):
+            return (
+                TaskRetryRequestResult(
+                    status=TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL,
                     execution_id=execution_id,
                     state=state,
                     attempt_number=attempt_number,
@@ -770,6 +813,7 @@ def request_task_retry(
         expected_attempt_number=expected_attempt_number,
         expected_execution_generation=expected_execution_generation,
         expected_workflow_identity=expected_workflow_identity,
+        supported_protocols=SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     )
     return result
 
@@ -805,6 +849,7 @@ def retry_task(
         expected_attempt_number=expected_attempt_number,
         expected_execution_generation=expected_execution_generation,
         expected_workflow_identity=expected_workflow_identity,
+        supported_protocols=SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     )
     return retried
 
@@ -824,6 +869,7 @@ def record_failure(
     require_completion_data_match: bool = False,
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 ) -> bool:
     """Persist a failure and optionally queue the next attempt atomically."""
     with transaction.atomic():
@@ -840,6 +886,8 @@ def record_failure(
             filters["completion_data"] = expected_completion_data
         current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
         if current is None:
+            return False
+        if not supported_protocols.supports(int(current.execution_protocol_version)):
             return False
         if retry:
             runtime_env_for_execution(current)
@@ -917,7 +965,7 @@ def expire_queued_tasks(
     *,
     now: datetime,
     limit: int = 100,
-    supported_protocols: ExecutionProtocolRange | None = None,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 ) -> tuple[int, ...]:
     """Terminalize one bounded locked batch whose queue deadline is due."""
     if limit <= 0:
@@ -928,12 +976,9 @@ def expire_queued_tasks(
             queue_name__in=tuple(queue_names),
             queue_deadline_at__isnull=False,
             queue_deadline_at__lte=now,
+            execution_protocol_version__gte=supported_protocols.minimum,
+            execution_protocol_version__lte=supported_protocols.maximum,
         )
-        if supported_protocols is not None:
-            candidates = candidates.filter(
-                execution_protocol_version__gte=supported_protocols.minimum,
-                execution_protocol_version__lte=supported_protocols.maximum,
-            )
         rows = list(candidates.order_by("queue_deadline_at", "pk")[:limit])
         expired: list[int] = []
         for current in rows:
@@ -955,6 +1000,7 @@ def record_lost(
     expected_completion_data: str | None = None,
     expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 ) -> bool:
     """Persist a LOST transition and its bounded terminal attempt summary."""
     filters: dict[str, Any] = {
@@ -976,6 +1022,8 @@ def record_lost(
         current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
         if current is None:
             return False
+        if not supported_protocols.supports(int(current.execution_protocol_version)):
+            return False
         current.state = TaskState.LOST
         current.finished_at = datetime.now(UTC)
         current.error_message = error_message
@@ -996,6 +1044,7 @@ def succeed_task(
     expected_execution_generation: int | None = None,
     expected_completion_data: str | None = None,
     require_completion_data_match: bool = False,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 ) -> bool:
     """Persist a successful terminal transition with stale-write protection."""
     filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
@@ -1012,6 +1061,8 @@ def succeed_task(
     with transaction.atomic():
         current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
         if current is None:
+            return False
+        if not supported_protocols.supports(int(current.execution_protocol_version)):
             return False
         current.state = TaskState.SUCCEEDED
         current.finished_at = datetime.now(UTC)
@@ -1061,6 +1112,7 @@ def cancel_task(
     require_completion_data_match: bool = False,
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 ) -> bool:
     """Finalize a cancellation and preserve the cancelled attempt."""
     with transaction.atomic():
@@ -1080,6 +1132,8 @@ def cancel_task(
             filters["completion_data"] = expected_completion_data
         current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
         if current is None:
+            return False
+        if not supported_protocols.supports(int(current.execution_protocol_version)):
             return False
         current.state = TaskState.CANCELLED
         current.finished_at = datetime.now(UTC)

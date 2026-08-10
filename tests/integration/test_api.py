@@ -25,6 +25,7 @@ from django_ray.lifecycle import (
     TaskRetryRequestStatus,
 )
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.protocol_coordination import close_legacy_worker_admission
 from django_ray.redaction import REDACTED, redact_text
 from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from testproject import api as testproject_api
@@ -104,6 +105,56 @@ def test_cancellation_outcome_is_a_fixed_bounded_http_response() -> None:
         "next_action": "Refresh and re-authorize the current attempt before cancelling.",
         "response_max_bytes": testproject_api._CANCELLATION_RESPONSE_MAX_BYTES,
     }
+
+
+def test_retry_outcome_uses_a_fixed_fail_closed_message_for_unmapped_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(testproject_api, "_NINJA_STATUS", None)
+    monkeypatch.delitem(
+        testproject_api._RETRY_EXECUTION_MESSAGES,
+        TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL,
+    )
+
+    response = testproject_api._retry_execution_outcome(
+        TaskRetryRequestResult(
+            status=TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL,
+            execution_id=321,
+            state=TaskState.FAILED,
+            attempt_number=2,
+            execution_generation=4,
+        ),
+        status_code=409,
+    )
+
+    assert isinstance(response, tuple)
+    assert response[0] == 409
+    assert isinstance(response[1], dict)
+    assert response[1]["message"] == "The retry request was not accepted."
+
+
+def test_cancellation_outcome_uses_a_fixed_fail_closed_message_for_unmapped_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delitem(
+        testproject_api._CANCELLATION_EXECUTION_MESSAGES,
+        TaskCancellationRequestStatus.UNSUPPORTED_PROTOCOL,
+    )
+
+    response = testproject_api._cancellation_execution_outcome(
+        SimpleNamespace(),
+        TaskCancellationRequestResult(
+            status=TaskCancellationRequestStatus.UNSUPPORTED_PROTOCOL,
+            execution_id=321,
+            state=TaskState.RUNNING,
+            attempt_number=2,
+            execution_generation=4,
+        ),
+        status_code=409,
+    )
+
+    assert response.status_code == 409
+    assert json.loads(response.content)["message"] == ("The cancellation request was not accepted.")
 
 
 def test_browser_auth_javascript_executes_credentialed_actions() -> None:
@@ -2822,6 +2873,44 @@ class TestExecutionsAPI:
         assert "finished_at" not in data
         assert "cancellation_error" not in data
 
+    @pytest.mark.django_db(transaction=True)
+    def test_cancel_unsupported_protocol_is_an_explicit_conflict_without_mutation(
+        self,
+        client,
+    ) -> None:
+        close_legacy_worker_admission(
+            expected_revision=1,
+            legacy_producers_retired=True,
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="test-cancel-unsupported-protocol",
+            callable_path="test.task",
+            state=TaskState.QUEUED,
+            execution_protocol_version=2,
+            attempt_number=3,
+            execution_generation=7,
+        )
+        before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+
+        response = client.post(f"/api/executions/{task.pk}/cancel")
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "code": "UNSUPPORTED_PROTOCOL",
+            "message": "This django-ray build does not support the execution protocol.",
+            "execution_id": task.pk,
+            "state": "QUEUED",
+            "attempt_number": 3,
+            "execution_generation": 7,
+            "next_action": (
+                "Route this execution to a django-ray build that supports its protocol "
+                "before cancelling."
+            ),
+            "response_max_bytes": testproject_api._CANCELLATION_RESPONSE_MAX_BYTES,
+        }
+        assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
     def test_cancel_terminal_execution_is_an_explicit_conflict(self, client):
         task = RayTaskExecution.objects.create(
             task_id="test-cancel-terminal",
@@ -2974,6 +3063,39 @@ class TestExecutionsAPI:
         assert duplicate_data["execution_generation"] == 1
         assert "FAILED, CANCELLED, LOST, or EXPIRED" in duplicate_data["next_action"]
         assert TaskAttempt.objects.filter(execution=task).count() == 1
+
+    def test_retry_unsupported_protocol_is_an_explicit_conflict_without_mutation(
+        self,
+        client,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="test-retry-unsupported-protocol",
+            callable_path="test.task",
+            state=TaskState.FAILED,
+            execution_protocol_version=2,
+            attempt_number=3,
+            execution_generation=7,
+            error_message="retained failure",
+        )
+        before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+
+        response = client.post(f"/api/executions/{task.pk}/retry")
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "code": "UNSUPPORTED_PROTOCOL",
+            "message": "This django-ray build does not support the execution protocol.",
+            "execution_id": task.pk,
+            "state": "FAILED",
+            "attempt_number": 3,
+            "execution_generation": 7,
+            "next_action": (
+                "Route this execution to a django-ray build that supports its protocol "
+                "before retrying."
+            ),
+        }
+        assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_retry_succeeded_execution_guides_a_fresh_enqueue_without_mutation(self, client):
         result_marker = "successful-result-must-not-leak-issue-321"

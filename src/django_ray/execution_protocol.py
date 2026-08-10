@@ -34,6 +34,12 @@ class ExecutionProtocolRange:
         return self.minimum <= protocol_version <= self.maximum
 
 
+SUPPORTED_EXECUTION_PROTOCOL_RANGE = ExecutionProtocolRange(
+    minimum=MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    maximum=MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+)
+
+
 def explicit_worker_protocol_range(
     *,
     capability_schema_version: int,

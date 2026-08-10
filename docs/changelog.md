@@ -57,6 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provenance; terminal archival copies the exact protocol and manager/executor values,
   while retry preserves task-chain identity and clears those current attempt fields.
   Historical and unreported provenance remains null rather than being inferred.
+- Package-owned cancellation, retry, expiry, and terminal lifecycle services now check
+  the immutable execution protocol under the row lock before RuntimeEnv hydration,
+  attempt archival, cancellation effects, or durable mutation.
+  Unsupported cancellation/retry requests return a distinct bounded status, Admin
+  reports them separately, and other transitions leave the row unchanged.
 - PostgreSQL and SQLite rollout coordination now serializes exact-0.4 execution and
   lease inserts, legacy heartbeats, and concurrent policy transitions without using
   package Semantic Versions as compatibility evidence. Callers must provide the

@@ -510,6 +510,25 @@ _RETRY_EXECUTION_RESPONSES = {
     404: RetryExecutionOutcomeSchema,
     409: RetryExecutionOutcomeSchema | RetryExecutionRuntimeEnvConflictSchema,
 }
+_RETRY_EXECUTION_MESSAGES = {
+    TaskRetryRequestStatus.ACCEPTED: "A new task attempt was queued.",
+    TaskRetryRequestStatus.NOT_RETRYABLE: (
+        "The execution is not retryable from its current state."
+    ),
+    TaskRetryRequestStatus.NOT_FOUND: "The execution was not found.",
+    TaskRetryRequestStatus.STALE_ATTEMPT: (
+        "The execution attempt changed before the retry could be applied."
+    ),
+    TaskRetryRequestStatus.STALE_GENERATION: (
+        "The execution generation changed before the retry could be applied."
+    ),
+    TaskRetryRequestStatus.STALE_WORKFLOW_IDENTITY: (
+        "The workflow identity changed before the retry could be applied."
+    ),
+    TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL: (
+        "This django-ray build does not support the execution protocol."
+    ),
+}
 
 
 class CancellationExecutionOutcomeSchema(Schema):
@@ -530,6 +549,31 @@ _CANCELLATION_EXECUTION_RESPONSES = {
     404: CancellationExecutionOutcomeSchema,
     409: CancellationExecutionOutcomeSchema,
 }
+_CANCELLATION_EXECUTION_MESSAGES = {
+    TaskCancellationRequestStatus.ACCEPTED: "Cancellation was accepted.",
+    TaskCancellationRequestStatus.ALREADY_REQUESTED: (
+        "Cancellation was already requested for this execution."
+    ),
+    TaskCancellationRequestStatus.ALREADY_TERMINAL: (
+        "The execution is already terminal and cannot be cancelled."
+    ),
+    TaskCancellationRequestStatus.COMPLETION_PENDING: (
+        "A terminal completion is awaiting durable reconciliation."
+    ),
+    TaskCancellationRequestStatus.NOT_FOUND: "The execution was not found.",
+    TaskCancellationRequestStatus.STALE_ATTEMPT: (
+        "The execution attempt changed before cancellation could be applied."
+    ),
+    TaskCancellationRequestStatus.STALE_GENERATION: (
+        "The execution generation changed before cancellation could be applied."
+    ),
+    TaskCancellationRequestStatus.INVALID_STATE: (
+        "The execution is not cancellable from its current state."
+    ),
+    TaskCancellationRequestStatus.UNSUPPORTED_PROTOCOL: (
+        "This django-ray build does not support the execution protocol."
+    ),
+}
 # Django Ninja 1.5 uses the tuple contract; 1.6 adds Status to avoid its deprecation.
 _NINJA_STATUS = getattr(ninja_responses, "Status", None)
 
@@ -545,22 +589,6 @@ def _retry_execution_outcome(
     *,
     status_code: int,
 ) -> object:
-    messages = {
-        TaskRetryRequestStatus.ACCEPTED: "A new task attempt was queued.",
-        TaskRetryRequestStatus.NOT_RETRYABLE: (
-            "The execution is not retryable from its current state."
-        ),
-        TaskRetryRequestStatus.NOT_FOUND: "The execution was not found.",
-        TaskRetryRequestStatus.STALE_ATTEMPT: (
-            "The execution attempt changed before the retry could be applied."
-        ),
-        TaskRetryRequestStatus.STALE_GENERATION: (
-            "The execution generation changed before the retry could be applied."
-        ),
-        TaskRetryRequestStatus.STALE_WORKFLOW_IDENTITY: (
-            "The workflow identity changed before the retry could be applied."
-        ),
-    }
     if result.status is TaskRetryRequestStatus.ACCEPTED:
         next_action = "Poll or inspect the newly queued attempt."
     elif (
@@ -577,13 +605,20 @@ def _retry_execution_outcome(
         )
     elif result.status is TaskRetryRequestStatus.NOT_FOUND:
         next_action = "Verify the execution identifier and object authorization."
+    elif result.status is TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL:
+        next_action = (
+            "Route this execution to a django-ray build that supports its protocol before retrying."
+        )
     else:
         next_action = (
             "Refresh and re-authorize the current attempt before deciding whether to retry."
         )
     payload: dict[str, str | int | None] = {
         "code": result.status.value,
-        "message": messages[result.status],
+        "message": _RETRY_EXECUTION_MESSAGES.get(
+            result.status,
+            "The retry request was not accepted.",
+        ),
         "execution_id": result.execution_id,
         "state": result.state,
         "attempt_number": result.attempt_number,
@@ -600,28 +635,6 @@ def _cancellation_execution_outcome(
     status_code: int,
 ) -> HttpResponse:
     """Render one fixed cancellation result without execution diagnostics."""
-    messages = {
-        TaskCancellationRequestStatus.ACCEPTED: "Cancellation was accepted.",
-        TaskCancellationRequestStatus.ALREADY_REQUESTED: (
-            "Cancellation was already requested for this execution."
-        ),
-        TaskCancellationRequestStatus.ALREADY_TERMINAL: (
-            "The execution is already terminal and cannot be cancelled."
-        ),
-        TaskCancellationRequestStatus.COMPLETION_PENDING: (
-            "A terminal completion is awaiting durable reconciliation."
-        ),
-        TaskCancellationRequestStatus.NOT_FOUND: "The execution was not found.",
-        TaskCancellationRequestStatus.STALE_ATTEMPT: (
-            "The execution attempt changed before cancellation could be applied."
-        ),
-        TaskCancellationRequestStatus.STALE_GENERATION: (
-            "The execution generation changed before cancellation could be applied."
-        ),
-        TaskCancellationRequestStatus.INVALID_STATE: (
-            "The execution is not cancellable from its current state."
-        ),
-    }
     if result.status is TaskCancellationRequestStatus.ACCEPTED:
         if result.state == TaskState.CANCELLED:
             next_action = "The queued attempt is cancelled; retain its archived history."
@@ -638,12 +651,20 @@ def _cancellation_execution_outcome(
         TaskCancellationRequestStatus.STALE_GENERATION,
     }:
         next_action = "Refresh and re-authorize the current attempt before cancelling."
+    elif result.status is TaskCancellationRequestStatus.UNSUPPORTED_PROTOCOL:
+        next_action = (
+            "Route this execution to a django-ray build that supports its protocol "
+            "before cancelling."
+        )
     else:
         next_action = "Leave the current execution unchanged and inspect its lifecycle state."
     response = CancellationExecutionOutcomeSchema.model_validate(
         {
             "code": result.status,
-            "message": messages[result.status],
+            "message": _CANCELLATION_EXECUTION_MESSAGES.get(
+                result.status,
+                "The cancellation request was not accepted.",
+            ),
             "execution_id": result.execution_id,
             "state": result.state,
             "attempt_number": result.attempt_number,
