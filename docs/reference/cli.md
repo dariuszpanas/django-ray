@@ -157,6 +157,18 @@ startup-barrier timeout.
 refuses SQLite and other database engines because their locking behavior is not
 representative.
 
+Every run also emits additive schema-v1 `protocol_predicate_evidence`. The command
+intercepts the production priority claim `SELECT` before it executes, proves that its
+bounded comparison query has the same SQL shape, and compares it with a control that
+omits only the execution-protocol range. Both variants select the same exact owned
+rows at the package's active write protocol (currently protocol `1`) and use 12
+deterministic, counterbalanced timing pairs. The report
+contains fixed-vocabulary bounded `EXPLAIN ANALYZE` summaries, p50/p95 timings, and
+signed production-minus-control deltas; it never includes SQL, queue names, task IDs,
+or row IDs. Those timings are benchmark evidence rather than a pass/fail latency gate.
+The command deletes only its exact temporary rows and capture lease, including on
+failure.
+
 ## django_ray_purge_inputs
 
 Report retained external input payloads whose references are all terminal and older

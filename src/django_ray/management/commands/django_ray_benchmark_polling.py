@@ -11,24 +11,62 @@ import time
 import uuid
 from collections import Counter, deque
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from io import StringIO
 from typing import Any
 
 import django
 from django.core.management.base import BaseCommand, CommandError, CommandParser
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, transaction
 from django.db.migrations.recorder import MigrationRecorder
+from django.db.models import Q, QuerySet
 
 from django_ray import __version__ as django_ray_version
 from django_ray.execution_protocol import (
     EXECUTION_METADATA_SCHEMA_VERSION,
     EXECUTION_PROTOCOL_VERSION,
+    SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 )
 from django_ray.management.commands.django_ray_worker import Command as WorkerCommand
 from django_ray.management.diagnostics import render_console_diagnostic
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.runner.leasing import WorkerLeaseIdentity, get_heartbeat_interval
 from django_ray.runner.polling import AdaptivePollingPolicy
+
+_PROTOCOL_PREDICATE_EVIDENCE_SCHEMA_VERSION = 1
+_PROTOCOL_PREDICATE_METHOD = "paired_counterbalanced_production_claim"
+_PROTOCOL_PREDICATE_MAX_ROWS = 256
+_PROTOCOL_PREDICATE_TIMED_PAIRS = 12
+_PRODUCTION_VARIANT = "production_protocol_predicate"
+_CONTROL_VARIANT = "control_without_protocol_predicate"
+_MAX_PLAN_NODES = 32
+_CAPTURE_EMPTY_SELECT = "SELECT 1 WHERE FALSE"
+
+_PLAN_NODE_CATEGORIES = {
+    "Append": "append",
+    "Bitmap Heap Scan": "bitmap_heap_scan",
+    "Bitmap Index Scan": "bitmap_index_scan",
+    "Gather": "gather",
+    "Gather Merge": "gather_merge",
+    "Incremental Sort": "incremental_sort",
+    "Index Only Scan": "index_only_scan",
+    "Index Scan": "index_scan",
+    "Limit": "limit",
+    "LockRows": "lock_rows",
+    "Materialize": "materialize",
+    "Memoize": "memoize",
+    "Result": "result",
+    "Seq Scan": "seq_scan",
+    "Sort": "sort",
+}
+
+
+class _ProductionClaimSqlCapturedError(Exception):
+    """Stop the real claim path after its SELECT has been observed."""
+
+
+class _CaptureProcessInvocationError(Exception):
+    """Prevent capture-only workers from crossing the application boundary."""
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -101,6 +139,156 @@ def _is_claim_query(sql: str) -> bool:
     table_name = RayTaskExecution._meta.db_table.upper()
     return (
         normalized.startswith("SELECT") and table_name in normalized and "FOR UPDATE" in normalized
+    )
+
+
+def _is_production_claim_query(sql: str) -> bool:
+    """Distinguish the priority claim SELECT from the preceding expiry sweep."""
+    normalized = " ".join(sql.upper().split())
+    order_clause = normalized.rsplit("ORDER BY", 1)[-1] if "ORDER BY" in normalized else ""
+    return (
+        _is_claim_query(sql)
+        and '"PRIORITY" DESC' in order_clause
+        and '"CREATED_AT" ASC' in order_clause
+    )
+
+
+def _is_expiry_sweep_query(sql: str) -> bool:
+    """Recognize the bounded expiry SELECT that precedes production claiming."""
+    normalized = " ".join(sql.upper().split())
+    if " WHERE " not in normalized or " ORDER BY " not in normalized:
+        return False
+    where_clause = normalized.split(" WHERE ", 1)[1].rsplit(" ORDER BY ", 1)[0]
+    order_clause = normalized.rsplit(" ORDER BY ", 1)[1]
+    return (
+        _is_claim_query(sql)
+        and '"QUEUE_DEADLINE_AT" IS NOT NULL' in where_clause
+        and '"QUEUE_DEADLINE_AT" <=' in where_clause
+        and '"QUEUE_DEADLINE_AT" ASC' in order_clause
+    )
+
+
+def _normalized_sql_shape(sql: str) -> str:
+    """Normalize captured SQL for an internal shape comparison only."""
+    return " ".join(sql.upper().split())
+
+
+def _has_inclusive_protocol_predicates(sql: str) -> bool:
+    """Return whether a SQL shape includes both protocol-range bounds."""
+    normalized = _normalized_sql_shape(sql)
+    column = '"EXECUTION_PROTOCOL_VERSION"'
+    return f"{column} >=" in normalized and f"{column} <=" in normalized
+
+
+@dataclass(frozen=True)
+class ProtocolPredicatePlanSummary:
+    """Fixed, bounded PostgreSQL plan facts without SQL or row identifiers."""
+
+    node_shape: tuple[str, ...]
+    index_categories: tuple[str, ...]
+    estimated_rows: int
+    actual_rows: int
+    actual_loops: int
+    estimated_total_cost: float
+
+
+@dataclass(frozen=True)
+class ProtocolPredicateVariantResult:
+    """One bounded query variant's paired timing and plan evidence."""
+
+    name: str
+    protocol_predicate: bool
+    duration_samples_ms: tuple[float, ...]
+    duration_p50_ms: float
+    duration_p95_ms: float
+    plan: ProtocolPredicatePlanSummary
+
+
+@dataclass(frozen=True)
+class ProtocolPredicateEvidence:
+    """Counterbalanced evidence for the production protocol-range predicate."""
+
+    schema_version: int
+    method: str
+    seeded_rows: int
+    query_limit: int
+    timed_pairs: int
+    production_first_pairs: int
+    control_first_pairs: int
+    seeded_protocol_version: int
+    protocol_minimum: int
+    protocol_maximum: int
+    production_claim_sql_shape_verified: bool
+    variant_selection_verified: bool
+    paired_delta_samples_ms: tuple[float, ...]
+    paired_delta_p50_ms: float
+    paired_delta_p95_ms: float
+    variants: tuple[ProtocolPredicateVariantResult, ProtocolPredicateVariantResult]
+
+
+def _plan_number(plan: dict[str, object], key: str, *, integer: bool = False) -> float | int:
+    value = plan.get(key)
+    if type(value) not in (int, float):
+        raise CommandError("PostgreSQL returned an unsupported EXPLAIN JSON shape")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric < 0:
+        raise CommandError("PostgreSQL returned an unsupported EXPLAIN JSON shape")
+    return int(numeric) if integer else numeric
+
+
+def _summarize_explain(raw_explain: str) -> ProtocolPredicatePlanSummary:
+    """Reduce EXPLAIN JSON to a fixed vocabulary and bounded node sequence."""
+    try:
+        decoded = json.loads(raw_explain)
+    except (TypeError, ValueError):
+        raise CommandError("PostgreSQL returned an unsupported EXPLAIN JSON shape") from None
+    if not isinstance(decoded, list) or len(decoded) != 1 or not isinstance(decoded[0], dict):
+        raise CommandError("PostgreSQL returned an unsupported EXPLAIN JSON shape")
+    root = decoded[0].get("Plan")
+    if not isinstance(root, dict):
+        raise CommandError("PostgreSQL returned an unsupported EXPLAIN JSON shape")
+
+    node_shape: list[str] = []
+    index_categories: set[str] = set()
+
+    def visit(node: dict[str, object], depth: int) -> None:
+        if len(node_shape) >= _MAX_PLAN_NODES:
+            raise CommandError("PostgreSQL EXPLAIN plan exceeded the bounded node limit")
+        raw_node_type = node.get("Node Type")
+        node_category = (
+            _PLAN_NODE_CATEGORIES.get(raw_node_type, "other")
+            if isinstance(raw_node_type, str)
+            else "other"
+        )
+        node_shape.append(f"{depth}:{node_category}")
+
+        raw_index_name = node.get("Index Name")
+        if isinstance(raw_index_name, str):
+            if raw_index_name == "ray_task_claimable_idx":
+                index_categories.add("claimable")
+            elif "execution_protocol_version" in raw_index_name:
+                index_categories.add("protocol")
+            elif raw_index_name.endswith("_pkey"):
+                index_categories.add("primary_key")
+            else:
+                index_categories.add("other")
+
+        children = node.get("Plans", [])
+        if not isinstance(children, list):
+            raise CommandError("PostgreSQL returned an unsupported EXPLAIN JSON shape")
+        for child in children:
+            if not isinstance(child, dict):
+                raise CommandError("PostgreSQL returned an unsupported EXPLAIN JSON shape")
+            visit(child, depth + 1)
+
+    visit(root, 0)
+    return ProtocolPredicatePlanSummary(
+        node_shape=tuple(node_shape),
+        index_categories=tuple(sorted(index_categories)),
+        estimated_rows=int(_plan_number(root, "Plan Rows", integer=True)),
+        actual_rows=int(_plan_number(root, "Actual Rows", integer=True)),
+        actual_loops=int(_plan_number(root, "Actual Loops", integer=True)),
+        estimated_total_cost=float(_plan_number(root, "Total Cost")),
     )
 
 
@@ -214,6 +402,10 @@ class Command(BaseCommand):
                 seed=seed,
             ),
         ]
+        protocol_predicate_evidence = self._run_protocol_predicate_evidence(
+            task_count=tasks,
+            seed=seed,
+        )
 
         payload = {
             "environment": self._environment_metadata(
@@ -225,6 +417,7 @@ class Command(BaseCommand):
                 seed=seed,
             ),
             "results": [asdict(result) for result in results],
+            "protocol_predicate_evidence": asdict(protocol_predicate_evidence),
         }
         if options["json_output"]:
             self.stdout.write(json.dumps(payload, sort_keys=True))
@@ -241,6 +434,13 @@ class Command(BaseCommand):
                 f"claim_p95={result.claim_latency_p95_ms:.2f}ms, "
                 f"burst_throughput={result.burst_claim_throughput_per_second:.2f} tasks/s"
             )
+        self.stdout.write(
+            "protocol_predicate: "
+            f"production_p50={protocol_predicate_evidence.variants[0].duration_p50_ms:.3f}ms, "
+            f"control_p50={protocol_predicate_evidence.variants[1].duration_p50_ms:.3f}ms, "
+            f"paired_delta_p50={protocol_predicate_evidence.paired_delta_p50_ms:.3f}ms, "
+            "production_claim_sql_shape_verified=true"
+        )
 
     @staticmethod
     def _positive_int(value: object, option: str) -> int:
@@ -296,6 +496,298 @@ class Command(BaseCommand):
             if app == "django_ray"
         )
         return applied[-1] if applied else "unmigrated"
+
+    def _run_protocol_predicate_evidence(
+        self,
+        *,
+        task_count: int,
+        seed: int,
+    ) -> ProtocolPredicateEvidence:
+        """Compare the exact production claim predicate with a paired control."""
+        run_id = uuid.uuid4().hex
+        queue_name = f"django-ray-poll-protocol-{run_id}"
+        task_prefix = f"poll-protocol-{run_id}-"
+        row_count = min(task_count, _PROTOCOL_PREDICATE_MAX_ROWS)
+        created_pks: list[int] = []
+        try:
+            for index in range(row_count):
+                task_id = f"{task_prefix}{index}"
+                with transaction.atomic():
+                    execution = self._create_execution(
+                        task_id=task_id,
+                        queue_name=queue_name,
+                    )
+                    if execution.pk is None:
+                        raise CommandError(
+                            "protocol predicate benchmark could not retain row ownership"
+                        )
+                    created_pk = int(execution.pk)
+                created_pks.append(created_pk)
+
+            claim_now = datetime.now(UTC)
+            captured_sql = self._capture_production_claim_sql(
+                queue_name=queue_name,
+                query_limit=row_count,
+            )
+            self._verify_production_claim_sql_shape(
+                captured_sql=captured_sql,
+                queue_name=queue_name,
+                claim_now=claim_now,
+                query_limit=row_count,
+            )
+
+            production_plan = self._explain_claim_query(
+                queue_name=queue_name,
+                claim_now=claim_now,
+                query_limit=row_count,
+                protocol_predicate=True,
+            )
+            control_plan = self._explain_claim_query(
+                queue_name=queue_name,
+                claim_now=claim_now,
+                query_limit=row_count,
+                protocol_predicate=False,
+            )
+
+            production_samples: list[float] = []
+            control_samples: list[float] = []
+            paired_deltas: list[float] = []
+            production_first_pairs = 0
+            control_first_pairs = 0
+
+            warmup_order = (True, False) if seed % 2 else (False, True)
+            for protocol_predicate in warmup_order:
+                _, selected_pks = self._time_claim_query(
+                    queue_name=queue_name,
+                    claim_now=claim_now,
+                    query_limit=row_count,
+                    protocol_predicate=protocol_predicate,
+                )
+                self._assert_protocol_selection(
+                    selected_pks=selected_pks,
+                    expected_pks=created_pks,
+                )
+
+            for pair_index in range(_PROTOCOL_PREDICATE_TIMED_PAIRS):
+                production_first = (pair_index + seed) % 2 == 1
+                if production_first:
+                    production_first_pairs += 1
+                    order = (True, False)
+                else:
+                    control_first_pairs += 1
+                    order = (False, True)
+                pair_durations: dict[bool, float] = {}
+                for protocol_predicate in order:
+                    duration_ms, selected_pks = self._time_claim_query(
+                        queue_name=queue_name,
+                        claim_now=claim_now,
+                        query_limit=row_count,
+                        protocol_predicate=protocol_predicate,
+                    )
+                    self._assert_protocol_selection(
+                        selected_pks=selected_pks,
+                        expected_pks=created_pks,
+                    )
+                    pair_durations[protocol_predicate] = duration_ms
+                production_duration = pair_durations[True]
+                control_duration = pair_durations[False]
+                production_samples.append(production_duration)
+                control_samples.append(control_duration)
+                paired_deltas.append(production_duration - control_duration)
+
+            variants = (
+                ProtocolPredicateVariantResult(
+                    name=_PRODUCTION_VARIANT,
+                    protocol_predicate=True,
+                    duration_samples_ms=tuple(production_samples),
+                    duration_p50_ms=_percentile(production_samples, 0.5),
+                    duration_p95_ms=_percentile(production_samples, 0.95),
+                    plan=production_plan,
+                ),
+                ProtocolPredicateVariantResult(
+                    name=_CONTROL_VARIANT,
+                    protocol_predicate=False,
+                    duration_samples_ms=tuple(control_samples),
+                    duration_p50_ms=_percentile(control_samples, 0.5),
+                    duration_p95_ms=_percentile(control_samples, 0.95),
+                    plan=control_plan,
+                ),
+            )
+            return ProtocolPredicateEvidence(
+                schema_version=_PROTOCOL_PREDICATE_EVIDENCE_SCHEMA_VERSION,
+                method=_PROTOCOL_PREDICATE_METHOD,
+                seeded_rows=row_count,
+                query_limit=row_count,
+                timed_pairs=_PROTOCOL_PREDICATE_TIMED_PAIRS,
+                production_first_pairs=production_first_pairs,
+                control_first_pairs=control_first_pairs,
+                seeded_protocol_version=EXECUTION_PROTOCOL_VERSION,
+                protocol_minimum=SUPPORTED_EXECUTION_PROTOCOL_RANGE.minimum,
+                protocol_maximum=SUPPORTED_EXECUTION_PROTOCOL_RANGE.maximum,
+                production_claim_sql_shape_verified=True,
+                variant_selection_verified=True,
+                paired_delta_samples_ms=tuple(paired_deltas),
+                paired_delta_p50_ms=_percentile(paired_deltas, 0.5),
+                paired_delta_p95_ms=_percentile(paired_deltas, 0.95),
+                variants=variants,
+            )
+        finally:
+            if created_pks:
+                owned_rows = RayTaskExecution.objects.filter(pk__in=created_pks)
+                owned_rows.delete()
+                if RayTaskExecution.objects.filter(pk__in=created_pks).exists():
+                    raise CommandError("protocol predicate benchmark row cleanup was incomplete")
+
+    @staticmethod
+    def _claim_queryset(
+        *,
+        queue_name: str,
+        claim_now: datetime,
+        query_limit: int,
+        protocol_predicate: bool,
+    ) -> QuerySet:
+        claim_filters: dict[str, object] = {
+            "state": TaskState.QUEUED,
+            "queue_name__in": [queue_name],
+        }
+        if protocol_predicate:
+            claim_filters.update(
+                execution_protocol_version__gte=SUPPORTED_EXECUTION_PROTOCOL_RANGE.minimum,
+                execution_protocol_version__lte=SUPPORTED_EXECUTION_PROTOCOL_RANGE.maximum,
+            )
+        tasks = RayTaskExecution.objects.select_for_update(skip_locked=True).filter(**claim_filters)
+        return (
+            tasks.filter(Q(run_after__isnull=True) | Q(run_after__lte=claim_now))
+            .filter(Q(queue_deadline_at__isnull=True) | Q(queue_deadline_at__gt=claim_now))
+            .order_by("-priority", "created_at", "pk")[:query_limit]
+        )
+
+    @staticmethod
+    def _capture_production_claim_sql(*, queue_name: str, query_limit: int) -> str:
+        command = WorkerCommand()
+        command.stdout = StringIO()
+        command._set_worker_id(f"benchmark-{queue_name}-capture")
+        command.execution_mode = "local"
+        command.shutdown_requested = False
+        command.active_tasks = {}
+        command.ray_core_runner = None
+        captured_sql: str | None = None
+
+        def reject_process_task(_task: RayTaskExecution) -> None:
+            raise _CaptureProcessInvocationError
+
+        command.process_task = reject_process_task  # type: ignore[method-assign]
+
+        def observe(execute, sql, params, many, context):
+            nonlocal captured_sql
+            if _is_claim_query(sql):
+                if _is_production_claim_query(sql):
+                    captured_sql = str(sql)
+                    raise _ProductionClaimSqlCapturedError
+                if _is_expiry_sweep_query(sql):
+                    return execute(_CAPTURE_EMPTY_SELECT, (), False, context)
+                raise CommandError("capture encountered an unrecognized task-row locking SELECT")
+            return execute(sql, params, many, context)
+
+        try:
+            command._create_lease(queue_name)
+            if command.lease_identity is None:
+                raise CommandError("protocol predicate benchmark could not acquire a capture lease")
+            try:
+                with transaction.atomic():
+                    try:
+                        with connection.execute_wrapper(observe):
+                            command.claim_and_process_tasks([queue_name], concurrency=query_limit)
+                    finally:
+                        transaction.set_rollback(True)
+            except _ProductionClaimSqlCapturedError:
+                pass
+            except _CaptureProcessInvocationError:
+                raise CommandError(
+                    "capture reached the protected application processing boundary"
+                ) from None
+            if captured_sql is None:
+                raise CommandError(
+                    "protocol predicate benchmark did not observe the production claim"
+                )
+            return captured_sql
+        finally:
+            Command._delete_exact_leases([command.lease_identity])
+
+    @staticmethod
+    def _verify_production_claim_sql_shape(
+        *,
+        captured_sql: str,
+        queue_name: str,
+        claim_now: datetime,
+        query_limit: int,
+    ) -> None:
+        with transaction.atomic():
+            queryset = Command._claim_queryset(
+                queue_name=queue_name,
+                claim_now=claim_now,
+                query_limit=query_limit,
+                protocol_predicate=True,
+            )
+            candidate_sql, _ = queryset.query.sql_with_params()
+        if not _has_inclusive_protocol_predicates(captured_sql):
+            raise CommandError(
+                "production claim SELECT is missing the inclusive protocol-range predicates"
+            )
+        if _normalized_sql_shape(captured_sql) != _normalized_sql_shape(candidate_sql):
+            raise CommandError(
+                "protocol predicate benchmark query shape does not match the production claim SELECT"
+            )
+
+    @staticmethod
+    def _explain_claim_query(
+        *,
+        queue_name: str,
+        claim_now: datetime,
+        query_limit: int,
+        protocol_predicate: bool,
+    ) -> ProtocolPredicatePlanSummary:
+        with transaction.atomic():
+            queryset = Command._claim_queryset(
+                queue_name=queue_name,
+                claim_now=claim_now,
+                query_limit=query_limit,
+                protocol_predicate=protocol_predicate,
+            )
+            raw_explain = queryset.explain(
+                analyze=True,
+                buffers=True,
+                format="json",
+                timing=False,
+            )
+        return _summarize_explain(raw_explain)
+
+    @staticmethod
+    def _time_claim_query(
+        *,
+        queue_name: str,
+        claim_now: datetime,
+        query_limit: int,
+        protocol_predicate: bool,
+    ) -> tuple[float, list[int]]:
+        with transaction.atomic():
+            queryset = Command._claim_queryset(
+                queue_name=queue_name,
+                claim_now=claim_now,
+                query_limit=query_limit,
+                protocol_predicate=protocol_predicate,
+            )
+            started_ns = time.perf_counter_ns()
+            selected_pks = [int(execution.pk) for execution in queryset]
+            elapsed_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
+        if not math.isfinite(elapsed_ms) or elapsed_ms < 0:
+            raise CommandError("protocol predicate benchmark produced an invalid duration")
+        return elapsed_ms, selected_pks
+
+    @staticmethod
+    def _assert_protocol_selection(*, selected_pks: list[int], expected_pks: list[int]) -> None:
+        if selected_pks != expected_pks:
+            raise CommandError("protocol predicate benchmark variants selected different task rows")
 
     def _run_policy(
         self,
@@ -714,8 +1206,8 @@ class Command(BaseCommand):
                 TaskWorkerLease.objects.filter(**identity.database_filters()).delete()
 
     @staticmethod
-    def _create_execution(*, task_id: str, queue_name: str) -> None:
-        RayTaskExecution.objects.create(
+    def _create_execution(*, task_id: str, queue_name: str) -> RayTaskExecution:
+        return RayTaskExecution.objects.create(
             task_id=task_id,
             callable_path="django_ray.benchmarks.polling_probe",
             metadata_schema_version=EXECUTION_METADATA_SCHEMA_VERSION,

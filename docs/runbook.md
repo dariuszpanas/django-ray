@@ -429,6 +429,15 @@ Increase the maximum gradually and compare idle queries per worker-second with p
 claim latency. Do not lengthen heartbeat, timeout, or cancellation settings to reduce
 claim-query load; those schedules are independent safety controls.
 
+For rollout-related claim regressions, also inspect the benchmark's schema-v1
+`protocol_predicate_evidence`. Require `production_claim_sql_shape_verified=true`, equal
+seeded/query-limit counts, six production-first and six control-first pairs, finite
+samples, and bounded plan shapes for both variants. The signed paired delta is
+production minus control, so negative values are valid. Compare repeated runs on the
+same database and workload before opening an index change; there is intentionally no
+single-run latency threshold. The report omits raw SQL and durable identities, so use
+ordinary database tooling separately if an authorized plan investigation needs them.
+
 ## 2) Tasks Stuck In RUNNING
 
 Symptoms:
