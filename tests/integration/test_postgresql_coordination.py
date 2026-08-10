@@ -25,6 +25,7 @@ from django.utils import timezone
 
 import django_ray.admin as django_ray_admin
 import django_ray.workflow_progress as workflow_progress_module
+from django_ray import __version__ as django_ray_version
 from django_ray.input_storage import (
     EXTERNAL_INPUT_PLACEHOLDER,
     load_task_input,
@@ -239,6 +240,7 @@ def test_incompatible_candidate_does_not_wait_for_locked_source_lease() -> None:
         claimed_by_worker=source.worker_id,
         started_at=now - timedelta(hours=1),
         last_heartbeat_at=now - timedelta(hours=1),
+        managed_with_django_ray_version="0.4.0-manager",
     )
     candidate = _claim_command("postgres-a-v1-candidate", [])
     source_locked = Event()
@@ -303,6 +305,7 @@ def test_nested_compatible_takeover_preserves_global_lease_lock_order(
         claimed_by_worker=source.worker_id,
         started_at=now - timedelta(hours=1),
         last_heartbeat_at=now - timedelta(hours=1),
+        managed_with_django_ray_version="0.4.0-manager",
     )
     candidate = _claim_command("postgres-z-v1-lock-candidate", [])
     source_locked = Event()
@@ -363,6 +366,7 @@ def test_nested_compatible_takeover_preserves_global_lease_lock_order(
     task.refresh_from_db()
     source.refresh_from_db()
     assert task.claimed_by_worker == candidate.worker_id
+    assert task.managed_with_django_ray_version == django_ray_version
     assert source.is_active is False
 
 
@@ -547,9 +551,20 @@ def test_two_workers_claim_each_execution_exactly_once() -> None:
     assert set(claimed_a) | set(claimed_b) == expected_ids
     assert len(claimed_a) == len(claimed_b) == 6
 
-    owners = dict(RayTaskExecution.objects.values_list("pk", "claimed_by_worker"))
-    assert {owners[task_id] for task_id in claimed_a} == {"postgres-worker-a"}
-    assert {owners[task_id] for task_id in claimed_b} == {"postgres-worker-b"}
+    ownership = {
+        task_pk: (owner, manager)
+        for task_pk, owner, manager in RayTaskExecution.objects.values_list(
+            "pk",
+            "claimed_by_worker",
+            "managed_with_django_ray_version",
+        )
+    }
+    assert {ownership[task_id] for task_id in claimed_a} == {
+        ("postgres-worker-a", django_ray_version)
+    }
+    assert {ownership[task_id] for task_id in claimed_b} == {
+        ("postgres-worker-b", django_ray_version)
+    }
 
 
 def test_two_workers_claim_global_priority_frontier_with_fifo_ties() -> None:
@@ -743,6 +758,7 @@ def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:
         ray_address="ray://cluster:10001",
         started_at=now - timedelta(minutes=5),
         last_heartbeat_at=now - timedelta(minutes=5),
+        managed_with_django_ray_version="0.4.0-manager",
     )
     snapshots = [RayTaskExecution.objects.get(pk=task.pk) for _ in range(2)]
     adopters = [
@@ -764,6 +780,7 @@ def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:
     task.refresh_from_db()
     winner = str(task.claimed_by_worker)
     assert winner in {"adopter-a", "adopter-b"}
+    assert task.managed_with_django_ray_version == django_ray_version
     winning_command = adopters[0] if winner == "adopter-a" else adopters[1]
     assert winning_command.active_tasks == {task.pk: "raysubmit_postgres_orphan"}
     expired_lease = TaskWorkerLease.objects.get(worker_id="expired-owner")
@@ -1524,6 +1541,10 @@ def test_concurrent_manual_retry_advances_attempt_and_generation_once() -> None:
 
 
 def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> None:
+    close_legacy_worker_admission(
+        expected_revision=1,
+        legacy_producers_retired=True,
+    )
     unrelated_marker = "postgres-unrelated-lifecycle-" + ("x" * 131_072)
     required_result = "postgres-required-result-" + ("y" * 65_536)
     digest = "d" * 64
@@ -1553,6 +1574,10 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
         cancellation_error=unrelated_marker,
         error_message="retryable failure",
         error_traceback="RetryError: retryable failure",
+        execution_protocol_version=2,
+        created_with_django_ray_version="0.4.0-creator",
+        managed_with_django_ray_version="0.5.0-manager",
+        executor_django_ray_version="0.5.0-executor",
     )
 
     with CaptureQueriesContext(connection) as retry_queries:
@@ -1589,6 +1614,9 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
             "runtime_env_profile",
             "runtime_env_json",
             "runtime_env_hash",
+            "execution_protocol_version",
+            "managed_with_django_ray_version",
+            "executor_django_ray_version",
         },
     ]
     assert "FOR UPDATE" in retry_projections[0][1].upper()
@@ -1609,11 +1637,18 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
     assert task.input_reference == input_reference
     assert task.result_data is None
     assert task.result_reference is None
+    assert task.execution_protocol_version == 2
+    assert task.created_with_django_ray_version == "0.4.0-creator"
+    assert task.managed_with_django_ray_version is None
+    assert task.executor_django_ray_version is None
     archived = TaskAttempt.objects.get(execution=task, attempt_number=3)
     assert archived.result_data == required_result
     assert archived.result_reference == result_reference
     assert archived.error_message == "retryable failure"
     assert archived.error_traceback == "RetryError: retryable failure"
+    assert archived.execution_protocol_version == 2
+    assert archived.managed_with_django_ray_version == "0.5.0-manager"
+    assert archived.executor_django_ray_version == "0.5.0-executor"
     payload.refresh_from_db()
     assert payload.state == InputPayloadState.ACTIVE
 
@@ -1629,6 +1664,9 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
         result_reference=cancellation_result_reference,
         error_message="queued cancellation",
         error_traceback="CancellationError: queued cancellation",
+        execution_protocol_version=2,
+        managed_with_django_ray_version="0.5.0-manager",
+        executor_django_ray_version=None,
         runtime_env_json=unrelated_marker,
         progress_data=unrelated_marker,
         workflow_plan_json=unrelated_marker,
@@ -1661,6 +1699,9 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
             "result_reference",
             "workflow_progress_summary_json",
             "workflow_run_id",
+            "execution_protocol_version",
+            "managed_with_django_ray_version",
+            "executor_django_ray_version",
         },
     ]
     assert "FOR UPDATE" in queued_cancellation_projections[0][1].upper()
@@ -1673,6 +1714,9 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
     assert queued_attempt.result_reference == cancellation_result_reference
     assert queued_attempt.error_message == "queued cancellation"
     assert queued_attempt.error_traceback == "CancellationError: queued cancellation"
+    assert queued_attempt.execution_protocol_version == 2
+    assert queued_attempt.managed_with_django_ray_version == "0.5.0-manager"
+    assert queued_attempt.executor_django_ray_version is None
 
     completion_marker = "postgres-unrelated-completion-" + ("z" * 131_072)
     running = _execution(

@@ -179,6 +179,9 @@ Primary execution record for one task attempt chain.
 | `priority` | Django priority from `-100` to `100`; larger values are claimed sooner |
 | `state` | `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `CANCELLING`, `LOST`, `EXPIRED` |
 | `attempt_number` | Current attempt counter |
+| `metadata_schema_version`, `execution_protocol_version` | Immutable integer metadata and execution-contract epochs selected by the package-owned producer |
+| `created_with_django_ray_version` | Nullable diagnostic package version that created the task chain; historical writers remain unknown |
+| `managed_with_django_ray_version`, `executor_django_ray_version` | Nullable attempt-scoped diagnostic manager and executor package versions |
 | `args_json`, `kwargs_json` | Serialized arguments, or JSON `null` placeholders for external input |
 | `input_reference` | Optional durable pointer to a versioned combined input envelope |
 | `result_data` | Inline JSON result when under size limit |
@@ -291,12 +294,16 @@ payload while another enqueue is registering the same content.
 
 ### `TaskAttempt`
 
-Each terminal transition records the one-based attempt number, state, result
-references, and failure diagnostics in `TaskAttempt`. The current
+Each terminal transition records the one-based attempt number, execution protocol,
+attempt-scoped manager and executor provenance, state, result references, and failure
+diagnostics in `TaskAttempt`. The current
 `RayTaskExecution` row remains the source of truth for scheduling, while this
 history makes retries auditable after the current row is reset for its next
-attempt. Admin retries, the operational retry API, and automatic worker retries
-all use the same row-locked lifecycle service and increment the attempt counter. When
+attempt. Creator provenance remains on the task chain rather than being copied into
+each attempt. Admin retries, the operational retry API, and automatic worker retries
+all use the same row-locked lifecycle service, increment the attempt counter, and clear
+the current manager/executor fields after archiving them so the replacement attempt
+cannot inherit diagnostic ownership it has not earned. When
 the current run has already published an accepted canonical terminal schema-v3
 summary, `workflow_progress_summary_json` stores those exact bounded bytes on the
 attempt. If timeout, loss, cancellation, or another lifecycle owner wins first, the
@@ -634,10 +641,13 @@ metadata and requires a stopped-writer maintenance window.
 Migration `0019` establishes the schema-first execution-protocol boundary. It records
 protocol `1` on every existing execution and archived attempt, classifies existing and
 old-writer execution rows as metadata schema `0`, and leaves their package provenance
-null. New model writers use metadata schema `1`. Existing and pre-capability worker
-leases use capability schema `0`, a null protocol range, and the singleton legacy
-admission token; upgraded workers advertise capability schema `1` and the explicit
-supported range `1` through `1`. Database fences keep execution, attempt, and lease
+null. Package-owned 0.5 producers explicitly write metadata schema `1`, protocol `1`,
+and their creator package version; an old writer that relies on database defaults
+continues to produce schema-`0` rows with unknown creator provenance. Existing and
+pre-capability worker leases use capability schema `0`, a null protocol range, and the
+singleton legacy admission token; upgraded workers advertise capability schema `1`
+and the explicit supported range `1` through `1`. Database fences keep execution,
+attempt, and lease
 capability identity immutable. While protocol `1` and legacy admission remain open,
 the ownership fence is deliberately dormant so existing recovery behavior is unchanged.
 For a future protocol, or after legacy admission closes, a new ownership transition is
@@ -662,6 +672,14 @@ admission, or expose policy mutation through Admin. Admin displays the policy an
 bounded lease capability as read-only operational evidence. The integer execution
 protocol is the normative compatibility decision; `django-ray` package versions are
 diagnostic provenance only and must not be used to infer admission or routing.
+
+After a compatible claim or ownership adoption, the execution records the package
+version of the manager for that current attempt. Terminal archival copies the exact
+execution protocol plus the current manager/executor provenance into `TaskAttempt`
+under the lifecycle row lock. Retry preserves the task-chain metadata, creator, and
+protocol while resetting current manager/executor provenance for the replacement
+attempt. This slice does not infer executor provenance from the manager or enrich a
+remote completion envelope: a legacy or unversioned executor therefore remains null.
 
 The private protocol-coordination primitive is implementation infrastructure for the
 later supported operator adapter; it is not itself an adopter-facing mutation API. A

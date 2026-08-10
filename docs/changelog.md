@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture the exact live lease range before global execution scans. Unsupported active
   tracking is retired locally before a status, log, or stop call, while the durable
   execution and its source lease remain available to a compatible worker cohort.
+- Package-owned producers now persist explicit metadata schema `1`, execution protocol
+  `1`, and creator provenance. Compatible claims/adoptions stamp attempt-scoped manager
+  provenance; terminal archival copies the exact protocol and manager/executor values,
+  while retry preserves task-chain identity and clears those current attempt fields.
+  Historical and unreported provenance remains null rather than being inferred.
 - PostgreSQL and SQLite rollout coordination now serializes exact-0.4 execution and
   lease inserts, legacy heartbeats, and concurrent policy transitions without using
   package Semantic Versions as compatibility evidence. Callers must provide the

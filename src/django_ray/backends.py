@@ -40,8 +40,13 @@ from django.tasks import TaskResult, TaskResultStatus
 from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.exceptions import TaskResultDoesNotExist
 
+from django_ray import __version__ as django_ray_version
 from django_ray.conf.defaults import QUEUE_TIMEOUT_SECONDS_MAX
 from django_ray.conf.settings import get_settings
+from django_ray.execution_protocol import (
+    EXECUTION_METADATA_SCHEMA_VERSION,
+    EXECUTION_PROTOCOL_VERSION,
+)
 from django_ray.input_storage import (
     InputPayloadError,
     load_task_input,
@@ -258,6 +263,9 @@ class RayTaskBackend(BaseTaskBackend):
                         execution = RayTaskExecution.objects.create(
                             task_id=task_id,
                             callable_path=callable_path,
+                            metadata_schema_version=EXECUTION_METADATA_SCHEMA_VERSION,
+                            execution_protocol_version=EXECUTION_PROTOCOL_VERSION,
+                            created_with_django_ray_version=django_ray_version,
                             queue_name=task.queue_name,
                             priority=task.priority,
                             state=TaskState.QUEUED,

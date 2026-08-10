@@ -760,6 +760,9 @@ def test_create_execution_uses_realistic_payload(monkeypatch) -> None:
     create.assert_called_once_with(
         task_id="task",
         callable_path="django_ray.benchmarks.polling_probe",
+        metadata_schema_version=benchmark.EXECUTION_METADATA_SCHEMA_VERSION,
+        execution_protocol_version=benchmark.EXECUTION_PROTOCOL_VERSION,
+        created_with_django_ray_version=benchmark.django_ray_version,
         queue_name="queue",
         state=benchmark.TaskState.QUEUED,
         args_json="[]",

@@ -42,6 +42,9 @@ _LIFECYCLE_LOCK_FIELDS = (
     "execution_generation",
 )
 _ATTEMPT_ARCHIVE_READ_FIELDS = (
+    "execution_protocol_version",
+    "managed_with_django_ray_version",
+    "executor_django_ray_version",
     "started_at",
     "finished_at",
     "error_message",
@@ -72,6 +75,9 @@ _RETRY_ACCEPTED_READ_FIELDS = (
     "runtime_env_profile",
     "runtime_env_json",
     "runtime_env_hash",
+    "execution_protocol_version",
+    "managed_with_django_ray_version",
+    "executor_django_ray_version",
 )
 
 
@@ -431,6 +437,9 @@ def _persist_terminal_only_workflow_progress_summary(
 def _record_attempt(execution: RayTaskExecution) -> None:
     """Persist the current execution snapshot before it is overwritten."""
     defaults = {
+        "execution_protocol_version": execution.execution_protocol_version,
+        "managed_with_django_ray_version": execution.managed_with_django_ray_version,
+        "executor_django_ray_version": execution.executor_django_ray_version,
         "state": execution.state,
         "started_at": execution.started_at,
         "finished_at": execution.finished_at,
@@ -685,6 +694,8 @@ def _request_task_retry(
         current.finished_at = None
         current.last_heartbeat_at = None
         current.claimed_by_worker = None
+        current.managed_with_django_ray_version = None
+        current.executor_django_ray_version = None
         promote_legacy_ray_target(current)
         current.ray_job_id = None
         current.ray_address = None
@@ -710,6 +721,8 @@ def _request_task_retry(
                 "finished_at",
                 "last_heartbeat_at",
                 "claimed_by_worker",
+                "managed_with_django_ray_version",
+                "executor_django_ray_version",
                 "ray_job_id",
                 "ray_target_address",
                 "ray_address",
@@ -854,6 +867,8 @@ def record_failure(
             current.started_at = None
             current.finished_at = None
             current.claimed_by_worker = None
+            current.managed_with_django_ray_version = None
+            current.executor_django_ray_version = None
             current.progress_data = None
             current.workflow_progress_summary_json = None
             current.workflow_run_id = None
@@ -874,6 +889,8 @@ def record_failure(
                 "started_at",
                 "finished_at",
                 "claimed_by_worker",
+                "managed_with_django_ray_version",
+                "executor_django_ray_version",
                 "progress_data",
                 "workflow_progress_summary_json",
                 "workflow_run_id",

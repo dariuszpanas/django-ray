@@ -1381,6 +1381,7 @@ class Command(BaseCommand):
                 task.started_at = claim_now
                 task.last_heartbeat_at = claim_now
                 task.claimed_by_worker = self.worker_id
+                task.managed_with_django_ray_version = django_ray_version
                 task.execution_generation = int(task.execution_generation) + 1
                 task.completion_data = None
                 task.progress_data = None
@@ -1396,6 +1397,7 @@ class Command(BaseCommand):
                         "started_at",
                         "last_heartbeat_at",
                         "claimed_by_worker",
+                        "managed_with_django_ray_version",
                         "execution_generation",
                         "completion_data",
                         "progress_data",
@@ -3028,7 +3030,13 @@ class Command(BaseCommand):
             adopted = source_worker_id != self.worker_id
             if adopted:
                 current.claimed_by_worker = self.worker_id
-                current.save(update_fields=["claimed_by_worker"])
+                current.managed_with_django_ray_version = django_ray_version
+                current.save(
+                    update_fields=[
+                        "claimed_by_worker",
+                        "managed_with_django_ray_version",
+                    ]
+                )
 
             yield _OwnedTask(execution=current, adopted=adopted)
 

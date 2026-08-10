@@ -127,6 +127,14 @@ paths; future-protocol and post-legacy ownership transitions require an explicit
 compatible active lease. Do not update the policy, token, protocol, or capability
 columns directly.
 
+For provenance review, treat `created_with_django_ray_version` as the immutable writer
+of the task chain. `managed_with_django_ray_version` describes only the current attempt
+and is replaced when a compatible task manager adopts ownership. An archived attempt
+keeps the exact protocol plus its manager/executor values; a retry clears the current
+manager/executor values before the next attempt can be claimed. Null is meaningful:
+historical producers and legacy completion envelopes cannot be reconstructed, and a
+manager package version must never be substituted for an unreported executor version.
+
 Package-owned producers insert `QUEUED` rows and acquire ownership through the fenced
 update path. Directly inserting an already-`RUNNING` or `CANCELLING` row is unsupported
 and bypasses that ownership-transition check.
