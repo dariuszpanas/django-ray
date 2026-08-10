@@ -202,6 +202,30 @@ capability, or its protocol range as proof that Ray is ready. Ray/Python version
 cluster-instance attestation, normalized target capacity, and supported blue/green drain
 status are separate rollout requirements.
 
+Use the read-only protocol report before reviewing any later rollout transition:
+
+```bash
+python manage.py django_ray_protocol_status
+python manage.py django_ray_protocol_status --database=default --json
+```
+
+The text and canonical JSON views share one versioned bounded observation. They report the
+policy/token relationship, live and stale-active task-manager lease totals, aggregated
+protocol ranges, nonterminal work grouped by queue/state/protocol, protocol-only work
+with no heartbeat-live compatible lease, work with no heartbeat-live explicit upgraded
+reader, and fixed closure or rollback blocker codes. The report owns one consistent
+read-only database snapshot, is redaction-safe, and does not mutate any row. Queue text
+is bounded in SQL before materialization. Repeated sections are capped with exact
+omitted totals, and the complete output is bounded to 65,536 UTF-8 bytes.
+
+This is evidence, not an activation command or end-to-end readiness result.
+`queue_capacity_attested=false` is deliberate because lease queue text is
+informational; the command cannot prove queue membership, available concurrency, Ray
+connectivity, target identity, or Ray/Python compatibility. It also cannot discover
+capability-unaware web, API, producer, or reader processes. Retirement of those
+processes remains an explicit external assertion, and every changing coordination
+operation rechecks its durable preconditions under the transactional fence.
+
 The package now contains a private coordination primitive for a later supported
 operator adapter. It is not an operator API: do not import or call it directly, and do
 not use SQL, model updates, Admin mutation, or manual token deletion as a substitute.

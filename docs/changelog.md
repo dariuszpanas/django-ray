@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A read-only `django_ray_protocol_status` command now emits bounded text or canonical
+  versioned JSON for the rollout policy/token relationship, live and stale-active lease
+  capability aggregates, nonterminal protocol groups, protocol-only unsupported work,
+  work lacking a live explicit upgraded reader, and fixed closure/rollback blockers.
+  It reads one consistent database snapshot, bounds queue text before materialization,
+  never mutates rollout state, and exposes no durable identities. Queue capacity, Ray
+  readiness, Ray/Python or cluster identity, and capability-unaware process retirement
+  remain explicitly unattested.
 - A schema-first durable execution-protocol boundary records immutable protocol `1` on
   executions and attempts, advertises upgraded worker support as the bounded range
   `1` through `1`, and installs a dormant ownership fence for future protocols and the

@@ -830,6 +830,21 @@ identity and membership of a target cluster. Those target-readiness and blue/gre
 drain guarantees require their separate compatibility boundary before a future status
 surface can report end-to-end capacity.
 
+The read-only protocol-status service exposes only the database facts this boundary can
+support. One versioned immutable report aggregates policy/token consistency, active and
+heartbeat-stale task-manager leases, explicit or policy-controlled protocol ranges, and
+bounded nonterminal queue/state/protocol groups. It derives both protocol-only
+unsupported work and the exact nonterminal count lacking a heartbeat-live explicit
+upgraded reader, so legacy-reader retirement cannot be mistaken for capacity. The
+builder owns one consistent read-only database snapshot and bounds queue text in SQL
+before materialization. `queue_capacity_attested` remains false and fixed blocker codes
+retain every unprovable external retirement requirement. Text and canonical JSON render
+from the same report, cap repeated sections with exact omitted counts, stay within a
+fixed UTF-8 byte budget, and disclose no task, worker, host, callable, error,
+package-version, or payload identity. Building or rendering the report never locks for
+mutation and never changes rollout state; every changing transition rechecks its own
+durable preconditions.
+
 A code-only rollback and a schema reversal are different operations. To return to exact
 0.4.0 code, first keep the policy at protocol `1` with legacy admission open, verify
 that nonterminal work is protocol `1`, stop upgraded task managers, and reconcile their
