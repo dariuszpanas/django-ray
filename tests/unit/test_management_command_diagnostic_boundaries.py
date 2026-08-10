@@ -127,6 +127,7 @@ def test_worker_success_status_does_not_project_application_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, stream = _output_command()
+    command._create_lease("default")
     task = RayTaskExecution.objects.create(
         task_id="fixed-success-output",
         callable_path="tests.fake",

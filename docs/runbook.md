@@ -135,6 +135,15 @@ manager/executor values before the next attempt can be claimed. Null is meaningf
 historical producers and legacy completion envelopes cannot be reconstructed, and a
 manager package version must never be substituted for an unreported executor version.
 
+Completion provenance is trusted only after the manager validates a versioned-v1
+envelope's exact schema, protocol, task primary/public identity, attempt, and generation
+under the authoritative lease-and-task lock. Any reserved versioned field requires the
+complete strict envelope and prevents fallback to the legacy adapter. Only then may the
+manager canonicalize a result reference, store a result, or archive the bounded executor
+package version. Semantic package versions remain diagnostic and do not admit work.
+Unversioned protocol-v1 completions remain supported for 0.4 handoff and keep executor
+provenance null.
+
 Package-owned producers insert `QUEUED` rows and acquire ownership through the fenced
 update path. Directly inserting an already-`RUNNING` or `CANCELLING` row is unsupported
 and bypasses that ownership-transition check.
@@ -172,8 +181,10 @@ Forgetting a Ray Core handle is not a recoverable handoff. The `ObjectRef` belon
 the original driver, so another task manager cannot adopt it as it can a persisted Ray
 Job ID. Keep the compatible driver alive while that work drains, or make an explicit
 operator decision about the unchanged uncertain row. This boundary still does not
-version the remote completion transport or prove that an executor can deserialize or
-run the task.
+transport an execution request or prove that an executor can deserialize or run the
+task. The next transport slice must reject protocol mismatch before Django setup, input
+hydration, callable import, or invocation. Exact Ray/Python and cluster-instance
+attestation must happen before Ray Core serialization and submission.
 
 Do not interpret the lease's informational `queue_name` text as a durable per-queue
 capability, or its protocol range as proof that Ray is ready. Ray/Python version and
@@ -353,9 +364,18 @@ Notes:
   requests a stop for the exact persisted job ID, and suppresses automatic retry
   because the remote execution is not proven quiescent. Inspect
   `cancellation_status`/`cancellation_error` and Ray before retrying it manually.
-- An expired malformed or invalid completion envelope follows that same exact-stop,
-  `LOST`, no-auto-retry path while Ray still reports `PENDING` or `RUNNING`. A terminal
-  Ray status may instead use the configured failure/retry policy.
+- An unversioned malformed completion retains the bounded recovery and grace behavior
+  used by legacy protocol-v1 jobs. While Ray still reports `PENDING` or `RUNNING`, an
+  expired legacy envelope follows the exact-stop, `LOST`, no-auto-retry path; a terminal
+  Ray status may use the configured failure/retry policy.
+- A partial or mismatched versioned completion cannot fall back to legacy handling. Its
+  result, result reference, and claimed error are ignored. An active or unknown exact Ray
+  Job is stopped and retained as `LOST`; a terminal job becomes a fixed non-retryable
+  failure. Inspect the bounded diagnostic and remote state before any manual retry.
+- A completion that exceeds the fixed envelope byte, depth, or node budget is also
+  rejected without automatic retry, including an unversioned legacy envelope. This is a
+  deterministic resource boundary, not legacy malformed-envelope grace; inspect the
+  remote execution before deciding whether replay is safe.
 - Ray Job version, status, stop, and log HTTP requests used by lifecycle control are
   bounded to five seconds. A timeout can therefore leave `cancellation_status` as
   `INDETERMINATE`; verify the exact persisted Ray Job before manually retrying. Ray

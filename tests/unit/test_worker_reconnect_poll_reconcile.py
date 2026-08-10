@@ -15,9 +15,15 @@ import pytest
 from django.db import transaction
 
 from django_ray import __version__ as django_ray_version
+from django_ray.execution_codec import (
+    ExecutionCompletion,
+    ExecutionIdentity,
+    encode_execution_completion,
+)
 from django_ray.execution_protocol import (
     MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     WORKER_CAPABILITY_SCHEMA_VERSION,
 )
 from django_ray.lifecycle import record_lost, retry_task
@@ -139,6 +145,38 @@ def _completion(
             task.execution_generation if execution_generation is None else execution_generation
         ),
         result_json=result_json,
+    )
+
+
+def _versioned_completion_json(
+    task: RayTaskExecution,
+    *,
+    task_id: str | None = None,
+    success: bool = True,
+    result: Any = 3,
+    error: str | None = None,
+    retryable: bool | None = None,
+    executor_version: str = "0.5.0-executor",
+) -> str:
+    assert task.pk is not None
+    return encode_execution_completion(
+        ExecutionCompletion(
+            identity=ExecutionIdentity(
+                task_execution_pk=int(task.pk),
+                task_id=task_id or str(task.task_id),
+                attempt_number=int(task.attempt_number),
+                execution_generation=int(task.execution_generation),
+            ),
+            execution_protocol_version=int(task.execution_protocol_version),
+            executor_django_ray_version=executor_version,
+            success=success,
+            result=result if success else None,
+            result_reference=None,
+            error=error if not success else None,
+            traceback=None,
+            exception_type="builtins.RuntimeError" if not success else None,
+            retryable=retryable if not success else None,
+        )
     )
 
 
@@ -1490,10 +1528,170 @@ class TestWorkerReconnectPollReconcile:
         assert success_task.error_message is None
         assert success_task.error_traceback is None
         assert success_task.finished_at is not None
-        assert failures and failures[0]["error_message"] == "boom"
+        assert len(failures) == 2
+        assert failures[0]["error_message"] == "boom"
+        assert failures[1]["error_message"] == (
+            "Legacy execution completion rejected (malformed_legacy)"
+        )
+        assert failures[1]["exception_type"] == "RayCompletionMalformed"
+        assert failures[1]["retryable"] is None
         assert bad_json_task.state == TaskState.RUNNING
         assert "Task 999999 not found in database" in cmd.stdout.getvalue()
-        assert "Error processing task" in cmd.stdout.getvalue()
+
+    def test_poll_ray_core_tasks_consumes_exact_versioned_completion_provenance(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="poll-versioned-success-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            attempt_number=2,
+            execution_generation=7,
+        )
+        cmd = _make_command()
+        handle = _pending_handle(task)
+        serialized = _versioned_completion_json(task, result={"value": 3})
+
+        class Runner:
+            _pending_tasks = {task.pk: handle}
+            pending_count = 1
+
+            @property
+            def pending_task_handles(self):
+                return tuple(self._pending_tasks.values())
+
+            def poll_completed(self, handles=None):
+                assert handles == (handle,)
+                return [_completion(task, serialized)]
+
+        cmd.ray_core_runner = cast(Any, Runner())
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+
+        assert cmd.poll_ray_core_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert json.loads(task.result_data or "null") == {"value": 3}
+        assert task.executor_django_ray_version == "0.5.0-executor"
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+        assert archived.executor_django_ray_version == "0.5.0-executor"
+
+    def test_poll_ray_core_tasks_rejects_versioned_identity_before_result_storage(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="poll-versioned-mismatch-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            attempt_number=2,
+            execution_generation=7,
+        )
+        cmd = _make_command()
+        handle = _pending_handle(task)
+        serialized = _versioned_completion_json(
+            task,
+            task_id="another-task-identity",
+            result={"must_not_store": "secret"},
+        )
+
+        class Runner:
+            _pending_tasks = {task.pk: handle}
+            pending_count = 1
+
+            @property
+            def pending_task_handles(self):
+                return tuple(self._pending_tasks.values())
+
+            def poll_completed(self, handles=None):
+                assert handles == (handle,)
+                return [_completion(task, serialized)]
+
+        cmd.ray_core_runner = cast(Any, Runner())
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "an incompatible completion must not reach result storage"
+            ),
+        )
+
+        assert cmd.poll_ray_core_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 2
+        assert task.result_data is None
+        assert task.result_reference is None
+        assert task.executor_django_ray_version is None
+        assert task.error_message == ("Execution completion rejected (identity_mismatch)")
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+        assert archived.executor_django_ray_version is None
+        assert "must_not_store" not in (task.error_message or "")
+
+    def test_poll_ray_core_tasks_rejects_oversized_legacy_completion_without_retry(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="poll-legacy-resource-limit-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            attempt_number=2,
+            execution_generation=7,
+        )
+        cmd = _make_command()
+        handle = _pending_handle(task)
+        serialized = json.dumps(
+            {
+                "success": True,
+                "result": {"must_not_store": "x" * 256},
+            }
+        )
+
+        class Runner:
+            _pending_tasks = {task.pk: handle}
+            pending_count = 1
+
+            @property
+            def pending_task_handles(self):
+                return tuple(self._pending_tasks.values())
+
+            def poll_completed(self, handles=None):
+                assert handles == (handle,)
+                return [_completion(task, serialized)]
+
+        cmd.ray_core_runner = cast(Any, Runner())
+        monkeypatch.setattr(
+            "django_ray.execution_codec.EXECUTION_COMPLETION_MAX_BYTES",
+            128,
+        )
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "a resource-limited completion must not reach result storage"
+            ),
+        )
+
+        assert cmd.poll_ray_core_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 2
+        assert task.result_data is None
+        assert task.result_reference is None
+        assert task.executor_django_ray_version is None
+        assert task.error_message == "Execution completion rejected (resource_limit)"
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+        assert archived.state == TaskState.FAILED
+        assert archived.executor_django_ray_version is None
 
     @pytest.mark.parametrize(
         "result_json",
@@ -2021,7 +2219,7 @@ class TestWorkerReconnectPollReconcile:
             (
                 "invalid",
                 "{not-json",
-                "completion envelope was invalid",
+                "completion envelope was rejected (malformed_legacy)",
                 None,
             ),
         ],
@@ -3472,9 +3670,119 @@ class TestWorkerReconnectPollReconcile:
                 "expected_execution_generation": 0,
                 "expected_completion_data": task.completion_data,
                 "require_completion_data_match": True,
+                "supported_protocols": SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+                "executor_django_ray_version": None,
             }
         ]
         assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_tasks_consumes_versioned_completion_before_status_rpc(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-versioned-success-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            ray_job_id="raysubmit_versioned_success_001",
+            attempt_number=2,
+            execution_generation=7,
+        )
+        cmd = _make_command()
+        task.refresh_from_db()
+        task.completion_data = _versioned_completion_json(task, result={"value": 3})
+        task.save(update_fields=["completion_data"])
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+        cmd.active_task_identities = {
+            task.pk: (int(task.attempt_number), int(task.execution_generation))
+        }
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                pytest.fail("a valid durable completion must precede the status RPC")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert json.loads(task.result_data or "null") == {"value": 3}
+        assert task.executor_django_ray_version == "0.5.0-executor"
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+        assert archived.executor_django_ray_version == "0.5.0-executor"
+        assert task.pk not in cmd.active_tasks
+
+    @pytest.mark.parametrize(
+        ("remote_status", "expected_state", "expected_cancel_count"),
+        [
+            (JobStatus.PENDING, TaskState.LOST, 1),
+            (JobStatus.SUCCEEDED, TaskState.FAILED, 0),
+        ],
+    )
+    def test_reconcile_tasks_quarantines_versioned_identity_mismatch_without_retry(
+        self,
+        monkeypatch,
+        remote_status: JobStatus,
+        expected_state: str,
+        expected_cancel_count: int,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id=f"reconcile-versioned-mismatch-{remote_status.value.lower()}-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            ray_job_id=f"raysubmit_versioned_mismatch_{remote_status.value.lower()}_001",
+            attempt_number=2,
+            execution_generation=7,
+            last_heartbeat_at=datetime.now(UTC),
+        )
+        cmd = _make_command()
+        task.refresh_from_db()
+        task.completion_data = _versioned_completion_json(
+            task,
+            task_id="another-task-identity",
+            result={"must_not_store": "secret"},
+        )
+        task.save(update_fields=["completion_data"])
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+        cmd.active_task_identities = {
+            task.pk: (int(task.attempt_number), int(task.execution_generation))
+        }
+        cancellations: list[str] = []
+
+        class FakeRunner:
+            def get_status(self, handle):
+                return JobInfo(job_id=handle.ray_job_id, status=remote_status)
+
+            def cancel_with_status(self, handle):
+                cancellations.append(handle.ray_job_id)
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "an incompatible completion must not reach result storage"
+            ),
+        )
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == expected_state
+        assert task.attempt_number == 2
+        assert task.result_data is None
+        assert task.result_reference is None
+        assert task.executor_django_ray_version is None
+        assert task.error_message == ("Execution completion rejected (identity_mismatch)")
+        assert len(cancellations) == expected_cancel_count
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+        assert archived.state == expected_state
+        assert archived.executor_django_ray_version is None
+        assert "must_not_store" not in (task.error_message or "")
 
     def test_reconcile_tasks_handles_missing_task_and_runner_exception(self, monkeypatch) -> None:
         existing = RayTaskExecution.objects.create(

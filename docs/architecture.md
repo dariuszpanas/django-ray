@@ -678,8 +678,9 @@ version of the manager for that current attempt. Terminal archival copies the ex
 execution protocol plus the current manager/executor provenance into `TaskAttempt`
 under the lifecycle row lock. Retry preserves the task-chain metadata, creator, and
 protocol while resetting current manager/executor provenance for the replacement
-attempt. This slice does not infer executor provenance from the manager or enrich a
-remote completion envelope: a legacy or unversioned executor therefore remains null.
+attempt. Executor provenance is accepted only from a strictly validated versioned
+completion and is written under that same lock before archival. It is never inferred
+from the manager. A legacy or unversioned executor therefore remains null.
 
 The private protocol-coordination primitive is implementation infrastructure for the
 later supported operator adapter; it is not itself an adopter-facing mutation API. A
@@ -772,10 +773,39 @@ loss handling. Retiring a local handle is not handoff or replay: another process
 recover its `ObjectRef`, so an unsupported or uncertain Ray Core row remains an explicit
 drain or operator-decision boundary.
 
-This manager-side fence does not make protocol capability a remote-runtime attestation
-or version the Ray Core completion transport. Remote pre-import protocol rejection,
-executor-reported provenance, and completion-envelope identity remain separate
-compatibility work.
+Completion consumption has its own private schema boundary. A flat versioned-v1
+envelope preserves the legacy `success`, `result`, reference, and failure keys while
+adding an exact completion schema, task primary/public identity, attempt, generation,
+execution protocol, and bounded executor package provenance. Any reserved versioned
+field opts the whole envelope into strict validation; a partial or mismatched envelope
+cannot downgrade to the legacy adapter. The manager compares the complete identity and
+protocol under the authoritative lease-and-task lock before it canonicalizes a result
+reference, stores a result, changes lifecycle state, or records executor provenance.
+Package Semantic Version remains diagnostic and never decides compatibility.
+
+Unversioned 0.4 completions remain explicit protocol-v1 legacy envelopes. Their existing
+success/failure behavior and bounded malformed-envelope recovery remain available during
+a manager rolling handoff, but they cannot report executor provenance. A valid
+versioned-v1 completion can also be consumed by an older permissive v1 manager because
+the legacy outcome keys remain at the top level. In contrast, a versioned schema,
+protocol, identity, or shape mismatch is uncertain: its result and reference are never
+inspected or stored and it is never automatically retried. A still-active Ray Job is
+quiesced by its exact durable identity and retained as `LOST`; a proven terminal
+executor is recorded as a non-retryable failure.
+
+Both adapters enforce a fixed whole-envelope byte, structure-depth, and node budget
+before constructing the parsed tree. Exceeding that deterministic resource boundary is
+non-retryable even for an unversioned envelope: the manager cannot safely scan beyond
+the bound to prove its framing, and replaying the same completed work would create a
+retry storm. Within that boundary the legacy adapter retains released-v1 JSON behavior,
+including non-finite result numbers and long failure diagnostics.
+
+This completion boundary does not yet carry an execution request to the remote runtime.
+The next transport slice must decode and check the expected protocol before Django
+setup, input hydration, callable import, or invocation in Ray Core and Ray Job modes.
+Ray Core serializes Python work before remote code can run, so that executor-side check
+also cannot replace the separate exact Ray/Python and cluster-instance attestation
+required before submission.
 
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
 capability. Likewise, an execution-protocol-capable lease proves only task-manager
@@ -805,13 +835,12 @@ making it active and retains every old key until no durable row needs it; this r
 does not rewrite or rewrap historical rows.
 
 The completion envelope and `execution_generation` fields are part of the Ray Job
-protocol. Drain Ray Job workers before deploying a version that introduces or changes
-this protocol: let submitted jobs finish and reconcile, or explicitly verify remote
-quiescence before retrying them; then stop the old workers, apply database migrations,
-and start the new workers. Do not run a mixed old/new task-manager fleet or leave old
-and new workers reconciling the same in-flight jobs, because an old driver may not write
-the envelope or generation metadata required for the new worker to prove which execution
-produced a terminal state.
+protocol. This release's explicit legacy-v1 adapter permits compatible 0.4 completions
+to finish while upgraded task managers reconcile them, and the flat enriched-v1 shape
+retains the old top-level outcome keys. A future incompatible request or completion
+schema still requires a reader-first rollout and a compatible manager cohort until every
+older in-flight Ray Job drains. Never retry an uncertain remote execution merely to
+complete an upgrade; first prove its exact remote identity and quiescence.
 
 ## Reliability Controls
 

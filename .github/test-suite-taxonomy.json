@@ -195,6 +195,7 @@
           "tests/integration/test_worker.py",
           "tests/unit/test_distributed.py",
           "tests/unit/test_distributed_mocked.py",
+          "tests/unit/test_execution_codec.py",
           "tests/unit/test_ray_core.py",
           "tests/unit/test_ray_core_runner.py",
           "tests/unit/test_ray_job.py",

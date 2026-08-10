@@ -18,6 +18,14 @@ from django.db import IntegrityError, connection, transaction
 
 from django_ray import __version__ as django_ray_version
 from django_ray.conf.settings import get_settings
+from django_ray.execution_codec import (
+    DecodedExecutionCompletion,
+    ExecutionCompletionDecodeError,
+    ExecutionCompletionRejection,
+    ExecutionCompletionSource,
+    ExecutionIdentity,
+    decode_execution_completion,
+)
 from django_ray.execution_protocol import (
     MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
@@ -91,6 +99,16 @@ class _OwnedTask:
     execution: RayTaskExecution
     adopted: bool
     supported_protocols: ExecutionProtocolRange
+
+
+@dataclass(frozen=True, slots=True)
+class _InspectedExecutionCompletion:
+    """One completion decoded inside the authoritative task boundary."""
+
+    decoded: DecodedExecutionCompletion | None
+    prepared_result_reference: str | None
+    rejection: ExecutionCompletionRejection | None
+    requires_nonretryable_disposition: bool
 
 
 @dataclass(frozen=True)
@@ -1201,37 +1219,87 @@ class Command(BaseCommand):
         return now - last_activity_dt > get_stuck_timeout()
 
     @staticmethod
-    def _is_valid_completion_envelope(result: Any) -> bool:
-        """Validate the required shape before applying a completion envelope."""
-        if not isinstance(result, dict) or not isinstance(result.get("success"), bool):
-            return False
-        if "result" not in result:
-            return False
+    def _execution_completion_identity(task: RayTaskExecution) -> ExecutionIdentity:
+        """Return the exact durable identity a completion must echo."""
+        assert task.pk is not None
+        return ExecutionIdentity(
+            task_execution_pk=int(task.pk),
+            task_id=str(task.task_id),
+            attempt_number=int(task.attempt_number),
+            execution_generation=int(task.execution_generation),
+        )
 
-        if result["success"]:
-            result_reference = result.get("result_reference")
-            if result_reference is None:
-                return True
+    @classmethod
+    def _inspect_execution_completion(
+        cls,
+        serialized: object,
+        task: RayTaskExecution,
+        *,
+        supported_protocols: ExecutionProtocolRange,
+    ) -> _InspectedExecutionCompletion:
+        """Decode one exact completion before any result or reference side effect."""
+        try:
+            decoded = decode_execution_completion(
+                serialized,
+                expected_identity=cls._execution_completion_identity(task),
+                expected_execution_protocol_version=int(task.execution_protocol_version),
+                supported_protocols=supported_protocols,
+            )
+        except ExecutionCompletionDecodeError as error:
+            return _InspectedExecutionCompletion(
+                decoded=None,
+                prepared_result_reference=None,
+                rejection=error.classification,
+                requires_nonretryable_disposition=(error.requires_nonretryable_disposition),
+            )
+
+        prepared_result_reference: str | None = None
+        result_reference = decoded.completion.result_reference
+        if decoded.completion.success and result_reference is not None:
             from django_ray.result_storage import (
                 ResultStorageError,
                 canonicalize_result_reference,
             )
 
             try:
-                canonicalize_result_reference(result_reference)
+                prepared_result_reference = canonicalize_result_reference(result_reference)
             except ResultStorageError:
-                return False
-            return True
+                versioned = decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+                return _InspectedExecutionCompletion(
+                    decoded=None,
+                    prepared_result_reference=None,
+                    rejection=(
+                        ExecutionCompletionRejection.INVALID_VERSIONED
+                        if versioned
+                        else ExecutionCompletionRejection.MALFORMED_LEGACY
+                    ),
+                    requires_nonretryable_disposition=versioned,
+                )
 
-        if not isinstance(result.get("error"), str):
-            return False
-        retryable = result.get("retryable")
-        if retryable is not None and not isinstance(retryable, bool):
-            return False
-        return all(
-            value is None or isinstance(value, str)
-            for key in ("traceback", "exception_type")
-            for value in [result.get(key)]
+        return _InspectedExecutionCompletion(
+            decoded=decoded,
+            prepared_result_reference=prepared_result_reference,
+            rejection=None,
+            requires_nonretryable_disposition=False,
+        )
+
+    @staticmethod
+    def _completion_rejection_policy(
+        inspection: _InspectedExecutionCompletion,
+    ) -> tuple[str, str, bool | None]:
+        """Map one fixed codec rejection to bounded lifecycle policy."""
+        assert inspection.rejection is not None
+        code = inspection.rejection.value
+        if inspection.requires_nonretryable_disposition:
+            return (
+                f"Execution completion rejected ({code})",
+                "RayCompletionIncompatible",
+                False,
+            )
+        return (
+            f"Legacy execution completion rejected ({code})",
+            "RayCompletionMalformed",
+            None,
         )
 
     def _get_ray_cluster_resources_with_timeout(
@@ -1709,16 +1777,14 @@ class Command(BaseCommand):
                 input_reference=getattr(task, "input_reference", None),
                 ray_job_driver=False,
             )
-            result = json.loads(result_json)
-
-            if result["success"]:
-                if not RayTaskExecution.objects.filter(
-                    pk=task.pk,
-                    state=TaskState.RUNNING,
-                    claimed_by_worker=expected_worker_id,
-                    attempt_number=expected_attempt_number,
-                    execution_generation=expected_execution_generation,
-                ).exists():
+            succeeded = False
+            with self._authoritative_task_owner(
+                task,
+                expected_state=TaskState.RUNNING,
+                allow_takeover=False,
+                require_completion_data_match=True,
+            ) as owned:
+                if owned is None:
                     self.stdout.write(
                         self.style.NOTICE(
                             f"  Ignoring stale synchronous result for task {task.pk} "
@@ -1727,27 +1793,63 @@ class Command(BaseCommand):
                         )
                     )
                     return
-                if not self._store_and_succeed_task(
-                    task,
-                    result["result"],
-                    expected_claimed_by_worker=expected_worker_id,
-                    expected_attempt_number=expected_attempt_number,
-                    expected_execution_generation=expected_execution_generation,
-                ):
-                    return
-                self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} succeeded"))
-            else:
-                # Task failed - check if we should retry
-                self._handle_task_failure(
-                    task,
-                    error_message=result["error"],
-                    error_traceback=result.get("traceback"),
-                    exception_type=result.get("exception_type"),
-                    retryable=result.get("retryable"),
-                    expected_claimed_by_worker=expected_worker_id,
-                    expected_attempt_number=expected_attempt_number,
-                    expected_execution_generation=expected_execution_generation,
+                current = owned.execution
+                inspection = self._inspect_execution_completion(
+                    result_json,
+                    current,
+                    supported_protocols=owned.supported_protocols,
                 )
+                decoded = inspection.decoded
+                if decoded is None:
+                    error_message, exception_type, retryable = self._completion_rejection_policy(
+                        inspection
+                    )
+                    self._handle_task_failure(
+                        current,
+                        error_message=error_message,
+                        exception_type=exception_type,
+                        retryable=retryable,
+                        expected_claimed_by_worker=expected_worker_id,
+                        expected_attempt_number=expected_attempt_number,
+                        expected_execution_generation=expected_execution_generation,
+                        expected_completion_data=current.completion_data,
+                        require_completion_data_match=True,
+                        supported_protocols=owned.supported_protocols,
+                    )
+                    return
+
+                completion = decoded.completion
+                if completion.success:
+                    succeeded = self._store_and_succeed_task(
+                        current,
+                        completion.result,
+                        prepared_result_reference=inspection.prepared_result_reference,
+                        expected_claimed_by_worker=expected_worker_id,
+                        expected_attempt_number=expected_attempt_number,
+                        expected_execution_generation=expected_execution_generation,
+                        expected_completion_data=current.completion_data,
+                        require_completion_data_match=True,
+                        supported_protocols=owned.supported_protocols,
+                        executor_django_ray_version=(completion.executor_django_ray_version),
+                    )
+                else:
+                    self._handle_task_failure(
+                        current,
+                        error_message=completion.error or "Unknown error",
+                        error_traceback=completion.traceback,
+                        exception_type=completion.exception_type,
+                        retryable=completion.retryable,
+                        expected_claimed_by_worker=expected_worker_id,
+                        expected_attempt_number=expected_attempt_number,
+                        expected_execution_generation=expected_execution_generation,
+                        expected_completion_data=current.completion_data,
+                        require_completion_data_match=True,
+                        supported_protocols=owned.supported_protocols,
+                        executor_django_ray_version=(completion.executor_django_ray_version),
+                    )
+
+            if succeeded:
+                self.stdout.write(self.style.SUCCESS(f"  Task {task.pk} succeeded"))
 
         except Exception as e:
             self._handle_task_failure(
@@ -1824,6 +1926,7 @@ class Command(BaseCommand):
         expected_completion_data: str | None = None,
         require_completion_data_match: bool = False,
         supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+        executor_django_ray_version: str | None = None,
     ) -> bool:
         """Store and publish one successful result under the execution row lock.
 
@@ -1869,6 +1972,7 @@ class Command(BaseCommand):
                 expected_completion_data=expected_completion_data,
                 require_completion_data_match=require_completion_data_match,
                 supported_protocols=supported_protocols,
+                _executor_django_ray_version=executor_django_ray_version,
             )
             if persisted:
                 task.__dict__.update(current.__dict__)
@@ -1894,6 +1998,7 @@ class Command(BaseCommand):
         cancellation_status: str | None = None,
         cancellation_error: str | None = None,
         supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+        executor_django_ray_version: str | None = None,
     ) -> bool:
         """Handle a failed task, potentially scheduling a retry.
 
@@ -1927,6 +2032,7 @@ class Command(BaseCommand):
                 cancellation_status=cancellation_status,
                 cancellation_error=cancellation_error,
                 supported_protocols=supported_protocols,
+                _executor_django_ray_version=executor_django_ray_version,
             )
         except RuntimeEnvSnapshotError as storage_error:
             retry_decision = RetryDecision(
@@ -1949,6 +2055,7 @@ class Command(BaseCommand):
                 cancellation_status=cancellation_status,
                 cancellation_error=cancellation_error,
                 supported_protocols=supported_protocols,
+                _executor_django_ray_version=executor_django_ray_version,
             )
         if not handled:
             return False
@@ -2190,46 +2297,35 @@ class Command(BaseCommand):
         error_message: str,
         exception_type: str,
         cancellation: CancellationOutcome,
+        supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     ) -> bool:
         """Close one ambiguous completion channel while its task lock is held."""
         completion_data = current.completion_data
-        result: Any = None
-        if completion_data is not None:
-            try:
-                result = json.loads(completion_data)
-            except (TypeError, json.JSONDecodeError):
-                result = None
-        valid_result = (
-            result
-            if isinstance(result, dict) and self._is_valid_completion_envelope(result)
+        inspection = (
+            self._inspect_execution_completion(
+                completion_data,
+                current,
+                supported_protocols=supported_protocols,
+            )
+            if completion_data is not None
             else None
         )
+        decoded = inspection.decoded if inspection is not None else None
 
-        prepared_result_reference: str | None = None
-        if valid_result is not None and valid_result["success"]:
-            result_reference = valid_result.get("result_reference")
-            if result_reference is not None:
-                from django_ray.result_storage import (
-                    ResultStorageError,
-                    canonicalize_result_reference,
-                )
-
-                try:
-                    prepared_result_reference = canonicalize_result_reference(result_reference)
-                except ResultStorageError:
-                    valid_result = None
-
-        if valid_result is not None and valid_result["success"]:
+        if decoded is not None and decoded.completion.success:
+            completion = decoded.completion
             handled = self._store_and_succeed_task(
                 current,
-                valid_result.get("result"),
-                prepared_result_reference=prepared_result_reference,
+                completion.result,
+                prepared_result_reference=inspection.prepared_result_reference,
                 expected_ray_job_id=reserved_handle.ray_job_id,
                 expected_claimed_by_worker=expected_worker_id,
                 expected_attempt_number=expected_attempt_number,
                 expected_execution_generation=expected_execution_generation,
                 expected_completion_data=completion_data,
                 require_completion_data_match=True,
+                supported_protocols=supported_protocols,
+                executor_django_ray_version=completion.executor_django_ray_version,
             )
             if handled:
                 self.stdout.write(
@@ -2242,11 +2338,18 @@ class Command(BaseCommand):
 
         mismatch_error = error_message
         error_traceback: str | None = None
-        if valid_result is not None and not valid_result["success"]:
-            mismatch_error = f"{error_message}; completion reported: {valid_result['error']}"
-            error_traceback = valid_result.get("traceback")
+        executor_django_ray_version: str | None = None
+        if decoded is not None and not decoded.completion.success:
+            completion = decoded.completion
+            mismatch_error = f"{error_message}; completion reported: {completion.error}"
+            error_traceback = completion.traceback
+            executor_django_ray_version = completion.executor_django_ray_version
         elif completion_data is not None:
-            mismatch_error = f"{error_message}; completion envelope was invalid"
+            assert inspection is not None
+            assert inspection.rejection is not None
+            mismatch_error = (
+                f"{error_message}; completion envelope was rejected ({inspection.rejection.value})"
+            )
 
         return self._handle_task_failure(
             current,
@@ -2262,6 +2365,8 @@ class Command(BaseCommand):
             require_completion_data_match=True,
             cancellation_status=cancellation.status.value,
             cancellation_error=cancellation.message,
+            supported_protocols=supported_protocols,
+            executor_django_ray_version=executor_django_ray_version,
         )
 
     def _handle_ray_job_confirmation_loss(
@@ -2391,6 +2496,7 @@ class Command(BaseCommand):
                             error_message=error_message,
                             exception_type=exception_type,
                             cancellation=cancellation,
+                            supported_protocols=owned.supported_protocols,
                         )
                     if handled:
                         task_pk = int(task.pk)
@@ -2665,7 +2771,7 @@ class Command(BaseCommand):
                     )
                     continue
 
-                result = json.loads(completion.result_json)
+                completion_succeeded = False
                 with self._authoritative_task_owner(
                     task,
                     expected_state=TaskState.RUNNING,
@@ -2692,10 +2798,21 @@ class Command(BaseCommand):
                         continue
 
                     current = owned.execution
-                    if result.get("success"):
-                        persisted = self._store_and_succeed_task(
+                    inspection = self._inspect_execution_completion(
+                        completion.result_json,
+                        current,
+                        supported_protocols=owned.supported_protocols,
+                    )
+                    decoded = inspection.decoded
+                    if decoded is None:
+                        error_message, exception_type, retryable = (
+                            self._completion_rejection_policy(inspection)
+                        )
+                        persisted = self._handle_task_failure(
                             current,
-                            result.get("result"),
+                            error_message=error_message,
+                            exception_type=exception_type,
+                            retryable=retryable,
                             expected_claimed_by_worker=self.worker_id,
                             expected_attempt_number=attempt_number,
                             expected_execution_generation=execution_generation,
@@ -2703,19 +2820,40 @@ class Command(BaseCommand):
                             require_completion_data_match=True,
                             supported_protocols=owned.supported_protocols,
                         )
-                    else:
-                        persisted = self._handle_task_failure(
+                    elif decoded.completion.success:
+                        accepted_completion = decoded.completion
+                        completion_succeeded = True
+                        persisted = self._store_and_succeed_task(
                             current,
-                            error_message=result.get("error", "Unknown error"),
-                            error_traceback=result.get("traceback"),
-                            exception_type=result.get("exception_type"),
-                            retryable=result.get("retryable"),
+                            accepted_completion.result,
+                            prepared_result_reference=(inspection.prepared_result_reference),
                             expected_claimed_by_worker=self.worker_id,
                             expected_attempt_number=attempt_number,
                             expected_execution_generation=execution_generation,
                             expected_completion_data=current.completion_data,
                             require_completion_data_match=True,
                             supported_protocols=owned.supported_protocols,
+                            executor_django_ray_version=(
+                                accepted_completion.executor_django_ray_version
+                            ),
+                        )
+                    else:
+                        accepted_completion = decoded.completion
+                        persisted = self._handle_task_failure(
+                            current,
+                            error_message=accepted_completion.error or "Unknown error",
+                            error_traceback=accepted_completion.traceback,
+                            exception_type=accepted_completion.exception_type,
+                            retryable=accepted_completion.retryable,
+                            expected_claimed_by_worker=self.worker_id,
+                            expected_attempt_number=attempt_number,
+                            expected_execution_generation=execution_generation,
+                            expected_completion_data=current.completion_data,
+                            require_completion_data_match=True,
+                            supported_protocols=owned.supported_protocols,
+                            executor_django_ray_version=(
+                                accepted_completion.executor_django_ray_version
+                            ),
                         )
 
                 if not persisted:
@@ -2725,7 +2863,7 @@ class Command(BaseCommand):
                             "result was being applied"
                         )
                     )
-                elif result.get("success"):
+                elif completion_succeeded:
                     self.stdout.write(self.style.SUCCESS(f"\n  Task {task.pk} completed"))
 
             except RayTaskExecution.DoesNotExist:
@@ -3381,30 +3519,12 @@ class Command(BaseCommand):
         expected_attempt_number, expected_execution_generation = expected_identity
         handle = self._build_submission_handle(task, ray_job_id)
 
-        def consume_valid_completion(completion_data: str | None) -> bool:
-            """Apply one valid durable envelope without depending on Ray availability."""
+        def consume_valid_completion(
+            completion_data: str | None,
+        ) -> tuple[bool, _InspectedExecutionCompletion | None]:
+            """Apply one exact envelope or return its fixed rejection policy."""
             if completion_data is None:
-                return False
-            try:
-                result = json.loads(completion_data)
-            except (TypeError, json.JSONDecodeError):
-                return False
-            if not self._is_valid_completion_envelope(result):
-                return False
-
-            prepared_result_reference: str | None = None
-            if result["success"] and result.get("result_reference") is not None:
-                from django_ray.result_storage import (
-                    ResultStorageError,
-                    canonicalize_result_reference,
-                )
-
-                try:
-                    prepared_result_reference = canonicalize_result_reference(
-                        result["result_reference"]
-                    )
-                except ResultStorageError:
-                    return False
+                return False, None
 
             handled = False
             current: RayTaskExecution | None = None
@@ -3415,40 +3535,57 @@ class Command(BaseCommand):
                 require_completion_data_match=True,
             ) as owned:
                 if owned is None:
-                    return True
+                    return True, None
                 current = owned.execution
-                if result["success"]:
+                inspection = self._inspect_execution_completion(
+                    completion_data,
+                    current,
+                    supported_protocols=owned.supported_protocols,
+                )
+                decoded = inspection.decoded
+                if decoded is None:
+                    return False, inspection
+                accepted_completion = decoded.completion
+                if accepted_completion.success:
                     handled = self._store_and_succeed_task(
                         current,
-                        result.get("result"),
-                        prepared_result_reference=prepared_result_reference,
+                        accepted_completion.result,
+                        prepared_result_reference=inspection.prepared_result_reference,
                         expected_ray_job_id=ray_job_id,
                         expected_claimed_by_worker=expected_worker_id,
                         expected_attempt_number=expected_attempt_number,
                         expected_execution_generation=expected_execution_generation,
                         expected_completion_data=completion_data,
                         require_completion_data_match=True,
+                        supported_protocols=owned.supported_protocols,
+                        executor_django_ray_version=(
+                            accepted_completion.executor_django_ray_version
+                        ),
                     )
                 else:
                     handled = self._handle_task_failure(
                         current,
-                        error_message=result["error"],
-                        error_traceback=result.get("traceback"),
-                        exception_type=result.get("exception_type"),
-                        retryable=result.get("retryable"),
+                        error_message=accepted_completion.error or "Unknown error",
+                        error_traceback=accepted_completion.traceback,
+                        exception_type=accepted_completion.exception_type,
+                        retryable=accepted_completion.retryable,
                         expected_ray_job_id=ray_job_id,
                         expected_claimed_by_worker=expected_worker_id,
                         expected_attempt_number=expected_attempt_number,
                         expected_execution_generation=expected_execution_generation,
                         expected_completion_data=completion_data,
                         require_completion_data_match=True,
+                        supported_protocols=owned.supported_protocols,
+                        executor_django_ray_version=(
+                            accepted_completion.executor_django_ray_version
+                        ),
                     )
                 if handled is False:
-                    return True
+                    return True, None
 
             assert current is not None
             task.__dict__.update(current.__dict__)
-            if result["success"]:
+            if accepted_completion.success:
                 self.stdout.write(self.style.SUCCESS(f"\nTask {task.pk} completed"))
             else:
                 self.stdout.write(
@@ -3457,12 +3594,13 @@ class Command(BaseCommand):
                     )
                 )
             complete_tracking()
-            return True
+            return True, None
 
         # The entrypoint's valid durable envelope is authoritative. Consume it
         # before contacting Ray so a control-plane outage cannot strand a task
         # whose terminal result is already safely persisted.
-        if consume_valid_completion(task.completion_data):
+        completion_consumed, completion_inspection = consume_valid_completion(task.completion_data)
+        if completion_consumed:
             return
 
         job_info = runner.get_status(handle)
@@ -3511,12 +3649,13 @@ class Command(BaseCommand):
             expected_completion_data: str | None,
             error_message: str,
             log_detail: str,
+            require_stale: bool = True,
         ) -> bool:
             """Fence an untrusted execution, request its exact stop, and retain LOST."""
             timeout_recovery_owns_task = expected_completion_data is None and is_task_timed_out(
                 task
             )
-            if timeout_recovery_owns_task or not is_task_stuck(task):
+            if require_stale and (timeout_recovery_owns_task or not is_task_stuck(task)):
                 return False
 
             prepared_cancellation = prepare_remote_cancellation(runner, handle)
@@ -3539,7 +3678,7 @@ class Command(BaseCommand):
                 timeout_recovery_owns_task = expected_completion_data is None and is_task_timed_out(
                     current
                 )
-                if timeout_recovery_owns_task or not is_task_stuck(current):
+                if require_stale and (timeout_recovery_owns_task or not is_task_stuck(current)):
                     return False
                 if not record_lost(
                     current,
@@ -3547,6 +3686,7 @@ class Command(BaseCommand):
                     expected_completion_data=expected_completion_data,
                     expected_attempt_number=expected_attempt_number,
                     expected_execution_generation=expected_execution_generation,
+                    supported_protocols=owned.supported_protocols,
                 ):
                     return False
                 cancellation = request_remote_cancellation(
@@ -3576,6 +3716,7 @@ class Command(BaseCommand):
             exception_type: str,
             expected_completion_data: str | None,
             error_traceback: str | None = None,
+            retryable: bool | None = None,
         ) -> bool:
             """Apply one Ray Job failure only behind the exact live lease fence."""
             current: RayTaskExecution | None = None
@@ -3594,12 +3735,14 @@ class Command(BaseCommand):
                     error_message=error_message,
                     error_traceback=error_traceback,
                     exception_type=exception_type,
+                    retryable=retryable,
                     expected_ray_job_id=ray_job_id,
                     expected_claimed_by_worker=expected_worker_id,
                     expected_attempt_number=expected_attempt_number,
                     expected_execution_generation=expected_execution_generation,
                     expected_completion_data=expected_completion_data,
                     require_completion_data_match=True,
+                    supported_protocols=owned.supported_protocols,
                 )
 
             if handled:
@@ -3612,7 +3755,8 @@ class Command(BaseCommand):
         # The entrypoint's durable envelope is authoritative even while Ray
         # briefly continues to report PENDING/RUNNING during process teardown.
         # Consume it before monitor heartbeat or timeout logic can obscure it.
-        if consume_valid_completion(completion_data):
+        completion_consumed, completion_inspection = consume_valid_completion(completion_data)
+        if completion_consumed:
             return
 
         if completion_data is None and job_info.status in (
@@ -3641,16 +3785,48 @@ class Command(BaseCommand):
             return
 
         if completion_data is not None:
-            completion_error: str | None = None
-            try:
-                result = json.loads(completion_data)
-            except (TypeError, json.JSONDecodeError):
-                completion_error = "malformed"
+            assert completion_inspection is not None
+            assert completion_inspection.decoded is None
+            assert completion_inspection.rejection is not None
+            completion_error = (
+                "malformed"
+                if completion_inspection.rejection is ExecutionCompletionRejection.MALFORMED_LEGACY
+                else completion_inspection.rejection.value.replace("_", " ")
+            )
 
-            if completion_error is None and not self._is_valid_completion_envelope(result):
-                completion_error = "invalid"
+            if completion_inspection.requires_nonretryable_disposition:
+                error_message, exception_type, retryable = self._completion_rejection_policy(
+                    completion_inspection
+                )
+                if job_info.status in (
+                    JobStatus.UNKNOWN,
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                ):
+                    resolve_stale_untrusted_execution(
+                        expected_completion_data=completion_data,
+                        error_message=error_message,
+                        log_detail="published a non-retryable incompatible completion",
+                        require_stale=False,
+                    )
+                    return
+                handled = handle_failure_authoritatively(
+                    error_message=error_message,
+                    exception_type=exception_type,
+                    expected_completion_data=completion_data,
+                    retryable=retryable,
+                )
+                if handled:
+                    complete_tracking()
+                    self.stdout.write(
+                        self.style.ERROR(
+                            f"\nTask {task.pk} terminalized a non-retryable incompatible "
+                            "completion without automatic retry"
+                        )
+                    )
+                return
 
-            if completion_error is not None:
+            if completion_inspection.rejection is not None:
                 if job_info.status == JobStatus.UNKNOWN:
                     if resolve_stale_untrusted_execution(
                         expected_completion_data=completion_data,

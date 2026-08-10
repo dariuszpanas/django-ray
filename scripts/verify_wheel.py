@@ -14,6 +14,7 @@ from packaging.version import Version
 EXPECTED_FILES = {
     "django_ray/__init__.py",
     "django_ray/admin.py",
+    "django_ray/execution_codec.py",
     "django_ray/execution_protocol.py",
     "django_ray/protocol_coordination.py",
     "django_ray/models.py",

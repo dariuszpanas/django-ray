@@ -954,6 +954,184 @@ def test_ray_core_exact_lease_loss_after_get_is_a_durable_noop(
     assert runner.pending_count == 0
 
 
+def test_enriched_ray_core_completion_blocked_by_task_replacement_is_a_durable_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.execution_codec import (
+        ExecutionCompletion,
+        ExecutionCompletionSource,
+        ExecutionIdentity,
+        decode_execution_completion,
+        encode_execution_completion,
+    )
+
+    command = _claim_command("postgres-enriched-completion-owner", [])
+    command.last_task_monitor_heartbeat = time.monotonic()
+    command.task_monitor_heartbeat_interval = 3600
+    observed_at = datetime.now(UTC)
+    task = _execution(
+        "postgres-enriched-completion-replacement-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker=command.worker_id,
+        attempt_number=3,
+        execution_generation=7,
+        started_at=observed_at,
+        last_heartbeat_at=observed_at,
+    )
+    assert task.pk is not None
+    completion_identity = ExecutionIdentity(
+        task_execution_pk=int(task.pk),
+        task_id=str(task.task_id),
+        attempt_number=3,
+        execution_generation=7,
+    )
+    result_json = encode_execution_completion(
+        ExecutionCompletion(
+            identity=completion_identity,
+            execution_protocol_version=int(task.execution_protocol_version),
+            executor_django_ray_version="0.5.0-stale-executor",
+            success=True,
+            result={"stale": "x" * 128},
+            result_reference=None,
+            error=None,
+            traceback=None,
+            exception_type=None,
+            retryable=None,
+        )
+    )
+    object_ref = object()
+    handle = RayCoreHandle(
+        task_pk=int(task.pk),
+        object_ref=object_ref,
+        submitted_at=observed_at,
+        task_name="postgres enriched completion replacement",
+        attempt_number=3,
+        execution_generation=7,
+    )
+    runner = _ray_core_runner_with_handle(handle)
+    command.ray_core_runner = runner
+
+    completion_ready = Event()
+    central_authority_entered = Event()
+    release_central_authority = Event()
+    replacement_locked = Event()
+    release_replacement = Event()
+    poll_connected = Event()
+    poll_backend_pid: list[int] = []
+    original_authority = command._authoritative_task_owner
+
+    def ready_wait(refs, *, num_returns: int, timeout: int):
+        assert refs == [object_ref]
+        assert num_returns == 1
+        assert timeout == 0
+        return [object_ref], []
+
+    def ready_get(ref):
+        assert ref is object_ref
+        decoded = decode_execution_completion(
+            result_json,
+            expected_identity=completion_identity,
+            expected_execution_protocol_version=int(task.execution_protocol_version),
+        )
+        assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+        completion_ready.set()
+        return result_json
+
+    @contextmanager
+    def delayed_central_authority(snapshot, **kwargs):
+        central_authority_entered.set()
+        if not release_central_authority.wait(timeout=10):
+            raise TimeoutError("test did not release central completion authority")
+        with original_authority(snapshot, **kwargs) as owned:
+            yield owned
+
+    monkeypatch.setattr("ray.is_initialized", lambda: True)
+    monkeypatch.setattr("ray.wait", ready_wait)
+    monkeypatch.setattr("ray.get", ready_get)
+    monkeypatch.setattr(command, "_authoritative_task_owner", delayed_central_authority)
+    monkeypatch.setattr(
+        command,
+        "_store_task_result",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a stale enriched completion must not reach result storage"
+        ),
+    )
+
+    def replace_task_identity() -> dict[str, Any]:
+        close_old_connections()
+        try:
+            assert command.lease_identity is not None
+            with transaction.atomic():
+                TaskWorkerLease.objects.select_for_update().get(
+                    **command.lease_identity.database_filters()
+                )
+                current = RayTaskExecution.objects.select_for_update().get(pk=task.pk)
+                current.attempt_number = 4
+                current.execution_generation = 8
+                current.started_at = observed_at + timedelta(seconds=1)
+                current.last_heartbeat_at = observed_at + timedelta(seconds=1)
+                current.managed_with_django_ray_version = "0.6.0-replacement-manager"
+                current.executor_django_ray_version = "0.6.0-replacement-executor"
+                current.save(
+                    update_fields=[
+                        "attempt_number",
+                        "execution_generation",
+                        "started_at",
+                        "last_heartbeat_at",
+                        "managed_with_django_ray_version",
+                        "executor_django_ray_version",
+                    ]
+                )
+                replacement = RayTaskExecution.objects.values().get(pk=task.pk)
+                replacement_locked.set()
+                if not release_replacement.wait(timeout=10):
+                    raise TimeoutError("test did not release the replacement transaction")
+                return replacement
+        finally:
+            close_old_connections()
+
+    def poll_ready_result() -> int:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                poll_backend_pid.append(int(cursor.fetchone()[0]))
+            poll_connected.set()
+            return command.poll_ray_core_tasks()
+        finally:
+            close_old_connections()
+
+    replacement_future = None
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        poll_future = executor.submit(poll_ready_result)
+        try:
+            assert poll_connected.wait(timeout=10)
+            assert completion_ready.wait(timeout=10)
+            assert central_authority_entered.wait(timeout=10)
+            replacement_future = executor.submit(replace_task_identity)
+            assert replacement_locked.wait(timeout=10)
+            release_central_authority.set()
+            _wait_for_postgresql_lock(poll_backend_pid[0])
+        finally:
+            release_central_authority.set()
+            release_replacement.set()
+
+        assert replacement_future is not None
+        replacement = replacement_future.result(timeout=20)
+        assert poll_future.result(timeout=20) == 1
+
+    assert RayTaskExecution.objects.values().get(pk=task.pk) == replacement
+    task.refresh_from_db()
+    assert task.state == TaskState.RUNNING
+    assert task.attempt_number == 4
+    assert task.execution_generation == 8
+    assert task.result_data is None
+    assert task.result_reference is None
+    assert task.executor_django_ray_version == "0.6.0-replacement-executor"
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+    assert runner.pending_count == 0
+
+
 def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:
     now = datetime.now(UTC)
     TaskWorkerLease.objects.create(
