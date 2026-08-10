@@ -18,8 +18,11 @@ from django_ray.execution_codec import (
     ExecutionIdentity,
     ExecutionRequest,
     ExecutionRequestRejection,
+    NestedExecutionRequestRejected,
+    NestedExecutionRequestRejection,
     decode_execution_completion,
     encode_execution_request,
+    find_nested_execution_request_rejection,
 )
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.ray_job_protocol import (
@@ -197,6 +200,7 @@ class TestEntrypointPayload:
             "ray_job_driver": True,
             "_completion_identity": request.identity,
             "_execution_protocol_version": request.execution_protocol_version,
+            "_strict_execution_request": True,
         }
 
     def test_legacy_payload_accepts_released_ray_job_metadata(self, monkeypatch) -> None:
@@ -562,11 +566,13 @@ class TestEntrypointPayload:
             return {
                 "task_pk": context.task_pk,
                 "task_id": context.task_id,
+                "execution_protocol_version": context.execution_protocol_version,
                 "attempt_number": context.attempt_number,
                 "execution_generation": context.execution_generation,
                 "runtime_env_profile": context.runtime_env_profile,
                 "runtime_env_hash": context.runtime_env_hash,
                 "ray_job_driver": context.ray_job_driver,
+                "strict_execution_request": context.strict_execution_request,
                 "compiled_graph_submission_transport": (
                     context.compiled_graph_submission_transport
                 ),
@@ -581,16 +587,25 @@ class TestEntrypointPayload:
             lambda value: {} if value == "{}" else [],
         )
 
-        result_json = entrypoint.execute_task(
-            "testproject.tasks.echo_task",
-            "[]",
-            "{}",
+        identity = ExecutionIdentity(
             task_execution_pk=42,
             task_id="00000000-0000-4000-8000-000000000042",
             attempt_number=3,
             execution_generation=7,
+        )
+        result_json = entrypoint.execute_task(
+            "testproject.tasks.echo_task",
+            "[]",
+            "{}",
+            task_execution_pk=identity.task_execution_pk,
+            task_id=identity.task_id,
+            attempt_number=identity.attempt_number,
+            execution_generation=identity.execution_generation,
             runtime_env_profile="thin",
             runtime_env_hash="abc123",
+            _completion_identity=identity,
+            _execution_protocol_version=1,
+            _strict_execution_request=True,
         )
 
         result = json.loads(result_json)
@@ -598,11 +613,13 @@ class TestEntrypointPayload:
         assert result["result"] == {
             "task_pk": 42,
             "task_id": "00000000-0000-4000-8000-000000000042",
+            "execution_protocol_version": 1,
             "attempt_number": 3,
             "execution_generation": 7,
             "runtime_env_profile": "thin",
             "runtime_env_hash": "abc123",
             "ray_job_driver": True,
+            "strict_execution_request": True,
             "compiled_graph_submission_transport": "ray-job",
         }
 
@@ -774,6 +791,84 @@ class TestEntrypointPayload:
         assert result["success"] is False
         assert result["retryable"] is False
         assert result["exception_type"].endswith("WorkflowPlanMismatchError")
+
+    def test_execute_task_marks_nested_request_rejection_non_retryable(
+        self,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+
+        def reject() -> None:
+            raise NestedExecutionRequestRejected(NestedExecutionRequestRejection.CALLABLE_MISMATCH)
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: reject,
+        )
+
+        encoded = entrypoint.execute_task("tests.nested_rejection", "[]", "{}")
+        result = json.loads(encoded)
+
+        assert result == {
+            "success": False,
+            "result": None,
+            "result_reference": None,
+            "error": "nested execution request rejected: callable_mismatch",
+            "traceback": None,
+            "exception_type": ("django_ray.execution_codec.NestedExecutionRequestRejected"),
+            "retryable": False,
+        }
+
+    def test_execute_task_unwraps_typed_nested_rejection_without_ray_diagnostics(
+        self,
+        monkeypatch,
+    ) -> None:
+        from ray.exceptions import RayTaskError
+
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        cause = NestedExecutionRequestRejected(NestedExecutionRequestRejection.IDENTITY_MISMATCH)
+        wrapped = RayTaskError(
+            "nested_leaf",
+            "secret-bearing remote traceback",
+            cause,
+            proctitle="ray::nested_leaf",
+            pid=123,
+            ip="127.0.0.1",
+        )
+
+        def reject() -> None:
+            raise wrapped
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: reject,
+        )
+
+        encoded = entrypoint.execute_task("tests.wrapped_nested_rejection", "[]", "{}")
+        result = json.loads(encoded)
+
+        assert result["error"] == "nested execution request rejected: identity_mismatch"
+        assert result["traceback"] is None
+        assert result["exception_type"] == (
+            "django_ray.execution_codec.NestedExecutionRequestRejected"
+        )
+        assert result["retryable"] is False
+        assert "secret-bearing" not in encoded
+
+    def test_nested_rejection_unwrap_is_bounded_for_cyclic_ray_causes(self) -> None:
+        from ray.exceptions import RayTaskError
+
+        wrapped = RayTaskError(
+            "nested_leaf",
+            "cycle",
+            RuntimeError("ordinary application failure"),
+            proctitle="ray::nested_leaf",
+            pid=123,
+            ip="127.0.0.1",
+        )
+        wrapped.cause = wrapped
+
+        assert find_nested_execution_request_rejection(wrapped) is None
 
     @pytest.mark.parametrize("exception_type", [asyncio.CancelledError, KeyboardInterrupt])
     def test_execute_task_does_not_serialize_async_cancellation_base_exceptions(

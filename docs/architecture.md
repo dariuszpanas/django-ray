@@ -869,12 +869,42 @@ separately. Operators should enable durable input references for large or sensit
 inputs and must not interpret strict parsing as proof that arbitrary command length is
 portable.
 
-The outer Ray Core check still occurs after Ray has deserialized the trusted bootstrap
-and its plain request string. Neither outer transport proves cross-version cloudpickle
-compatibility or replaces the separate exact Ray/Python and cluster-instance
-attestation required before submission. Nested workflow, fold, and distributed
-callable boundaries remain later slices and may not infer compatibility from the
-outer-task check.
+Strict outer Ray Core and Ray Job contexts now extend the same immutable task identity
+and execution protocol through nested workflow steps, result-fold actors, and
+distributed map, starmap, and scatter leaves. Each leaf receives one canonical bounded
+request plus independent expected identity, protocol, boundary, callable, and RuntimeEnv
+controls. Any partial strict controls reject without falling back to the released direct
+call shape. Workflow and fold requests bind the exact run, node, and primary callable
+path. A workflow-step request also binds the exact nullable output-preview callable path
+and compares it with the independent leaf argument before either application callable
+is imported; that wire field must be null for every other boundary. Distributed
+requests bind an operation/index and the SHA-256 digest of the still-opaque pickled
+callable. The transported RuntimeEnv plan identity retains its exact schema and checksum
+and is descriptive of the selected environment, not live cluster attestation.
+
+A workflow leaf validates before Django setup or callable import, then installs the
+decoded strict context around invocation so deeper nesting remains fenced. A result-fold
+actor validates before setup, initial serialization, or reducer import and reports a
+typed rejection from its required ready acknowledgement before mapped leaves are
+admitted; reducer calls run under the same context. A distributed leaf validates before
+Django setup, django-ray's callable `pickle.loads`, or invocation. Ray has necessarily
+already deserialized the remote bootstrap, request primitives, and ordinary Ray
+arguments before any Python leaf body executes.
+
+A typed nested-request rejection remains fixed and pickle-safe through bounded
+`RayTaskError.cause` unwrapping. The outer completion records only its fixed classifier,
+no remote traceback, and `retryable=false`; it is never automatically replayed because
+sibling leaves may already have produced effects. Marker-free released direct calls
+remain the protocol-v1 compatibility path, while an explicitly strict context cannot
+downgrade. These boundaries still do not prove cross-version cloudpickle compatibility
+or replace the separate exact Ray/Python and cluster-instance attestation required
+before serialization and submission.
+
+This completes the still-unreleased 0.5 explicit protocol-`1` worker contract. The
+supported rolling boundary is released 0.4 legacy/schema-`0` workers versus one exact
+final 0.5 candidate; intermediate development snapshots that advertised schema `1`
+before this boundary landed are not a supported cohort and must be stopped and drained.
+Protocol fields deliberately do not encode Git commits or package Semantic Versions.
 
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
 capability. Likewise, an execution-protocol-capable lease proves only task-manager

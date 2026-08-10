@@ -24,8 +24,17 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable, Sequence
-from typing import Any, TypeVar
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypeVar, cast
+from uuid import uuid4
+
+if TYPE_CHECKING:
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        NestedExecutionBoundaryKind,
+    )
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -39,6 +48,19 @@ _django_bootstrapped = False
 _parallel_map_remote_cached: Any = None
 _parallel_starmap_remote_cached: Any = None
 _scatter_gather_remote_cached: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class _NestedDistributedOperation:
+    """Strict outer context shared by every item in one helper invocation."""
+
+    outer_identity: ExecutionIdentity
+    execution_protocol_version: int
+    boundary_kind: NestedExecutionBoundaryKind
+    operation_id: str
+    runtime_env_plan_identity: dict[str, Any]
+    runtime_env_plan_digest: str
+    runtime_env_transport_digest: str
 
 
 def _validate_resources(num_cpus: float, num_gpus: float) -> None:
@@ -72,33 +94,293 @@ def _validate_callable(func: object, name: str = "func") -> None:
         raise TypeError(f"{name} must be callable")
 
 
-def _parallel_map_remote(pickled_func: bytes, item: Any, kwargs: dict[str, Any]) -> Any:
+def _strict_nested_operation(
+    boundary_kind: NestedExecutionBoundaryKind,
+) -> _NestedDistributedOperation | None:
+    """Capture one strict outer context, or retain the released legacy path."""
+    from django_ray.runtime.context import (
+        get_current_task_context,
+        nested_execution_identity,
+        require_strict_task_execution_context,
+    )
+
+    current = get_current_task_context()
+    if current is None or getattr(current, "strict_execution_request", False) is False:
+        return None
+
+    current = require_strict_task_execution_context(current)
+    from django_ray.execution_codec import nested_runtime_env_digests
+
+    outer_identity, execution_protocol_version = nested_execution_identity(current)
+    runtime_env_plan_identity = cast(dict[str, Any], current.runtime_env_plan_identity)
+    plan_digest, transport_digest = nested_runtime_env_digests(runtime_env_plan_identity)
+    return _NestedDistributedOperation(
+        outer_identity=outer_identity,
+        execution_protocol_version=execution_protocol_version,
+        boundary_kind=boundary_kind,
+        operation_id=uuid4().hex,
+        runtime_env_plan_identity=runtime_env_plan_identity,
+        runtime_env_plan_digest=plan_digest,
+        runtime_env_transport_digest=transport_digest,
+    )
+
+
+def _nested_distributed_request(
+    operation: _NestedDistributedOperation,
+    pickled_func: bytes,
+    item_index: int,
+) -> tuple[str, int, str, int, int, int, str, int, str, str]:
+    """Bind one still-opaque callable to an exact distributed leaf identity."""
+    from django_ray.execution_codec import (
+        NestedCallableBindingKind,
+        NestedDistributedBoundaryIdentity,
+        NestedExecutionRequest,
+        encode_nested_execution_request,
+        nested_callable_digest,
+    )
+
+    boundary_identity = NestedDistributedBoundaryIdentity(
+        operation_id=operation.operation_id,
+        item_index=item_index,
+    )
+    request = NestedExecutionRequest(
+        outer_identity=operation.outer_identity,
+        execution_protocol_version=operation.execution_protocol_version,
+        boundary_kind=operation.boundary_kind,
+        boundary_identity=boundary_identity,
+        callable_binding_kind=NestedCallableBindingKind.DIGEST,
+        callable_binding=nested_callable_digest(pickled_func),
+        runtime_env_plan_identity=operation.runtime_env_plan_identity,
+        runtime_env_plan_digest=operation.runtime_env_plan_digest,
+        runtime_env_transport_digest=operation.runtime_env_transport_digest,
+    )
+    identity = operation.outer_identity
+    return (
+        encode_nested_execution_request(request),
+        identity.task_execution_pk,
+        identity.task_id,
+        identity.attempt_number,
+        identity.execution_generation,
+        operation.execution_protocol_version,
+        boundary_identity.operation_id,
+        boundary_identity.item_index,
+        operation.runtime_env_plan_digest,
+        operation.runtime_env_transport_digest,
+    )
+
+
+@contextmanager
+def _nested_distributed_leaf_execution(
+    pickled_func: bytes,
+    nested_request: str | None,
+    expected_task_execution_pk: int | None,
+    expected_task_id: str | None,
+    expected_attempt_number: int | None,
+    expected_execution_generation: int | None,
+    expected_execution_protocol_version: int | None,
+    expected_operation_id: str | None,
+    expected_item_index: int | None,
+    expected_runtime_env_plan_digest: str | None,
+    expected_runtime_env_transport_digest: str | None,
+    *,
+    boundary_kind: NestedExecutionBoundaryKind,
+) -> Iterator[None]:
+    """Validate strict controls before loading the still-opaque callable bytes.
+
+    Ray has already deserialized this handler's ordinary bootstrap and item
+    arguments. This boundary deliberately protects the explicit callable pickle
+    from ``pickle.loads`` and prevents application setup or invocation on reject.
+    """
+    expected_controls = (
+        expected_task_execution_pk,
+        expected_task_id,
+        expected_attempt_number,
+        expected_execution_generation,
+        expected_execution_protocol_version,
+        expected_operation_id,
+        expected_item_index,
+        expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest,
+    )
+    if nested_request is None and all(control is None for control in expected_controls):
+        yield
+        return
+
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        NestedCallableBindingKind,
+        NestedDistributedBoundaryIdentity,
+        NestedExecutionRequestRejected,
+        NestedExecutionRequestRejection,
+        assert_nested_callable_binding,
+        decode_nested_execution_request,
+        nested_callable_digest,
+    )
+
+    if type(nested_request) is not str or any(control is None for control in expected_controls):
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.INVALID_VERSIONED
+        ) from None
+
+    expected_outer_identity = ExecutionIdentity(
+        task_execution_pk=cast(int, expected_task_execution_pk),
+        task_id=cast(str, expected_task_id),
+        attempt_number=cast(int, expected_attempt_number),
+        execution_generation=cast(int, expected_execution_generation),
+    )
+    expected_boundary_identity = NestedDistributedBoundaryIdentity(
+        operation_id=cast(str, expected_operation_id),
+        item_index=cast(int, expected_item_index),
+    )
+    callable_binding = nested_callable_digest(pickled_func)
+    decoded = decode_nested_execution_request(
+        nested_request,
+        expected_outer_identity=expected_outer_identity,
+        expected_execution_protocol_version=expected_execution_protocol_version,
+        expected_boundary_kind=boundary_kind,
+        expected_boundary_identity=expected_boundary_identity,
+        expected_callable_binding_kind=NestedCallableBindingKind.DIGEST,
+        expected_callable_binding=callable_binding,
+        expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
+    )
+    assert_nested_callable_binding(decoded, serialized_callable=pickled_func)
+
+    from django_ray.runtime.compiled_graph import CompiledGraphSubmissionTransport
+    from django_ray.runtime.context import durable_task_execution
+
+    identity = decoded.outer_identity
+    runtime_env_profile = decoded.runtime_env_plan_identity.get("profile")
+    with durable_task_execution(
+        identity.task_execution_pk,
+        task_id=identity.task_id,
+        execution_protocol_version=decoded.execution_protocol_version,
+        attempt_number=identity.attempt_number,
+        execution_generation=identity.execution_generation,
+        runtime_env_profile=runtime_env_profile,
+        runtime_env_plan_identity=decoded.runtime_env_plan_identity,
+        compiled_graph_submission_transport=(
+            CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value
+        ),
+        strict_execution_request=True,
+    ):
+        yield
+
+
+def _parallel_map_remote(
+    pickled_func: bytes,
+    item: Any,
+    kwargs: dict[str, Any],
+    nested_request: str | None = None,
+    expected_task_execution_pk: int | None = None,
+    expected_task_id: str | None = None,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
+    expected_execution_protocol_version: int | None = None,
+    expected_operation_id: str | None = None,
+    expected_item_index: int | None = None,
+    expected_runtime_env_plan_digest: str | None = None,
+    expected_runtime_env_transport_digest: str | None = None,
+) -> Any:
     """Execute one ``parallel_map`` item on a Ray worker."""
-    import pickle
+    from django_ray.execution_codec import NestedExecutionBoundaryKind
 
-    _bootstrap_django_if_needed()
-    fn = pickle.loads(pickled_func)
-    return fn(item, **kwargs)
+    with _nested_distributed_leaf_execution(
+        pickled_func,
+        nested_request,
+        expected_task_execution_pk,
+        expected_task_id,
+        expected_attempt_number,
+        expected_execution_generation,
+        expected_execution_protocol_version,
+        expected_operation_id,
+        expected_item_index,
+        expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest,
+        boundary_kind=NestedExecutionBoundaryKind.DISTRIBUTED_MAP,
+    ):
+        import pickle
+
+        _bootstrap_django_if_needed()
+        fn = pickle.loads(pickled_func)
+        return fn(item, **kwargs)
 
 
-def _parallel_starmap_remote(pickled_func: bytes, args: tuple[Any, ...]) -> Any:
+def _parallel_starmap_remote(
+    pickled_func: bytes,
+    args: tuple[Any, ...],
+    nested_request: str | None = None,
+    expected_task_execution_pk: int | None = None,
+    expected_task_id: str | None = None,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
+    expected_execution_protocol_version: int | None = None,
+    expected_operation_id: str | None = None,
+    expected_item_index: int | None = None,
+    expected_runtime_env_plan_digest: str | None = None,
+    expected_runtime_env_transport_digest: str | None = None,
+) -> Any:
     """Execute one ``parallel_starmap`` item on a Ray worker."""
-    import pickle
+    from django_ray.execution_codec import NestedExecutionBoundaryKind
 
-    _bootstrap_django_if_needed()
-    fn = pickle.loads(pickled_func)
-    return fn(*args)
+    with _nested_distributed_leaf_execution(
+        pickled_func,
+        nested_request,
+        expected_task_execution_pk,
+        expected_task_id,
+        expected_attempt_number,
+        expected_execution_generation,
+        expected_execution_protocol_version,
+        expected_operation_id,
+        expected_item_index,
+        expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest,
+        boundary_kind=NestedExecutionBoundaryKind.DISTRIBUTED_STARMAP,
+    ):
+        import pickle
+
+        _bootstrap_django_if_needed()
+        fn = pickle.loads(pickled_func)
+        return fn(*args)
 
 
 def _scatter_gather_remote(
-    pickled_func: bytes, args: tuple[Any, ...], kwargs: dict[str, Any]
+    pickled_func: bytes,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    nested_request: str | None = None,
+    expected_task_execution_pk: int | None = None,
+    expected_task_id: str | None = None,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
+    expected_execution_protocol_version: int | None = None,
+    expected_operation_id: str | None = None,
+    expected_item_index: int | None = None,
+    expected_runtime_env_plan_digest: str | None = None,
+    expected_runtime_env_transport_digest: str | None = None,
 ) -> Any:
     """Execute one ``scatter_gather`` item on a Ray worker."""
-    import pickle
+    from django_ray.execution_codec import NestedExecutionBoundaryKind
 
-    _bootstrap_django_if_needed()
-    fn = pickle.loads(pickled_func)
-    return fn(*args, **kwargs)
+    with _nested_distributed_leaf_execution(
+        pickled_func,
+        nested_request,
+        expected_task_execution_pk,
+        expected_task_id,
+        expected_attempt_number,
+        expected_execution_generation,
+        expected_execution_protocol_version,
+        expected_operation_id,
+        expected_item_index,
+        expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest,
+        boundary_kind=NestedExecutionBoundaryKind.DISTRIBUTED_SCATTER,
+    ):
+        import pickle
+
+        _bootstrap_django_if_needed()
+        fn = pickle.loads(pickled_func)
+        return fn(*args, **kwargs)
 
 
 def _get_cached_remote(kind: str) -> Any:
@@ -247,6 +529,10 @@ def parallel_map[T, R](
         # Fallback to sequential execution
         return [func(item, **kwargs) for item in materialized_items]
 
+    from django_ray.execution_codec import NestedExecutionBoundaryKind
+
+    operation = _strict_nested_operation(NestedExecutionBoundaryKind.DISTRIBUTED_MAP)
+
     # Pickle the function once to send to workers
     import pickle
 
@@ -254,7 +540,18 @@ def parallel_map[T, R](
 
     pickled_func = pickle.dumps(func)
     remote = _get_cached_remote("map").options(num_cpus=num_cpus, num_gpus=num_gpus)
-    calls = [(pickled_func, item, kwargs) for item in materialized_items]
+    if operation is None:
+        calls = [(pickled_func, item, kwargs) for item in materialized_items]
+    else:
+        calls = [
+            (
+                pickled_func,
+                item,
+                kwargs,
+                *_nested_distributed_request(operation, pickled_func, index),
+            )
+            for index, item in enumerate(materialized_items)
+        ]
     return _collect_remote_results(ray, remote, calls, max_concurrency)
 
 
@@ -300,6 +597,10 @@ def parallel_starmap[R](
     if not is_ray_available():
         return [func(*args) for args in materialized_items]
 
+    from django_ray.execution_codec import NestedExecutionBoundaryKind
+
+    operation = _strict_nested_operation(NestedExecutionBoundaryKind.DISTRIBUTED_STARMAP)
+
     import pickle
 
     import ray
@@ -307,7 +608,17 @@ def parallel_starmap[R](
     # Pickle the function once
     pickled_func = pickle.dumps(func)
     remote = _get_cached_remote("starmap").options(num_cpus=num_cpus, num_gpus=num_gpus)
-    calls = [(pickled_func, args) for args in materialized_items]
+    if operation is None:
+        calls = [(pickled_func, args) for args in materialized_items]
+    else:
+        calls = [
+            (
+                pickled_func,
+                args,
+                *_nested_distributed_request(operation, pickled_func, index),
+            )
+            for index, args in enumerate(materialized_items)
+        ]
     return _collect_remote_results(ray, remote, calls, max_concurrency)
 
 
@@ -357,12 +668,29 @@ def scatter_gather[R](
     if not is_ray_available():
         return [func(*args, **kwargs) for func, args, kwargs in materialized_tasks]
 
+    from django_ray.execution_codec import NestedExecutionBoundaryKind
+
+    operation = _strict_nested_operation(NestedExecutionBoundaryKind.DISTRIBUTED_SCATTER)
+
     import pickle
 
     import ray
 
     remote = _get_cached_remote("scatter_gather").options(num_cpus=num_cpus, num_gpus=num_gpus)
-    calls = [(pickle.dumps(func), args, kwargs) for func, args, kwargs in materialized_tasks]
+    calls: list[tuple[Any, ...]] = []
+    for index, (func, args, kwargs) in enumerate(materialized_tasks):
+        pickled_func = pickle.dumps(func)
+        if operation is None:
+            calls.append((pickled_func, args, kwargs))
+        else:
+            calls.append(
+                (
+                    pickled_func,
+                    args,
+                    kwargs,
+                    *_nested_distributed_request(operation, pickled_func, index),
+                )
+            )
     return _collect_remote_results(ray, remote, calls, None)
 
 

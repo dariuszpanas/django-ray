@@ -6,6 +6,7 @@ import copy
 import json
 import sys
 import time
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -158,6 +159,7 @@ def execute_django_task_remote(
             runtime_env_hash=request.runtime_env_hash,
             runtime_env_plan_identity=request.runtime_env_plan_identity,
             compiled_graph_submission_transport=request.compiled_graph_submission_transport,
+            strict_execution_request=True,
         ):
             result = execute_task(
                 request.callable_path,
@@ -222,6 +224,160 @@ def execute_django_task_remote(
     return result
 
 
+def _nested_task_execution(request: Any | None) -> Any:
+    """Install one decoded strict leaf context, or preserve a legacy call."""
+    if request is None:
+        return nullcontext()
+
+    from django_ray.runtime.compiled_graph import CompiledGraphSubmissionTransport
+    from django_ray.runtime.context import durable_task_execution
+
+    profile = request.runtime_env_plan_identity.get("profile")
+    return durable_task_execution(
+        request.outer_identity.task_execution_pk,
+        task_id=request.outer_identity.task_id,
+        execution_protocol_version=request.execution_protocol_version,
+        attempt_number=request.outer_identity.attempt_number,
+        execution_generation=request.outer_identity.execution_generation,
+        runtime_env_profile=profile if isinstance(profile, str) else None,
+        runtime_env_hash="",
+        runtime_env_plan_identity=request.runtime_env_plan_identity,
+        compiled_graph_submission_transport=(
+            CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value
+        ),
+        strict_execution_request=True,
+    )
+
+
+def _decode_workflow_step_request(
+    serialized: str | None,
+    *,
+    callable_path: str,
+    output_preview_path: str | None,
+    expected_outer_task_execution_pk: int | None,
+    expected_outer_task_id: str | None,
+    expected_outer_attempt_number: int | None,
+    expected_outer_execution_generation: int | None,
+    expected_execution_protocol_version: int | None,
+    expected_workflow_run_id: str | None,
+    expected_node_id: str | None,
+    expected_runtime_env_plan_digest: str | None,
+    expected_runtime_env_transport_digest: str | None,
+) -> Any | None:
+    """Fence a strict workflow leaf before setup/import, or admit legacy."""
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        NestedCallableBindingKind,
+        NestedExecutionBoundaryKind,
+        NestedExecutionRequestRejected,
+        NestedExecutionRequestRejection,
+        NestedWorkflowBoundaryIdentity,
+        assert_nested_callable_binding,
+        decode_nested_execution_request,
+    )
+
+    expectations = (
+        expected_outer_task_execution_pk,
+        expected_outer_task_id,
+        expected_outer_attempt_number,
+        expected_outer_execution_generation,
+        expected_execution_protocol_version,
+        expected_workflow_run_id,
+        expected_node_id,
+        expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest,
+    )
+    if serialized is None:
+        if any(value is not None for value in expectations):
+            raise NestedExecutionRequestRejected(
+                NestedExecutionRequestRejection.MISSING_CONTEXT
+            ) from None
+        return None
+    if any(value is None for value in expectations):
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.MISSING_CONTEXT
+        ) from None
+
+    expected_identity = ExecutionIdentity(
+        task_execution_pk=expected_outer_task_execution_pk,
+        task_id=expected_outer_task_id,
+        attempt_number=expected_outer_attempt_number,
+        execution_generation=expected_outer_execution_generation,
+    )
+    expected_boundary = NestedWorkflowBoundaryIdentity(
+        workflow_run_id=expected_workflow_run_id,
+        node_id=expected_node_id,
+    )
+    request = decode_nested_execution_request(
+        serialized,
+        expected_outer_identity=expected_identity,
+        expected_execution_protocol_version=expected_execution_protocol_version,
+        expected_boundary_kind=NestedExecutionBoundaryKind.WORKFLOW_STEP,
+        expected_boundary_identity=expected_boundary,
+        expected_callable_binding_kind=NestedCallableBindingKind.PATH,
+        expected_callable_binding=callable_path,
+        expected_output_preview_callable_path=output_preview_path,
+        expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
+    )
+    assert_nested_callable_binding(request, callable_path=callable_path)
+    return request
+
+
+def _assert_workflow_step_transport(
+    request: Any,
+    *,
+    task_execution_pk: int | None,
+    node_id: str,
+    workflow_run_identity: dict[str, Any] | None,
+) -> None:
+    """Bind separately transported progress fields to the strict request."""
+    from django_ray.execution_codec import (
+        NestedExecutionRequestRejected,
+        NestedExecutionRequestRejection,
+        NestedWorkflowBoundaryIdentity,
+    )
+
+    boundary = request.boundary_identity
+    if (
+        not isinstance(boundary, NestedWorkflowBoundaryIdentity)
+        or type(node_id) is not str
+        or boundary.node_id != node_id
+    ):
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.BOUNDARY_MISMATCH
+        ) from None
+    identity = request.outer_identity
+    if type(task_execution_pk) is not int or identity.task_execution_pk != task_execution_pk:
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.IDENTITY_MISMATCH
+        ) from None
+    if workflow_run_identity is None:
+        return
+    expected_run_identity = {
+        "schema_version": 1,
+        "run_id": boundary.workflow_run_id,
+        "task_execution_pk": identity.task_execution_pk,
+        "attempt_number": identity.attempt_number,
+        "execution_generation": identity.execution_generation,
+    }
+    if (
+        type(workflow_run_identity) is not dict
+        or len(workflow_run_identity) != len(expected_run_identity)
+        or any(type(key) is not str for key in workflow_run_identity)
+        or set(workflow_run_identity) != set(expected_run_identity)
+        or type(workflow_run_identity["schema_version"]) is not int
+        or type(workflow_run_identity["run_id"]) is not str
+        or type(workflow_run_identity["task_execution_pk"]) is not int
+        or type(workflow_run_identity["attempt_number"]) is not int
+        or type(workflow_run_identity["execution_generation"]) is not int
+        or workflow_run_identity != expected_run_identity
+    ):
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.BOUNDARY_MISMATCH
+        ) from None
+
+
 def execute_workflow_step_remote(
     callable_path: str,
     bootstrap_django: bool,
@@ -235,8 +391,75 @@ def execute_workflow_step_remote(
     output_preview_path: str | None = None,
     workflow_run_identity: dict[str, Any] | None = None,
     workflow_progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
+    nested_execution_request: str | None = None,
+    expected_outer_task_execution_pk: int | None = None,
+    expected_outer_task_id: str | None = None,
+    expected_outer_attempt_number: int | None = None,
+    expected_outer_execution_generation: int | None = None,
+    expected_execution_protocol_version: int | None = None,
+    expected_workflow_run_id: str | None = None,
+    expected_node_id: str | None = None,
+    expected_runtime_env_plan_digest: str | None = None,
+    expected_runtime_env_transport_digest: str | None = None,
 ) -> Any:
-    """Execute a lightweight workflow step without database coordination."""
+    """Execute one strict nested workflow step or a released direct call."""
+    request = _decode_workflow_step_request(
+        nested_execution_request,
+        callable_path=callable_path,
+        output_preview_path=output_preview_path,
+        expected_outer_task_execution_pk=expected_outer_task_execution_pk,
+        expected_outer_task_id=expected_outer_task_id,
+        expected_outer_attempt_number=expected_outer_attempt_number,
+        expected_outer_execution_generation=expected_outer_execution_generation,
+        expected_execution_protocol_version=expected_execution_protocol_version,
+        expected_workflow_run_id=expected_workflow_run_id,
+        expected_node_id=expected_node_id,
+        expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
+        expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
+    )
+    if request is not None:
+        _assert_workflow_step_transport(
+            request,
+            task_execution_pk=task_execution_pk,
+            node_id=node_id,
+            workflow_run_identity=workflow_run_identity,
+        )
+    with _nested_task_execution(request):
+        return _execute_workflow_step(
+            callable_path,
+            bootstrap_django,
+            bound_args,
+            bound_kwargs,
+            input_kwargs,
+            (
+                request.outer_identity.task_execution_pk
+                if request is not None
+                else task_execution_pk
+            ),
+            progress_actor,
+            node_id,
+            *input_args,
+            output_preview_path=output_preview_path,
+            workflow_run_identity=workflow_run_identity,
+            workflow_progress_limits=workflow_progress_limits,
+        )
+
+
+def _execute_workflow_step(
+    callable_path: str,
+    bootstrap_django: bool,
+    bound_args: tuple[Any, ...],
+    bound_kwargs: dict[str, Any],
+    input_kwargs: dict[str, Any],
+    task_execution_pk: int | None,
+    progress_actor: Any | None,
+    node_id: str,
+    *input_args: Any,
+    output_preview_path: str | None = None,
+    workflow_run_identity: dict[str, Any] | None = None,
+    workflow_progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
+) -> Any:
+    """Run a workflow step after its outer boundary has been selected."""
     if bootstrap_django:
         from django_ray.runtime.entrypoint import bootstrap_django as setup_django
 
@@ -283,11 +506,18 @@ def execute_workflow_step_remote(
         ):
             result = callable_obj(*input_args, *bound_args, **kwargs)
     except BaseException as error:
+        nested_rejection = None
+        if isinstance(error, Exception):
+            from django_ray.execution_codec import (
+                find_nested_execution_request_rejection,
+            )
+
+            nested_rejection = find_nested_execution_request_rejection(error)
         try:
             failure_payload = {
                 "node_id": node_id,
                 "label": label,
-                "error": str(error),
+                "error": str(nested_rejection or error),
             }
         except Exception:
             failure_payload = {
@@ -302,6 +532,12 @@ def execute_workflow_step_remote(
             failure_payload,
             limits=workflow_progress_limits,
         )
+        if nested_rejection is not None:
+            try:
+                logger.error("Workflow step rejected nested execution request")
+            except Exception:
+                pass
+            raise nested_rejection from None
         logger.exception("Workflow step failed")
         raise
     if output_preview_path is not None:

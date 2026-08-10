@@ -65,8 +65,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unverifiable binding is exact-stopped and retained as `LOST`. Neither path trusts its
   exit code or Ray logs as proof of execution phase. Released unversioned protocol-v1
   payloads remain the rolling-drain adapter. This does not yet replace inline shell
-  payloads with mandatory bounded references, attest Ray/Python or cluster identity, or
-  cover nested workflow/distributed callable transports.
+  payloads with mandatory bounded references or attest Ray/Python or cluster identity.
+- Strict outer tasks now propagate one canonical bounded execution request through
+  workflow steps, result-fold actors, and distributed map, starmap, and scatter leaves.
+  Exact outer identity/protocol, boundary identity, primary and optional preview
+  callable paths or opaque-byte digest, and checksummed RuntimeEnv plan identity are
+  validated before Django setup and application callable import, django-ray
+  `pickle.loads`, or invocation. Partial strict controls cannot downgrade to the
+  released direct-call path; validated contexts remain strict through deeper nesting. A
+  typed mismatch becomes a fixed outer non-retryable completion without a remote
+  traceback because sibling leaves may already have effects.
+  Ray has already deserialized the bootstrap and ordinary arguments at that point, so
+  exact Ray/Python and cluster-instance attestation remains a separate pre-submission
+  requirement. This completes the unreleased 0.5 explicit protocol-`1` contract;
+  intermediate development snapshots that advertised that protocol are not a supported
+  rolling cohort and must be drained before the exact final candidate.
 - A read-only `django_ray_protocol_status` command now emits bounded text or canonical
   versioned JSON for the rollout policy/token relationship, live and stale-active lease
   capability aggregates, nonterminal protocol groups, protocol-only unsupported work,
@@ -123,8 +136,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   positional submissions remain the protocol-v1 compatibility path. A strict handle
   that returns no executor envelope becomes a fixed non-retryable transport failure
   without remote exception text or executor provenance. This does not attest Ray/Python
-  or cluster identity and does not yet cover Ray Job or nested workflow/distributed
-  callable transports.
+  or cluster identity.
 - PostgreSQL and SQLite rollout coordination now serializes exact-0.4 execution and
   lease inserts, legacy heartbeats, and concurrent policy transitions without using
   package Semantic Versions as compatibility evidence. Callers must provide the

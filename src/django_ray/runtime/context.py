@@ -7,13 +7,16 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from django_ray.workflow_progress_limits import (
     WORKFLOW_PROGRESS_LIMITS_V1,
     WorkflowProgressLimits,
 )
+
+if TYPE_CHECKING:
+    from django_ray.execution_codec import ExecutionIdentity
 
 WORKFLOW_PROGRESS_SCHEMA_VERSION = 2
 WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION = 1
@@ -34,6 +37,7 @@ class DurableTaskContext:
     compiled_graph_submission_transport: str | None = None
     task_id: str | None = None
     execution_protocol_version: int | None = None
+    strict_execution_request: bool = False
 
 
 @dataclass(frozen=True)
@@ -148,6 +152,70 @@ def get_current_task_context() -> DurableTaskContext | None:
     return _current_task.get()
 
 
+def require_strict_task_execution_context(
+    context: DurableTaskContext | None = None,
+) -> DurableTaskContext:
+    """Return an explicitly strict, fully fenceable durable task context."""
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        NestedExecutionRequestRejected,
+        NestedExecutionRequestRejection,
+        is_valid_execution_identity,
+        nested_runtime_env_digests,
+    )
+    from django_ray.execution_protocol import SUPPORTED_EXECUTION_PROTOCOL_RANGE
+
+    current = _current_task.get() if context is None else context
+    identity = (
+        ExecutionIdentity(
+            task_execution_pk=current.task_pk,
+            task_id=current.task_id,
+            attempt_number=current.attempt_number,
+            execution_generation=current.execution_generation,
+        )
+        if current is not None
+        else None
+    )
+    protocol = current.execution_protocol_version if current is not None else None
+    invalid = (
+        current is None
+        or current.strict_execution_request is not True
+        or not is_valid_execution_identity(identity)
+        or type(protocol) is not int
+        or not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(protocol)
+        or not isinstance(current.runtime_env_plan_identity, dict)
+    )
+    if not invalid:
+        try:
+            nested_runtime_env_digests(current.runtime_env_plan_identity)
+        except NestedExecutionRequestRejected:
+            invalid = True
+    if invalid:
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.MISSING_CONTEXT
+        ) from None
+    assert current is not None
+    return current
+
+
+def nested_execution_identity(
+    context: DurableTaskContext | None = None,
+) -> tuple[ExecutionIdentity, int]:
+    """Return the exact outer identity and protocol inherited by nested work."""
+    from django_ray.execution_codec import ExecutionIdentity
+
+    current = require_strict_task_execution_context(context)
+    return (
+        ExecutionIdentity(
+            task_execution_pk=current.task_pk,
+            task_id=cast(str, current.task_id),
+            attempt_number=cast(int, current.attempt_number),
+            execution_generation=cast(int, current.execution_generation),
+        ),
+        cast(int, current.execution_protocol_version),
+    )
+
+
 def get_current_workflow_run_identity() -> dict[str, Any] | None:
     """Return a detached workflow-run identity inside a running leaf."""
     context = _current_workflow_step.get()
@@ -169,6 +237,7 @@ def durable_task_execution(
     runtime_env_plan_identity: dict[str, Any] | None = None,
     ray_job_driver: bool = False,
     compiled_graph_submission_transport: str | None = None,
+    strict_execution_request: bool = False,
 ) -> Iterator[None]:
     """Expose a durable task identity to nested workflow coordination."""
     token = _current_task.set(
@@ -187,6 +256,7 @@ def durable_task_execution(
             ),
             ray_job_driver=ray_job_driver,
             compiled_graph_submission_transport=compiled_graph_submission_transport,
+            strict_execution_request=strict_execution_request,
         )
     )
     try:

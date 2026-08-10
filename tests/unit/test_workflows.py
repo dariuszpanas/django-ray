@@ -144,6 +144,25 @@ def fail_on_two(value: int) -> int:
     return value
 
 
+def fail_with_nested_request_rejection(value: int) -> int:
+    from ray.exceptions import RayTaskError
+
+    from django_ray.execution_codec import (
+        NestedExecutionRequestRejected,
+        NestedExecutionRequestRejection,
+    )
+
+    cause = NestedExecutionRequestRejected(NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH)
+    raise RayTaskError(
+        "nested_map_leaf",
+        "secret-bearing mapped traceback",
+        cause,
+        proctitle="ray::nested_map_leaf",
+        pid=123,
+        ip="127.0.0.1",
+    )
+
+
 def fail_workflow_step(value: int) -> int:
     del value
     raise RuntimeError("intentional workflow failure")
@@ -485,6 +504,7 @@ class _InstrumentedWindowExecutor(_Executor):
     submissions: int = 0
     cancelled: list[_PendingValue] = field(default_factory=list)
     wait_sizes: list[int] = field(default_factory=list)
+    finished_errors: list[str | None] = field(default_factory=list)
 
     def submit_step(
         self,
@@ -531,6 +551,20 @@ class _InstrumentedWindowExecutor(_Executor):
         assert timeout_seconds >= 0
         self.cancelled.extend(values)
         self.live.difference_update(values)
+
+    def map_finished(
+        self,
+        node_id,
+        label,
+        *,
+        submitted,
+        completed,
+        input_exhausted,
+        failed=False,
+        error=None,
+    ):
+        del node_id, label, submitted, completed, input_exhausted, failed
+        self.finished_errors.append(error)
 
 
 class _CleanupRef:
@@ -729,6 +763,30 @@ def test_bounded_map_stops_generator_admission_and_preserves_failure(monkeypatch
     assert len(executor.cancelled) == 2
     assert executor.live == set()
     assert closed is True
+
+
+def test_bounded_map_sanitizes_nested_rejection_before_failure_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.execution_codec import (
+        NestedExecutionRequestRejected,
+        NestedExecutionRequestRejection,
+    )
+
+    executor = _InstrumentedWindowExecutor()
+    monkeypatch.setattr("django_ray.workflows._get_executor", lambda use_ray: executor)
+
+    with pytest.raises(NestedExecutionRequestRejected) as caught:
+        map_step(fail_with_nested_request_rejection).with_limits(
+            max_concurrency=1,
+            max_items=1,
+        ).run([1])
+
+    assert caught.value.classification is (NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH)
+    assert executor.finished_errors == ["nested execution request rejected: runtime_env_mismatch"]
+    reported_error = executor.finished_errors[0]
+    assert reported_error is not None
+    assert "secret-bearing" not in reported_error
 
 
 @pytest.mark.parametrize(
@@ -2501,6 +2559,146 @@ def test_terminal_only_submit_omits_all_progress_transport_metadata() -> None:
     args, kwargs = remote_calls[0]
     assert args[6] is None
     assert kwargs == {}
+
+
+def test_strict_ray_executor_submits_exact_nested_workflow_request() -> None:
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        NestedCallableBindingKind,
+        NestedExecutionBoundaryKind,
+        NestedWorkflowBoundaryIdentity,
+        decode_nested_execution_request,
+    )
+    from django_ray.workflow_plans import materialize_workflow_plan
+
+    def thaw(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: thaw(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return [thaw(item) for item in value]
+        return value
+
+    remote_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    class _Ref:
+        @staticmethod
+        def task_id() -> Any:
+            raise RuntimeError("task id unavailable")
+
+    class _RemoteStep:
+        def options(self, **kwargs: Any) -> _RemoteStep:
+            del kwargs
+            return self
+
+        def remote(self, *args: Any, **kwargs: Any) -> _Ref:
+            remote_calls.append((args, kwargs))
+            return _Ref()
+
+    signature = step(increment).with_output_preview(preview_increment)
+    materialized = materialize_workflow_plan(
+        signature,
+        invocation_args=(1,),
+        invocation_kwargs={},
+    )
+    binding = materialized.binding_for_node("0")
+    assert binding is not None
+    workflow_identity = _workflow_identity(
+        task_execution_pk=42,
+        attempt_number=2,
+        execution_generation=5,
+        run_id="00000000-0000-4000-8000-000000000701",
+    )
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = DurableTaskContext(
+        task_pk=42,
+        task_id="00000000-0000-4000-8000-000000000042",
+        attempt_number=2,
+        execution_generation=5,
+        execution_protocol_version=1,
+        runtime_env_plan_identity=thaw(binding.runtime_env_plan_identity),
+        strict_execution_request=True,
+    )
+    executor.task_execution_pk = 42
+    executor.workflow_run_identity = workflow_identity
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
+    executor.reporting_policy = "full"
+    executor.progress_actor = _IngestOnlyProgressActor()
+    executor.materialized_plan = materialized
+    executor.remote_step = _RemoteStep()
+
+    executor.submit_step(signature, (1,), {}, "0", ())
+
+    assert len(remote_calls) == 1
+    args, kwargs = remote_calls[0]
+    expected_outer = ExecutionIdentity(
+        task_execution_pk=42,
+        task_id="00000000-0000-4000-8000-000000000042",
+        attempt_number=2,
+        execution_generation=5,
+    )
+    request = decode_nested_execution_request(
+        kwargs["nested_execution_request"],
+        expected_outer_identity=expected_outer,
+        expected_execution_protocol_version=1,
+        expected_boundary_kind=NestedExecutionBoundaryKind.WORKFLOW_STEP,
+        expected_boundary_identity=NestedWorkflowBoundaryIdentity(
+            workflow_run_id=workflow_identity.run_id,
+            node_id="0",
+        ),
+        expected_callable_binding_kind=NestedCallableBindingKind.PATH,
+        expected_callable_binding=f"{__name__}.increment",
+        expected_output_preview_callable_path=f"{__name__}.preview_increment",
+        expected_runtime_env_plan_digest=binding.runtime_env_plan_digest,
+        expected_runtime_env_transport_digest=binding.runtime_env_transport_digest,
+    )
+    assert args[0] == f"{__name__}.increment"
+    assert kwargs["output_preview_path"] == f"{__name__}.preview_increment"
+    assert request.output_preview_callable_path == f"{__name__}.preview_increment"
+    assert request.runtime_env_plan_identity == thaw(binding.runtime_env_plan_identity)
+    assert kwargs["expected_node_id"] == "0"
+
+
+@pytest.mark.parametrize("strict_marker", [True, None, 1])
+def test_incomplete_or_malformed_strict_context_never_submits_legacy_work(
+    strict_marker: Any,
+) -> None:
+    from django_ray.execution_codec import (
+        NestedExecutionRequestRejected,
+        NestedExecutionRequestRejection,
+    )
+    from django_ray.workflow_plans import materialize_workflow_plan
+
+    class _RemoteStep:
+        def options(self, **kwargs: Any) -> _RemoteStep:
+            del kwargs
+            return self
+
+        def remote(self, *args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            pytest.fail("invalid strict context downgraded to a legacy submission")
+
+    signature = step(increment)
+    materialized = materialize_workflow_plan(
+        signature,
+        invocation_args=(1,),
+        invocation_kwargs={},
+    )
+    task_context = DurableTaskContext(task_pk=42)
+    object.__setattr__(task_context, "strict_execution_request", strict_marker)
+    executor = object.__new__(_RayExecutor)
+    executor.task_context = task_context
+    executor.task_execution_pk = 42
+    executor.workflow_run_identity = _workflow_identity()
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
+    executor.reporting_policy = "terminal_only"
+    executor.progress_actor = None
+    executor.materialized_plan = materialized
+    executor.remote_step = _RemoteStep()
+
+    with pytest.raises(NestedExecutionRequestRejected) as captured:
+        executor.submit_step(signature, (1,), {}, "0", ())
+
+    assert captured.value.classification is NestedExecutionRequestRejection.MISSING_CONTEXT
 
 
 def test_ray_executor_submit_passes_strict_pilot_limits_to_remote_step() -> None:

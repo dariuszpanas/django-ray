@@ -216,10 +216,28 @@ until the separate bounded reference-only transport work lands; enable input spi
 for large or sensitive arguments and do not treat the codec's resource budget as an
 operating-system command length guarantee.
 
-Neither Ray Core nor Ray Job outer validation covers nested workflow, fold, or
-distributed callables. Those require their own transport boundaries before they can
-make the same pre-application-code claim. Exact Ray/Python and cluster-instance
-attestation also remains a separate pre-submission requirement.
+Strict Ray Core and Ray Job contexts carry their exact task identity and protocol into
+nested workflow steps, result-fold reducers, and distributed map, starmap, and scatter
+leaves. Those leaves validate a canonical boundary request and independent controls
+before Django setup and application callable import or invocation; distributed leaves
+also validate the callable-byte digest before django-ray calls `pickle.loads`. A partial
+strict boundary never falls back to the released direct call. Result-fold admission
+waits for the actor's validated ready acknowledgement before mapper effects begin.
+
+A nested incompatibility is a fixed non-retryable outer failure, even when Ray wraps it
+in a typed task-error cause. Do not manually replay it merely because the rejecting leaf
+did not invoke its callable: sibling workflow or distributed leaves may already have
+effects. A workflow output-preview path mismatch has the same disposition; the strict
+request binds that optional second application import independently. Ray deserializes
+each remote bootstrap and ordinary item arguments before the leaf body can validate, so
+exact Ray/Python and cluster-instance attestation remains a separate pre-serialization
+and pre-submission requirement.
+
+Use only the exact final 0.5 candidate as the schema-`1`, protocol-`1` upgraded cohort.
+Intermediate unreleased 0.5 snapshots that advertised the same protocol before nested
+fencing was complete are not rollout-compatible; stop and drain them before the final
+candidate. The supported handoff is from released 0.4 legacy/schema-`0` workers, not
+between arbitrary development commits that happen to share a protocol number.
 
 Do not interpret the lease's informational `queue_name` text as a durable per-queue
 capability, or its protocol range as proof that Ray is ready. Ray/Python version and

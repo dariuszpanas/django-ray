@@ -415,6 +415,8 @@ class StepExecutionBinding:
     runtime_env_metadata: Mapping[str, Any]
     runtime_env_plan_digest: str | None
     runtime_env_trust_identity: Mapping[str, str]
+    runtime_env_plan_identity: Mapping[str, Any] | None = None
+    runtime_env_transport_digest: str | None = None
 
     def ray_options_dict(self) -> dict[str, Any]:
         return _thaw_json(self.ray_options)
@@ -452,14 +454,14 @@ def prepare_materialized_plan_for_ray(
     )
 
     prepared_bindings: dict[str, StepExecutionBinding] = {}
-    prepared_runtime_envs: dict[tuple[str, str, tuple[tuple[str, str], ...]], str] = {}
+    prepared_runtime_envs: dict[tuple[str, str | None, tuple[tuple[str, str], ...]], str] = {}
     for node_id, binding in materialized_plan.step_bindings.items():
         if binding.runtime_env_serialized is None:
             prepared_bindings[node_id] = binding
             continue
         cache_key = (
             binding.runtime_env_serialized,
-            binding.runtime_env_plan_digest or "",
+            binding.runtime_env_plan_digest,
             tuple(sorted(binding.runtime_env_trust_identity.items())),
         )
         prepared_serialized = prepared_runtime_envs.get(cache_key)
@@ -489,7 +491,9 @@ def prepare_materialized_plan_for_ray(
             runtime_env_profile=binding.runtime_env_profile,
             runtime_env_serialized=prepared_serialized,
             runtime_env_metadata=binding.runtime_env_metadata,
+            runtime_env_plan_identity=binding.runtime_env_plan_identity,
             runtime_env_plan_digest=binding.runtime_env_plan_digest,
+            runtime_env_transport_digest=binding.runtime_env_transport_digest,
             runtime_env_trust_identity=binding.runtime_env_trust_identity,
         )
     return MaterializedWorkflowPlan(
@@ -1067,8 +1071,18 @@ def runtime_env_plan_identity_from_transport(
     value: Mapping[str, Any],
     *,
     trust_identity: Mapping[str, str] | None = None,
+    require_trust_match: bool = True,
 ) -> RuntimeEnvPlanIdentity:
-    """Strictly reconstruct a transported identity at the worker boundary."""
+    """Strictly reconstruct a transported identity at the worker boundary.
+
+    ``require_trust_match=False`` is limited to transitive transport of an
+    already-bound descriptive identity. It still enforces the exact schema and
+    checksum; it does not attest the receiving worker's live trust material.
+    """
+    if type(require_trust_match) is not bool:
+        raise WorkflowPlanValidationError(
+            "Transported RuntimeEnv trust-match policy must be a boolean"
+        )
     if not isinstance(value, Mapping):
         raise WorkflowPlanValidationError("Transported RuntimeEnv identity must be a mapping")
     normalized = _normalize_json(value, path="runtime_env", depth=0)
@@ -1175,15 +1189,16 @@ def runtime_env_plan_identity_from_transport(
         raise WorkflowPlanValidationError(
             "Transported RuntimeEnv identity has inconsistent retry-safety metadata"
         )
-    trust = _normalize_trust_identity(trust_identity or {})
-    expected_trust_digest = _domain_digest(
-        b"django-ray.workflow-plan-trust-v1\0",
-        _canonical_bytes(trust),
-    )
-    if normalized["trust_digest"] != expected_trust_digest:
-        raise WorkflowPlanValidationError(
-            "Transported RuntimeEnv identity does not match the worker trust identity"
+    if require_trust_match:
+        trust = _normalize_trust_identity(trust_identity or {})
+        expected_trust_digest = _domain_digest(
+            b"django-ray.workflow-plan-trust-v1\0",
+            _canonical_bytes(trust),
         )
+        if normalized["trust_digest"] != expected_trust_digest:
+            raise WorkflowPlanValidationError(
+                "Transported RuntimeEnv identity does not match the worker trust identity"
+            )
     payload = dict(normalized)
     transported_digest = payload.pop("transport_digest")
     expected_transport_digest = _domain_digest(
@@ -1697,9 +1712,9 @@ class _PlanBuilder:
             runtime_env_profile=runtime_env.profile if runtime_env is not None else None,
             runtime_env_serialized=(runtime_env.serialized if runtime_env is not None else None),
             runtime_env_metadata=_freeze_json(binding_runtime_metadata),
-            runtime_env_plan_digest=(
-                str(runtime_identity.manifest["digest"]) if runtime_env is not None else None
-            ),
+            runtime_env_plan_identity=_freeze_json(runtime_identity.as_transport_dict()),
+            runtime_env_plan_digest=str(runtime_identity.manifest["digest"]),
+            runtime_env_transport_digest=str(runtime_identity.manifest["transport_digest"]),
             runtime_env_trust_identity=_freeze_json(self.trust_identity),
         )
         return contract

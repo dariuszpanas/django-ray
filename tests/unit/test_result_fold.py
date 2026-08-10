@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from contextlib import contextmanager
@@ -10,6 +11,16 @@ from typing import Any
 
 import pytest
 
+from django_ray.execution_codec import (
+    ExecutionIdentity,
+    NestedCallableBindingKind,
+    NestedExecutionBoundaryKind,
+    NestedExecutionRequest,
+    NestedExecutionRequestRejected,
+    NestedExecutionRequestRejection,
+    NestedWorkflowBoundaryIdentity,
+    encode_nested_execution_request,
+)
 from django_ray.runtime.result_fold import (
     RESULT_FOLD_ACTOR_MAX_PENDING_CALLS,
     RESULT_FOLD_CODEC,
@@ -62,6 +73,33 @@ def append_text(accumulator: str, item: Any, separator: str = ">") -> str:
 
 
 def sum_items(accumulator: int, item: int) -> int:
+    return accumulator + item
+
+
+def strict_context_reducer(accumulator: int, item: int) -> dict[str, Any]:
+    from django_ray.runtime.context import get_current_task_context
+
+    context = get_current_task_context()
+    assert context is not None
+    return {
+        "value": accumulator + item,
+        "task_pk": context.task_pk,
+        "task_id": context.task_id,
+        "attempt_number": context.attempt_number,
+        "execution_generation": context.execution_generation,
+        "execution_protocol_version": context.execution_protocol_version,
+        "strict_execution_request": context.strict_execution_request,
+        "compiled_graph_submission_transport": (context.compiled_graph_submission_transport),
+        "runtime_env_hash": context.runtime_env_hash,
+        "runtime_env_plan_identity": context.runtime_env_plan_identity,
+    }
+
+
+def counted_strict_reducer(accumulator: int, item: int, counter: Any) -> int:
+    """Record reducer invocation through a real Ray actor."""
+    import ray
+
+    ray.get(counter.increment.remote())
     return accumulator + item
 
 
@@ -130,6 +168,55 @@ def _actor_options(**overrides: Any) -> dict[str, Any]:
         "memory": 64 * 1024,
         **overrides,
     }
+
+
+def _strict_fold_request(
+    *,
+    callable_path: str,
+    workflow_run_id: str = "00000000-0000-4000-8000-000000000611",
+    node_id: str = "0.reducer",
+) -> tuple[str, dict[str, object], dict[str, object]]:
+    from django_ray.runtime.runtime_env import normalize_runtime_env
+    from django_ray.workflow_plans import runtime_env_plan_identity
+
+    outer_identity = ExecutionIdentity(
+        task_execution_pk=611,
+        task_id="00000000-0000-4000-8000-000000000611",
+        attempt_number=3,
+        execution_generation=7,
+    )
+    runtime_identity = runtime_env_plan_identity(
+        normalize_runtime_env({"env_vars": {"FOLD_TEST": "1"}})
+    ).as_transport_dict()
+    serialized = encode_nested_execution_request(
+        NestedExecutionRequest(
+            outer_identity=outer_identity,
+            execution_protocol_version=1,
+            boundary_kind=NestedExecutionBoundaryKind.RESULT_FOLD,
+            boundary_identity=NestedWorkflowBoundaryIdentity(
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            ),
+            callable_binding_kind=NestedCallableBindingKind.PATH,
+            callable_binding=callable_path,
+            runtime_env_plan_identity=runtime_identity,
+            runtime_env_plan_digest=str(runtime_identity["digest"]),
+            runtime_env_transport_digest=str(runtime_identity["transport_digest"]),
+        )
+    )
+    kwargs: dict[str, object] = {
+        "nested_execution_request": serialized,
+        "expected_outer_task_execution_pk": outer_identity.task_execution_pk,
+        "expected_outer_task_id": outer_identity.task_id,
+        "expected_outer_attempt_number": outer_identity.attempt_number,
+        "expected_outer_execution_generation": outer_identity.execution_generation,
+        "expected_execution_protocol_version": 1,
+        "expected_workflow_run_id": workflow_run_id,
+        "expected_node_id": node_id,
+        "expected_runtime_env_plan_digest": runtime_identity["digest"],
+        "expected_runtime_env_transport_digest": runtime_identity["transport_digest"],
+    }
+    return serialized, runtime_identity, kwargs
 
 
 def _fold(
@@ -549,6 +636,98 @@ def test_actor_bootstraps_and_defensively_rejects_async_reducer(
             {},
             0,
         )
+
+
+def test_strict_fold_installs_context_for_later_reducer_and_finalize_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ray.cloudpickle as cloudpickle
+
+    from django_ray.runtime.context import get_current_task_context
+
+    callable_path = f"{__name__}.strict_context_reducer"
+    _, runtime_identity, request_kwargs = _strict_fold_request(callable_path=callable_path)
+    actor = WorkflowMapResultFold(
+        1,
+        1,
+        4096,
+        callable_path,
+        False,
+        (),
+        {},
+        0,
+        **request_kwargs,
+    )
+    original_loads = cloudpickle.loads
+    observed_unpickle_contexts: list[bool] = []
+
+    def loads_in_strict_context(payload: bytes) -> Any:
+        context = get_current_task_context()
+        observed_unpickle_contexts.append(
+            context is not None and context.strict_execution_request is True
+        )
+        return original_loads(payload)
+
+    monkeypatch.setattr(cloudpickle, "loads", loads_in_strict_context)
+
+    assert validate_result_fold_ack(actor.ready(), state="ready")["folded_items"] == 0
+    assert actor.append(0, 2)["folded_items"] == 1
+    result, final = actor.finalize(1)
+
+    assert validate_result_fold_ack(final, state="finalized", expected_items=1)
+    assert result == {
+        "value": 2,
+        "task_pk": 611,
+        "task_id": "00000000-0000-4000-8000-000000000611",
+        "attempt_number": 3,
+        "execution_generation": 7,
+        "execution_protocol_version": 1,
+        "strict_execution_request": True,
+        "compiled_graph_submission_transport": "direct-ray-core",
+        "runtime_env_hash": "",
+        "runtime_env_plan_identity": runtime_identity,
+    }
+    assert observed_unpickle_contexts
+    assert all(observed_unpickle_contexts)
+
+
+def test_strict_fold_reports_fixed_ready_rejection_before_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callable_path = f"{__name__}.sum_items"
+    serialized, _, request_kwargs = _strict_fold_request(callable_path=callable_path)
+    request_kwargs["nested_execution_request"] = serialized.replace(
+        '"node_id":"0.reducer"',
+        '"node_id":"secret-mixed-node"',
+    )
+    bootstrapped: list[bool] = []
+    monkeypatch.setattr(
+        "django_ray.runtime.entrypoint.bootstrap_django",
+        lambda: bootstrapped.append(True),
+    )
+    monkeypatch.setattr(
+        "django_ray.runtime.result_fold.import_callable",
+        lambda _path: pytest.fail("reducer imported before strict ready rejection"),
+    )
+
+    actor = WorkflowMapResultFold(
+        1,
+        1,
+        4096,
+        callable_path,
+        True,
+        (),
+        {},
+        _UnserializableInitial(),
+        **request_kwargs,
+    )
+
+    with pytest.raises(NestedExecutionRequestRejected) as captured:
+        actor.ready()
+    assert captured.value.classification is NestedExecutionRequestRejection.BOUNDARY_MISMATCH
+    assert "secret-mixed-node" not in str(captured.value)
+    assert captured.value.retryable is False
+    assert bootstrapped == []
 
 
 def test_actor_rejects_invalid_append_and_finalize_transitions() -> None:
@@ -1349,6 +1528,17 @@ class _RealEventTracker:
         return list(self.values)
 
 
+class _RealInvocationCounter:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def increment(self) -> None:
+        self.count += 1
+
+    def value(self) -> int:
+        return self.count
+
+
 def build_oversized_fold_item(index: int, tracker: Any) -> str:
     import ray
 
@@ -1395,6 +1585,71 @@ class _ResultFoldOwner:
         )
         ray.get(child.ready.remote())
         return child
+
+
+@pytest.mark.real_ray
+def test_real_ray_strict_fold_ready_rejection_is_typed_and_has_no_effects(
+    ray_cluster: Any,
+) -> None:
+    from ray.exceptions import RayTaskError
+
+    callable_path = f"{__name__}.counted_strict_reducer"
+    serialized, _runtime_identity, kwargs = _strict_fold_request(
+        callable_path=callable_path,
+        workflow_run_id="00000000-0000-4000-8000-000000000612",
+        node_id="0.reducer-real-ray",
+    )
+    protocol_payload = json.loads(serialized)
+    protocol_payload["execution_protocol_version"] += 1
+    tampered_protocol = json.dumps(
+        protocol_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    counter = ray_cluster.remote(num_cpus=0)(_RealInvocationCounter).remote()
+    cases = (
+        (
+            tampered_protocol,
+            callable_path,
+            NestedExecutionRequestRejection.PROTOCOL_MISMATCH,
+        ),
+        (
+            serialized,
+            f"{__name__}.alternate_reducer",
+            NestedExecutionRequestRejection.CALLABLE_MISMATCH,
+        ),
+    )
+
+    for submitted_request, submitted_callable, classification in cases:
+        actor = (
+            ray_cluster.remote(WorkflowMapResultFold)
+            .options(num_cpus=0.25, max_restarts=0, max_task_retries=0)
+            .remote(
+                1,
+                1,
+                1024 * 1024,
+                submitted_callable,
+                False,
+                (counter,),
+                {},
+                0,
+                **{**kwargs, "nested_execution_request": submitted_request},
+            )
+        )
+        try:
+            with pytest.raises(RayTaskError) as caught:
+                ray_cluster.get(actor.ready.remote())
+
+            cause = caught.value.cause
+            assert isinstance(cause, NestedExecutionRequestRejected)
+            assert cause.classification is classification
+            assert str(cause) == (f"nested execution request rejected: {classification.value}")
+            assert cause.retryable is False
+        finally:
+            ray_cluster.kill(actor, no_restart=True)
+
+    assert ray_cluster.get(counter.value.remote()) == 0
 
 
 @pytest.mark.real_ray
