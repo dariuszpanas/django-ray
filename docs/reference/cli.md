@@ -102,6 +102,40 @@ in this repository maps these environment variables into command-line options:
 | `130` | Interrupted (SIGINT) |
 | `143` | Terminated (SIGTERM) |
 
+## django_ray_protocol_status
+
+Inspect the durable execution-protocol rollout state without changing policy, leases,
+or task rows:
+
+```bash
+python manage.py django_ray_protocol_status
+python manage.py django_ray_protocol_status --database=default --json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--database=ALIAS` | Django database alias to inspect; default `default` |
+| `--json` | Emit the canonical versioned JSON report instead of the text view |
+
+Both formats describe the same `django-ray.protocol-status` report. It includes the
+policy and admission-token relationship, active and heartbeat-stale task-manager lease
+totals, aggregated protocol capability ranges, bounded nonterminal counts by queue,
+state, and protocol, protocol-only unsupported-work counts, work lacking a
+heartbeat-live explicit upgraded reader, and fixed rollout blocker codes. The service
+owns one consistent read-only database snapshot; changing coordination operations still
+recheck every durable precondition. Repeated groups are deterministic and capped at 64
+entries with exact omitted group and task totals; the complete UTF-8 output is capped at
+65,536 bytes.
+
+The command emits no task IDs, worker IDs, hosts, callable paths, errors, package
+versions, or payload data, and it performs no database mutation. Queue text is bounded
+in the database before it is materialized, then normalized and redacted. Its
+`queue_capacity_attested` field is always `false`: `TaskWorkerLease.queue_name` is
+informational, and a protocol-compatible heartbeat does not prove that a worker serves
+a particular queue or has a working Ray target. The database also cannot prove that
+capability-unaware producer or reader processes have retired. Treat those fixed
+limitations as operator evidence still required outside this report.
+
 ## django_ray_benchmark_polling
 
 Compare fixed and adaptive claim polling against the configured PostgreSQL database:

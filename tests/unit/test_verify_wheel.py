@@ -20,6 +20,8 @@ def test_release_boundary_tracks_execution_protocol_schema_migration() -> None:
     assert "django_ray/execution_codec.py" in EXPECTED_FILES
     assert "django_ray/execution_protocol.py" in EXPECTED_FILES
     assert "django_ray/protocol_coordination.py" in EXPECTED_FILES
+    assert "django_ray/protocol_status.py" in EXPECTED_FILES
+    assert "django_ray/management/commands/django_ray_protocol_status.py" in EXPECTED_FILES
     assert "django_ray/migrations/0019_execution_protocol_schema.py" in EXPECTED_FILES
     assert "django_ray/migrations/0020_legacy_open_rollback_fence.py" in EXPECTED_FILES
     assert EXPECTED_MIGRATION_LEAF == (

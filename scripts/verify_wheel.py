@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import io
+import json
 import tarfile
 import zipfile
 from email.parser import Parser
@@ -17,6 +19,7 @@ EXPECTED_FILES = {
     "django_ray/execution_codec.py",
     "django_ray/execution_protocol.py",
     "django_ray/protocol_coordination.py",
+    "django_ray/protocol_status.py",
     "django_ray/models.py",
     "django_ray/runtime/runtime_env_encryption.py",
     "django_ray/static/django_ray/admin/diagnostics.css",
@@ -38,6 +41,7 @@ EXPECTED_FILES = {
     "django_ray/migrations/0019_execution_protocol_schema.py",
     "django_ray/migrations/0020_legacy_open_rollback_fence.py",
     "django_ray/management/commands/django_ray_worker.py",
+    "django_ray/management/commands/django_ray_protocol_status.py",
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
@@ -238,8 +242,16 @@ def verify_installed_wheel(expected_version: str) -> None:
         if not isinstance(registered_admin, admin.ModelAdmin):
             raise RuntimeError(f"{model.__name__} did not retain standard admin compatibility")
 
-    if "django_ray_worker" not in get_commands():
-        raise RuntimeError("django_ray_worker management command was not discovered")
+    expected_commands = {
+        "django_ray_protocol_status",
+        "django_ray_worker",
+    }
+    missing_commands = expected_commands - get_commands().keys()
+    if missing_commands:
+        raise RuntimeError(
+            "django-ray management commands were not discovered: "
+            f"{', '.join(sorted(missing_commands))}"
+        )
 
     migration_leaves = set(MigrationLoader(connection).graph.leaf_nodes("django_ray"))
     if migration_leaves != {EXPECTED_MIGRATION_LEAF}:
@@ -252,6 +264,22 @@ def verify_installed_wheel(expected_version: str) -> None:
     applied = MigrationRecorder(connection).applied_migrations()
     if EXPECTED_MIGRATION_LEAF not in applied:
         raise RuntimeError(f"installed migration leaf was not applied: {EXPECTED_MIGRATION_LEAF!r}")
+
+    protocol_status_output = io.StringIO()
+    call_command(
+        "django_ray_protocol_status",
+        "--json",
+        stdout=protocol_status_output,
+    )
+    encoded_protocol_status = protocol_status_output.getvalue()
+    if len(encoded_protocol_status.encode("utf-8")) > 65_536:
+        raise RuntimeError("django_ray_protocol_status exceeded its output budget")
+    protocol_status = json.loads(encoded_protocol_status)
+    if (
+        protocol_status.get("schema") != "django-ray.protocol-status"
+        or protocol_status.get("schema_version") != 1
+    ):
+        raise RuntimeError("django_ray_protocol_status did not emit its versioned JSON schema")
 
 
 def main() -> int:
