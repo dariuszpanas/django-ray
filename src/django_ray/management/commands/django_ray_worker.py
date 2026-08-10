@@ -2789,6 +2789,7 @@ class Command(BaseCommand):
         source_worker_id: str | None,
         allow_takeover: bool,
         renew_heartbeat: bool = True,
+        required_execution_protocol_version: int | None = None,
     ) -> TaskWorkerLease | None:
         """Lock involved leases and prove this process still owns its identity.
 
@@ -2855,6 +2856,16 @@ class Command(BaseCommand):
             )
             return None
 
+        if required_execution_protocol_version is not None:
+            supported_protocols = self._explicit_protocol_range(live_lease)
+            if supported_protocols is None or not supported_protocols.supports(
+                required_execution_protocol_version
+            ):
+                # Protocol mismatch is an admission refusal, not lease loss.
+                # Check it before retiring a stale source lease so an
+                # incompatible manager cannot mutate another cohort's lease.
+                return None
+
         if source_worker_id is None or source_worker_id == self.worker_id:
             return live_lease
         if not allow_takeover:
@@ -2893,6 +2904,54 @@ class Command(BaseCommand):
             maximum=lease.max_supported_execution_protocol_version,
         )
 
+    def _preliminary_takeover_protocol_range(self) -> ExecutionProtocolRange | None:
+        """Read immutable candidate capability without locking a source lease.
+
+        This advisory read avoids taking the candidate lease out of the final
+        globally sorted lock order when a caller already owns a transaction.
+        The combined lease lock revalidates identity, liveness, and protocol
+        support before any source-lease or execution mutation.
+        """
+        identity = self.lease_identity
+        if identity is None:
+            self._request_shutdown_for_lease_loss("worker lease was never acquired")
+            return None
+
+        cutoff = datetime.now(UTC) - get_lease_duration()
+        lease = (
+            TaskWorkerLease.objects.filter(
+                **identity.database_filters(),
+                is_active=True,
+                last_heartbeat_at__gte=cutoff,
+            )
+            .only(
+                "capability_schema_version",
+                "legacy_admission_token",
+                "min_supported_execution_protocol_version",
+                "max_supported_execution_protocol_version",
+            )
+            .first()
+        )
+        if lease is None:
+            self._request_shutdown_for_lease_loss(
+                "worker lease expired, became inactive, disappeared, or was replaced "
+                "before takeover"
+            )
+            return None
+        return self._explicit_protocol_range(lease)
+
+    def _authoritative_protocol_range_for_scan(self) -> ExecutionProtocolRange | None:
+        """Read this process's exact durable capability before a task scan."""
+        with transaction.atomic():
+            lease = self._lock_authoritative_leases(
+                source_worker_id=self.worker_id,
+                allow_takeover=False,
+                renew_heartbeat=False,
+            )
+            if lease is None:
+                return None
+            return self._explicit_protocol_range(lease)
+
     @contextmanager
     def _authoritative_task_owner(
         self,
@@ -2909,11 +2968,24 @@ class Command(BaseCommand):
         transfer and its corresponding durable terminal transition.
         """
         source_worker_id = str(snapshot.claimed_by_worker) if snapshot.claimed_by_worker else None
+        required_protocol = int(snapshot.execution_protocol_version)
+
+        if source_worker_id is not None and source_worker_id != self.worker_id:
+            # Reject a mismatch without acquiring the source lease. The
+            # capability fields are immutable; the final globally sorted lock
+            # still rechecks the exact live identity and range for TOCTOU safety.
+            preliminary_protocols = self._preliminary_takeover_protocol_range()
+            if preliminary_protocols is None or not preliminary_protocols.supports(
+                required_protocol
+            ):
+                yield None
+                return
 
         with transaction.atomic():
             lease = self._lock_authoritative_leases(
                 source_worker_id=source_worker_id,
                 allow_takeover=allow_takeover,
+                required_execution_protocol_version=required_protocol,
             )
             if lease is None:
                 yield None
@@ -3510,6 +3582,10 @@ class Command(BaseCommand):
         if self.sync_mode or self.shutdown_requested:
             return 0
 
+        supported_protocols = self._authoritative_protocol_range_for_scan()
+        if supported_protocols is None:
+            return 0
+
         from django_ray.runner.leasing import get_active_workers
         from django_ray.runner.ray_job import RayJobRunner
 
@@ -3523,7 +3599,10 @@ class Command(BaseCommand):
                 break
             tracked_identity = self.active_task_identities.get(task_pk)
             try:
-                task = RayTaskExecution.objects.get(pk=task_pk)
+                task = RayTaskExecution.objects.filter(
+                    execution_protocol_version__gte=supported_protocols.minimum,
+                    execution_protocol_version__lte=supported_protocols.maximum,
+                ).get(pk=task_pk)
                 reconciled_task_ids.add(task.pk)
                 self._reconcile_ray_job_task(
                     task,
@@ -3557,6 +3636,8 @@ class Command(BaseCommand):
         orphaned_tasks = RayTaskExecution.objects.filter(
             state=TaskState.RUNNING,
             ray_job_id__startswith="raysubmit_",
+            execution_protocol_version__gte=supported_protocols.minimum,
+            execution_protocol_version__lte=supported_protocols.maximum,
         ).exclude(pk__in=reconciled_task_ids)
 
         for task in orphaned_tasks:
@@ -3603,10 +3684,16 @@ class Command(BaseCommand):
         if self.shutdown_requested:
             return 0
 
+        supported_protocols = self._authoritative_protocol_range_for_scan()
+        if supported_protocols is None:
+            return 0
+
         # Check all running tasks. For tasks owned by active workers, skip recovery
         # and let the owning worker manage its own in-flight work.
         running_tasks = RayTaskExecution.objects.filter(
             state=TaskState.RUNNING,
+            execution_protocol_version__gte=supported_protocols.minimum,
+            execution_protocol_version__lte=supported_protocols.maximum,
         )
 
         active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
@@ -3900,7 +3987,14 @@ class Command(BaseCommand):
         """Adopt and finalize cancellation requests left by dead workers."""
         if self.shutdown_requested:
             return 0
-        cancelling_tasks = RayTaskExecution.objects.filter(state=TaskState.CANCELLING)
+        supported_protocols = self._authoritative_protocol_range_for_scan()
+        if supported_protocols is None:
+            return 0
+        cancelling_tasks = RayTaskExecution.objects.filter(
+            state=TaskState.CANCELLING,
+            execution_protocol_version__gte=supported_protocols.minimum,
+            execution_protocol_version__lte=supported_protocols.maximum,
+        )
         finalized_count = 0
 
         for task in cancelling_tasks:

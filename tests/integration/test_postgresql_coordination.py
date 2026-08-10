@@ -49,6 +49,7 @@ from django_ray.models import (
     TaskWorkerLease,
     WorkflowProgressRunStorage,
 )
+from django_ray.protocol_coordination import close_legacy_worker_admission
 from django_ray.runner.cancellation import (
     CancellationOutcome,
     CancellationOutcomeStatus,
@@ -212,6 +213,157 @@ def _execution(task_id: str, **overrides: object) -> RayTaskExecution:
     }
     values.update(overrides)
     return RayTaskExecution.objects.create(**values)
+
+
+def test_incompatible_candidate_does_not_wait_for_locked_source_lease() -> None:
+    close_legacy_worker_admission(
+        expected_revision=1,
+        legacy_producers_retired=True,
+    )
+    now = datetime.now(UTC)
+    source = TaskWorkerLease.objects.create(
+        worker_id="postgres-z-v2-locked-source",
+        hostname="v2-source-host",
+        pid=1099,
+        capability_schema_version=1,
+        django_ray_version="0.5.0-test",
+        min_supported_execution_protocol_version=2,
+        max_supported_execution_protocol_version=2,
+        legacy_admission_token=None,
+        last_heartbeat_at=now - timedelta(hours=1),
+    )
+    task = _execution(
+        "postgres-incompatible-source-lock-001",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=source.worker_id,
+        started_at=now - timedelta(hours=1),
+        last_heartbeat_at=now - timedelta(hours=1),
+    )
+    candidate = _claim_command("postgres-a-v1-candidate", [])
+    source_locked = Event()
+    release_source = Event()
+
+    def hold_source_lease() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                TaskWorkerLease.objects.select_for_update().get(worker_id=source.worker_id)
+                source_locked.set()
+                if not release_source.wait(timeout=10):
+                    raise TimeoutError("test did not release source lease")
+        finally:
+            close_old_connections()
+
+    def attempt_incompatible_takeover() -> RayTaskExecution | None:
+        close_old_connections()
+        try:
+            return candidate._take_over_task_if_owner_stale(task, now=datetime.now(UTC))
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_source_lease)
+        assert source_locked.wait(timeout=10)
+        takeover = executor.submit(attempt_incompatible_takeover)
+        try:
+            assert takeover.result(timeout=5) is None
+        finally:
+            release_source.set()
+        holder.result(timeout=10)
+
+    source.refresh_from_db()
+    task.refresh_from_db()
+    assert source.is_active is True
+    assert source.stopped_at is None
+    assert task.state == TaskState.RUNNING
+    assert task.claimed_by_worker == source.worker_id
+    assert candidate.shutdown_requested is False
+
+
+def test_nested_compatible_takeover_preserves_global_lease_lock_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    source = TaskWorkerLease.objects.create(
+        worker_id="postgres-a-v1-lock-source",
+        hostname="v1-source-host",
+        pid=1100,
+        capability_schema_version=1,
+        django_ray_version="0.5.0-test",
+        min_supported_execution_protocol_version=1,
+        max_supported_execution_protocol_version=1,
+        legacy_admission_token=None,
+        last_heartbeat_at=now - timedelta(hours=1),
+    )
+    task = _execution(
+        "postgres-compatible-lock-order-001",
+        execution_protocol_version=1,
+        state=TaskState.RUNNING,
+        claimed_by_worker=source.worker_id,
+        started_at=now - timedelta(hours=1),
+        last_heartbeat_at=now - timedelta(hours=1),
+    )
+    candidate = _claim_command("postgres-z-v1-lock-candidate", [])
+    source_locked = Event()
+    preflight_read = Event()
+    request_candidate_lock = Event()
+    candidate_locked = Event()
+    release_locks = Event()
+
+    original_preflight = candidate._preliminary_takeover_protocol_range
+
+    def observe_preflight():
+        supported = original_preflight()
+        preflight_read.set()
+        return supported
+
+    monkeypatch.setattr(candidate, "_preliminary_takeover_protocol_range", observe_preflight)
+
+    def hold_source_then_candidate() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                TaskWorkerLease.objects.select_for_update().get(worker_id=source.worker_id)
+                source_locked.set()
+                if not request_candidate_lock.wait(timeout=10):
+                    raise TimeoutError("test did not request the candidate lock")
+                TaskWorkerLease.objects.select_for_update().get(worker_id=candidate.worker_id)
+                candidate_locked.set()
+                if not release_locks.wait(timeout=10):
+                    raise TimeoutError("test did not release the ordered lease locks")
+        finally:
+            close_old_connections()
+
+    def attempt_compatible_takeover() -> RayTaskExecution | None:
+        close_old_connections()
+        try:
+            # The caller-owned transaction would retain a locking preflight and
+            # invert source-before-candidate order. The advisory preflight must
+            # remain nonlocking until the final sorted acquisition.
+            with transaction.atomic():
+                return candidate._take_over_task_if_owner_stale(task, now=datetime.now(UTC))
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_source_then_candidate)
+        assert source_locked.wait(timeout=10)
+        takeover = executor.submit(attempt_compatible_takeover)
+        assert preflight_read.wait(timeout=10)
+        request_candidate_lock.set()
+        try:
+            assert candidate_locked.wait(timeout=5)
+        finally:
+            release_locks.set()
+        holder.result(timeout=10)
+        adopted = takeover.result(timeout=10)
+
+    assert adopted is not None
+    task.refresh_from_db()
+    source.refresh_from_db()
+    assert task.claimed_by_worker == candidate.worker_id
+    assert source.is_active is False
 
 
 def _execution_select_projections(

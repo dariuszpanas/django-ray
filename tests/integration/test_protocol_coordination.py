@@ -42,6 +42,8 @@ from django_ray.protocol_coordination import (
     close_legacy_worker_admission,
     reopen_legacy_worker_admission,
 )
+from django_ray.runner.base import JobInfo, JobStatus, SubmissionHandle
+from django_ray.runner.leasing import WorkerLeaseIdentity
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -104,6 +106,39 @@ def _explicit_v1_worker(worker_id: str) -> Command:
     worker.stdout = StringIO()
     worker._set_worker_id(worker_id)
     worker._create_lease("default")
+    return worker
+
+
+def _explicit_range_worker(
+    worker_id: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> Command:
+    """Build one command around an exact synthetic capability cohort."""
+    worker = Command()
+    worker.stdout = StringIO()
+    worker._set_worker_id(worker_id)
+    now = timezone.now()
+    lease = TaskWorkerLease.objects.create(
+        worker_id=worker_id,
+        hostname="range-host",
+        pid=1003,
+        capability_schema_version=1,
+        django_ray_version="0.5.0-test",
+        min_supported_execution_protocol_version=minimum,
+        max_supported_execution_protocol_version=maximum,
+        legacy_admission_token=None,
+        started_at=now,
+        last_heartbeat_at=now,
+    )
+    worker.lease = lease
+    worker.lease_identity = WorkerLeaseIdentity(
+        worker_id=worker_id,
+        hostname=str(lease.hostname),
+        pid=int(lease.pid),
+        started_at=lease.started_at,
+    )
     return worker
 
 
@@ -274,6 +309,306 @@ def test_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> N
 def test_postgresql_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> None:
     _require_postgresql()
     _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched()
+
+
+def _assert_global_lifecycle_scans_exclude_unsupported_protocols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _close()
+    stale_at = timezone.now() - timedelta(hours=1)
+    old_owner = TaskWorkerLease.objects.create(
+        worker_id="coordination-v2-scan-owner",
+        hostname="v2-host",
+        pid=2002,
+        capability_schema_version=1,
+        django_ray_version="0.5.0-test",
+        min_supported_execution_protocol_version=2,
+        max_supported_execution_protocol_version=2,
+        legacy_admission_token=None,
+        last_heartbeat_at=stale_at,
+    )
+    reconcile = RayTaskExecution.objects.create(
+        task_id="coordination-v2-scan-reconcile",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=old_owner.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+        ray_job_id="raysubmit_coordination_v2_scan",
+        ray_address="ray://v2-cluster:10001",
+    )
+    stuck = RayTaskExecution.objects.create(
+        task_id="coordination-v2-scan-stuck",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=old_owner.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+        timeout_seconds=1,
+    )
+    cancelling = RayTaskExecution.objects.create(
+        task_id="coordination-v2-scan-cancelling",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.CANCELLING,
+        claimed_by_worker=old_owner.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+        ray_job_id="raysubmit_coordination_v2_cancel",
+        ray_address="ray://v2-cluster:10001",
+    )
+    worker = _explicit_v1_worker("coordination-v1-scan-worker")
+    remote_calls: list[str] = []
+
+    class RejectingRunner:
+        def get_status(self, _handle: object) -> JobInfo:
+            remote_calls.append("status")
+            raise AssertionError("unsupported Ray Job must be filtered before status RPC")
+
+        def get_logs(self, _handle: object) -> str | None:
+            remote_calls.append("logs")
+            raise AssertionError("unsupported Ray Job must be filtered before log RPC")
+
+    monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", RejectingRunner)
+    monkeypatch.setattr(
+        worker,
+        "_request_timeout_cancellation",
+        lambda _task: (_ for _ in ()).throw(
+            AssertionError("unsupported timeout must be filtered before stop RPC")
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_request_cancellation_for_task",
+        lambda _task: (_ for _ in ()).throw(
+            AssertionError("unsupported cancellation must be filtered before stop RPC")
+        ),
+    )
+
+    assert worker.reconcile_tasks() == 0
+    assert worker.detect_stuck_tasks() == 0
+    assert worker.process_cancellations() == 0
+
+    assert remote_calls == []
+    old_owner.refresh_from_db()
+    assert old_owner.is_active is True
+    for row, state in (
+        (reconcile, TaskState.RUNNING),
+        (stuck, TaskState.RUNNING),
+        (cancelling, TaskState.CANCELLING),
+    ):
+        row.refresh_from_db()
+        assert row.state == state
+        assert row.claimed_by_worker == old_owner.worker_id
+        assert row.finished_at is None
+        assert not TaskAttempt.objects.filter(execution=row).exists()
+
+
+def test_global_lifecycle_scans_exclude_unsupported_protocols_before_remote_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_global_lifecycle_scans_exclude_unsupported_protocols(monkeypatch)
+
+
+@pytest.mark.postgresql
+def test_postgresql_global_lifecycle_scans_exclude_unsupported_protocols_before_remote_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _require_postgresql()
+    _assert_global_lifecycle_scans_exclude_unsupported_protocols(monkeypatch)
+
+
+def test_unsupported_active_ray_job_tracking_is_retired_before_status_rpc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _close()
+    worker_id = "coordination-replaced-range-worker"
+    original = _explicit_range_worker(worker_id, minimum=2, maximum=2)
+    task = RayTaskExecution.objects.create(
+        task_id="coordination-replaced-range-active",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=worker_id,
+        started_at=timezone.now(),
+        last_heartbeat_at=timezone.now(),
+        ray_job_id="raysubmit_coordination_replaced_range",
+        ray_address="ray://v2-cluster:10001",
+        attempt_number=3,
+        execution_generation=7,
+    )
+    assert original.lease_identity is not None
+    TaskWorkerLease.objects.filter(**original.lease_identity.database_filters()).delete()
+    worker = _explicit_range_worker(worker_id, minimum=1, maximum=1)
+    worker.active_tasks[task.pk] = str(task.ray_job_id)
+    worker.active_task_identities[task.pk] = (
+        int(task.attempt_number),
+        int(task.execution_generation),
+    )
+    status_calls: list[str] = []
+
+    class RejectingRunner:
+        def get_status(self, _handle: object) -> JobInfo:
+            status_calls.append("status")
+            raise AssertionError("unsupported active tracking reached Ray")
+
+    monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", RejectingRunner)
+
+    assert worker.reconcile_tasks() == 1
+
+    task.refresh_from_db()
+    assert status_calls == []
+    assert worker.active_tasks == {}
+    assert worker.active_task_identities == {}
+    assert task.state == TaskState.RUNNING
+    assert task.claimed_by_worker == worker_id
+    assert task.finished_at is None
+    assert worker.shutdown_requested is False
+
+
+def test_global_reconciliation_uses_exact_locked_lease_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _close()
+    stale_at = timezone.now() - timedelta(hours=1)
+    old_owner = TaskWorkerLease.objects.create(
+        worker_id="coordination-v2-compatible-owner",
+        hostname="v2-host",
+        pid=2003,
+        capability_schema_version=1,
+        django_ray_version="0.5.0-test",
+        min_supported_execution_protocol_version=2,
+        max_supported_execution_protocol_version=2,
+        legacy_admission_token=None,
+        last_heartbeat_at=stale_at,
+    )
+    task = RayTaskExecution.objects.create(
+        task_id="coordination-v2-compatible-reconcile",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=old_owner.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+        ray_job_id="raysubmit_coordination_v2_compatible",
+        ray_address="ray://v2-cluster:10001",
+        attempt_number=3,
+        execution_generation=7,
+    )
+    worker = _explicit_range_worker(
+        "coordination-v2-compatible-reconciler",
+        minimum=1,
+        maximum=2,
+    )
+    status_calls: list[str] = []
+
+    class PendingRunner:
+        def get_status(self, handle: SubmissionHandle) -> JobInfo:
+            status_calls.append(str(handle.ray_job_id))
+            return JobInfo(
+                job_id=str(handle.ray_job_id),
+                status=JobStatus.PENDING,
+            )
+
+    monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", PendingRunner)
+
+    assert worker.reconcile_tasks() == 1
+
+    task.refresh_from_db()
+    old_owner.refresh_from_db()
+    assert status_calls == ["raysubmit_coordination_v2_compatible"]
+    assert task.state == TaskState.RUNNING
+    assert task.claimed_by_worker == worker.worker_id
+    assert task.pk in worker.active_tasks
+    assert old_owner.is_active is False
+
+
+def _assert_protocol_mismatch_precedes_stale_source_lease_retirement() -> None:
+    _close()
+    stale_at = timezone.now() - timedelta(hours=1)
+    old_owner = TaskWorkerLease.objects.create(
+        worker_id="coordination-v2-central-owner",
+        hostname="v2-host",
+        pid=2004,
+        capability_schema_version=1,
+        django_ray_version="0.5.0-test",
+        min_supported_execution_protocol_version=2,
+        max_supported_execution_protocol_version=2,
+        legacy_admission_token=None,
+        last_heartbeat_at=stale_at,
+    )
+    task = RayTaskExecution.objects.create(
+        task_id="coordination-v2-central-mismatch",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=old_owner.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+    )
+    worker = _explicit_v1_worker("coordination-v1-central-worker")
+
+    assert worker._take_over_task_if_owner_stale(task, now=timezone.now()) is None
+
+    old_owner.refresh_from_db()
+    task.refresh_from_db()
+    assert old_owner.is_active is True
+    assert old_owner.stopped_at is None
+    assert task.claimed_by_worker == old_owner.worker_id
+    assert task.state == TaskState.RUNNING
+    assert worker.shutdown_requested is False
+    assert worker.lease_ownership_lost is False
+
+
+def test_protocol_mismatch_precedes_stale_source_lease_retirement() -> None:
+    _assert_protocol_mismatch_precedes_stale_source_lease_retirement()
+
+
+@pytest.mark.postgresql
+def test_postgresql_protocol_mismatch_precedes_stale_source_lease_retirement() -> None:
+    _require_postgresql()
+    _assert_protocol_mismatch_precedes_stale_source_lease_retirement()
+
+
+def test_expired_candidate_is_lease_loss_before_protocol_mismatch() -> None:
+    _close()
+    stale_at = timezone.now() - timedelta(hours=1)
+    source = TaskWorkerLease.objects.create(
+        worker_id="coordination-v2-expired-candidate-source",
+        hostname="v2-host",
+        pid=2005,
+        capability_schema_version=1,
+        django_ray_version="0.5.0-test",
+        min_supported_execution_protocol_version=2,
+        max_supported_execution_protocol_version=2,
+        legacy_admission_token=None,
+        last_heartbeat_at=stale_at,
+    )
+    task = RayTaskExecution.objects.create(
+        task_id="coordination-v2-expired-candidate",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        claimed_by_worker=source.worker_id,
+        started_at=stale_at,
+        last_heartbeat_at=stale_at,
+    )
+    worker = _explicit_v1_worker("coordination-v1-expired-candidate")
+    assert worker.lease_identity is not None
+    TaskWorkerLease.objects.filter(**worker.lease_identity.database_filters()).update(
+        last_heartbeat_at=stale_at
+    )
+
+    assert worker._take_over_task_if_owner_stale(task, now=timezone.now()) is None
+
+    source.refresh_from_db()
+    task.refresh_from_db()
+    assert worker.shutdown_requested is True
+    assert worker.lease_ownership_lost is True
+    assert source.is_active is True
+    assert task.claimed_by_worker == source.worker_id
 
 
 def test_close_detaches_inactive_legacy_rows_and_rejects_historical_writers() -> None:

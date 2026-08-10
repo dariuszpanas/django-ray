@@ -713,6 +713,21 @@ and the execution unchanged; it is not treated as lease loss. The database owner
 trigger remains the independent backstop for writers that do not use this application
 path.
 
+Ray Job reconciliation, stuck/timeout recovery, and cancellation processing capture
+that same exact lease range in a short lease-first transaction before querying global
+execution state. Their active-task lookup and `RUNNING` or `CANCELLING` discovery
+queries apply the range before iteration, so an incompatible manager neither contacts
+Ray for an unsupported task nor changes its durable owner or source lease. Unsupported
+in-memory Ray Job tracking is forgotten locally and may be recovered later by a
+compatible cohort. The final remote or durable effect still passes through the
+authoritative lease-then-execution lock, and candidate compatibility is checked before
+an inactive source lease can be retired during takeover.
+
+This scan boundary does not make protocol capability a remote-runtime attestation and
+does not yet version the Ray Core completion transport. Ray Core handle polling and
+bulk monitor heartbeats, direct lifecycle APIs, and remote pre-import protocol
+rejection remain separate compatibility work.
+
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
 capability. Likewise, an execution-protocol-capable lease proves only task-manager
 compatibility: it does not attest Ray connectivity, the Ray or Python version, or the
