@@ -270,12 +270,17 @@ workflow plan body/selection, completion, or cancellation payload columns. Its b
 | `STALE_ATTEMPT` | The caller authorized an older attempt of the same durable execution. |
 | `STALE_GENERATION` | The caller authorized an older execution generation. |
 | `STALE_WORKFLOW_IDENTITY` | The caller authorized a different workflow run or plan identity. |
+| `UNSUPPORTED_PROTOCOL` | This package build cannot mutate the execution's durable protocol. Route it to a compatible cohort. |
 
 The service does not authorize the caller or perform an operator confirmation. Resolve
 the object through the application's tenant/ownership policy first, then apply that
 application's confirmation, idempotency, and audit requirements. The bundled
 testproject endpoint returns `202` with `ACCEPTED`, `404` with `NOT_FOUND`, and `409`
 for other bounded outcomes; it never returns the task result or error in this response.
+The public service always uses the installed package's supported protocol range; an
+application caller cannot widen that range.
+Adapters must treat any future status they do not recognize as a bounded conflict and
+leave the execution unchanged; only the exact `ACCEPTED` value authorizes success.
 `RuntimeEnvSnapshotError` instead means the locked row has an identified snapshot that
 cannot be verified. Do not retry it or include the stored payload in an API response.
 The testproject maps it to one fixed redaction-safe `409`, while bulk Admin retry skips
@@ -302,10 +307,15 @@ reloads a deferred execution field implicitly inside the transaction. Its bounde
 | `STALE_ATTEMPT` | The caller authorized an older attempt of the same durable execution. |
 | `STALE_GENERATION` | The caller authorized an older execution generation. |
 | `INVALID_STATE` | The persisted state is outside django-ray's lifecycle vocabulary. |
+| `UNSUPPORTED_PROTOCOL` | This package build cannot mutate the execution's durable protocol. Route it to a compatible cohort. |
 
 The service does not authorize the caller. Resolve the object through the application's
 tenant/ownership policy first, then pass its primary key, observed attempt number, and
 observed execution generation. Queued work is cancelled and archived immediately.
+The public service always uses the installed package's supported protocol range; an
+application caller cannot widen that range.
+Adapters must treat any future status they do not recognize as a bounded conflict and
+leave the execution unchanged; only the exact `ACCEPTED` value authorizes success.
 Running work moves to `CANCELLING` unless its Ray Job entrypoint already published
 `completion_data`; that case returns `COMPLETION_PENDING` and leaves reconciliation
 to consume the terminal envelope. Otherwise a worker requests backend interruption

@@ -59,7 +59,12 @@ from django_ray.admin_workflow_graph import (
 )
 from django_ray.conf.settings import get_settings
 from django_ray.execution_protocol import EXECUTION_PROTOCOL_VERSION
-from django_ray.lifecycle import request_task_cancellation, retry_task
+from django_ray.lifecycle import (
+    TaskCancellationRequestStatus,
+    TaskRetryRequestStatus,
+    request_task_cancellation,
+    request_task_retry,
+)
 from django_ray.models import (
     RayTaskExecution,
     TaskAttempt,
@@ -3158,9 +3163,10 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         count = 0
         blocked = 0
         changed = 0
+        unsupported = 0
         for row in snapshot:
             try:
-                retried = retry_task(
+                result = request_task_retry(
                     row["pk"],
                     allowed_states=(row["state"],),
                     expected_attempt_number=row["attempt_number"],
@@ -3173,8 +3179,12 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             except RuntimeEnvSnapshotError:
                 blocked += 1
                 continue
-            count += int(retried is not None)
-            changed += int(retried is None)
+            count += int(result.accepted)
+            unsupported += int(result.status is TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL)
+            changed += int(
+                not result.accepted
+                and result.status is not TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL
+            )
 
         message = f"Queued {count} task(s) for retry."
         if changed:
@@ -3183,6 +3193,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             message += (
                 f" Skipped {blocked} task(s) because their persisted RuntimeEnv "
                 "snapshots failed validation."
+            )
+        if unsupported:
+            message += (
+                f" Skipped {unsupported} task(s) because this django-ray build does not "
+                "support their execution protocol."
             )
         self.message_user(
             request,
@@ -3193,6 +3208,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     def cancel_tasks(self, request: HttpRequest, queryset: QuerySet[RayTaskExecution]) -> None:
         """Request package-owned cancellation for each authorized selection."""
         accepted_count = 0
+        unsupported_count = 0
         for task in queryset.only("pk", "attempt_number", "execution_generation"):
             if task.pk is None:  # pragma: no cover - querysets contain persisted rows
                 continue
@@ -3202,6 +3218,9 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 expected_execution_generation=task.execution_generation,
             )
             accepted_count += int(result.accepted)
+            unsupported_count += int(
+                result.status is TaskCancellationRequestStatus.UNSUPPORTED_PROTOCOL
+            )
         if accepted_count:
             message = (
                 f"Accepted cancellation for {accepted_count} task(s). "
@@ -3209,6 +3228,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             )
         else:
             message = "No selected tasks accepted cancellation."
+        if unsupported_count:
+            message += (
+                f" Skipped {unsupported_count} task(s) because this django-ray build does "
+                "not support their execution protocol."
+            )
         self.message_user(request, message)
 
 

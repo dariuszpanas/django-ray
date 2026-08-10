@@ -20,6 +20,17 @@ from django.utils import timezone
 import django_ray.protocol_coordination as protocol_coordination
 from django_ray import __version__ as django_ray_version
 from django_ray.execution_protocol import ExecutionProtocolRange, explicit_worker_protocol_range
+from django_ray.lifecycle import (
+    TaskCancellationRequestStatus,
+    TaskRetryRequestStatus,
+    cancel_task,
+    expire_queued_tasks,
+    record_failure,
+    record_lost,
+    request_task_cancellation,
+    request_task_retry,
+    succeed_task,
+)
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import (
     LegacyWorkerAdmissionToken,
@@ -312,6 +323,102 @@ def test_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> N
 def test_postgresql_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> None:
     _require_postgresql()
     _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched()
+
+
+def _assert_direct_lifecycle_paths_leave_unsupported_rows_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _close()
+    now = timezone.now()
+    queued = RayTaskExecution.objects.create(
+        task_id="coordination-direct-v2-queued",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.QUEUED,
+        queue_deadline_at=now - timedelta(seconds=1),
+        attempt_number=3,
+        execution_generation=7,
+    )
+    failed = RayTaskExecution.objects.create(
+        task_id="coordination-direct-v2-failed",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.FAILED,
+        attempt_number=3,
+        execution_generation=7,
+        error_message="retained failure",
+    )
+    running = RayTaskExecution.objects.create(
+        task_id="coordination-direct-v2-running",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.RUNNING,
+        attempt_number=3,
+        execution_generation=7,
+        started_at=now - timedelta(minutes=5),
+        last_heartbeat_at=now - timedelta(minutes=1),
+    )
+    cancelling = RayTaskExecution.objects.create(
+        task_id="coordination-direct-v2-cancelling",
+        callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=2,
+        state=TaskState.CANCELLING,
+        attempt_number=3,
+        execution_generation=7,
+        started_at=now - timedelta(minutes=5),
+        last_heartbeat_at=now - timedelta(minutes=1),
+    )
+    rows = (queued, failed, running, cancelling)
+    before = {row.pk: RayTaskExecution.objects.filter(pk=row.pk).values().get() for row in rows}
+
+    def unexpected_effect(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("unsupported lifecycle path reached hydration or archival")
+
+    monkeypatch.setattr("django_ray.lifecycle.runtime_env_for_execution", unexpected_effect)
+    monkeypatch.setattr("django_ray.lifecycle._record_attempt", unexpected_effect)
+
+    queued_cancel = request_task_cancellation(
+        queued.pk,
+        expected_attempt_number=3,
+        expected_execution_generation=7,
+    )
+    retry = request_task_retry(
+        failed.pk,
+        expected_attempt_number=3,
+        expected_execution_generation=7,
+    )
+    running_cancel = request_task_cancellation(
+        running.pk,
+        expected_attempt_number=3,
+        expected_execution_generation=7,
+    )
+
+    assert queued_cancel.status is TaskCancellationRequestStatus.UNSUPPORTED_PROTOCOL
+    assert retry.status is TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL
+    assert running_cancel.status is TaskCancellationRequestStatus.UNSUPPORTED_PROTOCOL
+    assert expire_queued_tasks(["default"], now=now) == ()
+    assert not record_failure(running, error_message="replacement", retry=True)
+    assert not record_lost(running, error_message="replacement")
+    assert not succeed_task(running, result_data="replacement", result_reference=None)
+    assert not cancel_task(cancelling)
+
+    for row in rows:
+        assert RayTaskExecution.objects.filter(pk=row.pk).values().get() == before[row.pk]
+        assert not TaskAttempt.objects.filter(execution=row).exists()
+
+
+def test_direct_lifecycle_paths_leave_unsupported_rows_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_direct_lifecycle_paths_leave_unsupported_rows_untouched(monkeypatch)
+
+
+@pytest.mark.postgresql
+def test_postgresql_direct_lifecycle_paths_leave_unsupported_rows_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _require_postgresql()
+    _assert_direct_lifecycle_paths_leave_unsupported_rows_untouched(monkeypatch)
 
 
 def _assert_global_lifecycle_scans_exclude_unsupported_protocols(

@@ -129,10 +129,14 @@ Application APIs that need an explicit outcome should call
 `django_ray.lifecycle.request_task_retry()` with the attempt number and execution
 generation observed during object authorization. Its stable result distinguishes
 accepted, missing, non-retryable, stale-attempt, stale-generation, and stale-workflow
-requests without returning task arguments, output, or errors. The compatibility helper
-`retry_task()` remains available when a model-or-`None` result is sufficient. Manual
-retry archives the terminal attempt, increments both values, and clears only
-attempt-local data.
+requests, plus work whose durable execution protocol this package does not support,
+without returning task arguments, output, or errors. The public service binds the
+installed package's supported range; application callers cannot widen it. The
+compatibility helper `retry_task()` remains available when a model-or-`None` result is
+sufficient. Manual retry archives the terminal attempt, increments both values, and
+clears only attempt-local data.
+An adapter must fail closed on a future result status it does not recognize: return one
+bounded conflict/no-op response and never interpret it as an accepted retry.
 The transactional reads are deliberately projected. One `select_for_update()` query
 locks only durable state and workflow-identity fences. After those fences accept the
 retry, one explicit read loads the RuntimeEnv, routing, queue-deadline,
@@ -162,6 +166,8 @@ authorization-neutral cancellation service: it immediately archives queued work 
 `CANCELLED`, or moves running work to `CANCELLING` for worker-owned, best-effort backend
 interruption. Its stable result distinguishes accepted, duplicate, terminal, missing,
 stale-attempt, stale-generation, completion-pending, and invalid-state requests. A
+protocol this package cannot support returns `UNSUPPORTED_PROTOCOL` without changing
+the row; application callers cannot widen the public service's package-bound range. A
 running row whose Ray Job entrypoint has already published its durable completion
 returns `COMPLETION_PENDING` and remains owned by reconciliation. Cancellation does
 not discard that terminal channel. The lock projection contains only lifecycle
@@ -172,12 +178,14 @@ completion presence in SQL without transferring the completion envelope. Task in
 RuntimeEnv, progress, workflow plan, completion content, and unrelated cancellation
 payloads remain outside these projections. Cancellation does not guarantee immediate interruption of
 already-running synchronous Python code.
+An adapter must likewise map an unknown future cancellation status to a bounded
+conflict/no-op response; only the exact `ACCEPTED` value authorizes success.
 
 The testproject maps cancellation to a fixed bounded HTTP outcome: `202` only for
 `ACCEPTED`, `404` for `NOT_FOUND`, and `409` for `ALREADY_REQUESTED`,
 `ALREADY_TERMINAL`, `COMPLETION_PENDING`, `STALE_ATTEMPT`, `STALE_GENERATION`, and
-`INVALID_STATE`. The response contains only `code`, `message`, `execution_id`, `state`,
-`attempt_number`, `execution_generation`, `next_action`, and
+`INVALID_STATE`, plus `UNSUPPORTED_PROTOCOL`. The response contains only `code`,
+`message`, `execution_id`, `state`, `attempt_number`, `execution_generation`, `next_action`, and
 `response_max_bytes=4096`, and the complete body is at most 4,096 bytes. It does not
 refresh or serialize unrelated execution fields or return task payloads and diagnostics.
 

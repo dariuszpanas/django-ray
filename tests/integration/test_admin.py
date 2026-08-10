@@ -3659,7 +3659,7 @@ class TestRayTaskExecutionAdmin:
         self,
         monkeypatch,
     ) -> None:
-        from django_ray.lifecycle import retry_task as locked_retry_task
+        from django_ray.lifecycle import request_task_retry as locked_request_task_retry
 
         admin_obj = _task_admin()
         messages: list[str] = []
@@ -3680,9 +3680,9 @@ class TestRayTaskExecutionAdmin:
 
         def change_state_before_row_lock(execution_id: int | str, **kwargs: Any) -> Any:
             RayTaskExecution.objects.filter(pk=execution_id).update(state=TaskState.CANCELLED)
-            return locked_retry_task(execution_id, **kwargs)
+            return locked_request_task_retry(execution_id, **kwargs)
 
-        monkeypatch.setattr("django_ray.admin.retry_task", change_state_before_row_lock)
+        monkeypatch.setattr("django_ray.admin.request_task_retry", change_state_before_row_lock)
         assert admin_obj.retry_tasks(_confirmed_retry_request(response), queryset) is None
 
         task.refresh_from_db()
@@ -3707,7 +3707,7 @@ class TestRayTaskExecutionAdmin:
         field: str,
         replacement: str,
     ) -> None:
-        from django_ray.lifecycle import retry_task as locked_retry_task
+        from django_ray.lifecycle import request_task_retry as locked_request_task_retry
 
         admin_obj = _task_admin()
         messages: list[str] = []
@@ -3730,9 +3730,9 @@ class TestRayTaskExecutionAdmin:
 
         def change_workflow_before_row_lock(execution_id: int | str, **kwargs: Any) -> Any:
             RayTaskExecution.objects.filter(pk=execution_id).update(**{field: replacement})
-            return locked_retry_task(execution_id, **kwargs)
+            return locked_request_task_retry(execution_id, **kwargs)
 
-        monkeypatch.setattr("django_ray.admin.retry_task", change_workflow_before_row_lock)
+        monkeypatch.setattr("django_ray.admin.request_task_retry", change_workflow_before_row_lock)
         assert admin_obj.retry_tasks(_confirmed_retry_request(response), queryset) is None
 
         task.refresh_from_db()
@@ -3852,6 +3852,46 @@ class TestRayTaskExecutionAdmin:
         admin_obj.retry_tasks(_retry_request(), RayTaskExecution.objects.filter(pk=task.pk))
 
         assert messages[-1] == "No failed, lost, or expired tasks found in selection."
+
+    def test_retry_and_cancel_actions_report_unsupported_protocol_without_mutation(
+        self,
+        monkeypatch,
+    ) -> None:
+        admin_obj = _task_admin()
+        messages: list[str] = []
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, message: messages.append(str(message)),
+        )
+        task = RayTaskExecution.objects.create(
+            task_id="admin-unsupported-protocol-actions",
+            callable_path="testproject.tasks.failing_task",
+            state=TaskState.FAILED,
+            execution_protocol_version=2,
+            attempt_number=3,
+            execution_generation=7,
+            error_message="retained failure",
+        )
+        before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+        queryset = RayTaskExecution.objects.filter(pk=task.pk)
+
+        confirmation = _retry_confirmation(admin_obj, queryset)
+        assert admin_obj.retry_tasks(_confirmed_retry_request(confirmation), queryset) is None
+        admin_obj.cancel_tasks(_request(), queryset)
+
+        assert messages == [
+            (
+                "Queued 0 task(s) for retry. Skipped 1 task(s) because this django-ray "
+                "build does not support their execution protocol."
+            ),
+            (
+                "No selected tasks accepted cancellation. Skipped 1 task(s) because this "
+                "django-ray build does not support their execution protocol."
+            ),
+        ]
+        assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+        assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_cancel_tasks_handles_queued_and_running_paths(self, monkeypatch) -> None:
         admin_obj = _task_admin()

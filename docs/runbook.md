@@ -150,9 +150,19 @@ tracking is dropped locally without changing the task or its source lease; a com
 cohort can recover it later. Every resulting effect still crosses the authoritative
 lease-then-execution boundary.
 
-This does not yet fence Ray Core handle polling and bulk monitor heartbeats, direct
-lifecycle APIs, or the remote completion transport. Do not use the scan filter as
-proof that an executor can deserialize or run the task.
+Direct package lifecycle calls use the package-supported protocol range by default and
+check the exact locked execution before cancellation, retry, expiry, success, failure,
+loss, or final cancellation. Unsupported cancellation and retry requests return a
+distinct fixed status; expiry and terminal transitions leave the row unchanged. The
+check runs before RuntimeEnv hydration, attempt archival, or any remote cancellation
+effect. Admin actions report unsupported selections separately. Do not attempt to
+widen the public retry or cancellation services: they always bind the installed
+package's supported range. A broader package-private range is valid only after the
+calling worker cohort has already proved that capability.
+
+This does not yet fence Ray Core handle polling and bulk monitor heartbeats or version
+the remote completion transport. Do not use the scan or lifecycle filters as proof that
+an executor can deserialize or run the task.
 
 Do not interpret the lease's informational `queue_name` text as a durable per-queue
 capability, or its protocol range as proof that Ray is ready. Ray/Python version and
