@@ -68,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   monitor heartbeats include the protocol fence, and completions plus reconnect loss
   handling re-enter the lease-then-execution boundary before storage or lifecycle
   effects. This does not make driver-owned `ObjectRef` handles transferable.
+- Completion consumers now support both unversioned protocol-v1 records and a strict
+  flat versioned-v1 envelope carrying the exact task identity, protocol, and bounded
+  executor provenance. Any reserved versioned field disables legacy fallback. Schema,
+  protocol, identity, or shape mismatch cannot reach result storage or automatic retry;
+  accepted executor provenance is archived atomically with the terminal attempt. A
+  fixed byte/depth/node budget rejects deterministic resource-limit violations without
+  replay while preserving released legacy non-finite results and long diagnostics
+  within that whole-envelope boundary. This slice does not yet transport the execution
+  request or enforce pre-import rejection.
 - PostgreSQL and SQLite rollout coordination now serializes exact-0.4 execution and
   lease inserts, legacy heartbeats, and concurrent policy transitions without using
   package Semantic Versions as compatibility evidence. Callers must provide the

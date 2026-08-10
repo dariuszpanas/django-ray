@@ -85,6 +85,15 @@ _RETRY_ACCEPTED_READ_FIELDS = (
 )
 
 
+class _ExecutorDjangoRayVersionUnset:
+    """Typed sentinel for lifecycle calls without completion provenance."""
+
+    __slots__ = ()
+
+
+_EXECUTOR_DJANGO_RAY_VERSION_UNSET = _ExecutorDjangoRayVersionUnset()
+
+
 def _locked_execution(
     execution_id: int,
     *,
@@ -870,6 +879,9 @@ def record_failure(
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
     supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    _executor_django_ray_version: str | None | _ExecutorDjangoRayVersionUnset = (
+        _EXECUTOR_DJANGO_RAY_VERSION_UNSET
+    ),
 ) -> bool:
     """Persist a failure and optionally queue the next attempt atomically."""
     with transaction.atomic():
@@ -892,6 +904,8 @@ def record_failure(
         if retry:
             runtime_env_for_execution(current)
 
+        if isinstance(_executor_django_ray_version, str):
+            current.executor_django_ray_version = _executor_django_ray_version
         current.error_message = error_message
         current.error_traceback = error_traceback
         current.cancellation_status = cancellation_status
@@ -1045,6 +1059,9 @@ def succeed_task(
     expected_completion_data: str | None = None,
     require_completion_data_match: bool = False,
     supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    _executor_django_ray_version: str | None | _ExecutorDjangoRayVersionUnset = (
+        _EXECUTOR_DJANGO_RAY_VERSION_UNSET
+    ),
 ) -> bool:
     """Persist a successful terminal transition with stale-write protection."""
     filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
@@ -1064,6 +1081,8 @@ def succeed_task(
             return False
         if not supported_protocols.supports(int(current.execution_protocol_version)):
             return False
+        if isinstance(_executor_django_ray_version, str):
+            current.executor_django_ray_version = _executor_django_ray_version
         current.state = TaskState.SUCCEEDED
         current.finished_at = datetime.now(UTC)
         current.result_data = result_data
@@ -1083,6 +1102,7 @@ def succeed_task(
                 "result_reference",
                 "error_message",
                 "error_traceback",
+                "executor_django_ray_version",
                 "workflow_progress_summary_json",
             ]
         )

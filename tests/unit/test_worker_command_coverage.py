@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import signal
 import sys
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,8 @@ from typing import Any, cast
 
 import pytest
 
+from django_ray.execution_codec import ExecutionCompletionRejection
+from django_ray.execution_protocol import SUPPORTED_EXECUTION_PROTOCOL_RANGE
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.redaction import normalize_terminal_text, redact_text
@@ -65,6 +68,24 @@ def _pending_handle(task: RayTaskExecution) -> RayCoreHandle:
         task_name="test",
         attempt_number=task.attempt_number,
         execution_generation=task.execution_generation,
+    )
+
+
+def _inspect_completion(value: object):
+    task = cast(
+        RayTaskExecution,
+        SimpleNamespace(
+            pk=1,
+            task_id="coverage-completion",
+            attempt_number=1,
+            execution_generation=0,
+            execution_protocol_version=1,
+        ),
+    )
+    return Command._inspect_execution_completion(
+        json.dumps(value),
+        task,
+        supported_protocols=SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     )
 
 
@@ -272,28 +293,35 @@ class TestWorkerCommandCoverage:
         assert cmd.active_tasks == {1: "raysubmit_active"}
 
     def test_completion_envelope_validation_rejects_invalid_shapes(self) -> None:
-        assert not Command._is_valid_completion_envelope([])
-        assert not Command._is_valid_completion_envelope({"success": "yes", "result": None})
-        assert not Command._is_valid_completion_envelope({"success": True})
-        assert not Command._is_valid_completion_envelope(
-            {"success": False, "result": None, "error": None}
-        )
-        assert not Command._is_valid_completion_envelope(
+        invalid = (
+            [],
+            {"success": "yes", "result": None},
+            {"success": True},
+            {"success": False, "result": None, "error": None},
             {
                 "success": False,
                 "result": None,
                 "error": "task failed",
                 "retryable": "sometimes",
-            }
+            },
         )
-        assert Command._is_valid_completion_envelope(
-            {
-                "success": False,
-                "result": None,
-                "error": "task failed",
-                "traceback": None,
-                "exception_type": "RuntimeError",
-            }
+        for envelope in invalid:
+            assert (
+                _inspect_completion(envelope).rejection
+                is ExecutionCompletionRejection.MALFORMED_LEGACY
+            )
+
+        assert (
+            _inspect_completion(
+                {
+                    "success": False,
+                    "result": None,
+                    "error": "task failed",
+                    "traceback": None,
+                    "exception_type": "RuntimeError",
+                }
+            ).decoded
+            is not None
         )
 
     def test_completion_envelope_requires_configured_filesystem_namespace(self, settings) -> None:
@@ -302,10 +330,14 @@ class TestWorkerCommandCoverage:
         envelope = {"success": True, "result": None, "result_reference": reference}
         settings.DJANGO_RAY = {}
 
-        assert not Command._is_valid_completion_envelope(envelope)
+        assert (
+            _inspect_completion(envelope).rejection is ExecutionCompletionRejection.MALFORMED_LEGACY
+        )
 
         settings.DJANGO_RAY = {"RESULT_STORAGE_FILESYSTEM_PATH": "/srv/django-ray/results"}
-        assert Command._is_valid_completion_envelope(envelope)
+        inspected = _inspect_completion(envelope)
+        assert inspected.decoded is not None
+        assert inspected.prepared_result_reference == reference
 
     def test_ray_cluster_resource_check_returns_resources_and_reraises_errors(
         self, monkeypatch

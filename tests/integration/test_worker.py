@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 
 import pytest
 
+from django_ray.execution_codec import (
+    ExecutionCompletion,
+    ExecutionIdentity,
+    encode_execution_completion,
+)
 from django_ray.lifecycle import QUEUE_EXPIRED_ERROR
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import (
@@ -768,6 +774,214 @@ class TestWorkerSync:
         assert task.result_data == "8"
         assert task.error_message is None
         assert task.error_traceback is None
+
+    def test_sync_worker_consumes_exact_versioned_completion_provenance(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker-versioned-sync"
+        cmd.active_tasks = {}
+        _acquire_test_lease(cmd)
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-versioned-sync-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+            claimed_by_worker=cmd.worker_id,
+            attempt_number=2,
+            execution_generation=7,
+        )
+        assert task.pk is not None
+        serialized = encode_execution_completion(
+            ExecutionCompletion(
+                identity=ExecutionIdentity(
+                    task_execution_pk=int(task.pk),
+                    task_id=task.task_id,
+                    attempt_number=2,
+                    execution_generation=7,
+                ),
+                execution_protocol_version=1,
+                executor_django_ray_version="0.5.0-sync-executor",
+                success=True,
+                result=8,
+                result_reference=None,
+                error=None,
+                traceback=None,
+                exception_type=None,
+                retryable=None,
+            )
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda **_kwargs: serialized,
+        )
+
+        cmd.execute_task_sync(task)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert task.result_data == "8"
+        assert task.executor_django_ray_version == "0.5.0-sync-executor"
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+        assert archived.executor_django_ray_version == "0.5.0-sync-executor"
+
+    def test_sync_worker_preserves_released_legacy_nan_success(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker-legacy-nan-sync"
+        cmd.active_tasks = {}
+        _acquire_test_lease(cmd)
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-legacy-nan-sync-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            claimed_by_worker=cmd.worker_id,
+            attempt_number=2,
+            execution_generation=7,
+        )
+        serialized = json.dumps(
+            {
+                "success": True,
+                "result": math.nan,
+                "result_reference": None,
+                "error": None,
+                "traceback": None,
+                "exception_type": None,
+                "retryable": None,
+            }
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda **_kwargs: serialized,
+        )
+
+        cmd.execute_task_sync(task)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert math.isnan(json.loads(task.result_data or "null"))
+        assert task.executor_django_ray_version is None
+
+    def test_sync_worker_preserves_released_legacy_nonretryable_long_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker-legacy-long-failure-sync"
+        cmd.active_tasks = {}
+        _acquire_test_lease(cmd)
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-legacy-long-failure-sync-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            claimed_by_worker=cmd.worker_id,
+            attempt_number=2,
+            execution_generation=7,
+        )
+        error_message = "legacy failure " + "x" * 70_000
+        serialized = json.dumps(
+            {
+                "success": False,
+                "result": None,
+                "error": error_message,
+                "traceback": "legacy traceback " + "y" * 70_000,
+                "exception_type": "builtins.ValueError",
+                "retryable": False,
+            }
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda **_kwargs: serialized,
+        )
+
+        cmd.execute_task_sync(task)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 2
+        assert task.error_message == error_message
+        assert task.executor_django_ray_version is None
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+        assert archived.state == TaskState.FAILED
+        assert archived.error_message == error_message
+
+    def test_sync_worker_rejects_versioned_identity_before_result_storage(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.execution_mode = "sync"
+        cmd.worker_id = "test-worker-versioned-sync-mismatch"
+        cmd.active_tasks = {}
+        _acquire_test_lease(cmd)
+        task = RayTaskExecution.objects.create(
+            task_id="test-worker-versioned-sync-mismatch-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[5, 3]",
+            kwargs_json="{}",
+            claimed_by_worker=cmd.worker_id,
+            attempt_number=2,
+            execution_generation=7,
+        )
+        assert task.pk is not None
+        serialized = encode_execution_completion(
+            ExecutionCompletion(
+                identity=ExecutionIdentity(
+                    task_execution_pk=int(task.pk),
+                    task_id="another-task-identity",
+                    attempt_number=2,
+                    execution_generation=7,
+                ),
+                execution_protocol_version=1,
+                executor_django_ray_version="0.5.0-untrusted-executor",
+                success=True,
+                result={"must_not_store": "secret"},
+                result_reference=None,
+                error=None,
+                traceback=None,
+                exception_type=None,
+                retryable=None,
+            )
+        )
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda **_kwargs: serialized,
+        )
+        monkeypatch.setattr(
+            cmd,
+            "_store_task_result",
+            lambda *_args, **_kwargs: pytest.fail(
+                "an incompatible completion must not reach result storage"
+            ),
+        )
+
+        cmd.execute_task_sync(task)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 2
+        assert task.result_data is None
+        assert task.result_reference is None
+        assert task.executor_django_ray_version is None
+        assert task.error_message == ("Execution completion rejected (identity_mismatch)")
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+        assert archived.executor_django_ray_version is None
 
     def test_worker_processes_failing_task(self, setup_django_env):
         """Test that the worker handles failing tasks correctly."""

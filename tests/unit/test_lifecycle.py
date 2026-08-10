@@ -299,6 +299,139 @@ def test_attempt_archival_copies_exact_protocol_and_provenance(
         assert task.executor_django_ray_version == executor_version
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("transition", ["success", "final_failure"])
+def test_enriched_completion_stamps_executor_provenance_on_terminal_outcome(
+    transition: str,
+) -> None:
+    task = RayTaskExecution.objects.create(
+        task_id=f"lifecycle-enriched-completion-{transition}",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        executor_django_ray_version="0.4.0-previous",
+    )
+
+    if transition == "success":
+        accepted = succeed_task(
+            task,
+            result_data="3",
+            result_reference=None,
+            _executor_django_ray_version="0.5.0-executor",
+        )
+        expected_state = TaskState.SUCCEEDED
+    else:
+        accepted = record_failure(
+            task,
+            error_message="terminal failure",
+            retry=False,
+            _executor_django_ray_version="0.5.0-executor",
+        )
+        expected_state = TaskState.FAILED
+
+    assert accepted
+    task.refresh_from_db()
+    assert task.state == expected_state
+    assert task.executor_django_ray_version == "0.5.0-executor"
+    archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+    assert archived.state == expected_state
+    assert archived.executor_django_ray_version == "0.5.0-executor"
+
+
+@pytest.mark.django_db
+def test_enriched_completion_archives_then_clears_executor_provenance_on_retry() -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-enriched-completion-retry",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        executor_django_ray_version="0.4.0-previous",
+    )
+
+    assert record_failure(
+        task,
+        error_message="retryable failure",
+        retry=True,
+        _executor_django_ray_version="0.5.0-executor",
+    )
+
+    task.refresh_from_db()
+    assert task.state == TaskState.QUEUED
+    assert task.attempt_number == 3
+    assert task.executor_django_ray_version is None
+    archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+    assert archived.state == TaskState.FAILED
+    assert archived.executor_django_ray_version == "0.5.0-executor"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("transition", ["success", "final_failure"])
+def test_legacy_completion_omission_preserves_existing_executor_provenance(
+    transition: str,
+) -> None:
+    task = RayTaskExecution.objects.create(
+        task_id=f"lifecycle-legacy-completion-{transition}",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        executor_django_ray_version="0.4.0-existing",
+    )
+
+    if transition == "success":
+        accepted = succeed_task(task, result_data="3", result_reference=None)
+        expected_state = TaskState.SUCCEEDED
+    else:
+        accepted = record_failure(
+            task,
+            error_message="terminal failure",
+            retry=False,
+        )
+        expected_state = TaskState.FAILED
+
+    assert accepted
+    task.refresh_from_db()
+    assert task.executor_django_ray_version == "0.4.0-existing"
+    archived = TaskAttempt.objects.get(execution=task, attempt_number=2)
+    assert archived.state == expected_state
+    assert archived.executor_django_ray_version == "0.4.0-existing"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("transition", ["success", "failure"])
+def test_rejected_completion_does_not_mutate_executor_provenance(transition: str) -> None:
+    task = RayTaskExecution.objects.create(
+        task_id=f"lifecycle-rejected-completion-provenance-{transition}",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=4,
+        executor_django_ray_version="0.4.0-existing",
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+
+    if transition == "success":
+        accepted = succeed_task(
+            task,
+            result_data="3",
+            result_reference=None,
+            expected_execution_generation=3,
+            _executor_django_ray_version="0.5.0-rejected",
+        )
+    else:
+        accepted = record_failure(
+            task,
+            error_message="stale failure",
+            retry=False,
+            expected_execution_generation=3,
+            _executor_django_ray_version="0.5.0-rejected",
+        )
+
+    assert not accepted
+    assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+    assert task.executor_django_ray_version == "0.4.0-existing"
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("operation", "initial_state"),
@@ -946,9 +1079,11 @@ def test_automatic_retry_attempt_archive_failure_rolls_back_provenance_clear(
             error_message="current failure",
             retry=True,
             supported_protocols=_SYNTHETIC_V1_V2_PROTOCOLS,
+            _executor_django_ray_version="0.6.0-rejected-by-rollback",
         )
 
     assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+    assert task.executor_django_ray_version == "0.5.0-executor"
     assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
