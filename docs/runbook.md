@@ -160,9 +160,20 @@ widen the public retry or cancellation services: they always bind the installed
 package's supported range. A broader package-private range is valid only after the
 calling worker cohort has already proved that capability.
 
-This does not yet fence Ray Core handle polling and bulk monitor heartbeats or version
-the remote completion transport. Do not use the scan or lifecycle filters as proof that
-an executor can deserialize or run the task.
+Ray Core managers also prove the exact live lease and durable handle identity before a
+task-specific `ray.wait` or `ray.get`. Unsupported, missing, terminal, stale, or
+transferred handles are forgotten locally before that call; only exact compatible
+`RUNNING` or `CANCELLING` rows receive monitor heartbeats. A completion rechecks the
+authoritative lease-then-execution boundary before result storage or any lifecycle
+effect, and disconnect/reconnect loss handling follows the same rule. An unsupported
+durable row remains byte-for-byte unchanged.
+
+Forgetting a Ray Core handle is not a recoverable handoff. The `ObjectRef` belongs to
+the original driver, so another task manager cannot adopt it as it can a persisted Ray
+Job ID. Keep the compatible driver alive while that work drains, or make an explicit
+operator decision about the unchanged uncertain row. This boundary still does not
+version the remote completion transport or prove that an executor can deserialize or
+run the task.
 
 Do not interpret the lease's informational `queue_name` text as a durable per-queue
 capability, or its protocol range as proof that Ray is ready. Ray/Python version and

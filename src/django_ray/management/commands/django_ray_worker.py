@@ -21,6 +21,7 @@ from django_ray.conf.settings import get_settings
 from django_ray.execution_protocol import (
     MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     WORKER_CAPABILITY_SCHEMA_VERSION,
     ExecutionProtocolRange,
     explicit_worker_protocol_range,
@@ -62,7 +63,7 @@ from django_ray.runner.leasing import (
     is_worker_id_primary_key_collision,
 )
 from django_ray.runner.polling import AdaptivePollingPolicy
-from django_ray.runner.ray_core import RayCoreRunner
+from django_ray.runner.ray_core import RayCoreHandle, RayCoreRunner
 from django_ray.runner.reconciliation import (
     get_stuck_timeout,
     is_task_stuck,
@@ -89,6 +90,7 @@ class _OwnedTask:
 
     execution: RayTaskExecution
     adopted: bool
+    supported_protocols: ExecutionProtocolRange
 
 
 @dataclass(frozen=True)
@@ -1098,6 +1100,95 @@ class Command(BaseCommand):
         if updated:
             task.last_heartbeat_at = heartbeat_time
 
+    def _partition_ray_core_handles(
+        self,
+        runner: RayCoreRunner,
+        handles: tuple[RayCoreHandle, ...],
+        *,
+        heartbeat_at: datetime | None = None,
+    ) -> tuple[RayCoreHandle, ...] | None:
+        """Authorize exact local handles and retire every ineligible capability.
+
+        The live worker lease is locked before any execution heartbeat update.
+        No Ray call occurs in this transaction. Unsupported, stale, missing,
+        terminal, or transferred handles are forgotten locally without changing
+        their durable rows.
+        """
+        if not handles:
+            return ()
+
+        eligible_handles: list[RayCoreHandle] = []
+        with transaction.atomic():
+            lease = self._lock_authoritative_leases(
+                source_worker_id=self.worker_id,
+                allow_takeover=False,
+                renew_heartbeat=False,
+            )
+            if lease is None:
+                return None
+            supported_protocols = self._explicit_protocol_range(lease)
+            if supported_protocols is None:
+                return None
+
+            rows_by_pk = {
+                int(row.pk): row
+                for row in RayTaskExecution.objects.filter(
+                    pk__in=[handle.task_pk for handle in handles]
+                ).only(
+                    "pk",
+                    "state",
+                    "claimed_by_worker",
+                    "attempt_number",
+                    "execution_generation",
+                    "execution_protocol_version",
+                )
+            }
+            heartbeat_groups: dict[tuple[int, int, int], list[int]] = {}
+            for handle in handles:
+                row = rows_by_pk.get(handle.task_pk)
+                if (
+                    row is None
+                    or str(row.claimed_by_worker or "") != self.worker_id
+                    or row.state not in (TaskState.RUNNING, TaskState.CANCELLING)
+                    or int(row.attempt_number) != handle.attempt_number
+                    or int(row.execution_generation) != handle.execution_generation
+                    or not supported_protocols.supports(int(row.execution_protocol_version))
+                ):
+                    continue
+                eligible_handles.append(handle)
+                if heartbeat_at is not None and row.state == TaskState.RUNNING:
+                    identity = (
+                        handle.attempt_number,
+                        handle.execution_generation,
+                        int(row.execution_protocol_version),
+                    )
+                    heartbeat_groups.setdefault(identity, []).append(handle.task_pk)
+
+            for (
+                attempt_number,
+                execution_generation,
+                execution_protocol_version,
+            ), task_ids in heartbeat_groups.items():
+                RayTaskExecution.objects.filter(
+                    pk__in=task_ids,
+                    state=TaskState.RUNNING,
+                    claimed_by_worker=self.worker_id,
+                    attempt_number=attempt_number,
+                    execution_generation=execution_generation,
+                    execution_protocol_version=execution_protocol_version,
+                ).update(last_heartbeat_at=heartbeat_at)
+
+        eligible_handle_ids = {id(handle) for handle in eligible_handles}
+        retired = 0
+        for handle in handles:
+            if id(handle) not in eligible_handle_ids:
+                retired += int(runner.retire_pending_handle(handle))
+        if retired:
+            self.stdout.write(
+                self.style.NOTICE(f"\n  Retired {retired} stale or unsupported Ray Core handle(s)")
+            )
+        return tuple(eligible_handles)
+
     def _completion_envelope_grace_expired(
         self,
         task: RayTaskExecution,
@@ -1269,33 +1360,127 @@ class Command(BaseCommand):
         if not self.ray_core_runner or self.ray_core_runner.pending_count == 0:
             return
 
-        pending_handles = self.ray_core_runner.pending_task_handles
-        handles_by_task_pk = {handle.task_pk: handle for handle in pending_handles}
+        runner = self.ray_core_runner
+        pending_handles = runner.pending_task_handles
+        eligible_handles = self._partition_ray_core_handles(runner, pending_handles)
+        if eligible_handles is None:
+            return
+        self._terminalize_lost_ray_core_handles(
+            runner,
+            eligible_handles,
+            error_message="Ray connection lost - task state unknown",
+        )
+
+    def _terminalize_lost_ray_core_handles(
+        self,
+        runner: RayCoreRunner,
+        handles: tuple[RayCoreHandle, ...],
+        *,
+        error_message: str,
+    ) -> int:
+        """Terminalize authorized lost handles under the central lease fence."""
         count = 0
-        for task in RayTaskExecution.objects.filter(
-            pk__in=handles_by_task_pk,
-            state=TaskState.RUNNING,
-        ):
-            handle = handles_by_task_pk[task.pk]
-            handled = self._handle_task_failure(
+        current_handles = {handle.task_pk: handle for handle in runner.pending_task_handles}
+        for handle in handles:
+            if current_handles.get(handle.task_pk) is not handle:
+                continue
+            try:
+                task = RayTaskExecution.objects.get(pk=handle.task_pk)
+            except RayTaskExecution.DoesNotExist:
+                runner.retire_pending_handle(handle)
+                continue
+
+            if (
+                task.state != TaskState.RUNNING
+                or int(task.attempt_number) != handle.attempt_number
+                or int(task.execution_generation) != handle.execution_generation
+            ):
+                runner.retire_pending_handle(handle)
+                continue
+
+            with self._authoritative_task_owner(
                 task,
-                error_message="Ray connection lost - task state unknown",
-                exception_type="RayConnectionError",
-                expected_claimed_by_worker=self.worker_id,
-                expected_attempt_number=handle.attempt_number,
-                expected_execution_generation=handle.execution_generation,
-            )
-            if handled:
-                count += 1
+                expected_state=TaskState.RUNNING,
+                allow_takeover=False,
+                require_completion_data_match=True,
+            ) as owned:
+                if owned is not None:
+                    current = owned.execution
+                    handled = self._handle_task_failure(
+                        current,
+                        error_message=error_message,
+                        exception_type="RayConnectionError",
+                        expected_claimed_by_worker=self.worker_id,
+                        expected_attempt_number=handle.attempt_number,
+                        expected_execution_generation=handle.execution_generation,
+                        expected_completion_data=current.completion_data,
+                        require_completion_data_match=True,
+                        supported_protocols=owned.supported_protocols,
+                    )
+                    if handled:
+                        count += 1
 
-        # Clear the runner's pending tasks
-        self.ray_core_runner.clear_pending_tasks()
+            runner.retire_pending_handle(handle)
 
-        if count > 0:
+        if count:
             self.stdout.write(
                 self.style.WARNING(
-                    f"  Routed {count} stale Ray Core task(s) through retry/failure handling"
+                    f"  Routed {count} stale Ray Core task(s) through lifecycle handling"
                 )
+            )
+        return count
+
+    def _finalize_ray_core_cancellation(
+        self,
+        *,
+        task_pk: int,
+        attempt_number: int,
+        execution_generation: int,
+    ) -> bool:
+        """Finalize one exact cancellation after a Ray Core completion."""
+        task = (
+            RayTaskExecution.objects.filter(
+                pk=task_pk,
+                state=TaskState.CANCELLING,
+                claimed_by_worker=self.worker_id,
+                attempt_number=attempt_number,
+                execution_generation=execution_generation,
+            )
+            .only(
+                "pk",
+                "state",
+                "claimed_by_worker",
+                "ray_job_id",
+                "ray_address",
+                "attempt_number",
+                "execution_generation",
+                "execution_protocol_version",
+                "started_at",
+                "last_heartbeat_at",
+                "completion_data",
+            )
+            .first()
+        )
+        if task is None:
+            return False
+
+        with self._authoritative_task_owner(
+            task,
+            expected_state=TaskState.CANCELLING,
+            allow_takeover=False,
+            require_completion_data_match=True,
+        ) as owned:
+            if owned is None:
+                return False
+            current = owned.execution
+            return cancel_task(
+                current,
+                expected_worker_id=self.worker_id,
+                expected_attempt_number=attempt_number,
+                expected_execution_generation=execution_generation,
+                expected_completion_data=current.completion_data,
+                require_completion_data_match=True,
+                supported_protocols=owned.supported_protocols,
             )
 
     def claim_and_process_tasks(self, queues: Sequence[str], concurrency: int) -> int:
@@ -1638,6 +1823,7 @@ class Command(BaseCommand):
         expected_execution_generation: int | None = None,
         expected_completion_data: str | None = None,
         require_completion_data_match: bool = False,
+        supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     ) -> bool:
         """Store and publish one successful result under the execution row lock.
 
@@ -1663,6 +1849,8 @@ class Command(BaseCommand):
             current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
             if current is None:
                 return False
+            if not supported_protocols.supports(int(current.execution_protocol_version)):
+                return False
 
             if prepared_result_reference is None:
                 diagnostics = self._store_task_result(current, result_value) or ()
@@ -1680,6 +1868,7 @@ class Command(BaseCommand):
                 expected_execution_generation=expected_execution_generation,
                 expected_completion_data=expected_completion_data,
                 require_completion_data_match=require_completion_data_match,
+                supported_protocols=supported_protocols,
             )
             if persisted:
                 task.__dict__.update(current.__dict__)
@@ -1704,6 +1893,7 @@ class Command(BaseCommand):
         require_completion_data_match: bool = False,
         cancellation_status: str | None = None,
         cancellation_error: str | None = None,
+        supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     ) -> bool:
         """Handle a failed task, potentially scheduling a retry.
 
@@ -1736,6 +1926,7 @@ class Command(BaseCommand):
                 require_completion_data_match=require_completion_data_match,
                 cancellation_status=cancellation_status,
                 cancellation_error=cancellation_error,
+                supported_protocols=supported_protocols,
             )
         except RuntimeEnvSnapshotError as storage_error:
             retry_decision = RetryDecision(
@@ -1757,6 +1948,7 @@ class Command(BaseCommand):
                 require_completion_data_match=require_completion_data_match,
                 cancellation_status=cancellation_status,
                 cancellation_error=cancellation_error,
+                supported_protocols=supported_protocols,
             )
         if not handled:
             return False
@@ -2395,58 +2587,45 @@ class Command(BaseCommand):
         if self.ray_core_runner is None or self.ray_core_runner.pending_count == 0:
             return 0
 
+        runner = self.ray_core_runner
+        monitored_handles = runner.pending_task_handles
+        monitor_time = time.monotonic()
+        heartbeat_due = (
+            monitor_time - self.last_task_monitor_heartbeat >= self.task_monitor_heartbeat_interval
+        )
+        eligible_handles = self._partition_ray_core_handles(
+            runner,
+            monitored_handles,
+            heartbeat_at=datetime.now(UTC) if heartbeat_due else None,
+        )
+        if eligible_handles is None:
+            return 0
+        retired_count = len(monitored_handles) - len(eligible_handles)
+        if heartbeat_due:
+            self.last_task_monitor_heartbeat = monitor_time
+
+        if not eligible_handles:
+            return retired_count
+
         import ray
 
-        # Check if Ray is still connected
+        # Check connection only after unsupported local capabilities are retired.
         if not ray.is_initialized():
-            self.stdout.write(self.style.WARNING("\nRay disconnected, clearing pending tasks..."))
-            # Mark all pending tasks as needing retry
-            pending_handles = self.ray_core_runner.pending_task_handles
-            for handle in pending_handles:
-                try:
-                    task = RayTaskExecution.objects.get(pk=handle.task_pk)
-                    self._handle_task_failure(
-                        task,
-                        error_message="Ray connection lost",
-                        exception_type="RayConnectionError",
-                        expected_claimed_by_worker=self.worker_id,
-                        expected_attempt_number=handle.attempt_number,
-                        expected_execution_generation=handle.execution_generation,
-                    )
-                except RayTaskExecution.DoesNotExist:
-                    pass
-            self.ray_core_runner.clear_pending_tasks()
-            return len(pending_handles)
-
-        monitored_handles = self.ray_core_runner.pending_task_handles
-        monitor_time = time.monotonic()
-        if (
-            monitored_handles
-            and monitor_time - self.last_task_monitor_heartbeat
-            >= self.task_monitor_heartbeat_interval
-        ):
-            heartbeat_time = datetime.now(UTC)
-            task_ids_by_identity: dict[tuple[int, int], list[int]] = {}
-            for handle in monitored_handles:
-                identity = (handle.attempt_number, handle.execution_generation)
-                task_ids_by_identity.setdefault(identity, []).append(handle.task_pk)
-            for (attempt_number, execution_generation), task_ids in task_ids_by_identity.items():
-                RayTaskExecution.objects.filter(
-                    pk__in=task_ids,
-                    state=TaskState.RUNNING,
-                    claimed_by_worker=self.worker_id,
-                    attempt_number=attempt_number,
-                    execution_generation=execution_generation,
-                ).update(last_heartbeat_at=heartbeat_time)
-            self.last_task_monitor_heartbeat = monitor_time
+            self.stdout.write(self.style.WARNING("\nRay disconnected, retiring pending tasks..."))
+            self._terminalize_lost_ray_core_handles(
+                runner,
+                eligible_handles,
+                error_message="Ray connection lost",
+            )
+            return retired_count + len(eligible_handles)
 
         # Poll for completed tasks
         try:
-            completed = self.ray_core_runner.poll_completed()
+            completed = runner.poll_completed(eligible_handles)
         except Exception as e:
             diagnostic = render_console_diagnostic(e)
             self.stdout.write(self.style.ERROR(f"\nError polling Ray Core tasks: {diagnostic}"))
-            return 0
+            return retired_count
 
         for completion in completed:
             task_pk = completion.task_pk
@@ -2467,14 +2646,13 @@ class Command(BaseCommand):
                     )
                     continue
 
-                # Skip if task was cancelled externally
+                # Cancellation wins over a concurrently completed Ray result.
                 if task.state in (TaskState.CANCELLED, TaskState.CANCELLING):
                     if task.state == TaskState.CANCELLING:
-                        cancel_task(
-                            task,
-                            expected_worker_id=self.worker_id,
-                            expected_attempt_number=attempt_number,
-                            expected_execution_generation=execution_generation,
+                        self._finalize_ray_core_cancellation(
+                            task_pk=task_pk,
+                            attempt_number=attempt_number,
+                            execution_generation=execution_generation,
                         )
                     self.stdout.write(self.style.WARNING(f"\n  Task {task.pk} was cancelled"))
                     continue
@@ -2488,34 +2666,67 @@ class Command(BaseCommand):
                     continue
 
                 result = json.loads(completion.result_json)
-
-                if result.get("success"):
-                    if not self._store_and_succeed_task(
-                        task,
-                        result.get("result"),
-                        expected_claimed_by_worker=self.worker_id,
-                        expected_attempt_number=attempt_number,
-                        expected_execution_generation=execution_generation,
-                    ):
+                with self._authoritative_task_owner(
+                    task,
+                    expected_state=TaskState.RUNNING,
+                    allow_takeover=False,
+                    require_completion_data_match=True,
+                ) as owned:
+                    if owned is None:
+                        cancelled = self._finalize_ray_core_cancellation(
+                            task_pk=task_pk,
+                            attempt_number=attempt_number,
+                            execution_generation=execution_generation,
+                        )
+                        if cancelled:
+                            self.stdout.write(
+                                self.style.WARNING(f"\n  Task {task.pk} was cancelled")
+                            )
+                            continue
                         self.stdout.write(
                             self.style.NOTICE(
-                                f"\n  Task {task.pk} changed while its Ray Core "
-                                "result was being stored"
+                                f"\n  Task {task.pk} changed before its Ray Core "
+                                "result could be applied"
                             )
                         )
                         continue
-                    self.stdout.write(self.style.SUCCESS(f"\n  Task {task.pk} completed"))
-                else:
-                    self._handle_task_failure(
-                        task,
-                        error_message=result.get("error", "Unknown error"),
-                        error_traceback=result.get("traceback"),
-                        exception_type=result.get("exception_type"),
-                        retryable=result.get("retryable"),
-                        expected_claimed_by_worker=self.worker_id,
-                        expected_attempt_number=attempt_number,
-                        expected_execution_generation=execution_generation,
+
+                    current = owned.execution
+                    if result.get("success"):
+                        persisted = self._store_and_succeed_task(
+                            current,
+                            result.get("result"),
+                            expected_claimed_by_worker=self.worker_id,
+                            expected_attempt_number=attempt_number,
+                            expected_execution_generation=execution_generation,
+                            expected_completion_data=current.completion_data,
+                            require_completion_data_match=True,
+                            supported_protocols=owned.supported_protocols,
+                        )
+                    else:
+                        persisted = self._handle_task_failure(
+                            current,
+                            error_message=result.get("error", "Unknown error"),
+                            error_traceback=result.get("traceback"),
+                            exception_type=result.get("exception_type"),
+                            retryable=result.get("retryable"),
+                            expected_claimed_by_worker=self.worker_id,
+                            expected_attempt_number=attempt_number,
+                            expected_execution_generation=execution_generation,
+                            expected_completion_data=current.completion_data,
+                            require_completion_data_match=True,
+                            supported_protocols=owned.supported_protocols,
+                        )
+
+                if not persisted:
+                    self.stdout.write(
+                        self.style.NOTICE(
+                            f"\n  Task {task.pk} changed while its Ray Core "
+                            "result was being applied"
+                        )
                     )
+                elif result.get("success"):
+                    self.stdout.write(self.style.SUCCESS(f"\n  Task {task.pk} completed"))
 
             except RayTaskExecution.DoesNotExist:
                 self.stdout.write(self.style.WARNING(f"\n  Task {task_pk} not found in database"))
@@ -2525,7 +2736,7 @@ class Command(BaseCommand):
                     self.style.ERROR(f"\n  Error processing task {task_pk} result: {diagnostic}")
                 )
 
-        return len(completed)
+        return retired_count + len(completed)
 
     def submit_task_to_ray(self, task: RayTaskExecution) -> None:
         """Submit a task to Ray for execution."""
@@ -3038,7 +3249,11 @@ class Command(BaseCommand):
                     ]
                 )
 
-            yield _OwnedTask(execution=current, adopted=adopted)
+            yield _OwnedTask(
+                execution=current,
+                adopted=adopted,
+                supported_protocols=supported_protocols,
+            )
 
     def _take_over_task_if_owner_stale(
         self,

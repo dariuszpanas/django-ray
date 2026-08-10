@@ -585,23 +585,45 @@ class RayCoreRunner(BaseRunner):
         """
         return None
 
-    def poll_completed(self) -> list[RayCoreCompletion]:
+    def retire_pending_handle(self, handle: RayCoreHandle) -> bool:
+        """Forget one exact local capability without contacting Ray."""
+        if self._pending_tasks.get(handle.task_pk) is not handle:
+            return False
+        self._pending_tasks.pop(handle.task_pk, None)
+        return True
+
+    def poll_completed(
+        self,
+        handles: tuple[RayCoreHandle, ...] | None = None,
+    ) -> list[RayCoreCompletion]:
         """Poll for completed tasks and return their results.
 
         This is a convenience method for the worker to efficiently
-        check multiple pending tasks at once.
+        check multiple pending tasks at once. When ``handles`` is provided,
+        only exact capabilities that remain current are allowed to cross the
+        Ray boundary; a replacement or newly submitted handle is not polled.
 
         Returns:
             Completion envelopes carrying the exact submitted execution identity.
         """
         import ray
 
-        if not self._pending_tasks:
+        if handles is None:
+            selected_handles = tuple(self._pending_tasks.values())
+        else:
+            selected_by_task = {
+                handle.task_pk: handle
+                for handle in handles
+                if self._pending_tasks.get(handle.task_pk) is handle
+            }
+            selected_handles = tuple(selected_by_task.values())
+
+        if not selected_handles:
             return []
 
         # Get all pending object refs
-        refs = [h.object_ref for h in self._pending_tasks.values()]
-        handle_by_ref = {h.object_ref: h for h in self._pending_tasks.values()}
+        refs = [handle.object_ref for handle in selected_handles]
+        handle_by_ref = {handle.object_ref: handle for handle in selected_handles}
 
         # Check for completed tasks (non-blocking)
         ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
@@ -640,8 +662,7 @@ class RayCoreRunner(BaseRunner):
                 )
 
             # Remove from pending
-            if self._pending_tasks.get(handle.task_pk) is handle:
-                self._pending_tasks.pop(handle.task_pk, None)
+            self.retire_pending_handle(handle)
 
         return completed
 
