@@ -65,7 +65,7 @@ object-storage = [
 ]
 sample = [
     "django-ninja>=1.5.1",
-    "django-unfold==0.102.0",
+    "django-unfold==0.103.0",
     "gunicorn>=23.0",
     "whitenoise>=6.6",
 ]
@@ -73,7 +73,7 @@ sample = [
 [dependency-groups]
 dev = [
     "django-ninja>=1.5.1",
-    "django-unfold==0.102.0",
+    "django-unfold==0.103.0",
     "whitenoise>=6.6",
     "ruff>=0.14.13",
     "ty>=0.0.12",
