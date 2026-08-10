@@ -15,7 +15,12 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, transaction
 from django.tasks.exceptions import InvalidTask, TaskResultDoesNotExist
 
+from django_ray import __version__ as django_ray_version
 from django_ray.backends import RayTaskBackend, TaskResultIdAllocationError
+from django_ray.execution_protocol import (
+    EXECUTION_METADATA_SCHEMA_VERSION,
+    EXECUTION_PROTOCOL_VERSION,
+)
 from django_ray.input_storage import prepare_task_input
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.result_storage import FilesystemResultStorage, ResultStorageError
@@ -186,6 +191,11 @@ class TestRayTaskBackend:
         execution = RayTaskExecution.objects.get(task_id=result.id)
 
         assert execution.callable_path == "testproject.tasks.add_numbers"
+        assert execution.metadata_schema_version == EXECUTION_METADATA_SCHEMA_VERSION
+        assert execution.execution_protocol_version == EXECUTION_PROTOCOL_VERSION
+        assert execution.created_with_django_ray_version == django_ray_version
+        assert execution.managed_with_django_ray_version is None
+        assert execution.executor_django_ray_version is None
         assert execution.priority == 0
         assert execution.state == TaskState.QUEUED
         assert json.loads(execution.args_json) == [2, 3]

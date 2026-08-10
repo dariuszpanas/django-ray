@@ -18,6 +18,7 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 import django_ray.protocol_coordination as protocol_coordination
+from django_ray import __version__ as django_ray_version
 from django_ray.execution_protocol import ExecutionProtocolRange, explicit_worker_protocol_range
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import (
@@ -213,6 +214,8 @@ def _assert_worker_claim_and_expiry_use_exact_explicit_protocol_range(
     assert TaskAttempt.objects.filter(execution=overdue_v1, state=TaskState.EXPIRED).exists()
     assert queued_v1.state == TaskState.RUNNING
     assert queued_v1.claimed_by_worker == worker.worker_id
+    assert queued_v1.created_with_django_ray_version is None
+    assert queued_v1.managed_with_django_ray_version == django_ray_version
     assert processed == [queued_v1.pk]
     for unsupported in (overdue_v2, queued_v2):
         assert unsupported.state == TaskState.QUEUED
@@ -438,6 +441,7 @@ def test_unsupported_active_ray_job_tracking_is_retired_before_status_rpc(
         ray_address="ray://v2-cluster:10001",
         attempt_number=3,
         execution_generation=7,
+        managed_with_django_ray_version="0.4.0-manager",
     )
     assert original.lease_identity is not None
     TaskWorkerLease.objects.filter(**original.lease_identity.database_filters()).delete()
@@ -464,6 +468,7 @@ def test_unsupported_active_ray_job_tracking_is_retired_before_status_rpc(
     assert worker.active_task_identities == {}
     assert task.state == TaskState.RUNNING
     assert task.claimed_by_worker == worker_id
+    assert task.managed_with_django_ray_version == "0.4.0-manager"
     assert task.finished_at is None
     assert worker.shutdown_requested is False
 
@@ -496,6 +501,7 @@ def test_global_reconciliation_uses_exact_locked_lease_range(
         ray_address="ray://v2-cluster:10001",
         attempt_number=3,
         execution_generation=7,
+        managed_with_django_ray_version="0.4.0-manager",
     )
     worker = _explicit_range_worker(
         "coordination-v2-compatible-reconciler",
@@ -521,6 +527,7 @@ def test_global_reconciliation_uses_exact_locked_lease_range(
     assert status_calls == ["raysubmit_coordination_v2_compatible"]
     assert task.state == TaskState.RUNNING
     assert task.claimed_by_worker == worker.worker_id
+    assert task.managed_with_django_ray_version == django_ray_version
     assert task.pk in worker.active_tasks
     assert old_owner.is_active is False
 
@@ -547,6 +554,7 @@ def _assert_protocol_mismatch_precedes_stale_source_lease_retirement() -> None:
         claimed_by_worker=old_owner.worker_id,
         started_at=stale_at,
         last_heartbeat_at=stale_at,
+        managed_with_django_ray_version="0.4.0-manager",
     )
     worker = _explicit_v1_worker("coordination-v1-central-worker")
 
@@ -557,6 +565,7 @@ def _assert_protocol_mismatch_precedes_stale_source_lease_retirement() -> None:
     assert old_owner.is_active is True
     assert old_owner.stopped_at is None
     assert task.claimed_by_worker == old_owner.worker_id
+    assert task.managed_with_django_ray_version == "0.4.0-manager"
     assert task.state == TaskState.RUNNING
     assert worker.shutdown_requested is False
     assert worker.lease_ownership_lost is False

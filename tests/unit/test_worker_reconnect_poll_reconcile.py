@@ -13,6 +13,7 @@ from urllib.parse import quote
 import pytest
 from django.db import transaction
 
+from django_ray import __version__ as django_ray_version
 from django_ray.execution_protocol import (
     MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
@@ -2597,6 +2598,32 @@ class TestWorkerReconnectPollReconcile:
         assert task.ray_address is None
         assert task.ray_target_address == "ray://target:10001"
 
+    def test_claim_stamps_manager_without_backfilling_legacy_creator(self, monkeypatch) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="claim-stamps-manager-legacy-001",
+            callable_path="testproject.tasks.add_numbers",
+            metadata_schema_version=0,
+            execution_protocol_version=1,
+            created_with_django_ray_version=None,
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command()
+        monkeypatch.setattr(cmd, "process_task", lambda _task: None)
+
+        assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.claimed_by_worker == cmd.worker_id
+        assert task.metadata_schema_version == 0
+        assert task.execution_protocol_version == 1
+        assert task.created_with_django_ray_version is None
+        assert task.managed_with_django_ray_version == django_ray_version
+        assert task.executor_django_ray_version is None
+
     def test_claim_promotes_legacy_address_before_clearing_handle(self, monkeypatch) -> None:
         task = RayTaskExecution.objects.create(
             task_id="claim-promotes-legacy-routing-001",
@@ -2707,6 +2734,7 @@ class TestWorkerReconnectPollReconcile:
             args_json="[1, 2]",
             kwargs_json="{}",
             claimed_by_worker="worker-coverage",
+            managed_with_django_ray_version="0.4.0-manager",
             ray_job_id="raysubmit_owner_transfer_during_status_001",
             attempt_number=2,
             execution_generation=7,
@@ -2720,6 +2748,7 @@ class TestWorkerReconnectPollReconcile:
             def get_status(self, _handle):
                 RayTaskExecution.objects.filter(pk=task.pk).update(
                     claimed_by_worker="replacement-worker",
+                    managed_with_django_ray_version="0.5.0-replacement",
                     completion_data=completion_data,
                 )
                 return JobInfo(
@@ -2747,6 +2776,7 @@ class TestWorkerReconnectPollReconcile:
         task.refresh_from_db()
         assert task.state == TaskState.RUNNING
         assert task.claimed_by_worker == "replacement-worker"
+        assert task.managed_with_django_ray_version == "0.5.0-replacement"
         assert task.completion_data == completion_data
         assert not TaskAttempt.objects.filter(execution=task).exists()
         assert task.pk not in cmd.active_tasks
@@ -3053,6 +3083,7 @@ class TestWorkerReconnectPollReconcile:
             ray_job_id="raysubmit_orphan_running_001",
             ray_address="ray://cluster:10001",
             claimed_by_worker="dead-worker",
+            managed_with_django_ray_version="0.4.0-manager",
             started_at=datetime.now(UTC),
         )
         cmd = _make_command(worker_id="adopting-worker")
@@ -3072,6 +3103,7 @@ class TestWorkerReconnectPollReconcile:
 
         orphan.refresh_from_db()
         assert orphan.claimed_by_worker == "adopting-worker"
+        assert orphan.managed_with_django_ray_version == django_ray_version
         assert orphan.last_heartbeat_at is not None
         assert cmd.active_tasks[orphan.pk] == "raysubmit_orphan_running_001"
         assert activity_count == 1

@@ -19,6 +19,11 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import close_old_connections, connection
 from django.db.migrations.recorder import MigrationRecorder
 
+from django_ray import __version__ as django_ray_version
+from django_ray.execution_protocol import (
+    EXECUTION_METADATA_SCHEMA_VERSION,
+    EXECUTION_PROTOCOL_VERSION,
+)
 from django_ray.management.commands.django_ray_worker import Command as WorkerCommand
 from django_ray.management.diagnostics import render_console_diagnostic
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
@@ -713,6 +718,9 @@ class Command(BaseCommand):
         RayTaskExecution.objects.create(
             task_id=task_id,
             callable_path="django_ray.benchmarks.polling_probe",
+            metadata_schema_version=EXECUTION_METADATA_SCHEMA_VERSION,
+            execution_protocol_version=EXECUTION_PROTOCOL_VERSION,
+            created_with_django_ray_version=django_ray_version,
             queue_name=queue_name,
             state=TaskState.QUEUED,
             args_json="[]",

@@ -16,6 +16,7 @@ from django_ray.lifecycle import (
     TaskCancellationRequestStatus,
     TaskRetryRequestStatus,
     cancel_task,
+    expire_queued_tasks,
     record_failure,
     record_lost,
     request_task_cancellation,
@@ -30,6 +31,7 @@ from django_ray.models import (
     TaskInputPayload,
     TaskState,
 )
+from django_ray.protocol_coordination import close_legacy_worker_admission
 from django_ray.redaction import REDACTED, normalize_terminal_text, redact_text
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
@@ -44,6 +46,9 @@ from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 _LOCK_PROJECTION = {"id", "state", "attempt_number", "execution_generation"}
 _ATTEMPT_ARCHIVE_READ_PROJECTION = {
+    "execution_protocol_version",
+    "managed_with_django_ray_version",
+    "executor_django_ray_version",
     "started_at",
     "finished_at",
     "error_message",
@@ -113,6 +118,11 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
         state=TaskState.FAILED,
         attempt_number=2,
         execution_generation=4,
+        metadata_schema_version=0,
+        execution_protocol_version=1,
+        created_with_django_ray_version=None,
+        managed_with_django_ray_version="0.4.0-manager",
+        executor_django_ray_version="0.4.0-executor",
         input_reference="s3://inputs/django-ray/inputs/immutable.json?bytes=42",
         workflow_plan_selection='{"selected_strategy":"dynamic_tasks"}',
         error_message="boom",
@@ -128,6 +138,11 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     assert task.state == TaskState.QUEUED
     assert task.attempt_number == 3
     assert task.execution_generation == 5
+    assert task.metadata_schema_version == 0
+    assert task.execution_protocol_version == 1
+    assert task.created_with_django_ray_version is None
+    assert task.managed_with_django_ray_version is None
+    assert task.executor_django_ray_version is None
     assert task.input_reference == "s3://inputs/django-ray/inputs/immutable.json?bytes=42"
     assert task.workflow_plan_selection is None
     assert task.error_message is None
@@ -136,6 +151,112 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     history = TaskAttempt.objects.get(execution=task, attempt_number=2)
     assert history.state == TaskState.FAILED
     assert history.error_message == "boom"
+    assert history.execution_protocol_version == 1
+    assert history.managed_with_django_ray_version == "0.4.0-manager"
+    assert history.executor_django_ray_version == "0.4.0-executor"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "transition",
+    [
+        "queued_cancel",
+        "manual_retry",
+        "automatic_retry",
+        "final_failure",
+        "expiry",
+        "lost",
+        "success",
+        "finalized_cancel",
+    ],
+)
+@pytest.mark.parametrize(
+    "executor_version",
+    [None, "0.5.0-executor"],
+    ids=["executor-unknown", "executor-reported"],
+)
+def test_attempt_archival_copies_exact_protocol_and_provenance(
+    transition: str,
+    executor_version: str | None,
+) -> None:
+    close_legacy_worker_admission(
+        expected_revision=1,
+        legacy_producers_retired=True,
+    )
+    now = datetime.now(UTC)
+    initial_state = {
+        "queued_cancel": TaskState.QUEUED,
+        "manual_retry": TaskState.FAILED,
+        "automatic_retry": TaskState.RUNNING,
+        "final_failure": TaskState.RUNNING,
+        "expiry": TaskState.QUEUED,
+        "lost": TaskState.RUNNING,
+        "success": TaskState.RUNNING,
+        "finalized_cancel": TaskState.CANCELLING,
+    }[transition]
+    task = RayTaskExecution.objects.create(
+        task_id=f"lifecycle-provenance-{transition}-{executor_version or 'unknown'}",
+        callable_path="testproject.tasks.add_numbers",
+        metadata_schema_version=1,
+        execution_protocol_version=2,
+        created_with_django_ray_version="0.4.0-creator",
+        managed_with_django_ray_version="0.5.0-manager",
+        executor_django_ray_version=executor_version,
+        queue_name="default",
+        state=initial_state,
+        attempt_number=3,
+        execution_generation=7,
+        queue_deadline_at=now - timedelta(seconds=1),
+        started_at=now - timedelta(minutes=5),
+        last_heartbeat_at=now - timedelta(minutes=1),
+        error_message="previous diagnostic",
+    )
+
+    if transition == "queued_cancel":
+        result = request_task_cancellation(task.pk)
+        assert result.status is TaskCancellationRequestStatus.ACCEPTED
+    elif transition == "manual_retry":
+        assert retry_task(task.pk) is not None
+    elif transition == "automatic_retry":
+        assert record_failure(task, error_message="retryable failure", retry=True)
+    elif transition == "final_failure":
+        assert record_failure(task, error_message="terminal failure", retry=False)
+    elif transition == "expiry":
+        assert expire_queued_tasks(["default"], now=now) == (task.pk,)
+    elif transition == "lost":
+        assert record_lost(task, error_message="worker lost")
+    elif transition == "success":
+        assert succeed_task(task, result_data="3", result_reference=None)
+    else:
+        assert cancel_task(task)
+
+    task.refresh_from_db()
+    archived = TaskAttempt.objects.get(execution=task, attempt_number=3)
+    expected_state = {
+        "queued_cancel": TaskState.CANCELLED,
+        "manual_retry": TaskState.FAILED,
+        "automatic_retry": TaskState.FAILED,
+        "final_failure": TaskState.FAILED,
+        "expiry": TaskState.EXPIRED,
+        "lost": TaskState.LOST,
+        "success": TaskState.SUCCEEDED,
+        "finalized_cancel": TaskState.CANCELLED,
+    }[transition]
+    assert archived.state == expected_state
+    assert archived.execution_protocol_version == 2
+    assert archived.managed_with_django_ray_version == "0.5.0-manager"
+    assert archived.executor_django_ray_version == executor_version
+    assert task.metadata_schema_version == 1
+    assert task.execution_protocol_version == 2
+    assert task.created_with_django_ray_version == "0.4.0-creator"
+    if transition in {"manual_retry", "automatic_retry"}:
+        assert task.state == TaskState.QUEUED
+        assert task.managed_with_django_ray_version is None
+        assert task.executor_django_ray_version is None
+    else:
+        assert task.state == expected_state
+        assert task.managed_with_django_ray_version == "0.5.0-manager"
+        assert task.executor_django_ray_version == executor_version
 
 
 @pytest.mark.django_db
@@ -161,11 +282,15 @@ def test_explicit_retry_of_expired_task_gets_fresh_deadline() -> None:
     assert TaskAttempt.objects.get(execution=task, attempt_number=1).state == TaskState.EXPIRED
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("storage_mode", ["inline", "external"])
 def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
     storage_mode: str,
 ) -> None:
+    close_legacy_worker_admission(
+        expected_revision=1,
+        legacy_producers_retired=True,
+    )
     unrelated_marker = f"unrelated-{storage_mode}-" + ("x" * 65_536)
     input_reference: str | None = None
     result_data: str | None = '{"result":"inline"}'
@@ -193,6 +318,11 @@ def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
         state=TaskState.FAILED,
         attempt_number=2,
         execution_generation=4,
+        metadata_schema_version=1,
+        execution_protocol_version=2,
+        created_with_django_ray_version="0.4.0-creator",
+        managed_with_django_ray_version="0.5.0-manager",
+        executor_django_ray_version="0.5.0-executor",
         args_json=args_json,
         kwargs_json=kwargs_json,
         input_reference=input_reference,
@@ -224,6 +354,11 @@ def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
     assert current.state == TaskState.QUEUED
     assert current.attempt_number == 3
     assert current.execution_generation == 5
+    assert current.metadata_schema_version == 1
+    assert current.execution_protocol_version == 2
+    assert current.created_with_django_ray_version == "0.4.0-creator"
+    assert current.managed_with_django_ray_version is None
+    assert current.executor_django_ray_version is None
     assert current.args_json == args_json
     assert current.kwargs_json == kwargs_json
     assert current.input_reference == input_reference
@@ -234,6 +369,9 @@ def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
     assert archived.result_reference == result_reference
     assert archived.error_message == "retryable failure"
     assert archived.error_traceback == "RetryError: retryable failure"
+    assert archived.execution_protocol_version == 2
+    assert archived.managed_with_django_ray_version == "0.5.0-manager"
+    assert archived.executor_django_ray_version == "0.5.0-executor"
     if payload is not None:
         payload.refresh_from_db()
         assert payload.state == InputPayloadState.ACTIVE
@@ -315,8 +453,12 @@ def test_retry_noop_and_stale_paths_use_one_bounded_lock(
     assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_cancellation_uses_state_specific_projections_without_payload_reload() -> None:
+    close_legacy_worker_admission(
+        expected_revision=1,
+        legacy_producers_retired=True,
+    )
     unrelated_marker = "unrelated-cancel-" + ("x" * 65_536)
     queued = RayTaskExecution.objects.create(
         task_id="lifecycle-projected-cancel-queued",
@@ -337,6 +479,9 @@ def test_cancellation_uses_state_specific_projections_without_payload_reload() -
         error_message="queued cancellation",
         error_traceback="CancellationError: queued cancellation",
         workflow_run_id="00000000-0000-0000-0000-000000000335",
+        execution_protocol_version=2,
+        managed_with_django_ray_version="0.5.0-manager",
+        executor_django_ray_version=None,
     )
     summary = workflow_progress_summary(queued)
     RayTaskExecution.objects.filter(pk=queued.pk).update(
@@ -366,6 +511,9 @@ def test_cancellation_uses_state_specific_projections_without_payload_reload() -
     assert archived.result_reference == "digest:" + ("c" * 64)
     assert archived.error_message == "queued cancellation"
     assert archived.error_traceback == "CancellationError: queued cancellation"
+    assert archived.execution_protocol_version == 2
+    assert archived.managed_with_django_ray_version == "0.5.0-manager"
+    assert archived.executor_django_ray_version is None
 
 
 @pytest.mark.django_db
@@ -540,6 +688,40 @@ def test_attempt_storage_failure_rolls_back_projected_lifecycle_transition(
 
     with pytest.raises(DatabaseError, match="attempt storage unavailable"):
         transition(task.pk)
+
+    assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_automatic_retry_attempt_archive_failure_rolls_back_provenance_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_legacy_worker_admission(
+        expected_revision=1,
+        legacy_producers_retired=True,
+    )
+    task = RayTaskExecution.objects.create(
+        task_id="lifecycle-auto-retry-provenance-archive-failure",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        attempt_number=2,
+        execution_generation=4,
+        execution_protocol_version=2,
+        created_with_django_ray_version="0.4.0-creator",
+        managed_with_django_ray_version="0.5.0-manager",
+        executor_django_ray_version="0.5.0-executor",
+        error_message="retained failure",
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+
+    def fail_attempt_storage(*_args: Any, **_kwargs: Any) -> None:
+        raise DatabaseError("attempt provenance archive unavailable")
+
+    monkeypatch.setattr(TaskAttempt.objects, "update_or_create", fail_attempt_storage)
+
+    with pytest.raises(DatabaseError, match="attempt provenance archive unavailable"):
+        record_failure(task, error_message="current failure", retry=True)
 
     assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
     assert not TaskAttempt.objects.filter(execution=task).exists()
