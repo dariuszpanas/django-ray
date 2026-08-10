@@ -102,6 +102,16 @@ Coroutine tasks use the same encoded entrypoint and completion envelope as synch
 tasks. The isolated driver owns the per-task loop, and a Ray Job stop request terminates
 that driver rather than preserving detached coroutine children.
 
+New Ray Job submissions carry a canonical versioned request plus independently bound
+identity, protocol, and digest metadata. The driver validates both before Django setup,
+input hydration, or application callable import/invocation, and a compatible replacement
+task manager can reconcile the same persisted job ID. Released protocol-v1 payloads
+remain supported during the drain window. Strict rejection or a strict terminal driver
+without an exact completion is never automatically retried. The rejection exit code is
+diagnostic rather than proof of execution phase, and Ray Job logs are not compatibility
+authority. This outer check does not attest the Ray/Python/cluster tuple or cover nested
+workflow and distributed leaf callables.
+
 ## Distributed Utilities
 
 `parallel_map()`, `parallel_starmap()`, and `scatter_gather()` work in local, cluster,

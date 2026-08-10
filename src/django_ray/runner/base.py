@@ -41,6 +41,8 @@ class JobInfo:
     message: str | None = None
     start_time: datetime | None = None
     end_time: datetime | None = None
+    metadata: dict[str, str] | None = None
+    driver_exit_code: int | None = None
 
 
 class BaseRunner(ABC):

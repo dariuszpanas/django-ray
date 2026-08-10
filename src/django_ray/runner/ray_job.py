@@ -11,6 +11,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from django_ray.conf.settings import get_settings
+from django_ray.execution_codec import ExecutionIdentity, ExecutionRequest, encode_execution_request
+from django_ray.ray_job_protocol import (
+    STRICT_RAY_JOB_SUBMISSION_ID_PREFIX,
+    build_ray_job_request_metadata,
+    fixed_safe_ray_job_metadata,
+)
 from django_ray.redaction import materialize_exception_message, materialize_exception_text
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
@@ -26,7 +32,6 @@ if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
 
 
-_SUBMISSION_ID_PREFIX = "raysubmit_django_ray_v1_"
 _CONTROL_REQUEST_TIMEOUT_SECONDS = 5.0
 _REQUEST_TIMEOUT_ATTRIBUTE = "_django_ray_request_timeout_seconds"
 
@@ -169,7 +174,7 @@ class RayJobRunner(BaseRunner):
             sort_keys=True,
         )
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        return f"{_SUBMISSION_ID_PREFIX}{digest}"
+        return f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}{digest}"
 
     def submission_handle(self, task_execution: RayTaskExecution) -> SubmissionHandle:
         """Build the exact handle that :meth:`submit` will give to Ray."""
@@ -191,7 +196,42 @@ class RayJobRunner(BaseRunner):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> SubmissionHandle:
-        """Submit a task via Ray Job Submission API."""
+        """Submit the explicit public-runner inputs via Ray Job."""
+        input_reference = getattr(task_execution, "input_reference", None)
+        if input_reference:
+            args_json = task_execution.args_json
+            kwargs_json = task_execution.kwargs_json
+        else:
+            args_json = serialize_args(list(args))
+            kwargs_json = serialize_args(kwargs)
+        return self._submit_serialized_request(
+            task_execution=task_execution,
+            callable_path=callable_path,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            input_reference=input_reference,
+        )
+
+    def submit_durable(self, task_execution: RayTaskExecution) -> SubmissionHandle:
+        """Submit the task manager's already-persisted opaque input fields."""
+        return self._submit_serialized_request(
+            task_execution=task_execution,
+            callable_path=task_execution.callable_path,
+            args_json=task_execution.args_json,
+            kwargs_json=task_execution.kwargs_json,
+            input_reference=getattr(task_execution, "input_reference", None),
+        )
+
+    def _submit_serialized_request(
+        self,
+        *,
+        task_execution: RayTaskExecution,
+        callable_path: str,
+        args_json: str,
+        kwargs_json: str,
+        input_reference: str | None,
+    ) -> SubmissionHandle:
+        """Submit one canonical request without hydrating application input."""
         handle = self.submission_handle(task_execution)
         runtime_env = runtime_env_for_execution(task_execution)
         client = self._get_client(handle.ray_address)
@@ -243,51 +283,47 @@ class RayJobRunner(BaseRunner):
                         "Outer RuntimeEnv local content changed while it was being snapshotted"
                     )
 
-                # Inline tasks retain the unversioned v1 transport during rolling
-                # upgrades. Referenced tasks use v2 so the command line remains small.
-                payload: dict[str, Any] = {
-                    "callable_path": callable_path,
-                    "task_execution_pk": task_execution.pk,
-                    "task_id": str(task_execution.task_id),
-                    "attempt_number": task_execution.attempt_number,
-                    "execution_generation": task_execution.execution_generation,
-                    "runtime_env_profile": runtime_env.profile,
-                    "runtime_env_hash": runtime_env.digest,
-                    "runtime_env_plan_identity": snapshot_runtime_env_identity.as_transport_dict(),
-                }
-                input_reference = getattr(task_execution, "input_reference", None)
-                if input_reference:
-                    payload.update(
-                        {
-                            "transport_version": 2,
-                            "input_reference": input_reference,
-                        }
-                    )
-                else:
-                    payload.update(
-                        {
-                            "serialized_args": serialize_args(list(args)),
-                            "serialized_kwargs": serialize_args(kwargs),
-                        }
-                    )
-                payload_json = json.dumps(payload, separators=(",", ":"))
+                request_identity = ExecutionIdentity(
+                    task_execution_pk=int(task_execution.pk),
+                    task_id=str(task_execution.task_id),
+                    attempt_number=int(task_execution.attempt_number),
+                    execution_generation=int(task_execution.execution_generation),
+                )
+                execution_request = ExecutionRequest(
+                    identity=request_identity,
+                    execution_protocol_version=int(task_execution.execution_protocol_version),
+                    callable_path=callable_path,
+                    transport_version=2 if input_reference else 1,
+                    serialized_args=args_json,
+                    serialized_kwargs=kwargs_json,
+                    input_reference=input_reference,
+                    runtime_env_profile=runtime_env.profile,
+                    runtime_env_hash=runtime_env.digest,
+                    runtime_env_plan_identity=(snapshot_runtime_env_identity.as_transport_dict()),
+                    compiled_graph_submission_transport="ray-job",
+                )
+                payload_json = encode_execution_request(execution_request)
                 payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
 
                 entrypoint = f"python -m django_ray.runtime.entrypoint --payload-b64 {payload_b64}"
+                metadata = {
+                    # Retain released visibility fields while the strict binding
+                    # independently identifies the public task and request bytes.
+                    "django_ray_task_id": str(task_execution.pk),
+                    "django_ray_attempt_number": str(task_execution.attempt_number),
+                    "django_ray_execution_generation": str(task_execution.execution_generation),
+                    "callable_path": callable_path,
+                    "runtime_env_profile": runtime_env.profile or "",
+                    "runtime_env_hash": runtime_env.digest,
+                    **build_ray_job_request_metadata(execution_request, payload_json),
+                }
 
                 request_started = True
                 returned_submission_id = client.submit_job(
                     entrypoint=entrypoint,
                     runtime_env=submitted_runtime_env.spec,
                     submission_id=handle.ray_job_id,
-                    metadata={
-                        "django_ray_task_id": str(task_execution.pk),
-                        "django_ray_attempt_number": str(task_execution.attempt_number),
-                        "django_ray_execution_generation": str(task_execution.execution_generation),
-                        "callable_path": callable_path,
-                        "runtime_env_profile": runtime_env.profile or "",
-                        "runtime_env_hash": runtime_env.digest,
-                    },
+                    metadata=metadata,
                 )
         except Exception as exc:
             if request_started:
@@ -328,6 +364,12 @@ class RayJobRunner(BaseRunner):
                 message=getattr(info, "message", None),
                 start_time=getattr(info, "start_time", None),
                 end_time=getattr(info, "end_time", None),
+                metadata=fixed_safe_ray_job_metadata(getattr(info, "metadata", None)),
+                driver_exit_code=(
+                    getattr(info, "driver_exit_code", None)
+                    if type(getattr(info, "driver_exit_code", None)) is int
+                    else None
+                ),
             )
         except Exception as e:
             return JobInfo(

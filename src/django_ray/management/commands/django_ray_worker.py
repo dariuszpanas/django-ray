@@ -49,6 +49,14 @@ from django_ray.management.diagnostics import (
     render_console_resource_summary,
 )
 from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.ray_job_protocol import (
+    RayJobRequestBindingError,
+    is_strict_ray_job_submission_id,
+    is_valid_strict_ray_job_submission_id,
+    parse_ray_job_request_metadata,
+    ray_job_metadata_has_strict_marker,
+    validate_ray_job_request_expectation,
+)
 from django_ray.redaction import (
     materialize_exception_message,
     materialize_exception_text,
@@ -2874,7 +2882,6 @@ class Command(BaseCommand):
         """Submit a task to Ray for execution."""
         from django_ray.runner import RayJobSubmissionUncertainError
         from django_ray.runner.ray_job import RayJobRunner
-        from django_ray.runtime.serialization import deserialize_args
         from django_ray.workflow_plans import WorkflowPlanMismatchError
 
         expected_worker_id = self.worker_id
@@ -2884,12 +2891,6 @@ class Command(BaseCommand):
 
         try:
             runner = RayJobRunner()
-            if task.input_reference:
-                args: Any = ()
-                kwargs: Any = {}
-            else:
-                args = deserialize_args(task.args_json)
-                kwargs = deserialize_args(task.kwargs_json)
 
         except Exception as e:
             import traceback
@@ -2958,12 +2959,7 @@ class Command(BaseCommand):
         )
 
         try:
-            handle = runner.submit(
-                task_execution=task,
-                callable_path=task.callable_path,
-                args=tuple(args),
-                kwargs=kwargs,
-            )
+            handle = runner.submit_durable(task_execution=task)
         except RayJobSubmissionUncertainError as exc:
             if (
                 exc.observed_submission_id is not None
@@ -3512,6 +3508,7 @@ class Command(BaseCommand):
 
         expected_attempt_number, expected_execution_generation = expected_identity
         handle = self._build_submission_handle(task, ray_job_id)
+        strict_ray_job = is_strict_ray_job_submission_id(ray_job_id)
 
         def consume_valid_completion(
             completion_data: str | None,
@@ -3612,6 +3609,7 @@ class Command(BaseCommand):
                     "claimed_by_worker",
                     "attempt_number",
                     "execution_generation",
+                    "execution_protocol_version",
                     "started_at",
                     "last_heartbeat_at",
                 ]
@@ -3746,11 +3744,89 @@ class Command(BaseCommand):
 
         completion_data = task.completion_data
 
+        strict_metadata_marker = ray_job_metadata_has_strict_marker(
+            getattr(job_info, "metadata", None)
+        )
         # The entrypoint's durable envelope is authoritative even while Ray
         # briefly continues to report PENDING/RUNNING during process teardown.
         # Consume it before monitor heartbeat or timeout logic can obscure it.
         completion_consumed, completion_inspection = consume_valid_completion(completion_data)
         if completion_consumed:
+            return
+
+        if strict_metadata_marker and not strict_ray_job:
+            resolve_stale_untrusted_execution(
+                expected_completion_data=completion_data,
+                error_message=(
+                    "Strict Ray Job request binding could not be verified "
+                    "(unexpected_strict_metadata)"
+                ),
+                log_detail=("had strict request metadata attached to a legacy submission ID"),
+                require_stale=False,
+            )
+            return
+
+        if strict_ray_job:
+            binding_rejection: str | None = None
+            if not is_valid_strict_ray_job_submission_id(ray_job_id):
+                binding_rejection = "invalid_submission_id"
+            elif job_info.job_id != ray_job_id:
+                binding_rejection = "job_id_mismatch"
+            elif job_info.status != JobStatus.UNKNOWN or job_info.metadata is not None:
+                try:
+                    expectation = parse_ray_job_request_metadata(
+                        job_info.metadata,
+                        required=True,
+                    )
+                    assert expectation is not None
+                    validate_ray_job_request_expectation(
+                        expectation,
+                        expected_identity=self._execution_completion_identity(task),
+                        expected_execution_protocol_version=int(task.execution_protocol_version),
+                    )
+                except RayJobRequestBindingError as exc:
+                    binding_rejection = exc.classification.value
+
+            if binding_rejection is not None:
+                resolve_stale_untrusted_execution(
+                    expected_completion_data=completion_data,
+                    error_message=(
+                        "Strict Ray Job request binding could not be verified "
+                        f"({binding_rejection})"
+                    ),
+                    log_detail=(f"had an untrusted strict request binding ({binding_rejection})"),
+                    require_stale=False,
+                )
+                return
+
+        strict_terminal = strict_ray_job and job_info.status in (
+            JobStatus.SUCCEEDED,
+            JobStatus.FAILED,
+            JobStatus.STOPPED,
+        )
+        if strict_terminal:
+            if not self._completion_envelope_grace_expired(task, now=now):
+                self.stdout.write(
+                    self.style.NOTICE(
+                        f"\nTask {task.pk} strict Ray job {job_info.status.value.lower()}; "
+                        "waiting for an exact completion envelope"
+                    )
+                )
+                return
+            handled = handle_failure_authoritatively(
+                error_message=("Strict Ray Job terminated without an exact completion envelope"),
+                exception_type="RayJobCompletionMissing",
+                expected_completion_data=completion_data,
+                retryable=False,
+            )
+            if handled:
+                complete_tracking()
+                self.stdout.write(
+                    self.style.ERROR(
+                        f"\nTask {task.pk} strict Ray job exceeded the completion "
+                        "envelope grace period without automatic retry"
+                    )
+                )
             return
 
         if completion_data is None and job_info.status in (

@@ -18,6 +18,7 @@ EXPECTED_FILES = {
     "django_ray/admin.py",
     "django_ray/execution_codec.py",
     "django_ray/execution_protocol.py",
+    "django_ray/ray_job_protocol.py",
     "django_ray/protocol_coordination.py",
     "django_ray/protocol_status.py",
     "django_ray/models.py",
@@ -42,6 +43,8 @@ EXPECTED_FILES = {
     "django_ray/migrations/0020_legacy_open_rollback_fence.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
+    "django_ray/runner/ray_job.py",
+    "django_ray/runtime/entrypoint.py",
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",

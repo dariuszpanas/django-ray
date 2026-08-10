@@ -193,9 +193,33 @@ inspect the remote execution before considering manual replay.
 
 This check runs only after Ray deserializes the trusted bootstrap and plain request
 string. Exact Ray/Python and cluster-instance attestation must still happen before Ray
-Core serialization and submission. Do not treat this as coverage for Ray Job requests
-or nested workflow, fold, or distributed callables; those require their own transport
-boundaries before they can make the same pre-application-code claim.
+Core serialization and submission.
+
+New Ray Job submissions use the same canonical request, sourced from durable JSON or an
+opaque input reference, and independently bind its exact identity, protocol, and digest
+in bounded Ray Job metadata. The driver validates both before Django setup, input
+hydration, or callable import/invocation. A compatible replacement manager validates
+the exact persisted strict job ID plus bounded identity and protocol metadata; it does
+not reconstruct the shell request or use the digest to infer execution effects.
+Released unversioned payloads remain the protocol-v1 drain adapter, and a released
+driver can still read the flat strict-v1 fields while upgraded code remains at active
+protocol `1`.
+
+Treat every strict terminal Ray Job with a verified binding but no exact completion as
+non-retryable after the normal publication grace period. The dedicated rejection exit
+code is diagnostic only: it cannot prove the driver stopped before imports or
+application effects. The manager does not use Ray Job logs to establish compatibility,
+phase, or replay safety. Malformed or missing strict metadata is uncertain: let the
+exact stop/`LOST` boundary complete, inspect the remote job, and require an explicit
+operator decision before replay. Inline request bytes still occupy the shell command
+until the separate bounded reference-only transport work lands; enable input spillover
+for large or sensitive arguments and do not treat the codec's resource budget as an
+operating-system command length guarantee.
+
+Neither Ray Core nor Ray Job outer validation covers nested workflow, fold, or
+distributed callables. Those require their own transport boundaries before they can
+make the same pre-application-code claim. Exact Ray/Python and cluster-instance
+attestation also remains a separate pre-submission requirement.
 
 Do not interpret the lease's informational `queue_name` text as a durable per-queue
 capability, or its protocol range as proof that Ray is ready. Ray/Python version and
@@ -407,6 +431,14 @@ Notes:
   result, result reference, and claimed error are ignored. An active or unknown exact Ray
   Job is stopped and retained as `LOST`; a terminal job becomes a fixed non-retryable
   failure. Inspect the bounded diagnostic and remote state before any manual retry.
+- The strict driver uses a dedicated nonzero exit when it rejects a request before
+  Django setup, but reconciliation treats that value only as diagnostic. Application or
+  import code can terminate with the same value, so the exit alone cannot prove the
+  execution phase or absence of effects.
+- Every strict Ray Job that becomes terminal without its exact completion envelope
+  waits for the normal publication grace period and then receives the same fixed generic
+  failure without automatic retry or log inspection. Missing or mismatched strict
+  metadata instead follows the exact-stop, `LOST`, no-auto-retry boundary.
 - A completion that exceeds the fixed envelope byte, depth, or node budget is also
   rejected without automatic retry, including an unversioned legacy envelope. This is a
   deterministic resource boundary, not legacy malformed-envelope grace; inspect the
