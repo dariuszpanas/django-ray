@@ -9,6 +9,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 import ray
@@ -319,7 +320,9 @@ class TestRayRemoteExecution:
         """The package's real Ray Core wrapper awaits async tasks and preserves context."""
         from django_ray.runtime.remote import execute_django_task_remote
 
-        remote_entrypoint = ray.remote(execute_django_task_remote)
+        remote_entrypoint: Any = ray.remote(execute_django_task_remote).options(
+            runtime_env={"env_vars": {"DJANGO_SETTINGS_MODULE": "testproject.settings"}}
+        )
         result = json.loads(
             ray.get(
                 remote_entrypoint.remote(
@@ -356,6 +359,67 @@ class TestRayRemoteExecution:
         assert failure["success"] is False
         assert failure["error"] == "Async task requested a retryable failure"
         assert failure["exception_type"] == "builtins.ValueError"
+
+    def test_ray_core_runs_one_strict_versioned_request(
+        self,
+        django_settings_env,
+        ray_cluster,
+    ):
+        """A real Ray worker validates the outer request and enriches its completion."""
+        from django_ray.execution_codec import (
+            ExecutionCompletionSource,
+            ExecutionIdentity,
+            ExecutionRequest,
+            decode_execution_completion,
+            encode_execution_request,
+        )
+        from django_ray.runtime.remote import execute_django_task_remote
+
+        identity = ExecutionIdentity(
+            task_execution_pk=4244,
+            task_id="strict-ray-core-request",
+            attempt_number=2,
+            execution_generation=3,
+        )
+        request = encode_execution_request(
+            ExecutionRequest(
+                identity=identity,
+                execution_protocol_version=1,
+                callable_path="testproject.tasks.add_numbers",
+                transport_version=1,
+                serialized_args="[20,22]",
+                serialized_kwargs="{}",
+                input_reference=None,
+                runtime_env_profile=None,
+                runtime_env_hash="0" * 64,
+                runtime_env_plan_identity={},
+                compiled_graph_submission_transport="direct-ray-core",
+            )
+        )
+        remote_entrypoint: Any = ray.remote(execute_django_task_remote).options(
+            runtime_env={"env_vars": {"DJANGO_SETTINGS_MODULE": "testproject.settings"}}
+        )
+
+        serialized_completion = ray.get(
+            remote_entrypoint.remote(
+                request,
+                expected_task_execution_pk=identity.task_execution_pk,
+                expected_task_id=identity.task_id,
+                expected_attempt_number=identity.attempt_number,
+                expected_execution_generation=identity.execution_generation,
+                expected_execution_protocol_version=1,
+            )
+        )
+        decoded = decode_execution_completion(
+            serialized_completion,
+            expected_identity=identity,
+            expected_execution_protocol_version=1,
+        )
+
+        assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+        assert decoded.completion.success is True
+        assert decoded.completion.result == 42
+        assert decoded.completion.executor_django_ray_version
 
     def test_ray_job_runs_async_task_through_cli_entrypoint(
         self,

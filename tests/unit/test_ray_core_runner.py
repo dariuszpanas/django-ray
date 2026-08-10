@@ -149,6 +149,11 @@ def _task_execution(
     **attributes: Any,
 ) -> SimpleNamespace:
     task_attributes = {
+        "task_id": f"task-{pk}",
+        "execution_protocol_version": 1,
+        "args_json": "[]",
+        "kwargs_json": "{}",
+        "input_reference": None,
         "runtime_env_profile": None,
         "runtime_env_json": "{}",
         "runtime_env_hash": "",
@@ -178,7 +183,7 @@ class TestRayCoreRunnerRuntime:
         fake = _install_fake_ray(monkeypatch)
         monkeypatch.setattr(
             "django_ray.runtime.entrypoint.execute_task",
-            lambda callable_path, args_json, kwargs_json: json.dumps(
+            lambda callable_path, args_json, kwargs_json, **_kwargs: json.dumps(
                 {
                     "success": True,
                     "result": {
@@ -207,6 +212,58 @@ class TestRayCoreRunnerRuntime:
         assert pending.execution_generation == 0
         assert pending.ray_job_id == "02000000"
         assert pending.ray_task_id == fake.default_hex[:48]
+        from django_ray.execution_codec import decode_execution_request
+
+        submitted_request = decode_execution_request(fake.remote_invocations[-1][0][0])
+        assert json.loads(submitted_request.serialized_args) == [3, 4]
+        assert json.loads(submitted_request.serialized_kwargs) == {"x": 1}
+
+    def test_submit_uses_durable_json_as_the_opaque_request_source(self, monkeypatch) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        monkeypatch.setattr(
+            "django_ray.runtime.entrypoint.execute_task",
+            lambda *_args, **_kwargs: json.dumps({"success": True, "result": None}),
+        )
+        execution = _task_execution(
+            111,
+            task_id="durable-request-task",
+            attempt_number=4,
+            execution_generation=7,
+            callable_path="testproject.tasks.echo_task",
+            args_json='["durable-argument"]',
+            kwargs_json='{"source":"durable"}',
+        )
+
+        RayCoreRunner().submit_durable(task_execution=execution)
+
+        from django_ray.execution_codec import (
+            ExecutionIdentity,
+            decode_execution_request,
+        )
+
+        submitted_args, submitted_kwargs = fake.remote_invocations[-1]
+        assert len(submitted_args) == 1
+        assert (
+            decode_execution_request(
+                submitted_args[0],
+                expected_identity=ExecutionIdentity(
+                    task_execution_pk=111,
+                    task_id="durable-request-task",
+                    attempt_number=4,
+                    execution_generation=7,
+                ),
+                expected_execution_protocol_version=1,
+            ).serialized_args
+            == '["durable-argument"]'
+        )
+        assert json.loads(submitted_args[0])["serialized_kwargs"] == '{"source":"durable"}'
+        assert submitted_kwargs == {
+            "expected_task_execution_pk": 111,
+            "expected_task_id": "durable-request-task",
+            "expected_attempt_number": 4,
+            "expected_execution_generation": 7,
+            "expected_execution_protocol_version": 1,
+        }
 
     def test_submit_decrypts_stored_runtime_env_before_remote_submission(
         self,
@@ -252,8 +309,19 @@ class TestRayCoreRunnerRuntime:
         assert stored.serialized != runtime_env.serialized
         assert fake.remote_calls[-1]["runtime_env"] == runtime_env.spec
         submitted_args, submitted_kwargs = fake.remote_invocations[-1]
-        assert submitted_args[4:6] == (runtime_env.profile, runtime_env.digest)
-        assert submitted_kwargs["runtime_env_plan_identity"]["profile"] == runtime_env.profile
+        from django_ray.execution_codec import decode_execution_request
+
+        request = decode_execution_request(submitted_args[0])
+        assert request.runtime_env_profile == runtime_env.profile
+        assert request.runtime_env_hash == runtime_env.digest
+        assert request.runtime_env_plan_identity["profile"] == runtime_env.profile
+        assert submitted_kwargs == {
+            "expected_task_execution_pk": 12,
+            "expected_task_id": task_id,
+            "expected_attempt_number": 1,
+            "expected_execution_generation": 0,
+            "expected_execution_protocol_version": 1,
+        }
 
     def test_submit_rejects_duplicate_pk_before_remote_submission(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
@@ -333,6 +401,7 @@ class TestRayCoreRunnerRuntime:
             kwargs_json: str,
             *,
             input_reference: str | None = None,
+            **_kwargs: object,
         ) -> str:
             captured.update(
                 callable_path=callable_path,
@@ -453,7 +522,7 @@ class TestRayCoreRunnerRuntime:
 
         monkeypatch.setattr(
             "django_ray.runtime.entrypoint.execute_task",
-            lambda callable_path, args_json, kwargs_json: json.dumps(
+            lambda callable_path, args_json, kwargs_json, **_kwargs: json.dumps(
                 {"success": True, "result": callable_path}
             ),
         )
@@ -475,7 +544,7 @@ class TestRayCoreRunnerRuntime:
 
         monkeypatch.setattr(
             "django_ray.runtime.entrypoint.execute_task",
-            lambda callable_path, args_json, kwargs_json: json.dumps(
+            lambda callable_path, args_json, kwargs_json, **_kwargs: json.dumps(
                 {"success": True, "result": callable_path}
             ),
         )
@@ -507,7 +576,7 @@ class TestRayCoreRunnerRuntime:
         fake = _install_fake_ray(monkeypatch)
         monkeypatch.setattr(
             "django_ray.runtime.entrypoint.execute_task",
-            lambda callable_path, args_json, kwargs_json: json.dumps(
+            lambda callable_path, args_json, kwargs_json, **_kwargs: json.dumps(
                 {"success": True, "result": callable_path}
             ),
         )
@@ -561,7 +630,7 @@ class TestRayCoreRunnerRuntime:
         fake.runtime_job_id = _FakeJobID()
         monkeypatch.setattr(
             "django_ray.runtime.entrypoint.execute_task",
-            lambda callable_path, args_json, kwargs_json: json.dumps(
+            lambda callable_path, args_json, kwargs_json, **_kwargs: json.dumps(
                 {"success": True, "result": callable_path}
             ),
         )
@@ -582,7 +651,7 @@ class TestRayCoreRunnerRuntime:
         fake.runtime_context_error = RuntimeError("no runtime context")
         monkeypatch.setattr(
             "django_ray.runtime.entrypoint.execute_task",
-            lambda callable_path, args_json, kwargs_json: json.dumps(
+            lambda callable_path, args_json, kwargs_json, **_kwargs: json.dumps(
                 {"success": True, "result": {"callable_path": callable_path}}
             ),
         )
@@ -607,7 +676,7 @@ class TestRayCoreRunnerRuntime:
         fake.runtime_context_error = RuntimeError("no runtime context")
         monkeypatch.setattr(
             "django_ray.runtime.entrypoint.execute_task",
-            lambda callable_path, args_json, kwargs_json: json.dumps(
+            lambda callable_path, args_json, kwargs_json, **_kwargs: json.dumps(
                 {"success": True, "result": callable_path}
             ),
         )
@@ -1114,7 +1183,7 @@ class TestRayCoreRunnerRuntime:
         ref_ok = _FakeObjectRef("aaa")
         ref_err = _FakeObjectRef("bbb")
         fake.values[ref_ok] = '{"success": true, "result": 1}'
-        fake.values[ref_err] = RuntimeError("task crashed")
+        fake.values[ref_err] = RuntimeError("task crashed with password=secret")
         fake.ready_refs.update({ref_ok, ref_err})
         runner._pending_tasks[10] = RayCoreHandle(
             task_pk=10,
@@ -1131,6 +1200,7 @@ class TestRayCoreRunnerRuntime:
             task_name="err",
             attempt_number=4,
             execution_generation=5,
+            strict_request=True,
         )
 
         completed = runner.poll_completed()
@@ -1141,7 +1211,16 @@ class TestRayCoreRunnerRuntime:
         assert completed_by_pk[10].result_json == '{"success": true, "result": 1}'
         assert completed_by_pk[20].attempt_number == 4
         assert completed_by_pk[20].execution_generation == 5
-        assert "task crashed" in completed_by_pk[20].result_json
+        assert json.loads(completed_by_pk[20].result_json) == {
+            "success": False,
+            "result": None,
+            "result_reference": None,
+            "error": "Ray Core execution transport failed",
+            "traceback": None,
+            "exception_type": "RayCoreExecutionTransportError",
+            "retryable": False,
+        }
+        assert "secret" not in completed_by_pk[20].result_json
         assert runner.pending_count == 0
 
     def test_poll_completed_only_crosses_selected_exact_handles(self, monkeypatch) -> None:

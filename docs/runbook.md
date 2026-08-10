@@ -181,10 +181,21 @@ Forgetting a Ray Core handle is not a recoverable handoff. The `ObjectRef` belon
 the original driver, so another task manager cannot adopt it as it can a persisted Ray
 Job ID. Keep the compatible driver alive while that work drains, or make an explicit
 operator decision about the unchanged uncertain row. This boundary still does not
-transport an execution request or prove that an executor can deserialize or run the
-task. The next transport slice must reject protocol mismatch before Django setup, input
-hydration, callable import, or invocation. Exact Ray/Python and cluster-instance
-attestation must happen before Ray Core serialization and submission.
+make the handle transferable. For new Ray Core submissions, the manager sends one
+bounded canonical request assembled from durable JSON or an opaque input reference,
+plus independent expected task and protocol primitives. The by-value bootstrap rejects
+a malformed, unsupported, or mismatched request with a fixed non-retryable completion
+before Django setup, input hydration, or application callable import/invocation.
+Released positional submissions remain the protocol-v1 rolling-compatibility path.
+If Ray returns no completion for a strict handle, the manager uses a fixed
+non-retryable transport failure with no remote exception text or executor provenance;
+inspect the remote execution before considering manual replay.
+
+This check runs only after Ray deserializes the trusted bootstrap and plain request
+string. Exact Ray/Python and cluster-instance attestation must still happen before Ray
+Core serialization and submission. Do not treat this as coverage for Ray Job requests
+or nested workflow, fold, or distributed callables; those require their own transport
+boundaries before they can make the same pre-application-code claim.
 
 Do not interpret the lease's informational `queue_name` text as a durable per-queue
 capability, or its protocol range as proof that Ray is ready. Ray/Python version and

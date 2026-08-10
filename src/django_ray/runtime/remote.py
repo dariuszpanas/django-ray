@@ -65,11 +65,29 @@ def _event_timestamp_us(value: str) -> int:
     return (delta.days * 24 * 60 * 60 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
+def _fixed_legacy_request_rejection(classification: str) -> str:
+    """Return a bounded non-retryable fallback when identity is untrusted."""
+    return json.dumps(
+        {
+            "success": False,
+            "result": None,
+            "result_reference": None,
+            "error": f"execution request rejected: {classification}",
+            "traceback": None,
+            "exception_type": "RayExecutionRequestIncompatible",
+            "retryable": False,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def execute_django_task_remote(
-    callable_path: str,
-    args_json: str,
-    kwargs_json: str,
-    task_id: int,
+    request_or_callable_path: str,
+    args_json: str | None = None,
+    kwargs_json: str | None = None,
+    task_id: int | None = None,
     runtime_env_profile: str | None = None,
     runtime_env_hash: str = "",
     input_reference: str | None = None,
@@ -77,15 +95,103 @@ def execute_django_task_remote(
     execution_generation: int | None = None,
     runtime_env_plan_identity: dict[str, Any] | None = None,
     compiled_graph_submission_transport: str | None = None,
+    *,
+    expected_task_execution_pk: int | None = None,
+    expected_task_id: str | None = None,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
+    expected_execution_protocol_version: int | None = None,
 ) -> str:
-    """Execute one durable django-ray task on a Ray worker."""
+    """Execute one durable task through the strict or released-v1 boundary."""
+    if (args_json is None) != (kwargs_json is None):
+        return _fixed_legacy_request_rejection("legacy_request")
+    if args_json is None and kwargs_json is None:
+        from django_ray import __version__
+        from django_ray.execution_codec import (
+            ExecutionIdentity,
+            ExecutionRequestDecodeError,
+            ExecutionRequestEncodeError,
+            decode_execution_request,
+            encode_execution_request_rejection,
+        )
+
+        expected_identity = ExecutionIdentity(
+            task_execution_pk=cast(int, expected_task_execution_pk),
+            task_id=cast(str, expected_task_id),
+            attempt_number=cast(int, expected_attempt_number),
+            execution_generation=cast(int, expected_execution_generation),
+        )
+        try:
+            request = decode_execution_request(
+                request_or_callable_path,
+                expected_identity=expected_identity,
+                expected_execution_protocol_version=expected_execution_protocol_version,
+            )
+        except ExecutionRequestDecodeError as error:
+            try:
+                return encode_execution_request_rejection(
+                    expected_identity=expected_identity,
+                    expected_execution_protocol_version=cast(
+                        int, expected_execution_protocol_version
+                    ),
+                    executor_django_ray_version=__version__,
+                    classification=error.classification,
+                )
+            except ExecutionRequestEncodeError:
+                return _fixed_legacy_request_rejection(error.classification.value)
+
+        from django_ray.redaction import redact_text
+        from django_ray.runtime.context import durable_task_execution
+        from django_ray.runtime.entrypoint import execute_task
+
+        print(
+            f"[Task {request.identity.task_execution_pk}] Starting: {request.callable_path}",
+            flush=True,
+        )
+        with durable_task_execution(
+            request.identity.task_execution_pk,
+            task_id=request.identity.task_id,
+            execution_protocol_version=request.execution_protocol_version,
+            attempt_number=request.identity.attempt_number,
+            execution_generation=request.identity.execution_generation,
+            runtime_env_profile=request.runtime_env_profile,
+            runtime_env_hash=request.runtime_env_hash,
+            runtime_env_plan_identity=request.runtime_env_plan_identity,
+            compiled_graph_submission_transport=request.compiled_graph_submission_transport,
+        ):
+            result = execute_task(
+                request.callable_path,
+                request.serialized_args,
+                request.serialized_kwargs,
+                input_reference=request.input_reference,
+                _completion_identity=request.identity,
+                _execution_protocol_version=request.execution_protocol_version,
+            )
+
+        parsed = json.loads(result)
+        if parsed.get("success"):
+            print(f"[Task {request.identity.task_execution_pk}] SUCCESS", flush=True)
+        else:
+            print(
+                f"[Task {request.identity.task_execution_pk}] FAILED: "
+                f"{redact_text(parsed.get('error'))}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return result
+
+    # Positional calls are the released, unversioned protocol-v1 adapter. New
+    # managers never select it by inspecting request contents.
+    if task_id is None:
+        return _fixed_legacy_request_rejection("legacy_request")
     from django_ray.redaction import redact_text
     from django_ray.runtime.context import durable_task_execution
     from django_ray.runtime.entrypoint import execute_task
 
-    print(f"[Task {task_id}] Starting: {callable_path}", flush=True)
+    print(f"[Task {task_id}] Starting: {request_or_callable_path}", flush=True)
     with durable_task_execution(
         task_id,
+        execution_protocol_version=1,
         attempt_number=attempt_number,
         execution_generation=execution_generation,
         runtime_env_profile=runtime_env_profile,
@@ -94,10 +200,10 @@ def execute_django_task_remote(
         compiled_graph_submission_transport=compiled_graph_submission_transport,
     ):
         if input_reference is None:
-            result = execute_task(callable_path, args_json, kwargs_json)
+            result = execute_task(request_or_callable_path, args_json, kwargs_json)
         else:
             result = execute_task(
-                callable_path,
+                request_or_callable_path,
                 args_json,
                 kwargs_json,
                 input_reference=input_reference,

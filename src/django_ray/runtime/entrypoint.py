@@ -15,7 +15,7 @@ import traceback
 from contextlib import nullcontext
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import django
 from django.apps import apps
@@ -24,6 +24,9 @@ from django_ray.conf.settings import get_settings
 from django_ray.input_storage import InputPayloadValidationError, load_task_input
 from django_ray.logging import get_logger
 from django_ray.redaction import redact_text
+
+if TYPE_CHECKING:
+    from django_ray.execution_codec import ExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -40,22 +43,76 @@ class TaskResult:
     exception_type: str | None = None
 
 
-def _serialize_error(e: Exception) -> str:
+def _serialize_completion(
+    *,
+    success: bool,
+    result: Any,
+    result_reference: str | None,
+    error: str | None,
+    error_traceback: str | None,
+    exception_type: str | None,
+    retryable: bool | None,
+    completion_identity: ExecutionIdentity | None = None,
+    execution_protocol_version: int | None = None,
+) -> str:
+    """Serialize an enriched v1 outcome with a released-v1 fallback."""
+    payload = {
+        "success": success,
+        "result": result,
+        "result_reference": result_reference,
+        "error": error,
+        "traceback": error_traceback,
+        "exception_type": exception_type,
+        "retryable": retryable,
+    }
+    if completion_identity is not None and execution_protocol_version is not None:
+        from django_ray import __version__
+        from django_ray.execution_codec import ExecutionCompletion, encode_execution_completion
+
+        try:
+            return encode_execution_completion(
+                ExecutionCompletion(
+                    identity=completion_identity,
+                    execution_protocol_version=execution_protocol_version,
+                    executor_django_ray_version=__version__,
+                    success=success,
+                    result=result,
+                    result_reference=result_reference,
+                    error=error,
+                    traceback=error_traceback,
+                    exception_type=exception_type,
+                    retryable=retryable,
+                )
+            )
+        except (TypeError, ValueError):
+            # Protocol v1 deliberately retains the released JSON surface for
+            # producer-emittable values outside the strict enriched schema.
+            pass
+    return json.dumps(payload)
+
+
+def _serialize_error(
+    e: Exception,
+    *,
+    completion_identity: ExecutionIdentity | None = None,
+    execution_protocol_version: int | None = None,
+) -> str:
     """Serialize an exception as a task result JSON string."""
     from django_ray.workflow_plans import WorkflowPlanMismatchError
 
-    return json.dumps(
-        {
-            "success": False,
-            "result": None,
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-            "exception_type": type(e).__module__ + "." + type(e).__name__,
-            "retryable": not isinstance(
-                e,
-                (InputPayloadValidationError, WorkflowPlanMismatchError),
-            ),
-        }
+    return _serialize_completion(
+        success=False,
+        result=None,
+        result_reference=None,
+        error=str(e),
+        error_traceback=traceback.format_exc(),
+        exception_type=type(e).__module__ + "." + type(e).__name__,
+        retryable=not isinstance(
+            e,
+            (InputPayloadValidationError, WorkflowPlanMismatchError),
+        ),
+        completion_identity=completion_identity,
+        execution_protocol_version=execution_protocol_version,
     )
 
 
@@ -180,6 +237,8 @@ def execute_task(
     runtime_env_plan_identity: dict[str, Any] | None = None,
     input_reference: str | None = None,
     ray_job_driver: bool | None = None,
+    _completion_identity: ExecutionIdentity | None = None,
+    _execution_protocol_version: int | None = None,
 ) -> str:
     """Execute a Django Task and return JSON result.
 
@@ -246,20 +305,24 @@ def execute_task(
             attempt_number=attempt_number,
             execution_generation=execution_generation,
         )
-        result_json = json.dumps(
-            {
-                "success": True,
-                "result": result_value,
-                "result_reference": result_reference,
-                "error": None,
-                "traceback": None,
-                "exception_type": None,
-                "retryable": None,
-            }
+        result_json = _serialize_completion(
+            success=True,
+            result=result_value,
+            result_reference=result_reference,
+            error=None,
+            error_traceback=None,
+            exception_type=None,
+            retryable=None,
+            completion_identity=_completion_identity,
+            execution_protocol_version=_execution_protocol_version,
         )
 
     except Exception as e:
-        result_json = _serialize_error(e)
+        result_json = _serialize_error(
+            e,
+            completion_identity=_completion_identity,
+            execution_protocol_version=_execution_protocol_version,
+        )
 
     _persist_task_completion(
         completion_task_execution_pk,
