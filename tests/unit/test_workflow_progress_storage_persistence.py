@@ -373,7 +373,7 @@ def test_stage_final_fence_rolls_back_without_holding_a_task_row_lock(
     execution_fence_reads = 0
     locked_execution_reads = 0
 
-    def turn_stale_after_first_fence(queryset: QuerySet[object]) -> bool:
+    def turn_stale_after_first_fence(queryset: QuerySet) -> bool:
         nonlocal execution_fence_reads
         result = original_exists(queryset)
         if queryset.model is RayTaskExecution:
@@ -382,7 +382,7 @@ def test_stage_final_fence_rolls_back_without_holding_a_task_row_lock(
                 RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.SUCCEEDED)
         return result
 
-    def track_locked_recheck(queryset: QuerySet[object], *args: object, **kwargs: object):
+    def track_locked_recheck(queryset: QuerySet, *args: object, **kwargs: object):
         nonlocal locked_execution_reads
         if queryset.model is RayTaskExecution:
             locked_execution_reads += 1
@@ -407,7 +407,7 @@ def test_stage_candidate_writes_never_request_the_lifecycle_task_row_lock(
     original_select_for_update = QuerySet.select_for_update
     locked_models: list[type[object]] = []
 
-    def track_locks(queryset: QuerySet[object], *args: object, **kwargs: object):
+    def track_locks(queryset: QuerySet, *args: object, **kwargs: object):
         locked_models.append(queryset.model)
         return original_select_for_update(queryset, *args, **kwargs)
 

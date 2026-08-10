@@ -6,6 +6,8 @@ from pathlib import Path
 
 from coverage import Coverage
 from coverage.results import should_fail_under
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 
@@ -13,6 +15,19 @@ def _css_rule_body(stylesheet: str, selector: str) -> str:
     match = re.search(rf"{selector}\s*\{{(?P<body>[^}}]*)\}}", stylesheet)
     assert match is not None
     return match.group("body")
+
+
+def _requirements_for_distribution(
+    requirements: list[str],
+    distribution_name: str,
+) -> list[Requirement]:
+    canonical_name = canonicalize_name(distribution_name)
+    parsed_requirements = [Requirement(requirement) for requirement in requirements]
+    return [
+        requirement
+        for requirement in parsed_requirements
+        if canonicalize_name(requirement.name) == canonical_name
+    ]
 
 
 def test_coverage_floor_uses_central_two_decimal_precision() -> None:
@@ -202,16 +217,46 @@ def test_unfold_is_testproject_only_and_reproducibly_pinned() -> None:
     """The modern sample admin must not become a required package dependency."""
     project_root = Path(__file__).parents[2]
     config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((project_root / "uv.lock").read_text(encoding="utf-8"))
     project = config["project"]
-    unfold_requirement = "django-unfold==0.102.0"
+    unfold_name = canonicalize_name("django-unfold")
+    sample_unfold_requirements = _requirements_for_distribution(
+        project["optional-dependencies"]["sample"],
+        unfold_name,
+    )
+    dev_unfold_requirements = _requirements_for_distribution(
+        config["dependency-groups"]["dev"],
+        unfold_name,
+    )
 
-    assert all("django-unfold" not in requirement for requirement in project["dependencies"])
-    assert unfold_requirement in project["optional-dependencies"]["sample"]
-    assert unfold_requirement in config["dependency-groups"]["dev"]
+    assert not _requirements_for_distribution(project["dependencies"], unfold_name)
+    assert len(sample_unfold_requirements) == 1
+    assert dev_unfold_requirements == sample_unfold_requirements
+    unfold_requirement = sample_unfold_requirements[0]
+    assert not unfold_requirement.extras
+    assert unfold_requirement.marker is None
+    assert unfold_requirement.url is None
+    unfold_specifiers = list(unfold_requirement.specifier)
+    assert len(unfold_specifiers) == 1
+    unfold_specifier = unfold_specifiers[0]
+    assert unfold_specifier.operator == "=="
+    assert unfold_specifier.version
+    assert "*" not in unfold_specifier.version
+    locked_unfold_versions = [
+        package["version"]
+        for package in lock["package"]
+        if canonicalize_name(package["name"]) == unfold_name
+    ]
+    assert locked_unfold_versions == [unfold_specifier.version]
     assert all(
-        all("django-unfold" not in requirement for requirement in requirements)
+        not _requirements_for_distribution(requirements, unfold_name)
         for extra, requirements in project["optional-dependencies"].items()
         if extra != "sample"
+    )
+    assert all(
+        not _requirements_for_distribution(requirements, unfold_name)
+        for group, requirements in config["dependency-groups"].items()
+        if group != "dev"
     )
 
 

@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Callable
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -9,6 +10,7 @@ from django.templatetags.static import static
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+_DJANGO_UNFOLD_REQUIREMENT = f"django-unfold=={distribution_version('django-unfold')}"
 
 # The optional Ray Data recipe only accepts inputs and publishes artifacts beneath
 # server-controlled absolute roots. Deployments that use shared storage must give
@@ -358,7 +360,7 @@ DJANGO_RAY = {
             "pip": [
                 "cryptography>=42.0.8",
                 "django>=6.0",
-                "django-unfold==0.102.0",
+                _DJANGO_UNFOLD_REQUIREMENT,
                 "psycopg[binary]>=3.1",
                 "django-ninja>=1.5.1",
                 "whitenoise>=6.6",

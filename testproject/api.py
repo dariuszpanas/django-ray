@@ -1245,12 +1245,12 @@ def _decode_execution_list_cursor(
 
 
 def _guarded_execution_diagnostics(
-    queryset: QuerySet[RayTaskExecution],
+    queryset: QuerySet,
     *,
     annotation_prefix: str,
     max_bytes: int,
     surface: str,
-) -> QuerySet[RayTaskExecution]:
+) -> QuerySet:
     """Project inline diagnostics only when their stored byte length is bounded."""
     if connection.vendor not in _EXECUTION_PROJECTION_DATABASE_VENDORS:
         raise ImproperlyConfigured(
@@ -1288,7 +1288,7 @@ def _guarded_execution_diagnostics(
 
 
 def _bounded_execution_list_rows(
-    queryset: QuerySet[RayTaskExecution],
+    queryset: QuerySet,
     *,
     limit: int,
 ) -> list[dict[str, Any]]:

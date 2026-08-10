@@ -5,10 +5,13 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import cast
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 from tests import conftest
 from tests.integration import test_live_failure_injection, test_task_execution
@@ -252,7 +255,15 @@ def test_live_submission_tracks_declared_testproject_runtime_packages(monkeypatc
     runtime_packages = runtime_env["pip"]
     assert isinstance(runtime_packages, list)
     assert all(isinstance(requirement, str) for requirement in runtime_packages)
-    assert any(requirement.startswith("django-unfold==") for requirement in runtime_packages)
+    parsed_requirements = [Requirement(requirement) for requirement in runtime_packages]
+    unfold_requirements = [
+        requirement
+        for requirement in parsed_requirements
+        if canonicalize_name(requirement.name) == canonicalize_name("django-unfold")
+    ]
+    assert unfold_requirements == [
+        Requirement(f"django-unfold=={distribution_version('django-unfold')}")
+    ]
 
 
 def test_external_resource_guard_is_tryfirst() -> None:
