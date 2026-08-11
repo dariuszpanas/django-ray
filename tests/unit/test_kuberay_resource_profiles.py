@@ -305,18 +305,18 @@ def test_local_profile_resource_totals_match_documented_baselines(
     rendered_profiles: dict[str, list[dict[str, Any]]],
 ) -> None:
     assert _profile_totals(rendered_profiles["direct"]) == {
-        "pods": 10,
-        "requested_millicores": 3200,
-        "requested_mibibytes": 4800,
-        "limit_millicores": 9300,
-        "limit_mibibytes": 11648,
+        "pods": 11,
+        "requested_millicores": 3300,
+        "requested_mibibytes": 5056,
+        "limit_millicores": 9800,
+        "limit_mibibytes": 12160,
     }
     assert _profile_totals(rendered_profiles["kong"]) == {
-        "pods": 16,
-        "requested_millicores": 10100,
-        "requested_mibibytes": 16832,
-        "limit_millicores": 26800,
-        "limit_mibibytes": 37760,
+        "pods": 17,
+        "requested_millicores": 10200,
+        "requested_mibibytes": 17088,
+        "limit_millicores": 27300,
+        "limit_mibibytes": 38272,
     }
 
 
@@ -350,6 +350,8 @@ def test_kong_deploy_does_not_apply_the_lean_profile_first() -> None:
     assert recipe.index("status.availableWorkerReplicas}'=4") < recipe.index(
         "--for=condition=Ready pod -l app=ray,component=worker"
     )
+    assert "rollout restart deployment/django-ray-worker-ray-job" in recipe
+    assert "rollout status deployment/django-ray-worker-ray-job" in recipe
 
 
 def test_direct_deploy_cold_replaces_ray_and_removes_kong_routes() -> None:

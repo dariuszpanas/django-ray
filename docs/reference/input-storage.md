@@ -2,7 +2,10 @@
 
 `django-ray` stores task arguments inline by default. An optional size threshold can
 move an oversized combined argument envelope to durable storage and keep one
-`input_reference` on the execution row.
+`input_reference` on the execution row. Ray Job mode also stores every complete
+canonical execution request in the same retrievable backend and keeps its separate
+`ray_job_request_reference`; this outer rq2 carrier is mandatory even when the task's
+arguments remain inline.
 
 ## When to Use It
 
@@ -14,6 +17,11 @@ small task argument and let the application own its lifecycle and authorization.
 
 Durable input storage does not add Python serialization and does not persist Ray
 `ObjectRef` values. Arguments must remain JSON-serializable.
+
+Configure a retrievable backend before starting a Ray Job task manager. Synchronous and
+Ray Core workers can remain storage-free while input spillover is disabled. A Ray Job
+manager validates the backend before it creates a worker lease or claims work, so a
+missing or malformed configuration cannot strand newly claimed tasks.
 
 ## Enable Spillover
 
@@ -41,15 +49,16 @@ database fields contain JSON `null` placeholders plus `input_reference`.
 
 Set `INPUT_STORAGE_BACKEND` to `"filesystem"` and configure
 `INPUT_STORAGE_FILESYSTEM_PATH`. Every process that can enqueue, execute, inspect, or
-reactivate a task must see the same shared path in a multi-host deployment.
+reactivate a referenced task must see the same shared path in a multi-host deployment.
+For rq2, the task manager needs write access and each Ray Job driver needs read access.
 
 ### S3
 
 Set `INPUT_STORAGE_BACKEND` to `"s3"` and configure
 `INPUT_STORAGE_S3_BUCKET`. `INPUT_STORAGE_S3_PREFIX` defaults to
 `django-ray/inputs`; region and S3-compatible endpoint settings are optional. Install
-`django-ray[s3]` and give enqueueing and worker identities read/write/delete access
-only to the configured bucket and prefix. S3-compatible endpoints must honor the
+`django-ray[s3]` and give manager/cleanup identities the required write/delete access
+and Ray Job drivers read access only to the configured bucket and prefix. S3-compatible endpoints must honor the
 conditional create and ETag-conditional delete requests used to prevent overwrite or
 cleanup of a replaced content-addressed input.
 
@@ -57,9 +66,9 @@ cleanup of a replaced content-addressed input.
 
 Set `INPUT_STORAGE_BACKEND` to `"gcs"` and configure
 `INPUT_STORAGE_GCS_BUCKET`. `INPUT_STORAGE_GCS_PREFIX` defaults to
-`django-ray/inputs`. Install `django-ray[gcs]` and scope credentials to the configured
-bucket and prefix. Writes are create-only, and reads and deletes are pinned to one GCS
-generation.
+`django-ray/inputs`. Install `django-ray[gcs]` and scope manager/cleanup and driver
+identities to the configured bucket and prefix with only their required access. Writes
+are create-only, and reads and deletes are pinned to one GCS generation.
 
 Digest-only storage is rejected for inputs because workers must retrieve the original
 payload.
@@ -88,13 +97,27 @@ a dedicated mount and identity for shared durable-input storage.
 Missing, malformed, unauthorized, or corrupt input references fail the execution
 without running user code. Malformed, unauthorized, and integrity-validation failures
 are non-retryable because another attempt would read the same invalid reference.
-Retrieval/storage failures follow the configured retry policy because an object-store
-or mount outage may be transient. Restore a missing object or correct the deployment
-configuration before forcing a manual retry.
+Ordinary task-input retrieval/storage failures follow the configured retry policy when
+an object-store or mount outage may be transient. Rq2 request preparation treats a
+definitely pre-submission storage outage as retryable, but once Ray submission begins a
+driver-side missing/unreadable request is not automatically replayed: reconcile or stop
+the exact persisted job and prove it quiescent first.
 
-Ray Core passes only the reference to the executor. Ray Job uses transport version 2
-for referenced inputs and does not place the raw argument payload in its command line.
-Inline tasks retain the version 1 transport.
+Ray Core passes only an `input_reference` to the executor when argument spillover is
+active. Ray Job rq2 always stores the *outer* canonical execution request and puts only
+`--request-ref-b64 <bounded-locator>` in the process command. The stored request still
+uses inner transport version `1` for inline JSON arguments or `2` for an opaque
+`input_reference`. Neither form places application arguments or the callable path in
+the rq2 command or metadata.
+
+The locator is a strict, unpadded base64url encoding of bounded canonical JSON. It
+contains the content-addressed reference, request digest and size, backend kind, and an
+allowlisted non-secret filesystem root or object-store bucket/prefix/region/endpoint.
+It is validated against independently bound metadata before storage I/O. Provider
+credentials are never serialized into the locator, JobInfo, or process arguments; they
+remain ambient workload identity or environment. The driver constructs the storage
+reader directly from the locator and does not load Django settings, query the payload
+registry, or import application code to discover the request.
 
 ## Backend and Namespace Rotation
 
@@ -112,6 +135,12 @@ For a filesystem-root change, copy and verify the complete digest tree before ch
 filesystem references do not encode which root created them. Rotating credentials without changing
 the authorized namespace requires no reference rewrite, but both enqueue and worker identities must
 have the required access before rollout.
+
+An rq2 driver locator freezes the non-secret namespace coordinates needed for that one
+request, but it does not make retention cleanup namespace-independent. The manager-side
+registry still dispatches deletion through the configured per-scheme authority. Keep the
+old namespace configuration and ambient credentials until its last execution reference
+and tombstone is retired, and do not use the locator as a general storage migration tool.
 
 Do not reuse a result-storage namespace for inputs. Input retention cleanup may delete an
 object while a result still references the same content-addressed key. Startup rejects
@@ -147,7 +176,11 @@ registry references, change the setting, and exercise reads before upgrading.
 ## Retries and Retention
 
 Automatic and manual retries reuse the execution row's immutable `input_reference`;
-they do not upload a replacement payload. `TaskInputPayload` records content metadata,
+they do not upload a replacement argument payload. Each freshly claimed Ray Job attempt
+builds and stores its own exact request, while the prior job ID, address, and request
+reference stay together until that claim or an explicit retry clears the old tuple.
+Terminal and uncertain executions retain the reference for reconciliation and purge.
+`TaskInputPayload` records content metadata,
 last use, cleanup state, cleanup errors, and whether the object is a task-input envelope
 or a Ray Job execution request. Multiple execution rows may safely share one
 content-addressed object. The two payload kinds use separate execution columns;
@@ -172,8 +205,8 @@ column, so a concurrent writer cannot lose a shared payload and a cross-kind col
 fails closed. Successful cleanup keeps execution references and a `PURGED` tombstone for
 audit. A future writer of the same kind and content may reactivate the object.
 Every attachment/reactivation path must lock or register the payload before it locks and
-updates the execution row. Cleanup safety depends on that common lock order; the dormant
-`0021` schema does not authorize a request writer that bypasses it.
+updates the execution row. Cleanup safety depends on that common lock order; rq2
+registration/attachment and its definite pre-submission release path follow it.
 
 Command output identifies a reference only by a 16-character SHA-256 fingerprint. It
 does not print the bucket, prefix, digest locator, provider exception text, or full
@@ -186,20 +219,36 @@ recovery requirements. The command never runs automatically.
 
 ## Rolling Upgrade
 
-Migration `0021_ray_job_request_reference` is additive preparation for the bounded Ray
-Job request transport. It gives `payload_kind` the Python and database default
-`task_input`, so released writers that omit the column remain compatible. Applying it
-does not enable request-reference submissions.
+Migration `0021_ray_job_request_reference` is additive preparation for rq2. It gives
+`payload_kind` the Python and database default `task_input`, so released writers that
+omit the column remain compatible. Applying it alone does not change submissions.
 
-1. Apply the additive migrations while `MAX_INLINE_INPUT_SIZE_BYTES` remains `None`.
-2. Deploy the new code to every web, worker, and Ray runtime environment.
-3. Drain or finish jobs started by old Ray Job drivers.
-4. Enable a retrievable input backend and then set the threshold.
+1. Apply all additive migrations while old writers still run.
+2. Configure one retrievable backend/namespace and ambient credentials reachable by the
+   new task managers and Ray Job drivers. Keep argument spillover disabled if its own
+   reader rollout is not complete.
+3. Deploy the exact final rq2 reader everywhere that may reconcile or start a Ray Job.
+4. Upgrade or disable every released/intermediate scheduled or manual
+   `django_ray_purge_inputs` invocation. Older binaries understand neither
+   `payload_kind` nor `ray_job_request_reference`; their dry run misreports an aged active
+   request as unreferenced and `--delete` can remove it. Resume purge only from the exact
+   final rq2 code, and revoke storage delete permission from retired runtime identities
+   where practical.
+5. Pause claims/producers as needed, retire every released 0.4.0 and intermediate rq1
+   task-manager claimer, then close the existing legacy-admission latch with its reviewed
+   revision and producer-retirement fence. Do not edit policy/token rows directly.
+6. Resume Ray Job claims. Already submitted legacy and rq1 jobs can drain under upgraded
+   reconciliation; all new submissions use rq2 while active protocol remains `1`.
+7. Retain every old storage namespace and credential set until no queued/running task,
+   retained request reference, or registry tombstone needs it.
 
-Existing inline rows need no rewrite. Do not enable spillover while old workers can
-still claim tasks: they do not understand `input_reference` and will reject the JSON
-`null` placeholders before application code runs. Before rolling back to an older
-release, disable new spillover and drain all referenced tasks.
+Existing inline argument rows need no rewrite. Before rolling back to a manager that
+cannot write rq2, stop new claims and reconcile or drain every rq2 job; do not clear a
+request reference to manufacture replay safety. Keep old purge invocations disabled and
+run retention from the exact final rq2 code until every retained rq2 request reference
+and registry tombstone has expired; restoring an older binary sooner can destroy retry
+and audit bytes it cannot see through the new reference column. Before rolling back input
+spillover, disable new spillover and drain every task with `input_reference`.
 
 ## See Also
 

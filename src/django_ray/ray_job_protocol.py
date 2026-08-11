@@ -1,10 +1,10 @@
 """Bounded Ray Job request bindings shared by submitters and executors.
 
 Ray exposes submitted Job metadata to the entrypoint process through
-``RAY_JOB_CONFIG_JSON_ENV_VAR``.  A strict request binds the canonical request bytes to
-that independent control-plane metadata before Django, task input, or user code
-is imported.  Errors from this module are fixed classifications and never
-retain attacker-controlled metadata.
+``RAY_JOB_CONFIG_JSON_ENV_VAR``.  A strict request binds the canonical request bytes and
+its exact request locator to that independent control-plane metadata before
+Django, task input, or user code is imported.  Errors from this module are fixed
+classifications and never retain attacker-controlled metadata.
 """
 
 from __future__ import annotations
@@ -22,6 +22,10 @@ from django_ray.execution_codec import (
     ExecutionIdentity,
     ExecutionRequest,
 )
+from django_ray.ray_job_request_storage import (
+    RAY_JOB_REQUEST_LOCATOR_MAX_CHARS,
+    RAY_JOB_REQUEST_REFERENCE_MAX_BYTES,
+)
 
 RAY_JOB_CONFIG_JSON_ENV_VAR = "RAY_JOB_CONFIG_JSON_ENV_VAR"
 RAY_JOB_REQUEST_REJECTED_EXIT_CODE = 78
@@ -29,9 +33,12 @@ RAY_JOB_REQUEST_REJECTED_EXIT_CODE = 78
 LEGACY_RAY_JOB_SUBMISSION_ID_PREFIX = "raysubmit_django_ray_v1_"
 STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX = "raysubmit_django_ray_rq"
 STRICT_RAY_JOB_SUBMISSION_ID_PREFIX = "raysubmit_django_ray_rq1_"
+STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX = "raysubmit_django_ray_rq2_"
 
 RAY_JOB_REQUEST_METADATA_MARKER_KEY = "django_ray_request_binding"
 RAY_JOB_REQUEST_METADATA_MARKER_VALUE = "django-ray.ray-job-request-binding/v1"
+RAY_JOB_REQUEST_REFERENCE_METADATA_MARKER_VALUE = "django-ray.ray-job-request-binding/v2"
+RAY_JOB_REQUEST_REFERENCE_TRANSPORT = "ray-job-request-reference"
 
 RAY_JOB_CONFIG_JSON_MAX_BYTES = 4 * 1024 * 1024
 RAY_JOB_REQUEST_METADATA_MAX_BYTES = 16 * 1024
@@ -41,8 +48,12 @@ _MAX_COUNTER = (1 << 63) - 1
 _MAX_COUNTER_DECIMAL_DIGITS = 19
 _UTF8_CHUNK_CHARS = 64 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_STRICT_SUBMISSION_ID = re.compile(
+_BASE64URL_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
+_STRICT_RQ1_SUBMISSION_ID = re.compile(
     rf"{re.escape(STRICT_RAY_JOB_SUBMISSION_ID_PREFIX)}[0-9a-f]{{64}}"
+)
+_STRICT_RQ2_SUBMISSION_ID = re.compile(
+    rf"{re.escape(STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX)}[0-9a-f]{{64}}"
 )
 
 _TASK_EXECUTION_PK_KEY = "django_ray_task_execution_pk"
@@ -50,10 +61,15 @@ _PUBLIC_TASK_ID_KEY = "django_ray_public_task_id"
 _ATTEMPT_NUMBER_KEY = "django_ray_attempt_number"
 _EXECUTION_GENERATION_KEY = "django_ray_execution_generation"
 _EXECUTION_PROTOCOL_VERSION_KEY = "django_ray_execution_protocol_version"
+_COORDINATION_SHA256_KEY = "django_ray_coordination_sha256"
 _REQUEST_SHA256_KEY = "django_ray_request_sha256"
+_REQUEST_SIZE_BYTES_KEY = "django_ray_request_size_bytes"
+_REQUEST_REFERENCE_SHA256_KEY = "django_ray_request_reference_sha256"
+_REQUEST_LOCATOR_SHA256_KEY = "django_ray_request_locator_sha256"
 _SUBMISSION_TRANSPORT_KEY = "django_ray_submission_transport"
+_UNKNOWN_RESERVED_METADATA_KEY = "django_ray_unknown_reserved_field"
 
-_STRICT_METADATA_KEYS = (
+_RQ1_METADATA_KEYS = (
     RAY_JOB_REQUEST_METADATA_MARKER_KEY,
     _TASK_EXECUTION_PK_KEY,
     _PUBLIC_TASK_ID_KEY,
@@ -63,12 +79,45 @@ _STRICT_METADATA_KEYS = (
     _REQUEST_SHA256_KEY,
     _SUBMISSION_TRANSPORT_KEY,
 )
+_RQ2_METADATA_KEYS = (
+    RAY_JOB_REQUEST_METADATA_MARKER_KEY,
+    _COORDINATION_SHA256_KEY,
+    _EXECUTION_PROTOCOL_VERSION_KEY,
+    _REQUEST_SHA256_KEY,
+    _REQUEST_SIZE_BYTES_KEY,
+    _REQUEST_REFERENCE_SHA256_KEY,
+    _REQUEST_LOCATOR_SHA256_KEY,
+    _SUBMISSION_TRANSPORT_KEY,
+)
+_STRICT_METADATA_KEYS = tuple(dict.fromkeys((*_RQ1_METADATA_KEYS, *_RQ2_METADATA_KEYS)))
+_RQ1_ONLY_METADATA_KEYS = frozenset(_RQ1_METADATA_KEYS) - frozenset(_RQ2_METADATA_KEYS)
+_RQ2_ONLY_METADATA_KEYS = frozenset(_RQ2_METADATA_KEYS) - frozenset(_RQ1_METADATA_KEYS)
+_RELEASED_VISIBILITY_KEYS = frozenset(
+    {
+        "django_ray_task_id",
+        "callable_path",
+        "runtime_env_profile",
+        "runtime_env_hash",
+    }
+)
+_DJANGO_RAY_METADATA_PREFIX = "django_ray_"
+_RQ1_ALLOWED_RESERVED_METADATA_KEYS = frozenset(_RQ1_METADATA_KEYS) | frozenset(
+    key for key in _RELEASED_VISIBILITY_KEYS if key.startswith(_DJANGO_RAY_METADATA_PREFIX)
+)
+_RQ2_ALLOWED_RESERVED_METADATA_KEYS = frozenset(_RQ2_METADATA_KEYS)
+_KNOWN_RESERVED_METADATA_KEYS = frozenset(_STRICT_METADATA_KEYS) | frozenset(
+    key for key in _RELEASED_VISIBILITY_KEYS if key.startswith(_DJANGO_RAY_METADATA_PREFIX)
+)
 _STRICT_MARKER_KEYS = (
     RAY_JOB_REQUEST_METADATA_MARKER_KEY,
     _TASK_EXECUTION_PK_KEY,
     _PUBLIC_TASK_ID_KEY,
+    _COORDINATION_SHA256_KEY,
     _EXECUTION_PROTOCOL_VERSION_KEY,
     _REQUEST_SHA256_KEY,
+    _REQUEST_SIZE_BYTES_KEY,
+    _REQUEST_REFERENCE_SHA256_KEY,
+    _REQUEST_LOCATOR_SHA256_KEY,
     _SUBMISSION_TRANSPORT_KEY,
 )
 
@@ -100,6 +149,19 @@ class RayJobRequestExpectation:
     identity: ExecutionIdentity
     execution_protocol_version: int
     request_sha256: str
+    submission_transport: str
+
+
+@dataclass(frozen=True, slots=True)
+class RayJobRequestReferenceExpectation:
+    """Validated rq2 metadata that binds one opaque durable request."""
+
+    coordination_sha256: str
+    execution_protocol_version: int
+    request_sha256: str
+    request_size_bytes: int
+    request_reference_sha256: str
+    request_locator_sha256: str
     submission_transport: str
 
 
@@ -208,6 +270,71 @@ def request_sha256(serialized_request: str) -> str:
     return digest.hexdigest()
 
 
+def request_size_bytes(serialized_request: str) -> int:
+    """Return the bounded UTF-8 size of one canonical execution request."""
+    return _bounded_utf8_size(
+        serialized_request,
+        max_bytes=EXECUTION_REQUEST_MAX_BYTES,
+    )
+
+
+def coordination_sha256(identity: ExecutionIdentity) -> str:
+    """Digest the complete execution identity without exposing its raw fields."""
+    if not isinstance(identity, ExecutionIdentity) or not _valid_identity(identity):
+        _reject(RayJobRequestBindingRejection.INVALID)
+    serialized = json.dumps(
+        {
+            "attempt_number": identity.attempt_number,
+            "execution_generation": identity.execution_generation,
+            "task_execution_pk": identity.task_execution_pk,
+            "task_id": identity.task_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    digest = hashlib.sha256()
+    for chunk in _bounded_utf8_chunks(
+        serialized,
+        max_bytes=RAY_JOB_REQUEST_METADATA_MAX_BYTES,
+    ):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def request_reference_sha256(request_reference: str) -> str:
+    """Digest one bounded underlying request reference without retaining it."""
+    digest = hashlib.sha256()
+    observed = False
+    for chunk in _bounded_utf8_chunks(
+        request_reference,
+        max_bytes=RAY_JOB_REQUEST_REFERENCE_MAX_BYTES,
+    ):
+        observed = True
+        digest.update(chunk)
+    if not observed:
+        _reject(RayJobRequestBindingRejection.INVALID)
+    return digest.hexdigest()
+
+
+def request_locator_sha256(request_locator: str) -> str:
+    """Digest one exact bounded strict base64url request-locator token."""
+    if type(request_locator) is not str:
+        _reject(RayJobRequestBindingRejection.INVALID)
+    if len(request_locator) > RAY_JOB_REQUEST_LOCATOR_MAX_CHARS:
+        _reject(RayJobRequestBindingRejection.RESOURCE_LIMIT)
+    if not request_locator or _BASE64URL_TOKEN.fullmatch(request_locator) is None:
+        _reject(RayJobRequestBindingRejection.INVALID)
+
+    digest = hashlib.sha256()
+    for chunk in _bounded_utf8_chunks(
+        request_locator,
+        max_bytes=RAY_JOB_REQUEST_LOCATOR_MAX_CHARS,
+    ):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def is_strict_ray_job_submission_id(value: object) -> bool:
     """Return whether an ID selects the strict path, even if its suffix is bad.
 
@@ -219,7 +346,22 @@ def is_strict_ray_job_submission_id(value: object) -> bool:
 
 def is_valid_strict_ray_job_submission_id(value: object) -> bool:
     """Return whether an ID is one canonical strict Ray Job submission ID."""
-    return type(value) is str and _STRICT_SUBMISSION_ID.fullmatch(value) is not None
+    return type(value) is str and (
+        _STRICT_RQ1_SUBMISSION_ID.fullmatch(value) is not None
+        or _STRICT_RQ2_SUBMISSION_ID.fullmatch(value) is not None
+    )
+
+
+def is_rq2_ray_job_submission_id(value: object) -> bool:
+    """Return whether an ID selects rq2, even if its suffix is malformed."""
+    return type(value) is str and value.startswith(
+        STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX
+    )
+
+
+def is_valid_rq2_ray_job_submission_id(value: object) -> bool:
+    """Return whether an ID is one canonical rq2 submission ID."""
+    return type(value) is str and _STRICT_RQ2_SUBMISSION_ID.fullmatch(value) is not None
 
 
 def build_ray_job_request_metadata(
@@ -261,6 +403,47 @@ def build_ray_job_request_metadata(
     return metadata
 
 
+def build_ray_job_request_reference_metadata(
+    request: ExecutionRequest,
+    serialized_request: str,
+    request_reference: str,
+    request_locator: str,
+) -> dict[str, str]:
+    """Build rq2 metadata containing only opaque, bounded request bindings."""
+    if not _valid_identity(request.identity) or not _valid_counter(
+        request.execution_protocol_version
+    ):
+        _reject(RayJobRequestBindingRejection.INVALID)
+    if request.compiled_graph_submission_transport != "ray-job":
+        _reject(RayJobRequestBindingRejection.TRANSPORT_MISMATCH)
+
+    metadata = {
+        RAY_JOB_REQUEST_METADATA_MARKER_KEY: (RAY_JOB_REQUEST_REFERENCE_METADATA_MARKER_VALUE),
+        _COORDINATION_SHA256_KEY: coordination_sha256(request.identity),
+        _EXECUTION_PROTOCOL_VERSION_KEY: str(request.execution_protocol_version),
+        _REQUEST_SHA256_KEY: request_sha256(serialized_request),
+        _REQUEST_SIZE_BYTES_KEY: str(request_size_bytes(serialized_request)),
+        _REQUEST_REFERENCE_SHA256_KEY: request_reference_sha256(request_reference),
+        _REQUEST_LOCATOR_SHA256_KEY: request_locator_sha256(request_locator),
+        _SUBMISSION_TRANSPORT_KEY: RAY_JOB_REQUEST_REFERENCE_TRANSPORT,
+    }
+    _bounded_metadata_values_size(metadata.values())
+    try:
+        serialized_metadata = json.dumps(
+            metadata,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError, OverflowError):
+        _reject(RayJobRequestBindingRejection.INVALID)
+    _bounded_utf8_size(
+        serialized_metadata,
+        max_bytes=RAY_JOB_REQUEST_METADATA_MAX_BYTES,
+    )
+    return metadata
+
+
 def ray_job_metadata_has_strict_marker(metadata: object) -> bool:
     """Return whether user metadata contains any strict reserved field."""
     return type(metadata) is dict and any(key in metadata for key in _STRICT_MARKER_KEYS)
@@ -270,7 +453,7 @@ def parse_ray_job_request_metadata(
     metadata: object,
     *,
     required: bool = False,
-) -> RayJobRequestExpectation | None:
+) -> RayJobRequestExpectation | RayJobRequestReferenceExpectation | None:
     """Parse bounded Ray Job user metadata into a trusted expectation."""
     if type(metadata) is not dict:
         if required:
@@ -281,7 +464,28 @@ def parse_ray_job_request_metadata(
             _reject(RayJobRequestBindingRejection.MISSING)
         return None
 
-    selected: dict[str, object] = {key: metadata.get(key) for key in _STRICT_METADATA_KEYS}
+    marker = metadata.get(RAY_JOB_REQUEST_METADATA_MARKER_KEY)
+    if marker == RAY_JOB_REQUEST_METADATA_MARKER_VALUE:
+        allowed_reserved_keys = _RQ1_ALLOWED_RESERVED_METADATA_KEYS
+        if any(key in metadata for key in _RQ2_ONLY_METADATA_KEYS):
+            _reject(RayJobRequestBindingRejection.INVALID)
+        metadata_keys = _RQ1_METADATA_KEYS
+    elif marker == RAY_JOB_REQUEST_REFERENCE_METADATA_MARKER_VALUE:
+        allowed_reserved_keys = _RQ2_ALLOWED_RESERVED_METADATA_KEYS
+        if any(key in metadata for key in (*_RQ1_ONLY_METADATA_KEYS, *_RELEASED_VISIBILITY_KEYS)):
+            _reject(RayJobRequestBindingRejection.INVALID)
+        metadata_keys = _RQ2_METADATA_KEYS
+    else:
+        _reject(RayJobRequestBindingRejection.INVALID)
+    if any(
+        type(key) is str
+        and key.startswith(_DJANGO_RAY_METADATA_PREFIX)
+        and key not in allowed_reserved_keys
+        for key in metadata
+    ):
+        _reject(RayJobRequestBindingRejection.INVALID)
+
+    selected: dict[str, object] = {key: metadata.get(key) for key in metadata_keys}
     _bounded_metadata_values_size(selected.values())
     try:
         serialized_metadata = json.dumps(
@@ -297,8 +501,34 @@ def parse_ray_job_request_metadata(
         max_bytes=RAY_JOB_REQUEST_METADATA_MAX_BYTES,
     )
 
-    if selected[RAY_JOB_REQUEST_METADATA_MARKER_KEY] != RAY_JOB_REQUEST_METADATA_MARKER_VALUE:
-        _reject(RayJobRequestBindingRejection.INVALID)
+    if marker == RAY_JOB_REQUEST_REFERENCE_METADATA_MARKER_VALUE:
+        coordination_digest = selected[_COORDINATION_SHA256_KEY]
+        request_digest = selected[_REQUEST_SHA256_KEY]
+        request_reference_digest = selected[_REQUEST_REFERENCE_SHA256_KEY]
+        request_locator_digest = selected[_REQUEST_LOCATOR_SHA256_KEY]
+        submission_transport = selected[_SUBMISSION_TRANSPORT_KEY]
+        if (
+            type(coordination_digest) is not str
+            or _SHA256.fullmatch(coordination_digest) is None
+            or type(request_digest) is not str
+            or _SHA256.fullmatch(request_digest) is None
+            or type(request_reference_digest) is not str
+            or _SHA256.fullmatch(request_reference_digest) is None
+            or type(request_locator_digest) is not str
+            or _SHA256.fullmatch(request_locator_digest) is None
+            or submission_transport != RAY_JOB_REQUEST_REFERENCE_TRANSPORT
+        ):
+            _reject(RayJobRequestBindingRejection.INVALID)
+        return RayJobRequestReferenceExpectation(
+            coordination_sha256=coordination_digest,
+            execution_protocol_version=_parse_counter(selected[_EXECUTION_PROTOCOL_VERSION_KEY]),
+            request_sha256=request_digest,
+            request_size_bytes=_parse_counter(selected[_REQUEST_SIZE_BYTES_KEY]),
+            request_reference_sha256=request_reference_digest,
+            request_locator_sha256=request_locator_digest,
+            submission_transport=submission_transport,
+        )
+
     task_id = selected[_PUBLIC_TASK_ID_KEY]
     digest = selected[_REQUEST_SHA256_KEY]
     submission_transport = selected[_SUBMISSION_TRANSPORT_KEY]
@@ -331,7 +561,7 @@ def parse_ray_job_request_metadata(
 
 def load_ray_job_request_expectation(
     config_json: str | None,
-) -> RayJobRequestExpectation | None:
+) -> RayJobRequestExpectation | RayJobRequestReferenceExpectation | None:
     """Load strict metadata from bounded ``RAY_JOB_CONFIG_JSON_ENV_VAR`` input."""
     if config_json is None:
         return None
@@ -360,6 +590,8 @@ def validate_ray_job_request_expectation(
     expected_submission_transport: str = "ray-job",
 ) -> None:
     """Compare one parsed expectation with independently known request values."""
+    if not isinstance(expectation, RayJobRequestExpectation):
+        _reject(RayJobRequestBindingRejection.INVALID)
     if expectation.identity != expected_identity:
         _reject(RayJobRequestBindingRejection.IDENTITY_MISMATCH)
     if expectation.execution_protocol_version != expected_execution_protocol_version:
@@ -373,6 +605,73 @@ def validate_ray_job_request_expectation(
         _reject(RayJobRequestBindingRejection.DIGEST_MISMATCH)
 
 
+def validate_ray_job_request_reference_expectation(
+    expectation: RayJobRequestReferenceExpectation,
+    *,
+    expected_identity: ExecutionIdentity | None = None,
+    expected_execution_protocol_version: int | None = None,
+    expected_request_sha256: str | None = None,
+    expected_request_size_bytes: int | None = None,
+    expected_submission_id: str | None = None,
+    serialized_request: str | None = None,
+    request_reference: str | None = None,
+    request_locator: str | None = None,
+    expected_submission_transport: str = RAY_JOB_REQUEST_REFERENCE_TRANSPORT,
+) -> None:
+    """Compare rq2 metadata with independently known request and locator bindings."""
+    if not isinstance(expectation, RayJobRequestReferenceExpectation):
+        _reject(RayJobRequestBindingRejection.INVALID)
+    if expected_identity is not None and expectation.coordination_sha256 != coordination_sha256(
+        expected_identity
+    ):
+        _reject(RayJobRequestBindingRejection.IDENTITY_MISMATCH)
+    if (
+        expected_execution_protocol_version is not None
+        and expectation.execution_protocol_version != expected_execution_protocol_version
+    ):
+        _reject(RayJobRequestBindingRejection.PROTOCOL_MISMATCH)
+    if expectation.submission_transport != expected_submission_transport:
+        _reject(RayJobRequestBindingRejection.TRANSPORT_MISMATCH)
+    if expected_submission_id is not None:
+        if not is_valid_rq2_ray_job_submission_id(expected_submission_id):
+            _reject(RayJobRequestBindingRejection.INVALID)
+        bound_submission_id = (
+            f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}"
+            f"{expectation.coordination_sha256}"
+        )
+        if expected_submission_id != bound_submission_id:
+            _reject(RayJobRequestBindingRejection.IDENTITY_MISMATCH)
+    if (expected_request_sha256 is None) != (expected_request_size_bytes is None):
+        _reject(RayJobRequestBindingRejection.INVALID)
+    if expected_request_sha256 is not None:
+        if (
+            type(expected_request_sha256) is not str
+            or _SHA256.fullmatch(expected_request_sha256) is None
+            or not _valid_counter(expected_request_size_bytes)
+        ):
+            _reject(RayJobRequestBindingRejection.INVALID)
+        if (
+            expectation.request_sha256 != expected_request_sha256
+            or expectation.request_size_bytes != expected_request_size_bytes
+        ):
+            _reject(RayJobRequestBindingRejection.DIGEST_MISMATCH)
+    if serialized_request is not None:
+        if request_size_bytes(serialized_request) != expectation.request_size_bytes:
+            _reject(RayJobRequestBindingRejection.DIGEST_MISMATCH)
+        if request_sha256(serialized_request) != expectation.request_sha256:
+            _reject(RayJobRequestBindingRejection.DIGEST_MISMATCH)
+    if (
+        request_reference is not None
+        and request_reference_sha256(request_reference) != expectation.request_reference_sha256
+    ):
+        _reject(RayJobRequestBindingRejection.DIGEST_MISMATCH)
+    if (
+        request_locator is not None
+        and request_locator_sha256(request_locator) != expectation.request_locator_sha256
+    ):
+        _reject(RayJobRequestBindingRejection.DIGEST_MISMATCH)
+
+
 def fixed_safe_ray_job_metadata(metadata: object) -> dict[str, str] | None:
     """Copy only bounded protocol fields from Ray's untrusted JobInfo metadata.
 
@@ -382,9 +681,34 @@ def fixed_safe_ray_job_metadata(metadata: object) -> dict[str, str] | None:
     """
     if type(metadata) is not dict:
         return None
+    marker = metadata.get(RAY_JOB_REQUEST_METADATA_MARKER_KEY)
+    if marker == RAY_JOB_REQUEST_METADATA_MARKER_VALUE:
+        metadata_keys = (*_RQ1_METADATA_KEYS, *_RQ2_ONLY_METADATA_KEYS)
+        forbidden_keys = _RQ2_ONLY_METADATA_KEYS
+    elif marker == RAY_JOB_REQUEST_REFERENCE_METADATA_MARKER_VALUE:
+        metadata_keys = (
+            *_RQ2_METADATA_KEYS,
+            *_RQ1_ONLY_METADATA_KEYS,
+            *_RELEASED_VISIBILITY_KEYS,
+        )
+        forbidden_keys = _RQ1_ONLY_METADATA_KEYS | _RELEASED_VISIBILITY_KEYS
+    else:
+        metadata_keys = (*_STRICT_METADATA_KEYS, *_RELEASED_VISIBILITY_KEYS)
+        forbidden_keys = frozenset(metadata_keys) - {RAY_JOB_REQUEST_METADATA_MARKER_KEY}
+
     selected: dict[str, str] = {}
-    for key in _STRICT_METADATA_KEYS:
+    if marker is not None and any(
+        type(key) is str
+        and key.startswith(_DJANGO_RAY_METADATA_PREFIX)
+        and key not in _KNOWN_RESERVED_METADATA_KEYS
+        for key in metadata
+    ):
+        selected[_UNKNOWN_RESERVED_METADATA_KEY] = ""
+    for key in metadata_keys:
         if key not in metadata:
+            continue
+        if key in forbidden_keys:
+            selected[key] = ""
             continue
         value = metadata[key]
         try:

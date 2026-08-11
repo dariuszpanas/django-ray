@@ -6,7 +6,10 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 
 from django_ray.conf.defaults import DEFAULTS
-from django_ray.conf.settings import validate_settings
+from django_ray.conf.settings import (
+    validate_ray_job_request_storage_settings,
+    validate_settings,
+)
 from django_ray.redaction_patterns import (
     REDACTION_PATTERN_MAX_CONFIGURED_COUNT,
     REDACTION_PATTERN_MAX_SOURCE_BYTES,
@@ -39,6 +42,22 @@ class TestValidateSettings:
         }
         # Should not raise
         validate_settings(settings)
+
+    def test_ray_job_request_storage_is_required_only_at_the_mode_boundary(self) -> None:
+        config = {"RAY_ADDRESS": "ray://localhost:10001"}
+
+        validate_settings(config)
+        with pytest.raises(ImproperlyConfigured, match="Ray Job request-reference transport"):
+            validate_ray_job_request_storage_settings(config)
+
+    def test_ray_job_request_storage_accepts_a_retrievable_backend(self, tmp_path) -> None:
+        validate_ray_job_request_storage_settings(
+            {
+                "RAY_ADDRESS": "ray://localhost:10001",
+                "INPUT_STORAGE_BACKEND": "filesystem",
+                "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+            }
+        )
 
     def test_workflow_progress_detail_retention_default(self) -> None:
         assert DEFAULTS["WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS"] == 7

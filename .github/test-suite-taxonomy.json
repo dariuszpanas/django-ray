@@ -199,6 +199,7 @@
           "tests/unit/test_ray_core.py",
           "tests/unit/test_ray_core_runner.py",
           "tests/unit/test_ray_job.py",
+          "tests/unit/test_ray_job_request_storage.py",
           "tests/unit/test_remote.py",
           "tests/unit/test_worker_command_coverage.py",
           "tests/unit/test_worker_command_runtime.py",

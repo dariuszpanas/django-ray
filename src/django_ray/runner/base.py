@@ -59,7 +59,9 @@ class BaseRunner(ABC):
         """Submit a task for execution.
 
         Args:
-            task_execution: The task execution model instance.
+            task_execution: The persisted task execution model instance. The
+                Ray Job runner requires an already claimed RUNNING row before
+                it can reserve an external submission safely.
             callable_path: Dotted path to the task callable.
             args: Positional arguments for the task.
             kwargs: Keyword arguments for the task.

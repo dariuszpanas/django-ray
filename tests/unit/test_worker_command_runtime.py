@@ -673,9 +673,21 @@ class TestWorkerCommandRuntime:
             calls.append("claim")
 
         monkeypatch.setattr(cmd, "claim_and_process_tasks", fake_claim)
-        monkeypatch.setattr(cmd, "reconcile_tasks", lambda: calls.append("reconcile"))
-        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda: calls.append("stuck"))
-        monkeypatch.setattr(cmd, "process_cancellations", lambda: calls.append("cancel"))
+        monkeypatch.setattr(
+            cmd,
+            "reconcile_tasks",
+            lambda queues: calls.append(f"reconcile:{','.join(queues)}"),
+        )
+        monkeypatch.setattr(
+            cmd,
+            "detect_stuck_tasks",
+            lambda queues: calls.append(f"stuck:{','.join(queues)}"),
+        )
+        monkeypatch.setattr(
+            cmd,
+            "process_cancellations",
+            lambda queues: calls.append(f"cancel:{','.join(queues)}"),
+        )
 
         def cleanup_once():
             calls.append("cleanup")
@@ -691,7 +703,15 @@ class TestWorkerCommandRuntime:
 
         cmd.run_loop(queues=["default"], concurrency=2, heartbeat_interval=1)
 
-        assert calls == ["heartbeat", "poll", "claim", "cancel", "reconcile", "stuck", "cleanup"]
+        assert calls == [
+            "heartbeat",
+            "poll",
+            "claim",
+            "cancel:default",
+            "reconcile:default",
+            "stuck:default",
+            "cleanup",
+        ]
 
     def test_run_loop_stops_immediately_after_heartbeat_loses_lease(self, monkeypatch) -> None:
         cmd = _make_command()
@@ -706,9 +726,9 @@ class TestWorkerCommandRuntime:
         monkeypatch.setattr(cmd, "send_heartbeat", lose_lease)
         monkeypatch.setattr(cmd, "poll_ray_core_tasks", lambda: calls.append("poll"))
         monkeypatch.setattr(cmd, "claim_and_process_tasks", lambda *_: calls.append("claim"))
-        monkeypatch.setattr(cmd, "process_cancellations", lambda: calls.append("cancel"))
-        monkeypatch.setattr(cmd, "reconcile_tasks", lambda: calls.append("reconcile"))
-        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda: calls.append("stuck"))
+        monkeypatch.setattr(cmd, "process_cancellations", lambda _queues: calls.append("cancel"))
+        monkeypatch.setattr(cmd, "reconcile_tasks", lambda _queues: calls.append("reconcile"))
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda _queues: calls.append("stuck"))
         monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: calls.append("cleanup"))
 
         cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=1)
@@ -727,9 +747,9 @@ class TestWorkerCommandRuntime:
             return 0
 
         monkeypatch.setattr(cmd, "claim_and_process_tasks", lose_lease)
-        monkeypatch.setattr(cmd, "process_cancellations", lambda: calls.append("cancel"))
-        monkeypatch.setattr(cmd, "reconcile_tasks", lambda: calls.append("reconcile"))
-        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda: calls.append("stuck"))
+        monkeypatch.setattr(cmd, "process_cancellations", lambda _queues: calls.append("cancel"))
+        monkeypatch.setattr(cmd, "reconcile_tasks", lambda _queues: calls.append("reconcile"))
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda _queues: calls.append("stuck"))
         monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: calls.append("cleanup"))
 
         cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=1)
@@ -759,13 +779,13 @@ class TestWorkerCommandRuntime:
                 cmd.shutdown_requested = True
             return 0
 
-        def cancel() -> int:
+        def cancel(_queues) -> int:
             cancellations.append(clock.now)
             return int(len(cancellations) == 2)
 
         monkeypatch.setattr(cmd, "claim_and_process_tasks", claim)
-        monkeypatch.setattr(cmd, "reconcile_tasks", lambda: 0)
-        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda: 0)
+        monkeypatch.setattr(cmd, "reconcile_tasks", lambda _queues: 0)
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda _queues: 0)
         monkeypatch.setattr(cmd, "process_cancellations", cancel)
         monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: 0)
         monkeypatch.setattr(
@@ -806,9 +826,9 @@ class TestWorkerCommandRuntime:
             return 0
 
         monkeypatch.setattr(cmd, "claim_and_process_tasks", claim)
-        monkeypatch.setattr(cmd, "reconcile_tasks", lambda: 0)
-        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda: 0)
-        monkeypatch.setattr(cmd, "process_cancellations", lambda: 0)
+        monkeypatch.setattr(cmd, "reconcile_tasks", lambda _queues: 0)
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda _queues: 0)
+        monkeypatch.setattr(cmd, "process_cancellations", lambda _queues: 0)
         monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: 0)
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.time.monotonic",
@@ -856,9 +876,9 @@ class TestWorkerCommandRuntime:
             "claim_and_process_tasks",
             lambda _queues, _concurrency: claims.append(clock.now) or 0,
         )
-        monkeypatch.setattr(cmd, "reconcile_tasks", lambda: 0)
-        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda: 0)
-        monkeypatch.setattr(cmd, "process_cancellations", lambda: 0)
+        monkeypatch.setattr(cmd, "reconcile_tasks", lambda _queues: 0)
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda _queues: 0)
+        monkeypatch.setattr(cmd, "process_cancellations", lambda _queues: 0)
         monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: 0)
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.time.monotonic",
@@ -903,14 +923,14 @@ class TestWorkerCommandRuntime:
         monkeypatch.setattr(
             cmd,
             "reconcile_tasks",
-            lambda: reconciliations.append(clock.now) or 0,
+            lambda _queues: reconciliations.append(clock.now) or 0,
         )
         monkeypatch.setattr(
             cmd,
             "detect_stuck_tasks",
-            lambda: timeout_checks.append(clock.now) or 0,
+            lambda _queues: timeout_checks.append(clock.now) or 0,
         )
-        monkeypatch.setattr(cmd, "process_cancellations", lambda: 0)
+        monkeypatch.setattr(cmd, "process_cancellations", lambda _queues: 0)
         monkeypatch.setattr(
             cmd,
             "cleanup_expired_leases",
@@ -1089,6 +1109,11 @@ class TestWorkerCommandRuntime:
         monkeypatch.setattr(cmd, "run_loop", lambda **_kwargs: None)
         monkeypatch.setattr(cmd, "shutdown", lambda: None)
         monkeypatch.setattr(cmd, "setup_signal_handlers", lambda: None)
+        monkeypatch.setattr(
+            cmd,
+            "_validate_execution_mode_configuration",
+            lambda _settings: None,
+        )
 
         cmd.handle(
             queue="default",
@@ -1190,6 +1215,61 @@ class TestWorkerCommandRuntime:
 @pytest.mark.django_db
 class TestWorkerCommandRuntimeDb:
     """DB-backed helper path tests."""
+
+    def test_ray_job_storage_validation_precedes_lease_and_claim(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="rq2-startup-storage-required-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+        )
+        cmd = _make_command(worker_id="rq2-invalid-storage-worker")
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_settings",
+            lambda: {
+                "RUNNER": "ray_job",
+                "RAY_ADDRESS": "ray://cluster:10001",
+                "DEFAULT_CONCURRENCY": 1,
+                "INPUT_STORAGE_BACKEND": None,
+            },
+        )
+        monkeypatch.setattr(
+            cmd,
+            "_create_lease",
+            lambda _queue: pytest.fail("invalid rq2 storage must precede lease creation"),
+        )
+        monkeypatch.setattr(
+            cmd,
+            "run_loop",
+            lambda **_kwargs: pytest.fail("invalid rq2 storage must precede task claims"),
+        )
+        monkeypatch.setattr(
+            cmd,
+            "setup_signal_handlers",
+            lambda: pytest.fail("invalid rq2 storage must fail during preflight"),
+        )
+
+        with pytest.raises(CommandError, match="request storage configuration is invalid"):
+            cmd.handle(
+                queue="default",
+                queues=None,
+                all_queues=False,
+                concurrency=1,
+                sync=False,
+                local=False,
+                cluster=None,
+                verbosity=1,
+            )
+
+        task.refresh_from_db()
+        assert not TaskWorkerLease.objects.filter(worker_id="rq2-invalid-storage-worker").exists()
+        assert task.state == TaskState.QUEUED
+        assert task.claimed_by_worker is None
 
     @pytest.mark.parametrize(
         ("args_json", "kwargs_json", "input_reference"),

@@ -2,25 +2,44 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from django.core.exceptions import ImproperlyConfigured
+
 from django_ray.conf.settings import get_settings
-from django_ray.execution_codec import ExecutionIdentity, ExecutionRequest, encode_execution_request
+from django_ray.execution_codec import (
+    ExecutionIdentity,
+    ExecutionRequest,
+    ExecutionRequestEncodeError,
+    ExecutionRequestRejection,
+    encode_execution_request,
+)
 from django_ray.ray_job_protocol import (
-    STRICT_RAY_JOB_SUBMISSION_ID_PREFIX,
-    build_ray_job_request_metadata,
+    STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX,
+    RayJobRequestBindingError,
+    RayJobRequestBindingRejection,
+    build_ray_job_request_reference_metadata,
+    coordination_sha256,
     fixed_safe_ray_job_metadata,
+)
+from django_ray.ray_job_request_storage import (
+    RayJobRequestStorageError,
+    prepare_ray_job_request,
+    register_and_attach_ray_job_request,
+    release_ray_job_request_reservation,
 )
 from django_ray.redaction import materialize_exception_message, materialize_exception_text
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
-from django_ray.runner.errors import RayJobSubmissionUncertainError
+from django_ray.runner.errors import (
+    RayJobRequestPreparationError,
+    RayJobRequestPreparationRejection,
+    RayJobSubmissionUncertainError,
+)
 from django_ray.runtime.runtime_env import (
     normalize_runtime_env,
     runtime_env_for_execution,
@@ -34,6 +53,37 @@ if TYPE_CHECKING:
 
 _CONTROL_REQUEST_TIMEOUT_SECONDS = 5.0
 _REQUEST_TIMEOUT_ATTRIBUTE = "_django_ray_request_timeout_seconds"
+
+_STORAGE_PREPARATION_REJECTIONS = {
+    "invalid_locator": RayJobRequestPreparationRejection.INVALID_REQUEST,
+    "resource_limit": RayJobRequestPreparationRejection.RESOURCE_LIMIT,
+    "configuration": RayJobRequestPreparationRejection.CONFIGURATION,
+    "storage_unavailable": RayJobRequestPreparationRejection.STORAGE_UNAVAILABLE,
+    "integrity_mismatch": RayJobRequestPreparationRejection.INTEGRITY_MISMATCH,
+    "invalid_request": RayJobRequestPreparationRejection.INVALID_REQUEST,
+    "registry_mismatch": RayJobRequestPreparationRejection.REGISTRY_MISMATCH,
+    "binding_mismatch": RayJobRequestPreparationRejection.BINDING_MISMATCH,
+}
+
+
+def _fixed_preparation_rejection(
+    error: ExecutionRequestEncodeError | RayJobRequestBindingError | Exception,
+) -> RayJobRequestPreparationRejection:
+    """Map a fixed lower-layer classification without inspecting exception text."""
+    classification = getattr(error, "classification", None)
+    value = getattr(classification, "value", None)
+    if isinstance(error, ExecutionRequestEncodeError):
+        if classification is ExecutionRequestRejection.RESOURCE_LIMIT:
+            return RayJobRequestPreparationRejection.RESOURCE_LIMIT
+        return RayJobRequestPreparationRejection.INVALID_REQUEST
+    if isinstance(error, RayJobRequestBindingError):
+        if classification is RayJobRequestBindingRejection.RESOURCE_LIMIT:
+            return RayJobRequestPreparationRejection.RESOURCE_LIMIT
+        return RayJobRequestPreparationRejection.INVALID_REQUEST
+    return _STORAGE_PREPARATION_REJECTIONS.get(
+        value,
+        RayJobRequestPreparationRejection.INVALID_REQUEST,
+    )
 
 
 def _find_auto_ray_address() -> str:
@@ -142,9 +192,17 @@ class RayJobRunner(BaseRunner):
     """Runner that uses Ray Job Submission API."""
 
     def __init__(self) -> None:
-        """Initialize the Ray Job runner."""
-        settings = get_settings()
-        self.ray_address = settings["RAY_ADDRESS"]
+        """Initialize Ray Job control without requiring submission storage."""
+        try:
+            settings = get_settings()
+            ray_address = settings.get("RAY_ADDRESS")
+            if type(ray_address) is not str or not ray_address.strip():
+                raise ImproperlyConfigured("django-ray: RAY_ADDRESS must be a non-empty string")
+        except ImproperlyConfigured as error:
+            raise RayJobRequestPreparationError(
+                RayJobRequestPreparationRejection.CONFIGURATION
+            ) from error
+        self.ray_address = ray_address
 
     def _get_client(self, ray_address: str | None = None) -> Any:
         """Get a Ray JobSubmissionClient for the requested cluster.
@@ -160,21 +218,21 @@ class RayJobRunner(BaseRunner):
     def submission_id(task_execution: RayTaskExecution) -> str:
         """Return the stable Ray submission ID for one execution generation."""
         if task_execution.pk is None:
-            raise ValueError("Ray Job submission requires a persisted task execution")
-
-        identity = json.dumps(
-            {
-                "attempt_number": int(task_execution.attempt_number),
-                "execution_generation": int(task_execution.execution_generation),
-                "task_execution_pk": int(task_execution.pk),
-                "task_id": str(task_execution.task_id),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        return f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}{digest}"
+            raise RayJobRequestPreparationError(RayJobRequestPreparationRejection.INVALID_REQUEST)
+        try:
+            digest = coordination_sha256(
+                ExecutionIdentity(
+                    task_execution_pk=int(task_execution.pk),
+                    task_id=str(task_execution.task_id),
+                    attempt_number=int(task_execution.attempt_number),
+                    execution_generation=int(task_execution.execution_generation),
+                )
+            )
+        except (TypeError, ValueError, OverflowError, RayJobRequestBindingError) as error:
+            raise RayJobRequestPreparationError(
+                RayJobRequestPreparationRejection.INVALID_REQUEST
+            ) from error
+        return f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}{digest}"
 
     def submission_handle(self, task_execution: RayTaskExecution) -> SubmissionHandle:
         """Build the exact handle that :meth:`submit` will give to Ray."""
@@ -189,6 +247,105 @@ class RayJobRunner(BaseRunner):
             submitted_at=datetime.now(UTC),
         )
 
+    def _reserve_public_submission(
+        self,
+        task_execution: RayTaskExecution,
+        handle: SubmissionHandle,
+        *,
+        callable_path: str,
+        args_json: str,
+        kwargs_json: str,
+        input_reference: str | None,
+    ) -> bool:
+        """Reserve rq2 for the public API under an exact claimed-row CAS."""
+        from django.db import transaction
+
+        from django_ray.models import RayTaskExecution, TaskState
+
+        if not isinstance(task_execution, RayTaskExecution) or task_execution.pk is None:
+            raise RayJobRequestPreparationError(RayJobRequestPreparationRejection.BINDING_MISMATCH)
+        if handle.ray_job_id != self.submission_id(task_execution):
+            raise RayJobRequestPreparationError(RayJobRequestPreparationRejection.BINDING_MISMATCH)
+        database = task_execution._state.db or "default"
+        expected_worker = task_execution.claimed_by_worker
+        expected_runtime_profile = task_execution.runtime_env_profile
+        expected_runtime_hash = task_execution.runtime_env_hash
+        if type(expected_worker) is not str or not expected_worker:
+            raise RayJobRequestPreparationError(RayJobRequestPreparationRejection.BINDING_MISMATCH)
+
+        with transaction.atomic(using=database):
+            current = (
+                RayTaskExecution.objects.using(database)
+                .select_for_update()
+                .filter(pk=task_execution.pk)
+                .first()
+            )
+            selected_address = (
+                getattr(current, "ray_target_address", None)
+                or getattr(current, "ray_address", None)
+                or self.ray_address
+            )
+            exact_row = current is not None and (
+                current.state == TaskState.RUNNING
+                and current.task_id == task_execution.task_id
+                and current.attempt_number == task_execution.attempt_number
+                and current.execution_generation == task_execution.execution_generation
+                and current.execution_protocol_version == task_execution.execution_protocol_version
+                and current.claimed_by_worker == expected_worker
+                and current.callable_path == callable_path
+                and current.args_json == args_json
+                and current.kwargs_json == kwargs_json
+                and current.input_reference == input_reference
+                and current.runtime_env_profile == expected_runtime_profile
+                and current.runtime_env_hash == expected_runtime_hash
+                and selected_address == handle.ray_address
+            )
+            if not exact_row:
+                raise RayJobRequestPreparationError(
+                    RayJobRequestPreparationRejection.BINDING_MISMATCH
+                )
+            assert current is not None
+
+            newly_reserved = current.ray_job_id is None
+            if newly_reserved:
+                if current.ray_address is not None or current.ray_job_request_reference is not None:
+                    raise RayJobRequestPreparationError(
+                        RayJobRequestPreparationRejection.BINDING_MISMATCH
+                    )
+                current.ray_job_id = handle.ray_job_id
+                current.ray_address = handle.ray_address
+                current.save(update_fields=["ray_job_id", "ray_address"], using=database)
+            elif (
+                current.ray_job_id != handle.ray_job_id or current.ray_address != handle.ray_address
+            ):
+                raise RayJobRequestPreparationError(
+                    RayJobRequestPreparationRejection.BINDING_MISMATCH
+                )
+
+            task_execution.__dict__.update(current.__dict__)
+            return newly_reserved
+
+    @staticmethod
+    def _release_public_submission(
+        task_execution: RayTaskExecution,
+        handle: SubmissionHandle,
+    ) -> None:
+        """Release one definitely unsubmitted public reservation exactly."""
+        try:
+            released = release_ray_job_request_reservation(
+                task_execution,
+                handle,
+                expected_reference=getattr(
+                    task_execution,
+                    "ray_job_request_reference",
+                    None,
+                ),
+            )
+        except RayJobRequestStorageError as error:
+            raise RayJobRequestPreparationError(_fixed_preparation_rejection(error)) from error
+        if not released:
+            raise RayJobRequestPreparationError(RayJobRequestPreparationRejection.BINDING_MISMATCH)
+
     def submit(
         self,
         task_execution: RayTaskExecution,
@@ -196,7 +353,13 @@ class RayJobRunner(BaseRunner):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> SubmissionHandle:
-        """Submit the explicit public-runner inputs via Ray Job."""
+        """Submit from a persisted, RUNNING, manager-claimed execution row.
+
+        The public path reserves its rq2 ID and address with an exact row CAS.
+        It never submits an unclaimed row or falls back to the rq1 transport.
+        An existing exact reservation raises an uncertain-acceptance result for
+        reconciliation without issuing or releasing a second remote submission.
+        """
         input_reference = getattr(task_execution, "input_reference", None)
         if input_reference:
             args_json = task_execution.args_json
@@ -204,16 +367,40 @@ class RayJobRunner(BaseRunner):
         else:
             args_json = serialize_args(list(args))
             kwargs_json = serialize_args(kwargs)
-        return self._submit_serialized_request(
-            task_execution=task_execution,
+        handle = self.submission_handle(task_execution)
+        newly_reserved = self._reserve_public_submission(
+            task_execution,
+            handle,
             callable_path=callable_path,
             args_json=args_json,
             kwargs_json=kwargs_json,
             input_reference=input_reference,
         )
+        if not newly_reserved:
+            # Another caller owns the durable tuple but may not yet have crossed
+            # the remote submission boundary. Never report definite submission,
+            # submit it again, or release the other caller's reservation.
+            raise RayJobSubmissionUncertainError(
+                handle.ray_job_id,
+                "durable submission reservation already exists",
+            )
+        try:
+            return self._submit_serialized_request(
+                task_execution=task_execution,
+                callable_path=callable_path,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                input_reference=input_reference,
+            )
+        except RayJobSubmissionUncertainError:
+            raise
+        except Exception:
+            if newly_reserved:
+                self._release_public_submission(task_execution, handle)
+            raise
 
     def submit_durable(self, task_execution: RayTaskExecution) -> SubmissionHandle:
-        """Submit the task manager's already-persisted opaque input fields."""
+        """Submit one already-reserved task-manager row using its opaque inputs."""
         return self._submit_serialized_request(
             task_execution=task_execution,
             callable_path=task_execution.callable_path,
@@ -234,11 +421,10 @@ class RayJobRunner(BaseRunner):
         """Submit one canonical request without hydrating application input."""
         handle = self.submission_handle(task_execution)
         runtime_env = runtime_env_for_execution(task_execution)
-        client = self._get_client(handle.ray_address)
-        from django_ray.conf.settings import get_settings
         from django_ray.workflow_plans import runtime_env_plan_identity
 
-        trust_identity = get_settings().get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
+        settings = get_settings()
+        trust_identity = settings.get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
         source_runtime_env_identity = runtime_env_plan_identity(
             runtime_env,
             trust_identity=trust_identity,
@@ -259,6 +445,67 @@ class RayJobRunner(BaseRunner):
                     raise WorkflowPlanMismatchError(
                         "Outer RuntimeEnv immutable snapshot differs from its effective plan"
                     )
+                try:
+                    request_identity = ExecutionIdentity(
+                        task_execution_pk=int(task_execution.pk),
+                        task_id=str(task_execution.task_id),
+                        attempt_number=int(task_execution.attempt_number),
+                        execution_generation=int(task_execution.execution_generation),
+                    )
+                    execution_request = ExecutionRequest(
+                        identity=request_identity,
+                        execution_protocol_version=int(task_execution.execution_protocol_version),
+                        callable_path=callable_path,
+                        transport_version=2 if input_reference else 1,
+                        serialized_args=args_json,
+                        serialized_kwargs=kwargs_json,
+                        input_reference=input_reference,
+                        runtime_env_profile=runtime_env.profile,
+                        runtime_env_hash=runtime_env.digest,
+                        runtime_env_plan_identity=(
+                            snapshot_runtime_env_identity.as_transport_dict()
+                        ),
+                        compiled_graph_submission_transport="ray-job",
+                    )
+                    payload_json = encode_execution_request(execution_request)
+                except (TypeError, ValueError, OverflowError) as error:
+                    rejection = (
+                        _fixed_preparation_rejection(error)
+                        if isinstance(error, ExecutionRequestEncodeError)
+                        else RayJobRequestPreparationRejection.INVALID_REQUEST
+                    )
+                    raise RayJobRequestPreparationError(rejection) from error
+
+                try:
+                    prepared_request = prepare_ray_job_request(payload_json, settings)
+                    metadata = build_ray_job_request_reference_metadata(
+                        execution_request,
+                        payload_json,
+                        prepared_request.reference,
+                        prepared_request.encoded_locator,
+                    )
+                    attached_reference = register_and_attach_ray_job_request(
+                        prepared_request,
+                        task_execution=task_execution,
+                        submission_handle=handle,
+                    )
+                except (RayJobRequestStorageError, RayJobRequestBindingError) as error:
+                    raise RayJobRequestPreparationError(
+                        _fixed_preparation_rejection(error)
+                    ) from error
+                if attached_reference != prepared_request.reference:
+                    raise RayJobRequestPreparationError(
+                        RayJobRequestPreparationRejection.INTEGRITY_MISMATCH
+                    )
+
+                entrypoint = (
+                    "python -m django_ray.runtime.entrypoint --request-ref-b64 "
+                    f"{prepared_request.encoded_locator}"
+                )
+
+                # The canonical request and its durable binding are complete
+                # before a Ray client is opened or any RuntimeEnv is uploaded.
+                client = self._get_client(handle.ray_address)
                 submitted_spec = json.loads(immutable_snapshot.serialized)
                 client._upload_working_dir_if_needed(submitted_spec)
                 client._upload_py_modules_if_needed(submitted_spec)
@@ -283,41 +530,6 @@ class RayJobRunner(BaseRunner):
                         "Outer RuntimeEnv local content changed while it was being snapshotted"
                     )
 
-                request_identity = ExecutionIdentity(
-                    task_execution_pk=int(task_execution.pk),
-                    task_id=str(task_execution.task_id),
-                    attempt_number=int(task_execution.attempt_number),
-                    execution_generation=int(task_execution.execution_generation),
-                )
-                execution_request = ExecutionRequest(
-                    identity=request_identity,
-                    execution_protocol_version=int(task_execution.execution_protocol_version),
-                    callable_path=callable_path,
-                    transport_version=2 if input_reference else 1,
-                    serialized_args=args_json,
-                    serialized_kwargs=kwargs_json,
-                    input_reference=input_reference,
-                    runtime_env_profile=runtime_env.profile,
-                    runtime_env_hash=runtime_env.digest,
-                    runtime_env_plan_identity=(snapshot_runtime_env_identity.as_transport_dict()),
-                    compiled_graph_submission_transport="ray-job",
-                )
-                payload_json = encode_execution_request(execution_request)
-                payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
-
-                entrypoint = f"python -m django_ray.runtime.entrypoint --payload-b64 {payload_b64}"
-                metadata = {
-                    # Retain released visibility fields while the strict binding
-                    # independently identifies the public task and request bytes.
-                    "django_ray_task_id": str(task_execution.pk),
-                    "django_ray_attempt_number": str(task_execution.attempt_number),
-                    "django_ray_execution_generation": str(task_execution.execution_generation),
-                    "callable_path": callable_path,
-                    "runtime_env_profile": runtime_env.profile or "",
-                    "runtime_env_hash": runtime_env.digest,
-                    **build_ray_job_request_metadata(execution_request, payload_json),
-                }
-
                 request_started = True
                 returned_submission_id = client.submit_job(
                     entrypoint=entrypoint,
@@ -334,11 +546,15 @@ class RayJobRunner(BaseRunner):
                 ) from exc
             raise
 
-        if returned_submission_id != handle.ray_job_id:
+        if (
+            type(returned_submission_id) is not str
+            or len(returned_submission_id) != len(handle.ray_job_id)
+            or returned_submission_id != handle.ray_job_id
+        ):
             raise RayJobSubmissionUncertainError(
                 handle.ray_job_id,
-                f"submit_job returned the unexpected ID {returned_submission_id!r}",
-                observed_submission_id=returned_submission_id,
+                "submit_job returned an unexpected submission ID",
+                observed_submission_id=None,
             )
         return handle
 

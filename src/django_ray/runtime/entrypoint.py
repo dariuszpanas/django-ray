@@ -21,9 +21,7 @@ from typing import TYPE_CHECKING, Any
 import django
 from django.apps import apps
 
-from django_ray.conf.settings import get_settings
 from django_ray.execution_codec import EXECUTION_REQUEST_MAX_BYTES
-from django_ray.input_storage import InputPayloadValidationError, load_task_input
 from django_ray.logging import get_logger
 from django_ray.ray_job_protocol import (
     RAY_JOB_CONFIG_JSON_ENV_VAR,
@@ -31,8 +29,10 @@ from django_ray.ray_job_protocol import (
     RayJobRequestBindingError,
     RayJobRequestBindingRejection,
     RayJobRequestExpectation,
+    RayJobRequestReferenceExpectation,
     load_ray_job_request_expectation,
     validate_ray_job_request_expectation,
+    validate_ray_job_request_reference_expectation,
 )
 from django_ray.redaction import redact_text
 
@@ -45,6 +45,29 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_RAY_JOB_PAYLOAD_B64_BYTES = 4 * ((EXECUTION_REQUEST_MAX_BYTES + 2) // 3)
+
+
+def get_settings() -> dict[str, Any]:
+    """Load runtime settings only after strict request validation."""
+    from django_ray.conf.settings import get_settings as load_settings
+
+    return load_settings()
+
+
+def load_task_input(
+    *,
+    args_json: str,
+    kwargs_json: str,
+    input_reference: str | None,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Hydrate task input only after strict request validation and Django setup."""
+    from django_ray.input_storage import load_task_input as hydrate_task_input
+
+    return hydrate_task_input(
+        args_json=args_json,
+        kwargs_json=kwargs_json,
+        input_reference=input_reference,
+    )
 
 
 class _StrictRequestRejectionResult(str):
@@ -130,6 +153,7 @@ def _serialize_error(
         NestedExecutionRequestRejected,
         find_nested_execution_request_rejection,
     )
+    from django_ray.input_storage import InputPayloadValidationError
     from django_ray.workflow_plans import WorkflowPlanMismatchError
 
     nested_rejection = find_nested_execution_request_rejection(e)
@@ -307,11 +331,11 @@ def execute_task(
     Returns:
         JSON-serialized TaskResult.
     """
-    from django_ray.runtime.import_utils import import_callable
-
     completion_task_execution_pk = task_execution_pk if ray_job_driver is not False else None
     try:
         bootstrap_django()
+
+        from django_ray.runtime.import_utils import import_callable
 
         args, kwargs = load_task_input(
             args_json=serialized_args,
@@ -430,6 +454,15 @@ def _binding_rejection_classification(
     return mapping.get(classification, ExecutionRequestRejection.INVALID_VERSIONED)
 
 
+def _request_storage_rejection_classification(classification: object) -> ExecutionRequestRejection:
+    """Map every opaque-reference failure to the fixed request vocabulary."""
+    from django_ray.execution_codec import ExecutionRequestRejection
+
+    if getattr(classification, "value", None) == "resource_limit":
+        return ExecutionRequestRejection.RESOURCE_LIMIT
+    return ExecutionRequestRejection.INVALID_VERSIONED
+
+
 def _fixed_unbound_request_rejection(classification: ExecutionRequestRejection) -> str:
     """Return a fixed legacy-shaped diagnostic when no identity is trusted."""
     return json.dumps(
@@ -476,6 +509,8 @@ def _strict_request_rejection(
 
 def _execute_legacy_payload(payload_json: str) -> str:
     """Retain the released unversioned protocol-v1 payload adapter."""
+    from django_ray.input_storage import InputPayloadValidationError
+
     try:
         payload = json.loads(payload_json)
         transport_version = payload.get("transport_version", 1)
@@ -518,6 +553,11 @@ def execute_task_from_payload(payload_b64: str) -> str:
         return _strict_request_rejection(
             None,
             _binding_rejection_classification(error.classification),
+        )
+    if expectation is not None and not isinstance(expectation, RayJobRequestExpectation):
+        return _strict_request_rejection(
+            None,
+            ExecutionRequestRejection.UNSUPPORTED_TRANSPORT,
         )
 
     try:
@@ -593,20 +633,136 @@ def execute_task_from_payload(payload_b64: str) -> str:
     )
 
 
+def execute_task_from_reference(encoded_locator: str) -> str:
+    """Load and bind one rq2 request before crossing the Django boundary."""
+    from django_ray.execution_codec import ExecutionRequestRejection
+    from django_ray.ray_job_request_storage import (
+        RayJobRequestStorageError,
+        decode_ray_job_request_locator,
+        load_ray_job_request,
+    )
+
+    try:
+        expectation = load_ray_job_request_expectation(os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR))
+    except RayJobRequestBindingError as error:
+        return _strict_request_rejection(
+            None,
+            _binding_rejection_classification(error.classification),
+        )
+    if expectation is None:
+        return _strict_request_rejection(
+            None,
+            ExecutionRequestRejection.INVALID_VERSIONED,
+        )
+    if not isinstance(expectation, RayJobRequestReferenceExpectation):
+        return _strict_request_rejection(
+            expectation if isinstance(expectation, RayJobRequestExpectation) else None,
+            ExecutionRequestRejection.UNSUPPORTED_TRANSPORT,
+        )
+
+    try:
+        validate_ray_job_request_reference_expectation(
+            expectation,
+            request_locator=encoded_locator,
+        )
+    except RayJobRequestBindingError as error:
+        return _strict_request_rejection(
+            None,
+            _binding_rejection_classification(error.classification),
+        )
+
+    try:
+        locator = decode_ray_job_request_locator(encoded_locator)
+    except RayJobRequestStorageError as error:
+        return _strict_request_rejection(
+            None,
+            _request_storage_rejection_classification(error.classification),
+        )
+
+    try:
+        validate_ray_job_request_reference_expectation(
+            expectation,
+            expected_request_sha256=locator.digest,
+            expected_request_size_bytes=locator.size_bytes,
+            request_reference=locator.reference,
+        )
+    except RayJobRequestBindingError as error:
+        return _strict_request_rejection(
+            None,
+            _binding_rejection_classification(error.classification),
+        )
+
+    try:
+        loaded = load_ray_job_request(locator)
+    except RayJobRequestStorageError as error:
+        return _strict_request_rejection(
+            None,
+            _request_storage_rejection_classification(error.classification),
+        )
+
+    request = loaded.request
+    if request.compiled_graph_submission_transport != "ray-job":
+        return _strict_request_rejection(
+            None,
+            ExecutionRequestRejection.UNSUPPORTED_TRANSPORT,
+        )
+    try:
+        validate_ray_job_request_reference_expectation(
+            expectation,
+            expected_identity=request.identity,
+            expected_execution_protocol_version=request.execution_protocol_version,
+            expected_request_sha256=loaded.digest,
+            expected_request_size_bytes=loaded.size_bytes,
+            serialized_request=loaded.serialized_request,
+            request_reference=loaded.reference,
+        )
+    except RayJobRequestBindingError as error:
+        return _strict_request_rejection(
+            None,
+            _binding_rejection_classification(error.classification),
+        )
+
+    return execute_task(
+        callable_path=request.callable_path,
+        serialized_args=request.serialized_args,
+        serialized_kwargs=request.serialized_kwargs,
+        task_execution_pk=request.identity.task_execution_pk,
+        task_id=request.identity.task_id,
+        attempt_number=request.identity.attempt_number,
+        execution_generation=request.identity.execution_generation,
+        runtime_env_profile=request.runtime_env_profile,
+        runtime_env_hash=request.runtime_env_hash,
+        runtime_env_plan_identity=request.runtime_env_plan_identity,
+        input_reference=request.input_reference,
+        ray_job_driver=True,
+        _completion_identity=request.identity,
+        _execution_protocol_version=request.execution_protocol_version,
+        _strict_execution_request=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for Ray Job execution."""
     parser = argparse.ArgumentParser(description="Execute a django-ray task payload")
-    parser.add_argument(
+    request_source = parser.add_mutually_exclusive_group(required=True)
+    request_source.add_argument(
         "--payload-b64",
-        required=True,
         help="URL-safe base64 encoded task payload",
+    )
+    request_source.add_argument(
+        "--request-ref-b64",
+        help="Bounded URL-safe base64 encoded durable request locator",
     )
     args = parser.parse_args(argv)
 
     # The durable completion envelope is persisted in the database by
     # ``execute_task``.  Do not print it: Ray Job logs are operational output
     # and must not become an accidental copy of a task's return value.
-    result_json = execute_task_from_payload(args.payload_b64)
+    if args.request_ref_b64 is not None:
+        result_json = execute_task_from_reference(args.request_ref_b64)
+    else:
+        assert args.payload_b64 is not None
+        result_json = execute_task_from_payload(args.payload_b64)
     try:
         result = json.loads(result_json)
     except (TypeError, json.JSONDecodeError):

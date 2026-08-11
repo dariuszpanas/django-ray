@@ -195,15 +195,23 @@ This check runs only after Ray deserializes the trusted bootstrap and plain requ
 string. Exact Ray/Python and cluster-instance attestation must still happen before Ray
 Core serialization and submission.
 
-New Ray Job submissions use the same canonical request, sourced from durable JSON or an
-opaque input reference, and independently bind its exact identity, protocol, and digest
-in bounded Ray Job metadata. The driver validates both before Django setup, input
-hydration, or callable import/invocation. A compatible replacement manager validates
-the exact persisted strict job ID plus bounded identity and protocol metadata; it does
-not reconstruct the shell request or use the digest to infer execution effects.
-Released unversioned payloads remain the protocol-v1 drain adapter, and a released
-driver can still read the flat strict-v1 fields while upgraded code remains at active
-protocol `1`.
+New Ray Job submissions use rq2. The task manager builds the same canonical request from
+durable JSON or an opaque input reference, enforces its fixed byte ceiling, stores the
+exact bytes in the configured retrievable input backend, and binds the content-addressed
+reference to the execution before it opens the Ray client or uploads RuntimeEnv
+artifacts. Only a bounded canonical locator enters `--request-ref-b64`. Metadata carries
+fixed markers, an opaque coordination digest, execution protocol, request digest and
+size, request-reference hash, and exact locator-token hash; it omits the public task ID,
+callable, arguments, raw RuntimeEnv identity, and storage credentials. The driver checks
+that whole locator binding before constructing a storage reader or performing I/O.
+
+The driver validates the locator and metadata binding before storage I/O, then validates
+the retrieved request bytes, canonical schema, exact identity, protocol, and inner input
+transport before Django setup, input hydration, or callable import/invocation. A
+compatible replacement manager validates the exact persisted rq2 job ID and reference
+binding; it does not reconstruct or retrieve the request through JobInfo and does not
+use a digest to infer execution effects. Released unversioned payloads and the earlier
+strict rq1 inline carrier remain protocol-`1` drain adapters only.
 
 Treat every strict terminal Ray Job with a verified binding but no exact completion as
 non-retryable after the normal publication grace period. The dedicated rejection exit
@@ -212,9 +220,27 @@ application effects. The manager does not use Ray Job logs to establish compatib
 phase, or replay safety. Malformed or missing strict metadata is uncertain: let the
 exact stop/`LOST` boundary complete, inspect the remote job, and require an explicit
 operator decision before replay. Inline request bytes still occupy the shell command
-until the separate bounded reference-only transport work lands; enable input spillover
-for large or sensitive arguments and do not treat the codec's resource budget as an
-operating-system command length guarantee.
+only for already submitted legacy and rq1 jobs. New rq2 commands contain one locator
+bounded independently of the stored request; no application argument, callable, public
+task ID, raw RuntimeEnv identity, or credential belongs in JobInfo metadata or process
+arguments.
+
+Rq2 does not activate protocol `2` and cannot stop a released 0.4.0 manager from claiming
+protocol-`1` work. Before declaring new submissions reference-only, configure one shared
+retrievable input namespace and ambient credentials for every task manager and Ray Job
+driver, deploy the exact final rq2 reader, pause claims/producers as needed, retire all
+0.4.0 and intermediate rq1 task-manager claimers, and upgrade or disable every older
+scheduled/manual `django_ray_purge_inputs` invocation before the first rq2 write. Older
+purge binaries understand neither `payload_kind` nor `ray_job_request_reference`: their
+dry run misreports an aged active request as unreferenced and `--delete` can remove its
+object. Resume purge only from the exact final rq2 code; where practical, revoke storage
+delete permission from retired runtime identities. Then close the existing
+legacy-admission latch with its revision and producer-retirement fence. Already submitted
+legacy and rq1 jobs may drain under upgraded reconciliation. Until the supported closure
+adapter lands, this is an explicit release blocker rather than a reason to mutate policy
+rows, tokens, or leases directly.
+Do not restore an older purge binary during rollback until every rq2 job has drained and
+every retained rq2 request reference and registry tombstone has expired.
 
 Strict Ray Core and Ray Job contexts carry their exact task identity and protocol into
 nested workflow steps, result-fold reducers, and distributed map, starmap, and scatter
@@ -451,8 +477,10 @@ Checks:
 
 Recovery:
 
-1. Let normal recovery run first (`detect_stuck_tasks` handles orphaned ownership and
-   Ray Job reconciliation can adopt persisted jobs from inactive workers).
+1. Let normal recovery run first. Production orphan reconciliation, timeout recovery,
+   and cancellation takeover are all limited to the worker's selected queues; a
+   compatible worker selected for that queue can adopt persisted Ray Jobs from inactive
+   workers.
 2. If needed, requeue only clearly orphaned/failed tasks using admin retry actions.
 
 Notes:
@@ -492,6 +520,12 @@ Notes:
 - A worker warning that submission acceptance is uncertain refers to a deterministic
   job ID that was persisted before the request. Let reconciliation resolve that exact
   ID; do not manually start another attempt while its Ray state is unknown.
+- A deterministic rq2 preparation rejection occurs before Ray submission. Invalid,
+  oversized, corrupt, misconfigured, or ambiguously bound requests suppress automatic
+  retry and retain only a fixed classification; a definitely pre-submission storage
+  outage may follow the configured retry policy. Once the submission request starts,
+  the exact job ID, address, and request reference remain one reconciliation tuple and
+  are never cleared merely because the client call failed.
 - A `RUNNING` row with non-null `completion_data` is between entrypoint publication
   and worker reconciliation. Cancellation reports `COMPLETION_PENDING`, and timeout
   recovery leaves it alone; let reconciliation consume the envelope even if Ray still
@@ -540,16 +574,20 @@ Checks:
    for task inputs or `ray_job_request_reference` for Ray Job requests) without copying
    the payload or reference into tickets or logs. A kind mismatch is ambiguous and must
    be corrected through a reviewed data repair, not guessed by cleanup.
-2. Confirm every enqueueing and worker process uses the same input backend, filesystem
-   root, bucket, prefix, and credentials.
+2. Confirm every enqueueing and task-manager process uses the same input backend,
+   filesystem root, bucket, prefix, and credentials. For rq2, the Ray Job driver must be
+   able to reach the exact locator namespace through its ambient workload identity or
+   environment; credentials must not be embedded in metadata or the locator.
 3. Verify the object exists and its access policy has not changed.
 4. If cleanup failed, inspect `cleanup_error` and fix storage access before rerunning.
 
 Recovery:
 
 1. Restore the exact content-addressed object or correct storage configuration.
-2. Use a controlled manual retry only after retrieval succeeds. Validation failures do
-   not auto-retry; storage retrieval failures may already follow normal retry policy.
+2. Use a controlled manual retry only after retrieval succeeds and the exact prior Ray
+   Job is proven quiescent. Validation failures do not auto-retry. A definitely
+   pre-submission request-store outage may follow normal retry policy, but a missing or
+   unreadable rq2 object observed by a started driver does not authorize replay.
 3. Preview retention with `django_ray_purge_inputs --retention-days=30` before using
    `--delete`. Increase retention when historical manual retry or audit access is needed.
 

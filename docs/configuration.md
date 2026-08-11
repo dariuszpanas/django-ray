@@ -269,7 +269,7 @@ required rolling-deployment order.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `MAX_INLINE_INPUT_SIZE_BYTES` | `int \| None` | `None` | Combined input-envelope threshold; `None` disables spillover |
-| `INPUT_STORAGE_BACKEND` | `str \| None` | `None` | Retrievable input backend: `"filesystem"`, `"s3"`, or `"gcs"` |
+| `INPUT_STORAGE_BACKEND` | `str \| None` | `None` | Retrievable task-input and Ray Job request backend: `"filesystem"`, `"s3"`, or `"gcs"` |
 | `INPUT_STORAGE_FILESYSTEM_PATH` | `str \| None` | `None` | Shared root required for the filesystem backend |
 | `INPUT_STORAGE_S3_BUCKET` | `str \| None` | `None` | Bucket required for the S3 backend |
 | `INPUT_STORAGE_S3_PREFIX` | `str` | `"django-ray/inputs"` | S3 object-key prefix |
@@ -278,8 +278,12 @@ required rolling-deployment order.
 | `INPUT_STORAGE_GCS_BUCKET` | `str \| None` | `None` | Bucket required for the GCS backend |
 | `INPUT_STORAGE_GCS_PREFIX` | `str` | `"django-ray/inputs"` | GCS object-key prefix |
 
-Spillover is opt-in. Configure a retrievable backend before setting the threshold;
-digest-only storage is not valid for inputs. See
+Argument spillover is opt-in. Configure a retrievable backend before setting the
+threshold; digest-only storage is not valid for inputs. Ray Job task managers require a
+retrievable backend even when the threshold remains `None`, because every new rq2
+submission externalizes its complete canonical execution request before opening the Ray
+client. Synchronous and Ray Core workers remain storage-optional while spillover is
+disabled. See
 [Durable Input Storage](reference/input-storage.md) for rollout, retention, and backend
 requirements.
 

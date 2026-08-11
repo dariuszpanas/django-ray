@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import runpy
 import sys
@@ -29,6 +30,14 @@ from django_ray.ray_job_protocol import (
     RAY_JOB_CONFIG_JSON_ENV_VAR,
     RAY_JOB_REQUEST_REJECTED_EXIT_CODE,
     build_ray_job_request_metadata,
+    build_ray_job_request_reference_metadata,
+)
+from django_ray.ray_job_request_storage import (
+    LoadedRayJobRequest,
+    RayJobRequestLoadError,
+    RayJobRequestLocator,
+    RayJobRequestStorageRejection,
+    encode_ray_job_request_locator,
 )
 from django_ray.workflow_plans import WorkflowPlanMismatchError
 
@@ -78,6 +87,42 @@ def _strict_config(request: ExecutionRequest, serialized: str) -> str:
             "runtime_env": {},
             "metadata": build_ray_job_request_metadata(request, serialized),
         }
+    )
+
+
+def _rq2_config(
+    request: ExecutionRequest,
+    serialized: str,
+    locator: RayJobRequestLocator,
+) -> str:
+    encoded_locator = encode_ray_job_request_locator(locator)
+    return json.dumps(
+        {
+            "runtime_env": {},
+            "metadata": build_ray_job_request_reference_metadata(
+                request,
+                serialized,
+                locator.reference,
+                encoded_locator,
+            ),
+        }
+    )
+
+
+def _rq2_locator(serialized: str, *, reference: str | None = None) -> RayJobRequestLocator:
+    payload = serialized.encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    size_bytes = len(payload)
+    resolved_reference = reference or (
+        f"resultfs://sha256/{digest}?rel={digest[:2]}/{digest[2:4]}/{digest}.json"
+        f"&bytes={size_bytes}"
+    )
+    return RayJobRequestLocator(
+        backend="filesystem",
+        reference=resolved_reference,
+        digest=digest,
+        size_bytes=size_bytes,
+        filesystem_path="/var/lib/django-ray/requests",
     )
 
 
@@ -203,6 +248,470 @@ class TestEntrypointPayload:
             "_strict_execution_request": True,
         }
 
+    def test_rq2_reference_validates_locator_metadata_and_request_before_dispatch(
+        self,
+        monkeypatch,
+    ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+
+        request, serialized = _strict_request(transport_version=2)
+        locator = _rq2_locator(serialized)
+        loaded = LoadedRayJobRequest(
+            serialized_request=serialized,
+            request=request,
+            locator=locator,
+            reference=locator.reference,
+            digest=locator.digest,
+            size_bytes=locator.size_bytes,
+        )
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _rq2_config(request, serialized, locator),
+        )
+        events: list[str] = []
+        captured: dict[str, object] = {}
+        validate_binding = entrypoint.validate_ray_job_request_reference_expectation
+
+        def tracked_validation(expectation, **kwargs):
+            events.append(
+                "metadata-carrier"
+                if kwargs.get("request_locator") is not None
+                else (
+                    "metadata-request"
+                    if kwargs.get("expected_identity") is not None
+                    else "metadata-locator"
+                )
+            )
+            return validate_binding(expectation, **kwargs)
+
+        def fake_execute_task(**kwargs):
+            events.append("execute")
+            captured.update(kwargs)
+            return '{"success":true}'
+
+        monkeypatch.setattr(
+            request_storage,
+            "decode_ray_job_request_locator",
+            lambda value: events.append("decode-locator") or locator,
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda value: events.append("load-request") or loaded,
+        )
+        monkeypatch.setattr(
+            entrypoint,
+            "validate_ray_job_request_reference_expectation",
+            tracked_validation,
+        )
+        monkeypatch.setattr(entrypoint, "execute_task", fake_execute_task)
+        monkeypatch.setattr(
+            entrypoint,
+            "bootstrap_django",
+            lambda: pytest.fail("rq2 validation must precede Django bootstrap"),
+        )
+
+        result = entrypoint.execute_task_from_reference(encode_ray_job_request_locator(locator))
+
+        assert result == '{"success":true}'
+        assert events == [
+            "metadata-carrier",
+            "decode-locator",
+            "metadata-locator",
+            "load-request",
+            "metadata-request",
+            "execute",
+        ]
+        assert captured == {
+            "callable_path": request.callable_path,
+            "serialized_args": request.serialized_args,
+            "serialized_kwargs": request.serialized_kwargs,
+            "task_execution_pk": request.identity.task_execution_pk,
+            "task_id": request.identity.task_id,
+            "attempt_number": request.identity.attempt_number,
+            "execution_generation": request.identity.execution_generation,
+            "runtime_env_profile": request.runtime_env_profile,
+            "runtime_env_hash": request.runtime_env_hash,
+            "runtime_env_plan_identity": request.runtime_env_plan_identity,
+            "input_reference": request.input_reference,
+            "ray_job_driver": True,
+            "_completion_identity": request.identity,
+            "_execution_protocol_version": request.execution_protocol_version,
+            "_strict_execution_request": True,
+        }
+
+    @pytest.mark.parametrize("config", [None, "{"])
+    def test_rq2_missing_or_invalid_metadata_rejects_before_storage_or_application(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        config: str | None,
+    ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+
+        if config is None:
+            monkeypatch.delenv(RAY_JOB_CONFIG_JSON_ENV_VAR, raising=False)
+        else:
+            monkeypatch.setenv(RAY_JOB_CONFIG_JSON_ENV_VAR, config)
+        monkeypatch.setattr(
+            request_storage,
+            "decode_ray_job_request_locator",
+            lambda _value: pytest.fail("unbound rq2 input must precede locator decode"),
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda _value: pytest.fail("unbound rq2 input must precede storage I/O"),
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_reference("bounded-locator")
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(encoded)["error"] == "execution request rejected: invalid_versioned"
+
+    def test_rq2_invalid_locator_rejects_after_exact_metadata_binding_before_storage_io(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+
+        request, serialized = _strict_request()
+        locator = _rq2_locator(serialized)
+        invalid_token = "e30"
+        metadata = build_ray_job_request_reference_metadata(
+            request,
+            serialized,
+            locator.reference,
+            invalid_token,
+        )
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            json.dumps({"runtime_env": {}, "metadata": metadata}),
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda _value: pytest.fail("invalid rq2 locator must precede storage I/O"),
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_reference(invalid_token)
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(encoded)["error"] == "execution request rejected: invalid_versioned"
+
+    def test_rq2_reference_binding_mismatch_rejects_before_storage_io(
+        self,
+        monkeypatch,
+    ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+
+        request, serialized = _strict_request()
+        submitted_locator = _rq2_locator(serialized)
+        submitted_token = encode_ray_job_request_locator(submitted_locator)
+        metadata = build_ray_job_request_reference_metadata(
+            request,
+            serialized,
+            submitted_locator.reference,
+            submitted_token,
+        )
+        metadata["django_ray_request_reference_sha256"] = "0" * 64
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            json.dumps({"runtime_env": {}, "metadata": metadata}),
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "decode_ray_job_request_locator",
+            lambda _value: submitted_locator,
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda _value: pytest.fail("mismatched rq2 metadata must precede storage I/O"),
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_reference(submitted_token)
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(encoded)["error"] == "execution request rejected: invalid_versioned"
+
+    @pytest.mark.parametrize("location_kind", ["filesystem", "s3-endpoint"])
+    def test_rq2_changed_locator_location_rejects_before_decode_or_storage_io(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        location_kind: str,
+    ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+        from django_ray.result_storage import _build_object_key, _object_reference
+
+        request, serialized = _strict_request()
+        if location_kind == "filesystem":
+            submitted_locator = _rq2_locator(serialized)
+            changed_locator = replace(
+                submitted_locator,
+                filesystem_path="/attacker-controlled/requests",
+            )
+        else:
+            payload = serialized.encode("utf-8")
+            digest = hashlib.sha256(payload).hexdigest()
+            prefix = "requests/rq2"
+            submitted_locator = RayJobRequestLocator(
+                backend="s3",
+                reference=_object_reference(
+                    scheme="s3",
+                    bucket="request-bucket",
+                    key=_build_object_key(prefix, digest),
+                    size_bytes=len(payload),
+                ),
+                digest=digest,
+                size_bytes=len(payload),
+                s3_bucket="request-bucket",
+                s3_prefix=prefix,
+                s3_region="us-test-1",
+                s3_endpoint_url="https://objects.example.invalid:9443",
+            )
+            changed_locator = replace(
+                submitted_locator,
+                s3_endpoint_url="https://attacker.example.invalid:9443",
+            )
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _rq2_config(request, serialized, submitted_locator),
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "decode_ray_job_request_locator",
+            lambda _value: pytest.fail(
+                "a changed rq2 locator must be rejected before path resolution"
+            ),
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda _value: pytest.fail(
+                "a changed rq2 locator must be rejected before reader construction"
+            ),
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_reference(
+            encode_ray_job_request_locator(changed_locator)
+        )
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(encoded)["error"] == "execution request rejected: invalid_versioned"
+
+    def test_rq2_oversized_locator_rejects_before_decode_storage_or_application(
+        self,
+        monkeypatch,
+    ) -> None:
+        import django_ray.ray_job_protocol as ray_job_protocol
+        import django_ray.ray_job_request_storage as request_storage
+
+        request, serialized = _strict_request()
+        locator = _rq2_locator(serialized)
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _rq2_config(request, serialized, locator),
+        )
+        monkeypatch.setattr(ray_job_protocol, "RAY_JOB_REQUEST_LOCATOR_MAX_CHARS", 8)
+        monkeypatch.setattr(request_storage, "RAY_JOB_REQUEST_LOCATOR_MAX_CHARS", 8)
+        monkeypatch.setattr(
+            request_storage.base64,
+            "b64decode",
+            lambda *_args, **_kwargs: pytest.fail(
+                "oversized rq2 locator must be rejected before base64 decode"
+            ),
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda _value: pytest.fail("oversized rq2 locator must precede storage I/O"),
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_reference("A" * 9)
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(encoded)["error"] == "execution request rejected: resource_limit"
+
+    @pytest.mark.parametrize(
+        "classification",
+        [
+            RayJobRequestStorageRejection.RESOURCE_LIMIT,
+            RayJobRequestStorageRejection.STORAGE_UNAVAILABLE,
+            RayJobRequestStorageRejection.INTEGRITY_MISMATCH,
+        ],
+    )
+    def test_rq2_load_failure_is_fixed_and_never_crosses_application_boundary(
+        self,
+        monkeypatch,
+        classification: RayJobRequestStorageRejection,
+    ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+
+        request, serialized = _strict_request()
+        locator = _rq2_locator(serialized)
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _rq2_config(request, serialized, locator),
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "decode_ray_job_request_locator",
+            lambda _value: locator,
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda _value: (_ for _ in ()).throw(RayJobRequestLoadError(classification)),
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_reference(encode_ray_job_request_locator(locator))
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        expected_error = (
+            "resource_limit"
+            if classification is RayJobRequestStorageRejection.RESOURCE_LIMIT
+            else "invalid_versioned"
+        )
+        assert json.loads(encoded) == {
+            "error": f"execution request rejected: {expected_error}",
+            "exception_type": "RayExecutionRequestIncompatible",
+            "result": None,
+            "result_reference": None,
+            "retryable": False,
+            "success": False,
+            "traceback": None,
+        }
+
+    def test_rq2_loaded_non_ray_job_transport_rejects_before_application(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+
+        expected_request, _expected_serialized = _strict_request()
+        loaded_request, loaded_serialized = _strict_request(
+            compiled_graph_submission_transport="ray-client"
+        )
+        locator = _rq2_locator(loaded_serialized)
+        loaded = LoadedRayJobRequest(
+            serialized_request=loaded_serialized,
+            request=loaded_request,
+            locator=locator,
+            reference=locator.reference,
+            digest=locator.digest,
+            size_bytes=locator.size_bytes,
+        )
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _rq2_config(expected_request, loaded_serialized, locator),
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "decode_ray_job_request_locator",
+            lambda _value: locator,
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda _value: loaded,
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_reference(encode_ray_job_request_locator(locator))
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(encoded)["error"] == "execution request rejected: unsupported_transport"
+
+    def test_rq2_loaded_identity_mismatch_rejects_before_input_or_callable_import(
+        self,
+        monkeypatch,
+    ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+
+        expected_request, _expected_serialized = _strict_request()
+        replacement_identity = replace(expected_request.identity, execution_generation=99)
+        loaded_request = replace(expected_request, identity=replacement_identity)
+        loaded_serialized = encode_execution_request(loaded_request)
+        locator = _rq2_locator(loaded_serialized)
+        loaded = LoadedRayJobRequest(
+            serialized_request=loaded_serialized,
+            request=loaded_request,
+            locator=locator,
+            reference=locator.reference,
+            digest=locator.digest,
+            size_bytes=locator.size_bytes,
+        )
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _rq2_config(expected_request, loaded_serialized, locator),
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "decode_ray_job_request_locator",
+            lambda _value: locator,
+        )
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda _value: loaded,
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_reference(encode_ray_job_request_locator(locator))
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(encoded)["error"] == "execution request rejected: identity_mismatch"
+
+    @pytest.mark.parametrize("selected_transport", ["payload", "request_reference"])
+    def test_control_plane_binding_cannot_cross_request_transport(
+        self,
+        monkeypatch,
+        selected_transport: str,
+    ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+
+        request, serialized = _strict_request()
+        locator = _rq2_locator(serialized)
+        if selected_transport == "payload":
+            monkeypatch.setenv(
+                RAY_JOB_CONFIG_JSON_ENV_VAR,
+                _rq2_config(request, serialized, locator),
+            )
+            monkeypatch.setattr(
+                entrypoint,
+                "_decode_payload_b64",
+                lambda _value: pytest.fail("rq2 metadata must not enter the rq1 decoder"),
+            )
+
+            def execute() -> str:
+                return entrypoint.execute_task_from_payload(_payload_b64(serialized))
+        else:
+            monkeypatch.setenv(
+                RAY_JOB_CONFIG_JSON_ENV_VAR,
+                _strict_config(request, serialized),
+            )
+            monkeypatch.setattr(
+                request_storage,
+                "decode_ray_job_request_locator",
+                lambda _value: pytest.fail("rq1 metadata must not enter the rq2 locator decoder"),
+            )
+
+            def execute() -> str:
+                return entrypoint.execute_task_from_reference("bounded-locator")
+
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = execute()
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(encoded)["error"] == ("execution request rejected: unsupported_transport")
+
     def test_legacy_payload_accepts_released_ray_job_metadata(self, monkeypatch) -> None:
         payload = {
             "callable_path": "myapp.tasks.legacy",
@@ -287,7 +796,15 @@ class TestEntrypointPayload:
 
     @pytest.mark.parametrize(
         "failure",
-        ["invalid_alphabet", "invalid_padding", "resource_limit"],
+        [
+            "wrong_type",
+            "non_ascii",
+            "invalid_alphabet",
+            "invalid_padding",
+            "decoded_resource_limit",
+            "resource_limit",
+            "invalid_utf8",
+        ],
     )
     def test_strict_payload_decode_failure_is_fixed_and_secret_free(
         self,
@@ -301,10 +818,24 @@ class TestEntrypointPayload:
         )
         _booby_trap_application_seams(monkeypatch)
         secret = "RAY_JOB_PAYLOAD_SECRET"
-        if failure == "resource_limit":
+        if failure == "wrong_type":
+            submitted: object = None
+            expected = ExecutionRequestRejection.INVALID_VERSIONED
+        elif failure == "non_ascii":
+            submitted = "é"
+            expected = ExecutionRequestRejection.INVALID_VERSIONED
+        elif failure == "decoded_resource_limit":
+            monkeypatch.setattr(entrypoint, "EXECUTION_REQUEST_MAX_BYTES", 2)
+            monkeypatch.setattr(entrypoint, "_MAX_RAY_JOB_PAYLOAD_B64_BYTES", 4)
+            submitted = base64.urlsafe_b64encode(b"abc").decode("ascii")
+            expected = ExecutionRequestRejection.RESOURCE_LIMIT
+        elif failure == "resource_limit":
             monkeypatch.setattr(entrypoint, "_MAX_RAY_JOB_PAYLOAD_B64_BYTES", 8)
             submitted = _payload_b64(json.dumps({"secret": secret}))
             expected = ExecutionRequestRejection.RESOURCE_LIMIT
+        elif failure == "invalid_utf8":
+            submitted = base64.urlsafe_b64encode(b"\xff").decode("ascii")
+            expected = ExecutionRequestRejection.INVALID_VERSIONED
         elif failure == "invalid_padding":
             submitted = "e30"
             expected = ExecutionRequestRejection.INVALID_VERSIONED
@@ -312,7 +843,7 @@ class TestEntrypointPayload:
             submitted = f"%%%{secret}%%%"
             expected = ExecutionRequestRejection.INVALID_VERSIONED
 
-        encoded = entrypoint.execute_task_from_payload(submitted)
+        encoded = entrypoint.execute_task_from_payload(submitted)  # type: ignore[arg-type]
         decoded = decode_execution_completion(
             encoded,
             expected_identity=request.identity,
@@ -322,6 +853,26 @@ class TestEntrypointPayload:
         assert decoded.completion.error == f"execution request rejected: {expected.value}"
         assert decoded.completion.retryable is False
         assert secret not in encoded
+
+    def test_unversioned_codec_resource_limit_rejects_without_legacy_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import django_ray.execution_codec as execution_codec
+
+        monkeypatch.delenv(RAY_JOB_CONFIG_JSON_ENV_VAR, raising=False)
+        monkeypatch.setattr(execution_codec, "EXECUTION_REQUEST_MAX_BYTES", 2)
+        monkeypatch.setattr(
+            entrypoint,
+            "_execute_legacy_payload",
+            lambda _value: pytest.fail("resource-limited JSON must not enter the legacy adapter"),
+        )
+        _booby_trap_application_seams(monkeypatch)
+
+        encoded = entrypoint.execute_task_from_payload(_payload_b64("abc"))
+
+        assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(encoded)["error"] == "execution request rejected: resource_limit"
 
     def test_oversized_payload_rejects_before_base64_json_or_application(
         self,
@@ -467,6 +1018,42 @@ class TestEntrypointPayload:
         assert output == "django-ray task completed successfully"
         assert "secret" not in output
 
+    def test_main_routes_request_reference_without_payload_fallback(
+        self,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        """The rq2 CLI source must remain distinct from rq1 and legacy payloads."""
+        seen: list[str] = []
+        monkeypatch.setattr(
+            entrypoint,
+            "execute_task_from_reference",
+            lambda value: seen.append(value) or '{"success":true}',
+        )
+        monkeypatch.setattr(
+            entrypoint,
+            "execute_task_from_payload",
+            lambda _value: pytest.fail("rq2 must not fall back to the payload adapter"),
+        )
+
+        exit_code = entrypoint.main(["--request-ref-b64", "bounded-locator"])
+
+        assert exit_code == 0
+        assert seen == ["bounded-locator"]
+        assert capsys.readouterr().out.strip() == "django-ray task completed successfully"
+
+    def test_main_rejects_ambiguous_request_sources(self) -> None:
+        """One Ray Job driver invocation selects exactly one request transport."""
+        with pytest.raises(SystemExit, match="2"):
+            entrypoint.main(
+                [
+                    "--payload-b64",
+                    "released-payload",
+                    "--request-ref-b64",
+                    "rq2-locator",
+                ]
+            )
+
     def test_main_uses_dedicated_exit_for_fixed_strict_rejection(
         self,
         monkeypatch,
@@ -486,6 +1073,30 @@ class TestEntrypointPayload:
         assert captured.err.strip() == (
             "django-ray task failed: execution request rejected: invalid_versioned"
         )
+
+    def test_main_uses_exit_78_for_rq2_locator_rejection(
+        self,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        request, serialized = _strict_request()
+        locator = _rq2_locator(serialized)
+        monkeypatch.setenv(
+            RAY_JOB_CONFIG_JSON_ENV_VAR,
+            _rq2_config(request, serialized, locator),
+        )
+        _booby_trap_application_seams(monkeypatch)
+        secret = "RQ2_LOCATOR_SECRET"
+
+        exit_code = entrypoint.main(["--request-ref-b64", f"%%%{secret}%%%"])
+        captured = capsys.readouterr()
+
+        assert exit_code == RAY_JOB_REQUEST_REJECTED_EXIT_CODE
+        assert captured.out == ""
+        assert captured.err.strip() == (
+            "django-ray task failed: execution request rejected: invalid_versioned"
+        )
+        assert secret not in captured.err
 
     def test_main_keeps_accepted_strict_application_failure_at_zero(
         self,

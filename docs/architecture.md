@@ -298,8 +298,8 @@ locks on the registry and both referencing columns prevent cleanup from deleting
 payload while another writer is registering the same content. A kind mismatch or a
 reference present in both columns is ambiguous and remains retained. Every writer that
 attaches or reactivates either kind must use the same registry-then-execution lock order;
-the rq2 transport slice must prove that ordering under PostgreSQL before it can activate
-request-reference writes.
+the rq2 request writer and its definite pre-submission release path use that ordering so
+cleanup cannot delete an object between registration and attachment.
 
 Migration `0021` adds this typed registry and request-reference link as dormant schema.
 Existing and released writers omit the new kind and receive the database default
@@ -369,12 +369,13 @@ reports `PENDING` or `RUNNING` follows the same exact-stop, no-auto-retry path; 
 a terminal Ray state can enter normal failure/retry handling. A submitter that outlives
 its worker lease distinguishes a same-identity ownership handoff from
 an execution replacement: it drops only its local tracker after handoff and never
-stops the adopted job. If Ray returns a submission identity different from the durable
-reservation, a valid exact owner stops both capabilities while holding the
-lease-to-execution fence, always stopping the undiscoverable observed job before the
-durable reservation, and consumes any already-published durable completion before
-closing the channel. A process that lost or transferred its lease stops only the
-untracked observed capability, preserving the reserved job for its replacement owner.
+stops the adopted job. A submission identity returned by the Jobs API is untrusted and
+never becomes a control capability: if it differs from the deterministic durable
+reservation, the runner emits a fixed acceptance-uncertain result without retaining,
+logging, comparing through attacker-defined hooks, or stopping that returned value.
+Reconciliation remains pinned to the exact job ID, address, and request reference that
+were durably bound before submission. Discovery or cleanup of any differently named
+remote job requires separately authenticated evidence; the raw API return is not enough.
 Ray Job success, failure, stop, missing-envelope, and timeout
 decisions also revalidate the exact observed completion envelope under the task row
 lock, so a concurrently published completion remains available to reconciliation.
@@ -516,17 +517,35 @@ while running:
 
 - Uses Ray Job Submission API.
 - New task managers build the same canonical flat versioned execution request used by
-  Ray Core directly from the durable input JSON or opaque input reference. The worker
-  submits that request through the payload transport command:
-  - `python -m django_ray.runtime.entrypoint --payload-b64 <...>`
+  Ray Core directly from the durable input JSON or opaque input reference. They enforce
+  its one fixed UTF-8 ceiling, store the exact canonical bytes in the configured
+  retrievable input backend, register and bind that request to the exact durable
+  execution, and only then open the Ray client or upload RuntimeEnv artifacts. The
+  submitted command contains only a bounded locator:
+  - `python -m django_ray.runtime.entrypoint --request-ref-b64 <...>`
+- Control-only runner construction and drain reconciliation do not require request
+  storage. The Ray Job task-manager command validates storage before creating its lease,
+  and every direct/public submission validates it again before opening a Ray client.
+- The public submission path reserves the exact durable rq2 tuple under a row lock. A
+  concurrent caller never submits or releases that tuple and receives a fixed uncertain
+  result until the reservation owner either crosses the Ray request boundary or releases
+  a definitely unsubmitted failure.
 - The request carries the callable, input transport, complete task identity, execution
-  protocol, and bounded RuntimeEnv identity. Independently bound Ray Job metadata
-  carries the expected identity, protocol, and request digest so the driver can validate
-  the command. A replacement manager validates the persisted strict job ID plus bounded
-  identity and protocol metadata; it does not reconstruct the command to infer effects.
-- An upgraded driver validates the metadata and canonical request before Django setup,
-  input hydration, application callable import, or invocation. Any strict marker opts
-  the whole submission into this check and cannot fall back to the legacy adapter.
+  protocol, and bounded RuntimeEnv identity. Rq2 metadata carries only fixed protocol
+  markers, an opaque coordination digest, the execution protocol, the request digest and
+  byte count, and hashes of the persisted request reference and exact locator token. It
+  does not disclose the
+  public task ID, callable, argument values, raw RuntimeEnv identity, or storage
+  credentials. A replacement manager validates that bounded metadata against the exact
+  persisted ID and reference; it does not retrieve request bytes from JobInfo or infer
+  effects from the command.
+- An rq2 driver first validates the bounded canonical locator and its metadata binding,
+  retrieves the content-addressed request through the locator's non-secret allowlisted
+  storage coordinates, and validates its declared size, SHA-256, canonical schema,
+  identity, protocol, and inner input transport before Django setup, input hydration,
+  application callable import, or invocation. Credentials remain ambient workload
+  identity or environment and never enter the locator. Any rq2 marker opts the whole
+  submission into this check and cannot fall back to rq1 or the legacy adapter.
 - Applies the same persisted RuntimeEnv snapshot to the submitted Ray Job.
 - Carries durable task identity into the driver and initializes Ray lazily for
   nested workflows, giving Ray Job and Ray Core the same graph/progress protocol.
@@ -535,8 +554,10 @@ while running:
   missing or malformed envelopes as initially non-terminal, then applies bounded
   recovery without duplicating a still-active Ray Job; Ray stdout/stderr is diagnostic
   only.
-- Workers can adopt orphaned persisted Ray Job handles from inactive workers and continue reconciliation
-  instead of immediately retrying duplicate work.
+- Workers selected for the execution's queue can adopt orphaned persisted Ray Job
+  handles from inactive workers and continue reconciliation instead of immediately
+  retrying duplicate work. Queue selection is checked before orphan reconciliation,
+  timeout recovery, cancellation takeover, or Ray status/stop I/O.
 - A strict request rejection has one fixed driver exit classification, but an exit code
   cannot prove how far the driver progressed or whether application effects occurred.
   Every strict terminal driver with a verified binding but no exact completion envelope
@@ -544,9 +565,11 @@ while running:
   non-retryable outcome. An unverifiable binding instead follows the exact-stop,
   `LOST`, no-auto-retry quarantine. Reconciliation never fetches logs for authority or
   automatically replays either class of work.
-- Released unversioned protocol-v1 payloads remain an explicit legacy adapter. The flat
-  strict request also retains the fields understood by the released entrypoint, so old
-  and new managers/drivers can drain protocol-v1 work in either deployment order.
+- Released unversioned protocol-v1 payloads and the earlier strict rq1 inline transport
+  remain explicit drain adapters. New submissions are rq2 only. Because all three carry
+  execution protocol `1`, operators must retire older task-manager claimers and close
+  legacy admission before treating a deployment as reference-only; already submitted
+  legacy/rq1 jobs can still drain under upgraded reconciliation.
 
 ## Entrypoint Contract
 
@@ -586,6 +609,16 @@ the new code everywhere while `MAX_INLINE_INPUT_SIZE_BYTES` remains `None`, then
 old Ray Job drivers before enabling spillover. Existing inline rows remain valid;
 referenced Ray Jobs use transport version 2 and contain only `input_reference`. Before
 rolling back, disable spillover and drain every task that already has a reference.
+
+Migration `0021` adds the separately typed Ray Job request reference used by rq2. It is
+additive and dormant under 0.4.0 writers, but an rq2 task manager requires a retrievable
+`INPUT_STORAGE_BACKEND` even when argument spillover remains disabled. Configure the
+same backend namespace and ambient credentials for task managers and Ray Job drivers,
+deploy the final rq2 reader, stop every 0.4.0 and intermediate rq1 task-manager claimer,
+upgrade or disable every older scheduled/manual input-purge command, and close the
+existing legacy-admission latch before resuming new Ray Job claims. Keep the old
+namespace available until every retained request reference and purge tombstone expires.
+Do not activate protocol `2`; rq2 is an outer carrier for protocol `1`.
 
 Migrations `0010` and `0011` add nullable workflow-run and effective-plan identity,
 selection, and pinned-attempt fields. They do not rewrite legacy progress, and older
@@ -778,14 +811,15 @@ trigger remains the independent backstop for writers that do not use this applic
 path.
 
 Ray Job reconciliation, stuck/timeout recovery, and cancellation processing capture
-that same exact lease range in a short lease-first transaction before querying global
-execution state. Their active-task lookup and `RUNNING` or `CANCELLING` discovery
-queries apply the range before iteration, so an incompatible manager neither contacts
-Ray for an unsupported task nor changes its durable owner or source lease. Unsupported
-in-memory Ray Job tracking is forgotten locally and may be recovered later by a
-compatible cohort. The final remote or durable effect still passes through the
-authoritative lease-then-execution lock, and candidate compatibility is checked before
-an inactive source lease can be retired during takeover.
+that same exact lease range in a short lease-first transaction before querying eligible
+execution state. Production scans apply both the worker's selected queues and the
+protocol range before iteration, so an out-of-queue or incompatible manager neither
+contacts Ray nor changes the task's durable owner or source lease. Unsupported in-memory
+Ray Job tracking is forgotten locally and may be recovered later by a compatible
+cohort. The final remote or durable effect still passes through the authoritative
+lease-then-execution lock, and candidate compatibility is checked before an inactive
+source lease can be retired during takeover. Direct administrative calls that omit a
+queue selection retain the all-queue recovery contract.
 
 Package-owned lifecycle entry points also default to the package's supported execution-
 protocol range and compare that range with the immutable protocol under the execution-
@@ -861,10 +895,14 @@ non-retryable transport failure without remote exception text or executor proven
 The missing envelope cannot prove application quiescence or safe replay, so ordinary
 automatic retry policy must not reinterpret that transport loss as a task failure.
 
-Ray Job uses that canonical request through its persisted submission command and binds
-the expected identity, protocol, and request digest independently in bounded Ray Job
-metadata. The driver reads and validates both before Django setup, input hydration, or
-application callable import/invocation, then publishes the same enriched completion.
+Ray Job stores that canonical request in the retrievable input backend, binds the exact
+reference to the execution, and passes only a bounded rq2 locator through the persisted
+submission command. Independently bounded metadata carries an opaque coordination
+digest, protocol, request content identity, request-reference hash, and exact canonical
+locator-token hash. The driver validates the whole locator binding before storage I/O
+and the retrieved canonical bytes before
+Django setup, input hydration, or application callable import/invocation, then publishes
+the same enriched completion.
 The dedicated rejection exit classification is diagnostic only: without the exact
 completion, reconciliation cannot prove the phase or absence of application effects.
 Every strict terminal driver with a verified binding but missing that completion waits
@@ -872,15 +910,10 @@ for publication grace and then receives a fixed generic non-retryable outcome. A
 unverifiable binding instead follows the exact-stop, `LOST`, no-auto-retry quarantine;
 Ray Job logs are not authority for either case. Persisted strict job IDs plus bounded
 identity and protocol metadata let a compatible replacement manager reconcile the same
-job without rewriting its task identity or generation. Unversioned released payloads
-remain protocol-v1 legacy input, and the flat versioned request remains readable by the
-released entrypoint during the drain window.
-
-The current shell transport still places inline request bytes in `--payload-b64`; its
-mandatory command-size and control-plane-confidentiality replacement is tracked
-separately. Operators should enable durable input references for large or sensitive
-inputs and must not interpret strict parsing as proof that arbitrary command length is
-portable.
+job without rewriting its task identity or generation. Rq2 never falls back to the
+earlier inline transports. Unversioned released payloads and rq1 remain protocol-v1 drain
+inputs only; upgraded managers continue to reconcile them while their already submitted
+jobs finish.
 
 Strict outer Ray Core and Ray Job contexts now extend the same immutable task identity
 and execution protocol through nested workflow steps, result-fold actors, and

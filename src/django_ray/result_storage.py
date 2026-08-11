@@ -14,8 +14,6 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote, unquote, urlsplit
 
-from django_ray.conf.settings import get_settings
-
 _REFERENCE_MAX_LENGTH = 500
 _MAX_REFERENCE_BYTE_COUNT = 9_223_372_036_854_775_807
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -31,8 +29,19 @@ _DEFAULT_INPUT_S3_PREFIX = "django-ray/inputs"
 _DEFAULT_INPUT_GCS_PREFIX = "django-ray/inputs"
 
 
+def get_settings() -> dict[str, Any]:
+    """Load Django-backed settings only when a caller omits explicit config."""
+    from django_ray.conf.settings import get_settings as load_settings
+
+    return load_settings()
+
+
 class ResultStorageError(RuntimeError):
     """Raised when result storage operations fail."""
+
+
+class ResultStorageIntegrityError(ResultStorageError):
+    """Raised when stored bytes do not match their content-addressed reference."""
 
 
 @dataclass(frozen=True)
@@ -363,14 +372,14 @@ def _verified_payload(payload: object, metadata: _ResultReference) -> str:
         or len(payload) != metadata.size_bytes
         or hashlib.sha256(payload).hexdigest() != metadata.digest
     ):
-        raise ResultStorageError("Stored result payload failed integrity verification")
+        raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
     decoded: str | None = None
     try:
         decoded = payload.decode("utf-8")
     except UnicodeDecodeError:
         pass
     if decoded is None:
-        raise ResultStorageError("Stored result payload failed integrity verification")
+        raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
     return decoded
 
 
@@ -422,7 +431,7 @@ def _read_filesystem_payload(
     if size is None:
         raise ResultStorageError(unavailable_message)
     if type(size) is not int or size != metadata.size_bytes:
-        raise ResultStorageError("Stored result payload failed integrity verification")
+        raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
 
     payload: bytes | None = None
     try:
@@ -849,7 +858,7 @@ class S3ResultStorage:
             raise ResultStorageError("Result payload is unavailable from S3 storage") from None
         if type(content_length) is not int or content_length != metadata.size_bytes or body is None:
             _close_response_body(body)
-            raise ResultStorageError("Stored result payload failed integrity verification")
+            raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
 
         payload: object | None = None
         read_failed = False
@@ -1011,7 +1020,7 @@ class GCSResultStorage:
         if failed:
             raise ResultStorageError("Result payload is unavailable from GCS storage") from None
         if type(blob_size) is not int or blob_size != metadata.size_bytes:
-            raise ResultStorageError("Stored result payload failed integrity verification")
+            raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
         generation: object | None = None
         try:
             generation = blob.generation
@@ -1020,7 +1029,7 @@ class GCSResultStorage:
         if failed:
             raise ResultStorageError("Result payload is unavailable from GCS storage") from None
         if type(generation) is not int or generation <= 0:
-            raise ResultStorageError("Stored result payload failed integrity verification")
+            raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
 
         payload: object | None = None
         try:

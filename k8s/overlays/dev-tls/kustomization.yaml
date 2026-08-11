@@ -106,17 +106,17 @@ patches:
           name: RAY_TLS_CA_CERT
           value: "/etc/ray/tls/ca.crt"
       - op: add
-        path: /spec/template/spec/containers/0/volumeMounts
+        path: /spec/template/spec/containers/0/volumeMounts/-
         value:
-          - name: ray-tls
-            mountPath: /etc/ray/tls
-            readOnly: true
+          name: ray-tls
+          mountPath: /etc/ray/tls
+          readOnly: true
       - op: add
-        path: /spec/template/spec/volumes
+        path: /spec/template/spec/volumes/-
         value:
-          - name: ray-tls
-            secret:
-              secretName: ray-tls-certs
+          name: ray-tls
+          secret:
+            secretName: ray-tls-certs
 
   # Django-Ray Worker TLS configuration
   - target:
@@ -144,17 +144,17 @@ patches:
           name: RAY_TLS_CA_CERT
           value: "/etc/ray/tls/ca.crt"
       - op: add
-        path: /spec/template/spec/containers/0/volumeMounts
+        path: /spec/template/spec/containers/0/volumeMounts/-
         value:
-          - name: ray-tls
-            mountPath: /etc/ray/tls
-            readOnly: true
+          name: ray-tls
+          mountPath: /etc/ray/tls
+          readOnly: true
       - op: add
-        path: /spec/template/spec/volumes
+        path: /spec/template/spec/volumes/-
         value:
-          - name: ray-tls
-            secret:
-              secretName: ray-tls-certs
+          name: ray-tls
+          secret:
+            secretName: ray-tls-certs
 
 images:
   - name: django-ray

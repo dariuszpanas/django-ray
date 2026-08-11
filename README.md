@@ -314,6 +314,12 @@ PostgreSQL and migration ordering.
 
 ### Queue Configuration
 
+The unqualified commands below select Ray Job mode. Configure a retrievable
+`INPUT_STORAGE_BACKEND` (including its filesystem root or object-store namespace) before
+starting them; new rq2 submissions always externalize the canonical execution request.
+For source-checkout development without shared request storage, add `--local` or use
+`uv run make worker-local`/`worker-all` instead.
+
 ```bash
 # Single queue
 uv run python testproject/manage.py django_ray_worker --queue=default

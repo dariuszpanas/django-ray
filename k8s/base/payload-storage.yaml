@@ -1,0 +1,18 @@
+# Shared task-input and Ray Job request payloads for evaluation and local
+# maintainer validation only. Production deployments should normally use a
+# scoped object-storage namespace and workload identity instead.
+#
+# The sample requires an RWX-capable StorageClass/provisioner. Django writers
+# mount this claim read-write; generic Ray head and worker pods mount it
+# read-only so rq2 drivers can retrieve an already content-addressed request.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: payload-storage-pvc
+  namespace: django-ray
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 256Mi

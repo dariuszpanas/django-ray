@@ -38,12 +38,23 @@ from django_ray.models import (
 )
 from django_ray.protocol_coordination import close_legacy_worker_admission
 from django_ray.ray_job_protocol import (
+    STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX,
     STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX,
     STRICT_RAY_JOB_SUBMISSION_ID_PREFIX,
     build_ray_job_request_metadata,
+    build_ray_job_request_reference_metadata,
+)
+from django_ray.ray_job_request_storage import (
+    RayJobRequestLocator,
+    encode_ray_job_request_locator,
+    ray_job_request_reference_content_identity,
 )
 from django_ray.redaction import normalize_terminal_text
-from django_ray.runner import RayJobSubmissionUncertainError
+from django_ray.runner import (
+    RayJobRequestPreparationError,
+    RayJobRequestPreparationRejection,
+    RayJobSubmissionUncertainError,
+)
 from django_ray.runner.base import JobInfo, JobStatus, SubmissionHandle
 from django_ray.runner.cancellation import (
     CancellationOutcome,
@@ -192,6 +203,27 @@ def _strict_ray_job_id(suffix: str = "a") -> str:
     return f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}{suffix * 64}"
 
 
+def _rq2_ray_job_id(suffix: str = "a") -> str:
+    """Return one canonical request-reference submission ID."""
+    assert len(suffix) == 1 and suffix in "0123456789abcdef"
+    return f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}{suffix * 64}"
+
+
+def _rq2_ray_job_id_for_metadata(metadata: dict[str, str]) -> str:
+    """Return the canonical rq2 submission ID bound by strict metadata."""
+    return (
+        f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}"
+        f"{metadata['django_ray_coordination_sha256']}"
+    )
+
+
+def _rq2_request_reference(digest: str, *, size_bytes: int = 128) -> str:
+    """Return one canonical retrievable filesystem request reference."""
+    assert len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
+    relative_path = f"{digest[:2]}/{digest[2:4]}/{digest}.json"
+    return f"resultfs://sha256/{digest}?rel={relative_path}&bytes={size_bytes}"
+
+
 def _strict_ray_job_metadata(
     task: RayTaskExecution,
     *,
@@ -223,6 +255,53 @@ def _strict_ray_job_metadata(
         compiled_graph_submission_transport="ray-job",
     )
     return build_ray_job_request_metadata(request, '{"bounded":"request"}')
+
+
+def _rq2_ray_job_metadata(
+    task: RayTaskExecution,
+    *,
+    request_reference: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, str]:
+    """Build rq2 metadata bound to one durable execution and request reference."""
+    assert task.pk is not None
+    reference = request_reference or task.ray_job_request_reference
+    assert reference is not None
+    request = ExecutionRequest(
+        identity=ExecutionIdentity(
+            task_execution_pk=int(task.pk),
+            task_id=task_id or str(task.task_id),
+            attempt_number=int(task.attempt_number),
+            execution_generation=int(task.execution_generation),
+        ),
+        execution_protocol_version=int(task.execution_protocol_version),
+        callable_path=task.callable_path,
+        transport_version=2 if task.input_reference else 1,
+        serialized_args=task.args_json,
+        serialized_kwargs=task.kwargs_json,
+        input_reference=task.input_reference,
+        runtime_env_profile=task.runtime_env_profile,
+        runtime_env_hash=task.runtime_env_hash,
+        runtime_env_plan_identity={},
+        compiled_graph_submission_transport="ray-job",
+    )
+    request_digest, request_size_bytes = ray_job_request_reference_content_identity(reference)
+    locator = RayJobRequestLocator(
+        backend="filesystem",
+        reference=reference,
+        digest=request_digest,
+        size_bytes=request_size_bytes,
+        filesystem_path="/var/lib/django-ray/requests",
+    )
+    metadata = build_ray_job_request_reference_metadata(
+        request,
+        '{"bounded":"request"}',
+        reference,
+        encode_ray_job_request_locator(locator),
+    )
+    metadata["django_ray_request_sha256"] = request_digest
+    metadata["django_ray_request_size_bytes"] = str(request_size_bytes)
+    return metadata
 
 
 class TestWorkerDispatchAndReconnectHelpers:
@@ -1923,6 +2002,63 @@ class TestWorkerReconnectPollReconcile:
         assert task.ray_address == "ray://cluster:10001"
         assert cmd.active_tasks[task.pk] == "raysubmit_coverage_001"
 
+    @pytest.mark.parametrize("failure_stage", ["constructor", "submission_handle"])
+    def test_pre_reservation_request_rejection_is_fixed_and_nonretryable(
+        self,
+        monkeypatch,
+        failure_stage: str,
+    ) -> None:
+        classification = (
+            RayJobRequestPreparationRejection.CONFIGURATION
+            if failure_stage == "constructor"
+            else RayJobRequestPreparationRejection.INVALID_REQUEST
+        )
+        task = RayTaskExecution.objects.create(
+            task_id=f"rq2-pre-reservation-{failure_stage}-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            attempt_number=1,
+            execution_generation=0,
+        )
+        cmd = _make_command()
+
+        class FakeRunner:
+            def __init__(self):
+                if failure_stage == "constructor":
+                    raise RayJobRequestPreparationError(classification)
+
+            def submission_handle(self, _task):
+                raise RayJobRequestPreparationError(classification)
+
+            def submit_durable(self, **_kwargs):
+                pytest.fail("pre-reservation rejection must precede submission")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.should_retry",
+            lambda *_args, **_kwargs: pytest.fail(
+                "deterministic rq2 preparation failure must bypass retry policy"
+            ),
+        )
+
+        cmd.submit_task_to_ray(task)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.error_message == (
+            f"Ray Job request preparation rejected: {classification.value}"
+        )
+        assert task.error_traceback is None
+        assert task.ray_job_id is None
+        archived = TaskAttempt.objects.get(execution=task, attempt_number=1)
+        assert archived.state == TaskState.FAILED
+        assert archived.error_traceback is None
+
     def test_uncertain_ray_job_submission_retains_exact_identity_without_retry(
         self,
         monkeypatch,
@@ -1976,7 +2112,63 @@ class TestWorkerReconnectPollReconcile:
         assert not TaskAttempt.objects.filter(execution=task).exists()
         assert "acceptance is uncertain" in cmd.stdout.getvalue()
 
-    def test_returned_ray_job_identity_mismatch_stops_observed_job_without_retry(
+    @pytest.mark.parametrize(
+        ("classification", "expected_retryable"),
+        [
+            (RayJobRequestPreparationRejection.INVALID_REQUEST, False),
+            (RayJobRequestPreparationRejection.STORAGE_UNAVAILABLE, None),
+        ],
+    )
+    def test_request_preparation_failure_releases_reservation_with_fixed_policy(
+        self,
+        monkeypatch,
+        classification: RayJobRequestPreparationRejection,
+        expected_retryable: bool | None,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id=f"rq2-preparation-{classification.value}-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            attempt_number=2,
+            execution_generation=7,
+        )
+        cmd = _make_command()
+        task.refresh_from_db()
+        reserved_handle = _ray_job_handle(task, _rq2_ray_job_id("f"))
+        captured: dict[str, object] = {}
+
+        class FakeRunner:
+            def submission_handle(self, _task):
+                return reserved_handle
+
+            def submit_durable(self, **_kwargs):
+                raise RayJobRequestPreparationError(classification)
+
+        def capture_failure(_task, **kwargs):
+            captured.update(kwargs)
+            return True
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(cmd, "_handle_task_failure", capture_failure)
+
+        cmd.submit_task_to_ray(task)
+
+        task.refresh_from_db()
+        assert task.ray_job_id is None
+        assert task.ray_address is None
+        assert task.pk not in cmd.active_tasks
+        assert task.pk not in cmd.active_task_identities
+        assert captured["error_message"] == (
+            f"Ray Job request preparation rejected: {classification.value}"
+        )
+        assert captured["error_traceback"] is None
+        assert str(captured["exception_type"]).endswith("RayJobRequestPreparationError")
+        assert captured["retryable"] is expected_retryable
+
+    def test_returned_ray_job_identity_mismatch_is_unbound_and_reconciled(
         self,
         monkeypatch,
         django_capture_on_commit_callbacks,
@@ -1998,6 +2190,9 @@ class TestWorkerReconnectPollReconcile:
             "raysubmit_django_ray_v1_reserved",
             "ray://cluster:10001",
         )
+        observed_submission_id = (
+            f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}{'e' * 64}"
+        )
         cancelled: list[str] = []
 
         class FakeRunner:
@@ -2008,7 +2203,7 @@ class TestWorkerReconnectPollReconcile:
                 raise RayJobSubmissionUncertainError(
                     reserved_handle.ray_job_id,
                     "Ray returned another identity",
-                    observed_submission_id="raysubmit_unexpected",
+                    observed_submission_id=observed_submission_id,
                 )
 
             def cancel(self, handle):
@@ -2025,18 +2220,70 @@ class TestWorkerReconnectPollReconcile:
             cmd.submit_task_to_ray(task)
 
         task.refresh_from_db()
-        assert cancelled == [
-            "raysubmit_unexpected",
-            reserved_handle.ray_job_id,
-        ]
-        assert task.state == TaskState.FAILED
+        assert cancelled == []
+        assert task.state == TaskState.RUNNING
         assert task.attempt_number == 2
         assert task.execution_generation == 7
         assert task.ray_job_id == reserved_handle.ray_job_id
-        assert task.cancellation_status == CancellationStatus.REQUESTED
-        assert task.pk not in cmd.active_tasks
-        assert task.pk not in cmd.active_task_identities
-        assert TaskAttempt.objects.filter(execution=task, attempt_number=2).count() == 1
+        assert task.cancellation_status is None
+        assert cmd.active_tasks[task.pk] == reserved_handle.ray_job_id
+        assert cmd.active_task_identities[task.pk] == (2, 7)
+        assert observed_submission_id not in cmd.stdout.getvalue()
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    def test_untrusted_returned_submission_identity_is_not_retained_or_cancelled(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="ray-job-submit-untrusted-return-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            claimed_by_worker="worker-coverage",
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            attempt_number=2,
+            execution_generation=7,
+        )
+        cmd = _make_command()
+        reserved_handle = _ray_job_handle(
+            task,
+            f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}{'d' * 64}",
+            "ray://cluster:10001",
+        )
+        private_observed_id = "private-returned-id-" + "x" * 20_000
+        cancelled: list[str] = []
+
+        class FakeRunner:
+            def submission_handle(self, _task):
+                return reserved_handle
+
+            def submit_durable(self, **_kwargs):
+                raise RayJobSubmissionUncertainError(
+                    reserved_handle.ray_job_id,
+                    "private detail that must not be retained",
+                    observed_submission_id=private_observed_id,
+                )
+
+            def cancel(self, handle):
+                cancelled.append(handle.ray_job_id)
+                return True
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        cmd.submit_task_to_ray(task)
+
+        task.refresh_from_db()
+        assert cancelled == []
+        assert task.state == TaskState.RUNNING
+        assert task.ray_job_id == reserved_handle.ray_job_id
+        assert task.ray_job_request_reference is None
+        assert cmd.active_tasks[task.pk] == reserved_handle.ray_job_id
+        assert cmd.active_task_identities[task.pk] == (2, 7)
+        assert private_observed_id not in cmd.stdout.getvalue()
+        assert "private detail" not in cmd.stdout.getvalue()
+        assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_mismatched_submission_rollback_retains_exact_tracking(self, monkeypatch) -> None:
         task = RayTaskExecution.objects.create(
@@ -2497,6 +2744,9 @@ class TestWorkerReconnectPollReconcile:
             "raysubmit_django_ray_v1_adopted_reserved",
             "ray://cluster:10001",
         )
+        observed_submission_id = (
+            f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}{'c' * 64}"
+        )
         cancelled: list[str] = []
 
         class FakeRunner:
@@ -2511,7 +2761,7 @@ class TestWorkerReconnectPollReconcile:
                 raise RayJobSubmissionUncertainError(
                     reserved_handle.ray_job_id,
                     "Ray returned another identity after adoption",
-                    observed_submission_id="raysubmit_unexpected_adopted",
+                    observed_submission_id=observed_submission_id,
                 )
 
             def cancel(self, handle):
@@ -2527,12 +2777,13 @@ class TestWorkerReconnectPollReconcile:
         cmd.submit_task_to_ray(task)
 
         task.refresh_from_db()
-        assert cancelled == ["raysubmit_unexpected_adopted"]
+        assert cancelled == []
         assert task.state == transferred_state
         assert task.claimed_by_worker == "replacement-worker"
         assert task.ray_job_id == reserved_handle.ray_job_id
         assert task.pk not in cmd.active_tasks
         assert task.pk not in cmd.active_task_identities
+        assert observed_submission_id not in cmd.stdout.getvalue()
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_ray_job_post_submit_tracking_exception_retains_durable_reservation(
@@ -2825,7 +3076,11 @@ class TestWorkerReconnectPollReconcile:
         assert task.error_message is None
         assert not TaskAttempt.objects.filter(execution=task, attempt_number=2).exists()
 
-    def test_reconcile_tasks_returns_early_for_sync_or_empty(self) -> None:
+    def test_reconcile_tasks_returns_early_for_sync_or_empty(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job.RayJobRunner",
+            lambda: SimpleNamespace(),
+        )
         cmd = _make_command()
         cmd.sync_mode = True
         cmd.active_tasks = {1: "raysubmit_x"}
@@ -2922,6 +3177,383 @@ class TestWorkerReconnectPollReconcile:
         assert task.state == TaskState.SUCCEEDED
         assert json.loads(task.result_data or "null") == {"value": 3}
         assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_rq2_running_job_binds_exact_durable_reference(
+        self,
+        monkeypatch,
+    ) -> None:
+        reference = _rq2_request_reference("a" * 64)
+        task = RayTaskExecution.objects.create(
+            task_id="rq2-running-binding-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_request_reference=reference,
+            started_at=datetime.now(UTC),
+        )
+        metadata = _rq2_ray_job_metadata(task)
+        task.ray_job_id = _rq2_ray_job_id_for_metadata(metadata)
+        task.save(update_fields=["ray_job_id"])
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=task.ray_job_id or "",
+                    status=JobStatus.RUNNING,
+                    metadata=metadata,
+                )
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == 0
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.ray_job_request_reference == reference
+        assert task.last_heartbeat_at is not None
+        assert cmd.active_tasks[task.pk] == task.ray_job_id
+
+    @pytest.mark.parametrize("mismatch", ["missing", "replaced"])
+    def test_reconcile_rq2_reference_ambiguity_stops_without_retry(
+        self,
+        monkeypatch,
+        mismatch: str,
+    ) -> None:
+        metadata_reference = _rq2_request_reference("b" * 64)
+        durable_reference = None if mismatch == "missing" else _rq2_request_reference("c" * 64)
+        task = RayTaskExecution.objects.create(
+            task_id=f"rq2-reference-{mismatch}-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_request_reference=durable_reference,
+            started_at=datetime.now(UTC),
+        )
+        metadata = _rq2_ray_job_metadata(
+            task,
+            request_reference=metadata_reference,
+        )
+        ray_job_id = _rq2_ray_job_id_for_metadata(metadata)
+        task.ray_job_id = ray_job_id
+        task.save(update_fields=["ray_job_id"])
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: ray_job_id}
+        cancelled: list[str] = []
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=ray_job_id,
+                    status=JobStatus.RUNNING,
+                    metadata=metadata,
+                )
+
+            def cancel_with_status(self, handle):
+                cancelled.append(handle.ray_job_id)
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.should_retry",
+            lambda *_args, **_kwargs: pytest.fail(
+                "rq2 reference ambiguity must never consume automatic retry policy"
+            ),
+        )
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert cancelled == [ray_job_id]
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.cancellation_status == CancellationStatus.REQUESTED
+        expected = "missing" if mismatch == "missing" else "digest_mismatch"
+        assert expected in (task.error_message or "")
+        assert task.pk not in cmd.active_tasks
+
+    @pytest.mark.parametrize(
+        ("metadata_field", "replacement"),
+        [
+            ("django_ray_request_sha256", "f" * 64),
+            ("django_ray_request_size_bytes", "129"),
+        ],
+    )
+    def test_reconcile_rq2_request_content_mismatch_stops_without_retry(
+        self,
+        monkeypatch,
+        metadata_field: str,
+        replacement: str,
+    ) -> None:
+        reference = _rq2_request_reference("4" * 64)
+        task = RayTaskExecution.objects.create(
+            task_id=f"rq2-content-{metadata_field}-mismatch-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_request_reference=reference,
+            started_at=datetime.now(UTC),
+        )
+        metadata = _rq2_ray_job_metadata(task)
+        metadata[metadata_field] = replacement
+        ray_job_id = _rq2_ray_job_id_for_metadata(metadata)
+        task.ray_job_id = ray_job_id
+        task.save(update_fields=["ray_job_id"])
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: ray_job_id}
+        cancelled: list[str] = []
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=ray_job_id,
+                    status=JobStatus.RUNNING,
+                    metadata=metadata,
+                )
+
+            def cancel_with_status(self, handle):
+                cancelled.append(handle.ray_job_id)
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.should_retry",
+            lambda *_args, **_kwargs: pytest.fail(
+                "rq2 request-content ambiguity must never consume automatic retry policy"
+            ),
+        )
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert cancelled == [ray_job_id]
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.cancellation_status == CancellationStatus.REQUESTED
+        assert "digest_mismatch" in (task.error_message or "")
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_rq2_malformed_durable_reference_stops_without_retry(
+        self,
+        monkeypatch,
+    ) -> None:
+        expected_reference = _rq2_request_reference("5" * 64)
+        task = RayTaskExecution.objects.create(
+            task_id="rq2-malformed-reference-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_request_reference="not-a-canonical-reference",
+            started_at=datetime.now(UTC),
+        )
+        metadata = _rq2_ray_job_metadata(task, request_reference=expected_reference)
+        ray_job_id = _rq2_ray_job_id_for_metadata(metadata)
+        task.ray_job_id = ray_job_id
+        task.save(update_fields=["ray_job_id"])
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: ray_job_id}
+        cancelled: list[str] = []
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=ray_job_id,
+                    status=JobStatus.RUNNING,
+                    metadata=metadata,
+                )
+
+            def cancel_with_status(self, handle):
+                cancelled.append(handle.ray_job_id)
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.should_retry",
+            lambda *_args, **_kwargs: pytest.fail(
+                "malformed rq2 references must never consume automatic retry policy"
+            ),
+        )
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert cancelled == [ray_job_id]
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.cancellation_status == CancellationStatus.REQUESTED
+        assert "invalid_locator" in (task.error_message or "")
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_rq2_submission_id_digest_mismatch_stops_without_retry(
+        self,
+        monkeypatch,
+    ) -> None:
+        reference = _rq2_request_reference("6" * 64)
+        task = RayTaskExecution.objects.create(
+            task_id="rq2-submission-id-mismatch-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_request_reference=reference,
+            started_at=datetime.now(UTC),
+        )
+        metadata = _rq2_ray_job_metadata(task)
+        correct_ray_job_id = _rq2_ray_job_id_for_metadata(metadata)
+        replacement = "0" if correct_ray_job_id[-1] != "0" else "1"
+        ray_job_id = f"{correct_ray_job_id[:-1]}{replacement}"
+        task.ray_job_id = ray_job_id
+        task.save(update_fields=["ray_job_id"])
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: ray_job_id}
+        cancelled: list[str] = []
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=ray_job_id,
+                    status=JobStatus.RUNNING,
+                    metadata=metadata,
+                )
+
+            def cancel_with_status(self, handle):
+                cancelled.append(handle.ray_job_id)
+                return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.should_retry",
+            lambda *_args, **_kwargs: pytest.fail(
+                "rq2 submission-ID ambiguity must never consume automatic retry policy"
+            ),
+        )
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert cancelled == [ray_job_id]
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert task.run_after is None
+        assert task.cancellation_status == CancellationStatus.REQUESTED
+        assert "identity_mismatch" in (task.error_message or "")
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_rq2_completion_published_during_status_keeps_precedence(
+        self,
+        monkeypatch,
+    ) -> None:
+        original_reference = _rq2_request_reference("d" * 64)
+        task = RayTaskExecution.objects.create(
+            task_id="rq2-completion-precedence-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_request_reference=original_reference,
+            started_at=datetime.now(UTC),
+        )
+        completion_data = _versioned_completion_json(task, result={"value": 3})
+        metadata = _rq2_ray_job_metadata(task)
+        task.ray_job_id = _rq2_ray_job_id_for_metadata(metadata)
+        task.save(update_fields=["ray_job_id"])
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: task.ray_job_id or ""}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                RayTaskExecution.objects.filter(pk=task.pk).update(
+                    completion_data=completion_data,
+                    ray_job_request_reference=_rq2_request_reference("e" * 64),
+                )
+                return JobInfo(
+                    job_id=task.ray_job_id or "",
+                    status=JobStatus.FAILED,
+                    metadata=metadata,
+                    driver_exit_code=78,
+                )
+
+            def cancel_with_status(self, _handle):
+                pytest.fail("an accepted completion must precede rq2 binding quarantine")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == 1
+
+        task.refresh_from_db()
+        assert task.state == TaskState.SUCCEEDED
+        assert json.loads(task.result_data or "null") == {"value": 3}
+        assert task.pk not in cmd.active_tasks
+
+    def test_reconcile_rq2_revalidates_reference_under_authoritative_lock(
+        self,
+        monkeypatch,
+    ) -> None:
+        expected_reference = _rq2_request_reference("1" * 64)
+        stale_reference = _rq2_request_reference("2" * 64)
+        task = RayTaskExecution.objects.create(
+            task_id="rq2-reference-lock-revalidation-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_request_reference=stale_reference,
+            started_at=datetime.now(UTC),
+        )
+        metadata = _rq2_ray_job_metadata(
+            task,
+            request_reference=expected_reference,
+        )
+        ray_job_id = _rq2_ray_job_id_for_metadata(metadata)
+        task.ray_job_id = ray_job_id
+        task.save(update_fields=["ray_job_id"])
+        cmd = _make_command()
+        cmd.active_tasks = {task.pk: ray_job_id}
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(
+                    job_id=ray_job_id,
+                    status=JobStatus.RUNNING,
+                    metadata=metadata,
+                )
+
+            def cancel_with_status(self, _handle):
+                pytest.fail("a corrected exact reference must not be quarantined")
+
+        def correct_reference_before_lock(_runner, _handle):
+            RayTaskExecution.objects.filter(pk=task.pk).update(
+                ray_job_request_reference=expected_reference
+            )
+            return None
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.prepare_remote_cancellation",
+            correct_reference_before_lock,
+        )
+
+        assert cmd.reconcile_tasks() == 0
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.ray_job_request_reference == expected_reference
+        assert task.pk in cmd.active_tasks
 
     def test_reconcile_strict_exit_78_waits_then_uses_generic_fixed_failure(
         self,
@@ -3075,7 +3707,7 @@ class TestWorkerReconnectPollReconcile:
         if binding_kind == "invalid_submission_id":
             ray_job_id = f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}not-canonical"
         elif binding_kind == "future_request_family":
-            ray_job_id = f"{STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX}2_{'3' * 64}"
+            ray_job_id = f"{STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX}3_{'3' * 64}"
         else:
             ray_job_id = _strict_ray_job_id("3")
         task = RayTaskExecution.objects.create(
@@ -4435,7 +5067,7 @@ class TestWorkerReconnectPollReconcile:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
-        activity_count = cmd.reconcile_tasks()
+        activity_count = cmd.reconcile_tasks(queues=("default",))
 
         orphan.refresh_from_db()
         assert orphan.claimed_by_worker == "adopting-worker"
@@ -4443,6 +5075,130 @@ class TestWorkerReconnectPollReconcile:
         assert orphan.last_heartbeat_at is not None
         assert cmd.active_tasks[orphan.pk] == "raysubmit_orphan_running_001"
         assert activity_count == 1
+
+    def test_reconcile_tasks_does_not_adopt_orphan_from_another_queue(
+        self,
+        monkeypatch,
+    ) -> None:
+        started_at = datetime.now(UTC)
+        orphan = RayTaskExecution.objects.create(
+            task_id="reconcile-orphan-other-queue-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="ray-data",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_orphan_other_queue_001",
+            ray_address="ray://cluster:10001",
+            claimed_by_worker="dead-ray-job-worker",
+            managed_with_django_ray_version="0.4.0-manager",
+            started_at=started_at,
+            last_heartbeat_at=started_at,
+        )
+        cmd = _make_command(worker_id="ml-worker")
+
+        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                pytest.fail("an out-of-queue orphan must not reach Ray Job status")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks(queues=("ml",)) == 0
+
+        orphan.refresh_from_db()
+        assert orphan.state == TaskState.RUNNING
+        assert orphan.claimed_by_worker == "dead-ray-job-worker"
+        assert orphan.managed_with_django_ray_version == "0.4.0-manager"
+        assert orphan.last_heartbeat_at == started_at
+        assert orphan.pk not in cmd.active_tasks
+        assert not TaskAttempt.objects.filter(execution=orphan).exists()
+
+    def test_reconcile_tasks_without_candidate_does_not_require_request_storage(
+        self,
+        monkeypatch,
+    ) -> None:
+        cmd = _make_command(worker_id="ray-core-worker")
+
+        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
+
+        class UnexpectedRunner:
+            def __init__(self) -> None:
+                pytest.fail("a Ray-Core-only queue must not initialize the Ray Job runner")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", UnexpectedRunner)
+
+        assert cmd.reconcile_tasks(queues=("default",)) == 0
+
+    def test_timeout_recovery_does_not_adopt_task_from_another_queue(
+        self,
+        monkeypatch,
+    ) -> None:
+        started_at = datetime.now(UTC) - timedelta(minutes=10)
+        task = RayTaskExecution.objects.create(
+            task_id="timeout-other-queue-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="ray-data",
+            state=TaskState.RUNNING,
+            args_json="[]",
+            kwargs_json="{}",
+            timeout_seconds=1,
+            started_at=started_at,
+            last_heartbeat_at=started_at,
+            claimed_by_worker="dead-ray-job-worker",
+            ray_job_id="raysubmit_timeout_other_queue_001",
+            ray_address="ray://cluster:10001",
+        )
+        cmd = _make_command(worker_id="ml-worker")
+        monkeypatch.setattr(
+            cmd,
+            "_request_timeout_cancellation",
+            lambda _task: pytest.fail("out-of-queue timeout must not request cancellation"),
+        )
+
+        assert cmd.detect_stuck_tasks(queues=("ml",)) == 0
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.claimed_by_worker == "dead-ray-job-worker"
+        assert task.started_at == started_at
+        assert task.last_heartbeat_at == started_at
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+
+    def test_cancellation_recovery_does_not_adopt_task_from_another_queue(
+        self,
+        monkeypatch,
+    ) -> None:
+        started_at = datetime.now(UTC) - timedelta(minutes=10)
+        task = RayTaskExecution.objects.create(
+            task_id="cancellation-other-queue-001",
+            callable_path="testproject.tasks.slow_task",
+            queue_name="ray-data",
+            state=TaskState.CANCELLING,
+            args_json="[]",
+            kwargs_json="{}",
+            started_at=started_at,
+            last_heartbeat_at=started_at,
+            claimed_by_worker="dead-ray-job-worker",
+            ray_job_id="raysubmit_cancellation_other_queue_001",
+            ray_address="ray://cluster:10001",
+        )
+        cmd = _make_command(worker_id="ml-worker")
+        monkeypatch.setattr(
+            cmd,
+            "_request_cancellation_for_task",
+            lambda _task: pytest.fail("out-of-queue cancellation must not reach Ray"),
+        )
+
+        assert cmd.process_cancellations(queues=("ml",)) == 0
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLING
+        assert task.claimed_by_worker == "dead-ray-job-worker"
+        assert task.started_at == started_at
+        assert task.last_heartbeat_at == started_at
+        assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_reconcile_tasks_completes_orphaned_succeeded_ray_job(self, monkeypatch) -> None:
         orphan = RayTaskExecution.objects.create(
@@ -5074,6 +5830,10 @@ class TestWorkerReconnectPollReconcile:
         def unavailable(_runner, _ray_address=None):
             raise TimeoutError("ray dashboard request timed out")
 
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job.RayJobRunner.__init__",
+            lambda runner: setattr(runner, "ray_address", "ray://cluster:10001"),
+        )
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner._get_client", unavailable)
         monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 

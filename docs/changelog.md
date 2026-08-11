@@ -36,11 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migration `0021` adds a dormant, attempt-scoped Ray Job request-reference column and
   types the shared payload registry as `task_input` or `ray_job_request`. Its Python and
   database default remains `task_input`, so released writers that omit the new column
-  continue to register task inputs. Applying the migration does not activate a new Ray
-  Job transport; new submissions remain unchanged until the later rq2 behavior slice.
+  continue to register task inputs. Applying the migration alone does not activate rq2.
+  Before resuming reference-only submissions, configure shared retrievable storage,
+  deploy the exact final rq2 reader, retire released 0.4.0 and intermediate rq1 task
+  managers, and close legacy admission through its reviewed revision/producer-retirement
+  fence. Already submitted legacy/rq1 protocol-`1` jobs remain drainable; rq2 does not
+  activate protocol `2`.
 
 ### Fixed
 
+- A mismatched Ray Jobs API submission return is now treated only as fixed,
+  acceptance-uncertain evidence. Arbitrary, oversized, unhashable, or merely
+  well-formed alternate values are neither retained nor logged and never become a stop
+  capability for an unrelated job; reconciliation remains pinned to the durable rq2
+  identity reserved before submission. Concurrent direct callers likewise cannot issue
+  a second submission or clear another caller's exact reservation.
 - Development checks remain compatible with the latest `ty`, and sample-only
   `django-unfold` handling now keeps its exact sample/dev and lockfile pin synchronized
   with the installed-version RuntimeEnv requirement and minimum-dependency CI, without
@@ -78,18 +88,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `django_ray_tasks_by_execution_protocol_total{protocol=1|other,state=...}` series,
   including zeros, without package-version labels.
 
-- New Ray Job submissions now reuse the canonical bounded execution request sourced
-  from durable JSON or an opaque input reference and bind its full identity, protocol,
-  and digest independently in Ray Job metadata. Upgraded drivers reject malformed,
-  unsupported, or mismatched requests before Django setup, input hydration, or
-  application callable import/invocation and publish enriched completions for accepted
-  work. Compatible replacement managers retain the persisted job ID during handoff;
-  every strict terminal job with a verified binding but no exact completion waits for
-  publication grace and receives a generic fixed non-retryable outcome, while an
-  unverifiable binding is exact-stopped and retained as `LOST`. Neither path trusts its
-  exit code or Ray logs as proof of execution phase. Released unversioned protocol-v1
-  payloads remain the rolling-drain adapter. This does not yet replace inline shell
-  payloads with mandatory bounded references or attest Ray/Python or cluster identity.
+- New Ray Job submissions now use the rq2 request-reference carrier. The manager builds
+  the same bounded canonical execution request from durable JSON or an opaque input
+  reference, stores and registry-attaches it before opening the Ray client or uploading
+  RuntimeEnv artifacts, and puts only a bounded canonical locator in
+  `--request-ref-b64`. Independently bounded metadata contains fixed markers, an opaque
+  coordination digest, execution protocol, request digest/size, request-reference hash,
+  and exact canonical locator-token hash; it omits the public task ID, callable,
+  arguments, raw RuntimeEnv identity, and credentials. The driver validates the whole
+  locator binding before storage I/O and the
+  loaded canonical bytes before Django setup, input hydration, or application import or
+  invocation. Deterministic preparation/validation failures use fixed diagnostics and
+  no automatic replay; definitely pre-submission storage outages may retry, while any
+  uncertain submission retains its exact job ID/address/reference tuple. Concurrent
+  public submissions share one durable reservation: only its owner may submit,
+  while contenders receive a fixed uncertain result for reconciliation. Compatible
+  managers selected for that execution's queue can adopt and reconcile the tuple;
+  out-of-queue managers exclude it from orphan reconciliation, timeout recovery, and
+  cancellation takeover before Ray status/stop I/O. Retention purges request objects
+  only through the existing registry-first lock order; rq2 activation must first upgrade
+  or disable older purge invocations that do not understand the request-reference
+  column. Released
+  unversioned payloads and rq1 remain protocol-`1` drain adapters only. This does not
+  attest Ray/Python or cluster identity.
 - Strict outer tasks now propagate one canonical bounded execution request through
   workflow steps, result-fold actors, and distributed map, starmap, and scatter leaves.
   Exact outer identity/protocol, boundary identity, primary and optional preview

@@ -78,6 +78,9 @@ spec:
               - name: runtime-env
                 mountPath: /runtime-env
                 readOnly: true
+              - name: payload-storage
+                mountPath: /payload-storage
+                readOnly: true
           - name: dashboard-importer
             image: python:3.12-slim
             imagePullPolicy: IfNotPresent
@@ -107,6 +110,9 @@ spec:
           - name: runtime-env
             persistentVolumeClaim:
               claimName: runtime-env-pvc
+          - name: payload-storage
+            persistentVolumeClaim:
+              claimName: payload-storage-pvc
 
   workerGroupSpecs:
     - groupName: worker-group
@@ -154,10 +160,16 @@ spec:
                 - name: runtime-env
                   mountPath: /runtime-env
                   readOnly: true
+                - name: payload-storage
+                  mountPath: /payload-storage
+                  readOnly: true
           volumes:
             - name: runtime-env
               persistentVolumeClaim:
                 claimName: runtime-env-pvc
+            - name: payload-storage
+              persistentVolumeClaim:
+                claimName: payload-storage-pvc
 
 ---
 # Stable dashboard NodePort for local development access.

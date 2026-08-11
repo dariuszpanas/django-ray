@@ -99,12 +99,17 @@ spec:
             - name: runtime-env
               mountPath: /runtime-env
               readOnly: true
+            - name: payload-storage
+              mountPath: /payload-storage
       volumes:
         - name: static-files
           emptyDir: {}
         - name: runtime-env
           persistentVolumeClaim:
             claimName: runtime-env-pvc
+        - name: payload-storage
+          persistentVolumeClaim:
+            claimName: payload-storage-pvc
 ---
 apiVersion: v1
 kind: Service

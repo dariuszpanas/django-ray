@@ -174,10 +174,12 @@ k8s-deploy-kong-local: k8s-evaluation-warning k8s-prepare-kuberay-kind k8s-insta
 	kubectl rollout restart deployment/django-ray-worker -n django-ray
 	-kubectl rollout restart deployment/django-ray-worker-sync -n django-ray
 	-kubectl rollout restart deployment/django-ray-worker-ml -n django-ray
+	kubectl rollout restart deployment/django-ray-worker-ray-job -n django-ray
 	kubectl rollout status deployment/django-web -n django-ray --timeout=180s
 	kubectl rollout status deployment/django-ray-worker -n django-ray --timeout=180s
 	-kubectl rollout status deployment/django-ray-worker-sync -n django-ray --timeout=180s
 	-kubectl rollout status deployment/django-ray-worker-ml -n django-ray --timeout=180s
+	kubectl rollout status deployment/django-ray-worker-ray-job -n django-ray --timeout=180s
 	@echo ""
 	@echo "Kong local deployment complete!"
 	@$(MAKE) --no-print-directory k8s-urls-kong

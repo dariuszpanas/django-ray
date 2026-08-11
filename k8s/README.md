@@ -18,6 +18,7 @@ k8s/
 │   ├── configmap.yaml       # Application config
 │   ├── secret.yaml          # Shared local/render-only Secret reference
 │   ├── postgres.yaml        # PostgreSQL deployment
+│   ├── payload-storage.yaml # Evaluation-only shared rq2/input storage PVC
 │   ├── ray-cluster.yaml     # Ray head + workers
 │   ├── ray-tls-secret.yaml  # TLS certificate secret template
 │   ├── django-web.yaml      # Django web application
@@ -43,6 +44,7 @@ k8s/
 | Ray Workers | Ray execution nodes | - |
 | Django Web | Web application and API | 8000 |
 | Django-Ray Worker | Task processor | - |
+| Payload Storage | Shared content-addressed task-input/rq2 request PVC | - |
 
 ## Prerequisites
 
@@ -89,6 +91,18 @@ make k8s-build    # Build images
 make k8s-deploy   # Deploy to cluster
 ```
 
+The evaluation base configures filesystem `INPUT_STORAGE_BACKEND` at
+`/payload-storage/inputs`. `payload-storage-pvc` is a separate RWX volume: Django web,
+the base/default task manager, and the dedicated Ray Job task manager mount it
+read/write to prepare and retain payloads, while static and KubeRay Ray head/worker
+containers mount it read-only so rq2 drivers can load their exact request before
+Django setup. The sample leaves inline-input spillover disabled; a deployment that
+enables it must additionally give every local/synchronous executor read access. Do
+not reuse `runtime-env-pvc`; request payloads have independent write, retention, and
+cleanup ownership. A production design may use a scoped S3/GCS namespace instead,
+with manager/cleanup writers and driver readers using component-specific ambient
+credentials.
+
 ## KubeRay Operator Path (Recommended for kind multi-node clusters)
 
 Use this path to manage Ray via `RayCluster` custom resources instead of static
@@ -107,22 +121,23 @@ integration validation, not deployment certification or a production-readiness a
 This local overlay also opts Django application processes into encrypted durable
 RuntimeEnv snapshots through the explicit `django-secret` fallback. The three
 selection variables are patched directly onto `django-web` and the default,
-synchronous, and ML task-manager containers; they are not added to the shared
-ConfigMap or `RayCluster` pod specification. The base and other overlays remain in
-the plaintext compatibility mode. This verifies the envelope and execution path, not
-production key isolation: the example Ray pods still import the shared Django signing
-secret used by the fallback. Use a dedicated key delivered only to Django application
-processes when separation from read-only database access is required.
+synchronous, ML, and Ray Job task-manager containers; they are not added to the
+shared ConfigMap or `RayCluster` pod specification. The base and other overlays
+remain in the plaintext compatibility mode. This verifies the envelope and
+execution path, not production key isolation: the example Ray pods still import
+the shared Django signing secret used by the fallback. Use a dedicated key
+delivered only to Django application processes when separation from read-only
+database access is required.
 
 ### Local capacity profiles
 
 The direct `kuberay-kind` overlay is the laptop-oriented exploratory baseline. It
 runs one default task manager for `default,high-priority,low-priority`, one
-synchronous task manager, one ML task manager, and two fixed Ray workers. Each
-Ray worker still advertises two CPUs, so the workers alone can schedule the
-testproject's default 12-leaf complex workflow, whose leaves request three CPUs
-in total. The Ray head, web, PostgreSQL, Prometheus, and Grafana retain their
-existing profiles.
+synchronous task manager, one ML task manager, one Ray Job task manager for
+`ray-data`, and two fixed Ray workers. Each Ray worker still advertises two CPUs,
+so the workers alone can schedule the testproject's default 12-leaf complex
+workflow, whose leaves request three CPUs in total. The Ray head, web,
+PostgreSQL, Prometheus, and Grafana retain their existing profiles.
 
 `kong-local` is the explicit heavier backlog/capacity profile. It restores two
 default task managers and four fixed Ray workers, then applies its larger web,
@@ -135,8 +150,8 @@ Desktop/Kubernetes overhead:
 
 | Profile | Pods in `django-ray` | CPU requests | Memory requests | CPU limits | Memory limits |
 |---|---:|---:|---:|---:|---:|
-| Direct `kuberay-kind` | 10 | 3.2 | 4,800 MiB | 9.3 | 11,648 MiB |
-| Heavier `kong-local` | 16 | 10.1 | 16,832 MiB | 26.8 | 37,760 MiB |
+| Direct `kuberay-kind` | 11 | 3.3 | 5,056 MiB | 9.8 | 12,160 MiB |
+| Heavier `kong-local` | 17 | 10.2 | 17,088 MiB | 27.3 | 38,272 MiB |
 
 ```bash
 # Build app images, load them into kind, install operator, deploy KubeRay overlay.
@@ -192,6 +207,7 @@ This overlay:
 - keeps two cluster-mode `django-ray-worker` replicas for `default,high-priority,low-priority`
 - adds a dedicated `django-ray-worker-sync` deployment for the `sync` queue
 - adds a dedicated `django-ray-worker-ml` deployment for the `ml` queue
+- keeps a dedicated `django-ray-worker-ray-job` deployment for the `ray-data` queue
 - keeps the main cluster-mode worker submission cap conservative for local stability:
   - `DJANGO_RAY_CONCURRENCY=16` per worker pod in the Kong local overlay
   - this is still below the earlier stress setting, but high enough to push the local stack harder now
@@ -234,6 +250,7 @@ kubectl wait --for=condition=Ready pod -l app=ray,component=head -n django-ray -
 kubectl rollout restart deployment/django-ray-worker -n django-ray
 kubectl rollout restart deployment/django-ray-worker-sync -n django-ray
 kubectl rollout restart deployment/django-ray-worker-ml -n django-ray
+kubectl rollout restart deployment/django-ray-worker-ray-job -n django-ray
 ```
 
 Notes:
@@ -243,8 +260,8 @@ Notes:
 - On a plain kind cluster, host-reachable ingress still requires extra networking setup such as
   `extraPortMappings` or `cloud-provider-kind`.
 - Mixed load profiles only reflect real queue throughput if the matching workers are deployed. The
-  Kong local overlay covers `default`, `high-priority`, `low-priority`, `sync`, and `ml`, but an
-  independently designed deployment still needs queue-specific worker planning.
+  Kong local overlay covers `default`, `high-priority`, `low-priority`, `sync`, `ml`, and
+  `ray-data`, but an independently designed deployment still needs queue-specific worker planning.
 - `sync` tasks are not supposed to run through Ray. They need a worker started with `--sync --queue=sync`,
   which is why the Kong local overlay deploys a separate `django-ray-worker-sync`.
 - Because Docker Desktop managed-kind reports duplicated per-node capacity, the practical local ceiling comes

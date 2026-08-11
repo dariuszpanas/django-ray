@@ -19,6 +19,7 @@ EXPECTED_FILES = {
     "django_ray/execution_codec.py",
     "django_ray/execution_protocol.py",
     "django_ray/ray_job_protocol.py",
+    "django_ray/ray_job_request_storage.py",
     "django_ray/protocol_coordination.py",
     "django_ray/protocol_status.py",
     "django_ray/models.py",

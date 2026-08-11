@@ -238,15 +238,24 @@ Ray to create a redundant nested virtualenv; this also works with pip-less uv Py
 installations on Windows. Before importing Ray, the probe disables Ray's automatic
 `uv run` propagation so workers use that preinstalled interpreter instead of replaying
 the outer editable-project command inside the deliberately minimal source archive.
+It also configures one disposable filesystem input-storage root before Django setup, so
+both real submissions exercise the rq2 request-reference carrier even though their
+ordinary task arguments remain small.
 Both Ray Jobs still use the persisted immutable source archive, RuntimeEnv environment
 variables, outer Job driver, and real Ray Data workers. The probe pins the durable
 backend target to the exact address of its new local cluster, so another developer
 cluster cannot capture the work through `auto` discovery.
 
-The probe requires two archived attempt outcomes and polls retained Job API metadata
-through django-ray's address-pinned, request-bounded client until both submission
-identities have terminal states. It does not depend on catching a short-lived database
-state or allow an ambient Ray address to redirect the evidence read. Both Ray Jobs are
+The probe requires two archived attempt outcomes and builds a bounded allowlist of rq2
+submission IDs from the known durable execution primary key/public ID, archived attempt
+protocols, and generation range. It matches JobInfo by ID before parsing metadata, then
+checks the exact coordination/protocol/submission binding and the current persisted
+request-reference hash plus embedded request digest/size. It never searches by public
+identity metadata or retrieves request bytes from JobInfo. The released rq1 ID remains
+accepted only as a drain-evidence candidate. The address-pinned, request-bounded client
+polls until both submission identities have terminal states; an unrelated malformed job
+is ignored rather than parsed. The probe does not depend on catching a short-lived
+database state or allow an ambient Ray address to redirect the evidence read. Both Ray Jobs are
 expected to be `SUCCEEDED` at the transport layer because the entrypoint exits
 successfully after durably delivering either a success or failure completion envelope.
 The authoritative application states remain the archived Django attempts: first

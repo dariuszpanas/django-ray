@@ -283,7 +283,12 @@ DJANGO_RAY = {
 
 Worker leases detect dead task managers. Task-monitor heartbeats show that a live
 manager is still reconciling active work. For persisted Ray Job handles, another
-manager first tries to adopt or reconcile the existing job. Work is marked `LOST` only
+manager first tries to adopt or reconcile the existing job. Rq2 retains the exact job
+ID, address, and request reference as one tuple after submission begins; a client error,
+manager restart, or automatic retry decision cannot clear only the request and authorize
+a duplicate. Deterministic pre-submission validation/configuration failures suppress
+automatic retry, while a definitely pre-submission storage outage may use normal retry
+policy because no Ray effect exists. Work is marked `LOST` only
 after no live owner or recoverable execution remains past the timeout. A Ray Job whose
 status remains `UNKNOWN` receives an exact best-effort stop request and is left `LOST`
 without automatic retry; verify the remote job is quiescent before using a manual

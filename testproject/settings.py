@@ -420,6 +420,19 @@ DJANGO_RAY = {
         "DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT",
         default=True,
     ),
+    # The local Kubernetes reference uses a dedicated RWX payload claim. Keep
+    # these unset for ordinary source-checkout development so sync and Ray Core
+    # workflows do not acquire a storage dependency they do not need.
+    "INPUT_STORAGE_BACKEND": os.environ.get(
+        "DJANGO_RAY_INPUT_STORAGE_BACKEND",
+        "",
+    ).strip()
+    or None,
+    "INPUT_STORAGE_FILESYSTEM_PATH": os.environ.get(
+        "DJANGO_RAY_INPUT_STORAGE_FILESYSTEM_PATH",
+        "",
+    ).strip()
+    or None,
     "MAX_TASK_ATTEMPTS": int(os.environ.get("RAY_MAX_RETRIES", "3")),
     "RETRY_BACKOFF_SECONDS": int(os.environ.get("RAY_RETRY_DELAY_SECONDS", "5")),
     # Exceptions that won't trigger auto-retry (use for manual retry testing)
