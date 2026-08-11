@@ -187,13 +187,27 @@ task-manager pods mount that archive. The task manager hashes it and uploads it 
 Ray's content-addressed GCS package store, allowing durable retries on the same
 generic Ray images without treating a mutable dependency spec as immutable.
 
-> **Storage requirement**: `runtime-env-pvc` uses `ReadWriteMany` (RWX) because
-> the setup job, Django web/workers, and every Ray pod must see the same archives.
-> Verify that the cluster has an RWX-capable StorageClass/provisioner before
-> deploying this example. A cluster whose available storage only supports
-> `ReadWriteOnce` will leave the PVC and dependent pods Pending. Install an RWX
-> provisioner, explicitly select an RWX-capable StorageClass, or use a shared
-> HTTPS/S3/GCS archive instead.
+The evaluation topology also creates a separate `payload-storage-pvc` and configures
+filesystem `INPUT_STORAGE_BACKEND` at `/payload-storage/inputs`. Django web, the
+base/default task manager, and the dedicated Ray Job task manager mount it read/write;
+static and KubeRay Ray head/worker containers mount it read-only so an rq2 Ray Job
+driver can retrieve and validate its content-addressed execution request before Django
+setup. The sample leaves inline-input spillover disabled; a deployment that enables it
+must additionally give every local/synchronous executor read access. This volume is
+intentionally separate from `runtime-env-pvc`: request storage has its own writer,
+retention, purge, and credential boundary. A production design may instead use a
+scoped S3/GCS namespace with ambient manager-writer and driver-reader identities;
+credentials must never be serialized into the rq2 locator, JobInfo, or process
+arguments.
+
+> **Storage requirement**: `runtime-env-pvc` and the evaluation-only
+> `payload-storage-pvc` use `ReadWriteMany` (RWX) because the required Django and Ray
+> processes must see the same archives or content-addressed requests. Verify that the
+> cluster has an RWX-capable StorageClass/provisioner before deploying this example. A
+> cluster whose available storage only supports `ReadWriteOnce` will leave the PVCs and
+> dependent pods Pending. Install an RWX provisioner, explicitly select an RWX-capable
+> StorageClass, or replace these sample filesystem boundaries with appropriately shared
+> immutable archives and S3/GCS request storage.
 
 This keeps Django web/worker Deployments in this repo, but replaces static Ray
 Deployments with a `RayCluster` custom resource.
@@ -206,18 +220,18 @@ integration boundary, not deployment certification or a production-readiness ass
 
 The direct `kuberay-kind` overlay is the constrained-laptop exploratory
 profile: one default/priority task manager, one sync task manager, one ML task
-manager, and two fixed two-CPU Ray workers. The optional `kong-local` overlay
-explicitly restores two default task managers and four fixed three-CPU Ray
-workers, alongside its larger web and PostgreSQL settings, for backlog and
-capacity work.
+manager, one Ray Job task manager for `ray-data`, and two fixed two-CPU Ray
+workers. The optional `kong-local` overlay explicitly restores two default task
+managers and four fixed three-CPU Ray workers, alongside its larger web and
+PostgreSQL settings, for backlog and capacity work.
 
 Rendered steady-state totals exclude the completed setup Job, the KubeRay
 operator, the Kong controller/gateway, and Kubernetes/Docker overhead:
 
 | Profile | `django-ray` pods | CPU requests | Memory requests | CPU limits | Memory limits |
 |---|---:|---:|---:|---:|---:|
-| Direct `kuberay-kind` | 10 | 3.2 | 4,800 MiB | 9.3 | 11,648 MiB |
-| Heavier `kong-local` | 16 | 10.1 | 16,832 MiB | 26.8 | 37,760 MiB |
+| Direct `kuberay-kind` | 11 | 3.3 | 5,056 MiB | 9.8 | 12,160 MiB |
+| Heavier `kong-local` | 17 | 10.2 | 17,088 MiB | 27.3 | 38,272 MiB |
 
 ### 1. Install Operator + Deploy
 
@@ -438,9 +452,10 @@ The local `kuberay-kind` overlay deliberately exercises the lower-configuration
 `DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE=encrypted`,
 `DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY=django-secret`, and
 `DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK=true` directly onto
-`django-web` and the default, synchronous, and ML task-manager containers. Those
-selectors are not placed in the shared ConfigMap or Ray pod specifications. The base
-and other overlays therefore keep plaintext writes unless they opt in explicitly.
+`django-web` and the default, synchronous, ML, and Ray Job task-manager containers.
+Those selectors are not placed in the shared ConfigMap or Ray pod specifications.
+The base and other overlays therefore keep plaintext writes unless they opt in
+explicitly.
 This local fallback validates encryption behavior, not key isolation: the generic upstream KubeRay
 head and worker pods still import `django-ray-secret`, including the Django signing secret from
 which the fallback key is derived. A production deployment gets the read-only database separation

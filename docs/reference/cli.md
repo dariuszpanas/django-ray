@@ -43,6 +43,10 @@ The explicit execution-mode flags are mutually exclusive. Omit all three to deri
 mode from `DJANGO_RAY`; contradictory flags are rejected instead of using an implicit
 precedence order.
 
+The default `ray_job` mode requires a retrievable `INPUT_STORAGE_BACKEND`, even when
+argument spillover is disabled. The worker validates that backend before creating a
+lease or claiming work, so a missing or malformed configuration fails at startup.
+
 #### Concurrency
 
 | Option | Description |
@@ -198,6 +202,10 @@ failures are recorded as a bounded exception class in
 success, and failure output use only a 16-character SHA-256 reference fingerprint; full
 storage references and provider exception messages are not printed. See
 [Durable Input Storage](input-storage.md#retries-and-retention) before scheduling cleanup.
+Before enabling rq2 writes, upgrade or disable every older scheduled/manual copy of this
+command: released binaries understand neither `payload_kind` nor
+`ray_job_request_reference`; their dry run misreports an aged active rq2 object and
+`--delete` can remove it. Resume cleanup only from the exact final rq2 code.
 
 ## django_ray_cleanup_workflow_progress
 

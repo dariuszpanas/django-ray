@@ -30,6 +30,20 @@ def get_settings() -> dict[str, Any]:
     return merged
 
 
+def validate_ray_job_request_storage_settings(
+    config: dict[str, Any] | None = None,
+) -> None:
+    """Require a retrievable request store before a Ray Job worker advertises capacity."""
+    if config is None:
+        config = get_settings()
+    validate_settings(config)
+    if config.get("INPUT_STORAGE_BACKEND") is None:
+        raise ImproperlyConfigured(
+            "django-ray: INPUT_STORAGE_BACKEND must be configured for "
+            "Ray Job request-reference transport"
+        )
+
+
 def validate_settings(config: dict[str, Any] | None = None) -> None:
     """Validate django-ray settings.
 

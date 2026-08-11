@@ -337,7 +337,11 @@ class ExecutionRequestDecodeError(ValueError):
 class ExecutionRequestEncodeError(ValueError):
     """Report a deterministic request-construction failure without field data."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        classification: ExecutionRequestRejection = ExecutionRequestRejection.INVALID_VERSIONED,
+    ) -> None:
+        self.classification = classification
         super().__init__("execution request is invalid")
 
 
@@ -975,10 +979,11 @@ def encode_execution_request_rejection(
         )
         normalized.update(_normalize_body(normalized, legacy=False))
         serialized = _bounded_json_dumps(normalized, sort_keys=True)
+    except _ResourceLimitError:
+        raise ExecutionRequestEncodeError(ExecutionRequestRejection.RESOURCE_LIMIT) from None
     except (
         ExecutionCompletionDecodeError,
         _InvalidJsonTreeError,
-        _ResourceLimitError,
         TypeError,
         ValueError,
         RecursionError,
@@ -1553,10 +1558,17 @@ def encode_execution_request(request: ExecutionRequest) -> str:
             max_bytes=EXECUTION_REQUEST_MAX_BYTES,
         )
         decode_execution_request(canonical)
+    except _ResourceLimitError:
+        raise ExecutionRequestEncodeError(ExecutionRequestRejection.RESOURCE_LIMIT) from None
+    except ExecutionRequestDecodeError as error:
+        classification = (
+            ExecutionRequestRejection.RESOURCE_LIMIT
+            if error.classification is ExecutionRequestRejection.RESOURCE_LIMIT
+            else ExecutionRequestRejection.INVALID_VERSIONED
+        )
+        raise ExecutionRequestEncodeError(classification) from None
     except (
-        ExecutionRequestDecodeError,
         _InvalidJsonTreeError,
-        _ResourceLimitError,
         _UnsupportedRequestTransportError,
         TypeError,
         ValueError,

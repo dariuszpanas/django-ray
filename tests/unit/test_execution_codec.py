@@ -298,6 +298,7 @@ def test_request_encoder_rejects_post_stringification_key_collision(
         encode_execution_request(request)
 
     assert str(caught.value) == "execution request is invalid"
+    assert caught.value.classification is ExecutionRequestRejection.INVALID_VERSIONED
 
 
 @pytest.mark.parametrize(
@@ -332,6 +333,7 @@ def test_request_encoder_has_fixed_failure_for_invalid_fields(
         encode_execution_request(request)
 
     assert str(caught.value) == "execution request is invalid"
+    assert caught.value.classification is ExecutionRequestRejection.INVALID_VERSIONED
     assert "forged" not in str(caught.value)
 
 
@@ -350,8 +352,9 @@ def test_referenced_request_requires_reference_and_safety_placeholders(
 ) -> None:
     request = replace(_referenced_request(identity), **changes)
 
-    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
+    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid") as caught:
         encode_execution_request(request)
+    assert caught.value.classification is ExecutionRequestRejection.INVALID_VERSIONED
 
 
 def test_request_encoder_rejects_nonfinite_and_invalid_unicode_metadata(
@@ -660,6 +663,33 @@ def test_request_encoded_byte_limit_is_checked_before_decoding(
     assert error.allows_legacy_fallback is False
 
 
+def test_multibyte_request_encode_and_decode_use_the_exact_utf8_byte_limit(
+    identity: ExecutionIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = replace(
+        _inline_request(identity),
+        serialized_args=json.dumps(["\u00e9"], ensure_ascii=False, separators=(",", ":")),
+    )
+    serialized = encode_execution_request(request)
+    byte_size = len(serialized.encode("utf-8"))
+    assert len(serialized) < byte_size
+
+    monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_BYTES", byte_size)
+    assert encode_execution_request(request) == serialized
+    assert _decode_request(serialized) == request
+
+    monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_BYTES", byte_size - 1)
+    with pytest.raises(ExecutionRequestEncodeError) as caught:
+        encode_execution_request(request)
+    assert caught.value.classification is ExecutionRequestRejection.RESOURCE_LIMIT
+    _assert_request_rejection(
+        serialized,
+        ExecutionRequestRejection.RESOURCE_LIMIT,
+        attempted_versioned=True,
+    )
+
+
 def test_oversized_request_never_reaches_reserved_marker_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -731,8 +761,9 @@ def test_request_runtime_identity_has_an_independent_byte_budget(
         "EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES",
         identity_size - 1,
     )
-    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
+    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid") as caught:
         encode_execution_request(request)
+    assert caught.value.classification is ExecutionRequestRejection.RESOURCE_LIMIT
     _assert_request_rejection(
         serialized,
         ExecutionRequestRejection.RESOURCE_LIMIT,
@@ -756,8 +787,9 @@ def test_request_encoder_stops_aggregate_json_before_detached_parse(
         pytest.fail("aggregate-over-cap request reached detached parsing")
 
     monkeypatch.setattr(codec_module, "_bounded_request_json_loads", fail_parse)
-    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
+    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid") as caught:
         encode_execution_request(request)
+    assert caught.value.classification is ExecutionRequestRejection.RESOURCE_LIMIT
 
 
 @pytest.mark.parametrize(
@@ -930,13 +962,14 @@ def test_request_rejection_executor_version_and_resource_bounds_are_exact(
         "EXECUTION_COMPLETION_MAX_BYTES",
         len(serialized.encode("utf-8")) - 1,
     )
-    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
+    with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid") as caught:
         encode_execution_request_rejection(
             expected_identity=identity,
             expected_execution_protocol_version=1,
             executor_django_ray_version="v" * 128,
             classification=ExecutionRequestRejection.RESOURCE_LIMIT,
         )
+    assert caught.value.classification is ExecutionRequestRejection.RESOURCE_LIMIT
 
 
 def test_enriched_success_round_trips_as_exact_canonical_flat_schema(

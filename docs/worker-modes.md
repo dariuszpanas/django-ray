@@ -102,15 +102,19 @@ Coroutine tasks use the same encoded entrypoint and completion envelope as synch
 tasks. The isolated driver owns the per-task loop, and a Ray Job stop request terminates
 that driver rather than preserving detached coroutine children.
 
-New Ray Job submissions carry a canonical versioned request plus independently bound
-identity, protocol, and digest metadata. The driver validates both before Django setup,
-input hydration, or application callable import/invocation, and a compatible replacement
-task manager can reconcile the same persisted job ID. Released protocol-v1 payloads
-remain supported during the drain window. Strict rejection or a strict terminal driver
-without an exact completion is never automatically retried. The rejection exit code is
-diagnostic rather than proof of execution phase, and Ray Job logs are not compatibility
-authority. This outer check does not attest the Ray/Python/cluster tuple or cover nested
-workflow and distributed leaf callables.
+Ray Job task managers require a retrievable `INPUT_STORAGE_BACKEND`, even when argument
+spillover is disabled. New rq2 submissions store the complete canonical request there,
+bind its reference to the durable row, and pass only a bounded locator plus opaque
+identity/protocol/content metadata to Ray. The driver validates the locator before
+storage I/O and the retrieved canonical request before Django setup, input hydration, or
+application callable import/invocation; a compatible replacement task manager can
+reconcile the same persisted job ID and reference. Released protocol-`1` payloads and
+the earlier strict rq1 inline carrier remain supported only during the drain window.
+Strict rejection or a strict terminal driver without an exact completion is never
+automatically retried. The rejection exit code is diagnostic rather than proof of
+execution phase, and Ray Job logs are not compatibility authority. Nested workflow,
+fold, and distributed application boundaries inherit the strict identity/protocol
+fence; exact Ray/Python/cluster attestation remains separate.
 
 ## Distributed Utilities
 

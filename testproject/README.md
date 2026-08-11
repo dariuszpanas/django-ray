@@ -193,12 +193,12 @@ boundary.
 ## Observe a low-resource mixed workload
 
 The guarded local KubeRay stack exposes the application on
-[localhost:30080](http://localhost:30080) and includes consumers for the default and priority
-queues, a synchronous worker, and an ML worker. Its direct exploratory profile uses one
-default/priority task manager and two fixed two-CPU Ray workers; the heavier Kong profile is for
-capacity and backlog exercises. The tracked `ObservabilityDemoUser` submits only one task at a time,
-waits for its terminal result, pauses for two to four seconds, and then moves to the next task family.
-One cycle covers:
+[localhost:30080](http://localhost:30080) and includes consumers for the default, priority,
+`sync`, `ml`, and `ray-data` queues. Its direct exploratory profile uses one default/priority
+Ray Core task manager, one `ray-data` Ray Job task manager, and two fixed two-CPU Ray workers;
+the heavier Kong profile is for capacity and backlog exercises. The tracked
+`ObservabilityDemoUser` submits only one task at a time, waits for its terminal result, pauses for
+two to four seconds, and then moves to the next task family. One cycle covers:
 
 - basic and deliberately slow default-queue tasks;
 - a high-priority task;

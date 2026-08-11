@@ -51,11 +51,15 @@ from django_ray.management.diagnostics import (
 from django_ray.models import CancellationStatus, RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.ray_job_protocol import (
     RayJobRequestBindingError,
+    RayJobRequestExpectation,
+    RayJobRequestReferenceExpectation,
+    is_rq2_ray_job_submission_id,
     is_strict_ray_job_submission_id,
     is_valid_strict_ray_job_submission_id,
     parse_ray_job_request_metadata,
     ray_job_metadata_has_strict_marker,
     validate_ray_job_request_expectation,
+    validate_ray_job_request_reference_expectation,
 )
 from django_ray.redaction import (
     materialize_exception_message,
@@ -282,6 +286,7 @@ class Command(BaseCommand):
         self.poll_max_interval = float(settings.get("WORKER_POLL_MAX_INTERVAL_SECONDS", 0.1))
         self.polling_policy = self._new_polling_policy()
 
+        self._validate_execution_mode_configuration(settings)
         self.setup_signal_handlers()
 
         heartbeat_interval = get_heartbeat_interval().total_seconds()
@@ -320,6 +325,28 @@ class Command(BaseCommand):
             self, "_called_from_command_line", False
         ):
             raise SystemExit(self.shutdown_exit_code)
+
+    def _validate_execution_mode_configuration(self, settings: dict[str, Any]) -> None:
+        """Fail before lease creation when Ray Job request storage is unusable."""
+        if self.execution_mode != "ray":
+            return
+
+        from django.core.exceptions import ImproperlyConfigured
+
+        from django_ray.conf.settings import validate_ray_job_request_storage_settings
+        from django_ray.ray_job_request_storage import (
+            RayJobRequestStorageError,
+            validate_ray_job_request_storage_config,
+        )
+
+        try:
+            validate_ray_job_request_storage_settings(settings)
+            validate_ray_job_request_storage_config(settings)
+        except (ImproperlyConfigured, RayJobRequestStorageError) as error:
+            diagnostic = render_console_diagnostic(error)
+            raise CommandError(
+                f"Ray Job request storage configuration is invalid: {diagnostic}"
+            ) from None
 
     def _initialize_ray_execution(self) -> None:
         """Initialize Ray only after this process owns its database lease."""
@@ -909,20 +936,20 @@ class Command(BaseCommand):
                 break
 
             if current_time >= next_cancellation:
-                activity = bool(self.process_cancellations()) or activity
+                activity = bool(self.process_cancellations(queues)) or activity
                 next_cancellation = current_time + self.cancellation_interval
             if self.shutdown_requested:
                 break
 
             if current_time >= next_reconciliation:
-                activity = bool(self.reconcile_tasks()) or activity
+                activity = bool(self.reconcile_tasks(queues)) or activity
                 self.last_reconciliation = current_time
                 next_reconciliation = current_time + self.reconciliation_interval
             if self.shutdown_requested:
                 break
 
             if current_time >= next_timeout_check:
-                activity = bool(self.detect_stuck_tasks()) or activity
+                activity = bool(self.detect_stuck_tasks(queues)) or activity
                 next_timeout_check = current_time + self.timeout_check_interval
             if self.shutdown_requested:
                 break
@@ -2882,7 +2909,10 @@ class Command(BaseCommand):
 
     def submit_task_to_ray(self, task: RayTaskExecution) -> None:
         """Submit a task to Ray for execution."""
-        from django_ray.runner import RayJobSubmissionUncertainError
+        from django_ray.runner import (
+            RayJobRequestPreparationError,
+            RayJobSubmissionUncertainError,
+        )
         from django_ray.runner.ray_job import RayJobRunner
         from django_ray.workflow_plans import WorkflowPlanMismatchError
 
@@ -2893,7 +2923,18 @@ class Command(BaseCommand):
 
         try:
             runner = RayJobRunner()
-
+        except RayJobRequestPreparationError as exc:
+            self._handle_task_failure(
+                task,
+                error_message=str(exc),
+                error_traceback=None,
+                exception_type=safe_exception_type_name(exc),
+                retryable=(False if exc.requires_nonretryable_disposition else None),
+                expected_claimed_by_worker=expected_worker_id,
+                expected_attempt_number=expected_attempt_number,
+                expected_execution_generation=expected_execution_generation,
+            )
+            return
         except Exception as e:
             import traceback
 
@@ -2925,6 +2966,18 @@ class Command(BaseCommand):
                 expected_execution_generation=expected_execution_generation,
                 expected_ray_job_id=expected_ray_job_id,
             )
+        except RayJobRequestPreparationError as exc:
+            self._handle_task_failure(
+                task,
+                error_message=str(exc),
+                error_traceback=None,
+                exception_type=safe_exception_type_name(exc),
+                retryable=(False if exc.requires_nonretryable_disposition else None),
+                expected_claimed_by_worker=expected_worker_id,
+                expected_attempt_number=expected_attempt_number,
+                expected_execution_generation=expected_execution_generation,
+            )
+            return
         except Exception as exc:
             import traceback
 
@@ -2963,27 +3016,6 @@ class Command(BaseCommand):
         try:
             handle = runner.submit_durable(task_execution=task)
         except RayJobSubmissionUncertainError as exc:
-            if (
-                exc.observed_submission_id is not None
-                and exc.observed_submission_id != reserved_handle.ray_job_id
-            ):
-                mismatched_handle = SubmissionHandle(
-                    ray_job_id=exc.observed_submission_id,
-                    ray_address=reserved_handle.ray_address,
-                    submitted_at=reserved_handle.submitted_at,
-                )
-                self._handle_mismatched_ray_job_submission(
-                    task,
-                    runner,
-                    reserved_handle,
-                    mismatched_handle,
-                    error_message=materialize_exception_message(exc),
-                    exception_type=safe_exception_type_name(exc),
-                    expected_worker_id=expected_worker_id,
-                    expected_attempt_number=expected_attempt_number,
-                    expected_execution_generation=expected_execution_generation,
-                )
-                return
             try:
                 still_reserved = self._persist_submission_tracking(
                     task,
@@ -3022,15 +3054,41 @@ class Command(BaseCommand):
                 )
             )
             return
+        except RayJobRequestPreparationError as exc:
+            from django_ray.ray_job_request_storage import (
+                release_ray_job_request_reservation,
+            )
+
+            released = release_ray_job_request_reservation(
+                task,
+                reserved_handle,
+                expected_reference=task.ray_job_request_reference,
+            )
+            self.active_tasks.pop(task.pk, None)
+            self.active_task_identities.pop(task.pk, None)
+            if released:
+                self._handle_task_failure(
+                    task,
+                    error_message=str(exc),
+                    error_traceback=None,
+                    exception_type=safe_exception_type_name(exc),
+                    retryable=(False if exc.requires_nonretryable_disposition else None),
+                    expected_claimed_by_worker=expected_worker_id,
+                    expected_attempt_number=expected_attempt_number,
+                    expected_execution_generation=expected_execution_generation,
+                )
+            return
         except Exception as exc:
             import traceback
 
-            released = self._release_submission_tracking(
+            from django_ray.ray_job_request_storage import (
+                release_ray_job_request_reservation,
+            )
+
+            released = release_ray_job_request_reservation(
                 task,
                 reserved_handle,
-                expected_worker_id=expected_worker_id,
-                expected_attempt_number=expected_attempt_number,
-                expected_execution_generation=expected_execution_generation,
+                expected_reference=task.ray_job_request_reference,
             )
             self.active_tasks.pop(task.pk, None)
             self.active_task_identities.pop(task.pk, None)
@@ -3511,6 +3569,7 @@ class Command(BaseCommand):
         expected_attempt_number, expected_execution_generation = expected_identity
         handle = self._build_submission_handle(task, ray_job_id)
         strict_ray_job = is_strict_ray_job_submission_id(ray_job_id)
+        rq2_ray_job = is_rq2_ray_job_submission_id(ray_job_id)
 
         def consume_valid_completion(
             completion_data: str | None,
@@ -3608,6 +3667,7 @@ class Command(BaseCommand):
                     "completion_data",
                     "ray_job_id",
                     "ray_address",
+                    "ray_job_request_reference",
                     "claimed_by_worker",
                     "attempt_number",
                     "execution_generation",
@@ -3644,6 +3704,7 @@ class Command(BaseCommand):
             error_message: str,
             log_detail: str,
             require_stale: bool = True,
+            binding_validator: Any | None = None,
         ) -> bool:
             """Fence an untrusted execution, request its exact stop, and retain LOST."""
             timeout_recovery_owns_task = expected_completion_data is None and is_task_timed_out(
@@ -3673,6 +3734,8 @@ class Command(BaseCommand):
                     current
                 )
                 if require_stale and (timeout_recovery_owns_task or not is_task_stuck(current)):
+                    return False
+                if binding_validator is not None and binding_validator(current) is None:
                     return False
                 if not record_lost(
                     current,
@@ -3756,50 +3819,83 @@ class Command(BaseCommand):
         if completion_consumed:
             return
 
-        if strict_metadata_marker and not strict_ray_job:
+        def strict_binding_rejection(candidate: RayTaskExecution) -> str | None:
+            """Validate the status metadata against one current durable row."""
+            if strict_metadata_marker and not strict_ray_job:
+                return "unexpected_strict_metadata"
+            if not strict_ray_job:
+                return None
+            if not is_valid_strict_ray_job_submission_id(ray_job_id):
+                return "invalid_submission_id"
+            if job_info.job_id != ray_job_id:
+                return "job_id_mismatch"
+            if job_info.status == JobStatus.UNKNOWN and job_info.metadata is None:
+                return None
+            try:
+                expectation = parse_ray_job_request_metadata(
+                    job_info.metadata,
+                    required=True,
+                )
+                assert expectation is not None
+                if rq2_ray_job:
+                    if not isinstance(expectation, RayJobRequestReferenceExpectation):
+                        return "invalid"
+                    request_reference = candidate.ray_job_request_reference
+                    if not request_reference:
+                        return "missing"
+                    from django_ray.ray_job_request_storage import (
+                        RayJobRequestStorageError,
+                        ray_job_request_reference_content_identity,
+                    )
+
+                    try:
+                        request_digest, request_size_bytes = (
+                            ray_job_request_reference_content_identity(request_reference)
+                        )
+                    except RayJobRequestStorageError as exc:
+                        return exc.classification.value
+                    validate_ray_job_request_reference_expectation(
+                        expectation,
+                        expected_identity=self._execution_completion_identity(candidate),
+                        expected_execution_protocol_version=int(
+                            candidate.execution_protocol_version
+                        ),
+                        expected_request_sha256=request_digest,
+                        expected_request_size_bytes=request_size_bytes,
+                        expected_submission_id=ray_job_id,
+                        request_reference=request_reference,
+                    )
+                else:
+                    if not isinstance(expectation, RayJobRequestExpectation):
+                        return "invalid"
+                    validate_ray_job_request_expectation(
+                        expectation,
+                        expected_identity=self._execution_completion_identity(candidate),
+                        expected_execution_protocol_version=int(
+                            candidate.execution_protocol_version
+                        ),
+                    )
+            except RayJobRequestBindingError as exc:
+                return exc.classification.value
+            return None
+
+        binding_rejection = strict_binding_rejection(task)
+        if binding_rejection is not None:
+            legacy_marker_conflict = not strict_ray_job
             resolve_stale_untrusted_execution(
                 expected_completion_data=completion_data,
                 error_message=(
-                    "Strict Ray Job request binding could not be verified "
-                    "(unexpected_strict_metadata)"
+                    f"Strict Ray Job request binding could not be verified ({binding_rejection})"
                 ),
-                log_detail=("had strict request metadata attached to a legacy submission ID"),
+                log_detail=(
+                    "had strict request metadata attached to a legacy submission ID"
+                    if legacy_marker_conflict
+                    else f"had an untrusted strict request binding ({binding_rejection})"
+                ),
                 require_stale=False,
+                binding_validator=strict_binding_rejection,
             )
             return
-
-        if strict_ray_job:
-            binding_rejection: str | None = None
-            if not is_valid_strict_ray_job_submission_id(ray_job_id):
-                binding_rejection = "invalid_submission_id"
-            elif job_info.job_id != ray_job_id:
-                binding_rejection = "job_id_mismatch"
-            elif job_info.status != JobStatus.UNKNOWN or job_info.metadata is not None:
-                try:
-                    expectation = parse_ray_job_request_metadata(
-                        job_info.metadata,
-                        required=True,
-                    )
-                    assert expectation is not None
-                    validate_ray_job_request_expectation(
-                        expectation,
-                        expected_identity=self._execution_completion_identity(task),
-                        expected_execution_protocol_version=int(task.execution_protocol_version),
-                    )
-                except RayJobRequestBindingError as exc:
-                    binding_rejection = exc.classification.value
-
-            if binding_rejection is not None:
-                resolve_stale_untrusted_execution(
-                    expected_completion_data=completion_data,
-                    error_message=(
-                        "Strict Ray Job request binding could not be verified "
-                        f"({binding_rejection})"
-                    ),
-                    log_detail=(f"had an untrusted strict request binding ({binding_rejection})"),
-                    require_stale=False,
-                )
-                return
 
         strict_terminal = strict_ray_job and job_info.status in (
             JobStatus.SUCCEEDED,
@@ -4048,8 +4144,13 @@ class Command(BaseCommand):
         """Stop a timed-out execution by its exact recorded backend identity."""
         return self._request_cancellation_for_task(task)
 
-    def reconcile_tasks(self) -> int:
-        """Reconcile task states with Ray."""
+    def reconcile_tasks(self, queues: Sequence[str] | None = None) -> int:
+        """Reconcile Ray Jobs, optionally fencing orphan adoption by queue.
+
+        The production loop always supplies its validated queue selection. The
+        default retains the all-queue scan for direct administrative callers and
+        compatibility with existing command-method integrations.
+        """
         if self.sync_mode or self.shutdown_requested:
             return 0
 
@@ -4060,7 +4161,7 @@ class Command(BaseCommand):
         from django_ray.runner.leasing import get_active_workers
         from django_ray.runner.ray_job import RayJobRunner
 
-        runner = RayJobRunner()
+        runner: RayJobRunner | None = None
         completed_tasks: list[int] = []
         reconciled_task_ids: set[int] = set()
         active_task_ids_before = set(self.active_tasks)
@@ -4070,6 +4171,8 @@ class Command(BaseCommand):
                 break
             tracked_identity = self.active_task_identities.get(task_pk)
             try:
+                if runner is None:
+                    runner = RayJobRunner()
                 task = RayTaskExecution.objects.filter(
                     execution_protocol_version__gte=supported_protocols.minimum,
                     execution_protocol_version__lte=supported_protocols.maximum,
@@ -4110,6 +4213,8 @@ class Command(BaseCommand):
             execution_protocol_version__gte=supported_protocols.minimum,
             execution_protocol_version__lte=supported_protocols.maximum,
         ).exclude(pk__in=reconciled_task_ids)
+        if queues is not None:
+            orphaned_tasks = orphaned_tasks.filter(queue_name__in=queues)
 
         for task in orphaned_tasks:
             if self.shutdown_requested:
@@ -4121,6 +4226,8 @@ class Command(BaseCommand):
                 continue
 
             try:
+                if runner is None:
+                    runner = RayJobRunner()
                 if not self._adopt_orphaned_ray_job_task(task, now=datetime.now(UTC)):
                     continue
                 self.stdout.write(
@@ -4144,11 +4251,13 @@ class Command(BaseCommand):
         adopted_count = len(set(self.active_tasks) - active_task_ids_before)
         return len(completed_tasks) + adopted_count
 
-    def detect_stuck_tasks(self) -> int:
+    def detect_stuck_tasks(self, queues: Sequence[str] | None = None) -> int:
         """Detect and mark stuck tasks as LOST.
 
         This checks for tasks that have been RUNNING for too long without
         heartbeats, which indicates the worker processing them may have crashed.
+        The production loop supplies its selected queues; omitting them retains
+        the all-queue administrative contract.
         """
         from django_ray.runner.leasing import get_active_workers
 
@@ -4166,6 +4275,8 @@ class Command(BaseCommand):
             execution_protocol_version__gte=supported_protocols.minimum,
             execution_protocol_version__lte=supported_protocols.maximum,
         )
+        if queues is not None:
+            running_tasks = running_tasks.filter(queue_name__in=queues)
 
         active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
         ray_core_pending_handles = (
@@ -4454,8 +4565,8 @@ class Command(BaseCommand):
 
         return CancellationOutcome(CancellationOutcomeStatus.NOT_APPLICABLE)
 
-    def process_cancellations(self) -> int:
-        """Adopt and finalize cancellation requests left by dead workers."""
+    def process_cancellations(self, queues: Sequence[str] | None = None) -> int:
+        """Adopt cancellations in selected queues, or all queues when omitted."""
         if self.shutdown_requested:
             return 0
         supported_protocols = self._authoritative_protocol_range_for_scan()
@@ -4466,6 +4577,8 @@ class Command(BaseCommand):
             execution_protocol_version__gte=supported_protocols.minimum,
             execution_protocol_version__lte=supported_protocols.maximum,
         )
+        if queues is not None:
+            cancelling_tasks = cancelling_tasks.filter(queue_name__in=queues)
         finalized_count = 0
 
         for task in cancelling_tasks:

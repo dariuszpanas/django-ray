@@ -1,38 +1,39 @@
-# Django-Ray Worker Deployment
-# Processes tasks from the queue and submits to Ray cluster
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: django-ray-worker
+  name: django-ray-worker-ray-job
   namespace: django-ray
   labels:
     app: django-ray
     component: worker
+    queues: ray-data
+    runner: ray-job
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: django-ray
       component: worker
+      queues: ray-data
+      runner: ray-job
   template:
     metadata:
       labels:
         app: django-ray
         component: worker
+        queues: ray-data
+        runner: ray-job
     spec:
       initContainers:
-        # Wait for PostgreSQL
         - name: wait-for-postgres
           image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;']
-        # Wait for Ray head
-        - name: wait-for-ray
+          command: ["sh", "-c", "until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;"]
+        - name: wait-for-ray-jobs
           image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z ray-head-svc 10001; do echo waiting for ray-head; sleep 2; done;']
+          command: ["sh", "-c", "until nc -z ray-head-svc 8265; do echo waiting for ray jobs; sleep 2; done;"]
         - name: wait-for-runtime-env
           image: busybox:1.36
-          command: ['sh', '-c', 'until test -f /runtime-env/django-ray-source.zip && test -f /runtime-env/django-ray-recovery.zip; do echo waiting for runtime env bundles; sleep 2; done;']
+          command: ["sh", "-c", "until test -f /runtime-env/django-ray-source.zip; do echo waiting for runtime env; sleep 2; done;"]
           volumeMounts:
             - name: runtime-env
               mountPath: /runtime-env
@@ -41,19 +42,17 @@ spec:
         - name: django-ray-worker
           image: django-ray:latest
           imagePullPolicy: IfNotPresent
-          args: ['worker-cluster']  # Connect to Ray cluster
+          command: ["python", "testproject/manage.py", "django_ray_worker"]
+          args:
+            - "--queue"
+            - "ray-data"
+            - "--concurrency"
+            - "1"
           envFrom:
             - configMapRef:
                 name: django-ray-config
             - secretRef:
                 name: django-ray-secret
-          env:
-            - name: RAY_ADDRESS
-              value: "ray://ray-head-svc:10001"
-            - name: DJANGO_RAY_QUEUE
-              value: "default"
-            - name: DJANGO_RAY_CONCURRENCY
-              value: "40"
           resources:
             requests:
               memory: "256Mi"
@@ -94,4 +93,3 @@ spec:
         - name: payload-storage
           persistentVolumeClaim:
             claimName: payload-storage-pvc
-

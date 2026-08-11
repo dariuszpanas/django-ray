@@ -11,6 +11,7 @@ resources:
   - ../../base
   - ray-cluster-kuberay.yaml
   - worker-ml.yaml
+  - worker-ray-job.yaml
   - worker-sync.yaml
 
 patches:
@@ -172,6 +173,20 @@ patches:
     target:
       kind: Deployment
       name: django-ray-worker-ml
+
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE
+            value: encrypted
+          - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY
+            value: django-secret
+          - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
+            value: "true"
+    target:
+      kind: Deployment
+      name: django-ray-worker-ray-job
 
   # Also consume the high-priority and low-priority queues from the default
   # worker pool so tasks submitted to them aren't stuck with no consumer.

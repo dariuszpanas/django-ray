@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,6 +61,7 @@ from scripts.local_kuberay_gate import (
     inspect_docker_context_allowlists,
     inspect_kubeconfig_snapshot,
     inspect_probe_contract,
+    inspect_ray_job_request_storage_overlay,
     inspect_rendered_resources,
     inspect_runtime_env_encryption_overlay,
     inspect_runtime_env_encryption_secret_data,
@@ -1760,6 +1762,7 @@ def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(tmp_path: Pat
     resources = load_rendered_resources(result.stdout)
     inspect_rendered_resources(resources, namespace=EXPECTED_NAMESPACE, tag=TAG)
     inspect_runtime_env_encryption_overlay(resources)
+    inspect_ray_job_request_storage_overlay(resources)
 
     assert all(
         resource["kind"] == "Namespace"
@@ -1767,6 +1770,15 @@ def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(tmp_path: Pat
         for resource in resources
     )
     assert not any(resource["kind"].startswith("ClusterRole") for resource in resources)
+
+    ray_cluster = next(resource for resource in resources if resource.get("kind") == "RayCluster")
+    head = ray_cluster["spec"]["headGroupSpec"]["template"]["spec"]["containers"][0]
+    payload_mount = next(
+        mount for mount in head["volumeMounts"] if mount["name"] == "payload-storage"
+    )
+    payload_mount.pop("readOnly")
+    with pytest.raises(ValueError, match="must be read-only"):
+        inspect_ray_job_request_storage_overlay(resources)
 
 
 def test_runtime_env_encryption_overlay_is_scoped_to_application_containers() -> None:
@@ -2003,6 +2015,394 @@ def test_setup_job_is_separated_and_live_secret_is_preserved() -> None:
         and resource.get("metadata", {}).get("name") in {*APP_DEPLOYMENTS, RAY_CLUSTER_NAME}
         for resource in prerequisites
     )
+
+
+def test_request_reference_payload_storage_has_exact_writer_reader_boundaries() -> None:
+    claim = yaml.safe_load((ROOT / "k8s/base/payload-storage.yaml").read_text(encoding="utf-8"))
+    assert claim["kind"] == "PersistentVolumeClaim"
+    assert claim["metadata"]["name"] == "payload-storage-pvc"
+    assert claim["spec"]["accessModes"] == ["ReadWriteMany"]
+
+    kustomization = yaml.safe_load(
+        (ROOT / "k8s/base/kustomization.yaml").read_text(encoding="utf-8")
+    )
+    assert "payload-storage.yaml" in kustomization["resources"]
+    config = yaml.safe_load((ROOT / "k8s/base/configmap.yaml").read_text(encoding="utf-8"))
+    assert config["data"]["DJANGO_RAY_INPUT_STORAGE_BACKEND"] == "filesystem"
+    assert config["data"]["DJANGO_RAY_INPUT_STORAGE_FILESYSTEM_PATH"] == "/payload-storage/inputs"
+
+    for manifest_name, deployment_name in (
+        ("django-web.yaml", "django-web"),
+        ("django-ray-worker.yaml", "django-ray-worker"),
+    ):
+        resources = list(
+            yaml.safe_load_all((ROOT / f"k8s/base/{manifest_name}").read_text(encoding="utf-8"))
+        )
+        deployment = next(
+            resource
+            for resource in resources
+            if resource.get("kind") == "Deployment"
+            and resource["metadata"]["name"] == deployment_name
+        )
+        pod = deployment["spec"]["template"]["spec"]
+        container = pod["containers"][0]
+        payload_mount = next(
+            mount for mount in container["volumeMounts"] if mount["name"] == "payload-storage"
+        )
+        assert payload_mount == {
+            "name": "payload-storage",
+            "mountPath": "/payload-storage",
+        }
+        payload_volume = next(
+            volume for volume in pod["volumes"] if volume["name"] == "payload-storage"
+        )
+        assert payload_volume["persistentVolumeClaim"]["claimName"] == "payload-storage-pvc"
+
+    static_ray = list(
+        yaml.safe_load_all((ROOT / "k8s/base/ray-cluster.yaml").read_text(encoding="utf-8"))
+    )
+    for deployment_name in ("ray-head", "ray-worker"):
+        deployment = next(
+            resource
+            for resource in static_ray
+            if resource.get("kind") == "Deployment"
+            and resource["metadata"]["name"] == deployment_name
+        )
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        payload_mount = next(
+            mount for mount in container["volumeMounts"] if mount["name"] == "payload-storage"
+        )
+        assert payload_mount["readOnly"] is True
+
+    kuberay = next(
+        resource
+        for resource in yaml.safe_load_all(
+            (ROOT / "k8s/overlays/kuberay-kind/ray-cluster-kuberay.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        if resource.get("kind") == "RayCluster"
+    )
+    ray_pod_specs = [
+        kuberay["spec"]["headGroupSpec"]["template"]["spec"],
+        kuberay["spec"]["workerGroupSpecs"][0]["template"]["spec"],
+    ]
+    for pod in ray_pod_specs:
+        container = pod["containers"][0]
+        payload_mount = next(
+            mount for mount in container["volumeMounts"] if mount["name"] == "payload-storage"
+        )
+        assert payload_mount == {
+            "name": "payload-storage",
+            "mountPath": "/payload-storage",
+            "readOnly": True,
+        }
+        payload_volume = next(
+            volume for volume in pod["volumes"] if volume["name"] == "payload-storage"
+        )
+        assert payload_volume["persistentVolumeClaim"]["claimName"] == "payload-storage-pvc"
+
+    ray_job_manager = yaml.safe_load(
+        (ROOT / "k8s/overlays/kuberay-kind/worker-ray-job.yaml").read_text(encoding="utf-8")
+    )
+    assert ray_job_manager["metadata"]["name"] == "django-ray-worker-ray-job"
+    ray_job_pod = ray_job_manager["spec"]["template"]["spec"]
+    ray_job_container = ray_job_pod["containers"][0]
+    assert ray_job_container["command"] == [
+        "python",
+        "testproject/manage.py",
+        "django_ray_worker",
+    ]
+    assert ray_job_container["args"] == [
+        "--queue",
+        "ray-data",
+        "--concurrency",
+        "1",
+    ]
+    assert not {"--sync", "--local", "--cluster"} & set(ray_job_container["args"])
+    ray_job_payload_mount = next(
+        mount for mount in ray_job_container["volumeMounts"] if mount["name"] == "payload-storage"
+    )
+    assert ray_job_payload_mount == {
+        "name": "payload-storage",
+        "mountPath": "/payload-storage",
+    }
+    ray_job_payload_volume = next(
+        volume for volume in ray_job_pod["volumes"] if volume["name"] == "payload-storage"
+    )
+    assert ray_job_payload_volume["persistentVolumeClaim"]["claimName"] == ("payload-storage-pvc")
+    kuberay_kustomization = yaml.safe_load(
+        (ROOT / "k8s/overlays/kuberay-kind/kustomization.yaml").read_text(encoding="utf-8")
+    )
+    assert "worker-ray-job.yaml" in kuberay_kustomization["resources"]
+
+    settings_source = (ROOT / "testproject/settings.py").read_text(encoding="utf-8")
+    assert '"DJANGO_RAY_INPUT_STORAGE_BACKEND"' in settings_source
+    assert '"DJANGO_RAY_INPUT_STORAGE_FILESYSTEM_PATH"' in settings_source
+
+    tls_overlay = (ROOT / "k8s/overlays/dev-tls/kustomization.yaml").read_text(encoding="utf-8")
+    assert tls_overlay.count("path: /spec/template/spec/containers/0/volumeMounts/-") == 3
+    assert tls_overlay.count("path: /spec/template/spec/volumes/-") == 3
+
+
+def test_live_rq2_gate_reconciles_one_job_and_runs_negative_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    job_id = f"raysubmit_django_ray_rq2_{'a' * 64}"
+    observations = iter(
+        (
+            {
+                "ready": True,
+                "state": "RUNNING",
+                "durable_state": "RUNNING",
+                "attempt_number": 1,
+                "execution_generation": 4,
+                "worker_id": "old-worker",
+                "job_id": job_id,
+                "carrier_ok": True,
+                "binding_ok": True,
+                "request_ok": True,
+                "info_clear": True,
+                "logs_clear": True,
+                "submission_count": 1,
+            },
+            {
+                "ready": True,
+                "state": "RUNNING",
+                "durable_state": "RUNNING",
+                "attempt_number": 1,
+                "execution_generation": 4,
+                "worker_id": "replacement-worker",
+                "job_id": job_id,
+                "carrier_ok": True,
+                "binding_ok": True,
+                "request_ok": True,
+                "info_clear": True,
+                "logs_clear": True,
+                "submission_count": 1,
+            },
+            {
+                "ready": True,
+                "state": "SUCCEEDED",
+                "durable_state": "SUCCEEDED",
+                "attempt_number": 1,
+                "execution_generation": 4,
+                "worker_id": "replacement-worker",
+                "job_id": job_id,
+                "carrier_ok": True,
+                "binding_ok": True,
+                "request_ok": True,
+                "info_clear": True,
+                "logs_clear": True,
+                "submission_count": 1,
+            },
+        )
+    )
+    events: list[str] = []
+
+    monkeypatch.setattr(gate, "_enqueue_ray_job_gate_task", lambda: TASK_ID)
+    monkeypatch.setattr(gate, "_decoded_credential_values", lambda: ())
+    monkeypatch.setattr(gate, "_ray_process_surfaces_clear", lambda _values: True)
+    monkeypatch.setattr(
+        gate,
+        "_restart_ray_job_manager",
+        lambda: events.append("manager-restarted"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_ray_job_gate_task",
+        lambda *_args, **_kwargs: next(observations),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_verify_missing_ray_job_request_reference",
+        lambda: events.append("missing-reference-verified"),
+    )
+
+    gate._verify_ray_job_request_reference()
+
+    assert events == ["manager-restarted", "missing-reference-verified"]
+    assert gate.evidence.ray_job_request_reference_carrier is True
+    assert gate.evidence.ray_job_raw_info_clear is True
+    assert gate.evidence.ray_job_processes_clear is True
+    assert gate.evidence.ray_job_logs_clear is True
+    assert gate.evidence.ray_job_manager_reconciled_same_job is True
+
+
+def test_live_rq2_in_pod_inspectors_are_valid_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    observed_fields: list[str] = []
+
+    def compile_private_script(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, f"<{field_name}>", "exec")
+        observed_fields.append(field_name)
+        return {
+            "rq2 positive task enqueue": {"task_id": TASK_ID},
+            "rq2 positive task observation": {},
+            "rq2 missing-reference submission": {},
+            "rq2 missing-reference observation": {},
+            "rq2 missing-reference stale fence": {"updated": 1},
+            "rq2 missing-reference disposition": {},
+        }[field_name]
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", compile_private_script)
+
+    assert gate._enqueue_ray_job_gate_task() == TASK_ID
+    gate._observe_ray_job_gate_task(TASK_ID)
+    gate._submit_missing_ray_job_request_reference("private-marker")
+    gate._observe_missing_ray_job_request_reference(
+        task_id=TASK_ID,
+        marker="private-marker",
+    )
+    gate._age_missing_ray_job_execution(TASK_ID)
+    gate._observe_missing_ray_job_disposition(TASK_ID)
+
+    assert observed_fields == [
+        "rq2 positive task enqueue",
+        "rq2 positive task observation",
+        "rq2 missing-reference submission",
+        "rq2 missing-reference observation",
+        "rq2 missing-reference stale fence",
+        "rq2 missing-reference disposition",
+    ]
+
+
+def test_ray_process_probe_tolerates_exits_but_still_detects_exposure(tmp_path: Path) -> None:
+    unreadable = tmp_path / "99999991" / "cmdline"
+    unreadable.mkdir(parents=True)
+    clear = tmp_path / "99999992" / "cmdline"
+    clear.parent.mkdir()
+    clear.write_bytes(b"python\x00-m\x00ray.worker")
+
+    probe = gate_module._build_ray_process_surface_probe(
+        ("private-marker",),
+        proc_root=tmp_path,
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"clear": True}
+
+    exposed = tmp_path / "99999993" / "cmdline"
+    exposed.parent.mkdir()
+    exposed.write_bytes(b"python\x00private-marker")
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"clear": False}
+
+
+def test_missing_reference_gate_restores_manager_and_rejects_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    job_id = f"raysubmit_django_ray_rq2_{'c' * 64}"
+    events: list[str] = []
+
+    monkeypatch.setattr(gate, "_register_ray_job_gate_value", lambda _value: None)
+    monkeypatch.setattr(
+        gate,
+        "_scale_ray_job_manager",
+        lambda replicas: events.append(f"scale:{replicas}"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_submit_missing_ray_job_request_reference",
+        lambda _marker: {
+            "task_id": TASK_ID,
+            "job_id": job_id,
+            "attempt_number": 1,
+            "execution_generation": 7,
+        },
+    )
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_missing_ray_job_failure",
+        lambda **_kwargs: {
+            "job_id": job_id,
+            "carrier_ok": True,
+            "binding_ok": True,
+            "info_clear": True,
+            "logs_clear": True,
+            "submission_count": 1,
+            "attempt_number": 1,
+        },
+    )
+    monkeypatch.setattr(gate, "_decoded_credential_values", lambda: ())
+    monkeypatch.setattr(gate, "_ray_process_surfaces_clear", lambda _values: True)
+    monkeypatch.setattr(
+        gate,
+        "_age_missing_ray_job_execution",
+        lambda _task_id: events.append("aged"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_application_topology",
+        lambda: events.append("topology"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_missing_ray_job_disposition",
+        lambda _task_id: {
+            "state": "FAILED",
+            "attempt_number": 1,
+            "execution_generation": 7,
+            "run_after_is_none": True,
+            "completion_is_none": True,
+            "result_is_none": True,
+            "fixed_error": True,
+            "archived_attempts": 1,
+            "submission_count": 1,
+        },
+    )
+
+    gate._verify_missing_ray_job_request_reference()
+
+    assert events == ["scale:0", "aged", "scale:1", "topology"]
+    assert gate.evidence.ray_job_missing_reference_no_marker is True
+    assert gate.evidence.ray_job_missing_reference_no_retry is True
+
+
+def test_missing_reference_gate_restores_manager_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    events: list[str] = []
+
+    monkeypatch.setattr(gate, "_register_ray_job_gate_value", lambda _value: None)
+    monkeypatch.setattr(
+        gate,
+        "_scale_ray_job_manager",
+        lambda replicas: events.append(f"scale:{replicas}"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_submit_missing_ray_job_request_reference",
+        lambda _marker: (_ for _ in ()).throw(RuntimeError("fixture failed")),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_application_topology",
+        lambda: events.append("topology"),
+    )
+
+    with pytest.raises(RuntimeError, match="fixture failed"):
+        gate._verify_missing_ray_job_request_reference()
+
+    assert events == ["scale:0", "scale:1", "topology"]
 
 
 def test_setup_log_requires_migrations_static_and_runtime_env_markers() -> None:
@@ -2355,6 +2755,12 @@ def test_application_inventory_binds_pods_through_exact_replicaset_and_deploymen
             "app": "django-ray",
             "component": "worker",
             "queues": "ml",
+        },
+        "django-ray-worker-ray-job": {
+            "app": "django-ray",
+            "component": "worker",
+            "queues": "ray-data",
+            "runner": "ray-job",
         },
     }
     gate = LocalKubeRayGate(_config())
@@ -6529,6 +6935,13 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.runtime_env_encryption_retry_preserved = True
     gate.evidence.runtime_env_encryption_logs_clear = True
     gate.evidence.django_ray_secret_preserved = True
+    gate.evidence.ray_job_request_reference_carrier = True
+    gate.evidence.ray_job_raw_info_clear = True
+    gate.evidence.ray_job_processes_clear = True
+    gate.evidence.ray_job_logs_clear = True
+    gate.evidence.ray_job_manager_reconciled_same_job = True
+    gate.evidence.ray_job_missing_reference_no_marker = True
+    gate.evidence.ray_job_missing_reference_no_retry = True
     gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
     gate.evidence.workflow_task_state = "SUCCEEDED"
     gate.evidence.workflow_schema_version = 3
@@ -6611,6 +7024,13 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.runtime_env_encryption_retry_preserved = True
     gate.evidence.runtime_env_encryption_logs_clear = True
     gate.evidence.django_ray_secret_preserved = True
+    gate.evidence.ray_job_request_reference_carrier = True
+    gate.evidence.ray_job_raw_info_clear = True
+    gate.evidence.ray_job_processes_clear = True
+    gate.evidence.ray_job_logs_clear = True
+    gate.evidence.ray_job_manager_reconciled_same_job = True
+    gate.evidence.ray_job_missing_reference_no_marker = True
+    gate.evidence.ray_job_missing_reference_no_retry = True
     gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
     gate.evidence.workflow_task_state = "SUCCEEDED"
     gate.evidence.workflow_schema_version = 3
@@ -6683,6 +7103,13 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("runtime_env_encryption_envelope") == "True"
     assert reconstructed("runtime_env_encryption_retry_preserved") == "True"
     assert reconstructed("django_ray_secret_preserved") == "True"
+    assert reconstructed("ray_job_request_reference_carrier") == "True"
+    assert reconstructed("ray_job_raw_info_clear") == "True"
+    assert reconstructed("ray_job_processes_clear") == "True"
+    assert reconstructed("ray_job_logs_clear") == "True"
+    assert reconstructed("ray_job_manager_reconciled_same_job") == "True"
+    assert reconstructed("ray_job_missing_reference_no_marker") == "True"
+    assert reconstructed("ray_job_missing_reference_no_retry") == "True"
     assert reconstructed("workflow_task_id") == WORKFLOW_TASK_ID
     assert reconstructed("workflow_availability") == "AVAILABLE"
     assert reconstructed("workflow_terminal_only_task_id") == TERMINAL_ONLY_WORKFLOW_TASK_ID
@@ -6698,6 +7125,9 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     )
     for forbidden in ("task_id", "sha256", "key_id", "nonce", "ciphertext", "envelope={"):
         assert forbidden not in encryption_evidence
+    ray_job_evidence = "\n".join(line for line in output if line.startswith("ray_job_"))
+    assert "locator" not in ray_job_evidence
+    assert re.search(r"[0-9a-f]{64}", ray_job_evidence) is None
     assert all(len(line) <= EVIDENCE_LINE_LIMIT for line in output)
 
 
@@ -6750,6 +7180,7 @@ def test_gate_guide_separates_runtime_evidence_from_durable_summary() -> None:
 
 def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservation() -> None:
     guide = (ROOT / "docs/deployment/local-kuberay-gate.md").read_text(encoding="utf-8")
+    normalized = " ".join(guide.split())
 
     assert "## Trigger matrix" in guide
     assert "Required" in guide
@@ -6782,6 +7213,11 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
     assert "Each emitted line is at most 72 characters" in guide
     assert "key_part_001" in guide
     assert "RuntimeEnv snapshot storage, encryption settings or dependencies" in guide
+    assert "Ray Job request encoding, request-reference storage" in guide
+    assert "11 running workload pods with 3.3 CPU and 5,056 MiB requested" in normalized
+    assert "four task-manager Deployments" in normalized
+    assert "`ray-job-request-reference`" in guide
+    assert "exact canonical locator digest" in normalized
     assert "with no selector in an init container, shared ConfigMap, setup Job, or Ray pod" in guide
     assert "task IDs, hashes, key IDs, nonces, ciphertext, or envelopes" in guide
     assert "full base64 `django-ray-secret.data` mapping" in guide
@@ -6876,6 +7312,7 @@ def _stub_successful_gate_layers(
         "_verify_generic_ray_nodes",
         "_verify_probes",
         "_verify_api",
+        "_verify_ray_job_request_reference",
         "_verify_runtime_env_encryption",
         "_verify_workflow_progress",
         "_verify_workflow_admin",
@@ -6891,6 +7328,11 @@ def test_runtime_env_encryption_runs_after_api_and_before_workflows(
     gate = LocalKubeRayGate(_config(), output=lambda _value: None)
     _stub_successful_gate_layers(gate, monkeypatch)
     monkeypatch.setattr(gate, "_verify_api", lambda: events.append("api-smoke"))
+    monkeypatch.setattr(
+        gate,
+        "_verify_ray_job_request_reference",
+        lambda: events.append("ray-job-request-reference"),
+    )
     monkeypatch.setattr(
         gate,
         "_verify_runtime_env_encryption",
@@ -6917,6 +7359,7 @@ def test_runtime_env_encryption_runs_after_api_and_before_workflows(
 
     assert events == [
         "api-smoke",
+        "ray-job-request-reference",
         "runtime-env-encryption",
         "workflow-progress",
         "workflow-admin",
@@ -7133,6 +7576,7 @@ def test_final_evidence_identity_failure_is_labeled_once_without_traceback(
         "_verify_generic_ray_nodes",
         "_verify_probes",
         "_verify_api",
+        "_verify_ray_job_request_reference",
         "_verify_runtime_env_encryption",
         "_verify_workflow_progress",
         "_verify_workflow_admin",

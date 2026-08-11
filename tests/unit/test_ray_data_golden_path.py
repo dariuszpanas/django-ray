@@ -259,12 +259,19 @@ def test_real_probe_forces_one_disposable_local_ray_runtime() -> None:
     assert 'statuses != {1: "SUCCEEDED", 2: "SUCCEEDED"}' in source
     assert '"ray_job_transports_succeeded": True' in source
     assert '"strict_ray_job_request_binding": True' in source
+    assert '"request_reference_transport": True' in source
     assert '"versioned_completion_envelope": True' in source
     assert '"executor_provenance_archived": True' in source
     assert '"preinstalled_ray_data_environment": True' in source
     assert '"disposable_cluster_target_pinned": True' in source
     assert '"failed_artifact_rejected": failed_artifact_rejected' in source
     assert '"idempotent_artifact_adoption": adopted_again == adopted' in source
+    backend_env = 'os.environ["DJANGO_RAY_INPUT_STORAGE_BACKEND"] = "filesystem"'
+    path_env = 'os.environ["DJANGO_RAY_INPUT_STORAGE_FILESYSTEM_PATH"]'
+    assert backend_env in source
+    assert path_env in source
+    assert source.index(backend_env) < source.index("django.setup()")
+    assert source.index(path_env) < source.index("django.setup()")
 
 
 def _strict_job_metadata(*, execution_pk: int, attempt: int, generation: int) -> dict[str, str]:
@@ -294,7 +301,106 @@ def _strict_job_metadata(*, execution_pk: int, attempt: int, generation: int) ->
     )
 
 
-def test_real_probe_reads_two_retained_job_api_identities(
+def _content_addressed_request_reference(serialized_request: str) -> str:
+    payload = serialized_request.encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    relative_path = f"{digest[:2]}/{digest[2:4]}/{digest}.json"
+    return f"resultfs://sha256/{digest}?rel={relative_path}&bytes={len(payload)}"
+
+
+def _rq2_job_binding(
+    *,
+    execution_pk: int,
+    attempt: int,
+    generation: int,
+    task_id: str | None = None,
+    callable_path: str = "testproject.tasks.add_numbers",
+) -> tuple[dict[str, str], str, str]:
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        ExecutionRequest,
+        encode_execution_request,
+    )
+    from django_ray.ray_job_protocol import (
+        STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX,
+        build_ray_job_request_reference_metadata,
+        coordination_sha256,
+    )
+    from django_ray.ray_job_request_storage import (
+        RayJobRequestLocator,
+        encode_ray_job_request_locator,
+    )
+
+    identity = ExecutionIdentity(
+        task_execution_pk=execution_pk,
+        task_id=task_id or f"probe-task-{execution_pk}",
+        attempt_number=attempt,
+        execution_generation=generation,
+    )
+    request = ExecutionRequest(
+        identity=identity,
+        execution_protocol_version=1,
+        callable_path=callable_path,
+        transport_version=1,
+        serialized_args="[]",
+        serialized_kwargs="{}",
+        input_reference=None,
+        runtime_env_profile=None,
+        runtime_env_hash="0" * 64,
+        runtime_env_plan_identity={},
+        compiled_graph_submission_transport="ray-job",
+    )
+    serialized_request = encode_execution_request(request)
+    reference = _content_addressed_request_reference(serialized_request)
+    payload = serialized_request.encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    locator = RayJobRequestLocator(
+        backend="filesystem",
+        reference=reference,
+        digest=digest,
+        size_bytes=len(payload),
+        filesystem_path="/var/lib/django-ray/requests",
+    )
+    metadata = build_ray_job_request_reference_metadata(
+        request,
+        serialized_request,
+        reference,
+        encode_ray_job_request_locator(locator),
+    )
+    submission_id = (
+        f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}{coordination_sha256(identity)}"
+    )
+    return metadata, submission_id, reference
+
+
+def _create_probe_execution(*, current_reference: str) -> None:
+    from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+
+    execution = RayTaskExecution.objects.create(
+        pk=41,
+        task_id="probe-task-41",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.SUCCEEDED,
+        attempt_number=2,
+        execution_generation=8,
+        ray_job_request_reference=current_reference,
+    )
+    TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=1,
+        execution_protocol_version=1,
+        state=TaskState.FAILED,
+    )
+    TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=2,
+        execution_protocol_version=1,
+        state=TaskState.SUCCEEDED,
+    )
+
+
+@pytest.mark.django_db
+def test_real_probe_reads_two_retained_rq2_job_api_identities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Let pytest restore the process environment after importing the standalone
@@ -302,16 +408,32 @@ def test_real_probe_reads_two_retained_job_api_identities(
     monkeypatch.setenv("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "test-sentinel")
     from scripts import ray_data_golden_path_probe as probe
 
+    first_metadata, first_submission_id, _ = _rq2_job_binding(
+        execution_pk=41,
+        attempt=1,
+        generation=7,
+    )
+    second_metadata, second_submission_id, second_reference = _rq2_job_binding(
+        execution_pk=41,
+        attempt=2,
+        generation=8,
+    )
+    _create_probe_execution(current_reference=second_reference)
     jobs = [
         SimpleNamespace(metadata={}, submission_id=None, status="RUNNING"),
         SimpleNamespace(
-            metadata=_strict_job_metadata(execution_pk=41, attempt=1, generation=7),
-            submission_id="raysubmit_django_ray_rq1_" + "1" * 64,
+            metadata={"django_ray_request_binding": "invalid-unrelated-binding"},
+            submission_id="raysubmit_django_ray_rq2_" + "f" * 64,
+            status="RUNNING",
+        ),
+        SimpleNamespace(
+            metadata=first_metadata,
+            submission_id=first_submission_id,
             status=SimpleNamespace(value="SUCCEEDED"),
         ),
         SimpleNamespace(
-            metadata=_strict_job_metadata(execution_pk=41, attempt=2, generation=8),
-            submission_id="raysubmit_django_ray_rq1_" + "2" * 64,
+            metadata=second_metadata,
+            submission_id=second_submission_id,
             status=SimpleNamespace(value="SUCCEEDED"),
         ),
     ]
@@ -329,27 +451,40 @@ def test_real_probe_reads_two_retained_job_api_identities(
     assert probe._load_ray_job_submission_evidence(
         ray_address="127.0.0.1:6379", execution_pk=41
     ) == {
-        1: (7, "raysubmit_django_ray_rq1_" + "1" * 64),
-        2: (8, "raysubmit_django_ray_rq1_" + "2" * 64),
+        1: (7, first_submission_id),
+        2: (8, second_submission_id),
     }
     assert addresses == ["127.0.0.1:6379"]
 
 
+@pytest.mark.django_db
 def test_real_probe_waits_for_both_ray_job_transports_to_be_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts import ray_data_golden_path_probe as probe
 
+    first_metadata, first_submission_id, _ = _rq2_job_binding(
+        execution_pk=41,
+        attempt=1,
+        generation=7,
+    )
+    second_metadata, second_submission_id, second_reference = _rq2_job_binding(
+        execution_pk=41,
+        attempt=2,
+        generation=8,
+    )
+    _create_probe_execution(current_reference=second_reference)
+
     def jobs(second_status: str) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(
-                metadata=_strict_job_metadata(execution_pk=41, attempt=1, generation=7),
-                submission_id="raysubmit_django_ray_rq1_" + "1" * 64,
+                metadata=first_metadata,
+                submission_id=first_submission_id,
                 status=SimpleNamespace(value="SUCCEEDED"),
             ),
             SimpleNamespace(
-                metadata=_strict_job_metadata(execution_pk=41, attempt=2, generation=8),
-                submission_id="raysubmit_django_ray_rq1_" + "2" * 64,
+                metadata=second_metadata,
+                submission_id=second_submission_id,
                 status=SimpleNamespace(value=second_status),
             ),
         ]
@@ -368,10 +503,130 @@ def test_real_probe_waits_for_both_ray_job_transports_to_be_terminal(
     assert probe._load_ray_job_submission_evidence(
         ray_address="127.0.0.1:6379", execution_pk=41
     ) == {
-        1: (7, "raysubmit_django_ray_rq1_" + "1" * 64),
-        2: (8, "raysubmit_django_ray_rq1_" + "2" * 64),
+        1: (7, first_submission_id),
+        2: (8, second_submission_id),
     }
     assert responses == []
+
+
+def test_real_probe_bounds_rq2_candidate_generation_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "test-sentinel")
+    from scripts import ray_data_golden_path_probe as probe
+
+    candidates = probe._build_rq2_submission_candidates(
+        execution_pk=41,
+        task_id="probe-task-41",
+        attempt_protocol_versions={1: 1, 2: 1},
+        current_generation=2,
+    )
+
+    assert len(candidates) == 6
+    assert {
+        (identity.attempt_number, identity.execution_generation, protocol)
+        for identity, protocol in candidates.values()
+    } == {
+        (1, 0, 1),
+        (1, 1, 1),
+        (1, 2, 1),
+        (2, 0, 1),
+        (2, 1, 1),
+        (2, 2, 1),
+    }
+    with pytest.raises(AssertionError, match="candidate set exceeded"):
+        probe._build_rq2_submission_candidates(
+            execution_pk=41,
+            task_id="probe-task-41",
+            attempt_protocol_versions={1: 1, 2: 1},
+            current_generation=probe.MAX_RAY_JOB_EVIDENCE_CANDIDATES // 2,
+        )
+
+
+@pytest.mark.django_db
+def test_real_probe_rejects_wrong_current_rq2_request_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "test-sentinel")
+    from scripts import ray_data_golden_path_probe as probe
+
+    _, expected_submission_id, expected_reference = _rq2_job_binding(
+        execution_pk=41,
+        attempt=2,
+        generation=8,
+    )
+    wrong_metadata, wrong_submission_id, _ = _rq2_job_binding(
+        execution_pk=41,
+        attempt=2,
+        generation=8,
+        callable_path="testproject.tasks.multiply_numbers",
+    )
+    assert wrong_submission_id == expected_submission_id
+    _create_probe_execution(current_reference=expected_reference)
+
+    class _Client:
+        def list_jobs(self) -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(
+                    metadata=wrong_metadata,
+                    submission_id=wrong_submission_id,
+                    status=SimpleNamespace(value="SUCCEEDED"),
+                )
+            ]
+
+    monkeypatch.setattr(
+        "django_ray.runner.ray_job._address_pinned_job_client",
+        lambda _address: _Client(),
+    )
+
+    with pytest.raises(AssertionError, match="did not match durable state"):
+        probe._load_ray_job_submission_evidence(
+            ray_address="127.0.0.1:6379",
+            execution_pk=41,
+        )
+
+
+@pytest.mark.django_db
+def test_real_probe_retains_rq1_jobinfo_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "test-sentinel")
+    from scripts import ray_data_golden_path_probe as probe
+
+    _, first_rq2_id, _ = _rq2_job_binding(execution_pk=41, attempt=1, generation=7)
+    _, second_rq2_id, current_reference = _rq2_job_binding(
+        execution_pk=41,
+        attempt=2,
+        generation=8,
+    )
+    first_id = first_rq2_id.replace("_rq2_", "_rq1_")
+    second_id = second_rq2_id.replace("_rq2_", "_rq1_")
+    _create_probe_execution(current_reference=current_reference)
+
+    class _Client:
+        def list_jobs(self) -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(
+                    metadata=_strict_job_metadata(execution_pk=41, attempt=1, generation=7),
+                    submission_id=first_id,
+                    status=SimpleNamespace(value="SUCCEEDED"),
+                ),
+                SimpleNamespace(
+                    metadata=_strict_job_metadata(execution_pk=41, attempt=2, generation=8),
+                    submission_id=second_id,
+                    status=SimpleNamespace(value="SUCCEEDED"),
+                ),
+            ]
+
+    monkeypatch.setattr(
+        "django_ray.runner.ray_job._address_pinned_job_client",
+        lambda _address: _Client(),
+    )
+
+    assert probe._load_ray_job_submission_evidence(
+        ray_address="127.0.0.1:6379",
+        execution_pk=41,
+    ) == {1: (7, first_id), 2: (8, second_id)}
 
 
 def test_success_publishes_one_canonical_manifest_and_bounded_result(

@@ -1424,13 +1424,23 @@ class TestWorkerSync:
 class TestWorkerRayJobRouting:
     """Ray Job claims preserve the backend alias selected at enqueue time."""
 
-    def test_backend_alias_targets_survive_claim_and_submit(self, monkeypatch) -> None:
+    def test_backend_alias_targets_survive_claim_and_submit(
+        self,
+        monkeypatch,
+        settings,
+        tmp_path,
+    ) -> None:
         from django_ray.backends import RayTaskBackend
         from django_ray.management.commands.django_ray_worker import Command
         from django_ray.runner.ray_job import RayJobRunner
         from testproject.tasks import add_numbers
 
-        submissions: list[tuple[str, int]] = []
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "INPUT_STORAGE_BACKEND": "filesystem",
+            "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+        }
+        submissions: list[tuple[str, str]] = []
 
         class FakeClient:
             def __init__(self, address: str) -> None:
@@ -1443,9 +1453,9 @@ class TestWorkerRayJobRouting:
                 return None
 
             def submit_job(self, **kwargs) -> str:
-                task_pk = int(kwargs["metadata"]["django_ray_task_id"])
-                submissions.append((self.address, task_pk))
-                return str(kwargs["submission_id"])
+                submission_id = str(kwargs["submission_id"])
+                submissions.append((self.address, submission_id))
+                return submission_id
 
         monkeypatch.setattr(
             RayJobRunner,
@@ -1478,8 +1488,8 @@ class TestWorkerRayJobRouting:
         execution_a.refresh_from_db()
         execution_b.refresh_from_db()
         assert submissions == [
-            ("ray://a:10001", execution_a.pk),
-            ("ray://b:10001", execution_b.pk),
+            ("ray://a:10001", RayJobRunner.submission_id(execution_a)),
+            ("ray://b:10001", RayJobRunner.submission_id(execution_b)),
         ]
         assert execution_a.ray_target_address == "ray://a:10001"
         assert execution_b.ray_target_address == "ray://b:10001"
@@ -1506,6 +1516,8 @@ class TestWorkerRayJobFailureHandling:
 
     def test_submit_task_to_ray_retries_on_submission_error(self, monkeypatch):
         """Submission errors should go through retry policy."""
+        from django_ray.runner.ray_job import RayJobRunner
+
         cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-ray-submit-retry-001",
@@ -1520,7 +1532,7 @@ class TestWorkerRayJobFailureHandling:
         )
 
         reserved_handle = SubmissionHandle(
-            ray_job_id="raysubmit_submit_retry_001",
+            ray_job_id=RayJobRunner.submission_id(task),
             ray_address="ray://retry-target:10001",
             submitted_at=datetime.now(UTC),
         )
@@ -1548,6 +1560,7 @@ class TestWorkerRayJobFailureHandling:
 
     def test_submit_task_to_ray_does_not_retry_pinned_plan_mismatch(self, monkeypatch):
         """A changed pinned plan is permanent for the existing task identity."""
+        from django_ray.runner.ray_job import RayJobRunner
         from django_ray.workflow_plans import WorkflowPlanMismatchError
 
         cmd = self._make_command()
@@ -1563,7 +1576,7 @@ class TestWorkerRayJobFailureHandling:
         )
 
         reserved_handle = SubmissionHandle(
-            ray_job_id="raysubmit_submit_plan_mismatch_001",
+            ray_job_id=RayJobRunner.submission_id(task),
             ray_address="ray://cluster:10001",
             submitted_at=datetime.now(UTC),
         )

@@ -20,6 +20,7 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/execution_codec.py" in EXPECTED_FILES
     assert "django_ray/execution_protocol.py" in EXPECTED_FILES
     assert "django_ray/ray_job_protocol.py" in EXPECTED_FILES
+    assert "django_ray/ray_job_request_storage.py" in EXPECTED_FILES
     assert "django_ray/protocol_coordination.py" in EXPECTED_FILES
     assert "django_ray/protocol_status.py" in EXPECTED_FILES
     assert "django_ray/management/commands/django_ray_protocol_status.py" in EXPECTED_FILES

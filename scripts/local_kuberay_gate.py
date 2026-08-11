@@ -62,8 +62,23 @@ APP_DEPLOYMENTS = (
     "django-ray-worker",
     "django-ray-worker-sync",
     "django-ray-worker-ml",
+    "django-ray-worker-ray-job",
 )
 TASK_MANAGER_DEPLOYMENTS = APP_DEPLOYMENTS[1:]
+RAY_JOB_MANAGER_DEPLOYMENT = "django-ray-worker-ray-job"
+RAY_JOB_GATE_QUEUE = "ray-data"
+RAY_JOB_REQUEST_REFERENCE_CARRIER = "--request-ref-b64"
+RAY_JOB_RELEASED_PAYLOAD_CARRIER = "--payload-b64"
+RAY_JOB_GATE_CALLABLE = "testproject.tasks.slow_task"
+RAY_JOB_GATE_SECONDS = 90.125
+RAY_JOB_GATE_TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "STOPPED"})
+RAY_JOB_REQUEST_STORAGE_CLAIM = "payload-storage-pvc"
+RAY_JOB_REQUEST_STORAGE_VOLUME = "payload-storage"
+RAY_JOB_REQUEST_STORAGE_MOUNT_PATH = "/payload-storage"
+RAY_JOB_REQUEST_STORAGE_CONFIG = {
+    "DJANGO_RAY_INPUT_STORAGE_BACKEND": "filesystem",
+    "DJANGO_RAY_INPUT_STORAGE_FILESYSTEM_PATH": "/payload-storage/inputs",
+}
 RAY_COMPONENTS = frozenset({"head", "worker"})
 RAY_CLUSTER_NAME = "ray"
 RAY_CLUSTER_LABEL = "ray.io/cluster"
@@ -536,6 +551,7 @@ PREREQUISITE_RESOURCE_IDENTITIES = frozenset(
         ("v1", "Service", "ray-dashboard-svc"),
         ("v1", "PersistentVolumeClaim", "postgres-pvc"),
         ("v1", "PersistentVolumeClaim", "runtime-env-pvc"),
+        ("v1", "PersistentVolumeClaim", "payload-storage-pvc"),
         ("apps/v1", "Deployment", "grafana"),
         ("apps/v1", "Deployment", "postgres"),
         ("apps/v1", "Deployment", "prometheus"),
@@ -964,6 +980,13 @@ class GateEvidence:
     runtime_env_encryption_retry_preserved: bool = False
     runtime_env_encryption_logs_clear: bool = False
     django_ray_secret_preserved: bool = False
+    ray_job_request_reference_carrier: bool = False
+    ray_job_raw_info_clear: bool = False
+    ray_job_processes_clear: bool = False
+    ray_job_logs_clear: bool = False
+    ray_job_manager_reconciled_same_job: bool = False
+    ray_job_missing_reference_no_marker: bool = False
+    ray_job_missing_reference_no_retry: bool = False
     workflow_task_id: str = ""
     workflow_task_state: str = ""
     workflow_attempt_number: int = 0
@@ -1514,8 +1537,130 @@ def inspect_runtime_env_encryption_overlay(resources: Sequence[Mapping[str, Any]
     ):
         raise ValueError(
             "RuntimeEnv encrypted Django-secret mode must appear exactly on django-web "
-            "and the default, synchronous, and ML task-manager containers"
+            "and the default, synchronous, ML, and Ray Job task-manager containers"
         )
+
+
+def inspect_ray_job_request_storage_overlay(
+    resources: Sequence[Mapping[str, Any]],
+) -> None:
+    """Require exact rq2 writer/read-only-reader boundaries in the rendered overlay."""
+
+    indexed = {_resource_identity(resource): resource for resource in resources}
+    claim = indexed.get(("v1", "PersistentVolumeClaim", RAY_JOB_REQUEST_STORAGE_CLAIM))
+    if claim is None:
+        raise ValueError("rendered rq2 request storage claim is missing")
+    claim_spec = _mapping(claim.get("spec"), field_name="rq2 request storage claim spec")
+    if claim_spec.get("accessModes") != ["ReadWriteMany"]:
+        raise ValueError("rq2 request storage claim must require exactly ReadWriteMany")
+
+    config = indexed.get(("v1", "ConfigMap", "django-ray-config"))
+    if config is None:
+        raise ValueError("rendered django-ray ConfigMap is missing")
+    config_data = _mapping(config.get("data"), field_name="django-ray ConfigMap data")
+    if any(
+        config_data.get(name) != value for name, value in RAY_JOB_REQUEST_STORAGE_CONFIG.items()
+    ):
+        raise ValueError("rendered rq2 request storage configuration is not exact")
+
+    expected_mounts = {
+        ("Deployment/django-web", "containers", "django-web"): False,
+        ("Deployment/django-ray-worker", "containers", "django-ray-worker"): False,
+        ("Deployment/django-ray-worker-ray-job", "containers", "django-ray-worker"): False,
+        ("RayCluster/ray head", "containers", "ray-head"): True,
+        ("RayCluster/ray worker worker-group", "containers", "ray-worker"): True,
+    }
+    expected_volume_workloads = {workload for workload, _collection, _name in expected_mounts}
+    observed_mounts: set[tuple[str, str, str]] = set()
+    observed_volume_workloads: set[str] = set()
+
+    for resource in resources:
+        for workload, pod_spec in _runtime_env_encryption_pod_specs(resource):
+            volumes = _sequence(
+                pod_spec.get("volumes", []),
+                field_name=f"{workload} volumes",
+            )
+            normalized_volumes = [
+                _mapping(value, field_name=f"{workload} volumes[{index}]")
+                for index, value in enumerate(volumes)
+            ]
+            payload_volumes = [
+                value
+                for value in normalized_volumes
+                if value.get("name") == RAY_JOB_REQUEST_STORAGE_VOLUME
+            ]
+            if len(payload_volumes) > 1:
+                raise ValueError(f"{workload} duplicates the rq2 request storage volume")
+            if payload_volumes:
+                payload_volume = payload_volumes[0]
+                persistent_claim = _mapping(
+                    payload_volume.get("persistentVolumeClaim"),
+                    field_name=f"{workload} rq2 request storage claim",
+                )
+                if set(payload_volume) != {"name", "persistentVolumeClaim"} or persistent_claim != {
+                    "claimName": RAY_JOB_REQUEST_STORAGE_CLAIM
+                }:
+                    raise ValueError(f"{workload} rq2 request storage volume is not exact")
+                observed_volume_workloads.add(workload)
+
+            for collection in ("initContainers", "containers"):
+                containers = _sequence(
+                    pod_spec.get(collection, []),
+                    field_name=f"{workload} {collection}",
+                )
+                for index, value in enumerate(containers):
+                    container = _mapping(
+                        value,
+                        field_name=f"{workload} {collection}[{index}]",
+                    )
+                    container_name = container.get("name")
+                    if not isinstance(container_name, str) or not container_name:
+                        raise ValueError(f"{workload} {collection}[{index}] has no container name")
+                    mounts = _sequence(
+                        container.get("volumeMounts", []),
+                        field_name=f"{workload} {container_name} volumeMounts",
+                    )
+                    normalized_mounts = [
+                        _mapping(
+                            mount,
+                            field_name=f"{workload} {container_name} volumeMounts[{mount_index}]",
+                        )
+                        for mount_index, mount in enumerate(mounts)
+                    ]
+                    payload_mounts = [
+                        mount
+                        for mount in normalized_mounts
+                        if mount.get("name") == RAY_JOB_REQUEST_STORAGE_VOLUME
+                    ]
+                    if len(payload_mounts) > 1:
+                        raise ValueError(
+                            f"{workload} {container_name} duplicates the rq2 request storage mount"
+                        )
+                    if not payload_mounts:
+                        continue
+                    key = (workload, collection, container_name)
+                    read_only = expected_mounts.get(key)
+                    if read_only is None:
+                        raise ValueError(
+                            f"{workload} {container_name} unexpectedly mounts rq2 request storage"
+                        )
+                    expected_mount: dict[str, object] = {
+                        "name": RAY_JOB_REQUEST_STORAGE_VOLUME,
+                        "mountPath": RAY_JOB_REQUEST_STORAGE_MOUNT_PATH,
+                    }
+                    if read_only:
+                        expected_mount["readOnly"] = True
+                    if payload_mounts[0] != expected_mount:
+                        access = "read-only" if read_only else "read-write"
+                        raise ValueError(
+                            f"{workload} {container_name} rq2 request storage mount must be {access}"
+                        )
+                    observed_mounts.add(key)
+
+    if observed_mounts != set(expected_mounts):
+        raise ValueError("rendered rq2 request storage mount inventory is not exact")
+    if observed_volume_workloads != expected_volume_workloads:
+        raise ValueError("rendered rq2 request storage volume inventory is not exact")
 
 
 def _decode_canonical_base64url(
@@ -2611,6 +2756,43 @@ def validate_bounded_poll_projection(
             raise ValueError(f"{surface} attempt mixed an error with its omission reason")
 
 
+def _build_ray_process_surface_probe(
+    forbidden_values: Sequence[str],
+    *,
+    proc_root: str | Path = "/proc",
+) -> str:
+    """Build the private Ray argv probe with per-process exit-race tolerance."""
+
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(
+            [value for value in forbidden_values if value],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).decode("ascii")
+    return f"""
+import base64
+import json
+import os
+import pathlib
+
+values = json.loads(base64.urlsafe_b64decode({encoded!r}))
+me = os.getpid()
+exposed = False
+for path in pathlib.Path({str(proc_root)!r}).glob("[0-9]*/cmdline"):
+    if int(path.parent.name) == me:
+        continue
+    try:
+        command_line = path.read_bytes()
+    except OSError:
+        continue
+    if any(value.encode() in command_line for value in values):
+        exposed = True
+        break
+print(json.dumps({{"clear": not exposed}}))
+""".strip()
+
+
 class LocalKubeRayGate:
     """Orchestrate the guarded gate and retain only secret-free evidence."""
 
@@ -2923,6 +3105,10 @@ class LocalKubeRayGate:
                     self._layer("probes", self._verify_probes)
                     self._layer("api-smoke", self._verify_api)
                     self._layer(
+                        "ray-job-request-reference",
+                        self._verify_ray_job_request_reference,
+                    )
+                    self._layer(
                         "runtime-env-encryption",
                         self._verify_runtime_env_encryption,
                     )
@@ -3136,6 +3322,7 @@ class LocalKubeRayGate:
         resources = load_rendered_resources(rendered)
         inspect_rendered_resources(resources, namespace=self.config.namespace, tag=tag)
         inspect_runtime_env_encryption_overlay(resources)
+        inspect_ray_job_request_storage_overlay(resources)
         self.evidence.runtime_env_encryption_overlay = True
         expected_app_image = f"{APP_IMAGE_REPOSITORY}:{tag}"
         setup = next(
@@ -4820,6 +5007,708 @@ class LocalKubeRayGate:
         self.evidence.task_state = last_state
         self.evidence.task_result = result
         self.evidence.api_execution_delete_rejected = True
+
+    @staticmethod
+    def _ray_job_gate_status(value: object, *, field_name: str) -> str:
+        if not isinstance(value, str) or value not in {
+            "PENDING",
+            "RUNNING",
+            *RAY_JOB_GATE_TERMINAL_STATES,
+        }:
+            raise ValueError(f"{field_name} has an invalid Ray Job state")
+        return value
+
+    def _register_ray_job_gate_value(self, value: str) -> None:
+        """Keep one fixture-only value out of diagnostics and evidence."""
+
+        if not value:
+            return
+        self.redactor.register(value)
+        if self.runner.redactor is not self.redactor:
+            self.runner.redactor.register(value)
+
+    def _enqueue_ray_job_gate_task(self) -> str:
+        script = f"""
+import json
+
+from testproject.tasks import slow_task
+
+result = slow_task.using(
+    backend={RAY_JOB_GATE_QUEUE!r},
+    queue_name={RAY_JOB_GATE_QUEUE!r},
+).enqueue(seconds={RAY_JOB_GATE_SECONDS!r})
+print(json.dumps({{"task_id": result.id}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        payload = self._sensitive_django_shell(
+            script,
+            field_name="rq2 positive task enqueue",
+        )
+        task_id = self._canonical_uuid4(
+            payload.get("task_id"),
+            field_name="rq2 positive task id",
+        )
+        self._register_ray_job_gate_value(task_id)
+        self._register_ray_job_gate_value(RAY_JOB_GATE_CALLABLE)
+        self._register_ray_job_gate_value(str(RAY_JOB_GATE_SECONDS))
+        return task_id
+
+    def _observe_ray_job_gate_task(self, task_id: str) -> Mapping[str, Any]:
+        script = f"""
+import json
+import os
+import shlex
+
+from django_ray.execution_codec import ExecutionIdentity
+from django_ray.models import RayTaskExecution
+from django_ray.ray_job_protocol import (
+    RayJobRequestReferenceExpectation,
+    parse_ray_job_request_metadata,
+    validate_ray_job_request_reference_expectation,
+)
+from django_ray.ray_job_request_storage import (
+    decode_ray_job_request_locator,
+    load_ray_job_request,
+    ray_job_request_reference_content_identity,
+)
+from django_ray.runner.ray_job import _address_pinned_job_client
+
+row = RayTaskExecution.objects.get(task_id={task_id!r})
+if not row.ray_job_id or not row.ray_job_request_reference or not row.ray_address:
+    print(json.dumps({{"ready": False, "state": str(row.state)}}))
+else:
+    client = _address_pinned_job_client(row.ray_address)
+    info = client.get_job_info(row.ray_job_id)
+    entrypoint = getattr(info, "entrypoint", "")
+    parts = shlex.split(entrypoint)
+    carrier_ok = (
+        len(parts) == 5
+        and parts[:4] == ["python", "-m", "django_ray.runtime.entrypoint", {RAY_JOB_REQUEST_REFERENCE_CARRIER!r}]
+        and {RAY_JOB_RELEASED_PAYLOAD_CARRIER!r} not in parts
+    )
+    locator = decode_ray_job_request_locator(parts[4]) if carrier_ok else None
+    loaded = load_ray_job_request(locator) if locator is not None else None
+    expectation = parse_ray_job_request_metadata(getattr(info, "metadata", None), required=True)
+    request_digest, request_size = ray_job_request_reference_content_identity(
+        row.ray_job_request_reference
+    )
+    identity = ExecutionIdentity(
+        task_execution_pk=row.pk,
+        task_id=row.task_id,
+        attempt_number=row.attempt_number,
+        execution_generation=row.execution_generation,
+    )
+    binding_ok = isinstance(expectation, RayJobRequestReferenceExpectation)
+    if binding_ok:
+        validate_ray_job_request_reference_expectation(
+            expectation,
+            expected_identity=identity,
+            expected_execution_protocol_version=row.execution_protocol_version,
+            expected_request_sha256=request_digest,
+            expected_request_size_bytes=request_size,
+            expected_submission_id=row.ray_job_id,
+            serialized_request=loaded.serialized_request if loaded is not None else None,
+            request_reference=row.ray_job_request_reference,
+            request_locator=parts[4] if carrier_ok else None,
+        )
+    binding_ok = binding_ok and carrier_ok
+    request_ok = (
+        loaded is not None
+        and loaded.reference == row.ray_job_request_reference
+        and loaded.request.identity == identity
+        and loaded.request.callable_path == row.callable_path
+    )
+    if hasattr(info, "model_dump"):
+        info_payload = info.model_dump()
+    elif hasattr(info, "dict"):
+        info_payload = info.dict()
+    else:
+        info_payload = vars(info)
+    raw_info = json.dumps(info_payload, sort_keys=True, separators=(",", ":"), default=str)
+    raw_logs = str(client.get_job_logs(row.ray_job_id) or "")
+    credential_values = [
+        value
+        for key, value in os.environ.items()
+        if value
+        and any(token in key.upper() for token in ("PASSWORD", "SECRET", "TOKEN", "API_KEY"))
+    ]
+    forbidden = [
+        row.task_id,
+        row.callable_path,
+        row.args_json,
+        row.kwargs_json,
+        {str(RAY_JOB_GATE_SECONDS)!r},
+        loaded.serialized_request if loaded is not None else "",
+        *credential_values,
+    ]
+    forbidden = [value for value in forbidden if value]
+    info_clear = all(value not in raw_info for value in forbidden)
+    logs_clear = all(value not in raw_logs for value in forbidden)
+    submissions = [
+        job
+        for job in client.list_jobs()
+        if getattr(job, "submission_id", None) == row.ray_job_id
+    ]
+    print(json.dumps({{
+        "ready": True,
+        "state": str(getattr(info, "status", "")),
+        "durable_state": str(row.state),
+        "attempt_number": row.attempt_number,
+        "execution_generation": row.execution_generation,
+        "worker_id": row.claimed_by_worker,
+        "job_id": row.ray_job_id,
+        "carrier_ok": carrier_ok,
+        "binding_ok": binding_ok,
+        "request_ok": request_ok,
+        "info_clear": info_clear,
+        "logs_clear": logs_clear,
+        "submission_count": len(submissions),
+    }}, sort_keys=True, separators=(",", ":"), default=str))
+""".strip()
+        return self._sensitive_django_shell(
+            script,
+            field_name="rq2 positive task observation",
+        )
+
+    def _wait_for_ray_job_gate_task(
+        self,
+        task_id: str,
+        *,
+        accepted_states: frozenset[str],
+        different_worker: str | None = None,
+        durable_state: str | None = None,
+    ) -> Mapping[str, Any]:
+        deadline = time.monotonic() + self.config.task_timeout
+        last_state = "not submitted"
+        while True:
+            observation = self._observe_ray_job_gate_task(task_id)
+            state_value = observation.get("state")
+            if observation.get("ready") is True:
+                state = self._ray_job_gate_status(
+                    state_value,
+                    field_name="rq2 positive Ray Job",
+                )
+                last_state = state
+                if state in RAY_JOB_GATE_TERMINAL_STATES - accepted_states:
+                    raise ValueError(f"rq2 positive Ray Job reached unexpected state {state}")
+                worker = observation.get("worker_id")
+                worker_changed = different_worker is None or (
+                    isinstance(worker, str) and worker and worker != different_worker
+                )
+                durable_ready = (
+                    durable_state is None or observation.get("durable_state") == durable_state
+                )
+                if state in accepted_states and worker_changed and durable_ready:
+                    return observation
+            elif isinstance(state_value, str):
+                last_state = state_value
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "rq2 positive Ray Job did not reach the required state within "
+                    f"{self.config.task_timeout}s (last state: {last_state})"
+                )
+            time.sleep(2)
+
+    def _ray_process_surfaces_clear(self, forbidden_values: Sequence[str]) -> bool:
+        probe_code = _build_ray_process_surface_probe(forbidden_values)
+        if self._ray_cluster_uid is None:
+            raise ValueError("RayCluster UID was not pinned before rq2 process inspection")
+        _, ray_pods = self._ray_pods(expected_cluster_uid=self._ray_cluster_uid)
+        for pod in ray_pods:
+            metadata = _metadata(pod)
+            labels = _mapping(metadata.get("labels"), field_name="Ray pod labels")
+            name = str(metadata.get("name"))
+            container = "ray-head" if labels.get("component") == "head" else "ray-worker"
+            result = self._kubectl(
+                "exec",
+                name,
+                "-c",
+                container,
+                "--",
+                "python",
+                "-c",
+                probe_code,
+                sensitive_output=True,
+            )
+            payload = _parse_json_without_cause(
+                result.stdout,
+                error_message="rq2 Ray process probe did not return valid private JSON",
+            )
+            if _mapping(payload, field_name="rq2 Ray process probe").get("clear") is not True:
+                return False
+        return True
+
+    def _decoded_credential_values(self) -> tuple[str, ...]:
+        values: list[str] = []
+        for key, encoded in self._secret_data().items():
+            if not isinstance(key, str) or not any(
+                token in key.upper() for token in ("PASSWORD", "SECRET", "TOKEN", "API_KEY")
+            ):
+                continue
+            if not isinstance(encoded, str):
+                raise ValueError("Secret/django-ray-secret contains a non-string data value")
+            try:
+                decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                raise ValueError(
+                    "Secret/django-ray-secret contains invalid credential data"
+                ) from None
+            if decoded:
+                self._register_ray_job_gate_value(decoded)
+                values.append(decoded)
+        return tuple(values)
+
+    def _restart_ray_job_manager(self) -> None:
+        self._kubectl(
+            "rollout",
+            "restart",
+            f"deployment/{RAY_JOB_MANAGER_DEPLOYMENT}",
+        )
+        self._kubectl(
+            "rollout",
+            "status",
+            f"deployment/{RAY_JOB_MANAGER_DEPLOYMENT}",
+            f"--timeout={self.config.rollout_timeout}s",
+            timeout=self._rollout_command_timeout(),
+        )
+        self._wait_for_application_topology()
+
+    def _verify_ray_job_request_reference(self) -> None:
+        """Exercise rq2 across the live Jobs API and a manager replacement."""
+
+        task_id = self._enqueue_ray_job_gate_task()
+        running = self._wait_for_ray_job_gate_task(
+            task_id,
+            accepted_states=frozenset({"RUNNING"}),
+        )
+        for field_name in ("job_id", "worker_id"):
+            if not isinstance(running.get(field_name), str) or not running[field_name]:
+                raise ValueError(f"rq2 running observation has no {field_name}")
+        if (
+            running.get("carrier_ok") is not True
+            or running.get("binding_ok") is not True
+            or running.get("request_ok") is not True
+            or running.get("info_clear") is not True
+            or running.get("logs_clear") is not True
+            or running.get("submission_count") != 1
+            or running.get("attempt_number") != 1
+        ):
+            raise ValueError("rq2 running observation failed its strict request contract")
+
+        credential_values = self._decoded_credential_values()
+        process_values = (
+            task_id,
+            RAY_JOB_GATE_CALLABLE,
+            str(RAY_JOB_GATE_SECONDS),
+            RAY_JOB_RELEASED_PAYLOAD_CARRIER,
+            *credential_values,
+        )
+        if not self._ray_process_surfaces_clear(process_values):
+            raise ValueError("rq2 Ray process argv exposed an application or credential value")
+        self.evidence.ray_job_processes_clear = True
+
+        self._restart_ray_job_manager()
+        reconciled = self._wait_for_ray_job_gate_task(
+            task_id,
+            accepted_states=frozenset({"RUNNING", "SUCCEEDED"}),
+            different_worker=str(running["worker_id"]),
+        )
+        if (
+            reconciled.get("job_id") != running["job_id"]
+            or reconciled.get("attempt_number") != 1
+            or reconciled.get("execution_generation") != running.get("execution_generation")
+            or reconciled.get("submission_count") != 1
+        ):
+            raise ValueError("rq2 manager replacement did not retain the exact submitted job")
+        self.evidence.ray_job_manager_reconciled_same_job = True
+
+        terminal = self._wait_for_ray_job_gate_task(
+            task_id,
+            accepted_states=frozenset({"SUCCEEDED"}),
+            durable_state="SUCCEEDED",
+        )
+        if (
+            terminal.get("durable_state") != "SUCCEEDED"
+            or terminal.get("carrier_ok") is not True
+            or terminal.get("binding_ok") is not True
+            or terminal.get("request_ok") is not True
+            or terminal.get("info_clear") is not True
+            or terminal.get("logs_clear") is not True
+            or terminal.get("submission_count") != 1
+        ):
+            raise ValueError("rq2 terminal observation lost its strict request contract")
+        self.evidence.ray_job_request_reference_carrier = True
+        self.evidence.ray_job_raw_info_clear = True
+        self.evidence.ray_job_logs_clear = True
+
+        self._verify_missing_ray_job_request_reference()
+
+    def _scale_ray_job_manager(self, replicas: int) -> None:
+        if replicas not in {0, 1}:
+            raise ValueError("rq2 gate manager replicas must be zero or one")
+        self._kubectl(
+            "scale",
+            f"deployment/{RAY_JOB_MANAGER_DEPLOYMENT}",
+            f"--replicas={replicas}",
+        )
+        self._kubectl(
+            "rollout",
+            "status",
+            f"deployment/{RAY_JOB_MANAGER_DEPLOYMENT}",
+            f"--timeout={self.config.rollout_timeout}s",
+            timeout=self._rollout_command_timeout(),
+        )
+
+    def _submit_missing_ray_job_request_reference(self, marker: str) -> Mapping[str, Any]:
+        script = f"""
+import copy
+import json
+
+from django.utils import timezone
+
+from django_ray.models import RayTaskExecution, TaskState
+from django_ray.ray_job_request_storage import (
+    _storage_for_locator,
+    decode_ray_job_request_locator,
+)
+from django_ray.runner.ray_job import RayJobRunner
+from testproject.tasks import echo_task
+
+result = echo_task.using(
+    backend={RAY_JOB_GATE_QUEUE!r},
+    queue_name={RAY_JOB_GATE_QUEUE!r},
+).enqueue({marker!r})
+row = RayTaskExecution.objects.get(task_id=result.id)
+row.callable_path = "builtins.print"
+row.state = TaskState.RUNNING
+row.claimed_by_worker = "rq2-gate-missing-reference"
+row.started_at = timezone.now()
+row.last_heartbeat_at = row.started_at
+runner = RayJobRunner()
+handle = runner.submission_handle(row)
+row.ray_job_id = handle.ray_job_id
+row.ray_address = handle.ray_address
+row.save(update_fields=[
+    "callable_path",
+    "state",
+    "claimed_by_worker",
+    "started_at",
+    "last_heartbeat_at",
+    "ray_job_id",
+    "ray_address",
+])
+
+real_client = runner._get_client(handle.ray_address)
+captured = {{}}
+
+class CaptureClient:
+    def _upload_working_dir_if_needed(self, runtime_env):
+        return real_client._upload_working_dir_if_needed(runtime_env)
+
+    def _upload_py_modules_if_needed(self, runtime_env):
+        return real_client._upload_py_modules_if_needed(runtime_env)
+
+    def submit_job(self, **kwargs):
+        captured.update(copy.deepcopy(kwargs))
+        return kwargs["submission_id"]
+
+runner._get_client = lambda _address=None: CaptureClient()
+submitted = runner.submit_durable(row)
+if submitted.ray_job_id != handle.ray_job_id:
+    raise AssertionError("captured rq2 submission changed its stable ID")
+entrypoint = captured.get("entrypoint", "")
+parts = entrypoint.split()
+if (
+    len(parts) != 5
+    or parts[:4] != ["python", "-m", "django_ray.runtime.entrypoint", {RAY_JOB_REQUEST_REFERENCE_CARRIER!r}]
+):
+    raise AssertionError("captured rq2 submission did not use the request-reference carrier")
+locator = decode_ray_job_request_locator(parts[4])
+if locator.reference != row.ray_job_request_reference:
+    raise AssertionError("captured rq2 locator changed the durable request reference")
+_storage_for_locator(locator).delete(reference=locator.reference)
+returned = real_client.submit_job(**captured)
+if returned != handle.ray_job_id:
+    raise AssertionError("missing-reference submission returned an unexpected ID")
+print(json.dumps({{
+    "task_id": row.task_id,
+    "job_id": row.ray_job_id,
+    "attempt_number": row.attempt_number,
+    "execution_generation": row.execution_generation,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        return self._sensitive_django_shell(
+            script,
+            field_name="rq2 missing-reference submission",
+        )
+
+    def _observe_missing_ray_job_request_reference(
+        self,
+        *,
+        task_id: str,
+        marker: str,
+    ) -> Mapping[str, Any]:
+        script = f"""
+import json
+import os
+import shlex
+
+from django_ray.execution_codec import ExecutionIdentity
+from django_ray.models import RayTaskExecution
+from django_ray.ray_job_protocol import (
+    RayJobRequestReferenceExpectation,
+    parse_ray_job_request_metadata,
+    validate_ray_job_request_reference_expectation,
+)
+from django_ray.ray_job_request_storage import ray_job_request_reference_content_identity
+from django_ray.runner.ray_job import _address_pinned_job_client
+
+row = RayTaskExecution.objects.get(task_id={task_id!r})
+client = _address_pinned_job_client(row.ray_address)
+info = client.get_job_info(row.ray_job_id)
+entrypoint = getattr(info, "entrypoint", "")
+parts = shlex.split(entrypoint)
+carrier_ok = (
+    len(parts) == 5
+    and parts[:4] == ["python", "-m", "django_ray.runtime.entrypoint", {RAY_JOB_REQUEST_REFERENCE_CARRIER!r}]
+    and {RAY_JOB_RELEASED_PAYLOAD_CARRIER!r} not in parts
+)
+expectation = parse_ray_job_request_metadata(getattr(info, "metadata", None), required=True)
+request_digest, request_size = ray_job_request_reference_content_identity(
+    row.ray_job_request_reference
+)
+binding_ok = isinstance(expectation, RayJobRequestReferenceExpectation)
+if binding_ok:
+    validate_ray_job_request_reference_expectation(
+        expectation,
+        expected_identity=ExecutionIdentity(
+            task_execution_pk=row.pk,
+            task_id=row.task_id,
+            attempt_number=row.attempt_number,
+            execution_generation=row.execution_generation,
+        ),
+        expected_execution_protocol_version=row.execution_protocol_version,
+        expected_request_sha256=request_digest,
+        expected_request_size_bytes=request_size,
+        expected_submission_id=row.ray_job_id,
+        request_reference=row.ray_job_request_reference,
+        request_locator=parts[4] if carrier_ok else None,
+    )
+binding_ok = binding_ok and carrier_ok
+if hasattr(info, "model_dump"):
+    info_payload = info.model_dump()
+elif hasattr(info, "dict"):
+    info_payload = info.dict()
+else:
+    info_payload = vars(info)
+raw_info = json.dumps(info_payload, sort_keys=True, separators=(",", ":"), default=str)
+raw_logs = str(client.get_job_logs(row.ray_job_id) or "")
+credential_values = [
+    value
+    for key, value in os.environ.items()
+    if value
+    and any(token in key.upper() for token in ("PASSWORD", "SECRET", "TOKEN", "API_KEY"))
+]
+forbidden = [
+    row.task_id,
+    row.callable_path,
+    row.args_json,
+    row.kwargs_json,
+    {marker!r},
+    *credential_values,
+]
+forbidden = [value for value in forbidden if value]
+submissions = [
+    job
+    for job in client.list_jobs()
+    if getattr(job, "submission_id", None) == row.ray_job_id
+]
+print(json.dumps({{
+    "state": str(getattr(info, "status", "")),
+    "durable_state": str(row.state),
+    "attempt_number": row.attempt_number,
+    "execution_generation": row.execution_generation,
+    "job_id": row.ray_job_id,
+    "carrier_ok": carrier_ok,
+    "binding_ok": binding_ok,
+    "info_clear": all(value not in raw_info for value in forbidden),
+    "logs_clear": all(value not in raw_logs for value in forbidden),
+    "submission_count": len(submissions),
+}}, sort_keys=True, separators=(",", ":"), default=str))
+""".strip()
+        return self._sensitive_django_shell(
+            script,
+            field_name="rq2 missing-reference observation",
+        )
+
+    def _wait_for_missing_ray_job_failure(
+        self,
+        *,
+        task_id: str,
+        marker: str,
+    ) -> Mapping[str, Any]:
+        deadline = time.monotonic() + self.config.task_timeout
+        last_state = "missing"
+        while True:
+            observation = self._observe_missing_ray_job_request_reference(
+                task_id=task_id,
+                marker=marker,
+            )
+            state = self._ray_job_gate_status(
+                observation.get("state"),
+                field_name="rq2 missing-reference Ray Job",
+            )
+            last_state = state
+            if state == "FAILED":
+                return observation
+            if state in {"SUCCEEDED", "STOPPED"}:
+                raise ValueError(f"rq2 missing-reference Ray Job reached unexpected state {state}")
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "rq2 missing-reference Ray Job did not fail within "
+                    f"{self.config.task_timeout}s (last state: {last_state})"
+                )
+            time.sleep(2)
+
+    def _age_missing_ray_job_execution(self, task_id: str) -> None:
+        script = f"""
+import json
+from datetime import timedelta
+
+from django.utils import timezone
+
+from django_ray.models import RayTaskExecution
+
+stale = timezone.now() - timedelta(minutes=10)
+updated = RayTaskExecution.objects.filter(task_id={task_id!r}).update(
+    started_at=stale,
+    last_heartbeat_at=stale,
+)
+print(json.dumps({{"updated": updated}}))
+""".strip()
+        payload = self._sensitive_django_shell(
+            script,
+            field_name="rq2 missing-reference stale fence",
+        )
+        if payload.get("updated") != 1:
+            raise ValueError("rq2 missing-reference stale fence did not update exactly one row")
+
+    def _observe_missing_ray_job_disposition(self, task_id: str) -> Mapping[str, Any]:
+        script = f"""
+import json
+
+from django_ray.models import RayTaskExecution, TaskAttempt
+from django_ray.runner.ray_job import _address_pinned_job_client
+
+row = RayTaskExecution.objects.get(task_id={task_id!r})
+client = _address_pinned_job_client(row.ray_address)
+submissions = [
+    job
+    for job in client.list_jobs()
+    if getattr(job, "submission_id", None) == row.ray_job_id
+]
+print(json.dumps({{
+    "state": str(row.state),
+    "attempt_number": row.attempt_number,
+    "execution_generation": row.execution_generation,
+    "run_after_is_none": row.run_after is None,
+    "completion_is_none": row.completion_data is None,
+    "result_is_none": row.result_data is None,
+    "fixed_error": row.error_message == "Strict Ray Job terminated without an exact completion envelope",
+    "archived_attempts": TaskAttempt.objects.filter(execution=row).count(),
+    "submission_count": len(submissions),
+}}, sort_keys=True, separators=(",", ":"), default=str))
+""".strip()
+        return self._sensitive_django_shell(
+            script,
+            field_name="rq2 missing-reference disposition",
+        )
+
+    def _wait_for_missing_ray_job_disposition(self, task_id: str) -> Mapping[str, Any]:
+        deadline = time.monotonic() + self.config.task_timeout
+        last_state = "missing"
+        while True:
+            observation = self._observe_missing_ray_job_disposition(task_id)
+            state = observation.get("state")
+            if isinstance(state, str):
+                last_state = state
+            if state == "FAILED":
+                return observation
+            if state == "QUEUED" or observation.get("attempt_number") != 1:
+                raise ValueError("rq2 missing-reference execution started an automatic retry")
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "rq2 missing-reference execution did not terminalize within "
+                    f"{self.config.task_timeout}s (last state: {last_state})"
+                )
+            time.sleep(2)
+
+    def _verify_missing_ray_job_request_reference(self) -> None:
+        marker = f"django-ray-rq2-missing-{secrets.token_hex(16)}"
+        self._register_ray_job_gate_value(marker)
+        manager_scaled_down = False
+        manager_restored = False
+        try:
+            self._scale_ray_job_manager(0)
+            manager_scaled_down = True
+            submitted = self._submit_missing_ray_job_request_reference(marker)
+            task_id = self._canonical_uuid4(
+                submitted.get("task_id"),
+                field_name="rq2 missing-reference task id",
+            )
+            self._register_ray_job_gate_value(task_id)
+            self._register_ray_job_gate_value("builtins.print")
+            job_id = submitted.get("job_id")
+            if not isinstance(job_id, str) or not job_id or submitted.get("attempt_number") != 1:
+                raise ValueError("rq2 missing-reference submission returned invalid identity")
+
+            failed = self._wait_for_missing_ray_job_failure(
+                task_id=task_id,
+                marker=marker,
+            )
+            if (
+                failed.get("job_id") != job_id
+                or failed.get("carrier_ok") is not True
+                or failed.get("binding_ok") is not True
+                or failed.get("info_clear") is not True
+                or failed.get("logs_clear") is not True
+                or failed.get("submission_count") != 1
+                or failed.get("attempt_number") != 1
+            ):
+                raise ValueError("rq2 missing-reference failure exposed or changed its request")
+            if not self._ray_process_surfaces_clear(
+                (
+                    task_id,
+                    marker,
+                    "builtins.print",
+                    RAY_JOB_RELEASED_PAYLOAD_CARRIER,
+                    *self._decoded_credential_values(),
+                )
+            ):
+                raise ValueError("rq2 missing-reference process surface exposed its marker")
+            self.evidence.ray_job_missing_reference_no_marker = True
+
+            self._age_missing_ray_job_execution(task_id)
+            self._scale_ray_job_manager(1)
+            manager_restored = True
+            self._wait_for_application_topology()
+            disposition = self._wait_for_missing_ray_job_disposition(task_id)
+            if (
+                disposition.get("state") != "FAILED"
+                or disposition.get("attempt_number") != 1
+                or disposition.get("execution_generation") != submitted.get("execution_generation")
+                or disposition.get("run_after_is_none") is not True
+                or disposition.get("completion_is_none") is not True
+                or disposition.get("result_is_none") is not True
+                or disposition.get("fixed_error") is not True
+                or disposition.get("archived_attempts") != 1
+                or disposition.get("submission_count") != 1
+            ):
+                raise ValueError("rq2 missing-reference failure was retried or lost its fence")
+            self.evidence.ray_job_missing_reference_no_retry = True
+        finally:
+            if manager_scaled_down and not manager_restored:
+                self._scale_ray_job_manager(1)
+                self._wait_for_application_topology()
 
     def _register_runtime_env_protected_value(self, value: str) -> None:
         """Register one gate-only storage value before any later diagnostics."""
@@ -7556,6 +8445,25 @@ class LocalKubeRayGate:
                 "django_ray_secret_preserved",
                 self.evidence.django_ray_secret_preserved,
             ),
+            (
+                "ray_job_request_reference_carrier",
+                self.evidence.ray_job_request_reference_carrier,
+            ),
+            ("ray_job_raw_info_clear", self.evidence.ray_job_raw_info_clear),
+            ("ray_job_processes_clear", self.evidence.ray_job_processes_clear),
+            ("ray_job_logs_clear", self.evidence.ray_job_logs_clear),
+            (
+                "ray_job_manager_reconciled_same_job",
+                self.evidence.ray_job_manager_reconciled_same_job,
+            ),
+            (
+                "ray_job_missing_reference_no_marker",
+                self.evidence.ray_job_missing_reference_no_marker,
+            ),
+            (
+                "ray_job_missing_reference_no_retry",
+                self.evidence.ray_job_missing_reference_no_retry,
+            ),
             ("workflow_task_id", self.evidence.workflow_task_id),
             ("workflow_task_state", self.evidence.workflow_task_state),
             ("workflow_attempt_number", self.evidence.workflow_attempt_number),
@@ -7861,6 +8769,7 @@ class LocalKubeRayGate:
                 "workloads",
                 "ray",
                 "runtime-env",
+                "ray-job-request-reference",
                 "runtime-env-encryption",
                 "rollouts",
             }
@@ -7884,6 +8793,7 @@ class LocalKubeRayGate:
                 "image-identity",
                 "probes",
                 "api-smoke",
+                "ray-job-request-reference",
                 "runtime-env-encryption",
                 "workflow-progress",
                 "workflow-admin",

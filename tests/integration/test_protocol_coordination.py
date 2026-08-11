@@ -378,7 +378,9 @@ def test_postgresql_v1_and_v1_v2_workers_obey_their_exact_protocol_ranges(
     _assert_v1_and_v1_v2_workers_obey_their_exact_protocol_ranges(monkeypatch)
 
 
-def _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> None:
+def _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _close()
     stale_at = timezone.now() - timedelta(hours=1)
     old_owner = TaskWorkerLease.objects.create(
@@ -426,6 +428,12 @@ def _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -
     )
     worker = _explicit_v1_worker("coordination-v1-recovery-worker")
 
+    class RejectingRunner:
+        def get_status(self, _handle: object) -> JobInfo:
+            raise AssertionError("unsupported Ray Job reached a status RPC")
+
+    monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", RejectingRunner)
+
     assert worker.reconcile_tasks() == 0
     assert worker.detect_stuck_tasks() == 0
     assert worker.process_cancellations() == 0
@@ -444,14 +452,18 @@ def _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -
     assert worker.lease_ownership_lost is False
 
 
-def test_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> None:
-    _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched()
+def test_worker_ownership_paths_leave_unsupported_inflight_rows_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched(monkeypatch)
 
 
 @pytest.mark.postgresql
-def test_postgresql_worker_ownership_paths_leave_unsupported_inflight_rows_untouched() -> None:
+def test_postgresql_worker_ownership_paths_leave_unsupported_inflight_rows_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _require_postgresql()
-    _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched()
+    _assert_worker_ownership_paths_leave_unsupported_inflight_rows_untouched(monkeypatch)
 
 
 def _assert_direct_lifecycle_paths_leave_unsupported_rows_untouched(

@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -38,8 +38,12 @@ from testproject.apps.cluster_tasks.ray_data_job import (  # noqa: E402
     validate_adoptable_artifact,
 )
 
+if TYPE_CHECKING:
+    from django_ray.execution_codec import ExecutionIdentity
+
 MAX_PROBE_SOURCE_FILES = 5_000
 MAX_PROBE_SOURCE_BYTES = 32 * 1024 * 1024
+MAX_RAY_JOB_EVIDENCE_CANDIDATES = 4_096
 
 
 def _build_probe_working_dir_archive(destination: Path) -> None:
@@ -183,19 +187,107 @@ def _wait_for_recovered_execution(
     raise AssertionError(f"Ray Data recovery task timed out:\n{_worker_log_tail(log)}")
 
 
+def _build_rq2_submission_candidates(
+    *,
+    execution_pk: int,
+    task_id: str,
+    attempt_protocol_versions: dict[int, int],
+    current_generation: int,
+) -> dict[str, tuple[ExecutionIdentity, int]]:
+    """Build a bounded rq2 ID allowlist from durable execution coordinates."""
+    from django_ray.execution_codec import ExecutionIdentity
+    from django_ray.ray_job_protocol import (
+        STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX,
+        RayJobRequestBindingError,
+        coordination_sha256,
+    )
+
+    if (
+        type(execution_pk) is not int
+        or execution_pk <= 0
+        or type(task_id) is not str
+        or not task_id
+        or type(current_generation) is not int
+        or current_generation < 0
+        or not attempt_protocol_versions
+        or any(
+            type(attempt) is not int or attempt <= 0 or type(protocol) is not int or protocol <= 0
+            for attempt, protocol in attempt_protocol_versions.items()
+        )
+    ):
+        raise AssertionError("Ray Job evidence coordinates were invalid")
+    candidate_count = len(attempt_protocol_versions) * (current_generation + 1)
+    if candidate_count > MAX_RAY_JOB_EVIDENCE_CANDIDATES:
+        raise AssertionError("Ray Job evidence candidate set exceeded its bounded contract")
+
+    candidates: dict[str, tuple[ExecutionIdentity, int]] = {}
+    try:
+        for attempt_number, protocol_version in sorted(attempt_protocol_versions.items()):
+            for generation in range(current_generation + 1):
+                identity = ExecutionIdentity(
+                    task_execution_pk=execution_pk,
+                    task_id=task_id,
+                    attempt_number=attempt_number,
+                    execution_generation=generation,
+                )
+                submission_id = (
+                    f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}"
+                    f"{coordination_sha256(identity)}"
+                )
+                if submission_id in candidates:
+                    raise AssertionError("Ray Job evidence candidate IDs were not unique")
+                candidates[submission_id] = (identity, protocol_version)
+    except RayJobRequestBindingError as error:
+        raise AssertionError("Ray Job evidence coordinates were invalid") from error
+    return candidates
+
+
 def _load_ray_job_submission_evidence(
     *, ray_address: str, execution_pk: int
 ) -> dict[int, tuple[int, str]]:
-    """Read retained terminal Job API metadata instead of a database polling race."""
+    """Read retained terminal Job API metadata without request bytes in JobInfo."""
+    from django_ray.models import RayTaskExecution, TaskAttempt
     from django_ray.ray_job_protocol import (
+        STRICT_RAY_JOB_SUBMISSION_ID_PREFIX,
         RayJobRequestBindingError,
-        is_valid_strict_ray_job_submission_id,
+        RayJobRequestExpectation,
+        RayJobRequestReferenceExpectation,
         parse_ray_job_request_metadata,
+        validate_ray_job_request_expectation,
+        validate_ray_job_request_reference_expectation,
+    )
+    from django_ray.ray_job_request_storage import (
+        RayJobRequestStorageError,
+        ray_job_request_reference_content_identity,
     )
     from django_ray.runner.ray_job import (
         _address_pinned_job_client,
         _bounded_control_requests,
     )
+
+    execution = RayTaskExecution.objects.only(
+        "pk",
+        "task_id",
+        "attempt_number",
+        "execution_generation",
+        "ray_job_request_reference",
+    ).get(pk=execution_pk)
+    attempt_protocol_versions = dict(
+        TaskAttempt.objects.filter(execution_id=execution_pk).values_list(
+            "attempt_number",
+            "execution_protocol_version",
+        )
+    )
+    rq2_candidates = _build_rq2_submission_candidates(
+        execution_pk=int(execution.pk),
+        task_id=str(execution.task_id),
+        attempt_protocol_versions=attempt_protocol_versions,
+        current_generation=int(execution.execution_generation),
+    )
+    rq1_candidates = {
+        f"{STRICT_RAY_JOB_SUBMISSION_ID_PREFIX}{submission_id.rsplit('_', 1)[1]}": candidate
+        for submission_id, candidate in rq2_candidates.items()
+    }
 
     client = _address_pinned_job_client(ray_address)
     deadline = time.monotonic() + 30
@@ -206,22 +298,71 @@ def _load_ray_job_submission_evidence(
         with _bounded_control_requests(client):
             jobs = client.list_jobs()
         for job in jobs:
-            metadata = job.metadata
+            submission_id = job.submission_id
+            if type(submission_id) is not str:
+                continue
+            rq2_candidate = rq2_candidates.get(submission_id)
+            rq1_candidate = rq1_candidates.get(submission_id)
+            if rq2_candidate is None and rq1_candidate is None:
+                continue
             try:
-                expectation = parse_ray_job_request_metadata(metadata)
+                expectation = parse_ray_job_request_metadata(job.metadata, required=True)
             except RayJobRequestBindingError as error:
                 raise AssertionError(
-                    "Ray Job metadata contained an invalid strict binding"
+                    "candidate Ray Job metadata contained an invalid strict binding"
                 ) from error
-            if expectation is None or expectation.identity.task_execution_pk != execution_pk:
-                continue
-            attempt_number = expectation.identity.attempt_number
-            execution_generation = expectation.identity.execution_generation
-            if expectation.execution_protocol_version != 1:
-                raise AssertionError("Ray Job metadata advertised an unexpected protocol")
-            submission_id = job.submission_id
-            if not is_valid_strict_ray_job_submission_id(submission_id):
-                raise AssertionError("Ray Job metadata matched a non-strict submission job")
+            candidate = rq2_candidate or rq1_candidate
+            assert candidate is not None
+            expected_identity, expected_protocol_version = candidate
+            try:
+                if rq2_candidate is not None:
+                    if not isinstance(expectation, RayJobRequestReferenceExpectation):
+                        raise AssertionError("rq2 candidate did not advertise rq2 metadata")
+                    validation_options: dict[str, object] = {}
+                    if (
+                        expected_identity.attempt_number == execution.attempt_number
+                        and expected_identity.execution_generation == execution.execution_generation
+                    ):
+                        request_reference = execution.ray_job_request_reference
+                        if not request_reference:
+                            raise AssertionError(
+                                "current rq2 candidate lost its durable request reference"
+                            )
+                        try:
+                            request_digest, request_size = (
+                                ray_job_request_reference_content_identity(request_reference)
+                            )
+                        except RayJobRequestStorageError as error:
+                            raise AssertionError(
+                                "current rq2 request reference was invalid"
+                            ) from error
+                        validation_options = {
+                            "expected_request_sha256": request_digest,
+                            "expected_request_size_bytes": request_size,
+                            "request_reference": request_reference,
+                        }
+                    validate_ray_job_request_reference_expectation(
+                        expectation,
+                        expected_identity=expected_identity,
+                        expected_execution_protocol_version=expected_protocol_version,
+                        expected_submission_id=submission_id,
+                        **validation_options,
+                    )
+                else:
+                    if not isinstance(expectation, RayJobRequestExpectation):
+                        raise AssertionError("rq1 candidate did not advertise rq1 metadata")
+                    validate_ray_job_request_expectation(
+                        expectation,
+                        expected_identity=expected_identity,
+                        expected_execution_protocol_version=expected_protocol_version,
+                    )
+            except RayJobRequestBindingError as error:
+                raise AssertionError(
+                    "candidate Ray Job binding did not match durable state"
+                ) from error
+
+            attempt_number = expected_identity.attempt_number
+            execution_generation = expected_identity.execution_generation
             identity = (execution_generation, submission_id)
             previous = submissions.setdefault(attempt_number, identity)
             if previous != identity:
@@ -276,6 +417,8 @@ def main() -> int:
         input_root.mkdir()
         output_root = root / "artifacts"
         output_root.mkdir()
+        request_storage_root = root / "ray-job-requests"
+        request_storage_root.mkdir()
         working_dir_archive = root / "ray-data-probe-working-dir.zip"
         _build_probe_working_dir_archive(working_dir_archive)
         os.environ["DJANGO_SETTINGS_MODULE"] = "testproject.settings"
@@ -284,6 +427,8 @@ def main() -> int:
         os.environ["DATABASE_NAME"] = str(root / "probe.sqlite3")
         os.environ["DJANGO_RAY_WORKING_DIR_URI"] = str(working_dir_archive)
         os.environ["DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE"] = "plaintext"
+        os.environ["DJANGO_RAY_INPUT_STORAGE_BACKEND"] = "filesystem"
+        os.environ["DJANGO_RAY_INPUT_STORAGE_FILESYSTEM_PATH"] = str(request_storage_root)
         os.environ["DJANGO_RAY_DATA_INPUT_ROOT"] = str(input_root)
         os.environ["DJANGO_RAY_DATA_OUTPUT_ROOT"] = str(output_root)
         os.environ["DJANGO_RAY_DATA_DEPLOYMENT_KEY"] = "real-ray-data-probe"
@@ -576,6 +721,7 @@ def main() -> int:
                 "ray_jobs_submitted": len(submissions),
                 "ray_job_transports_succeeded": True,
                 "strict_ray_job_request_binding": True,
+                "request_reference_transport": True,
                 "versioned_completion_envelope": True,
                 "executor_provenance_archived": True,
                 "preinstalled_ray_data_environment": True,

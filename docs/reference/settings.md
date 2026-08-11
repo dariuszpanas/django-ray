@@ -700,8 +700,12 @@ Enabling a threshold requires a retrievable `INPUT_STORAGE_BACKEND`.
 - **Default**: `None`
 - **Allowed**: `"filesystem"`, `"s3"`, `"gcs"`, or `None`
 
-Backend used for inputs larger than `MAX_INLINE_INPUT_SIZE_BYTES`. Digest-only storage
-is not supported because the worker must recover the original arguments.
+Backend used for inputs larger than `MAX_INLINE_INPUT_SIZE_BYTES` and for every rq2 Ray
+Job execution request. Digest-only storage is not supported because a worker or Ray Job
+driver must recover the canonical bytes. The setting may remain `None` for synchronous
+and Ray Core workers while spillover is disabled. A Ray Job task-manager command
+validates a retrievable backend before it creates a lease or claims work; control-only
+reconciliation remains available without submission storage so released jobs can drain.
 
 ### INPUT_STORAGE_FILESYSTEM_PATH
 
@@ -709,7 +713,9 @@ is not supported because the worker must recover the original arguments.
 - **Default**: `None`
 - **Required when**: `INPUT_STORAGE_BACKEND == "filesystem"`
 
-Root for content-addressed input envelopes. Use a shared volume for multi-host workers.
+Root for content-addressed task-input and Ray Job request envelopes. Use a shared volume
+for multi-host task managers; rq2 drivers must mount the same root read-only or otherwise
+have equivalent read access.
 
 ```python
 "INPUT_STORAGE_FILESYSTEM_PATH": "/var/lib/django-ray/inputs"
@@ -721,14 +727,14 @@ Root for content-addressed input envelopes. Use a shared volume for multi-host w
 - **Default**: `None`
 - **Required when**: `INPUT_STORAGE_BACKEND == "s3"`
 
-S3 or S3-compatible bucket for durable input envelopes.
+S3 or S3-compatible bucket for durable task-input and Ray Job request envelopes.
 
 ### INPUT_STORAGE_S3_PREFIX
 
 - **Type**: `str`
 - **Default**: `"django-ray/inputs"`
 
-Authorized object-key prefix for S3 input payloads.
+Authorized object-key prefix for task-input and Ray Job request payloads.
 
 ### INPUT_STORAGE_S3_REGION
 
@@ -750,14 +756,14 @@ Optional endpoint for an S3-compatible provider such as MinIO.
 - **Default**: `None`
 - **Required when**: `INPUT_STORAGE_BACKEND == "gcs"`
 
-Google Cloud Storage bucket for durable input envelopes.
+Google Cloud Storage bucket for durable task-input and Ray Job request envelopes.
 
 ### INPUT_STORAGE_GCS_PREFIX
 
 - **Type**: `str`
 - **Default**: `"django-ray/inputs"`
 
-Authorized object-key prefix for GCS input payloads.
+Authorized object-key prefix for task-input and Ray Job request payloads.
 
 See [Durable Input Storage](input-storage.md) for backend dependencies, execution
 validation, rollout ordering, retry behavior, and safe cleanup.

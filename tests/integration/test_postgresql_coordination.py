@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from io import StringIO
+from pathlib import Path
 from threading import Barrier, Event, Lock, get_ident
 from types import SimpleNamespace
 from typing import Any
@@ -46,6 +48,7 @@ from django_ray.lifecycle import (
 from django_ray.management.commands.django_ray_purge_inputs import Command as PurgeInputsCommand
 from django_ray.models import (
     CancellationStatus,
+    InputPayloadKind,
     InputPayloadState,
     RayTaskExecution,
     TaskAttempt,
@@ -221,6 +224,119 @@ def _execution(task_id: str, **overrides: object) -> RayTaskExecution:
     }
     values.update(overrides)
     return RayTaskExecution.objects.create(**values)
+
+
+def _rq2_reserved_execution(
+    task_id: str,
+    *,
+    worker_id: str = "postgres-rq2-worker",
+) -> tuple[RayTaskExecution, Any]:
+    """Create one exact pre-submit rq2 reservation and its submission handle."""
+    from django_ray.execution_codec import ExecutionIdentity
+    from django_ray.ray_job_protocol import (
+        STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX,
+        coordination_sha256,
+    )
+    from django_ray.runner.base import SubmissionHandle
+
+    address = "http://postgres-ray-head:8265"
+    execution = _execution(
+        task_id,
+        state=TaskState.RUNNING,
+        claimed_by_worker=worker_id,
+        attempt_number=1,
+        execution_generation=2,
+        execution_protocol_version=1,
+        ray_address=address,
+        args_json="[1]",
+        kwargs_json='{"flag":true}',
+        runtime_env_profile=None,
+        runtime_env_hash=hashlib.sha256(b"{}").hexdigest(),
+    )
+    assert execution.pk is not None
+    identity = ExecutionIdentity(
+        task_execution_pk=int(execution.pk),
+        task_id=execution.task_id,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+    job_id = (
+        f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}{coordination_sha256(identity)}"
+    )
+    execution.ray_job_id = job_id
+    execution.save(update_fields=["ray_job_id"])
+    return execution, SubmissionHandle(
+        ray_job_id=job_id,
+        ray_address=address,
+        submitted_at=datetime.now(UTC),
+    )
+
+
+def _prepared_rq2_request(execution: RayTaskExecution, root: Path) -> Any:
+    """Persist the canonical request bytes for one reserved execution."""
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        ExecutionRequest,
+        encode_execution_request,
+    )
+    from django_ray.ray_job_request_storage import prepare_ray_job_request
+
+    assert execution.pk is not None
+    request = ExecutionRequest(
+        identity=ExecutionIdentity(
+            task_execution_pk=int(execution.pk),
+            task_id=execution.task_id,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+        ),
+        execution_protocol_version=int(execution.execution_protocol_version),
+        callable_path=execution.callable_path,
+        transport_version=1,
+        serialized_args=execution.args_json,
+        serialized_kwargs=execution.kwargs_json,
+        input_reference=None,
+        runtime_env_profile=execution.runtime_env_profile,
+        runtime_env_hash=execution.runtime_env_hash,
+        runtime_env_plan_identity={},
+        compiled_graph_submission_transport="ray-job",
+    )
+    return prepare_ray_job_request(
+        encode_execution_request(request),
+        {
+            "INPUT_STORAGE_BACKEND": "filesystem",
+            "INPUT_STORAGE_FILESYSTEM_PATH": str(root),
+        },
+    )
+
+
+def _rq2_request_path(prepared: Any) -> Path:
+    locator = prepared.locator
+    assert locator.filesystem_path is not None
+    return (
+        Path(locator.filesystem_path)
+        / locator.digest[:2]
+        / locator.digest[2:4]
+        / f"{locator.digest}.json"
+    )
+
+
+class _RecordingRayJobClient:
+    """Record the bounded Ray Job request without opening a Ray connection."""
+
+    def __init__(self) -> None:
+        self.submissions: list[dict[str, object]] = []
+
+    @staticmethod
+    def _upload_working_dir_if_needed(_runtime_env: dict[str, object]) -> None:
+        return None
+
+    @staticmethod
+    def _upload_py_modules_if_needed(_runtime_env: dict[str, object]) -> None:
+        return None
+
+    def submit_job(self, **kwargs: object) -> str:
+        self.submissions.append(kwargs)
+        return str(kwargs["submission_id"])
 
 
 def _ray_core_runner_with_handle(handle: RayCoreHandle) -> RayCoreRunner:
@@ -3417,3 +3533,770 @@ def test_input_cleanup_racing_reenqueue_preserves_shared_payload(settings, tmp_p
         kwargs_json=replacement.kwargs_json,
         input_reference=replacement.input_reference,
     ) == ([large_value], {})
+
+
+def test_rq2_attach_waits_for_purge_then_restores_the_exact_request(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A purge-first race cannot delete the request selected by attachment."""
+    import django_ray.input_storage as input_storage_module
+    from django_ray.ray_job_request_storage import (
+        load_ray_job_request,
+        register_and_attach_ray_job_request,
+    )
+
+    storage_config = {
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    settings.DJANGO_RAY = {**settings.DJANGO_RAY, **storage_config}
+    execution, handle = _rq2_reserved_execution("postgres-rq2-attach-purge-001")
+    prepared = _prepared_rq2_request(execution, tmp_path)
+    payload = TaskInputPayload.objects.create(
+        reference=prepared.reference,
+        payload_kind=InputPayloadKind.RAY_JOB_REQUEST,
+        backend=prepared.backend,
+        digest=prepared.digest,
+        size_bytes=prepared.size_bytes,
+        envelope_version=prepared.envelope_version,
+        state=InputPayloadState.ACTIVE,
+    )
+    old_timestamp = timezone.now() - timedelta(days=60)
+    TaskInputPayload.objects.filter(pk=payload.pk).update(last_used_at=old_timestamp)
+    cutoff = timezone.now() - timedelta(days=30)
+    request_path = _rq2_request_path(prepared)
+    assert request_path.is_file()
+
+    deletion_started = Event()
+    release_deletion = Event()
+    attach_connected = Event()
+    attach_backend_pid: list[int] = []
+    original_delete = input_storage_module.delete_input_reference
+
+    def blocking_delete(reference: str) -> None:
+        original_delete(reference, config=storage_config)
+        deletion_started.set()
+        if not release_deletion.wait(timeout=10):
+            raise TimeoutError("test did not release rq2 request deletion")
+
+    monkeypatch.setattr(input_storage_module, "delete_input_reference", blocking_delete)
+
+    def purge_request() -> str:
+        close_old_connections()
+        try:
+            return PurgeInputsCommand()._process_reference(
+                prepared.reference,
+                cutoff=cutoff,
+                delete=True,
+            )
+        finally:
+            close_old_connections()
+
+    def attach_request() -> str:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                attach_backend_pid.append(int(cursor.fetchone()[0]))
+            attach_connected.set()
+            return register_and_attach_ray_job_request(
+                prepared,
+                task_execution=execution,
+                submission_handle=handle,
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        purge_future = executor.submit(purge_request)
+        try:
+            assert deletion_started.wait(timeout=10)
+            assert not request_path.exists()
+            attach_future = executor.submit(attach_request)
+            assert attach_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(attach_backend_pid[0])
+        finally:
+            release_deletion.set()
+        assert purge_future.result(timeout=20) == "purged"
+        assert attach_future.result(timeout=20) == prepared.reference
+
+    payload.refresh_from_db()
+    execution.refresh_from_db()
+    assert payload.state == InputPayloadState.ACTIVE
+    assert payload.purged_at is None
+    assert payload.last_used_at > cutoff
+    assert execution.ray_job_request_reference == prepared.reference
+    assert request_path.is_file()
+    assert load_ray_job_request(prepared.encoded_locator).request == prepared.request
+
+
+@pytest.mark.parametrize("transition", ["cancel", "owner-loss", "replacement"])
+def test_rq2_attach_rejects_a_concurrent_execution_transition_exactly(
+    tmp_path: Path,
+    transition: str,
+) -> None:
+    """Attachment rolls its registry write back after an exact CAS loses."""
+    from django_ray.ray_job_request_storage import (
+        RayJobRequestStorageError,
+        RayJobRequestStorageRejection,
+        register_and_attach_ray_job_request,
+    )
+
+    execution, handle = _rq2_reserved_execution(f"postgres-rq2-attach-{transition}-001")
+    prepared = _prepared_rq2_request(execution, tmp_path)
+    transition_locked = Event()
+    release_transition = Event()
+    attach_connected = Event()
+    attach_backend_pid: list[int] = []
+
+    def transition_execution() -> dict[str, Any]:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                current = RayTaskExecution.objects.get(pk=execution.pk)
+                if transition == "cancel":
+                    result = request_task_cancellation(
+                        int(execution.pk),
+                        expected_attempt_number=execution.attempt_number,
+                        expected_execution_generation=execution.execution_generation,
+                    )
+                    assert result.status is TaskCancellationRequestStatus.ACCEPTED
+                else:
+                    assert mark_task_lost(current) is True
+                    if transition == "replacement":
+                        replacement = retry_task(
+                            current,
+                            allowed_states=(TaskState.LOST,),
+                            expected_attempt_number=execution.attempt_number,
+                            expected_execution_generation=execution.execution_generation,
+                        )
+                        assert replacement is not None
+                transitioned = RayTaskExecution.objects.values().get(pk=execution.pk)
+                transition_locked.set()
+                if not release_transition.wait(timeout=10):
+                    raise TimeoutError("test did not release the rq2 execution transition")
+                return transitioned
+        finally:
+            close_old_connections()
+
+    def attach_request() -> str:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                attach_backend_pid.append(int(cursor.fetchone()[0]))
+            attach_connected.set()
+            return register_and_attach_ray_job_request(
+                prepared,
+                task_execution=execution,
+                submission_handle=handle,
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        transition_future = executor.submit(transition_execution)
+        try:
+            assert transition_locked.wait(timeout=10)
+            attach_future = executor.submit(attach_request)
+            assert attach_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(attach_backend_pid[0])
+        finally:
+            release_transition.set()
+        transitioned = transition_future.result(timeout=20)
+        with pytest.raises(RayJobRequestStorageError) as caught:
+            attach_future.result(timeout=20)
+
+    assert caught.value.classification is RayJobRequestStorageRejection.BINDING_MISMATCH
+    assert RayTaskExecution.objects.values().get(pk=execution.pk) == transitioned
+    assert not TaskInputPayload.objects.filter(reference=prepared.reference).exists()
+    assert _rq2_request_path(prepared).is_file()
+
+
+def test_rq2_definite_release_leaves_a_concurrent_replacement_untouched(
+    tmp_path: Path,
+) -> None:
+    """A stale definite-failure cleanup cannot clear a replacement tuple."""
+    from django_ray.ray_job_request_storage import (
+        register_and_attach_ray_job_request,
+        release_ray_job_request_reservation,
+    )
+
+    execution, handle = _rq2_reserved_execution("postgres-rq2-release-replacement-001")
+    prepared = _prepared_rq2_request(execution, tmp_path)
+    register_and_attach_ray_job_request(
+        prepared,
+        task_execution=execution,
+        submission_handle=handle,
+    )
+    replacement_locked = Event()
+    release_replacement = Event()
+    release_connected = Event()
+    release_backend_pid: list[int] = []
+
+    def replace_execution() -> dict[str, Any]:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                current = RayTaskExecution.objects.get(pk=execution.pk)
+                assert mark_task_lost(current) is True
+                retried = retry_task(
+                    current,
+                    allowed_states=(TaskState.LOST,),
+                    expected_attempt_number=execution.attempt_number,
+                    expected_execution_generation=execution.execution_generation,
+                )
+                assert retried is not None
+                replacement = RayTaskExecution.objects.values().get(pk=execution.pk)
+                replacement_locked.set()
+                if not release_replacement.wait(timeout=10):
+                    raise TimeoutError("test did not release the rq2 replacement transaction")
+                return replacement
+        finally:
+            close_old_connections()
+
+    def release_request() -> bool:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                release_backend_pid.append(int(cursor.fetchone()[0]))
+            release_connected.set()
+            return release_ray_job_request_reservation(
+                execution,
+                handle,
+                expected_reference=prepared.reference,
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        replacement_future = executor.submit(replace_execution)
+        try:
+            assert replacement_locked.wait(timeout=10)
+            cleanup_future = executor.submit(release_request)
+            assert release_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(release_backend_pid[0])
+        finally:
+            release_replacement.set()
+        replacement = replacement_future.result(timeout=20)
+        assert cleanup_future.result(timeout=20) is False
+
+    assert RayTaskExecution.objects.values().get(pk=execution.pk) == replacement
+    assert replacement["state"] == TaskState.QUEUED
+    assert replacement["ray_job_id"] is None
+    assert replacement["ray_job_request_reference"] is None
+    payload = TaskInputPayload.objects.get(reference=prepared.reference)
+    assert payload.payload_kind == InputPayloadKind.RAY_JOB_REQUEST
+    assert payload.state == InputPayloadState.ACTIVE
+    assert _rq2_request_path(prepared).is_file()
+
+
+def test_rq2_completion_committed_during_status_precedes_binding_rejection(
+    tmp_path: Path,
+) -> None:
+    """A committed exact completion wins over stale rq2 status metadata."""
+    from django_ray.execution_codec import ExecutionCompletion, encode_execution_completion
+    from django_ray.ray_job_protocol import build_ray_job_request_reference_metadata
+    from django_ray.ray_job_request_storage import register_and_attach_ray_job_request
+    from django_ray.runner.base import JobInfo, JobStatus
+
+    command = _claim_command("postgres-rq2-completion-owner", [])
+    execution, handle = _rq2_reserved_execution(
+        "postgres-rq2-completion-status-001",
+        worker_id=command.worker_id,
+    )
+    prepared = _prepared_rq2_request(execution, tmp_path)
+    register_and_attach_ray_job_request(
+        prepared,
+        task_execution=execution,
+        submission_handle=handle,
+    )
+    completion_data = encode_execution_completion(
+        ExecutionCompletion(
+            identity=prepared.request.identity,
+            execution_protocol_version=int(execution.execution_protocol_version),
+            executor_django_ray_version="0.5.0-postgres-rq2-executor",
+            success=True,
+            result={"value": 3},
+            result_reference=None,
+            error=None,
+            traceback=None,
+            exception_type=None,
+            retryable=None,
+        )
+    )
+    metadata = build_ray_job_request_reference_metadata(
+        prepared.request,
+        prepared.serialized_request,
+        prepared.reference,
+        prepared.encoded_locator,
+    )
+    stale_task = RayTaskExecution.objects.get(pk=execution.pk)
+    status_entered = Event()
+    publication_committed = Event()
+    completed_tasks: list[int] = []
+    conflicting_reference = f"resultfs://sha256/{'e' * 64}?rel=ee/ee/{'e' * 64}.json&bytes=1"
+
+    class StaleFailedStatusRunner:
+        def get_status(self, _handle: object) -> JobInfo:
+            status_entered.set()
+            if not publication_committed.wait(timeout=10):
+                raise TimeoutError("test did not publish the rq2 completion")
+            return JobInfo(
+                job_id=handle.ray_job_id,
+                status=JobStatus.FAILED,
+                metadata=metadata,
+                driver_exit_code=78,
+            )
+
+        def cancel_with_status(self, _handle: object) -> CancellationOutcome:
+            pytest.fail("an accepted rq2 completion must not be quarantined")
+
+        def get_logs(self, _handle: object) -> str | None:
+            pytest.fail("an accepted rq2 completion must not retrieve Ray Job logs")
+
+    def publish_completion() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                current = RayTaskExecution.objects.select_for_update().get(pk=execution.pk)
+                current.completion_data = completion_data
+                current.ray_job_request_reference = conflicting_reference
+                current.save(update_fields=["completion_data", "ray_job_request_reference"])
+        finally:
+            close_old_connections()
+        publication_committed.set()
+
+    def reconcile_status() -> None:
+        close_old_connections()
+        try:
+            command.active_tasks = {int(execution.pk): handle.ray_job_id}
+            command.active_task_identities = {
+                int(execution.pk): (
+                    execution.attempt_number,
+                    execution.execution_generation,
+                )
+            }
+            command._reconcile_ray_job_task(
+                stale_task,
+                StaleFailedStatusRunner(),
+                ray_job_id=handle.ray_job_id,
+                completed_tasks=completed_tasks,
+                orphaned=False,
+                tracked_identity=(
+                    execution.attempt_number,
+                    execution.execution_generation,
+                ),
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reconcile_future = executor.submit(reconcile_status)
+        try:
+            assert status_entered.wait(timeout=10)
+            publication_future = executor.submit(publish_completion)
+            publication_future.result(timeout=20)
+            assert reconcile_future.result(timeout=20) is None
+        finally:
+            publication_committed.set()
+
+    execution.refresh_from_db()
+    assert completed_tasks == [execution.pk]
+    assert execution.state == TaskState.SUCCEEDED
+    assert json.loads(execution.result_data or "null") == {"value": 3}
+    assert execution.ray_job_request_reference == conflicting_reference
+    assert execution.executor_django_ray_version == "0.5.0-postgres-rq2-executor"
+    assert command.active_tasks == {}
+
+
+@pytest.mark.parametrize(
+    ("value", "limit_delta", "accepted"),
+    [
+        ("ascii-boundary", 0, True),
+        ("multibyte-é", 0, True),
+        ("max-plus-one", -1, False),
+    ],
+    ids=("exact-max", "multibyte-exact-max", "max-plus-one"),
+)
+def test_rq2_public_submit_enforces_utf8_request_boundary_on_postgresql(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    limit_delta: int,
+    accepted: bool,
+) -> None:
+    """The encoded-byte ceiling fences the PostgreSQL reservation exactly."""
+    import django_ray.execution_codec as codec_module
+    from django_ray.conf.settings import get_settings
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        ExecutionRequest,
+        encode_execution_request,
+    )
+    from django_ray.runner.errors import (
+        RayJobRequestPreparationError,
+        RayJobRequestPreparationRejection,
+    )
+    from django_ray.runner.ray_job import RayJobRunner
+    from django_ray.runtime.runtime_env import normalize_runtime_env
+    from django_ray.runtime.serialization import serialize_args
+    from django_ray.workflow_plans import runtime_env_plan_identity
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "RAY_ADDRESS": "http://postgres-ray-head:8265",
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    runtime_env = normalize_runtime_env({})
+    args_json = serialize_args([value])
+    kwargs_json = serialize_args({})
+    task_id_suffix = value if "é" in value else str(ord(value[-1]))
+    execution = _execution(
+        f"postgres-rq2-request-boundary-{limit_delta}-{task_id_suffix}",
+        state=TaskState.RUNNING,
+        claimed_by_worker="postgres-rq2-boundary-owner",
+        args_json=args_json,
+        kwargs_json=kwargs_json,
+        execution_protocol_version=1,
+        runtime_env_profile=runtime_env.profile,
+        runtime_env_json=runtime_env.serialized,
+        runtime_env_hash=runtime_env.digest,
+    )
+    request = ExecutionRequest(
+        identity=ExecutionIdentity(
+            task_execution_pk=int(execution.pk),
+            task_id=execution.task_id,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+        ),
+        execution_protocol_version=int(execution.execution_protocol_version),
+        callable_path=execution.callable_path,
+        transport_version=1,
+        serialized_args=args_json,
+        serialized_kwargs=kwargs_json,
+        input_reference=None,
+        runtime_env_profile=runtime_env.profile,
+        runtime_env_hash=runtime_env.digest,
+        runtime_env_plan_identity=runtime_env_plan_identity(
+            runtime_env,
+            trust_identity=get_settings().get("WORKFLOW_PLAN_TRUST_IDENTITY", {}),
+        ).as_transport_dict(),
+        compiled_graph_submission_transport="ray-job",
+    )
+    serialized_request = encode_execution_request(request)
+    request_size_bytes = len(serialized_request.encode("utf-8"))
+    request_limit = request_size_bytes + limit_delta
+    assert request_size_bytes == request_limit + (0 if accepted else 1)
+    if "é" in value:
+        assert len(serialized_request) < request_size_bytes
+    monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_BYTES", request_limit)
+
+    runner = RayJobRunner()
+    client = _RecordingRayJobClient()
+    if accepted:
+        monkeypatch.setattr(runner, "_get_client", lambda _address=None: client)
+        handle = runner.submit(
+            task_execution=execution,
+            callable_path=execution.callable_path,
+            args=(value,),
+            kwargs={},
+        )
+        execution.refresh_from_db()
+        assert execution.ray_job_id == handle.ray_job_id
+        assert execution.ray_job_request_reference is not None
+        assert len(client.submissions) == 1
+        assert TaskInputPayload.objects.filter(
+            reference=execution.ray_job_request_reference,
+            payload_kind=InputPayloadKind.RAY_JOB_REQUEST,
+        ).exists()
+    else:
+        monkeypatch.setattr(
+            runner,
+            "_get_client",
+            lambda _address=None: pytest.fail("max+1 request opened a Ray client"),
+        )
+        with pytest.raises(RayJobRequestPreparationError) as caught:
+            runner.submit(
+                task_execution=execution,
+                callable_path=execution.callable_path,
+                args=(value,),
+                kwargs={},
+            )
+        assert caught.value.classification is RayJobRequestPreparationRejection.RESOURCE_LIMIT
+        execution.refresh_from_db()
+        assert execution.ray_job_id is None
+        assert execution.ray_address is None
+        assert execution.ray_job_request_reference is None
+        assert not TaskInputPayload.objects.filter(
+            payload_kind=InputPayloadKind.RAY_JOB_REQUEST,
+        ).exists()
+
+
+def test_rq2_public_submit_preserves_external_input_reference_on_postgresql(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public rq2 path nests one durable input reference without hydration."""
+    import django_ray.runner.ray_job as ray_job_module
+    from django_ray.ray_job_request_storage import load_ray_job_request
+    from django_ray.runner.ray_job import RayJobRunner
+    from django_ray.runtime.runtime_env import normalize_runtime_env
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "RAY_ADDRESS": "http://postgres-ray-head:8265",
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+        "MAX_INLINE_INPUT_SIZE_BYTES": 1024,
+    }
+    private_marker = "postgres-external-input-" + ("s" * 2048)
+    prepared_input = prepare_task_input((private_marker,), {"flag": True})
+    assert prepared_input.input_reference is not None
+    with transaction.atomic():
+        input_payload = register_task_input(prepared_input)
+    assert input_payload is not None
+
+    runtime_env = normalize_runtime_env({})
+    execution = _execution(
+        "postgres-rq2-external-input-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker="postgres-rq2-public-owner",
+        args_json=prepared_input.args_json,
+        kwargs_json=prepared_input.kwargs_json,
+        input_reference=prepared_input.input_reference,
+        execution_protocol_version=1,
+        runtime_env_profile=runtime_env.profile,
+        runtime_env_json=runtime_env.serialized,
+        runtime_env_hash=runtime_env.digest,
+    )
+    client = _RecordingRayJobClient()
+    runner = RayJobRunner()
+    monkeypatch.setattr(runner, "_get_client", lambda _address=None: client)
+    monkeypatch.setattr(
+        ray_job_module,
+        "serialize_args",
+        lambda _value: pytest.fail("external input was hydrated or reserialized"),
+    )
+
+    handle = runner.submit(
+        task_execution=execution,
+        callable_path=execution.callable_path,
+        args=(private_marker,),
+        kwargs={"flag": True},
+    )
+
+    execution.refresh_from_db()
+    assert execution.ray_job_id == handle.ray_job_id
+    assert execution.ray_job_request_reference is not None
+    request_payload = TaskInputPayload.objects.get(
+        reference=execution.ray_job_request_reference,
+    )
+    assert request_payload.payload_kind == InputPayloadKind.RAY_JOB_REQUEST
+    assert input_payload.payload_kind == InputPayloadKind.TASK_INPUT
+    assert len(client.submissions) == 1
+    submission = client.submissions[0]
+    encoded_locator = str(submission["entrypoint"]).rsplit(" ", maxsplit=1)[1]
+    request = load_ray_job_request(encoded_locator).request
+    assert request.transport_version == 2
+    assert request.serialized_args == EXTERNAL_INPUT_PLACEHOLDER
+    assert request.serialized_kwargs == EXTERNAL_INPUT_PLACEHOLDER
+    assert request.input_reference == prepared_input.input_reference
+    assert load_task_input(
+        args_json=request.serialized_args,
+        kwargs_json=request.serialized_kwargs,
+        input_reference=request.input_reference,
+    ) == ([private_marker], {"flag": True})
+    assert private_marker not in json.dumps(submission, default=str)
+
+
+def test_rq2_concurrent_public_submit_creates_one_remote_job_on_postgresql(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One PostgreSQL owner submits while a duplicate reports uncertainty."""
+    from django_ray.runner.errors import RayJobSubmissionUncertainError
+    from django_ray.runner.ray_job import RayJobRunner
+    from django_ray.runtime.runtime_env import normalize_runtime_env
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "RAY_ADDRESS": "http://postgres-ray-head:8265",
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    runtime_env = normalize_runtime_env({})
+    execution = _execution(
+        "postgres-rq2-duplicate-submit-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker="postgres-rq2-public-owner",
+        args_json="[]",
+        kwargs_json="{}",
+        execution_protocol_version=1,
+        runtime_env_profile=runtime_env.profile,
+        runtime_env_json=runtime_env.serialized,
+        runtime_env_hash=runtime_env.digest,
+    )
+    submit_started = Event()
+    release_submit = Event()
+
+    class BlockingRayJobClient(_RecordingRayJobClient):
+        def submit_job(self, **kwargs: object) -> str:
+            submission_id = super().submit_job(**kwargs)
+            submit_started.set()
+            if not release_submit.wait(timeout=10):
+                raise TimeoutError("test did not release the rq2 submission")
+            return submission_id
+
+    client = BlockingRayJobClient()
+    runners = (RayJobRunner(), RayJobRunner())
+    for runner in runners:
+        monkeypatch.setattr(runner, "_get_client", lambda _address=None: client)
+    start = Barrier(2)
+
+    def submit(runner: RayJobRunner):
+        close_old_connections()
+        try:
+            current = RayTaskExecution.objects.get(pk=execution.pk)
+            start.wait(timeout=10)
+            return runner.submit(
+                task_execution=current,
+                callable_path=current.callable_path,
+                args=(),
+                kwargs={},
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(submit, runner) for runner in runners]
+        try:
+            assert submit_started.wait(timeout=10)
+            completed, _pending = wait(
+                futures,
+                timeout=10,
+                return_when=FIRST_COMPLETED,
+            )
+            assert len(completed) == 1
+            assert len(client.submissions) == 1
+        finally:
+            release_submit.set()
+        handles = []
+        uncertain = []
+        for future in futures:
+            try:
+                handles.append(future.result(timeout=20))
+            except RayJobSubmissionUncertainError as error:
+                uncertain.append(error)
+
+    assert len(handles) == 1
+    assert len(uncertain) == 1
+    assert uncertain[0].submission_id == handles[0].ray_job_id
+    assert uncertain[0].observed_submission_id is None
+    execution.refresh_from_db()
+    assert execution.ray_job_id == handles[0].ray_job_id
+    assert execution.ray_job_request_reference is not None
+    assert (
+        TaskInputPayload.objects.filter(
+            payload_kind=InputPayloadKind.RAY_JOB_REQUEST,
+        ).count()
+        == 1
+    )
+
+
+def test_rq2_duplicate_stays_uncertain_when_owner_fails_before_remote_request(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate cannot report success before a failed owner releases rq2."""
+    from django_ray.runner.errors import RayJobSubmissionUncertainError
+    from django_ray.runner.ray_job import RayJobRunner
+    from django_ray.runtime.runtime_env import normalize_runtime_env
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "RAY_ADDRESS": "http://postgres-ray-head:8265",
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    runtime_env = normalize_runtime_env({})
+    execution = _execution(
+        "postgres-rq2-owner-pre-request-failure-001",
+        state=TaskState.RUNNING,
+        claimed_by_worker="postgres-rq2-public-owner",
+        args_json="[]",
+        kwargs_json="{}",
+        execution_protocol_version=1,
+        runtime_env_profile=runtime_env.profile,
+        runtime_env_json=runtime_env.serialized,
+        runtime_env_hash=runtime_env.digest,
+    )
+    owner = RayJobRunner()
+    duplicate = RayJobRunner()
+    owner_pre_request = Event()
+    release_owner = Event()
+    owner_error = ConnectionError("definite pre-request failure")
+    remote_calls: list[str] = []
+
+    def fail_before_remote_request(**_kwargs: object):
+        owner_pre_request.set()
+        if not release_owner.wait(timeout=10):
+            raise TimeoutError("test did not release the rq2 owner")
+        raise owner_error
+
+    def unexpected_client(_address=None):
+        remote_calls.append("client")
+        pytest.fail("pre-request race opened a Ray client")
+
+    monkeypatch.setattr(owner, "_submit_serialized_request", fail_before_remote_request)
+    monkeypatch.setattr(owner, "_get_client", unexpected_client)
+    monkeypatch.setattr(duplicate, "_get_client", unexpected_client)
+
+    def submit_owner():
+        close_old_connections()
+        try:
+            current = RayTaskExecution.objects.get(pk=execution.pk)
+            return owner.submit(
+                task_execution=current,
+                callable_path=current.callable_path,
+                args=(),
+                kwargs={},
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        owner_future = executor.submit(submit_owner)
+        try:
+            assert owner_pre_request.wait(timeout=10)
+            current = RayTaskExecution.objects.get(pk=execution.pk)
+            with pytest.raises(RayJobSubmissionUncertainError) as caught:
+                duplicate.submit(
+                    task_execution=current,
+                    callable_path=current.callable_path,
+                    args=(),
+                    kwargs={},
+                )
+        finally:
+            release_owner.set()
+        with pytest.raises(ConnectionError) as owner_caught:
+            owner_future.result(timeout=20)
+
+    assert caught.value.submission_id == owner.submission_id(execution)
+    assert owner_caught.value is owner_error
+    assert remote_calls == []
+    execution.refresh_from_db()
+    assert execution.ray_job_id is None
+    assert execution.ray_address is None
+    assert execution.ray_job_request_reference is None
+    assert not TaskInputPayload.objects.filter(
+        payload_kind=InputPayloadKind.RAY_JOB_REQUEST,
+    ).exists()
