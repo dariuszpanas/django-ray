@@ -10,8 +10,6 @@ const dashboardScript = fs.readFileSync(
   ),
   "utf8",
 );
-const sessionCredentialKey = "django-ray.testproject.api-token.v1";
-
 const elementIds = [
   "api-token",
   "use-token",
@@ -92,38 +90,6 @@ class FakeHeaders {
   }
 }
 
-class FakeSessionStorage {
-  constructor(initial = {}) {
-    this.values = new Map(Object.entries(initial));
-    this.throwOnGet = false;
-    this.throwOnGetAfterSet = false;
-    this.throwOnSet = false;
-    this.throwOnRemove = false;
-    this.throwOnRemoveAfterSet = false;
-    this.setCount = 0;
-  }
-
-  getItem(key) {
-    if (this.throwOnGet || (this.throwOnGetAfterSet && this.setCount > 0)) {
-      throw new Error("session storage get failed");
-    }
-    return this.values.get(key) ?? null;
-  }
-
-  setItem(key, value) {
-    if (this.throwOnSet) throw new Error("session storage set failed");
-    this.values.set(key, String(value));
-    this.setCount += 1;
-  }
-
-  removeItem(key) {
-    if (this.throwOnRemove || (this.throwOnRemoveAfterSet && this.setCount > 0)) {
-      throw new Error("session storage remove failed");
-    }
-    this.values.delete(key);
-  }
-}
-
 function response(status, payload) {
   return {
     ok: status >= 200 && status < 300,
@@ -145,18 +111,14 @@ function deferred() {
   return { promise, resolve };
 }
 
-function loadDashboard({
-  sessionStorage = new FakeSessionStorage(),
-  initialFetchResponses = [],
-  authorizationHeaderFailure = false,
-} = {}) {
+function loadDashboard({ authorizationHeaderFailure = false } = {}) {
   const elements = new Map(elementIds.map((id) => [id, new FakeElement()]));
   elements.get("credential-status").textContent =
     "Not authenticated. Protected actions will ask for a token.";
   elements.get("output").textContent =
     "Enter the local demo API token to enable protected actions.";
   const fetchCalls = [];
-  const fetchResponses = [...initialFetchResponses];
+  const fetchResponses = [];
   const scheduled = [];
 
   globalThis.document = {
@@ -173,7 +135,6 @@ function loadDashboard({
     }
   };
   globalThis.window = {
-    sessionStorage,
     async fetch(url, options) {
       fetchCalls.push({ url, options });
       assert.notEqual(fetchResponses.length, 0, `unexpected fetch for ${url}`);
@@ -190,15 +151,10 @@ function loadDashboard({
     fetchCalls,
     fetchResponses,
     scheduled,
-    sessionStorage,
     async click(id) {
       return elements.get(id).listeners.get("click")({});
     },
   };
-}
-
-async function settleDashboard() {
-  await new Promise((resolve) => setImmediate(resolve));
 }
 
 function assertCredentialNotRendered(dashboard, token) {
@@ -231,11 +187,7 @@ test("statistics and enqueue use the shared bearer request path", async () => {
   );
   assert.equal(
     dashboard.elements.get("credential-status").textContent,
-    "Authenticated for this browser session.",
-  );
-  assert.equal(
-    dashboard.sessionStorage.getItem(sessionCredentialKey),
-    "valid-dashboard-token",
+    "Authenticated for this loaded page. Reloading clears the token.",
   );
   assertCredentialNotRendered(dashboard, "valid-dashboard-token");
 
@@ -272,11 +224,7 @@ test("a stale 401 cannot clear a newer verified credential", async () => {
   await oldAttempt;
   assert.equal(
     dashboard.elements.get("credential-status").textContent,
-    "Authenticated for this browser session.",
-  );
-  assert.equal(
-    dashboard.sessionStorage.getItem(sessionCredentialKey),
-    "new-dashboard-token",
+    "Authenticated for this loaded page. Reloading clears the token.",
   );
 
   dashboard.fetchResponses.push(response(200, { task_id: "task-2", status: "READY" }));
@@ -299,7 +247,10 @@ test("a stale successful check cannot overwrite a newer verified credential", as
 
   oldResponse.resolve(response(200, stats));
   await oldAttempt;
-  assert.equal(dashboard.sessionStorage.getItem(sessionCredentialKey), "new-success-token");
+  assert.equal(
+    dashboard.elements.get("credential-status").textContent,
+    "Authenticated for this loaded page. Reloading clears the token.",
+  );
   dashboard.fetchResponses.push(response(200, { task_id: "task-new", status: "READY" }));
   await dashboard.click("trigger");
   assert.equal(
@@ -321,7 +272,7 @@ test("forgetting a credential wins over an in-flight successful check", async ()
 
   assert.equal(
     dashboard.elements.get("credential-status").textContent,
-    "Not authenticated. The browser-session API token was forgotten.",
+    "Not authenticated. The page-memory API token was forgotten.",
   );
   assert.equal(
     dashboard.elements.get("credential-status").classList.contains("authenticated"),
@@ -330,14 +281,6 @@ test("forgetting a credential wins over an in-flight successful check", async ()
   const fetchCount = dashboard.fetchCalls.length;
   await dashboard.click("trigger");
   assert.equal(dashboard.fetchCalls.length, fetchCount);
-  assert.equal(dashboard.sessionStorage.getItem(sessionCredentialKey), null);
-
-  const reloaded = loadDashboard({ sessionStorage: dashboard.sessionStorage });
-  assert.equal(reloaded.fetchCalls.length, 0);
-  assert.equal(
-    reloaded.elements.get("credential-status").textContent,
-    "Not authenticated. Protected actions will ask for a token.",
-  );
 });
 
 test("forgetting a credential fences an in-flight protected response", async () => {
@@ -357,9 +300,8 @@ test("forgetting a credential fences an in-flight protected response", async () 
   assert.equal(dashboard.elements.get("protected-response-body").textContent, "");
   assert.equal(
     dashboard.elements.get("output").textContent,
-    "Browser API token forgotten for this tab session.",
+    "Browser API token forgotten for this loaded page.",
   );
-  assert.equal(dashboard.sessionStorage.getItem(sessionCredentialKey), null);
 });
 
 test("an unverifiable candidate is discarded after a server error", async () => {
@@ -376,10 +318,9 @@ test("an unverifiable candidate is discarded after a server error", async () => 
   const fetchCount = dashboard.fetchCalls.length;
   await dashboard.click("trigger");
   assert.equal(dashboard.fetchCalls.length, fetchCount);
-  assert.equal(dashboard.sessionStorage.getItem(sessionCredentialKey), null);
 });
 
-test("starting a replacement removes the previously verified session token", async () => {
+test("a failed replacement does not restore the previously verified page token", async () => {
   const dashboard = loadDashboard();
   dashboard.fetchResponses.push(response(200, stats));
   dashboard.elements.get("api-token").value = "previous-dashboard-token";
@@ -390,64 +331,58 @@ test("starting a replacement removes the previously verified session token", asy
   dashboard.elements.get("api-token").value = "replacement-dashboard-token";
   const replacement = dashboard.click("use-token");
 
-  assert.equal(dashboard.sessionStorage.getItem(sessionCredentialKey), null);
   pendingResponse.resolve(response(503, { detail: "Unavailable" }));
   await replacement;
-  assert.equal(dashboard.sessionStorage.getItem(sessionCredentialKey), null);
+  const fetchCount = dashboard.fetchCalls.length;
+  await dashboard.click("trigger");
+  assert.equal(dashboard.fetchCalls.length, fetchCount);
 });
 
-test("a verified token survives reload and restores authenticated actions", async () => {
-  const sessionStorage = new FakeSessionStorage();
-  const initial = loadDashboard({ sessionStorage });
+test("a verified token is dropped when the dashboard reloads", async () => {
+  const initial = loadDashboard();
   initial.fetchResponses.push(response(200, stats));
   initial.elements.get("api-token").value = "reload-dashboard-token";
   await initial.click("use-token");
 
-  const reloaded = loadDashboard({
-    sessionStorage,
-    initialFetchResponses: [response(200, stats)],
-  });
-  await settleDashboard();
+  const reloaded = loadDashboard();
 
   assert.equal(reloaded.elements.get("api-token").value, "");
-  assert.equal(reloaded.fetchCalls[0].url, "/api/executions/stats");
-  assert.equal(
-    reloaded.fetchCalls[0].options.headers.get("Authorization"),
-    "Bearer reload-dashboard-token",
-  );
+  assert.equal(reloaded.fetchCalls.length, 0);
   assert.equal(
     reloaded.elements.get("credential-status").textContent,
-    "Authenticated for this browser session.",
+    "Not authenticated. Protected actions will ask for a token.",
   );
   assert.equal(
     reloaded.elements.get("output").textContent,
-    "Stored API token restored and task statistics refreshed.",
+    "Enter the local demo API token to enable protected actions.",
   );
   assertCredentialNotRendered(reloaded, "reload-dashboard-token");
 
-  reloaded.fetchResponses.push(response(200, { task_id: "task-reload", status: "READY" }));
   await reloaded.click("trigger");
-  assert.equal(
-    reloaded.fetchCalls.at(-1).options.headers.get("Authorization"),
-    "Bearer reload-dashboard-token",
-  );
+  assert.equal(reloaded.fetchCalls.length, 0);
+  assert.equal(reloaded.elements.get("output").textContent, "A browser API token is required.");
 });
 
-test("a restored credential rejected with 401 is removed", async () => {
-  const sessionStorage = new FakeSessionStorage({
-    [sessionCredentialKey]: "expired-dashboard-token",
-  });
-  const dashboard = loadDashboard({
-    sessionStorage,
-    initialFetchResponses: [response(401, { detail: "Unauthorized" })],
-  });
-  await settleDashboard();
+test("a current 401 clears the credential and protected response", async () => {
+  const dashboard = loadDashboard();
+  dashboard.fetchResponses.push(response(200, stats));
+  dashboard.elements.get("api-token").value = "expired-dashboard-token";
+  await dashboard.click("use-token");
 
-  assert.equal(sessionStorage.getItem(sessionCredentialKey), null);
+  dashboard.fetchResponses.push(response(200, "sensitive metrics payload"));
+  await dashboard.click("view-metrics");
+  assert.equal(dashboard.elements.get("protected-response").hidden, false);
+
+  dashboard.fetchResponses.push(response(401, { detail: "Unauthorized" }));
+  await dashboard.click("trigger");
+
   assert.equal(
     dashboard.elements.get("credential-status").textContent,
     "The API token was rejected. Paste a valid token and try again.",
   );
+  assert.equal(dashboard.elements.get("protected-response").hidden, true);
+  assert.equal(dashboard.elements.get("protected-response-title").textContent, "");
+  assert.equal(dashboard.elements.get("protected-response-body").textContent, "");
   const fetchCount = dashboard.fetchCalls.length;
   await dashboard.click("trigger");
   assert.equal(dashboard.fetchCalls.length, fetchCount);
@@ -463,62 +398,31 @@ test("a protected action denied with 403 retains the verified credential", async
   await dashboard.click("trigger");
 
   assert.equal(
-    dashboard.sessionStorage.getItem(sessionCredentialKey),
-    "permission-limited-token",
-  );
-  assert.equal(
     dashboard.elements.get("credential-status").textContent,
-    "Authenticated for this browser session.",
+    "Authenticated for this loaded page. Reloading clears the token.",
   );
-});
-
-test("a transient restore failure retains the previously verified session token", async () => {
-  const sessionStorage = new FakeSessionStorage({
-    [sessionCredentialKey]: "temporarily-unverifiable-token",
-  });
-  const dashboard = loadDashboard({
-    sessionStorage,
-    initialFetchResponses: [response(503, { detail: "Unavailable" })],
-  });
-  await settleDashboard();
-
-  assert.equal(
-    sessionStorage.getItem(sessionCredentialKey),
-    "temporarily-unverifiable-token",
-  );
-  assert.equal(
-    dashboard.elements.get("credential-status").textContent,
-    "The stored API token could not be verified yet. Protected actions will retry it.",
-  );
-
-  dashboard.fetchResponses.push(response(200, { task_id: "task-retry", status: "READY" }));
-  await dashboard.click("trigger");
+  dashboard.fetchResponses.push(response(200, "metrics after forbidden enqueue"));
+  await dashboard.click("view-metrics");
   assert.equal(
     dashboard.fetchCalls.at(-1).options.headers.get("Authorization"),
-    "Bearer temporarily-unverifiable-token",
+    "Bearer permission-limited-token",
   );
 });
 
-test("session storage read failures force page-memory fallback after verification", async () => {
-  const sessionStorage = new FakeSessionStorage();
-  sessionStorage.throwOnGet = true;
-
-  const dashboard = loadDashboard({ sessionStorage });
-
-  assert.equal(dashboard.fetchCalls.length, 0);
-  assert.equal(
-    dashboard.elements.get("credential-status").textContent,
-    "Not authenticated. Session storage is unavailable; a verified token will last only until reload.",
-  );
-  dashboard.fetchResponses.push(response(200, stats));
-  dashboard.elements.get("api-token").value = "read-failure-token";
-  await dashboard.click("use-token");
-  assert.equal(
-    dashboard.elements.get("credential-status").textContent,
-    "Authenticated for this loaded page; session storage is unavailable.",
-  );
-  sessionStorage.throwOnGet = false;
-  assert.equal(sessionStorage.getItem(sessionCredentialKey), null);
+test("the dashboard never persists or routes bearer credentials", () => {
+  for (const persistenceOrRoute of [
+    "sessionStorage",
+    "localStorage",
+    "indexedDB",
+    "document.cookie",
+    "window.name",
+    "window.location",
+    "URLSearchParams",
+  ]) {
+    assert.equal(dashboardScript.includes(persistenceOrRoute), false);
+  }
+  assert.equal(dashboardScript.includes('let apiToken = "";'), true);
+  assert.equal(dashboardScript.includes("restoreCredential"), false);
 });
 
 test("header construction failures never render the bearer token", async () => {
@@ -533,95 +437,4 @@ test("header construction failures never render the bearer token", async () => {
     dashboard.elements.get("output").textContent,
     "The authenticated request could not be sent.",
   );
-  assert.equal(dashboard.sessionStorage.getItem(sessionCredentialKey), null);
-});
-
-test("session storage write failures fall back to loaded-page memory", async () => {
-  const sessionStorage = new FakeSessionStorage();
-  sessionStorage.throwOnSet = true;
-  const dashboard = loadDashboard({ sessionStorage });
-  dashboard.fetchResponses.push(response(200, stats));
-  dashboard.elements.get("api-token").value = "memory-fallback-token";
-
-  await dashboard.click("use-token");
-
-  assert.equal(sessionStorage.getItem(sessionCredentialKey), null);
-  assert.equal(
-    dashboard.elements.get("credential-status").textContent,
-    "Authenticated for this loaded page; session storage is unavailable.",
-  );
-  dashboard.fetchResponses.push(response(200, { task_id: "task-memory", status: "READY" }));
-  await dashboard.click("trigger");
-  assert.equal(
-    dashboard.fetchCalls.at(-1).options.headers.get("Authorization"),
-    "Bearer memory-fallback-token",
-  );
-});
-
-test("failed persistence verification reports uncertain residual session state", async () => {
-  const sessionStorage = new FakeSessionStorage();
-  sessionStorage.throwOnGetAfterSet = true;
-  sessionStorage.throwOnRemoveAfterSet = true;
-  const dashboard = loadDashboard({ sessionStorage });
-  dashboard.fetchResponses.push(response(200, stats));
-  dashboard.elements.get("api-token").value = "uncertain-persistence-token";
-
-  await dashboard.click("use-token");
-
-  assert.equal(
-    dashboard.elements.get("credential-status").textContent,
-    "Authenticated for this loaded page, but session storage could not be updated. Close this tab or clear its site data.",
-  );
-  sessionStorage.throwOnGetAfterSet = false;
-  assert.equal(sessionStorage.getItem(sessionCredentialKey), "uncertain-persistence-token");
-});
-
-test("a replacement warns when prior session state cannot be removed or updated", async () => {
-  const sessionStorage = new FakeSessionStorage();
-  const dashboard = loadDashboard({ sessionStorage });
-  dashboard.fetchResponses.push(response(200, stats));
-  dashboard.elements.get("api-token").value = "old-persisted-token";
-  await dashboard.click("use-token");
-  sessionStorage.throwOnRemove = true;
-  sessionStorage.throwOnSet = true;
-
-  dashboard.fetchResponses.push(response(200, stats));
-  dashboard.elements.get("api-token").value = "new-page-token";
-  await dashboard.click("use-token");
-
-  assert.equal(sessionStorage.getItem(sessionCredentialKey), "old-persisted-token");
-  assert.equal(
-    dashboard.elements.get("credential-status").textContent,
-    "Authenticated for this loaded page, but session storage could not be updated. Close this tab or clear its site data.",
-  );
-  dashboard.fetchResponses.push(response(200, { task_id: "task-new", status: "READY" }));
-  await dashboard.click("trigger");
-  assert.equal(
-    dashboard.fetchCalls.at(-1).options.headers.get("Authorization"),
-    "Bearer new-page-token",
-  );
-});
-
-test("session storage removal failures are reported without retaining page access", async () => {
-  const sessionStorage = new FakeSessionStorage();
-  const dashboard = loadDashboard({ sessionStorage });
-  dashboard.fetchResponses.push(response(200, stats));
-  dashboard.elements.get("api-token").value = "removal-failure-token";
-  await dashboard.click("use-token");
-  sessionStorage.throwOnRemove = true;
-
-  await dashboard.click("forget-token");
-
-  assert.equal(sessionStorage.getItem(sessionCredentialKey), "removal-failure-token");
-  assert.match(
-    dashboard.elements.get("credential-status").textContent,
-    /Session storage could not be cleared/,
-  );
-  assert.equal(
-    dashboard.elements.get("output").textContent,
-    "Token cleared from this page, but session storage could not be cleared.",
-  );
-  const fetchCount = dashboard.fetchCalls.length;
-  await dashboard.click("trigger");
-  assert.equal(dashboard.fetchCalls.length, fetchCount);
 });

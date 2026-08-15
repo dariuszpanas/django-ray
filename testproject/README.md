@@ -65,7 +65,7 @@ docker compose logs migrate
 
 Open [the landing page](http://127.0.0.1:8000/) and paste the current
 `DJANGO_API_TOKEN` value into **Browser API access**. The page retains a verified token only in the
-current tab's `sessionStorage`.
+loaded page's memory; reloading starts a new page without the token.
 
 For Swagger, open [the API docs](http://127.0.0.1:8000/api/docs), select **Authorize**, and paste the
 token value. Swagger adds the `Bearer` scheme; do not paste the word `Bearer` into that dialog.

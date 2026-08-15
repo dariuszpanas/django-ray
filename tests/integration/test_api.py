@@ -216,12 +216,12 @@ class TestLandingPage:
         assert 'id="use-token"' in content
         assert 'id="view-metrics"' in content
         assert 'id="view-executions"' in content
-        assert "survives reloads" in content
+        assert "Reloading starts unauthenticated" in content
         assert 'id="stat-succeeded">1</strong>' in content
         assert 'id="stat-expired">1</strong>' in content
 
     def test_browser_auth_contract_does_not_embed_or_leak_token(self, settings):
-        """The browser session retains its credential without server-side leakage."""
+        """The loaded page retains its credential without persistence or leakage."""
         configured_token = "configured-browser-token-must-not-leak-issue-162"
         settings.DJANGO_API_TOKEN = configured_token
 
@@ -239,10 +239,9 @@ class TestLandingPage:
         assert 'href="/api/executions"' not in content
         assert script.count("window.fetch(") == 1
         assert 'headers.set("Authorization", `Bearer ${requestToken}`)' in script
-        assert 'const sessionCredentialKey = "django-ray.testproject.api-token.v1"' in script
-        assert "window.sessionStorage.getItem(sessionCredentialKey)" in script
-        assert "window.sessionStorage.setItem(sessionCredentialKey, token)" in script
-        assert "window.sessionStorage.removeItem(sessionCredentialKey)" in script
+        assert 'let apiToken = "";' in script
+        assert "let credentialGeneration = 0;" in script
+        assert "restoreCredential" not in script
         for endpoint in (
             "/api/executions/stats",
             "/api/enqueue/add/2/3",
@@ -251,8 +250,11 @@ class TestLandingPage:
         ):
             assert endpoint in script
         for leak_path in (
+            "sessionStorage",
             "localStorage",
+            "indexedDB",
             "document.cookie",
+            "window.name",
             "window.location",
             "URLSearchParams",
         ):

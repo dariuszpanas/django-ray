@@ -1,7 +1,6 @@
 (() => {
   "use strict";
 
-  const sessionCredentialKey = "django-ray.testproject.api-token.v1";
   const tokenInput = document.querySelector("#api-token");
   const useToken = document.querySelector("#use-token");
   const credentialStatus = document.querySelector("#credential-status");
@@ -25,7 +24,6 @@
 
   let apiToken = "";
   let credentialGeneration = 0;
-  let sessionStorageAvailable = true;
 
   class DashboardCredentialError extends Error {
     constructor(message, clearedCurrentCredential = false) {
@@ -40,52 +38,6 @@
     if (state) credentialStatus.classList.add(state);
   }
 
-  function readSessionCredential() {
-    if (!sessionStorageAvailable) return { available: false, token: "" };
-    try {
-      return { available: true, token: window.sessionStorage.getItem(sessionCredentialKey) || "" };
-    } catch {
-      sessionStorageAvailable = false;
-      return { available: false, token: "" };
-    }
-  }
-
-  function persistSessionCredential(token) {
-    if (!sessionStorageAvailable) return "page-only";
-    try {
-      window.sessionStorage.setItem(sessionCredentialKey, token);
-      if (window.sessionStorage.getItem(sessionCredentialKey) !== token) {
-        sessionStorageAvailable = false;
-        try {
-          window.sessionStorage.removeItem(sessionCredentialKey);
-          return "page-only";
-        } catch {
-          return "uncertain";
-        }
-      }
-      return "persisted";
-    } catch {
-      sessionStorageAvailable = false;
-      try {
-        window.sessionStorage.removeItem(sessionCredentialKey);
-        return "page-only";
-      } catch {
-        // The fixed UI warning tells the operator how to clear inaccessible session state.
-        return "uncertain";
-      }
-    }
-  }
-
-  function forgetSessionCredential() {
-    try {
-      window.sessionStorage.removeItem(sessionCredentialKey);
-      return true;
-    } catch {
-      sessionStorageAvailable = false;
-      return false;
-    }
-  }
-
   function replaceCredential(token = "") {
     credentialGeneration += 1;
     apiToken = token;
@@ -96,17 +48,17 @@
     return credentialGeneration === generation && apiToken === token;
   }
 
+  function clearProtectedResponse() {
+    protectedResponse.hidden = true;
+    protectedResponseTitle.textContent = "";
+    protectedResponseBody.textContent = "";
+  }
+
   function clearCredential(message, state = "") {
     replaceCredential();
-    const sessionCleared = forgetSessionCredential();
     tokenInput.value = "";
-    setCredentialStatus(
-      sessionCleared
-        ? message
-        : `${message} Session storage could not be cleared; close this tab or clear its site data.`,
-      sessionCleared ? state : "danger",
-    );
-    return sessionCleared;
+    clearProtectedResponse();
+    setCredentialStatus(message, state);
   }
 
   async function authenticatedRequest(url, options = {}) {
@@ -170,21 +122,15 @@
     }
 
     const suppliedGeneration = replaceCredential(suppliedToken);
-    const previousSessionCleared = forgetSessionCredential();
     setCredentialStatus("Checking the API token...");
     output.textContent = "Refreshing authenticated task statistics...";
     try {
       await refreshStats();
       if (!credentialIsCurrent(suppliedGeneration, suppliedToken)) return;
-      const persistence = persistSessionCredential(suppliedToken);
-      let authenticatedMessage = "Authenticated for this browser session.";
-      if (persistence !== "persisted") {
-        authenticatedMessage = previousSessionCleared && persistence === "page-only"
-          ? "Authenticated for this loaded page; session storage is unavailable."
-          : "Authenticated for this loaded page, but session storage could not be updated. " +
-            "Close this tab or clear its site data.";
-      }
-      setCredentialStatus(authenticatedMessage, "authenticated");
+      setCredentialStatus(
+        "Authenticated for this loaded page. Reloading clears the token.",
+        "authenticated",
+      );
       output.textContent = "Authenticated task statistics refreshed.";
     } catch (error) {
       if (error instanceof DashboardCredentialError && error.clearedCurrentCredential) {
@@ -197,39 +143,6 @@
         "danger",
       );
       tokenInput.focus();
-      showActionError(error);
-    }
-  }
-
-  async function restoreCredential() {
-    const storedCredential = readSessionCredential();
-    if (!storedCredential.available) {
-      setCredentialStatus(
-        "Not authenticated. Session storage is unavailable; a verified token will last only until reload.",
-        "danger",
-      );
-      return;
-    }
-    if (!storedCredential.token) return;
-
-    const restoredGeneration = replaceCredential(storedCredential.token);
-    setCredentialStatus("Restoring the browser-session API token...");
-    output.textContent = "Refreshing authenticated task statistics...";
-    try {
-      await refreshStats();
-      if (!credentialIsCurrent(restoredGeneration, storedCredential.token)) return;
-      setCredentialStatus("Authenticated for this browser session.", "authenticated");
-      output.textContent = "Stored API token restored and task statistics refreshed.";
-    } catch (error) {
-      if (error instanceof DashboardCredentialError && error.clearedCurrentCredential) {
-        showActionError(error);
-        return;
-      }
-      if (!credentialIsCurrent(restoredGeneration, storedCredential.token)) return;
-      setCredentialStatus(
-        "The stored API token could not be verified yet. Protected actions will retry it.",
-        "danger",
-      );
       showActionError(error);
     }
   }
@@ -286,14 +199,8 @@
     }
   });
   forgetToken.addEventListener("click", () => {
-    const sessionCleared = clearCredential(
-      "Not authenticated. The browser-session API token was forgotten.",
-    );
-    protectedResponse.hidden = true;
-    protectedResponseBody.textContent = "";
-    output.textContent = sessionCleared
-      ? "Browser API token forgotten for this tab session."
-      : "Token cleared from this page, but session storage could not be cleared.";
+    clearCredential("Not authenticated. The page-memory API token was forgotten.");
+    output.textContent = "Browser API token forgotten for this loaded page.";
     tokenInput.focus();
   });
   trigger.addEventListener("click", triggerTask);
@@ -306,8 +213,6 @@
     ),
   );
   closeProtectedResponse.addEventListener("click", () => {
-    protectedResponse.hidden = true;
-    protectedResponseBody.textContent = "";
+    clearProtectedResponse();
   });
-  restoreCredential();
 })();
