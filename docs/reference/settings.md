@@ -903,6 +903,8 @@ values in structured logs, Ray observability responses, the sample operational
 API, and Django admin task details. A configured string or sequence extends the
 built-in patterns for common names such as `password`, `secret`, `token`,
 `authorization`, and `private_key`.
+Sensitive mapping keys are emitted only as the fixed `<redacted>` marker with a
+`[REDACTED]` value; marker and normalized-key collisions fail closed.
 
 These patterns still govern the ordinary Admin detail. The separately authorized
 [unredacted task diagnostics](#unredacted-task-diagnostics) page deliberately bypasses

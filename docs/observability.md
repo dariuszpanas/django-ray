@@ -355,8 +355,9 @@ One structured root shares that matcher budget, a 4,096-item traversal ceiling, 
 65,536-character aggregate ceiling across nested string keys and values.
 Mapping keys, including structured-log extra keys, are normalized and matched through
 the same projections; a
-sensitive-looking key redacts its value, and a normalized-key collision cannot replace
-an earlier redaction. Exact string keys retain their text; other Python key types are
+sensitive-looking key is replaced with the fixed `<redacted>` marker and its value is
+redacted. Marker and normalized-key collisions cannot replace an earlier redaction.
+Ordinary exact string keys retain their normalized text; other Python key types are
 represented only by type so user-defined string conversion cannot enter diagnostics.
 Workflow-progress producer and storage mappings persist normalized
 keys, reject ambiguous collisions, and reject node/edge identities which normalization

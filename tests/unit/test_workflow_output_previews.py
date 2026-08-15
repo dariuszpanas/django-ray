@@ -86,7 +86,7 @@ def test_configured_redaction_is_applied_before_preview_publication() -> None:
     preview = prepare_workflow_output_preview(
         {
             "order_id": "order-1",
-            "api_token": "never-persist-this",
+            "api_token=never-persist-key-text": "never-persist-this",
             "message": "password=never-persist-this-either",
         }
     )
@@ -95,7 +95,7 @@ def test_configured_redaction_is_applied_before_preview_publication() -> None:
         "schema_version": 1,
         "availability": "REDACTED",
         "value": {
-            "api_token": REDACTED,
+            "<redacted>": REDACTED,
             "message": REDACTED,
             "order_id": "order-1",
         },
@@ -258,6 +258,11 @@ def test_projector_interrupt_propagates() -> None:
             "availability": "REDACTED",
             "value": {"status": "safe"},
         },
+        {
+            "schema_version": 1,
+            "availability": "REDACTED",
+            "value": {"api_token=never-persist-key-text": REDACTED},
+        },
     ],
 )
 def test_untrusted_preview_envelopes_are_revalidated_exactly(value: Any) -> None:
@@ -300,6 +305,23 @@ def test_read_policy_drift_replaces_only_the_historical_value(settings) -> None:
         "order_id": "order-1",
         "region": "newly-sensitive",
     }
+
+
+def test_read_suppresses_a_historical_sensitive_mapping_key() -> None:
+    stored = {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": {"api_token=never-return-key-text": REDACTED},
+    }
+
+    preview = read_workflow_output_preview(stored)
+
+    assert preview == {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": REDACTED,
+    }
+    assert "never-return-key-text" not in str(preview)
 
 
 def test_read_policy_drift_redacts_against_the_raw_terminal_formatted_value(settings) -> None:

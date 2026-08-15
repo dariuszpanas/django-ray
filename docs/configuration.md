@@ -364,8 +364,10 @@ worker logs, structured log fields, Ray State API/log responses, the sample
 operational API, and bounded diagnostic fields in the Django admin task detail
 view. When it is `None`, the built-in patterns cover common names such as
 `password`, `secret`, `token`, `authorization`, `cookie`, and `private_key`.
-A matching mapping key redacts its value; a matching string is replaced with
-`[REDACTED]`.
+A matching mapping key is replaced with the fixed `<redacted>` marker and its
+value becomes `[REDACTED]`; a matching string is replaced with `[REDACTED]`.
+Marker or normalized-key collisions also become `[REDACTED]` regardless of
+mapping order.
 
 The expressions use case-insensitive substring-search semantics. They support literals
 and escaped literals, `.`, positive or negated character classes and ranges, capturing
