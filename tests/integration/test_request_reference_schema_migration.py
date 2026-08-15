@@ -9,7 +9,7 @@ from django.utils import timezone
 
 MIGRATE_FROM = [("django_ray", "0020_legacy_open_rollback_fence")]
 MIGRATE_TO = [("django_ray", "0021_ray_job_request_reference")]
-LATEST = MIGRATE_TO
+LATEST = [("django_ray", "0022_ray_target_persistence")]
 
 
 def _insert_legacy_payload_row(payload_model, *, reference: str) -> None:

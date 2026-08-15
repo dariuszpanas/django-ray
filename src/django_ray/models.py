@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from uuid import uuid4
 
 from django.core.validators import (
+    MaxLengthValidator,
     MaxValueValidator,
     MinValueValidator,
     RegexValidator,
@@ -20,10 +22,35 @@ from django_ray.execution_protocol import (
     PROTOCOL_POLICY_SCHEMA_VERSION,
     WORKER_CAPABILITY_SCHEMA_VERSION,
 )
+from django_ray.target_attestation import (
+    RAY_CLUSTER_ATTESTATION_MAX_BYTES,
+    RAY_CLUSTER_ATTESTATION_SCHEMA_VERSION,
+    RAY_TARGET_ATTESTATION_MAX_COUNTER,
+    RAY_TARGET_ATTESTATION_MAX_TTL_SECONDS,
+    RAY_TARGET_EXPECTATION_MAX_BYTES,
+    RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
+    RayRunnerFamily,
+)
 
 _SHA256_HEX_VALIDATOR = RegexValidator(
     regex=r"^[0-9a-f]{64}$",
     message="Value must be a lowercase hexadecimal SHA-256 digest.",
+)
+_TAGGED_SHA256_HEX_VALIDATOR = RegexValidator(
+    regex=r"\Asha256:[0-9a-f]{64}\Z",
+    message="Value must be a canonical tagged lowercase SHA-256 digest.",
+)
+_RAY_TARGET_KEY_VALIDATOR = RegexValidator(
+    regex=r"\A[a-z0-9][a-z0-9_.-]{0,127}\Z",
+    message="Value must be a canonical Ray target key.",
+)
+_RAY_CLUSTER_SESSION_VALIDATOR = RegexValidator(
+    regex=r"\Asession_[A-Za-z0-9][A-Za-z0-9_.-]{0,247}\Z",
+    message="Value must be a canonical Ray cluster session name.",
+)
+_PYTHON_IMPLEMENTATION_VALIDATOR = RegexValidator(
+    regex=r"\A[a-z][a-z0-9_.-]{0,63}\Z",
+    message="Value must be a normalized Python implementation identifier.",
 )
 _WORKFLOW_TOPOLOGY_NODE_LIMIT = 25_000
 _WORKFLOW_TOPOLOGY_EDGE_LIMIT = 100_000
@@ -105,6 +132,14 @@ class WorkflowProgressNodeState(models.TextChoices):
     RUNNING = "RUNNING", "Running"
     SUCCEEDED = "SUCCEEDED", "Succeeded"
     FAILED = "FAILED", "Failed"
+
+
+class RayTargetDesiredState(models.TextChoices):
+    """Operator policy state for one dormant Ray target."""
+
+    ACTIVE = "active", "Active"
+    DRAINING = "draining", "Draining"
+    RETIRED = "retired", "Retired"
 
 
 class RayTaskExecution(models.Model):
@@ -1356,3 +1391,267 @@ class TaskExecutionProtocolPolicy(models.Model):
             f"Execution protocol v{self.active_write_protocol_version} "
             f"(legacy admission {legacy}, revision {self.revision})"
         )
+
+
+class RayTarget(models.Model):
+    """Immutable identity and exact runtime tuple for one dormant Ray target."""
+
+    target_key = models.CharField(
+        primary_key=True,
+        max_length=128,
+        editable=False,
+        validators=[_RAY_TARGET_KEY_VALIDATOR],
+        help_text="Stable operator key for this Ray target",
+    )
+    runner_family = models.CharField(
+        max_length=16,
+        choices=[(family.value, family.value) for family in RayRunnerFamily],
+        editable=False,
+        help_text="Ray submission family bound to this target",
+    )
+    cluster_session = models.CharField(
+        max_length=256,
+        editable=False,
+        validators=[_RAY_CLUSTER_SESSION_VALIDATOR],
+        help_text="Public Ray session name identifying the exact cluster instance",
+    )
+    ray_major = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    ray_minor = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    ray_patch = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    python_implementation = models.CharField(
+        max_length=64,
+        editable=False,
+        validators=[_PYTHON_IMPLEMENTATION_VALIDATOR],
+        help_text="Normalized Python implementation identifier",
+    )
+    python_major = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    python_minor = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    python_patch = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    runner_family__in=tuple(family.value for family in RayRunnerFamily)
+                ),
+                name="ray_target_runner_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    ray_major__gte=1,
+                    ray_major__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    ray_minor__gte=0,
+                    ray_minor__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    ray_patch__gte=0,
+                    ray_patch__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    python_major__gte=1,
+                    python_major__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    python_minor__gte=0,
+                    python_minor__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    python_patch__gte=0,
+                    python_patch__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                ),
+                name="ray_target_runtime_valid",
+            ),
+            models.UniqueConstraint(
+                fields=("runner_family", "cluster_session"),
+                name="ray_target_instance_uniq",
+            ),
+        ]
+        verbose_name = "Ray Target"
+        verbose_name_plural = "Ray Targets"
+
+    def __str__(self) -> str:
+        return str(self.target_key)
+
+
+class RayTargetPolicyRevision(models.Model):
+    """One immutable operator policy revision for a dormant Ray target."""
+
+    target = models.ForeignKey(
+        RayTarget,
+        on_delete=models.PROTECT,
+        related_name="policy_revisions",
+        editable=False,
+    )
+    revision = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    desired_state = models.CharField(
+        max_length=16,
+        choices=RayTargetDesiredState.choices,
+        editable=False,
+    )
+    expectation_schema_version = models.PositiveSmallIntegerField(
+        editable=False,
+        validators=[MinValueValidator(1)],
+    )
+    expectation_json = models.TextField(
+        editable=False,
+        validators=[MaxLengthValidator(RAY_TARGET_EXPECTATION_MAX_BYTES)],
+        help_text="Canonical Ray target expectation JSON",
+    )
+    expectation_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    expectation_schema_version=RAY_TARGET_EXPECTATION_SCHEMA_VERSION
+                ),
+                name="ray_tpolicy_schema_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(desired_state__in=RayTargetDesiredState.values),
+                name="ray_tpolicy_state_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    revision__gte=1,
+                    revision__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                ),
+                name="ray_tpolicy_revision_valid",
+            ),
+            models.UniqueConstraint(
+                fields=("target", "revision"),
+                name="ray_tpolicy_target_rev_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("target", "-revision"),
+                name="ray_tpolicy_latest_idx",
+            )
+        ]
+        verbose_name = "Ray Target Policy Revision"
+        verbose_name_plural = "Ray Target Policy Revisions"
+
+    def __str__(self) -> str:
+        return f"{self.target_id} policy revision {self.revision}"
+
+
+class RayTargetAttestationRevision(models.Model):
+    """One immutable bounded attestation revision for a target policy."""
+
+    policy = models.ForeignKey(
+        RayTargetPolicyRevision,
+        on_delete=models.PROTECT,
+        related_name="attestation_revisions",
+        editable=False,
+    )
+    revision = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    attestation_schema_version = models.PositiveSmallIntegerField(
+        editable=False,
+        validators=[MinValueValidator(1)],
+    )
+    attestation_json = models.TextField(
+        editable=False,
+        validators=[MaxLengthValidator(RAY_CLUSTER_ATTESTATION_MAX_BYTES)],
+        help_text="Canonical Ray cluster attestation JSON",
+    )
+    expectation_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    membership_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    attestation_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    observed_at = models.DateTimeField(editable=False)
+    expires_at = models.DateTimeField(editable=False)
+    recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    attestation_schema_version=RAY_CLUSTER_ATTESTATION_SCHEMA_VERSION
+                ),
+                name="ray_tattest_schema_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    revision__gte=1,
+                    revision__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                ),
+                name="ray_tattest_revision_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(expires_at__gt=models.F("observed_at"))
+                    & models.Q(
+                        expires_at__lte=models.F("observed_at")
+                        + timedelta(seconds=RAY_TARGET_ATTESTATION_MAX_TTL_SECONDS)
+                    )
+                    & models.Q(recorded_at__gte=models.F("observed_at"))
+                    & models.Q(recorded_at__lt=models.F("expires_at"))
+                ),
+                name="ray_tattest_window_valid",
+            ),
+            models.UniqueConstraint(
+                fields=("policy", "revision"),
+                name="ray_tattest_policy_rev_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("policy", "-revision"),
+                name="ray_tattest_latest_idx",
+            ),
+            models.Index(
+                fields=("expires_at",),
+                name="ray_tattest_expiry_idx",
+            ),
+        ]
+        verbose_name = "Ray Target Attestation Revision"
+        verbose_name_plural = "Ray Target Attestation Revisions"
+
+    def __str__(self) -> str:
+        return f"policy {self.policy_id} attestation revision {self.revision}"

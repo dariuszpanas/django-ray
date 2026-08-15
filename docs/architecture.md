@@ -593,11 +593,15 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0021_ray_job_request_reference` before starting upgraded workers:
+`0022_ray_target_persistence` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
 ```
+
+This command applies every unapplied `django_ray` migration through the current leaf.
+Migration `0022` adds only dormant target intent and verified-attestation history;
+current workers do not consume it for capacity, claims, or routing.
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:
@@ -996,12 +1000,45 @@ boundary; it does not misrepresent them as a stable membership epoch.
 
 This interval can detect a node set change visible at either snapshot, but cannot prove
 that no transient join and leave happened wholly between them or after the final
-snapshot. A later activation therefore still needs TTL renewal and expiry enforcement,
-fresh per-invocation validation, persisted target policy, and capability withdrawal. This
-slice adds none of those database, enqueue, claim, adoption, routing, or drain effects.
-It supports Ray Core and Ray Client observation only. Ray Job needs a separate
-authenticated pre-Django response channel; logs, process exit, rq2 metadata, and a
-Ray-writable shared payload object are not authoritative attestation results.
+snapshot. A later activation therefore still needs TTL renewal, fresh per-invocation
+validation, and capability withdrawal. The probe slice adds none of those database,
+enqueue, claim, adoption, routing, or drain effects. It supports Ray Core and Ray Client
+observation only. Ray Job needs a separate authenticated pre-Django response channel;
+logs, process exit, rq2 metadata, and a Ray-writable shared payload object are not
+authoritative attestation results.
+
+Migration `0022` adds the next dormant boundary as three separate append-history
+records. One immutable target binds the bounded operator key to its runner family,
+cluster session, and exact Ray/Python tuple. Immutable policy revisions bind that target
+to canonical expectation JSON, its digest, a compare-and-set revision, and the desired
+`active`, `draining`, or reserved `retired` vocabulary. Immutable attestation revisions
+retain only canonical proofs that matched the exact policy, including the expectation,
+membership, and full-attestation digests plus their observation window. The private
+coordination service registers Ray Core targets at policy revision `1` in `draining`,
+permits only revision-checked `draining`/`active` transitions, and does not expose
+`retired`; that transition remains reserved for #368's reviewed doctor, drain, and
+retirement adapter. Ray Job persistence remains blocked on its authenticated pre-Django
+proof channel.
+
+Attestation history is verified-only. A mismatch, unreachable probe, identity drift,
+malformed response, not-yet-valid proof, or expired proof is a rejection or read-time
+status, never a fabricated negative observation row. The current verified/expired
+meaning is derived from the latest matching immutable proof and its bounded expiry
+rather than stored as a mutable status that could outlive the evidence. Policy changes
+append a new revision and cannot rewrite earlier policy or attestation history. The
+coordinator owns that append discipline; database guards reject material updates and
+invalid identity, digest, or byte-bound inserts. Exact no-op updates and deliberate
+maintenance deletion remain possible.
+
+This persistence slice still has no task or attempt target field, worker target
+capability, lease relationship, enqueue selection, claim or adoption predicate,
+reconciliation/cancellation/retry fence, routing change, status/Admin/operator surface,
+renewal loop, or blue/green activation. In particular, applying `0022` alone cannot
+advertise capacity or move work. Released code ignores the new tables, so a code-only
+rollback retains `0022` and its audit history; reversing the schema is a separate
+stopped-writer operation. The reverse migration refuses while retained target history
+exists, so an operator must export or audit it and deliberately delete it before retrying
+the destructive reversal.
 
 The read-only protocol-status service exposes only the database facts this boundary can
 support. One versioned immutable report aggregates policy/token consistency, active and
