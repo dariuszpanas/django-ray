@@ -17,10 +17,11 @@ Docker build or Kubernetes mutation unless the checkout is clean, the active con
 context, the context is `docker-desktop` or `kind-<name>`, its API server is local, and the rendered
 resource set cannot escape `django-ray`. It also rejects a remote Docker context or `DOCKER_HOST`.
 Docker receives an archive of the committed Git tree, never the checkout directory, and both
-Dockerfiles have deny-by-default context allowlists. Recursive local-environment and SQLite database
-exclusions follow the broad source-directory exceptions so untracked nested `.env`, `.env.*`, and
-`*.sqlite3` files are not restored to either image context. The same one-time archive is the only
-source for the rendered Kubernetes manifests. The separately archived v0.4.0 handoff baseline is
+Dockerfiles have deny-by-default context allowlists. Recursive local-environment, SQLite database,
+and SQLite sidecar exclusions follow the broad source-directory exceptions so untracked nested
+`.env`, `.env.*`, `*.sqlite3`, and `*.sqlite3-*` files are not restored to either image context.
+The same one-time archive is the only source for the rendered Kubernetes manifests. The separately
+archived v0.4.0 handoff baseline is
 accepted under its historical context policy only when both its pinned commit and reviewed tree
 match exactly; because it is a Git archive, local untracked files cannot enter that baseline.
 Preflight also creates a private, flattened kubeconfig snapshot;

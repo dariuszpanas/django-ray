@@ -120,9 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advances so pages cannot mix publication epochs.
 - The sample browser dashboard now keeps its verified bearer token only in loaded-page memory;
   reload starts unauthenticated and no token is written to browser storage, cookies, or URLs.
-- Dockerfile-specific build contexts now re-exclude nested environment and SQLite database files
-  after broad source inclusions, and direct KubeRay deployment no longer removes a potentially
-  unrelated local Kong release or its routes.
+- Docker build contexts now recursively re-exclude nested environment files, SQLite databases,
+  and SQLite journal, WAL, and shared-memory sidecars, including after broad source inclusions;
+  direct KubeRay deployment no longer removes a potentially unrelated local Kong release or routes.
 - Commit-message validation now bounds mixed validation-evidence suffix scans, parses Markdown
   tables in one pass, rejects oversized generated counts and duplicate metadata markers without
   unbounded conversion or collection, and preserves leading blank headers for rejection.

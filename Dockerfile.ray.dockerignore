@@ -14,3 +14,4 @@
 **/.env
 **/.env.*
 **/*.sqlite3
+**/*.sqlite3-*
