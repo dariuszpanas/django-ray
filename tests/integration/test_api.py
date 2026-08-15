@@ -2610,8 +2610,8 @@ class TestExecutionsAPI:
         assert detail.status_code == listing.status_code == 200
         detail_result = detail.json()["result_data"]
         list_result = listing.json()["tasks"][0]["result_data"]
-        assert json.loads(detail_result) == {"password": REDACTED}
-        assert json.loads(list_result) == {"password": REDACTED}
+        assert json.loads(detail_result) == {"<redacted>": REDACTED}
+        assert json.loads(list_result) == {"<redacted>": REDACTED}
         assert "CANARY_VALID_ESCAPED_KEY" not in detail.content.decode()
         assert "CANARY_VALID_ESCAPED_KEY" not in listing.content.decode()
         assert detail.json()["result_data_omission_reason"] is None

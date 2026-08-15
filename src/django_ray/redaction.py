@@ -1,11 +1,12 @@
 """Small, defensive helpers for keeping task data out of operational output.
 
 Task arguments, return values, and exception messages are application data.  The
-helpers in this module are deliberately conservative: mappings redact values
-whose keys look sensitive, strings matching a configured expression are
-replaced as a whole, and objects which cannot be represented as JSON are shown
-only by type.  Redaction is intended for logs and operator-facing views; it is
-not encryption or a replacement for access control on the task database.
+helpers in this module are deliberately conservative: mappings replace keys
+which look sensitive with a fixed marker and redact their values, strings
+matching a configured expression are replaced as a whole, and objects which
+cannot be represented as JSON are shown only by type.  Redaction is intended
+for logs and operator-facing views; it is not encryption or a replacement for
+access control on the task database.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from django_ray.redaction_patterns import (
 )
 
 REDACTED = "[REDACTED]"
+_REDACTED_KEY = "<redacted>"
 
 _ESC = "\x1b"
 _C1_CSI = "\x9b"
@@ -935,8 +937,9 @@ def redact_value(
     """Return a JSON-compatible value with configured sensitive data removed.
 
     Nested mappings and sequences are traversed.  A mapping key matching a
-    pattern redacts its value, while a matching string is replaced in full.
-    Cycles and very deep objects are represented by a type marker.
+    pattern is replaced by a fixed key marker and its value is redacted, while
+    a matching string is replaced in full.  Cycles and very deep objects are
+    represented by a type marker.
     """
     compiled = _configured_patterns(patterns) if _compiled is None else _compiled
     root = _budget is None
@@ -958,6 +961,7 @@ def redact_value(
             return value
         if isinstance(value, Mapping):
             output: dict[str, Any] = {}
+            presented_by_normalized: dict[str, str] = {}
             for key, item in value.items():
                 _budget.consume_item()
                 # Arbitrary mapping-key ``__str__`` implementations are not a
@@ -970,6 +974,7 @@ def redact_value(
                     compiled,
                     budget=_budget.pattern_work,
                 )
+                output_key = _REDACTED_KEY if sensitive_key else normalized_key
                 normalized_item = (
                     REDACTED
                     if sensitive_key
@@ -980,10 +985,19 @@ def redact_value(
                         _depth=_depth + 1,
                     )
                 )
-                # Distinct raw keys can collapse to the same inert display key.
-                # Never let mapping order replace an earlier redaction (or choose
-                # arbitrarily between ambiguous values).
-                output[normalized_key] = REDACTED if normalized_key in output else normalized_item
+                # Distinct raw keys can collapse to the same inert display key,
+                # and every sensitive key collapses to one fixed safe marker.
+                # Track the original normalized presentation so moving a
+                # sensitive key to the marker cannot hide its collision with an
+                # ordinary key. Never let mapping order replace either side of
+                # an ambiguous presentation.
+                prior_output_key = presented_by_normalized.get(normalized_key)
+                if prior_output_key is None:
+                    presented_by_normalized[normalized_key] = output_key
+                else:
+                    output[prior_output_key] = REDACTED
+                    normalized_item = REDACTED
+                output[output_key] = REDACTED if output_key in output else normalized_item
             return output
         if isinstance(value, (list, tuple, set, frozenset)):
             return [
@@ -1002,7 +1016,7 @@ def redact_value(
         if not root:
             raise
         if isinstance(value, Mapping):
-            return {"<redacted>": REDACTED}
+            return {_REDACTED_KEY: REDACTED}
         if isinstance(value, (list, tuple, set, frozenset)):
             return [REDACTED]
         return REDACTED

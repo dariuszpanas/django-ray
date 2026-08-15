@@ -275,7 +275,7 @@ class TestStructuredLogAdapter:
         assert "Progress 50%" in caplog.text
         assert '"reported": "75%"' in caplog.text
 
-    def test_terminal_formatted_extra_keys_are_normalized_and_redact_values(
+    def test_sensitive_terminal_formatted_extra_keys_use_a_fixed_marker(
         self,
         caplog,
         settings,
@@ -292,12 +292,13 @@ class TestStructuredLogAdapter:
 
         assert isinstance(message, str)
         assert processed["extra"] == {
-            "password": "[REDACTED]",
-            "customer_email": "[REDACTED]",
+            "<redacted>": "[REDACTED]",
             "safe_key": "visible",
         }
         assert "default-key-value" not in message
         assert "custom-key-value" not in message
+        assert "password" not in message
+        assert "customer_email" not in message
         assert "\x1b" not in message
 
         with caplog.at_level(logging.INFO):
@@ -305,4 +306,6 @@ class TestStructuredLogAdapter:
 
         assert "default-key-value" not in caplog.text
         assert "custom-key-value" not in caplog.text
+        assert "password" not in caplog.text
+        assert "customer_email" not in caplog.text
         assert "\x1b" not in caplog.text

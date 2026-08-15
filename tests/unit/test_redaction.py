@@ -83,7 +83,7 @@ def test_mixed_terminal_sequence_families_compose_for_redaction(value: str) -> N
 
     assert "password" not in normalized
     assert redact_text(value) == REDACTED
-    assert redact_value({value: "hunter2"}) == {normalized: REDACTED}
+    assert redact_value({value: "hunter2"}) == {"<redacted>": REDACTED}
 
 
 @pytest.mark.parametrize(
@@ -103,7 +103,7 @@ def test_unsafe_unicode_controls_are_inert_and_cannot_split_patterns(control: st
 
     assert normalize_terminal_text(value) == "password=hunter2"
     assert redact_text(value) == REDACTED
-    assert redact_value({value.split("=")[0]: "hunter2"}) == {"password": REDACTED}
+    assert redact_value({value.split("=")[0]: "hunter2"}) == {"<redacted>": REDACTED}
 
 
 @pytest.mark.parametrize("control", ("\u034f", "\u200c", "\u200d", "\ufe0f"))
@@ -112,9 +112,7 @@ def test_harmless_unicode_shaping_is_preserved_but_cannot_split_patterns(control
 
     assert normalize_terminal_text(value) == value
     assert redact_text(value) == REDACTED
-    assert redact_value({value.split("=")[0]: "hunter2"}) == {
-        f"pass{control}word": REDACTED,
-    }
+    assert redact_value({value.split("=")[0]: "hunter2"}) == {"<redacted>": REDACTED}
 
 
 def test_unicode_graphemes_and_private_use_glyphs_survive_inert_display() -> None:
@@ -263,7 +261,7 @@ def test_embedded_zero_width_controls_cannot_hide_a_csi_final_from_redaction(
     assert normalize_terminal_text(value) == "passord=do-not-expose"
     assert redact_text(value) == REDACTED
     assert redact_value({value.split("=")[0]: "leaked-value"}) == {
-        "passord": REDACTED,
+        "<redacted>": REDACTED,
     }
 
 
@@ -310,24 +308,45 @@ def test_mapping_keys_are_normalized_and_matched_with_fail_closed_projections() 
     )
 
     assert rendered == {
-        "password": REDACTED,
-        "api_key": REDACTED,
-        "customer_email": REDACTED,
+        "<redacted>": REDACTED,
         "safe_key": "visible",
     }
+    assert "password" not in str(rendered)
+    assert "api_key" not in str(rendered)
+    assert "customer_email" not in str(rendered)
     assert "\x1b" not in str(rendered)
     assert not any(0x7F <= ord(character) <= 0x9F for character in str(rendered))
 
 
 @pytest.mark.parametrize("sensitive_first", (False, True))
-def test_normalized_mapping_key_collisions_remain_redacted(
+def test_sensitive_normalized_mapping_key_collisions_redact_both_presentations(
     sensitive_first: bool,
 ) -> None:
     sensitive = ("\x1b[31mvisible\x1b[0m", "must-not-win")
     ordinary = ("visible", "ordinary-value")
     items = (sensitive, ordinary) if sensitive_first else (ordinary, sensitive)
 
-    assert redact_value(dict(items), patterns=[r"\x1b"]) == {"visible": REDACTED}
+    rendered = redact_value(dict(items), patterns=[r"\x1b"])
+
+    assert rendered == {"<redacted>": REDACTED, "visible": REDACTED}
+    assert "must-not-win" not in str(rendered)
+    assert "\x1b" not in str(rendered)
+
+
+@pytest.mark.parametrize("sensitive_first", (False, True))
+def test_sensitive_mapping_key_marker_collisions_remain_redacted(
+    sensitive_first: bool,
+) -> None:
+    sensitive = ("api_token=synthetic-placeholder", "must-not-appear")
+    marker = ("<redacted>", "ordinary-value")
+    items = (sensitive, marker) if sensitive_first else (marker, sensitive)
+
+    rendered = redact_value(dict(items))
+
+    assert rendered == {"<redacted>": REDACTED}
+    assert "api_token" not in str(rendered)
+    assert "synthetic-placeholder" not in str(rendered)
+    assert "must-not-appear" not in str(rendered)
 
 
 def test_terminal_parser_work_grows_linearly_for_repeated_unterminated_strings(
@@ -418,8 +437,8 @@ def test_redact_value_handles_nested_mappings_and_sequences() -> None:
     }
 
     assert redact_value(value) == {
-        "user": {"name": "Ada", "password": REDACTED},
-        "items": [{"access_token": REDACTED, "value": 3}],
+        "user": {"name": "Ada", "<redacted>": REDACTED},
+        "items": [{"<redacted>": REDACTED, "value": 3}],
     }
 
 
@@ -562,7 +581,7 @@ def test_redaction_handles_depth_binary_values_and_exception_text() -> None:
     assert redact_value(b"binary-value").endswith(".bytes>")
     assert redact_text(ValueError("password=secret")) == REDACTED
     assert safe_json_dumps({"token": "secret", "number": 3}) == (
-        '{"token": "[REDACTED]", "number": 3}'
+        '{"<redacted>": "[REDACTED]", "number": 3}'
     )
 
 

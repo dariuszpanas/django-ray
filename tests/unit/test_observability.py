@@ -679,6 +679,30 @@ def test_observability_redacts_state_and_log_payloads(monkeypatch, settings) -> 
     assert "secret-value" not in str(get_ray_task_logs("ray-task-1"))
 
 
+def test_observability_does_not_return_sensitive_mapping_key_text(monkeypatch, settings) -> None:
+    marker = "SYNTHETIC_RAY_STATE_MAPPING_KEY_MARKER"
+    settings.DJANGO_RAY = {
+        "RAY_ADDRESS": "auto",
+        "RAY_STATE_API_ADDRESS": "http://ray-dashboard:8265",
+        "REDACT_PATTERNS": [r"access[_-]?token"],
+    }
+    fake_state = SimpleNamespace(
+        get_task=lambda **kwargs: [
+            SimpleNamespace(
+                asdict=lambda: {"metadata": {f"access_token={marker}": "ordinary-state-value"}}
+            )
+        ],
+    )
+    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+
+    rendered = str(get_ray_task_state("ray-task-sensitive-key"))
+
+    assert marker not in rendered
+    assert "access_token" not in rendered
+    assert "ordinary-state-value" not in rendered
+    assert "<redacted>" in rendered
+
+
 def test_get_ray_task_state_wraps_state_api_errors(monkeypatch, settings) -> None:
     settings.DJANGO_RAY = {
         "RAY_ADDRESS": "auto",

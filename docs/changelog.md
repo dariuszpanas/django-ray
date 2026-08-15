@@ -91,6 +91,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Operational redaction now replaces sensitive-looking mapping keys with one fixed
+  marker as well as redacting their values. Admin, API, structured logging, workflow
+  previews, and Ray observability therefore no longer retain sensitive key text, and
+  marker or normalized-key collisions remain fail-closed regardless of mapping order.
 - A mismatched Ray Jobs API submission return is now treated only as fixed,
   acceptance-uncertain evidence. Arbitrary, oversized, unhashable, or merely
   well-formed alternate values are neither retained nor logged and never become a stop

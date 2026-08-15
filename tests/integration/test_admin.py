@@ -480,6 +480,33 @@ class TestRayTaskExecutionAdmin:
         assert "result_reference" not in fieldset_fields
         assert {"input_reference_display", "result_reference_display"} <= fieldset_fields
 
+    @pytest.mark.django_db
+    def test_sensitive_mapping_key_text_is_not_rendered_in_task_fields(self, settings) -> None:
+        marker = "SYNTHETIC_ADMIN_MAPPING_KEY_MARKER"
+        sensitive_key = f"api_token={marker}"
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": [r"api[_-]?token"]}
+        admin_obj = _task_admin()
+        task = RayTaskExecution.objects.create(
+            task_id="admin-redacted-mapping-key-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.SUCCEEDED,
+            args_json=json.dumps([{sensitive_key: "ordinary-argument-value"}]),
+            result_data=json.dumps({sensitive_key: "ordinary-result-value"}),
+        )
+
+        rendered = " ".join(
+            (
+                admin_obj.args_json_display(task),
+                admin_obj.result_data_display(task),
+            )
+        )
+
+        assert marker not in rendered
+        assert "api_token" not in rendered
+        assert "ordinary-argument-value" not in rendered
+        assert "ordinary-result-value" not in rendered
+        assert '"<redacted>": "[REDACTED]"' in rendered
+
     def test_execution_references_are_bounded(self) -> None:
         admin_obj = _task_admin()
         task = RayTaskExecution(
