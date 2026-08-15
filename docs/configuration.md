@@ -139,7 +139,8 @@ opted-in backoff immediately.
 The maximum bounds how long an idle, available worker waits between observations of its
 queue; it is not an end-to-end task-start guarantee. Heartbeats, Ray completion polling,
 reconciliation, timeout checks, cancellation recovery, and lease cleanup use independent
-monotonic schedules; idle claim backoff does not postpone them.
+monotonic schedules; idle claim backoff does not postpone them. Graceful-shutdown signals
+interrupt the current idle wait, so an opted-in maximum does not extend worker handoff.
 
 ### Retry Policy
 
