@@ -84,6 +84,7 @@ from scripts.local_kuberay_gate import (
     validate_local_docker_endpoint,
     validate_local_http_url,
     validate_namespace,
+    validate_protocol_v2_rejection,
     validate_runtime_env_encryption_envelope,
     validate_task_status_payload,
     validate_terminal_diagnostic_text,
@@ -95,7 +96,16 @@ SOURCE_TREE = "e" * 40
 TAG = "local-gate-tree-eeeeeeeeeeee-20260721123456-deadbeef"
 APP_TAG = f"django-ray:{TAG}"
 IMAGE_ID = f"sha256:{'b' * 64}"
+PRIOR_RELEASED_V040_TAG = (
+    f"{gate_module.RELEASED_V040_IMAGE_REPOSITORY}:"
+    "released-v040-local-gate-tree-abcdef123456-20260813010203-cafebabe"
+)
+PRIOR_RELEASED_V040_HOSTNAME = f"dr-v040-{'1' * 32}"
+PRIOR_RELEASED_V040_WORKER_ID = "11234567-89ab-4cde-8fab-0123456789ab"
+PROTOCOL_V2_POISON = "protocol_v2_application_poison_0123456789abcdef0123456789abcdef"
 TASK_ID = "15200000-0000-4000-8000-000000000001"
+PROTOCOL_V1_SURVIVAL_TASK_ID = "16200000-0000-4000-8000-000000000011"
+PROTOCOL_V1_SURVIVAL_MARKER = "protocol_v1_handoff_queued_22222222222242228222222222222222"
 WORKFLOW_TASK_ID = "25200000-0000-4000-8000-000000000002"
 WORKFLOW_RUN_ID = "35200000-0000-4000-8000-000000000003"
 FAILED_WORKFLOW_TASK_ID = "45200000-0000-4000-8000-000000000004"
@@ -146,18 +156,36 @@ def _task_status_payload(
     }
 
 
-def _execution_protocol_metrics() -> bytes:
+def _execution_protocol_metrics(*, unsupported_queued: int = 0) -> bytes:
     name = gate_module.EXPECTED_EXECUTION_PROTOCOL_METRIC
     lines = [
         f"# HELP {name} Total tasks by bounded execution-protocol bucket and state",
         f"# TYPE {name} gauge",
     ]
     lines.extend(
-        f'{name}{{protocol="{protocol}",state="{state}"}} 0'
+        (
+            f'{name}{{protocol="{protocol}",state="{state}"}} '
+            f"{unsupported_queued if (protocol, state) == ('other', 'QUEUED') else 0}"
+        )
         for protocol in ("1", "other")
         for state in gate_module.TASK_STATUS_BY_STATE
     )
     return ("\n".join(lines) + "\n").encode()
+
+
+def _protocol_v2_rejection_payload() -> dict[str, object]:
+    return {
+        "classification": "unsupported_protocol",
+        "success": False,
+        "retryable": False,
+        "traceback_absent": True,
+        "result_absent": True,
+        "result_reference_absent": True,
+        "exception_type": "RayExecutionRequestIncompatible",
+        "transport_version": 1,
+        "input_reference_absent": True,
+        "application_marker_present": False,
+    }
 
 
 def _bounded_poll_metadata() -> dict[str, object]:
@@ -236,6 +264,30 @@ def test_protocol_visibility_gate_accepts_queued_and_succeeded_lifecycle_fields(
     validate_execution_protocol_visibility(queued, surface="task status")
 
 
+def test_protocol_visibility_gate_accepts_unsupported_protocol_without_a_worker() -> None:
+    queued = _task_status_payload(state="QUEUED")
+    queued["execution_protocol_version"] = 2
+    queued["managed_with_django_ray_version"] = None
+    queued["executor_django_ray_version"] = None
+    queued["protocol_compatible_worker_available"] = False
+
+    validate_execution_protocol_visibility(
+        queued,
+        surface="unsupported task status",
+        expected_protocol=2,
+        expected_compatible=False,
+    )
+
+    queued["protocol_compatible_worker_available"] = True
+    with pytest.raises(ValueError, match="compatible worker"):
+        validate_execution_protocol_visibility(
+            queued,
+            surface="unsupported task status",
+            expected_protocol=2,
+            expected_compatible=False,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -262,7 +314,12 @@ def test_protocol_visibility_gate_rejects_contract_drift(
 def test_protocol_metrics_gate_requires_every_fixed_bucket() -> None:
     body = _execution_protocol_metrics()
 
-    validate_execution_protocol_metrics(body)
+    samples = validate_execution_protocol_metrics(body)
+    assert samples[("1", "QUEUED")] == 0
+    assert samples[("other", "QUEUED")] == 0
+
+    unsupported = _execution_protocol_metrics(unsupported_queued=1)
+    assert validate_execution_protocol_metrics(unsupported)[("other", "QUEUED")] == 1
 
     missing = body.replace(
         b'django_ray_tasks_by_execution_protocol_total{protocol="other",state="LOST"} 0\n',
@@ -274,6 +331,44 @@ def test_protocol_metrics_gate_requires_every_fixed_bucket() -> None:
     unbounded = body.replace(b'protocol="other"', b'protocol="99"', 1)
     with pytest.raises(ValueError, match="label contract"):
         validate_execution_protocol_metrics(unbounded)
+
+
+def test_protocol_v2_rejection_gate_requires_the_exact_preinvocation_result() -> None:
+    validate_protocol_v2_rejection(_protocol_v2_rejection_payload())
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("classification", "protocol_mismatch"),
+        ("success", True),
+        ("retryable", True),
+        ("traceback_absent", False),
+        ("result_absent", False),
+        ("result_reference_absent", False),
+        ("exception_type", "ValueError"),
+        ("transport_version", 2),
+        ("input_reference_absent", False),
+        ("application_marker_present", True),
+    ],
+)
+def test_protocol_v2_rejection_gate_rejects_effect_or_transport_drift(
+    field: str,
+    replacement: object,
+) -> None:
+    payload = _protocol_v2_rejection_payload()
+    payload[field] = replacement
+
+    with pytest.raises(ValueError, match="fixed pre-invocation rejection"):
+        validate_protocol_v2_rejection(payload)
+
+
+def test_protocol_v2_rejection_gate_rejects_unbounded_extra_fields() -> None:
+    payload = _protocol_v2_rejection_payload()
+    payload["private_marker"] = "must-not-be-retained"
+
+    with pytest.raises(ValueError, match="fixed pre-invocation rejection"):
+        validate_protocol_v2_rejection(payload)
 
 
 @pytest.mark.parametrize(
@@ -1641,6 +1736,86 @@ def test_source_build_context_exports_only_the_committed_tree(tmp_path: Path) ->
     assert not (context / ".git").exists()
 
 
+def test_released_v040_handoff_pin_is_immutable() -> None:
+    assert gate_module.RELEASED_V040_TAG == "v0.4.0"
+    assert gate_module.RELEASED_V040_COMMIT == "95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485"
+    assert gate_module.RELEASED_V040_SOURCE_TREE == "6ce02dfe51832db6227cc886bcced62399167f8b"
+
+
+@pytest.mark.parametrize(
+    ("responses", "message"),
+    [
+        (
+            ("commit", gate_module.RELEASED_V040_COMMIT, gate_module.RELEASED_V040_SOURCE_TREE),
+            "annotated tag",
+        ),
+        (("tag", "f" * 40, gate_module.RELEASED_V040_SOURCE_TREE), "pinned release commit"),
+        (("tag", gate_module.RELEASED_V040_COMMIT, "f" * 40), "reviewed source tree"),
+    ],
+)
+def test_released_v040_source_identity_fails_closed_on_tag_drift(
+    responses: tuple[str, str, str],
+    message: str,
+) -> None:
+    class ReleaseIdentityRunner:
+        def __init__(self) -> None:
+            self.redactor = Redactor()
+            self.calls: list[tuple[str, ...]] = []
+            self.responses = iter(responses)
+
+        def run(self, args: list[str], **_kwargs: object) -> CommandResult:
+            self.calls.append(tuple(args))
+            return CommandResult(next(self.responses), "", 0)
+
+    runner = ReleaseIdentityRunner()
+    gate = LocalKubeRayGate(_config(), runner=runner)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match=message):
+        gate._verify_released_v040_source_identity()
+
+    assert runner.calls[0] == (
+        "git",
+        "cat-file",
+        "-t",
+        f"refs/tags/{gate_module.RELEASED_V040_TAG}",
+    )
+
+
+def test_released_v040_source_identity_verifies_exact_tag_commit_and_tree() -> None:
+    class ReleaseIdentityRunner:
+        def __init__(self) -> None:
+            self.redactor = Redactor()
+            self.calls: list[tuple[str, ...]] = []
+            self.responses = iter(
+                (
+                    "tag",
+                    gate_module.RELEASED_V040_COMMIT,
+                    gate_module.RELEASED_V040_SOURCE_TREE,
+                )
+            )
+
+        def run(self, args: list[str], **_kwargs: object) -> CommandResult:
+            self.calls.append(tuple(args))
+            return CommandResult(next(self.responses), "", 0)
+
+    runner = ReleaseIdentityRunner()
+    gate = LocalKubeRayGate(_config(), runner=runner)  # type: ignore[arg-type]
+
+    gate._verify_released_v040_source_identity()
+
+    tag_ref = f"refs/tags/{gate_module.RELEASED_V040_TAG}"
+    assert runner.calls == [
+        ("git", "cat-file", "-t", tag_ref),
+        ("git", "rev-parse", "--verify", f"{tag_ref}^{{commit}}"),
+        (
+            "git",
+            "rev-parse",
+            "--verify",
+            f"{gate_module.RELEASED_V040_COMMIT}^{{tree}}",
+        ),
+    ]
+
+
 def test_docker_context_policies_fail_closed_without_exact_specific_allowlists(
     tmp_path: Path,
 ) -> None:
@@ -2143,6 +2318,1944 @@ def test_request_reference_payload_storage_has_exact_writer_reader_boundaries() 
     tls_overlay = (ROOT / "k8s/overlays/dev-tls/kustomization.yaml").read_text(encoding="utf-8")
     assert tls_overlay.count("path: /spec/template/spec/containers/0/volumeMounts/-") == 3
     assert tls_overlay.count("path: /spec/template/spec/volumes/-") == 3
+
+
+def test_released_v040_manager_manifest_is_ephemeral_exact_and_protocol_honest() -> None:
+    gate = LocalKubeRayGate(_config())
+    gate.evidence.released_v040_image_tag = (
+        f"{gate_module.RELEASED_V040_IMAGE_REPOSITORY}:test-source"
+    )
+
+    manifest = gate._released_v040_manager_manifest()
+
+    assert gate_module.RELEASED_V040_MANAGER_DEPLOYMENT not in APP_DEPLOYMENTS
+    assert manifest["apiVersion"] == "apps/v1"
+    assert manifest["kind"] == "Deployment"
+    assert manifest["metadata"] == {
+        "name": gate_module.RELEASED_V040_MANAGER_DEPLOYMENT,
+        "namespace": EXPECTED_NAMESPACE,
+        "labels": {
+            "app": "django-ray",
+            "component": "worker",
+            "queues": gate_module.RAY_JOB_GATE_QUEUE,
+            "runner": "ray-job-v040",
+        },
+    }
+    spec = manifest["spec"]
+    assert spec["replicas"] == 1
+    assert spec["selector"]["matchLabels"] == spec["template"]["metadata"]["labels"]
+    pod_spec = spec["template"]["spec"]
+    container = pod_spec["containers"][0]
+    assert container["name"] == gate_module.RELEASED_V040_MANAGER_CONTAINER
+    assert container["image"] == gate.evidence.released_v040_image_tag
+    assert container["imagePullPolicy"] == "IfNotPresent"
+    assert container["command"] == [
+        "python",
+        "testproject/manage.py",
+        "django_ray_worker",
+    ]
+    assert container["args"] == [
+        "--queue",
+        gate_module.RAY_JOB_GATE_QUEUE,
+        "--concurrency",
+        "1",
+    ]
+    assert container["envFrom"] == [
+        {"configMapRef": {"name": "django-ray-config"}},
+        {"secretRef": {"name": "django-ray-secret"}},
+    ]
+    assert {entry["name"]: entry["value"] for entry in container["env"]} == {
+        "RAY_ADDRESS": "ray://ray-head-svc:10001",
+        **gate_module.RUNTIME_ENV_ENCRYPTION_ENV,
+    }
+    assert container["readinessProbe"]["successThreshold"] == 1
+    assert container["livenessProbe"]["successThreshold"] == 1
+    serialized = json.dumps(manifest, sort_keys=True)
+    assert "min_supported_execution_protocol_version" not in serialized
+    assert "max_supported_execution_protocol_version" not in serialized
+    assert "capability_schema_version" not in serialized
+
+
+def test_released_v040_manager_create_and_delete_are_exact_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate.temp_root = tmp_path
+    gate.evidence.released_v040_image_tag = PRIOR_RELEASED_V040_TAG
+    gate.evidence.released_v040_image_id = IMAGE_ID
+    manifest = gate._released_v040_manager_manifest()
+    deployment = json.loads(json.dumps(manifest))
+    deployment["status"] = {"readyReplicas": 1}
+    pod_spec = deployment["spec"]["template"]["spec"]
+    pod = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "django-ray-worker-ray-job-v040-test",
+            "namespace": EXPECTED_NAMESPACE,
+            "uid": "released-v040-pod-uid",
+        },
+        "spec": pod_spec,
+        "status": {
+            "initContainerStatuses": [
+                {
+                    "name": entry["name"],
+                    "image": entry["image"],
+                    "imageID": f"sha256:{'c' * 64}",
+                }
+                for entry in pod_spec["initContainers"]
+            ],
+            "containerStatuses": [
+                {
+                    "name": gate_module.RELEASED_V040_MANAGER_CONTAINER,
+                    "image": gate.evidence.released_v040_image_tag,
+                    "imageID": IMAGE_ID,
+                    "ready": True,
+                }
+            ],
+            "conditions": [{"type": "Ready", "status": "True"}],
+        },
+    }
+    calls: list[tuple[str, ...]] = []
+
+    def kubectl(*args: str, **_kwargs: object) -> CommandResult:
+        calls.append(args)
+        if args[:3] == (
+            "get",
+            "deployment",
+            gate_module.RELEASED_V040_MANAGER_DEPLOYMENT,
+        ):
+            if args[-2:] == ("-o", "json"):
+                return CommandResult(json.dumps(deployment), "", 0)
+            return CommandResult("", "", 0)
+        if args[:2] == ("get", "pods"):
+            return CommandResult(json.dumps({"items": [pod]}), "", 0)
+        if args[:2] == ("get", "pods,replicasets"):
+            return CommandResult(json.dumps({"items": []}), "", 0)
+        return CommandResult("", "", 0)
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+    monkeypatch.setattr(
+        gate,
+        "_docker",
+        lambda *_args, **_kwargs: CommandResult(_released_v040_image_inspect(), "", 0),
+    )
+
+    gate._apply_released_v040_manager()
+    gate._delete_released_v040_manager()
+
+    manifest_path = tmp_path / "released-v040-manager.yaml"
+    assert yaml.safe_load(manifest_path.read_text(encoding="utf-8")) == manifest
+    assert calls[0] == ("create", "-f", str(manifest_path))
+    assert calls[1][:3] == (
+        "rollout",
+        "status",
+        f"deployment/{gate_module.RELEASED_V040_MANAGER_DEPLOYMENT}",
+    )
+    assert calls[-3][:3] == (
+        "delete",
+        "deployment",
+        gate_module.RELEASED_V040_MANAGER_DEPLOYMENT,
+    )
+    assert "--ignore-not-found=true" in calls[-3]
+    assert "--wait=true" in calls[-3]
+    assert calls[-2] == (
+        "get",
+        "deployment",
+        gate_module.RELEASED_V040_MANAGER_DEPLOYMENT,
+        "--ignore-not-found",
+        "-o",
+        "name",
+    )
+    assert calls[-1][:2] == ("get", "pods,replicasets")
+    assert calls[-1][-2:] == ("-o", "json")
+
+
+def _released_v040_recovery_deployment(gate: LocalKubeRayGate) -> dict[str, Any]:
+    return gate._released_v040_manager_manifest(
+        image_tag=PRIOR_RELEASED_V040_TAG,
+        hostname=PRIOR_RELEASED_V040_HOSTNAME,
+    )
+
+
+def _released_v040_image_inspect(
+    *,
+    commit: str = gate_module.RELEASED_V040_COMMIT,
+    source_tree: str = gate_module.RELEASED_V040_SOURCE_TREE,
+) -> str:
+    return json.dumps(
+        [
+            {
+                "Id": IMAGE_ID,
+                "RepoTags": [PRIOR_RELEASED_V040_TAG],
+                "Config": {
+                    "Labels": {
+                        "org.opencontainers.image.revision": commit,
+                        "org.opencontainers.image.source-tree": source_tree,
+                    }
+                },
+            }
+        ]
+    )
+
+
+def test_released_v040_predelete_accepts_live_defaulted_probe_thresholds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    deployment = _released_v040_recovery_deployment(gate)
+    main = deployment["spec"]["template"]["spec"]["containers"][0]
+    main["readinessProbe"]["successThreshold"] = 1
+    main["livenessProbe"]["successThreshold"] = 1
+    assert main["readinessProbe"]["successThreshold"] == 1
+    assert main["livenessProbe"]["successThreshold"] == 1
+    calls: list[tuple[str, ...]] = []
+
+    def kubectl(*args: str, **_kwargs: object) -> CommandResult:
+        calls.append(args)
+        if args[:3] == (
+            "get",
+            "deployment",
+            gate_module.RELEASED_V040_MANAGER_DEPLOYMENT,
+        ):
+            if args[-2:] == ("-o", "json"):
+                return CommandResult(json.dumps(deployment), "", 0)
+            return CommandResult("", "", 0)
+        if args[:2] == ("get", "pods,replicasets"):
+            return CommandResult(json.dumps({"items": []}), "", 0)
+        return CommandResult("", "", 0)
+
+    gate._released_v040_hostname = PRIOR_RELEASED_V040_HOSTNAME
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+    monkeypatch.setattr(
+        gate,
+        "_docker",
+        lambda *_args, **_kwargs: CommandResult(_released_v040_image_inspect(), "", 0),
+    )
+
+    gate._delete_released_v040_manager()
+
+    assert calls[0][-2:] == ("-o", "json")
+    assert calls[1][:3] == (
+        "delete",
+        "deployment",
+        gate_module.RELEASED_V040_MANAGER_DEPLOYMENT,
+    )
+    assert sum(call[0] == "delete" for call in calls) == 1
+
+
+def _released_v040_recovery_lease(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "worker_id": PRIOR_RELEASED_V040_WORKER_ID,
+        "hostname": PRIOR_RELEASED_V040_HOSTNAME,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "capability_schema_version": 0,
+        "django_ray_version": None,
+        "min_supported_execution_protocol_version": None,
+        "max_supported_execution_protocol_version": None,
+        "is_active": False,
+        "last_heartbeat_at": "2026-08-13T00:00:00+00:00",
+        "stopped_at": "2026-08-13T00:01:00+00:00",
+        "heartbeat_live": False,
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.parametrize("foreign_after_create_failure", [False, True])
+def test_released_v040_ordinary_finally_never_deletes_unowned_same_name_after_create_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    foreign_after_create_failure: bool,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate.temp_root = tmp_path
+    gate.evidence.released_v040_image_tag = (
+        f"{gate_module.RELEASED_V040_IMAGE_REPOSITORY}:released-v040-{TAG}"
+    )
+    gate.evidence.released_v040_image_id = IMAGE_ID
+    foreign_deployment = _released_v040_recovery_deployment(gate)
+    create_failed = False
+    calls: list[tuple[str, ...]] = []
+
+    def kubectl(*args: str, **_kwargs: object) -> CommandResult:
+        nonlocal create_failed
+        calls.append(args)
+        if args[:3] == (
+            "get",
+            "deployment",
+            gate_module.RELEASED_V040_MANAGER_DEPLOYMENT,
+        ):
+            if args[-2:] == ("-o", "json"):
+                payload = (
+                    json.dumps(foreign_deployment)
+                    if create_failed and foreign_after_create_failure
+                    else ""
+                )
+                return CommandResult(payload, "", 0)
+            return CommandResult("", "", 0)
+        if args[:2] == ("get", "pods,replicasets"):
+            return CommandResult(json.dumps({"items": []}), "", 0)
+        if args[0] == "create":
+            create_failed = True
+            raise RuntimeError("released manager create failed")
+        if args[0] == "delete":
+            pytest.fail("ordinary cleanup must not delete a Deployment it did not create")
+        return CommandResult("", "", 0)
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+    monkeypatch.setattr(
+        gate,
+        "_observe_released_v040_reserved_leases",
+        lambda: {"count": 0, "rows": []},
+    )
+    monkeypatch.setattr(
+        gate,
+        "_docker",
+        lambda *_args, **_kwargs: CommandResult(
+            _released_v040_image_inspect(commit="f" * 40),
+            "",
+            0,
+        ),
+    )
+
+    gate._recover_released_v040_startup_residue()
+    with pytest.raises(RuntimeError, match="released manager create failed"):
+        gate._apply_released_v040_manager()
+
+    if foreign_after_create_failure:
+        with pytest.raises(ValueError):
+            gate._delete_released_v040_manager()
+    else:
+        gate._delete_released_v040_manager()
+
+    assert sum(call[0] == "create" for call in calls) == 1
+    assert not any(call[0] == "delete" for call in calls)
+
+
+def test_released_v040_startup_recovery_accepts_only_a_pinned_prior_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate.evidence.released_v040_image_tag = (
+        f"{gate_module.RELEASED_V040_IMAGE_REPOSITORY}:released-v040-{TAG}"
+    )
+    assert gate.evidence.released_v040_image_tag != PRIOR_RELEASED_V040_TAG
+    deployment = _released_v040_recovery_deployment(gate)
+    docker_calls: list[tuple[str, ...]] = []
+    cleanup_events: list[str] = []
+
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **_kwargs: CommandResult(json.dumps(deployment), "", 0),
+    )
+
+    def docker(*args: str, **_kwargs: object) -> CommandResult:
+        docker_calls.append(args)
+        return CommandResult(_released_v040_image_inspect(), "", 0)
+
+    monkeypatch.setattr(gate, "_docker", docker)
+    monkeypatch.setattr(
+        gate,
+        "_observe_released_v040_reserved_leases",
+        lambda: {"count": 0, "rows": []},
+    )
+
+    def delete_manager() -> None:
+        assert gate._released_v040_hostname == PRIOR_RELEASED_V040_HOSTNAME
+        cleanup_events.append("deployment")
+
+    def delete_lease() -> None:
+        assert gate._released_v040_hostname == PRIOR_RELEASED_V040_HOSTNAME
+        gate._released_v040_worker_id = PRIOR_RELEASED_V040_WORKER_ID
+        cleanup_events.append("lease")
+
+    monkeypatch.setattr(gate, "_delete_released_v040_manager", delete_manager)
+    monkeypatch.setattr(gate, "_delete_released_v040_worker_lease", delete_lease)
+
+    gate._recover_released_v040_startup_residue()
+
+    assert docker_calls == [("image", "inspect", PRIOR_RELEASED_V040_TAG)]
+    assert cleanup_events == ["deployment", "lease"]
+    assert gate._released_v040_hostname is None
+    assert gate._released_v040_worker_id is None
+
+
+@pytest.mark.parametrize(
+    "residue",
+    [
+        {"count": 2, "rows": [_released_v040_recovery_lease()] * 2},
+        {
+            "count": 1,
+            "rows": [_released_v040_recovery_lease(hostname=f"dr-v040-{'9' * 32}")],
+        },
+    ],
+)
+def test_released_v040_prior_deployment_refuses_ambiguous_or_foreign_lease_without_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    residue: Mapping[str, Any],
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    deployment = _released_v040_recovery_deployment(gate)
+    cleanup_events: list[str] = []
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **_kwargs: CommandResult(json.dumps(deployment), "", 0),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_docker",
+        lambda *_args, **_kwargs: CommandResult(_released_v040_image_inspect(), "", 0),
+    )
+    monkeypatch.setattr(gate, "_observe_released_v040_reserved_leases", lambda: residue)
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_manager",
+        lambda: cleanup_events.append("deployment"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_worker_lease",
+        lambda: cleanup_events.append("lease"),
+    )
+
+    with pytest.raises(ValueError, match="ambiguous|foreign"):
+        gate._recover_released_v040_startup_residue()
+
+    assert cleanup_events == []
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ["image-tag", "docker-revision", "docker-tree", "container-contract"],
+)
+def test_released_v040_startup_recovery_refuses_foreign_deployment_without_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    deployment = _released_v040_recovery_deployment(gate)
+    inspect_payload = _released_v040_image_inspect()
+    if drift == "image-tag":
+        deployment["spec"]["template"]["spec"]["containers"][0]["image"] = (
+            "foreign.example/django-ray:v0.4.0"
+        )
+    elif drift == "docker-revision":
+        inspect_payload = _released_v040_image_inspect(commit="f" * 40)
+    elif drift == "docker-tree":
+        inspect_payload = _released_v040_image_inspect(source_tree="f" * 40)
+    else:
+        deployment["spec"]["template"]["spec"]["containers"][0]["args"][-1] = "2"
+    cleanup_events: list[str] = []
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **_kwargs: CommandResult(json.dumps(deployment), "", 0),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_docker",
+        lambda *_args, **_kwargs: CommandResult(inspect_payload, "", 0),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_manager",
+        lambda: cleanup_events.append("deployment"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_worker_lease",
+        lambda: cleanup_events.append("lease"),
+    )
+
+    with pytest.raises(ValueError):
+        gate._recover_released_v040_startup_residue()
+
+    assert cleanup_events == []
+
+
+def test_released_v040_reserved_lease_observer_is_prefix_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    payload = {"count": 1, "rows": [_released_v040_recovery_lease()]}
+    observed: dict[str, str] = {}
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<released-v040-reserved-leases>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return payload
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._observe_released_v040_reserved_leases() == payload
+    assert observed["field_name"] == "released v0.4.0 reserved lease recovery observation"
+    assert 'hostname__startswith="dr-v040-"' in observed["script"]
+    assert '"hostname", "worker_id"' in observed["script"]
+    assert ")[:2]" in observed["script"]
+    assert "get_lease_duration" in observed["script"]
+    assert 'row["heartbeat_live"]' in observed["script"]
+
+
+def test_released_v040_startup_recovery_accepts_one_expired_exact_lease_and_resets_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    cleanup_events: list[str] = []
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **_kwargs: CommandResult("", "", 0),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_observe_released_v040_reserved_leases",
+        lambda: {"count": 1, "rows": [_released_v040_recovery_lease()]},
+    )
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_manager",
+        lambda: cleanup_events.append("deployment"),
+    )
+
+    def delete_lease() -> None:
+        assert gate._released_v040_hostname == PRIOR_RELEASED_V040_HOSTNAME
+        assert gate._released_v040_worker_id == PRIOR_RELEASED_V040_WORKER_ID
+        cleanup_events.append("lease")
+
+    monkeypatch.setattr(gate, "_delete_released_v040_worker_lease", delete_lease)
+
+    gate._recover_released_v040_startup_residue()
+
+    assert cleanup_events == ["deployment", "lease"]
+    assert gate._released_v040_hostname is None
+    assert gate._released_v040_worker_id is None
+
+    next_hostname_uuid = gate_module.UUID("21234567-89ab-4cde-8fab-0123456789ab")
+    gate.temp_root = tmp_path
+    gate.evidence.released_v040_image_tag = (
+        f"{gate_module.RELEASED_V040_IMAGE_REPOSITORY}:released-v040-{TAG}"
+    )
+    gate.evidence.released_v040_image_id = IMAGE_ID
+    monkeypatch.setattr(gate_module, "uuid4", lambda: next_hostname_uuid)
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("later apply failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="later apply failed"):
+        gate._apply_released_v040_manager()
+
+    assert gate._released_v040_hostname == f"dr-v040-{next_hostname_uuid.hex}"
+    assert gate._released_v040_hostname != PRIOR_RELEASED_V040_HOSTNAME
+    assert gate._released_v040_worker_id is None
+
+
+@pytest.mark.parametrize(
+    ("residue", "message"),
+    [
+        (
+            {"count": 1, "rows": [_released_v040_recovery_lease(heartbeat_live=True)]},
+            "live or foreign",
+        ),
+        (
+            {
+                "count": 2,
+                "rows": [
+                    _released_v040_recovery_lease(),
+                    _released_v040_recovery_lease(
+                        worker_id="31234567-89ab-4cde-8fab-0123456789ab",
+                        hostname=f"dr-v040-{'3' * 32}",
+                    ),
+                ],
+            },
+            "ambiguous",
+        ),
+        (
+            {
+                "count": 1,
+                "rows": [_released_v040_recovery_lease(queue_name="foreign-queue")],
+            },
+            "live or foreign",
+        ),
+        (
+            {
+                "count": 1,
+                "rows": [_released_v040_recovery_lease(capability_schema_version=1)],
+            },
+            "live or foreign",
+        ),
+        (
+            {
+                "count": 1,
+                "rows": [_released_v040_recovery_lease(django_ray_version="0.4.0")],
+            },
+            "live or foreign",
+        ),
+    ],
+)
+def test_released_v040_startup_recovery_refuses_live_ambiguous_or_foreign_leases(
+    monkeypatch: pytest.MonkeyPatch,
+    residue: Mapping[str, Any],
+    message: str,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    cleanup_events: list[str] = []
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **_kwargs: CommandResult("", "", 0),
+    )
+    monkeypatch.setattr(gate, "_observe_released_v040_reserved_leases", lambda: residue)
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_manager",
+        lambda: cleanup_events.append("deployment"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_worker_lease",
+        lambda: cleanup_events.append("lease"),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        gate._recover_released_v040_startup_residue()
+
+    assert cleanup_events == []
+    assert gate._released_v040_hostname is None
+    assert gate._released_v040_worker_id is None
+
+
+def test_protocol_cohort_observer_reads_real_legacy_and_explicit_leases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    observed: dict[str, str] = {}
+    payload = {
+        "report": {
+            "capabilities": {
+                "groups": [
+                    {
+                        "kind": "legacy",
+                        "minimum": 1,
+                        "maximum": 1,
+                        "heartbeat_live_leases": 1,
+                    },
+                    {
+                        "kind": "explicit",
+                        "minimum": 1,
+                        "maximum": 1,
+                        "heartbeat_live_leases": 1,
+                    },
+                ],
+                "total_groups": 2,
+                "total_leases": 2,
+                "omitted_groups": 0,
+                "omitted_leases": 0,
+            },
+        },
+        "legacy_worker_count": 1,
+        "legacy_worker_ids": ["released-v040-worker"],
+    }
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-cohort-observation>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return payload
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._observe_protocol_cohorts() == payload
+    assert observed["field_name"] == "protocol cohort observation"
+    assert "build_protocol_status" in observed["script"]
+    assert "capability_schema_version=0" in observed["script"]
+    assert "last_heartbeat_at__gte=cutoff" in observed["script"]
+
+
+def test_protocol_handoff_wait_requires_a_replacement_worker_without_resubmission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    job_id = f"raysubmit_django_ray_v1_{'a' * 64}"
+    observations = iter(
+        (
+            {
+                "ready": True,
+                "state": "RUNNING",
+                "durable_state": "RUNNING",
+                "attempt_number": 1,
+                "execution_generation": 4,
+                "worker_id": "released-v040-worker",
+                "job_id": job_id,
+                "released_carrier": True,
+                "request_reference_absent": True,
+                "submission_count": 1,
+            },
+            {
+                "ready": True,
+                "state": "RUNNING",
+                "durable_state": "RUNNING",
+                "attempt_number": 1,
+                "execution_generation": 4,
+                "worker_id": "current-explicit-worker",
+                "job_id": job_id,
+                "released_carrier": True,
+                "request_reference_absent": True,
+                "submission_count": 1,
+            },
+        )
+    )
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_handoff_task",
+        lambda _task_id: next(observations),
+    )
+    monkeypatch.setattr(gate_module.time, "sleep", lambda _seconds: None)
+
+    result = gate._wait_for_protocol_handoff_task(
+        TASK_ID,
+        accepted_states=frozenset({"RUNNING"}),
+        different_worker="released-v040-worker",
+    )
+
+    assert result["worker_id"] == "current-explicit-worker"
+    assert result["job_id"] == job_id
+    assert result["attempt_number"] == 1
+    assert result["execution_generation"] == 4
+    assert result["submission_count"] == 1
+
+
+def _protocol_v1_survival_fixture() -> dict[str, object]:
+    return {
+        "pk": 51,
+        "task_id": PROTOCOL_V1_SURVIVAL_TASK_ID,
+        "marker": PROTOCOL_V1_SURVIVAL_MARKER,
+        "row_sha256": "c" * 64,
+        "state": "QUEUED",
+        "execution_protocol_version": 1,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "attempt_number": 1,
+        "execution_generation": 0,
+        "run_after": "2026-08-14T21:00:00+00:00",
+        "claimed_by_worker": None,
+        "ray_job_id": None,
+        "ray_job_request_reference": None,
+    }
+
+
+def _protocol_v1_survival_observation() -> dict[str, object]:
+    fixture = _protocol_v1_survival_fixture()
+    return {
+        **fixture,
+        "callable_path": "testproject.tasks.echo_task",
+        "args_json": json.dumps([fixture["marker"]], separators=(",", ":")),
+        "kwargs_json": "{}",
+        "ray_address": None,
+    }
+
+
+def test_protocol_v1_survival_enqueue_is_deferred_on_the_live_ray_data_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = _protocol_v1_survival_fixture()
+    observed: dict[str, str] = {}
+    marker_uuid = gate_module.UUID("22222222-2222-4222-8222-222222222222")
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v1-survival-enqueue>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return fixture
+
+    monkeypatch.setattr(gate_module, "uuid4", lambda: marker_uuid)
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._enqueue_protocol_v1_survival_task() == fixture
+    assert gate._protocol_v1_survival_fixture == fixture
+    assert observed["field_name"] == "protocol-v1 deferred survival enqueue"
+    assert f"marker = {PROTOCOL_V1_SURVIVAL_MARKER!r}" in observed["script"]
+    assert f"timedelta(seconds={float(gate.config.task_timeout * 2)!r})" in observed["script"]
+    assert f"backend={gate_module.RAY_JOB_GATE_QUEUE!r}" in observed["script"]
+    assert f"queue_name={gate_module.RAY_JOB_GATE_QUEUE!r}" in observed["script"]
+    assert "run_after=run_after" in observed["script"]
+    assert ".enqueue(marker)" in observed["script"]
+
+
+def test_protocol_v1_survival_requires_the_same_unclaimed_queued_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = _protocol_v1_survival_fixture()
+    observation = _protocol_v1_survival_observation()
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_v1_survival_task",
+        lambda _fixture: observation,
+    )
+
+    assert gate._require_protocol_v1_survival_unchanged(fixture) == observation
+
+    observation["claimed_by_worker"] = "released-manager-claimed-the-deferred-row"
+    with pytest.raises(ValueError, match="changed during manager handoff"):
+        gate._require_protocol_v1_survival_unchanged(fixture)
+
+
+def test_protocol_v1_survival_release_is_exactly_one_unchanged_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = _protocol_v1_survival_fixture()
+    released = {
+        "matched": 1,
+        "updated": 1,
+        "pk": fixture["pk"],
+        "task_id": fixture["task_id"],
+        "state": "QUEUED",
+        "attempt_number": 1,
+        "execution_generation": 0,
+        "released_at": "2026-08-14T20:30:00+00:00",
+        "run_after": "2026-08-14T20:30:00+00:00",
+    }
+    observed: dict[str, str] = {}
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v1-survival-release>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return released
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._release_protocol_v1_survival_task(fixture) == released
+    assert observed["field_name"] == "protocol-v1 deferred survival release"
+    assert f"pk={fixture['pk']!r}" in observed["script"]
+    assert f"task_id={fixture['task_id']!r}" in observed["script"]
+    assert "state=TaskState.QUEUED" in observed["script"]
+    assert "execution_protocol_version=1" in observed["script"]
+    assert f"queue_name={gate_module.RAY_JOB_GATE_QUEUE!r}" in observed["script"]
+    assert "claimed_by_worker__isnull=True" in observed["script"]
+    assert "updated = queryset.update(run_after=released_at)" in observed["script"]
+
+
+@pytest.mark.parametrize(
+    ("cleanup", "expected_deleted"),
+    [
+        (
+            {
+                "matched": 1,
+                "states": ["QUEUED"],
+                "deleted": 1,
+                "queued_absent": True,
+            },
+            1,
+        ),
+        (
+            {
+                "matched": 1,
+                "states": ["RUNNING"],
+                "deleted": 0,
+                "queued_absent": True,
+            },
+            0,
+        ),
+    ],
+)
+def test_protocol_v1_survival_failure_cleanup_deletes_only_an_unclaimed_queued_row(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup: Mapping[str, Any],
+    expected_deleted: int,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = _protocol_v1_survival_fixture()
+    gate._protocol_v1_survival_fixture = fixture
+    observed: dict[str, str] = {}
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v1-survival-cleanup>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return cleanup
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._cleanup_protocol_v1_survival_task(fixture) == cleanup
+    assert gate._protocol_v1_survival_fixture is None
+    assert observed["field_name"] == "protocol-v1 deferred survival cleanup"
+    assert f"pk={fixture['pk']!r}" in observed["script"]
+    assert f"task_id={fixture['task_id']!r}" in observed["script"]
+    assert "execution_protocol_version=1" in observed["script"]
+    assert f"queue_name={gate_module.RAY_JOB_GATE_QUEUE!r}" in observed["script"]
+    assert 'callable_path="testproject.tasks.echo_task"' in observed["script"]
+    assert "claimed_by_worker__isnull=True" in observed["script"]
+    assert "ray_job_request_reference__isnull=True" in observed["script"]
+    assert cleanup["deleted"] == expected_deleted
+    if expected_deleted == 1:
+        assert cleanup["states"] == ["QUEUED"]
+    else:
+        assert cleanup["states"] == ["RUNNING"]
+
+
+def test_protocol_v2_fixture_is_seeded_only_on_the_live_ray_data_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate._protocol_handoff_initial_revision = 7
+    observed: dict[str, str] = {}
+    poison_uuid = gate_module.UUID("01234567-89ab-4cde-8fab-0123456789ab")
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "poison": f"protocol_v2_application_poison_{poison_uuid.hex}",
+        "row_sha256": "d" * 64,
+        "created_at": "2026-08-14T20:00:00+00:00",
+        "queued_at": "2026-08-14T20:00:01+00:00",
+        "initial_revision": 7,
+        "closed_revision": 8,
+    }
+    generated_ids = iter((gate_module.UUID(TASK_ID), poison_uuid))
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v2-fixture>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return fixture
+
+    monkeypatch.setattr(gate_module, "uuid4", lambda: next(generated_ids))
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._seed_protocol_v2_fixture() == {**fixture, "seed_confirmed": True}
+    assert observed["field_name"] == "protocol-v2 queued fixture creation"
+    assert f"queue_name={gate_module.RAY_JOB_GATE_QUEUE!r}" in observed["script"]
+    assert f"task_id = {TASK_ID!r}" in observed["script"]
+    assert f"poison = {fixture['poison']!r}" in observed["script"]
+    assert "execution_protocol_version=2" in observed["script"]
+    assert "state=TaskState.QUEUED" in observed["script"]
+    assert "close_legacy_worker_admission" in observed["script"]
+    created_terminal = observed["script"].index("state=TaskState.FAILED")
+    admission_closed = observed["script"].index("transition = close_legacy_worker_admission")
+    update_started = observed["script"].index("updated = RayTaskExecution.objects.filter(")
+    queued = observed["script"].index(
+        ".update(state=TaskState.QUEUED)",
+        update_started,
+    )
+    update_verified = observed["script"].index("if updated != 1:", queued)
+    queued_at_captured = observed["script"].index(
+        "queued_at = timezone.now()",
+        update_verified,
+    )
+    row_refreshed = observed["script"].index("row.refresh_from_db()", queued_at_captured)
+    emitted_hash = observed["script"].index(
+        '"row_sha256": row_sha256(row)',
+        row_refreshed,
+    )
+    emitted_queued_at = observed["script"].index(
+        '"queued_at": queued_at.isoformat()',
+        emitted_hash,
+    )
+    assert (
+        created_terminal
+        < admission_closed
+        < update_started
+        < queued
+        < update_verified
+        < queued_at_captured
+        < row_refreshed
+        < emitted_hash
+        < emitted_queued_at
+    )
+
+
+def test_protocol_v2_startup_recovery_terminalizes_before_reopen_and_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    recovered = {
+        "recovered": True,
+        "matched": 1,
+        "terminalized": 1,
+        "deleted": 1,
+        "row_absent": True,
+        "schema_version": 1,
+        "active_write_protocol_version": 1,
+        "legacy_worker_admission_enabled": True,
+        "revision": 9,
+        "token_count": 1,
+    }
+    observed: dict[str, str] = {}
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v2-startup-recovery>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return recovered
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._recover_protocol_v2_startup_fixture() == recovered
+    assert observed["field_name"] == "protocol-v2 startup fixture recovery"
+    assert (
+        'callable_path__startswith="testproject.tasks.protocol_v2_application_poison_"'
+        in observed["script"]
+    )
+    assert "rows = list(reserved[:2])" in observed["script"]
+    terminalized = observed["script"].index(".update(state=TaskState.FAILED)")
+    admission_reopened = observed["script"].index("transition = reopen_legacy_worker_admission")
+    deleted = observed["script"].index("deleted, _ = exact_terminal.delete()")
+    assert terminalized < admission_reopened < deleted
+
+
+def test_protocol_v2_startup_recovery_accepts_a_terminal_staged_hard_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    recovered = {
+        "recovered": True,
+        "matched": 1,
+        "terminalized": 0,
+        "deleted": 1,
+        "row_absent": True,
+        "schema_version": 1,
+        "active_write_protocol_version": 1,
+        "legacy_worker_admission_enabled": True,
+        "revision": 7,
+        "token_count": 1,
+    }
+    observed: dict[str, str] = {}
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v2-terminal-stage-recovery>", "exec")
+        observed["script"] = script
+        return recovered
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._recover_protocol_v2_startup_fixture() == recovered
+    assert "row.state in [TaskState.FAILED, TaskState.QUEUED]" in observed["script"]
+    assert (
+        "if policy.legacy_worker_admission_enabled and row.state != TaskState.FAILED"
+        in observed["script"]
+    )
+    assert "terminalized = 0" in observed["script"]
+    assert "deleted, _ = exact_terminal.delete()" in observed["script"]
+
+
+def test_protocol_handoff_recovery_orders_both_exact_cleanups_before_manager_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    events: list[str] = []
+    managers = iter(
+        (
+            {"replicas": 0, "ready_replicas": 0},
+            {"replicas": 1, "ready_replicas": 1},
+        )
+    )
+    monkeypatch.setattr(
+        gate,
+        "_recover_released_v040_startup_residue",
+        lambda: events.append("recover-released-v040"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_recover_protocol_v2_startup_fixture",
+        lambda: events.append("recover-protocol-v2"),
+    )
+
+    def observe_manager() -> Mapping[str, int]:
+        observation = next(managers)
+        events.append(f"manager:{observation['replicas']}/{observation['ready_replicas']}")
+        return observation
+
+    monkeypatch.setattr(gate, "_ray_job_manager_replica_observation", observe_manager)
+    monkeypatch.setattr(
+        gate,
+        "_scale_ray_job_manager",
+        lambda replicas: events.append(f"scale-manager:{replicas}"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_application_topology",
+        lambda: events.append("app-ready"),
+    )
+
+    gate._recover_protocol_handoff_residue()
+
+    assert events == [
+        "recover-released-v040",
+        "recover-protocol-v2",
+        "manager:0/0",
+        "scale-manager:1",
+        "app-ready",
+        "manager:1/1",
+    ]
+
+
+def test_protocol_v2_survival_rejects_any_queue_or_claim_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {"pk": 41, "task_id": TASK_ID, "row_sha256": "d" * 64}
+    observation = {
+        "row_sha256": fixture["row_sha256"],
+        "state": "QUEUED",
+        "execution_protocol_version": 2,
+        "queue_name": "protocol-v2-gate",
+        "claimed_by_worker": None,
+        "ray_job_id": None,
+        "ray_address": None,
+        "ray_data_explicit_lease_count": 1,
+        "post_queue_heartbeat": True,
+    }
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_v2_fixture",
+        lambda _fixture: observation,
+    )
+
+    with pytest.raises(ValueError, match="queued row changed"):
+        gate._wait_for_protocol_v2_survival(fixture)
+
+    observation["queue_name"] = gate_module.RAY_JOB_GATE_QUEUE
+    observation["claimed_by_worker"] = "unexpected-v1-manager"
+    with pytest.raises(ValueError, match="queued row changed"):
+        gate._wait_for_protocol_v2_survival(fixture)
+
+
+def test_protocol_v2_survival_waits_for_a_strictly_post_queue_manager_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {"pk": 41, "task_id": TASK_ID, "row_sha256": "d" * 64}
+    base = {
+        "row_sha256": fixture["row_sha256"],
+        "state": "QUEUED",
+        "execution_protocol_version": 2,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "claimed_by_worker": None,
+        "ray_job_id": None,
+        "ray_address": None,
+        "ray_data_explicit_lease_count": 1,
+    }
+    observations = iter(
+        (
+            {**base, "post_queue_heartbeat": False},
+            {**base, "post_queue_heartbeat": True},
+        )
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_v2_fixture",
+        lambda _fixture: next(observations),
+    )
+    monkeypatch.setattr(gate_module.time, "sleep", sleeps.append)
+
+    result = gate._wait_for_protocol_v2_survival(fixture)
+
+    assert result == {**base, "post_queue_heartbeat": True}
+    assert sleeps == [2]
+
+
+def test_protocol_v2_visibility_requires_unchanged_status_api_report_and_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "row_sha256": "d" * 64,
+    }
+    row = {
+        "row_sha256": fixture["row_sha256"],
+        "state": "QUEUED",
+        "execution_protocol_version": 2,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "claimed_by_worker": None,
+        "ray_job_id": None,
+        "ray_address": None,
+        "ray_data_explicit_lease_count": 1,
+        "post_queue_heartbeat": True,
+    }
+    task_status = _task_status_payload(state="QUEUED", task_id=TASK_ID)
+    task_status.update(
+        {
+            "execution_protocol_version": 2,
+            "managed_with_django_ray_version": None,
+            "executor_django_ray_version": None,
+            "protocol_compatible_worker_available": False,
+        }
+    )
+    paths: list[str] = []
+
+    def http(path: str, **_kwargs: object) -> tuple[int, bytes]:
+        paths.append(path)
+        if path.startswith("/api/tasks/"):
+            return 200, json.dumps(task_status).encode()
+        if path.startswith("/api/executions?"):
+            return 200, json.dumps({"tasks": [task_status]}).encode()
+        raise AssertionError(f"unexpected protocol-v2 HTTP path: {path}")
+
+    report = {
+        "policy": {
+            "legacy_worker_admission_enabled": False,
+            "legacy_admission_token_present": False,
+            "active_write_protocol_version": 1,
+        },
+        "non_v1_nonterminal_count": 1,
+        "unsupported_work": {
+            "groups": [
+                {
+                    "count": 1,
+                    "execution_protocol_version": 2,
+                    "queue": gate_module.RAY_JOB_GATE_QUEUE,
+                    "state": "QUEUED",
+                }
+            ],
+            "total_tasks": 1,
+            "omitted_tasks": 0,
+        },
+    }
+    monkeypatch.setattr(gate, "_wait_for_protocol_v2_survival", lambda _fixture: row)
+    monkeypatch.setattr(gate, "_secret_token", lambda: "local-token")
+    monkeypatch.setattr(gate, "_http", http)
+    monkeypatch.setattr(gate, "_observe_protocol_cohorts", lambda: {"report": report})
+    monkeypatch.setattr(
+        gate,
+        "_protocol_metric_counts",
+        lambda: {("other", "QUEUED"): 1},
+    )
+    monkeypatch.setattr(gate, "_observe_protocol_v2_fixture", lambda _fixture: row)
+
+    gate._verify_protocol_v2_visibility(
+        fixture,
+        baseline_metrics={("other", "QUEUED"): 0},
+    )
+
+    assert paths == [
+        f"/api/tasks/{TASK_ID}",
+        f"/api/executions?task_id={TASK_ID}&limit=1",
+    ]
+    assert gate.evidence.protocol_v2_queued_unchanged is True
+    assert gate.evidence.protocol_v2_unsupported_visible is True
+
+
+def test_protocol_v2_direct_probe_rejects_before_input_or_application_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "poison": PROTOCOL_V2_POISON,
+        "row_sha256": "d" * 64,
+    }
+    observed: dict[str, str] = {}
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v2-direct-rejection>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return _protocol_v2_rejection_payload()
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_v2_fixture",
+        lambda _fixture: {"row_sha256": fixture["row_sha256"]},
+    )
+
+    assert gate._verify_protocol_v2_rejection(fixture) == _protocol_v2_rejection_payload()
+    assert observed["field_name"] == "protocol-v2 direct Ray Core rejection"
+    assert "input_reference=None" in observed["script"]
+    assert 'request["execution_protocol_version"] = 2' in observed["script"]
+    assert "expected_execution_protocol_version=2" in observed["script"]
+    assert "ExecutionProtocolRange(minimum=1, maximum=2)" in observed["script"]
+    assert "application_marker_present" in observed["script"]
+    assert "from testproject" not in observed["script"]
+    assert gate.evidence.protocol_v2_preinvocation_rejected is True
+    assert gate.evidence.protocol_v2_application_marker_absent is True
+
+
+def test_protocol_v2_direct_probe_rejects_any_durable_row_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "poison": PROTOCOL_V2_POISON,
+        "row_sha256": "d" * 64,
+    }
+    monkeypatch.setattr(
+        gate,
+        "_sensitive_django_shell",
+        lambda _script, *, field_name: _protocol_v2_rejection_payload(),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_v2_fixture",
+        lambda _fixture: {"row_sha256": "e" * 64},
+    )
+
+    with pytest.raises(ValueError, match="changed during direct rejection"):
+        gate._verify_protocol_v2_rejection(fixture)
+
+    assert gate.evidence.protocol_v2_preinvocation_rejected is False
+    assert gate.evidence.protocol_v2_application_marker_absent is False
+
+
+def test_protocol_v2_cleanup_deletes_only_the_fixture_and_reopens_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "poison": PROTOCOL_V2_POISON,
+        "initial_revision": 7,
+        "closed_revision": 8,
+        "seed_confirmed": True,
+    }
+    cleanup = {
+        "matched": 1,
+        "terminalized": 1,
+        "deleted": 1,
+        "protocols": [2],
+        "states": ["QUEUED"],
+        "row_absent": True,
+        "schema_version": 1,
+        "active_write_protocol_version": 1,
+        "legacy_worker_admission_enabled": True,
+        "revision": 9,
+        "token_count": 1,
+    }
+    observed: dict[str, str] = {}
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v2-cleanup>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return cleanup
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._cleanup_protocol_v2_fixture(fixture) == cleanup
+    assert observed["field_name"] == "protocol-v2 fixture and policy cleanup"
+    assert f"expected_pk = {fixture['pk']!r}" in observed["script"]
+    assert "queryset = queryset.filter(pk=expected_pk)" in observed["script"]
+    assert f"task_id={fixture['task_id']!r}" in observed["script"]
+    assert "execution_protocol_version" in observed["script"]
+    assert "reopen_legacy_worker_admission" in observed["script"]
+    terminalized = observed["script"].index(
+        "terminalized = queryset.filter(state=TaskState.QUEUED).update(state=TaskState.FAILED)"
+    )
+    admission_reopened = observed["script"].index("transition = reopen_legacy_worker_admission")
+    deleted = observed["script"].index("deleted, _ = terminal_queryset.delete()")
+    assert terminalized < admission_reopened < deleted
+
+
+def test_protocol_v2_cleanup_rejects_inexact_deletion_or_policy_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "poison": PROTOCOL_V2_POISON,
+        "initial_revision": 7,
+        "closed_revision": 8,
+        "seed_confirmed": True,
+    }
+    monkeypatch.setattr(
+        gate,
+        "_sensitive_django_shell",
+        lambda _script, *, field_name: {
+            "matched": 0,
+            "deleted": 0,
+            "protocols": [],
+            "row_absent": False,
+            "schema_version": 1,
+            "active_write_protocol_version": 1,
+            "legacy_worker_admission_enabled": False,
+            "revision": 8,
+            "token_count": 0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="not restored exactly"):
+        gate._cleanup_protocol_v2_fixture(fixture)
+
+
+def test_protocol_v2_uncertain_cleanup_cannot_delete_a_task_id_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {
+        "pk": None,
+        "task_id": TASK_ID,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "poison": PROTOCOL_V2_POISON,
+        "initial_revision": 7,
+        "closed_revision": 8,
+        "seed_confirmed": False,
+    }
+    cleanup = {
+        "matched": 0,
+        "terminalized": 0,
+        "deleted": 0,
+        "protocols": [],
+        "states": [],
+        "row_absent": True,
+        "schema_version": 1,
+        "active_write_protocol_version": 1,
+        "legacy_worker_admission_enabled": True,
+        "revision": 9,
+        "token_count": 1,
+    }
+    observed: dict[str, str] = {}
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v2-collision-cleanup>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return cleanup
+
+    gate._protocol_v2_fixture = fixture
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+
+    assert gate._cleanup_protocol_v2_fixture(fixture) == cleanup
+    assert gate._protocol_v2_fixture is None
+    assert observed["field_name"] == "protocol-v2 fixture and policy cleanup"
+    assert f"task_id={TASK_ID!r}" in observed["script"]
+    assert "execution_protocol_version=2" in observed["script"]
+    assert f"queue_name={gate_module.RAY_JOB_GATE_QUEUE!r}" in observed["script"]
+    assert 'callable_path="testproject.tasks." + poison' in observed["script"]
+    assert 'args_json=json.dumps([poison], separators=(",", ":"))' in observed["script"]
+    assert 'kwargs_json="{}"' in observed["script"]
+    assert '"row_absent": not queryset.exists()' in observed["script"]
+
+
+def _protocol_policy_observation(revision: int) -> dict[str, object]:
+    return {
+        "report": {
+            "policy": {
+                "schema_version": 1,
+                "active_write_protocol_version": 1,
+                "legacy_worker_admission_enabled": True,
+                "legacy_admission_token_present": True,
+                "revision": revision,
+            }
+        },
+        "legacy_worker_count": 0,
+        "legacy_worker_ids": [],
+    }
+
+
+def _protocol_handoff_observation(
+    *,
+    worker_id: str,
+    job_id: str,
+    state: str = "RUNNING",
+    durable_state: str = "RUNNING",
+) -> dict[str, object]:
+    return {
+        "ready": True,
+        "state": state,
+        "durable_state": durable_state,
+        "attempt_number": 1,
+        "execution_generation": 4,
+        "worker_id": worker_id,
+        "job_id": job_id,
+        "released_carrier": True,
+        "request_reference_absent": True,
+        "submission_count": 1,
+    }
+
+
+def _protocol_v1_survival_terminal(job_id: str) -> dict[str, object]:
+    return {
+        "ready": True,
+        "state": "SUCCEEDED",
+        "durable_state": "SUCCEEDED",
+        "attempt_number": 1,
+        "execution_generation": 1,
+        "worker_id": "current-explicit-worker",
+        "job_id": job_id,
+        "carrier_ok": True,
+        "binding_ok": True,
+        "request_ok": True,
+        "info_clear": True,
+        "logs_clear": True,
+        "submission_count": 1,
+    }
+
+
+def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    released_worker = "11111111-1111-4111-8111-111111111111"
+    current_worker = "22222222-2222-4222-8222-222222222222"
+    job_id = f"raysubmit_django_ray_v1_{'a' * 64}"
+    survival_job_id = f"raysubmit_django_ray_rq2_{'b' * 64}"
+    survival_fixture = _protocol_v1_survival_fixture()
+    survival_terminal = _protocol_v1_survival_terminal(survival_job_id)
+    survival_row = {
+        "pk": survival_fixture["pk"],
+        "task_id": survival_fixture["task_id"],
+        "state": "SUCCEEDED",
+        "attempt_number": 1,
+        "execution_generation": survival_terminal["execution_generation"],
+        "ray_job_id": survival_job_id,
+        "ray_job_request_reference": "rq2-reference",
+    }
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "row_sha256": "d" * 64,
+        "initial_revision": 7,
+    }
+    manager_observations = iter(
+        (
+            {"replicas": 1, "ready_replicas": 1},
+            {"replicas": 1, "ready_replicas": 1},
+        )
+    )
+    policy_observations = iter((_protocol_policy_observation(7), _protocol_policy_observation(9)))
+    handoff_observations = iter(
+        (
+            _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
+            _protocol_handoff_observation(worker_id=current_worker, job_id=job_id),
+            _protocol_handoff_observation(
+                worker_id=current_worker,
+                job_id=job_id,
+                state="SUCCEEDED",
+                durable_state="SUCCEEDED",
+            ),
+        )
+    )
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        gate,
+        "_recover_released_v040_startup_residue",
+        lambda: events.append("recover-released-startup"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_recover_protocol_v2_startup_fixture",
+        lambda: events.append("recover-protocol-v2-startup"),
+    )
+
+    monkeypatch.setattr(
+        gate,
+        "_ray_job_manager_replica_observation",
+        lambda: next(manager_observations),
+    )
+
+    def observe_protocol_cohorts() -> Mapping[str, Any]:
+        events.append("observe-policy")
+        return next(policy_observations)
+
+    monkeypatch.setattr(gate, "_observe_protocol_cohorts", observe_protocol_cohorts)
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_manager",
+        lambda: events.append("delete-released-manager"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_apply_released_v040_manager",
+        lambda: events.append("apply-released-manager"),
+    )
+
+    def wait_for_cohorts() -> Mapping[str, Any]:
+        events.append("cohorts-visible")
+        gate._released_v040_worker_id = released_worker
+        gate.evidence.protocol_legacy_cohort_visible = True
+        gate.evidence.protocol_explicit_cohort_visible = True
+        return {}
+
+    monkeypatch.setattr(gate, "_wait_for_protocol_cohorts", wait_for_cohorts)
+    monkeypatch.setattr(
+        gate,
+        "_scale_ray_job_manager",
+        lambda replicas: events.append(f"scale-current:{replicas}"),
+    )
+    monkeypatch.setattr(gate, "_enqueue_released_v040_handoff_task", lambda: TASK_ID)
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_protocol_handoff_task",
+        lambda *_args, **_kwargs: next(handoff_observations),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_worker_lease",
+        lambda: events.append("delete-released-lease"),
+    )
+
+    def enqueue_survival() -> Mapping[str, Any]:
+        events.append("enqueue-protocol-v1-survival")
+        gate._protocol_v1_survival_fixture = survival_fixture
+        return survival_fixture
+
+    monkeypatch.setattr(gate, "_enqueue_protocol_v1_survival_task", enqueue_survival)
+    monkeypatch.setattr(
+        gate,
+        "_require_protocol_v1_survival_unchanged",
+        lambda _fixture: events.append("require-protocol-v1-survival") or {},
+    )
+    monkeypatch.setattr(
+        gate,
+        "_release_protocol_v1_survival_task",
+        lambda _fixture: events.append("release-protocol-v1-survival") or {},
+    )
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_ray_job_gate_task",
+        lambda *_args, **_kwargs: events.append("wait-protocol-v1-terminal") or survival_terminal,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_v1_survival_task",
+        lambda _fixture: events.append("observe-protocol-v1-terminal") or survival_row,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_protocol_metric_counts",
+        lambda: {("other", "QUEUED"): 0},
+    )
+
+    def seed_fixture() -> Mapping[str, Any]:
+        events.append("seed-protocol-v2")
+        gate._protocol_v2_fixture = fixture
+        return fixture
+
+    monkeypatch.setattr(gate, "_seed_protocol_v2_fixture", seed_fixture)
+
+    def verify_visibility(
+        _fixture: Mapping[str, Any], *, baseline_metrics: Mapping[tuple[str, str], int]
+    ) -> None:
+        assert baseline_metrics == {("other", "QUEUED"): 0}
+        events.append("verify-protocol-v2-visibility")
+        gate.evidence.protocol_v2_queued_unchanged = True
+        gate.evidence.protocol_v2_unsupported_visible = True
+
+    monkeypatch.setattr(gate, "_verify_protocol_v2_visibility", verify_visibility)
+
+    def verify_rejection(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
+        events.append("verify-protocol-v2-rejection")
+        gate.evidence.protocol_v2_preinvocation_rejected = True
+        gate.evidence.protocol_v2_application_marker_absent = True
+        return _protocol_v2_rejection_payload()
+
+    monkeypatch.setattr(gate, "_verify_protocol_v2_rejection", verify_rejection)
+
+    def cleanup_fixture(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
+        events.append("cleanup-protocol-v2")
+        gate._protocol_v2_fixture = None
+        return {"revision": 9}
+
+    monkeypatch.setattr(gate, "_cleanup_protocol_v2_fixture", cleanup_fixture)
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_application_topology",
+        lambda: events.append("topology-restored"),
+    )
+
+    gate._verify_protocol_handoff_certification()
+
+    assert gate.evidence.protocol_legacy_cohort_visible is True
+    assert gate.evidence.protocol_explicit_cohort_visible is True
+    assert gate.evidence.protocol_v1_handoff_same_job is True
+    assert gate.evidence.protocol_v1_handoff_no_resubmit is True
+    assert gate.evidence.protocol_v1_queued_survived_handoff is True
+    assert gate.evidence.protocol_v2_queued_unchanged is True
+    assert gate.evidence.protocol_v2_unsupported_visible is True
+    assert gate.evidence.protocol_v2_preinvocation_rejected is True
+    assert gate.evidence.protocol_v2_application_marker_absent is True
+    assert gate.evidence.protocol_handoff_cleanup_restored is True
+    assert events == [
+        "recover-released-startup",
+        "recover-protocol-v2-startup",
+        "observe-policy",
+        "apply-released-manager",
+        "cohorts-visible",
+        "scale-current:0",
+        "enqueue-protocol-v1-survival",
+        "require-protocol-v1-survival",
+        "delete-released-manager",
+        "delete-released-lease",
+        "scale-current:1",
+        "require-protocol-v1-survival",
+        "release-protocol-v1-survival",
+        "wait-protocol-v1-terminal",
+        "observe-protocol-v1-terminal",
+        "seed-protocol-v2",
+        "verify-protocol-v2-visibility",
+        "verify-protocol-v2-rejection",
+        "delete-released-manager",
+        "scale-current:1",
+        "cleanup-protocol-v2",
+        "topology-restored",
+        "observe-policy",
+    ]
+
+
+def test_protocol_handoff_failure_still_removes_fixture_and_restores_topology(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    released_worker = "11111111-1111-4111-8111-111111111111"
+    current_worker = "22222222-2222-4222-8222-222222222222"
+    job_id = f"raysubmit_django_ray_v1_{'a' * 64}"
+    survival_job_id = f"raysubmit_django_ray_rq2_{'b' * 64}"
+    survival_fixture = _protocol_v1_survival_fixture()
+    survival_terminal = _protocol_v1_survival_terminal(survival_job_id)
+    survival_row = {
+        "pk": survival_fixture["pk"],
+        "task_id": survival_fixture["task_id"],
+        "state": "SUCCEEDED",
+        "attempt_number": 1,
+        "execution_generation": survival_terminal["execution_generation"],
+        "ray_job_id": survival_job_id,
+        "ray_job_request_reference": "rq2-reference",
+    }
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
+        "row_sha256": "d" * 64,
+        "initial_revision": 7,
+    }
+    managers = iter(
+        (
+            {"replicas": 1, "ready_replicas": 1},
+            {"replicas": 1, "ready_replicas": 1},
+        )
+    )
+    policies = iter((_protocol_policy_observation(7), _protocol_policy_observation(9)))
+    observations = iter(
+        (
+            _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
+            _protocol_handoff_observation(worker_id=current_worker, job_id=job_id),
+            _protocol_handoff_observation(
+                worker_id=current_worker,
+                job_id=job_id,
+                state="SUCCEEDED",
+                durable_state="SUCCEEDED",
+            ),
+        )
+    )
+    events: list[str] = []
+    monkeypatch.setattr(gate, "_recover_released_v040_startup_residue", lambda: None)
+    monkeypatch.setattr(gate, "_recover_protocol_v2_startup_fixture", dict)
+    monkeypatch.setattr(gate, "_ray_job_manager_replica_observation", lambda: next(managers))
+    monkeypatch.setattr(gate, "_observe_protocol_cohorts", lambda: next(policies))
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_manager",
+        lambda: events.append("delete-released-manager"),
+    )
+    monkeypatch.setattr(gate, "_apply_released_v040_manager", lambda: None)
+
+    def wait_for_cohorts() -> Mapping[str, Any]:
+        gate._released_v040_worker_id = released_worker
+        return {}
+
+    monkeypatch.setattr(gate, "_wait_for_protocol_cohorts", wait_for_cohorts)
+    monkeypatch.setattr(
+        gate,
+        "_scale_ray_job_manager",
+        lambda replicas: events.append(f"scale-current:{replicas}"),
+    )
+    monkeypatch.setattr(gate, "_enqueue_released_v040_handoff_task", lambda: TASK_ID)
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_protocol_handoff_task",
+        lambda *_args, **_kwargs: next(observations),
+    )
+    monkeypatch.setattr(gate, "_delete_released_v040_worker_lease", lambda: None)
+
+    def enqueue_survival() -> Mapping[str, Any]:
+        gate._protocol_v1_survival_fixture = survival_fixture
+        return survival_fixture
+
+    monkeypatch.setattr(gate, "_enqueue_protocol_v1_survival_task", enqueue_survival)
+    monkeypatch.setattr(
+        gate,
+        "_require_protocol_v1_survival_unchanged",
+        lambda _fixture: {},
+    )
+    monkeypatch.setattr(gate, "_release_protocol_v1_survival_task", lambda _fixture: {})
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_ray_job_gate_task",
+        lambda *_args, **_kwargs: survival_terminal,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_v1_survival_task",
+        lambda _fixture: survival_row,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_protocol_metric_counts",
+        lambda: {("other", "QUEUED"): 0},
+    )
+
+    def seed_fixture() -> Mapping[str, Any]:
+        events.append("seed-protocol-v2")
+        gate._protocol_v2_fixture = fixture
+        return fixture
+
+    monkeypatch.setattr(gate, "_seed_protocol_v2_fixture", seed_fixture)
+
+    def fail_visibility(
+        _fixture: Mapping[str, Any], *, baseline_metrics: Mapping[tuple[str, str], int]
+    ) -> None:
+        events.append("visibility-failed")
+        raise RuntimeError("protocol-v2-visibility-failure")
+
+    monkeypatch.setattr(gate, "_verify_protocol_v2_visibility", fail_visibility)
+    monkeypatch.setattr(
+        gate,
+        "_verify_protocol_v2_rejection",
+        lambda _fixture: pytest.fail("rejection probe must not run after visibility failure"),
+    )
+
+    def cleanup_fixture(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
+        events.append("cleanup-protocol-v2")
+        gate._protocol_v2_fixture = None
+        return {"revision": 9}
+
+    monkeypatch.setattr(gate, "_cleanup_protocol_v2_fixture", cleanup_fixture)
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_application_topology",
+        lambda: events.append("topology-restored"),
+    )
+
+    with pytest.raises(RuntimeError, match="protocol-v2-visibility-failure"):
+        gate._verify_protocol_handoff_certification()
+
+    assert gate._protocol_v2_fixture is None
+    assert gate.evidence.protocol_handoff_cleanup_restored is True
+    assert events.count("delete-released-manager") == 2
+    assert events.count("scale-current:1") == 2
+    assert events[-2:] == ["cleanup-protocol-v2", "topology-restored"]
+
+
+def test_protocol_handoff_owner_failure_cleans_the_deferred_v1_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    released_worker = "11111111-1111-4111-8111-111111111111"
+    job_id = f"raysubmit_django_ray_v1_{'a' * 64}"
+    survival_fixture = _protocol_v1_survival_fixture()
+    managers = iter(
+        (
+            {"replicas": 1, "ready_replicas": 1},
+            {"replicas": 1, "ready_replicas": 1},
+        )
+    )
+    policies = iter((_protocol_policy_observation(7), _protocol_policy_observation(7)))
+    events: list[str] = []
+    monkeypatch.setattr(gate, "_recover_released_v040_startup_residue", lambda: None)
+    monkeypatch.setattr(gate, "_recover_protocol_v2_startup_fixture", dict)
+    monkeypatch.setattr(gate, "_ray_job_manager_replica_observation", lambda: next(managers))
+    monkeypatch.setattr(gate, "_observe_protocol_cohorts", lambda: next(policies))
+    monkeypatch.setattr(gate, "_apply_released_v040_manager", lambda: None)
+
+    def wait_for_cohorts() -> Mapping[str, Any]:
+        gate._released_v040_worker_id = released_worker
+        return {}
+
+    monkeypatch.setattr(gate, "_wait_for_protocol_cohorts", wait_for_cohorts)
+    monkeypatch.setattr(
+        gate,
+        "_scale_ray_job_manager",
+        lambda replicas: events.append(f"scale-current:{replicas}"),
+    )
+    monkeypatch.setattr(gate, "_enqueue_released_v040_handoff_task", lambda: TASK_ID)
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_protocol_handoff_task",
+        lambda *_args, **_kwargs: _protocol_handoff_observation(
+            worker_id=released_worker,
+            job_id=job_id,
+        ),
+    )
+
+    def enqueue_survival() -> Mapping[str, Any]:
+        gate._protocol_v1_survival_fixture = survival_fixture
+        return survival_fixture
+
+    monkeypatch.setattr(gate, "_enqueue_protocol_v1_survival_task", enqueue_survival)
+    monkeypatch.setattr(
+        gate,
+        "_require_protocol_v1_survival_unchanged",
+        lambda _fixture: (_ for _ in ()).throw(RuntimeError("v1-owner-failure")),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_release_protocol_v1_survival_task",
+        lambda _fixture: pytest.fail("the failed owner must not release the deferred row"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_manager",
+        lambda: events.append("delete-released-manager"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_delete_released_v040_worker_lease",
+        lambda: events.append("delete-released-lease"),
+    )
+
+    def cleanup_survival(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
+        events.append("cleanup-protocol-v1-survival")
+        gate._protocol_v1_survival_fixture = None
+        return {
+            "matched": 1,
+            "states": ["QUEUED"],
+            "deleted": 1,
+            "queued_absent": True,
+        }
+
+    monkeypatch.setattr(gate, "_cleanup_protocol_v1_survival_task", cleanup_survival)
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_application_topology",
+        lambda: events.append("topology-restored"),
+    )
+
+    with pytest.raises(RuntimeError, match="v1-owner-failure"):
+        gate._verify_protocol_handoff_certification()
+
+    assert gate._protocol_v1_survival_fixture is None
+    assert gate.evidence.protocol_handoff_cleanup_restored is True
+    assert events == [
+        "scale-current:0",
+        "delete-released-manager",
+        "delete-released-lease",
+        "cleanup-protocol-v1-survival",
+        "scale-current:1",
+        "topology-restored",
+    ]
 
 
 def test_live_rq2_gate_reconciles_one_job_and_runs_negative_fixture(
@@ -3870,6 +5983,69 @@ def test_ambient_context_changes_cannot_redirect_pinned_commands(
         gate._kubectl("get", "pods")
 
 
+def test_released_v040_image_build_uses_only_the_pinned_archive_and_labels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    released_context = tmp_path / "released-v040-source"
+    released_context.mkdir()
+    dockerfile = released_context / "Dockerfile"
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    gate.released_v040_source_context = released_context
+    gate.evidence.released_v040_image_tag = "django-ray-released-v040:test-source"
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(gate, "_verify_released_v040_source_identity", lambda: None)
+
+    def docker(*args: str, **_kwargs: object) -> CommandResult:
+        calls.append(args)
+        if args[:2] != ("image", "inspect"):
+            return CommandResult("", "", 0)
+        return CommandResult(
+            json.dumps(
+                [
+                    {
+                        "Id": IMAGE_ID,
+                        "RepoTags": [gate.evidence.released_v040_image_tag],
+                        "Config": {
+                            "Labels": {
+                                "org.opencontainers.image.revision": (
+                                    gate_module.RELEASED_V040_COMMIT
+                                ),
+                                "org.opencontainers.image.source-tree": (
+                                    gate_module.RELEASED_V040_SOURCE_TREE
+                                ),
+                            }
+                        },
+                    }
+                ]
+            ),
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(gate, "_docker", docker)
+
+    gate._build_released_v040_image()
+
+    assert calls == [
+        (
+            "build",
+            "--tag",
+            gate.evidence.released_v040_image_tag,
+            "--label",
+            f"org.opencontainers.image.revision={gate_module.RELEASED_V040_COMMIT}",
+            "--label",
+            f"org.opencontainers.image.source-tree={gate_module.RELEASED_V040_SOURCE_TREE}",
+            "--file",
+            str(dockerfile),
+            str(released_context),
+        ),
+        ("image", "inspect", gate.evidence.released_v040_image_tag),
+    ]
+    assert gate.evidence.released_v040_image_id == IMAGE_ID
+
+
 def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3889,11 +6065,13 @@ def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
         runner=runner,  # type: ignore[arg-type]
     )
     gate.source_context = tmp_path
+    gate.released_v040_source_context = tmp_path
     gate._docker_host = "unix:///var/run/docker.sock"
     gate.evidence.commit = COMMIT
     gate.evidence.source_tree = SOURCE_TREE
     gate.evidence.app_tag = APP_TAG
     gate.evidence.worker_tag = f"django-ray-worker:{TAG}"
+    gate.evidence.released_v040_image_tag = f"django-ray-released-v040:{TAG}"
     gate.resources = [
         {
             "apiVersion": "v1",
@@ -3903,6 +6081,7 @@ def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
         }
     ]
     monkeypatch.setattr(gate, "_verify_source_identity", lambda: None)
+    monkeypatch.setattr(gate, "_verify_released_v040_source_identity", lambda: None)
     for key in gate_module.KIND_ENVIRONMENT_KEYS:
         monkeypatch.setenv(key, f"hostile-{key.lower()}")
 
@@ -3910,6 +6089,12 @@ def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
         if args[:2] != ("image", "inspect"):
             return CommandResult("", "", 0)
         tag = args[2]
+        if tag == gate.evidence.released_v040_image_tag:
+            commit = gate_module.RELEASED_V040_COMMIT
+            source_tree = gate_module.RELEASED_V040_SOURCE_TREE
+        else:
+            commit = COMMIT
+            source_tree = SOURCE_TREE
         return CommandResult(
             json.dumps(
                 [
@@ -3918,8 +6103,8 @@ def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
                         "RepoTags": [tag],
                         "Config": {
                             "Labels": {
-                                "org.opencontainers.image.revision": COMMIT,
-                                "org.opencontainers.image.source-tree": SOURCE_TREE,
+                                "org.opencontainers.image.revision": commit,
+                                "org.opencontainers.image.source-tree": source_tree,
                             }
                         },
                     }
@@ -3935,6 +6120,11 @@ def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
 
     kind_args, environment = runner.calls[-1]
     assert kind_args[:3] == ("kind", "load", "docker-image")
+    assert kind_args[3:6] == (
+        gate.evidence.app_tag,
+        gate.evidence.worker_tag,
+        gate.evidence.released_v040_image_tag,
+    )
     assert environment is not None
     assert environment["DOCKER_HOST"] == "unix:///var/run/docker.sock"
     assert environment["KIND_EXPERIMENTAL_PROVIDER"] == "docker"
@@ -4017,8 +6207,10 @@ def test_every_evidence_field_passes_through_the_token_redactor(
         "docker_host",
         "app_tag",
         "worker_tag",
+        "released_v040_image_tag",
         "app_image_id",
         "worker_image_id",
+        "released_v040_image_id",
         "setup_bundle_sha256",
         "recovery_bundle_sha256",
         "ray_restart",
@@ -4065,6 +6257,23 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.runtime_env_encryption_retry_preserved = cast(Any, token)
     evidence.runtime_env_encryption_logs_clear = cast(Any, token)
     evidence.django_ray_secret_preserved = cast(Any, token)
+    evidence.ray_job_request_reference_carrier = cast(Any, token)
+    evidence.ray_job_raw_info_clear = cast(Any, token)
+    evidence.ray_job_processes_clear = cast(Any, token)
+    evidence.ray_job_logs_clear = cast(Any, token)
+    evidence.ray_job_manager_reconciled_same_job = cast(Any, token)
+    evidence.ray_job_missing_reference_no_marker = cast(Any, token)
+    evidence.ray_job_missing_reference_no_retry = cast(Any, token)
+    evidence.protocol_legacy_cohort_visible = cast(Any, token)
+    evidence.protocol_explicit_cohort_visible = cast(Any, token)
+    evidence.protocol_v1_handoff_same_job = cast(Any, token)
+    evidence.protocol_v1_handoff_no_resubmit = cast(Any, token)
+    evidence.protocol_v1_queued_survived_handoff = cast(Any, token)
+    evidence.protocol_v2_queued_unchanged = cast(Any, token)
+    evidence.protocol_v2_unsupported_visible = cast(Any, token)
+    evidence.protocol_v2_preinvocation_rejected = cast(Any, token)
+    evidence.protocol_v2_application_marker_absent = cast(Any, token)
+    evidence.protocol_handoff_cleanup_restored = cast(Any, token)
     evidence.workflow_schema_version = cast(Any, token)
     evidence.workflow_attempt_number = cast(Any, token)
     evidence.workflow_topology_nodes = cast(Any, token)
@@ -4382,6 +6591,27 @@ def test_preflight_registers_secret_before_any_mutation_or_diagnostics(
                 return CommandResult(str(ROOT), "", 0)
             if command[:2] == ("git", "status"):
                 return CommandResult("", "", 0)
+            if command == (
+                "git",
+                "cat-file",
+                "-t",
+                f"refs/tags/{gate_module.RELEASED_V040_TAG}",
+            ):
+                return CommandResult("tag", "", 0)
+            if command == (
+                "git",
+                "rev-parse",
+                "--verify",
+                f"refs/tags/{gate_module.RELEASED_V040_TAG}^{{commit}}",
+            ):
+                return CommandResult(gate_module.RELEASED_V040_COMMIT, "", 0)
+            if command == (
+                "git",
+                "rev-parse",
+                "--verify",
+                f"{gate_module.RELEASED_V040_COMMIT}^{{tree}}",
+            ):
+                return CommandResult(gate_module.RELEASED_V040_SOURCE_TREE, "", 0)
             if command[:3] == ("git", "rev-parse", "--verify"):
                 return CommandResult(SOURCE_TREE if "tree" in command[3] else COMMIT, "", 0)
             if command == ("kubectl", "config", "current-context"):
@@ -6906,8 +9136,10 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.docker_host = "npipe:////./pipe/dockerDesktopLinuxEngine"
     gate.evidence.app_tag = APP_TAG
     gate.evidence.worker_tag = f"django-ray-worker:{TAG}"
+    gate.evidence.released_v040_image_tag = f"{gate_module.RELEASED_V040_IMAGE_REPOSITORY}:{TAG}"
     gate.evidence.app_image_id = IMAGE_ID
     gate.evidence.worker_image_id = IMAGE_ID
+    gate.evidence.released_v040_image_id = IMAGE_ID
     gate.evidence.setup_bundle_bytes = 1
     gate.evidence.setup_bundle_sha256 = "f" * 64
     gate.evidence.recovery_bundle_bytes = 2
@@ -6942,6 +9174,16 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.ray_job_manager_reconciled_same_job = True
     gate.evidence.ray_job_missing_reference_no_marker = True
     gate.evidence.ray_job_missing_reference_no_retry = True
+    gate.evidence.protocol_legacy_cohort_visible = True
+    gate.evidence.protocol_explicit_cohort_visible = True
+    gate.evidence.protocol_v1_handoff_same_job = True
+    gate.evidence.protocol_v1_handoff_no_resubmit = True
+    gate.evidence.protocol_v1_queued_survived_handoff = True
+    gate.evidence.protocol_v2_queued_unchanged = True
+    gate.evidence.protocol_v2_unsupported_visible = True
+    gate.evidence.protocol_v2_preinvocation_rejected = True
+    gate.evidence.protocol_v2_application_marker_absent = True
+    gate.evidence.protocol_handoff_cleanup_restored = True
     gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
     gate.evidence.workflow_task_state = "SUCCEEDED"
     gate.evidence.workflow_schema_version = 3
@@ -6994,8 +9236,10 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.docker_host = "unix:///" + ("local-socket-segment/" * 30)
     gate.evidence.app_tag = APP_TAG
     gate.evidence.worker_tag = f"django-ray-worker:{TAG}"
+    gate.evidence.released_v040_image_tag = f"{gate_module.RELEASED_V040_IMAGE_REPOSITORY}:{TAG}"
     gate.evidence.app_image_id = IMAGE_ID
     gate.evidence.worker_image_id = IMAGE_ID
+    gate.evidence.released_v040_image_id = IMAGE_ID
     gate.evidence.setup_bundle_bytes = 293_956
     gate.evidence.setup_bundle_sha256 = "f" * 64
     gate.evidence.recovery_bundle_bytes = 20_000_000
@@ -7031,6 +9275,16 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.ray_job_manager_reconciled_same_job = True
     gate.evidence.ray_job_missing_reference_no_marker = True
     gate.evidence.ray_job_missing_reference_no_retry = True
+    gate.evidence.protocol_legacy_cohort_visible = True
+    gate.evidence.protocol_explicit_cohort_visible = True
+    gate.evidence.protocol_v1_handoff_same_job = True
+    gate.evidence.protocol_v1_handoff_no_resubmit = True
+    gate.evidence.protocol_v1_queued_survived_handoff = True
+    gate.evidence.protocol_v2_queued_unchanged = True
+    gate.evidence.protocol_v2_unsupported_visible = True
+    gate.evidence.protocol_v2_preinvocation_rejected = True
+    gate.evidence.protocol_v2_application_marker_absent = True
+    gate.evidence.protocol_handoff_cleanup_restored = True
     gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
     gate.evidence.workflow_task_state = "SUCCEEDED"
     gate.evidence.workflow_schema_version = 3
@@ -7092,6 +9346,7 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("kubernetes_server") == gate.evidence.kubernetes_server
     assert reconstructed("docker_host") == gate.evidence.docker_host
     assert reconstructed("app_image_id") == IMAGE_ID
+    assert reconstructed("released_v040_image_id") == IMAGE_ID
     assert reconstructed("recovery_runtime_env_bytes") == "20000000"
     assert reconstructed("api_task_status_bounded") == "True"
     assert reconstructed("api_workflow_runtime_polls_bounded") == "True"
@@ -7110,6 +9365,16 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("ray_job_manager_reconciled_same_job") == "True"
     assert reconstructed("ray_job_missing_reference_no_marker") == "True"
     assert reconstructed("ray_job_missing_reference_no_retry") == "True"
+    assert reconstructed("protocol_legacy_cohort_visible") == "True"
+    assert reconstructed("protocol_explicit_cohort_visible") == "True"
+    assert reconstructed("protocol_v1_handoff_same_job") == "True"
+    assert reconstructed("protocol_v1_handoff_no_resubmit") == "True"
+    assert reconstructed("protocol_v1_queued_survived_handoff") == "True"
+    assert reconstructed("protocol_v2_queued_unchanged") == "True"
+    assert reconstructed("protocol_v2_unsupported_visible") == "True"
+    assert reconstructed("protocol_v2_preinvocation_rejected") == "True"
+    assert reconstructed("protocol_v2_application_marker_absent") == "True"
+    assert reconstructed("protocol_handoff_cleanup_restored") == "True"
     assert reconstructed("workflow_task_id") == WORKFLOW_TASK_ID
     assert reconstructed("workflow_availability") == "AVAILABLE"
     assert reconstructed("workflow_terminal_only_task_id") == TERMINAL_ONLY_WORKFLOW_TASK_ID
@@ -7128,6 +9393,17 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     ray_job_evidence = "\n".join(line for line in output if line.startswith("ray_job_"))
     assert "locator" not in ray_job_evidence
     assert re.search(r"[0-9a-f]{64}", ray_job_evidence) is None
+    protocol_evidence = "\n".join(line for line in output if line.startswith("protocol_"))
+    for forbidden in (
+        "task_id",
+        "job_id",
+        "request_ref",
+        "request_bytes",
+        "protocol_v2_application_poison_",
+        TASK_ID,
+    ):
+        assert forbidden not in protocol_evidence
+    assert re.search(r"[0-9a-f]{64}", protocol_evidence) is None
     assert all(len(line) <= EVIDENCE_LINE_LIMIT for line in output)
 
 
@@ -7309,10 +9585,12 @@ def _stub_successful_gate_layers(
         "_restart_task_managers",
         "_wait_for_application_topology",
         "_verify_deployed_images",
+        "_recover_protocol_handoff_residue",
         "_verify_generic_ray_nodes",
         "_verify_probes",
         "_verify_api",
         "_verify_ray_job_request_reference",
+        "_verify_protocol_handoff_certification",
         "_verify_runtime_env_encryption",
         "_verify_workflow_progress",
         "_verify_workflow_admin",
@@ -7321,17 +9599,49 @@ def _stub_successful_gate_layers(
         monkeypatch.setattr(gate, method_name, lambda: None)
 
 
-def test_runtime_env_encryption_runs_after_api_and_before_workflows(
+def test_protocol_recovery_runs_after_app_readiness_and_before_any_task_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
     gate = LocalKubeRayGate(_config(), output=lambda _value: None)
     _stub_successful_gate_layers(gate, monkeypatch)
+    monkeypatch.setattr(gate, "_run_setup", lambda: events.append("database-ready"))
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_application_topology",
+        lambda: events.append("app-ready"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_verify_deployed_images",
+        lambda: events.append("image-identity"),
+    )
+
+    def recover_protocol_handoff_residue() -> None:
+        events.append("recover-released-v040")
+        events.append("recover-protocol-v2")
+
+    monkeypatch.setattr(
+        gate,
+        "_recover_protocol_handoff_residue",
+        recover_protocol_handoff_residue,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_verify_generic_ray_nodes",
+        lambda: events.append("runtime-env"),
+    )
+    monkeypatch.setattr(gate, "_verify_probes", lambda: events.append("probes"))
     monkeypatch.setattr(gate, "_verify_api", lambda: events.append("api-smoke"))
     monkeypatch.setattr(
         gate,
         "_verify_ray_job_request_reference",
         lambda: events.append("ray-job-request-reference"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_verify_protocol_handoff_certification",
+        lambda: events.append("protocol-handoff"),
     )
     monkeypatch.setattr(
         gate,
@@ -7358,8 +9668,16 @@ def test_runtime_env_encryption_runs_after_api_and_before_workflows(
     gate.run()
 
     assert events == [
+        "database-ready",
+        "app-ready",
+        "image-identity",
+        "recover-released-v040",
+        "recover-protocol-v2",
+        "runtime-env",
+        "probes",
         "api-smoke",
         "ray-job-request-reference",
+        "protocol-handoff",
         "runtime-env-encryption",
         "workflow-progress",
         "workflow-admin",
@@ -7573,10 +9891,12 @@ def test_final_evidence_identity_failure_is_labeled_once_without_traceback(
         "_restart_task_managers",
         "_wait_for_application_topology",
         "_verify_deployed_images",
+        "_recover_protocol_handoff_residue",
         "_verify_generic_ray_nodes",
         "_verify_probes",
         "_verify_api",
         "_verify_ray_job_request_reference",
+        "_verify_protocol_handoff_certification",
         "_verify_runtime_env_encryption",
         "_verify_workflow_progress",
         "_verify_workflow_admin",

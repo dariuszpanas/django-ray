@@ -265,6 +265,38 @@ fencing was complete are not rollout-compatible; stop and drain them before the 
 candidate. The supported handoff is from released 0.4 legacy/schema-`0` workers, not
 between arbitrary development commits that happen to share a protocol number.
 
+The guarded local KubeRay final gate certifies that boundary with real manager code from
+both cohorts. It builds an ephemeral task-manager image from the pinned released `v0.4.0` tree,
+lets that binary acquire its legacy capability-schema-`0` lease and submit a slow
+protocol-`1` Ray Job, then stops it and requires the exact current candidate's explicit
+schema-`1`, `1..1` lease to reconcile the same persisted job ID, attempt, and generation
+without resubmission. While the released manager is occupied, a separately deferred
+protocol-`1` row must remain byte-for-byte queued through that replacement; the current
+manager then completes the same durable row through one request-reference submission. Do
+not substitute a current binary with hand-edited legacy fields: that would test stored
+metadata, not the released rolling boundary.
+
+The gate's protocol-`2` path is deliberately negative and test-only. It first stages one
+synthetic row in a terminal state outside production producers while legacy admission is
+open. After the released manager and its exact schema-`0` lease are gone, the gate
+revision-checks and closes admission, then transitions that exact row to `QUEUED`.
+Migration `0020` permits the terminal marker while open but forbids the nonterminal row
+until this close; active write protocol remains `1`. It proves the current `1..1` managers
+do not claim or mutate the queued row and requires the
+read-only status, authenticated API, and fixed-label metrics surfaces to show unsupported
+work with no compatible worker. A direct
+strict Ray Core executor request then proves rejection before application invocation, with
+its unique invocation marker absent. This does not authorize a protocol-`2` producer,
+active-write change, or live `1..2` lease. Cleanup must first return the exact fixture to a
+terminal state, reopen legacy admission with a consistent token at the next revision, delete
+that fixture, and restore the current Ray Job manager replica count before passing evidence
+is emitted. The staged row and reserved release-manager hostname permit bounded recovery of
+only exact interrupted gate residue on a later run. Foreign residue, an orphan live lease
+without its exact Deployment, or ambiguity is never deleted automatically. Recovery runs
+after current image identity is verified and before any live task is submitted, then repeats
+immediately before the handoff to close the intervening race. The monotonic policy revision
+is not rolled back; any cleanup or restoration failure invalidates the run.
+
 Do not interpret the lease's informational `queue_name` text as a durable per-queue
 capability, or its protocol range as proof that Ray is ready. Ray/Python version and
 cluster-instance attestation, normalized target capacity, and supported blue/green drain

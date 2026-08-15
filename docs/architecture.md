@@ -952,6 +952,31 @@ final 0.5 candidate; intermediate development snapshots that advertised schema `
 before this boundary landed are not a supported cohort and must be stopped and drained.
 Protocol fields deliberately do not encode Git commits or package Semantic Versions.
 
+The guarded local KubeRay gate validates that boundary with the real released and current
+manager implementations rather than synthesizing their lease metadata. A manager built
+from the pinned released `v0.4.0` tree acquires a capability-schema-`0` lease and submits a
+slow protocol-`1` Ray Job through its released transport. After that manager stops, the exact
+current candidate's explicit schema-`1`, `1..1` lease must adopt the same persisted job,
+attempt, and generation without a second submission. A separately deferred protocol-`1`
+row must also remain byte-for-byte queued across the replacement, then complete from that
+same durable row through one current request-reference submission. A separate test-only
+protocol-`2` row is first staged in a terminal state while legacy admission is open. After
+the released manager and its exact schema-`0` lease are removed, the gate revision-checks
+and closes legacy admission and moves that exact row to `QUEUED`; active write protocol
+remains `1`. The row must remain unchanged and visible as unsupported to protocol status,
+authenticated API projections, and fixed-label metrics, while a direct strict Ray Core
+executor request rejects it before application invocation and leaves its unique marker
+absent. Ray Core retains the specific unsupported-protocol classification without creating
+a gate-only Ray Job transport. No production writer or live lease advertises protocol `2`
+or `1..2`. Cleanup returns the exact fixture to a terminal state before reopening legacy
+admission, deletes it after a consistent token exists at the next monotonic revision, and
+restores current-manager scaling before passing evidence is emitted. The terminal staging
+row and reserved release-manager hostname also let a later gate run identify and recover
+only its exact interrupted residue; missing ownership, foreign residue, an orphan live lease,
+or ambiguity fails closed. That recovery runs after the current application image identity is
+pinned but before any live task submission, and repeats immediately before the handoff
+certification.
+
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
 capability. Likewise, an execution-protocol-capable lease proves only task-manager
 compatibility: it does not attest Ray connectivity, the Ray or Python version, or the

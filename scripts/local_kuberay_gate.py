@@ -34,7 +34,7 @@ from urllib.request import (
     Request,
     build_opener,
 )
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import yaml
 
@@ -72,6 +72,19 @@ RAY_JOB_RELEASED_PAYLOAD_CARRIER = "--payload-b64"
 RAY_JOB_GATE_CALLABLE = "testproject.tasks.slow_task"
 RAY_JOB_GATE_SECONDS = 90.125
 RAY_JOB_GATE_TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "STOPPED"})
+RELEASED_V040_TAG = "v0.4.0"
+RELEASED_V040_COMMIT = "95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485"
+RELEASED_V040_SOURCE_TREE = "6ce02dfe51832db6227cc886bcced62399167f8b"
+RELEASED_V040_IMAGE_REPOSITORY = "django-ray-released-v040"
+RELEASED_V040_MANAGER_DEPLOYMENT = "django-ray-worker-ray-job-v040"
+RELEASED_V040_MANAGER_CONTAINER = "django-ray-worker-v040"
+RELEASED_V040_HOSTNAME_PATTERN = re.compile(r"dr-v040-[0-9a-f]{32}\Z")
+RELEASED_V040_IMAGE_TAG_PATTERN = re.compile(
+    rf"{re.escape(RELEASED_V040_IMAGE_REPOSITORY)}:"
+    r"released-v040-local-gate-tree-[0-9a-f]{12}-[0-9]{14}-[0-9a-f]{8}\Z"
+)
+PROTOCOL_V2_POISON_PATTERN = re.compile(r"protocol_v2_application_poison_[0-9a-f]{32}\Z")
+PROTOCOL_V1_SURVIVAL_PATTERN = re.compile(r"protocol_v1_handoff_queued_[0-9a-f]{32}\Z")
 RAY_JOB_REQUEST_STORAGE_CLAIM = "payload-storage-pvc"
 RAY_JOB_REQUEST_STORAGE_VOLUME = "payload-storage"
 RAY_JOB_REQUEST_STORAGE_MOUNT_PATH = "/payload-storage"
@@ -951,6 +964,8 @@ class GateEvidence:
     worker_tag: str = ""
     app_image_id: str = ""
     worker_image_id: str = ""
+    released_v040_image_tag: str = ""
+    released_v040_image_id: str = ""
     setup_bundle_bytes: int = 0
     setup_bundle_sha256: str = ""
     recovery_bundle_bytes: int = 0
@@ -987,6 +1002,16 @@ class GateEvidence:
     ray_job_manager_reconciled_same_job: bool = False
     ray_job_missing_reference_no_marker: bool = False
     ray_job_missing_reference_no_retry: bool = False
+    protocol_legacy_cohort_visible: bool = False
+    protocol_explicit_cohort_visible: bool = False
+    protocol_v1_handoff_same_job: bool = False
+    protocol_v1_handoff_no_resubmit: bool = False
+    protocol_v1_queued_survived_handoff: bool = False
+    protocol_v2_queued_unchanged: bool = False
+    protocol_v2_unsupported_visible: bool = False
+    protocol_v2_preinvocation_rejected: bool = False
+    protocol_v2_application_marker_absent: bool = False
+    protocol_handoff_cleanup_restored: bool = False
     workflow_task_id: str = ""
     workflow_task_state: str = ""
     workflow_attempt_number: int = 0
@@ -2626,12 +2651,18 @@ def validate_execution_protocol_visibility(
     payload: Mapping[str, Any],
     *,
     surface: str,
+    expected_protocol: int = EXPECTED_EXECUTION_PROTOCOL_VERSION,
+    expected_compatible: bool = True,
 ) -> None:
     """Validate the fixed protocol and bounded provenance API projection."""
+    if type(expected_protocol) is not int or expected_protocol < 1:
+        raise ValueError("expected execution protocol must be a positive integer")
+    if type(expected_compatible) is not bool:
+        raise ValueError("expected protocol compatibility must be boolean")
     if type(payload.get("execution_protocol_version")) is not int or (
-        payload.get("execution_protocol_version") != EXPECTED_EXECUTION_PROTOCOL_VERSION
+        payload.get("execution_protocol_version") != expected_protocol
     ):
-        raise ValueError(f"{surface} did not report execution protocol version 1")
+        raise ValueError(f"{surface} did not report execution protocol version {expected_protocol}")
 
     state = payload.get("state")
     required_provenance = {
@@ -2654,13 +2685,14 @@ def validate_execution_protocol_visibility(
         if len(encoded) > EXPECTED_EXECUTION_PROVENANCE_MAX_BYTES:
             raise ValueError(f"{surface} returned unbounded package provenance")
 
-    if payload.get("protocol_compatible_worker_available") is not True:
-        raise ValueError(f"{surface} has no protocol-compatible worker capacity")
+    if payload.get("protocol_compatible_worker_available") is not expected_compatible:
+        expectation = "has no" if expected_compatible else "unexpectedly has"
+        raise ValueError(f"{surface} {expectation} protocol-compatible worker capacity")
     if payload.get("queue_capacity_attested") is not False:
         raise ValueError(f"{surface} unexpectedly attested queue-specific capacity")
 
 
-def validate_execution_protocol_metrics(body: bytes) -> None:
+def validate_execution_protocol_metrics(body: bytes) -> dict[tuple[str, str], int]:
     """Require the complete fixed-bucket execution-protocol metric family."""
     try:
         text = body.decode("utf-8")
@@ -2676,22 +2708,48 @@ def validate_execution_protocol_metrics(body: bytes) -> None:
     if lines.count(help_line) != 1 or lines.count(type_line) != 1:
         raise ValueError("authenticated metrics omitted the bounded protocol metric family")
 
-    samples: list[tuple[str, str]] = []
+    samples: dict[tuple[str, str], int] = {}
     for line in lines:
         if not line.startswith(EXPECTED_EXECUTION_PROTOCOL_METRIC):
             continue
         match = EXECUTION_PROTOCOL_METRIC_SAMPLE_PATTERN.fullmatch(line)
         if match is None:
             raise ValueError("authenticated metrics changed the protocol metric label contract")
-        samples.append((match.group(1), match.group(2)))
+        key = (match.group(1), match.group(2))
+        if key in samples:
+            raise ValueError("authenticated metrics duplicated a protocol metric bucket")
+        samples[key] = int(line.rsplit(" ", 1)[1])
 
     expected = {
         (protocol, state)
         for protocol in EXPECTED_EXECUTION_PROTOCOL_METRIC_PROTOCOLS
         for state in EXPECTED_EXECUTION_PROTOCOL_METRIC_STATES
     }
-    if len(samples) != len(expected) or set(samples) != expected:
+    if set(samples) != expected:
         raise ValueError("authenticated metrics returned incomplete protocol metric buckets")
+    return samples
+
+
+def validate_protocol_v2_rejection(payload: Mapping[str, Any]) -> None:
+    """Validate the fixed pre-invocation result of the protocol-v2 probe."""
+
+    expected = {
+        "classification": "unsupported_protocol",
+        "success": False,
+        "retryable": False,
+        "traceback_absent": True,
+        "result_absent": True,
+        "result_reference_absent": True,
+        "exception_type": "RayExecutionRequestIncompatible",
+        "transport_version": 1,
+        "input_reference_absent": True,
+        "application_marker_present": False,
+    }
+    if set(payload) != set(expected) or any(
+        type(payload.get(field_name)) is not type(value) or payload.get(field_name) != value
+        for field_name, value in expected.items()
+    ):
+        raise ValueError("protocol-v2 probe did not return the fixed pre-invocation rejection")
 
 
 def validate_bounded_poll_projection(
@@ -2818,6 +2876,7 @@ class LocalKubeRayGate:
         self.rendered = ""
         self.temp_root: Path | None = None
         self.source_context: Path | None = None
+        self.released_v040_source_context: Path | None = None
         self.kubeconfig_path: Path | None = None
         self._kubeconfig_digest: str | None = None
         self._kubernetes_server: str | None = None
@@ -2842,6 +2901,11 @@ class LocalKubeRayGate:
         self.rendered_ray_topology: RayTopology | None = None
         self.setup_pod_images: PodImageContract | None = None
         self.deployment_contracts: dict[str, DeploymentContract] = {}
+        self._released_v040_worker_id: str | None = None
+        self._released_v040_hostname: str | None = None
+        self._protocol_v1_survival_fixture: Mapping[str, Any] | None = None
+        self._protocol_v2_fixture: Mapping[str, Any] | None = None
+        self._protocol_handoff_initial_revision: int | None = None
         self.expected_ray_head_count = 0
         self.expected_ray_worker_count = 0
         self.http_opener = build_local_http_opener()
@@ -3064,6 +3128,30 @@ class LocalKubeRayGate:
         if status.strip():
             raise ValueError("the checkout changed after the gate captured its immutable source")
 
+    def _verify_released_v040_source_identity(self) -> None:
+        """Pin the annotated v0.4.0 release tag to its reviewed commit and tree."""
+
+        tag_ref = f"refs/tags/{RELEASED_V040_TAG}"
+        object_type = self.runner.run(
+            ["git", "cat-file", "-t", tag_ref], cwd=self.config.root
+        ).stdout.strip()
+        if object_type != "tag":
+            raise ValueError(f"{RELEASED_V040_TAG} must resolve through an annotated tag object")
+        commit = self.runner.run(
+            ["git", "rev-parse", "--verify", f"{tag_ref}^{{commit}}"],
+            cwd=self.config.root,
+        ).stdout.strip()
+        if commit != RELEASED_V040_COMMIT:
+            raise ValueError(f"{RELEASED_V040_TAG} no longer resolves to the pinned release commit")
+        source_tree = self.runner.run(
+            ["git", "rev-parse", "--verify", f"{commit}^{{tree}}"],
+            cwd=self.config.root,
+        ).stdout.strip()
+        if source_tree != RELEASED_V040_SOURCE_TREE:
+            raise ValueError(
+                "the pinned v0.4.0 commit no longer resolves to its reviewed source tree"
+            )
+
     def run(self) -> None:
         """Run preflight and, unless requested otherwise, every integration layer."""
         temporary: tempfile.TemporaryDirectory[str] | None = None
@@ -3101,12 +3189,20 @@ class LocalKubeRayGate:
                         self._wait_for_application_topology,
                     )
                     self._layer("image-identity", self._verify_deployed_images)
+                    self._layer(
+                        "protocol-handoff-recovery",
+                        self._recover_protocol_handoff_residue,
+                    )
                     self._layer("runtime-env", self._verify_generic_ray_nodes)
                     self._layer("probes", self._verify_probes)
                     self._layer("api-smoke", self._verify_api)
                     self._layer(
                         "ray-job-request-reference",
                         self._verify_ray_job_request_reference,
+                    )
+                    self._layer(
+                        "protocol-handoff",
+                        self._verify_protocol_handoff_certification,
                     )
                     self._layer(
                         "runtime-env-encryption",
@@ -3246,6 +3342,10 @@ class LocalKubeRayGate:
         self.evidence.source_tree = source_tree
         self.evidence.app_tag = f"{APP_IMAGE_REPOSITORY}:{tag}"
         self.evidence.worker_tag = f"{LEGACY_WORKER_IMAGE_REPOSITORY}:{tag}"
+        self.evidence.released_v040_image_tag = (
+            f"{RELEASED_V040_IMAGE_REPOSITORY}:released-v040-{tag}"
+        )
+        self._verify_released_v040_source_identity()
 
         current = self.runner.run(
             ["kubectl", "config", "current-context"],
@@ -3312,6 +3412,15 @@ class LocalKubeRayGate:
             temporary_root=self.temp_root,
             commit=commit,
             source_tree=source_tree,
+        )
+        released_root = self.temp_root / "released-v040"
+        released_root.mkdir()
+        self.released_v040_source_context = create_source_build_context(
+            runner=self.runner,
+            root=self.config.root,
+            temporary_root=released_root,
+            commit=RELEASED_V040_COMMIT,
+            source_tree=RELEASED_V040_SOURCE_TREE,
         )
         overlay = configure_overlay_copy(
             source_k8s=self.source_context / "k8s",
@@ -3395,6 +3504,33 @@ class LocalKubeRayGate:
                 )
         self._verify_source_identity()
 
+    def _build_released_v040_image(self) -> None:
+        """Build the exact released v0.4.0 application image from its pinned archive."""
+
+        if self.released_v040_source_context is None:
+            raise ValueError("released v0.4.0 source archive has not been initialized")
+        self._verify_released_v040_source_identity()
+        command = [
+            "docker",
+            "build",
+            "--tag",
+            self.evidence.released_v040_image_tag,
+            "--label",
+            f"org.opencontainers.image.revision={RELEASED_V040_COMMIT}",
+            "--label",
+            f"org.opencontainers.image.source-tree={RELEASED_V040_SOURCE_TREE}",
+            "--file",
+            str(self.released_v040_source_context / "Dockerfile"),
+            str(self.released_v040_source_context),
+        ]
+        self._docker(*command[1:], timeout=self.config.build_timeout)
+        self.evidence.released_v040_image_id = parse_docker_image_inspect(
+            self._docker("image", "inspect", self.evidence.released_v040_image_tag).stdout,
+            expected_tag=self.evidence.released_v040_image_tag,
+            commit=RELEASED_V040_COMMIT,
+            source_tree=RELEASED_V040_SOURCE_TREE,
+        )
+
     def _build_images(self) -> None:
         if self.source_context is None:
             raise ValueError("immutable source archive has not been initialized")
@@ -3427,6 +3563,7 @@ class LocalKubeRayGate:
             commit=self.evidence.commit,
             source_tree=self.evidence.source_tree,
         )
+        self._build_released_v040_image()
         if self.config.context.startswith("kind-"):
             cluster_name = self.config.kind_cluster_name or self.config.context.removeprefix(
                 "kind-"
@@ -3446,6 +3583,7 @@ class LocalKubeRayGate:
                     "docker-image",
                     self.evidence.app_tag,
                     self.evidence.worker_tag,
+                    self.evidence.released_v040_image_tag,
                     "--name",
                     cluster_name,
                 ],
@@ -5357,6 +5495,2498 @@ else:
             f"--timeout={self.config.rollout_timeout}s",
             timeout=self._rollout_command_timeout(),
         )
+
+    def _ray_job_manager_replica_observation(self) -> Mapping[str, Any]:
+        """Return the exact current Ray Job manager replica counts."""
+
+        deployment = self._json_command(
+            self._kubectl("get", "deployment", RAY_JOB_MANAGER_DEPLOYMENT, "-o", "json"),
+            field_name=f"Deployment/{RAY_JOB_MANAGER_DEPLOYMENT}",
+        )
+        spec = _mapping(deployment.get("spec"), field_name="Ray Job manager spec")
+        status = _mapping(deployment.get("status"), field_name="Ray Job manager status")
+        replicas = spec.get("replicas", 1)
+        ready_replicas = status.get("readyReplicas", 0)
+        if (
+            type(replicas) is not int
+            or replicas not in {0, 1}
+            or type(ready_replicas) is not int
+            or ready_replicas not in {0, 1}
+            or ready_replicas > replicas
+        ):
+            raise ValueError("Ray Job manager returned invalid replica counts")
+        return {"replicas": replicas, "ready_replicas": ready_replicas}
+
+    def _wait_for_protocol_cohorts(self) -> Mapping[str, Any]:
+        """Wait for one genuine released cohort beside current explicit readers."""
+
+        deadline = time.monotonic() + self.config.task_timeout
+        while True:
+            observation = self._observe_protocol_cohorts()
+            report = _mapping(
+                observation.get("report"),
+                field_name="protocol cohort report",
+            )
+            policy = _mapping(report.get("policy"), field_name="protocol cohort policy")
+            policy_active_write = policy.get("active_write_protocol_version")
+            capabilities = _mapping(
+                report.get("capabilities"),
+                field_name="protocol cohort capabilities",
+            )
+            groups = [
+                dict(_mapping(value, field_name="protocol capability group"))
+                for value in _sequence(
+                    capabilities.get("groups"),
+                    field_name="protocol capability groups",
+                )
+            ]
+            legacy_groups = [
+                group
+                for group in groups
+                if group.get("kind") == "legacy"
+                and type(group.get("minimum")) is int
+                and group.get("minimum") == 1
+                and type(group.get("maximum")) is int
+                and group.get("maximum") == 1
+                and type(group.get("heartbeat_live_leases")) is int
+                and group.get("heartbeat_live_leases") == 1
+            ]
+            explicit_groups = [
+                group
+                for group in groups
+                if group.get("kind") == "explicit"
+                and type(group.get("minimum")) is int
+                and group.get("minimum") == 1
+                and type(group.get("maximum")) is int
+                and group.get("maximum") == 1
+                and type(group.get("heartbeat_live_leases")) is int
+                and group.get("heartbeat_live_leases", 0) >= 1
+            ]
+            worker_ids = observation.get("legacy_worker_ids")
+            legacy_worker_count = observation.get("legacy_worker_count")
+            omitted_groups = capabilities.get("omitted_groups")
+            omitted_leases = capabilities.get("omitted_leases")
+            ready = (
+                policy.get("legacy_worker_admission_enabled") is True
+                and policy.get("legacy_admission_token_present") is True
+                and type(policy_active_write) is int
+                and policy_active_write == 1
+                and type(legacy_worker_count) is int
+                and legacy_worker_count == 1
+                and isinstance(worker_ids, list)
+                and len(worker_ids) == 1
+                and len(legacy_groups) == 1
+                and len(explicit_groups) == 1
+                and type(omitted_groups) is int
+                and omitted_groups == 0
+                and type(omitted_leases) is int
+                and omitted_leases == 0
+            )
+            if ready:
+                worker_id = self._canonical_uuid4(
+                    worker_ids[0],
+                    field_name="released v0.4.0 worker id",
+                )
+                self._released_v040_worker_id = worker_id
+                self._register_ray_job_gate_value(worker_id)
+                self.evidence.protocol_legacy_cohort_visible = True
+                self.evidence.protocol_explicit_cohort_visible = True
+                return observation
+            if type(legacy_worker_count) is not int or legacy_worker_count not in {0, 1}:
+                raise ValueError("unexpected live legacy worker cohort appeared")
+            if time.monotonic() >= deadline:
+                raise ValueError("released and current protocol cohorts did not become visible")
+            time.sleep(2)
+
+    @staticmethod
+    def _released_v040_manager_labels() -> dict[str, str]:
+        """Return the reserved selector shared only by the transient manager."""
+
+        return {
+            "app": "django-ray",
+            "component": "worker",
+            "queues": RAY_JOB_GATE_QUEUE,
+            "runner": "ray-job-v040",
+        }
+
+    def _released_v040_manager_manifest(
+        self,
+        *,
+        image_tag: str | None = None,
+        hostname: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the one gate-owned legacy Ray Job manager Deployment."""
+
+        selected_image_tag = image_tag or self.evidence.released_v040_image_tag
+        if not selected_image_tag:
+            raise ValueError("released v0.4.0 image tag was not captured")
+        selected_hostname = hostname
+        if selected_hostname is None and self._released_v040_hostname is None:
+            self._released_v040_hostname = f"dr-v040-{uuid4().hex}"
+            self._register_ray_job_gate_value(self._released_v040_hostname)
+        if selected_hostname is None:
+            selected_hostname = self._released_v040_hostname
+        if (
+            not isinstance(selected_hostname, str)
+            or RELEASED_V040_HOSTNAME_PATTERN.fullmatch(selected_hostname) is None
+        ):
+            raise ValueError("released v0.4.0 gate hostname is invalid")
+        labels = self._released_v040_manager_labels()
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": RELEASED_V040_MANAGER_DEPLOYMENT,
+                "namespace": self.config.namespace,
+                "labels": labels,
+            },
+            "spec": {
+                "replicas": 1,
+                "selector": {"matchLabels": labels},
+                "template": {
+                    "metadata": {"labels": labels},
+                    "spec": {
+                        "hostname": selected_hostname,
+                        "initContainers": [
+                            {
+                                "name": "wait-for-postgres",
+                                "image": "busybox:1.36",
+                                "command": [
+                                    "sh",
+                                    "-c",
+                                    "until nc -z postgres-svc 5432; do sleep 2; done;",
+                                ],
+                            },
+                            {
+                                "name": "wait-for-ray-jobs",
+                                "image": "busybox:1.36",
+                                "command": [
+                                    "sh",
+                                    "-c",
+                                    "until nc -z ray-head-svc 8265; do sleep 2; done;",
+                                ],
+                            },
+                            {
+                                "name": "wait-for-runtime-env",
+                                "image": "busybox:1.36",
+                                "command": [
+                                    "sh",
+                                    "-c",
+                                    f"until test -f {RUNTIME_ENV_ARCHIVE}; do sleep 2; done;",
+                                ],
+                                "volumeMounts": [
+                                    {
+                                        "name": "runtime-env",
+                                        "mountPath": "/runtime-env",
+                                        "readOnly": True,
+                                    }
+                                ],
+                            },
+                        ],
+                        "containers": [
+                            {
+                                "name": RELEASED_V040_MANAGER_CONTAINER,
+                                "image": selected_image_tag,
+                                "imagePullPolicy": "IfNotPresent",
+                                "command": [
+                                    "python",
+                                    "testproject/manage.py",
+                                    "django_ray_worker",
+                                ],
+                                "args": [
+                                    "--queue",
+                                    RAY_JOB_GATE_QUEUE,
+                                    "--concurrency",
+                                    "1",
+                                ],
+                                "envFrom": [
+                                    {"configMapRef": {"name": "django-ray-config"}},
+                                    {"secretRef": {"name": "django-ray-secret"}},
+                                ],
+                                "env": [
+                                    {
+                                        "name": "RAY_ADDRESS",
+                                        "value": "ray://ray-head-svc:10001",
+                                    },
+                                    *(
+                                        {"name": name, "value": value}
+                                        for name, value in RUNTIME_ENV_ENCRYPTION_ENV.items()
+                                    ),
+                                ],
+                                "resources": {
+                                    "requests": {"memory": "256Mi", "cpu": "100m"},
+                                    "limits": {"memory": "512Mi", "cpu": "500m"},
+                                },
+                                "volumeMounts": [
+                                    {
+                                        "name": "runtime-env",
+                                        "mountPath": "/runtime-env",
+                                        "readOnly": True,
+                                    },
+                                    {
+                                        "name": RAY_JOB_REQUEST_STORAGE_VOLUME,
+                                        "mountPath": RAY_JOB_REQUEST_STORAGE_MOUNT_PATH,
+                                    },
+                                ],
+                                "readinessProbe": {
+                                    "exec": {
+                                        "command": [
+                                            "/bin/sh",
+                                            "-c",
+                                            "test -d /proc/1 && grep -q python /proc/1/cmdline",
+                                        ]
+                                    },
+                                    "initialDelaySeconds": 30,
+                                    "periodSeconds": 10,
+                                    "timeoutSeconds": 5,
+                                    "successThreshold": 1,
+                                    "failureThreshold": 6,
+                                },
+                                "livenessProbe": {
+                                    "exec": {
+                                        "command": [
+                                            "/bin/sh",
+                                            "-c",
+                                            "test -d /proc/1 && grep -q python /proc/1/cmdline",
+                                        ]
+                                    },
+                                    "initialDelaySeconds": 30,
+                                    "periodSeconds": 15,
+                                    "timeoutSeconds": 5,
+                                    "successThreshold": 1,
+                                    "failureThreshold": 3,
+                                },
+                            }
+                        ],
+                        "volumes": [
+                            {
+                                "name": "runtime-env",
+                                "persistentVolumeClaim": {"claimName": "runtime-env-pvc"},
+                            },
+                            {
+                                "name": RAY_JOB_REQUEST_STORAGE_VOLUME,
+                                "persistentVolumeClaim": {
+                                    "claimName": RAY_JOB_REQUEST_STORAGE_CLAIM
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        }
+
+    def _apply_released_v040_manager(self) -> None:
+        """Create and verify the exact released legacy manager as a transient cohort."""
+
+        if self.temp_root is None:
+            raise ValueError("temporary workspace is unavailable")
+        if not self.evidence.released_v040_image_id:
+            raise ValueError("released v0.4.0 image identity was not verified")
+        manifest = self._released_v040_manager_manifest()
+        path = self.temp_root / "released-v040-manager.yaml"
+        path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8", newline="\n")
+        self._kubectl("create", "-f", str(path))
+        self._kubectl(
+            "rollout",
+            "status",
+            f"deployment/{RELEASED_V040_MANAGER_DEPLOYMENT}",
+            f"--timeout={self.config.rollout_timeout}s",
+            timeout=self._rollout_command_timeout(),
+        )
+        deployment = self._json_command(
+            self._kubectl("get", "deployment", RELEASED_V040_MANAGER_DEPLOYMENT, "-o", "json"),
+            field_name=f"Deployment/{RELEASED_V040_MANAGER_DEPLOYMENT}",
+        )
+        if _resource_identity(deployment) != (
+            "apps/v1",
+            "Deployment",
+            RELEASED_V040_MANAGER_DEPLOYMENT,
+        ):
+            raise ValueError("released v0.4.0 manager creation returned the wrong Deployment")
+        spec = _mapping(deployment.get("spec"), field_name="released v0.4.0 Deployment spec")
+        status = _mapping(deployment.get("status"), field_name="released v0.4.0 Deployment status")
+        if spec.get("replicas") != 1 or status.get("readyReplicas") != 1:
+            raise ValueError("released v0.4.0 manager did not converge to exactly one replica")
+        rendered_spec = _pod_spec(manifest)
+        live_spec = _pod_spec(deployment)
+        if rendered_spec is None or live_spec is None:
+            raise ValueError("released v0.4.0 manager has no pod template")
+        expected_contract = pod_image_contract(rendered_spec)
+        if pod_image_contract(live_spec) != expected_contract:
+            raise ValueError("released v0.4.0 manager image contract changed during creation")
+        selector = self._selector(deployment)
+        pods_payload = self._json_command(
+            self._kubectl("get", "pods", "-l", selector, "-o", "json"),
+            field_name="released v0.4.0 manager pod list",
+        )
+        pods = _sequence(pods_payload.get("items"), field_name="released v0.4.0 manager pods")
+        if len(pods) != 1:
+            raise ValueError("released v0.4.0 manager must own exactly one pod")
+        pod = _mapping(pods[0], field_name="released v0.4.0 manager pod")
+        inspect_pod_runtime_identity(
+            pod,
+            namespace=self.config.namespace,
+            expected_contract=expected_contract,
+            expected_source_tag=self.evidence.released_v040_image_tag,
+            expected_source_id=self.evidence.released_v040_image_id,
+            require_ready=True,
+        )
+
+    def _delete_released_v040_manager(self) -> None:
+        """Delete only the transient released manager Deployment and verify absence."""
+
+        existing_result = self._kubectl(
+            "get",
+            "deployment",
+            RELEASED_V040_MANAGER_DEPLOYMENT,
+            "--ignore-not-found",
+            "-o",
+            "json",
+        )
+        if existing_result.stdout.strip():
+            deployment = self._json_command(
+                existing_result,
+                field_name="released v0.4.0 pre-delete Deployment",
+            )
+            retained_hostname = self._released_v040_hostname
+            observed_hostname = self._validate_released_v040_recovery_deployment(deployment)
+            if retained_hostname is not None and observed_hostname != retained_hostname:
+                self._released_v040_hostname = retained_hostname
+                raise ValueError("released v0.4.0 pre-delete Deployment hostname changed ownership")
+            self._kubectl(
+                "delete",
+                "deployment",
+                RELEASED_V040_MANAGER_DEPLOYMENT,
+                "--ignore-not-found=true",
+                "--wait=true",
+                f"--timeout={self.config.rollout_timeout}s",
+                timeout=self._rollout_command_timeout(),
+            )
+        remaining = self._kubectl(
+            "get",
+            "deployment",
+            RELEASED_V040_MANAGER_DEPLOYMENT,
+            "--ignore-not-found",
+            "-o",
+            "name",
+        ).stdout.strip()
+        if remaining:
+            raise ValueError("released v0.4.0 manager Deployment remained after deletion")
+        selector = ",".join(
+            f"{key}={value}" for key, value in self._released_v040_manager_labels().items()
+        )
+        deadline = time.monotonic() + self.config.rollout_timeout
+        while True:
+            payload = self._json_command(
+                self._kubectl(
+                    "get",
+                    "pods,replicasets",
+                    "-l",
+                    selector,
+                    "-o",
+                    "json",
+                ),
+                field_name="released v0.4.0 residual resources",
+            )
+            items = _sequence(
+                payload.get("items"),
+                field_name="released v0.4.0 residual resources",
+            )
+            if len(items) > MAX_APPLICATION_PODS + MAX_APPLICATION_REPLICASETS:
+                raise ValueError("released v0.4.0 residual resource list was unbounded")
+            if not items:
+                break
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "released v0.4.0 manager pods or ReplicaSets remained after deletion"
+                )
+            time.sleep(2)
+
+    def _observe_protocol_cohorts(self) -> Mapping[str, Any]:
+        """Read one bounded status report plus private live legacy lease identity."""
+
+        script = """
+import json
+
+from django_ray.models import TaskWorkerLease
+from django_ray.protocol_status import build_protocol_status, protocol_status_to_dict
+from django_ray.runner.leasing import get_lease_duration
+from django.utils import timezone
+
+report = protocol_status_to_dict(build_protocol_status())
+cutoff = timezone.now() - get_lease_duration()
+legacy_leases = TaskWorkerLease.objects.filter(
+    capability_schema_version=0,
+    is_active=True,
+    last_heartbeat_at__gte=cutoff,
+).order_by("worker_id")
+legacy_worker_count = legacy_leases.count()
+legacy_worker_ids = list(legacy_leases.values_list("worker_id", flat=True)[:2])
+print(json.dumps({
+    "report": report,
+    "legacy_worker_count": legacy_worker_count,
+    "legacy_worker_ids": legacy_worker_ids,
+}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        return self._sensitive_django_shell(script, field_name="protocol cohort observation")
+
+    def _enqueue_released_v040_handoff_task(self) -> str:
+        """Enqueue one marker-free protocol-v1 task for the released manager."""
+
+        return self._enqueue_ray_job_gate_task()
+
+    def _enqueue_protocol_v1_survival_task(self) -> Mapping[str, Any]:
+        """Enqueue one deferred protocol-v1 row while the released manager is busy."""
+
+        marker = "protocol_v1_handoff_queued_" + uuid4().hex
+        self._register_ray_job_gate_value(marker)
+        delay_seconds = float(self.config.task_timeout * 2)
+        script = f"""
+import hashlib
+import json
+from datetime import timedelta
+
+from django.core.serializers.json import DjangoJSONEncoder
+from django.utils import timezone
+
+from django_ray.models import RayTaskExecution, TaskState
+from testproject.tasks import echo_task
+
+
+def row_sha256(row):
+    fields = sorted(field.attname for field in row._meta.concrete_fields)
+    payload = {{name: getattr(row, name) for name in fields}}
+    canonical = json.dumps(
+        payload,
+        cls=DjangoJSONEncoder,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+marker = {marker!r}
+run_after = timezone.now() + timedelta(seconds={delay_seconds!r})
+result = echo_task.using(
+    backend={RAY_JOB_GATE_QUEUE!r},
+    queue_name={RAY_JOB_GATE_QUEUE!r},
+    run_after=run_after,
+).enqueue(marker)
+row = RayTaskExecution.objects.get(task_id=result.id)
+if row.state != TaskState.QUEUED:
+    raise RuntimeError("deferred protocol-v1 survival task was not queued")
+print(json.dumps({{
+    "pk": row.pk,
+    "task_id": row.task_id,
+    "marker": marker,
+    "row_sha256": row_sha256(row),
+    "state": str(row.state),
+    "execution_protocol_version": row.execution_protocol_version,
+    "queue_name": row.queue_name,
+    "attempt_number": row.attempt_number,
+    "execution_generation": row.execution_generation,
+    "run_after": row.run_after.isoformat() if row.run_after is not None else None,
+    "claimed_by_worker": row.claimed_by_worker,
+    "ray_job_id": row.ray_job_id,
+    "ray_job_request_reference": row.ray_job_request_reference,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        fixture = self._sensitive_django_shell(
+            script,
+            field_name="protocol-v1 deferred survival enqueue",
+        )
+        task_id = self._canonical_uuid4(
+            fixture.get("task_id"),
+            field_name="protocol-v1 survival task id",
+        )
+        run_after = fixture.get("run_after")
+        try:
+            run_after_value = datetime.fromisoformat(str(run_after))
+        except ValueError as error:
+            raise ValueError("protocol-v1 survival run-after timestamp is invalid") from error
+        row_sha256 = fixture.get("row_sha256")
+        pk = fixture.get("pk")
+        if (
+            type(pk) is not int
+            or pk < 1
+            or fixture.get("marker") != marker
+            or not isinstance(row_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", row_sha256) is None
+            or fixture.get("state") != "QUEUED"
+            or type(fixture.get("execution_protocol_version")) is not int
+            or fixture.get("execution_protocol_version") != 1
+            or fixture.get("queue_name") != RAY_JOB_GATE_QUEUE
+            or type(fixture.get("attempt_number")) is not int
+            or fixture.get("attempt_number") != 1
+            or type(fixture.get("execution_generation")) is not int
+            or fixture.get("execution_generation") != 0
+            or run_after_value.tzinfo is None
+            or fixture.get("claimed_by_worker") is not None
+            or fixture.get("ray_job_id") is not None
+            or fixture.get("ray_job_request_reference") is not None
+        ):
+            raise ValueError("protocol-v1 survival task did not retain its queued identity")
+        self._register_ray_job_gate_value(task_id)
+        confirmed = dict(fixture)
+        self._protocol_v1_survival_fixture = confirmed
+        return confirmed
+
+    def _observe_protocol_v1_survival_task(
+        self,
+        fixture: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Observe the exact deferred protocol-v1 row without claiming it."""
+
+        task_id = self._canonical_uuid4(
+            fixture.get("task_id"),
+            field_name="protocol-v1 survival observation task id",
+        )
+        pk = fixture.get("pk")
+        marker = fixture.get("marker")
+        if (
+            type(pk) is not int
+            or pk < 1
+            or not isinstance(marker, str)
+            or PROTOCOL_V1_SURVIVAL_PATTERN.fullmatch(marker) is None
+        ):
+            raise ValueError("protocol-v1 survival observation identity is invalid")
+        script = f"""
+import hashlib
+import json
+
+from django.core.serializers.json import DjangoJSONEncoder
+
+from django_ray.models import RayTaskExecution
+
+
+def row_sha256(row):
+    fields = sorted(field.attname for field in row._meta.concrete_fields)
+    payload = {{name: getattr(row, name) for name in fields}}
+    canonical = json.dumps(
+        payload,
+        cls=DjangoJSONEncoder,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+row = RayTaskExecution.objects.get(pk={pk!r}, task_id={task_id!r})
+print(json.dumps({{
+    "pk": row.pk,
+    "task_id": row.task_id,
+    "row_sha256": row_sha256(row),
+    "state": str(row.state),
+    "execution_protocol_version": row.execution_protocol_version,
+    "queue_name": row.queue_name,
+    "callable_path": row.callable_path,
+    "args_json": row.args_json,
+    "kwargs_json": row.kwargs_json,
+    "attempt_number": row.attempt_number,
+    "execution_generation": row.execution_generation,
+    "run_after": row.run_after.isoformat() if row.run_after is not None else None,
+    "claimed_by_worker": row.claimed_by_worker,
+    "ray_job_id": row.ray_job_id,
+    "ray_address": row.ray_address,
+    "ray_job_request_reference": row.ray_job_request_reference,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        return self._sensitive_django_shell(
+            script,
+            field_name="protocol-v1 deferred survival observation",
+        )
+
+    def _require_protocol_v1_survival_unchanged(
+        self,
+        fixture: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Require the deferred v1 row to remain byte-for-byte queued."""
+
+        observation = self._observe_protocol_v1_survival_task(fixture)
+        if (
+            observation.get("pk") != fixture.get("pk")
+            or observation.get("task_id") != fixture.get("task_id")
+            or observation.get("row_sha256") != fixture.get("row_sha256")
+            or observation.get("state") != "QUEUED"
+            or type(observation.get("execution_protocol_version")) is not int
+            or observation.get("execution_protocol_version") != 1
+            or observation.get("queue_name") != RAY_JOB_GATE_QUEUE
+            or observation.get("callable_path") != "testproject.tasks.echo_task"
+            or observation.get("args_json")
+            != json.dumps([fixture.get("marker")], separators=(",", ":"))
+            or observation.get("kwargs_json") != "{}"
+            or type(observation.get("attempt_number")) is not int
+            or observation.get("attempt_number") != 1
+            or type(observation.get("execution_generation")) is not int
+            or observation.get("execution_generation") != 0
+            or observation.get("run_after") != fixture.get("run_after")
+            or observation.get("claimed_by_worker") is not None
+            or observation.get("ray_job_id") is not None
+            or observation.get("ray_address") is not None
+            or observation.get("ray_job_request_reference") is not None
+        ):
+            raise ValueError("protocol-v1 deferred row changed during manager handoff")
+        return observation
+
+    def _release_protocol_v1_survival_task(
+        self,
+        fixture: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Make the exact survived v1 row eligible after current-manager adoption."""
+
+        task_id = self._canonical_uuid4(
+            fixture.get("task_id"),
+            field_name="protocol-v1 survival release task id",
+        )
+        pk = fixture.get("pk")
+        marker = fixture.get("marker")
+        run_after = fixture.get("run_after")
+        if (
+            type(pk) is not int
+            or pk < 1
+            or not isinstance(marker, str)
+            or PROTOCOL_V1_SURVIVAL_PATTERN.fullmatch(marker) is None
+            or not isinstance(run_after, str)
+        ):
+            raise ValueError("protocol-v1 survival release identity is invalid")
+        script = f"""
+import json
+from datetime import datetime
+
+from django.utils import timezone
+
+from django_ray.models import RayTaskExecution, TaskState
+
+marker = {marker!r}
+previous_run_after = datetime.fromisoformat({run_after!r})
+queryset = RayTaskExecution.objects.filter(
+    pk={pk!r},
+    task_id={task_id!r},
+    state=TaskState.QUEUED,
+    execution_protocol_version=1,
+    queue_name={RAY_JOB_GATE_QUEUE!r},
+    callable_path="testproject.tasks.echo_task",
+    args_json=json.dumps([marker], separators=(",", ":")),
+    kwargs_json="{{}}",
+    attempt_number=1,
+    execution_generation=0,
+    run_after=previous_run_after,
+    claimed_by_worker__isnull=True,
+    ray_job_id__isnull=True,
+    ray_address__isnull=True,
+    ray_job_request_reference__isnull=True,
+)
+matched = queryset.count()
+released_at = timezone.now()
+updated = queryset.update(run_after=released_at)
+row = RayTaskExecution.objects.get(pk={pk!r}, task_id={task_id!r})
+print(json.dumps({{
+    "matched": matched,
+    "updated": updated,
+    "pk": row.pk,
+    "task_id": row.task_id,
+    "state": str(row.state),
+    "attempt_number": row.attempt_number,
+    "execution_generation": row.execution_generation,
+    "released_at": released_at.isoformat(),
+    "run_after": row.run_after.isoformat() if row.run_after is not None else None,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        result = self._sensitive_django_shell(
+            script,
+            field_name="protocol-v1 deferred survival release",
+        )
+        if (
+            type(result.get("matched")) is not int
+            or result.get("matched") != 1
+            or type(result.get("updated")) is not int
+            or result.get("updated") != 1
+            or result.get("pk") != pk
+            or result.get("task_id") != task_id
+            or result.get("state") != "QUEUED"
+            or type(result.get("attempt_number")) is not int
+            or result.get("attempt_number") != 1
+            or type(result.get("execution_generation")) is not int
+            or result.get("execution_generation") != 0
+            or result.get("run_after") != result.get("released_at")
+        ):
+            raise ValueError("protocol-v1 survived row was not released exactly once")
+        return result
+
+    def _cleanup_protocol_v1_survival_task(
+        self,
+        fixture: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Delete only an exact, still-unclaimed deferred v1 failure fixture."""
+
+        task_id = self._canonical_uuid4(
+            fixture.get("task_id"),
+            field_name="protocol-v1 survival cleanup task id",
+        )
+        pk = fixture.get("pk")
+        marker = fixture.get("marker")
+        if (
+            type(pk) is not int
+            or pk < 1
+            or not isinstance(marker, str)
+            or PROTOCOL_V1_SURVIVAL_PATTERN.fullmatch(marker) is None
+        ):
+            raise ValueError("protocol-v1 survival cleanup identity is invalid")
+        script = f"""
+import json
+
+from django_ray.models import RayTaskExecution, TaskState
+
+marker = {marker!r}
+owned = RayTaskExecution.objects.filter(
+    pk={pk!r},
+    task_id={task_id!r},
+    execution_protocol_version=1,
+    queue_name={RAY_JOB_GATE_QUEUE!r},
+    callable_path="testproject.tasks.echo_task",
+    args_json=json.dumps([marker], separators=(",", ":")),
+    kwargs_json="{{}}",
+    attempt_number=1,
+)
+matched = owned.count()
+states = list(owned.values_list("state", flat=True)[:2])
+deletable = owned.filter(
+    state=TaskState.QUEUED,
+    execution_generation=0,
+    claimed_by_worker__isnull=True,
+    ray_job_id__isnull=True,
+    ray_address__isnull=True,
+    ray_job_request_reference__isnull=True,
+)
+deleted, _ = deletable.delete()
+print(json.dumps({{
+    "matched": matched,
+    "states": states,
+    "deleted": deleted,
+    "queued_absent": not owned.filter(state=TaskState.QUEUED).exists(),
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        result = self._sensitive_django_shell(
+            script,
+            field_name="protocol-v1 deferred survival cleanup",
+        )
+        matched = result.get("matched")
+        deleted = result.get("deleted")
+        states = result.get("states")
+        if (
+            type(matched) is not int
+            or matched not in {0, 1}
+            or not isinstance(states, list)
+            or len(states) != matched
+            or type(deleted) is not int
+            or deleted not in {0, 1}
+            or (deleted == 1 and states != ["QUEUED"])
+            or result.get("queued_absent") is not True
+        ):
+            raise ValueError("protocol-v1 survival failure fixture cleanup was not exact")
+        self._protocol_v1_survival_fixture = None
+        return result
+
+    def _observe_protocol_handoff_task(self, task_id: str) -> Mapping[str, Any]:
+        """Observe the durable row and the released payload-carrier Ray Job."""
+
+        script = f"""
+import json
+import shlex
+
+from django_ray.models import RayTaskExecution
+from django_ray.runner.ray_job import _address_pinned_job_client
+
+row = RayTaskExecution.objects.get(task_id={task_id!r})
+if not row.ray_job_id or not row.ray_address:
+    print(json.dumps({{"ready": False, "state": str(row.state)}}))
+else:
+    client = _address_pinned_job_client(row.ray_address)
+    info = client.get_job_info(row.ray_job_id)
+    submissions = sum(
+        1
+        for job in client.list_jobs()
+        if getattr(job, "submission_id", None) == row.ray_job_id
+    )
+    status = str(getattr(info, "status", "")) if info is not None else ""
+    if info is None or submissions < 1 or status not in {
+            "PENDING", "RUNNING", "SUCCEEDED", "FAILED", "STOPPED"
+        }:
+        print(json.dumps({{"ready": False, "state": str(row.state)}}))
+    else:
+        parts = shlex.split(str(getattr(info, "entrypoint", "")))
+        released_carrier = (
+            len(parts) == 5
+            and parts[:4] == [
+                "python",
+                "-m",
+                "django_ray.runtime.entrypoint",
+                {RAY_JOB_RELEASED_PAYLOAD_CARRIER!r},
+            ]
+            and {RAY_JOB_REQUEST_REFERENCE_CARRIER!r} not in parts
+        )
+        print(json.dumps({{
+            "ready": True,
+            "state": status,
+            "durable_state": str(row.state),
+            "attempt_number": row.attempt_number,
+            "execution_generation": row.execution_generation,
+            "worker_id": row.claimed_by_worker,
+            "job_id": row.ray_job_id,
+            "released_carrier": released_carrier,
+            "request_reference_absent": row.ray_job_request_reference is None,
+            "submission_count": submissions,
+        }}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        return self._sensitive_django_shell(
+            script,
+            field_name="released v0.4.0 handoff task observation",
+        )
+
+    def _wait_for_protocol_handoff_task(
+        self,
+        task_id: str,
+        *,
+        accepted_states: frozenset[str],
+        different_worker: str | None = None,
+        durable_state: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Wait for one released-carrier job without permitting resubmission."""
+
+        deadline = time.monotonic() + self.config.task_timeout
+        last_state = "not submitted"
+        while True:
+            observation = self._observe_protocol_handoff_task(task_id)
+            state_value = observation.get("state")
+            if observation.get("ready") is True:
+                state = self._ray_job_gate_status(
+                    state_value,
+                    field_name="released v0.4.0 handoff Ray Job",
+                )
+                last_state = state
+                if state in RAY_JOB_GATE_TERMINAL_STATES - accepted_states:
+                    raise ValueError(
+                        f"released v0.4.0 handoff Ray Job reached unexpected state {state}"
+                    )
+                worker = observation.get("worker_id")
+                worker_changed = different_worker is None or (
+                    isinstance(worker, str) and worker and worker != different_worker
+                )
+                durable_ready = (
+                    durable_state is None or observation.get("durable_state") == durable_state
+                )
+                if state in accepted_states and worker_changed and durable_ready:
+                    return observation
+            elif isinstance(state_value, str):
+                last_state = state_value
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "released v0.4.0 handoff Ray Job did not reach the required state within "
+                    f"{self.config.task_timeout}s (last state: {last_state})"
+                )
+            time.sleep(2)
+
+    def _delete_released_v040_worker_lease(self) -> None:
+        """Delete only schema-0 leases bound to the gate-unique pod hostname."""
+
+        if self._released_v040_hostname is None:
+            raise ValueError("released v0.4.0 gate hostname was not retained")
+        script = f"""
+import json
+
+from django_ray.models import TaskWorkerLease
+
+queryset = TaskWorkerLease.objects.filter(
+    hostname={self._released_v040_hostname!r},
+    capability_schema_version=0,
+)
+matched = queryset.count()
+rows = list(queryset.order_by("worker_id").values(
+    "worker_id",
+    "queue_name",
+    "django_ray_version",
+    "min_supported_execution_protocol_version",
+    "max_supported_execution_protocol_version",
+)[:2])
+if matched > 1 or len(rows) != matched:
+    raise RuntimeError("released v0.4.0 worker lease cleanup is ambiguous")
+if rows and (
+    rows[0]["queue_name"] != {RAY_JOB_GATE_QUEUE!r}
+    or rows[0]["django_ray_version"] is not None
+    or rows[0]["min_supported_execution_protocol_version"] is not None
+    or rows[0]["max_supported_execution_protocol_version"] is not None
+):
+    raise RuntimeError("released v0.4.0 worker lease cleanup identity is foreign")
+worker_ids = [row["worker_id"] for row in rows]
+expected_worker_id = {self._released_v040_worker_id!r}
+if expected_worker_id is not None and worker_ids != [expected_worker_id]:
+    raise RuntimeError("released v0.4.0 worker lease cleanup worker identity changed")
+deleted, _ = queryset.delete()
+print(json.dumps({{
+    "matched": matched,
+    "deleted": deleted,
+    "absent": not TaskWorkerLease.objects.filter(
+        hostname={self._released_v040_hostname!r},
+        capability_schema_version=0,
+    ).exists(),
+    "worker_ids": worker_ids,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        result = self._sensitive_django_shell(
+            script,
+            field_name="released v0.4.0 worker lease cleanup",
+        )
+        matched = result.get("matched")
+        deleted = result.get("deleted")
+        worker_ids = result.get("worker_ids")
+        worker_identity_exact = worker_ids == []
+        if matched == 1 and isinstance(worker_ids, list) and len(worker_ids) == 1:
+            observed_worker_id = self._canonical_uuid4(
+                worker_ids[0],
+                field_name="released v0.4.0 cleaned worker id",
+            )
+            worker_identity_exact = self._released_v040_worker_id in {
+                None,
+                observed_worker_id,
+            }
+            if self._released_v040_worker_id is None:
+                self._released_v040_worker_id = observed_worker_id
+                self._register_ray_job_gate_value(observed_worker_id)
+        if (
+            type(matched) is not int
+            or matched not in {0, 1}
+            or type(deleted) is not int
+            or deleted != matched
+            or not worker_identity_exact
+            or (self._released_v040_worker_id is not None and matched != 1)
+            or result.get("absent") is not True
+        ):
+            raise ValueError("released v0.4.0 worker lease cleanup was not exact")
+
+    def _observe_released_v040_reserved_leases(self) -> Mapping[str, Any]:
+        """Bound any lease using the gate-reserved hostname namespace."""
+
+        script = """
+import json
+
+from django_ray.models import TaskWorkerLease
+from django_ray.runner.leasing import get_lease_duration
+from django.utils import timezone
+
+cutoff = timezone.now() - get_lease_duration()
+queryset = TaskWorkerLease.objects.filter(hostname__startswith="dr-v040-").order_by(
+    "hostname", "worker_id"
+)
+count = queryset.count()
+rows = list(queryset.values(
+    "worker_id",
+    "hostname",
+    "queue_name",
+    "capability_schema_version",
+    "django_ray_version",
+    "min_supported_execution_protocol_version",
+    "max_supported_execution_protocol_version",
+    "is_active",
+    "last_heartbeat_at",
+    "stopped_at",
+)[:2])
+for row in rows:
+    row["heartbeat_live"] = bool(
+        row["is_active"] and row["last_heartbeat_at"] >= cutoff
+    )
+    row["last_heartbeat_at"] = row["last_heartbeat_at"].isoformat()
+    row["stopped_at"] = (
+        row["stopped_at"].isoformat() if row["stopped_at"] is not None else None
+    )
+print(json.dumps({
+    "count": count,
+    "rows": rows,
+}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        return self._sensitive_django_shell(
+            script,
+            field_name="released v0.4.0 reserved lease recovery observation",
+        )
+
+    def _validate_released_v040_recovery_deployment(
+        self,
+        deployment: Mapping[str, Any],
+    ) -> str:
+        """Validate one pre-existing transient Deployment and return its hostname."""
+
+        if _resource_identity(deployment) != (
+            "apps/v1",
+            "Deployment",
+            RELEASED_V040_MANAGER_DEPLOYMENT,
+        ):
+            raise ValueError("pre-existing released v0.4.0 resource is not the gate Deployment")
+        metadata = _metadata(deployment)
+        if metadata.get("namespace") != self.config.namespace:
+            raise ValueError("pre-existing released v0.4.0 Deployment escaped the namespace")
+        expected_labels = self._released_v040_manager_labels()
+        if (
+            dict(_mapping(metadata.get("labels"), field_name="released recovery Deployment labels"))
+            != expected_labels
+        ):
+            raise ValueError("pre-existing released v0.4.0 Deployment labels are foreign")
+        spec = _mapping(deployment.get("spec"), field_name="released recovery Deployment spec")
+        replicas = spec.get("replicas")
+        if type(replicas) is not int or replicas != 1:
+            raise ValueError("pre-existing released v0.4.0 Deployment replicas are not exact")
+        selector = normalize_label_selector(
+            spec.get("selector"),
+            field_name="released recovery Deployment selector",
+        )
+        if selector != tuple(sorted(expected_labels.items())):
+            raise ValueError("pre-existing released v0.4.0 Deployment selector is foreign")
+        template = _mapping(spec.get("template"), field_name="released recovery pod template")
+        template_metadata = _mapping(
+            template.get("metadata"),
+            field_name="released recovery pod metadata",
+        )
+        if (
+            dict(
+                _mapping(
+                    template_metadata.get("labels"),
+                    field_name="released recovery pod labels",
+                )
+            )
+            != expected_labels
+        ):
+            raise ValueError("pre-existing released v0.4.0 pod labels are foreign")
+        live_spec = _mapping(template.get("spec"), field_name="released recovery pod spec")
+        hostname = live_spec.get("hostname")
+        if (
+            not isinstance(hostname, str)
+            or RELEASED_V040_HOSTNAME_PATTERN.fullmatch(hostname) is None
+        ):
+            raise ValueError("pre-existing released v0.4.0 Deployment hostname is foreign")
+
+        live_main_containers = _sequence(
+            live_spec.get("containers"),
+            field_name="released recovery containers",
+        )
+        if len(live_main_containers) != 1:
+            raise ValueError("pre-existing released v0.4.0 Deployment containers are foreign")
+        live_main_container = _mapping(
+            live_main_containers[0],
+            field_name="released recovery main container",
+        )
+        live_image_tag = live_main_container.get("image")
+        if (
+            not isinstance(live_image_tag, str)
+            or RELEASED_V040_IMAGE_TAG_PATTERN.fullmatch(live_image_tag) is None
+        ):
+            raise ValueError("pre-existing released v0.4.0 Deployment image tag is foreign")
+        self._register_ray_job_gate_value(live_image_tag)
+        parse_docker_image_inspect(
+            self._docker("image", "inspect", live_image_tag).stdout,
+            expected_tag=live_image_tag,
+            commit=RELEASED_V040_COMMIT,
+            source_tree=RELEASED_V040_SOURCE_TREE,
+        )
+        expected_spec = _mapping(
+            _mapping(
+                _mapping(
+                    self._released_v040_manager_manifest(
+                        image_tag=live_image_tag,
+                        hostname=hostname,
+                    ).get("spec"),
+                    field_name="expected released recovery Deployment spec",
+                ).get("template"),
+                field_name="expected released recovery pod template",
+            ).get("spec"),
+            field_name="expected released recovery pod spec",
+        )
+        if pod_image_contract(live_spec) != pod_image_contract(expected_spec):
+            raise ValueError("pre-existing released v0.4.0 Deployment images are foreign")
+        for field_name in ("hostname", "volumes"):
+            if live_spec.get(field_name) != expected_spec.get(field_name):
+                raise ValueError(f"pre-existing released v0.4.0 Deployment {field_name} is foreign")
+        for container_field in ("initContainers", "containers"):
+            live_containers = _sequence(
+                live_spec.get(container_field),
+                field_name=f"released recovery {container_field}",
+            )
+            expected_containers = _sequence(
+                expected_spec.get(container_field),
+                field_name=f"expected released recovery {container_field}",
+            )
+            if len(live_containers) != len(expected_containers):
+                raise ValueError(
+                    f"pre-existing released v0.4.0 Deployment {container_field} are foreign"
+                )
+            for index, expected_value in enumerate(expected_containers):
+                live_container = _mapping(
+                    live_containers[index],
+                    field_name=f"released recovery {container_field}[{index}]",
+                )
+                expected_container = _mapping(
+                    expected_value,
+                    field_name=f"expected released recovery {container_field}[{index}]",
+                )
+                for key, value in expected_container.items():
+                    if live_container.get(key) != value:
+                        raise ValueError(
+                            "pre-existing released v0.4.0 Deployment container contract is foreign"
+                        )
+        self._released_v040_hostname = hostname
+        return hostname
+
+    def _recover_released_v040_startup_residue(self) -> None:
+        """Recover only an exact interrupted transient manager and its lease."""
+
+        result = self._kubectl(
+            "get",
+            "deployment",
+            RELEASED_V040_MANAGER_DEPLOYMENT,
+            "--ignore-not-found",
+            "-o",
+            "json",
+        )
+        if result.stdout.strip():
+            deployment = self._json_command(
+                result,
+                field_name="pre-existing released v0.4.0 Deployment",
+            )
+            hostname = self._validate_released_v040_recovery_deployment(deployment)
+            self._register_ray_job_gate_value(hostname)
+            leases = self._observe_released_v040_reserved_leases()
+            count = leases.get("count")
+            rows = leases.get("rows")
+            if (
+                type(count) is not int
+                or count not in {0, 1}
+                or not isinstance(rows, list)
+                or len(rows) != count
+            ):
+                raise ValueError("released v0.4.0 Deployment lease residue is ambiguous")
+            if rows:
+                row = _mapping(rows[0], field_name="released v0.4.0 Deployment lease")
+                if (
+                    row.get("hostname") != hostname
+                    or row.get("queue_name") != RAY_JOB_GATE_QUEUE
+                    or type(row.get("capability_schema_version")) is not int
+                    or row.get("capability_schema_version") != 0
+                    or row.get("django_ray_version") is not None
+                    or row.get("min_supported_execution_protocol_version") is not None
+                    or row.get("max_supported_execution_protocol_version") is not None
+                ):
+                    raise ValueError("released v0.4.0 Deployment lease residue is foreign")
+                worker_id = self._canonical_uuid4(
+                    row.get("worker_id"),
+                    field_name="released v0.4.0 Deployment recovery worker id",
+                )
+                self._released_v040_worker_id = worker_id
+                self._register_ray_job_gate_value(worker_id)
+            self._delete_released_v040_manager()
+            self._delete_released_v040_worker_lease()
+            self._released_v040_worker_id = None
+            self._released_v040_hostname = None
+            return
+
+        leases = self._observe_released_v040_reserved_leases()
+        count = leases.get("count")
+        rows = leases.get("rows")
+        if type(count) is not int or count < 0 or not isinstance(rows, list):
+            raise ValueError("released v0.4.0 recovery lease observation is invalid")
+        if count == 0 and rows == []:
+            self._delete_released_v040_manager()
+            self._released_v040_worker_id = None
+            self._released_v040_hostname = None
+            return
+        if count != 1 or len(rows) != 1:
+            raise ValueError("released v0.4.0 recovery lease residue is ambiguous")
+        row = _mapping(rows[0], field_name="released v0.4.0 recovery lease")
+        hostname = row.get("hostname")
+        if (
+            not isinstance(hostname, str)
+            or RELEASED_V040_HOSTNAME_PATTERN.fullmatch(hostname) is None
+            or row.get("queue_name") != RAY_JOB_GATE_QUEUE
+            or type(row.get("capability_schema_version")) is not int
+            or row.get("capability_schema_version") != 0
+            or row.get("django_ray_version") is not None
+            or row.get("min_supported_execution_protocol_version") is not None
+            or row.get("max_supported_execution_protocol_version") is not None
+            or row.get("heartbeat_live") is not False
+        ):
+            raise ValueError("released v0.4.0 recovery lease residue is live or foreign")
+        worker_id = self._canonical_uuid4(
+            row.get("worker_id"),
+            field_name="released v0.4.0 recovery worker id",
+        )
+        self._released_v040_hostname = hostname
+        self._released_v040_worker_id = worker_id
+        self._register_ray_job_gate_value(hostname)
+        self._register_ray_job_gate_value(worker_id)
+        self._delete_released_v040_manager()
+        self._delete_released_v040_worker_lease()
+        self._released_v040_worker_id = None
+        self._released_v040_hostname = None
+
+    def _recover_protocol_v2_startup_fixture(self) -> Mapping[str, Any]:
+        """Recover at most one exact interrupted protocol-2 gate fixture."""
+
+        script = f"""
+import json
+import re
+from uuid import UUID
+
+from django_ray.models import (
+    LegacyWorkerAdmissionToken,
+    RayTaskExecution,
+    TaskExecutionProtocolPolicy,
+    TaskState,
+)
+from django_ray.protocol_coordination import reopen_legacy_worker_admission
+
+
+def canonical_uuid4(value):
+    try:
+        parsed = UUID(str(value))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return parsed.version == 4 and str(parsed) == str(value)
+
+
+reserved = RayTaskExecution.objects.filter(
+    callable_path__startswith="testproject.tasks.protocol_v2_application_poison_"
+).order_by("pk")
+count = reserved.count()
+rows = list(reserved[:2])
+if count > 1 or len(rows) != count:
+    raise RuntimeError("protocol-v2 startup fixture residue is ambiguous")
+policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
+token_count = LegacyWorkerAdmissionToken.objects.filter(singleton_key=1).count()
+if (
+    policy.schema_version != 1
+    or policy.active_write_protocol_version != 1
+    or policy.revision < 1
+    or token_count not in [0, 1]
+    or (policy.legacy_worker_admission_enabled and token_count != 1)
+    or (not policy.legacy_worker_admission_enabled and token_count != 0)
+):
+    raise RuntimeError("protocol-v2 startup recovery policy is not exact")
+if not rows:
+    if not policy.legacy_worker_admission_enabled:
+        raise RuntimeError("closed legacy admission has no exact gate fixture identity")
+    print(json.dumps({{
+        "recovered": False,
+        "matched": 0,
+        "terminalized": 0,
+        "deleted": 0,
+        "row_absent": True,
+        "schema_version": policy.schema_version,
+        "active_write_protocol_version": policy.active_write_protocol_version,
+        "legacy_worker_admission_enabled": policy.legacy_worker_admission_enabled,
+        "revision": policy.revision,
+        "token_count": token_count,
+    }}, sort_keys=True, separators=(",", ":")))
+else:
+    row = rows[0]
+    poison = row.callable_path.removeprefix("testproject.tasks.")
+    exact = (
+        re.fullmatch(r"protocol_v2_application_poison_[0-9a-f]{{32}}", poison) is not None
+        and canonical_uuid4(row.task_id)
+        and row.callable_path == "testproject.tasks." + poison
+        and row.execution_protocol_version == 2
+        and row.metadata_schema_version == 1
+        and row.queue_name == {RAY_JOB_GATE_QUEUE!r}
+        and row.priority == 0
+        and row.state in [TaskState.FAILED, TaskState.QUEUED]
+        and row.attempt_number == 1
+        and row.execution_generation == 0
+        and row.args_json == json.dumps([poison], separators=(",", ":"))
+        and row.kwargs_json == "{{}}"
+        and row.claimed_by_worker is None
+        and row.ray_target_address is None
+        and row.ray_job_id is None
+        and row.ray_address is None
+        and row.ray_job_request_reference is None
+        and row.input_reference is None
+        and row.started_at is None
+        and row.finished_at is None
+        and row.last_heartbeat_at is None
+        and row.run_after is None
+        and row.timeout_seconds is None
+        and row.queue_timeout_seconds is None
+        and row.queue_deadline_at is None
+        and row.result_data is None
+        and row.result_reference is None
+        and row.completion_data is None
+        and row.error_message is None
+        and row.error_traceback is None
+        and row.cancellation_status is None
+        and row.cancellation_error is None
+    )
+    if not exact:
+        raise RuntimeError("reserved protocol-v2 startup fixture is foreign")
+    if policy.legacy_worker_admission_enabled and row.state != TaskState.FAILED:
+        raise RuntimeError("queued protocol-v2 residue exists while legacy admission is open")
+    terminalized = 0
+    if row.state == TaskState.QUEUED:
+        terminalized = RayTaskExecution.objects.filter(
+            pk=row.pk,
+            task_id=row.task_id,
+            state=TaskState.QUEUED,
+            execution_protocol_version=2,
+            queue_name={RAY_JOB_GATE_QUEUE!r},
+            callable_path=row.callable_path,
+            args_json=row.args_json,
+            kwargs_json="{{}}",
+            claimed_by_worker__isnull=True,
+            ray_job_id__isnull=True,
+            ray_address__isnull=True,
+            ray_target_address__isnull=True,
+            ray_job_request_reference__isnull=True,
+            input_reference__isnull=True,
+        ).update(state=TaskState.FAILED)
+        if terminalized != 1:
+            raise RuntimeError("protocol-v2 startup fixture did not terminalize exactly once")
+    if not policy.legacy_worker_admission_enabled:
+        transition = reopen_legacy_worker_admission(expected_revision=int(policy.revision))
+        if not transition.enabled or not transition.changed:
+            raise RuntimeError("legacy admission did not reopen during startup recovery")
+    policy.refresh_from_db()
+    token_count = LegacyWorkerAdmissionToken.objects.filter(singleton_key=1).count()
+    exact_terminal = RayTaskExecution.objects.filter(
+        pk=row.pk,
+        task_id=row.task_id,
+        state=TaskState.FAILED,
+        execution_protocol_version=2,
+        queue_name={RAY_JOB_GATE_QUEUE!r},
+        callable_path=row.callable_path,
+        args_json=row.args_json,
+        kwargs_json="{{}}",
+        claimed_by_worker__isnull=True,
+        ray_job_id__isnull=True,
+        ray_address__isnull=True,
+        ray_target_address__isnull=True,
+        ray_job_request_reference__isnull=True,
+        input_reference__isnull=True,
+    )
+    matched = exact_terminal.count()
+    deleted, _ = exact_terminal.delete()
+    print(json.dumps({{
+        "recovered": True,
+        "matched": matched,
+        "terminalized": terminalized,
+        "deleted": deleted,
+        "row_absent": not reserved.exists(),
+        "schema_version": policy.schema_version,
+        "active_write_protocol_version": policy.active_write_protocol_version,
+        "legacy_worker_admission_enabled": policy.legacy_worker_admission_enabled,
+        "revision": policy.revision,
+        "token_count": token_count,
+    }}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        result = self._sensitive_django_shell(
+            script,
+            field_name="protocol-v2 startup fixture recovery",
+        )
+        recovered = result.get("recovered")
+        matched = result.get("matched")
+        terminalized = result.get("terminalized")
+        deleted = result.get("deleted")
+        if recovered is True:
+            row_recovery_exact = (
+                type(matched) is int
+                and matched == 1
+                and type(terminalized) is int
+                and terminalized in {0, 1}
+                and type(deleted) is int
+                and deleted == 1
+            )
+        elif recovered is False:
+            row_recovery_exact = (
+                type(matched) is int
+                and matched == 0
+                and type(terminalized) is int
+                and terminalized == 0
+                and type(deleted) is int
+                and deleted == 0
+            )
+        else:
+            row_recovery_exact = False
+        revision = result.get("revision")
+        if (
+            not row_recovery_exact
+            or result.get("row_absent") is not True
+            or type(result.get("schema_version")) is not int
+            or result.get("schema_version") != 1
+            or type(result.get("active_write_protocol_version")) is not int
+            or result.get("active_write_protocol_version") != 1
+            or result.get("legacy_worker_admission_enabled") is not True
+            or type(revision) is not int
+            or revision < 1
+            or type(result.get("token_count")) is not int
+            or result.get("token_count") != 1
+        ):
+            raise ValueError("protocol-v2 startup fixture recovery was not exact")
+        return result
+
+    def _recover_protocol_handoff_residue(self) -> None:
+        """Remove exact interrupted fixtures and restore the current manager."""
+
+        self._recover_released_v040_startup_residue()
+        self._recover_protocol_v2_startup_fixture()
+        manager = self._ray_job_manager_replica_observation()
+        if manager != {"replicas": 1, "ready_replicas": 1}:
+            self._scale_ray_job_manager(1)
+            self._wait_for_application_topology()
+            manager = self._ray_job_manager_replica_observation()
+        if manager != {"replicas": 1, "ready_replicas": 1}:
+            raise ValueError("current Ray Job manager recovery did not reach one ready replica")
+
+    def _protocol_metric_counts(self) -> dict[tuple[str, str], int]:
+        """Read the authenticated bounded protocol metric family."""
+
+        headers = {"Authorization": f"Bearer {self._secret_token()}"}
+        status, body = self._http("/api/metrics", method="GET", headers=headers)
+        if status != 200:
+            raise ValueError(f"authenticated /api/metrics returned {status}, expected 200")
+        return validate_execution_protocol_metrics(body)
+
+    def _seed_protocol_v2_fixture(self) -> Mapping[str, Any]:
+        """Stage one terminal protocol-2 row, close admission, then queue it."""
+
+        initial_revision = self._protocol_handoff_initial_revision
+        if type(initial_revision) is not int or initial_revision < 1:
+            raise ValueError("protocol handoff did not retain its initial policy revision")
+        generated_task_id = str(uuid4())
+        generated_poison = "protocol_v2_application_poison_" + uuid4().hex
+        cleanup_identity: dict[str, Any] = {
+            "pk": None,
+            "task_id": generated_task_id,
+            "queue_name": RAY_JOB_GATE_QUEUE,
+            "poison": generated_poison,
+            "initial_revision": initial_revision,
+            "closed_revision": initial_revision + 1,
+            "seed_confirmed": False,
+        }
+        self._protocol_v2_fixture = cleanup_identity
+        self._register_ray_job_gate_value(generated_task_id)
+        self._register_ray_job_gate_value(generated_poison)
+        script = f"""
+import hashlib
+import json
+
+from django.core.serializers.json import DjangoJSONEncoder
+from django.utils import timezone
+
+from django_ray import __version__
+from django_ray.models import (
+    LegacyWorkerAdmissionToken,
+    RayTaskExecution,
+    TaskExecutionProtocolPolicy,
+    TaskState,
+    TaskWorkerLease,
+)
+from django_ray.protocol_coordination import (
+    close_legacy_worker_admission,
+)
+
+
+def row_sha256(row):
+    fields = sorted(field.attname for field in row._meta.concrete_fields)
+    payload = {{name: getattr(row, name) for name in fields}}
+    canonical = json.dumps(
+        payload,
+        cls=DjangoJSONEncoder,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
+token_present = LegacyWorkerAdmissionToken.objects.filter(singleton_key=1).exists()
+active_legacy = TaskWorkerLease.objects.filter(
+    capability_schema_version=0,
+    is_active=True,
+).count()
+non_v1_nonterminal = RayTaskExecution.objects.filter(
+    state__in=[TaskState.QUEUED, TaskState.RUNNING, TaskState.CANCELLING],
+).exclude(execution_protocol_version=1).count()
+if (
+    policy.schema_version != 1
+    or policy.active_write_protocol_version != 1
+    or policy.legacy_worker_admission_enabled is not True
+    or token_present is not True
+    or policy.revision != {initial_revision!r}
+    or active_legacy != 0
+    or non_v1_nonterminal != 0
+):
+    raise RuntimeError("protocol-v2 fixture preconditions are not exact")
+initial_revision = {initial_revision!r}
+task_id = {generated_task_id!r}
+poison = {generated_poison!r}
+callable_path = "testproject.tasks." + poison
+row = RayTaskExecution.objects.create(
+    task_id=task_id,
+    callable_path=callable_path,
+    execution_protocol_version=2,
+    created_with_django_ray_version=__version__,
+    queue_name={RAY_JOB_GATE_QUEUE!r},
+    state=TaskState.FAILED,
+    args_json=json.dumps([poison], separators=(",", ":")),
+    kwargs_json="{{}}",
+)
+transition = close_legacy_worker_admission(
+    expected_revision=initial_revision,
+    legacy_producers_retired=True,
+)
+if transition.enabled or not transition.changed or transition.revision != initial_revision + 1:
+    raise RuntimeError("legacy admission did not close exactly once")
+updated = RayTaskExecution.objects.filter(
+    pk=row.pk,
+    task_id=task_id,
+    callable_path=callable_path,
+    execution_protocol_version=2,
+    queue_name={RAY_JOB_GATE_QUEUE!r},
+    state=TaskState.FAILED,
+    args_json=json.dumps([poison], separators=(",", ":")),
+    kwargs_json="{{}}",
+    claimed_by_worker__isnull=True,
+    ray_job_id__isnull=True,
+    ray_address__isnull=True,
+    ray_target_address__isnull=True,
+    ray_job_request_reference__isnull=True,
+    input_reference__isnull=True,
+).update(state=TaskState.QUEUED)
+if updated != 1:
+    raise RuntimeError("protocol-v2 fixture did not transition to queued exactly once")
+queued_at = timezone.now()
+row.refresh_from_db()
+print(json.dumps({{
+    "pk": row.pk,
+    "task_id": row.task_id,
+    "queue_name": row.queue_name,
+    "poison": poison,
+    "row_sha256": row_sha256(row),
+    "created_at": row.created_at.isoformat(),
+    "queued_at": queued_at.isoformat(),
+    "initial_revision": initial_revision,
+    "closed_revision": transition.revision,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        fixture = self._sensitive_django_shell(
+            script,
+            field_name="protocol-v2 queued fixture creation",
+        )
+        returned_task_id = self._canonical_uuid4(
+            fixture.get("task_id"),
+            field_name="protocol-v2 queued fixture task id",
+        )
+        pk = fixture.get("pk")
+        returned_poison = fixture.get("poison")
+        queue_name = fixture.get("queue_name")
+        row_sha256 = fixture.get("row_sha256")
+        created_at = fixture.get("created_at")
+        queued_at = fixture.get("queued_at")
+        initial_revision = fixture.get("initial_revision")
+        closed_revision = fixture.get("closed_revision")
+        if (
+            type(pk) is not int
+            or pk < 1
+            or returned_task_id != generated_task_id
+            or returned_poison != generated_poison
+            or queue_name != RAY_JOB_GATE_QUEUE
+            or not isinstance(row_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", row_sha256) is None
+            or not isinstance(created_at, str)
+            or not created_at
+            or not isinstance(queued_at, str)
+            or not queued_at
+            or type(initial_revision) is not int
+            or type(closed_revision) is not int
+            or initial_revision != self._protocol_handoff_initial_revision
+            or closed_revision != initial_revision + 1
+        ):
+            raise ValueError("protocol-v2 queued fixture returned invalid identity")
+        try:
+            created_at_value = datetime.fromisoformat(created_at)
+            queued_at_value = datetime.fromisoformat(queued_at)
+        except ValueError as error:
+            raise ValueError("protocol-v2 fixture timestamps are invalid") from error
+        if (
+            created_at_value.tzinfo is None
+            or queued_at_value.tzinfo is None
+            or queued_at_value < created_at_value
+        ):
+            raise ValueError("protocol-v2 fixture timestamps are not ordered and aware")
+        confirmed = dict(fixture)
+        confirmed["seed_confirmed"] = True
+        self._protocol_v2_fixture = confirmed
+        return confirmed
+
+    def _observe_protocol_v2_fixture(self, fixture: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Return a full row digest and post-queue ray-data manager heartbeat proof."""
+
+        queued_at = fixture.get("queued_at")
+        if not isinstance(queued_at, str):
+            raise ValueError("protocol-v2 fixture queued timestamp is missing")
+        try:
+            queued_at_value = datetime.fromisoformat(queued_at)
+        except ValueError as error:
+            raise ValueError("protocol-v2 fixture queued timestamp is invalid") from error
+        if queued_at_value.tzinfo is None:
+            raise ValueError("protocol-v2 fixture queued timestamp must be timezone-aware")
+
+        script = f"""
+import hashlib
+import json
+from datetime import datetime
+
+from django.core.serializers.json import DjangoJSONEncoder
+
+from django_ray.models import RayTaskExecution, TaskWorkerLease
+
+
+def row_sha256(row):
+    fields = sorted(field.attname for field in row._meta.concrete_fields)
+    payload = {{name: getattr(row, name) for name in fields}}
+    canonical = json.dumps(
+        payload,
+        cls=DjangoJSONEncoder,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+row = RayTaskExecution.objects.get(pk={fixture["pk"]!r}, task_id={fixture["task_id"]!r})
+leases = TaskWorkerLease.objects.filter(
+    capability_schema_version=1,
+    is_active=True,
+    queue_name={RAY_JOB_GATE_QUEUE!r},
+    min_supported_execution_protocol_version=1,
+    max_supported_execution_protocol_version=1,
+)
+lease_count = leases.count()
+queued_at = datetime.fromisoformat({queued_at!r})
+post_queue_heartbeat = leases.filter(last_heartbeat_at__gt=queued_at).exists()
+print(json.dumps({{
+    "row_sha256": row_sha256(row),
+    "state": str(row.state),
+    "execution_protocol_version": row.execution_protocol_version,
+    "queue_name": row.queue_name,
+    "claimed_by_worker": row.claimed_by_worker,
+    "ray_job_id": row.ray_job_id,
+    "ray_address": row.ray_address,
+    "ray_data_explicit_lease_count": lease_count,
+    "post_queue_heartbeat": post_queue_heartbeat,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        return self._sensitive_django_shell(
+            script,
+            field_name="protocol-v2 queued fixture observation",
+        )
+
+    def _wait_for_protocol_v2_survival(
+        self,
+        fixture: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Wait for the live ray-data manager to poll after the fixture was queued."""
+
+        deadline = time.monotonic() + self.config.task_timeout
+        while True:
+            observation = self._observe_protocol_v2_fixture(fixture)
+            if (
+                observation.get("row_sha256") != fixture.get("row_sha256")
+                or observation.get("state") != "QUEUED"
+                or observation.get("execution_protocol_version") != 2
+                or observation.get("queue_name") != RAY_JOB_GATE_QUEUE
+                or observation.get("claimed_by_worker") is not None
+                or observation.get("ray_job_id") is not None
+                or observation.get("ray_address") is not None
+            ):
+                raise ValueError("protocol-v2 queued row changed before a manager poll completed")
+            lease_count = observation.get("ray_data_explicit_lease_count")
+            if type(lease_count) is not int or lease_count != 1:
+                raise ValueError("ray-data protocol-v1 manager lease count was not exactly one")
+            if observation.get("post_queue_heartbeat") is True:
+                return observation
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "ray-data manager did not heartbeat after the protocol-v2 row was queued"
+                )
+            time.sleep(2)
+
+    def _verify_protocol_v2_visibility(
+        self,
+        fixture: Mapping[str, Any],
+        *,
+        baseline_metrics: Mapping[tuple[str, str], int],
+    ) -> None:
+        """Prove unsupported work stays queued and visible on bounded live surfaces."""
+
+        self._wait_for_protocol_v2_survival(fixture)
+        headers = {"Authorization": f"Bearer {self._secret_token()}"}
+        task_id = str(fixture["task_id"])
+        status, body = self._http(
+            f"/api/tasks/{task_id}",
+            method="GET",
+            headers=headers,
+            response_limit=EXPECTED_TASK_STATUS_RESPONSE_MAX_BYTES,
+        )
+        if status != 200:
+            raise ValueError(f"protocol-v2 task status returned {status}, expected 200")
+        task_status = self._json_body(body, endpoint="protocol-v2 task status")
+        if validate_task_status_payload(task_status, task_id=task_id) != "QUEUED":
+            raise ValueError("protocol-v2 task status did not remain queued")
+        validate_execution_protocol_visibility(
+            task_status,
+            surface="protocol-v2 task status",
+            expected_protocol=2,
+            expected_compatible=False,
+        )
+
+        query = urlencode({"task_id": task_id, "limit": 1})
+        status, body = self._http(
+            f"/api/executions?{query}",
+            method="GET",
+            headers=headers,
+        )
+        if status != 200:
+            raise ValueError(f"protocol-v2 execution lookup returned {status}, expected 200")
+        listing = self._json_body(body, endpoint="protocol-v2 execution lookup")
+        tasks = _sequence(listing.get("tasks"), field_name="protocol-v2 execution tasks")
+        if len(tasks) != 1:
+            raise ValueError("protocol-v2 execution lookup did not return exactly one task")
+        execution = _mapping(tasks[0], field_name="protocol-v2 execution")
+        if execution.get("task_id") != task_id or execution.get("state") != "QUEUED":
+            raise ValueError("protocol-v2 execution lookup returned the wrong queued task")
+        validate_execution_protocol_visibility(
+            execution,
+            surface="protocol-v2 execution lookup",
+            expected_protocol=2,
+            expected_compatible=False,
+        )
+
+        cohorts = self._observe_protocol_cohorts()
+        report = _mapping(cohorts.get("report"), field_name="protocol status report")
+        policy = _mapping(report.get("policy"), field_name="protocol status policy")
+        unsupported = _mapping(
+            report.get("unsupported_work"),
+            field_name="protocol status unsupported work",
+        )
+        groups = _sequence(
+            unsupported.get("groups"),
+            field_name="protocol status unsupported work groups",
+        )
+        expected_group = {
+            "count": 1,
+            "execution_protocol_version": 2,
+            "queue": RAY_JOB_GATE_QUEUE,
+            "state": "QUEUED",
+        }
+        non_v1_nonterminal_count = report.get("non_v1_nonterminal_count")
+        unsupported_total_tasks = unsupported.get("total_tasks")
+        unsupported_omitted_tasks = unsupported.get("omitted_tasks")
+        active_write_protocol = policy.get("active_write_protocol_version")
+        observed_group = (
+            dict(_mapping(groups[0], field_name="unsupported protocol group"))
+            if len(groups) == 1
+            else {}
+        )
+        group_exact = set(observed_group) == set(expected_group) and all(
+            type(observed_group.get(field_name)) is type(expected_value)
+            and observed_group.get(field_name) == expected_value
+            for field_name, expected_value in expected_group.items()
+        )
+        if (
+            policy.get("legacy_worker_admission_enabled") is not False
+            or policy.get("legacy_admission_token_present") is not False
+            or type(active_write_protocol) is not int
+            or active_write_protocol != 1
+            or type(non_v1_nonterminal_count) is not int
+            or non_v1_nonterminal_count != 1
+            or type(unsupported_total_tasks) is not int
+            or unsupported_total_tasks != 1
+            or type(unsupported_omitted_tasks) is not int
+            or unsupported_omitted_tasks != 0
+            or len(groups) != 1
+            or not group_exact
+        ):
+            raise ValueError("protocol status did not expose the exact unsupported queued task")
+
+        current_metrics = self._protocol_metric_counts()
+        if current_metrics.get(("other", "QUEUED")) != (
+            baseline_metrics.get(("other", "QUEUED"), 0) + 1
+        ):
+            raise ValueError("protocol-v2 queued metric did not increase by exactly one")
+        final_row = self._observe_protocol_v2_fixture(fixture)
+        if final_row.get("row_sha256") != fixture.get("row_sha256"):
+            raise ValueError("protocol-v2 queued row changed while visibility was inspected")
+        self.evidence.protocol_v2_queued_unchanged = True
+        self.evidence.protocol_v2_unsupported_visible = True
+
+    def _verify_protocol_v2_rejection(
+        self,
+        fixture: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Submit protocol 2 directly and require its fixed pre-invocation rejection."""
+
+        script = f"""
+import json
+import os
+
+import ray
+
+from django_ray.conf.settings import get_settings
+from django_ray.execution_codec import (
+    ExecutionIdentity,
+    ExecutionRequest,
+    decode_execution_completion,
+    encode_execution_request,
+)
+from django_ray.execution_protocol import ExecutionProtocolRange
+from django_ray.runner.ray_core import (
+    _compiled_graph_submission_transport,
+    _get_remote_execute_django_task,
+)
+from django_ray.runtime.runtime_env import (
+    prepare_runtime_env_for_ray_core,
+    resolve_runtime_env_profile,
+    snapshot_local_runtime_env,
+)
+from django_ray.workflow_plans import runtime_env_plan_identity
+
+if not ray.is_initialized():
+    ray.init(address=os.environ["RAY_ADDRESS"], ignore_reinit_error=True)
+
+runtime_env = resolve_runtime_env_profile("project")
+trust_identity = get_settings().get("WORKFLOW_PLAN_TRUST_IDENTITY", {{}})
+with snapshot_local_runtime_env(runtime_env) as immutable_snapshot:
+    snapshot_identity = runtime_env_plan_identity(
+        immutable_snapshot,
+        trust_identity=trust_identity,
+    )
+    submitted_runtime_env = prepare_runtime_env_for_ray_core(immutable_snapshot)
+
+cloudpickle = getattr(ray, "cloudpickle", None)
+if cloudpickle is not None:
+    import django_ray.runtime.remote as remote_module
+
+    cloudpickle.register_pickle_by_value(remote_module)
+
+identity = ExecutionIdentity(
+    task_execution_pk={fixture["pk"]!r},
+    task_id={fixture["task_id"]!r},
+    attempt_number=1,
+    execution_generation=0,
+)
+poison = {fixture["poison"]!r}
+canonical_v1 = encode_execution_request(ExecutionRequest(
+    identity=identity,
+    execution_protocol_version=1,
+    callable_path="testproject.tasks." + poison,
+    transport_version=1,
+    serialized_args=json.dumps([poison], separators=(",", ":")),
+    serialized_kwargs="{{}}",
+    input_reference=None,
+    runtime_env_profile=runtime_env.profile,
+    runtime_env_hash=runtime_env.digest,
+    runtime_env_plan_identity=snapshot_identity.as_transport_dict(),
+    compiled_graph_submission_transport=_compiled_graph_submission_transport(ray),
+))
+request = json.loads(canonical_v1)
+request["execution_protocol_version"] = 2
+protocol_v2 = json.dumps(
+    request,
+    ensure_ascii=False,
+    allow_nan=False,
+    sort_keys=True,
+    separators=(",", ":"),
+)
+remote_options = {{"name": "django_ray:protocol-v2-preinvocation"}}
+if submitted_runtime_env:
+    remote_options["runtime_env"] = submitted_runtime_env
+raw_completion = ray.get(
+    _get_remote_execute_django_task().options(**remote_options).remote(
+        protocol_v2,
+        expected_task_execution_pk=identity.task_execution_pk,
+        expected_task_id=identity.task_id,
+        expected_attempt_number=identity.attempt_number,
+        expected_execution_generation=identity.execution_generation,
+        expected_execution_protocol_version=2,
+    )
+)
+completion = decode_execution_completion(
+    raw_completion,
+    expected_identity=identity,
+    expected_execution_protocol_version=2,
+    supported_protocols=ExecutionProtocolRange(minimum=1, maximum=2),
+).completion
+prefix = "execution request rejected: "
+classification = (
+    completion.error[len(prefix):]
+    if isinstance(completion.error, str) and completion.error.startswith(prefix)
+    else None
+)
+print(json.dumps({{
+    "classification": classification,
+    "success": completion.success,
+    "retryable": completion.retryable,
+    "traceback_absent": completion.traceback is None,
+    "result_absent": completion.result is None,
+    "result_reference_absent": completion.result_reference is None,
+    "exception_type": completion.exception_type,
+    "transport_version": request["transport_version"],
+    "input_reference_absent": request["input_reference"] is None,
+    "application_marker_present": poison in raw_completion,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        outcome = self._sensitive_django_shell(
+            script,
+            field_name="protocol-v2 direct Ray Core rejection",
+        )
+        validate_protocol_v2_rejection(outcome)
+        final_row = self._observe_protocol_v2_fixture(fixture)
+        if final_row.get("row_sha256") != fixture.get("row_sha256"):
+            raise ValueError("protocol-v2 queued row changed during direct rejection")
+        self.evidence.protocol_v2_preinvocation_rejected = True
+        self.evidence.protocol_v2_application_marker_absent = True
+        return outcome
+
+    def _cleanup_protocol_v2_fixture(
+        self,
+        fixture: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Terminalize the gate row, reopen admission, then delete it exactly."""
+
+        task_id = self._canonical_uuid4(
+            fixture.get("task_id"),
+            field_name="protocol-v2 cleanup task id",
+        )
+        expected_pk = fixture.get("pk")
+        poison = fixture.get("poison")
+        queue_name = fixture.get("queue_name")
+        initial_revision = fixture.get("initial_revision")
+        closed_revision = fixture.get("closed_revision")
+        seed_confirmed = fixture.get("seed_confirmed") is True
+        if (
+            (expected_pk is not None and (type(expected_pk) is not int or expected_pk < 1))
+            or not isinstance(poison, str)
+            or PROTOCOL_V2_POISON_PATTERN.fullmatch(poison) is None
+            or queue_name != RAY_JOB_GATE_QUEUE
+            or type(initial_revision) is not int
+            or initial_revision < 1
+            or type(closed_revision) is not int
+            or closed_revision != initial_revision + 1
+        ):
+            raise ValueError("protocol-v2 cleanup identity is invalid")
+        script = f"""
+import json
+
+from django_ray.models import (
+    LegacyWorkerAdmissionToken,
+    RayTaskExecution,
+    TaskExecutionProtocolPolicy,
+    TaskState,
+)
+from django_ray.protocol_coordination import reopen_legacy_worker_admission
+
+poison = {poison!r}
+queryset = RayTaskExecution.objects.filter(
+    task_id={task_id!r},
+    execution_protocol_version=2,
+    metadata_schema_version=1,
+    queue_name={RAY_JOB_GATE_QUEUE!r},
+    priority=0,
+    attempt_number=1,
+    execution_generation=0,
+    callable_path="testproject.tasks." + poison,
+    args_json=json.dumps([poison], separators=(",", ":")),
+    kwargs_json="{{}}",
+    claimed_by_worker__isnull=True,
+    ray_target_address__isnull=True,
+    ray_job_id__isnull=True,
+    ray_address__isnull=True,
+    ray_job_request_reference__isnull=True,
+    input_reference__isnull=True,
+    started_at__isnull=True,
+    finished_at__isnull=True,
+    last_heartbeat_at__isnull=True,
+    run_after__isnull=True,
+    timeout_seconds__isnull=True,
+    queue_timeout_seconds__isnull=True,
+    queue_deadline_at__isnull=True,
+    result_data__isnull=True,
+    result_reference__isnull=True,
+    completion_data__isnull=True,
+    error_message__isnull=True,
+    error_traceback__isnull=True,
+    cancellation_status__isnull=True,
+    cancellation_error__isnull=True,
+)
+expected_pk = {expected_pk!r}
+if expected_pk is not None:
+    queryset = queryset.filter(pk=expected_pk)
+matched = queryset.count()
+protocols = list(queryset.values_list("execution_protocol_version", flat=True)[:2])
+states = list(queryset.values_list("state", flat=True)[:2])
+if matched > 1 or len(states) != matched:
+    raise RuntimeError("protocol-v2 cleanup identity is ambiguous")
+policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
+token_count_before = LegacyWorkerAdmissionToken.objects.filter(singleton_key=1).count()
+if (
+    policy.schema_version != 1
+    or policy.active_write_protocol_version != 1
+    or (policy.legacy_worker_admission_enabled and token_count_before != 1)
+    or (not policy.legacy_worker_admission_enabled and token_count_before != 0)
+    or (
+        policy.legacy_worker_admission_enabled
+        and policy.revision not in [{initial_revision!r}, {initial_revision + 2!r}]
+    )
+    or (
+        not policy.legacy_worker_admission_enabled
+        and policy.revision != {closed_revision!r}
+    )
+):
+    raise RuntimeError("protocol-v2 cleanup policy is not exact")
+terminalized = 0
+if matched == 1:
+    state = states[0]
+    if state not in [TaskState.FAILED, TaskState.QUEUED]:
+        raise RuntimeError("protocol-v2 cleanup row is not staged or queued")
+    if policy.legacy_worker_admission_enabled and state == TaskState.QUEUED:
+        raise RuntimeError("queued protocol-v2 row exists while legacy admission is open")
+    if state == TaskState.QUEUED:
+        terminalized = queryset.filter(state=TaskState.QUEUED).update(state=TaskState.FAILED)
+        if terminalized != 1:
+            raise RuntimeError("protocol-v2 cleanup did not terminalize exactly once")
+elif not policy.legacy_worker_admission_enabled:
+    raise RuntimeError("closed legacy admission lost the exact protocol-v2 fixture")
+if not policy.legacy_worker_admission_enabled:
+    if policy.revision != {closed_revision!r}:
+        raise RuntimeError("closed legacy admission has an unexpected revision")
+    transition = reopen_legacy_worker_admission(expected_revision=int(policy.revision))
+    if not transition.enabled:
+        raise RuntimeError("legacy admission did not reopen")
+elif policy.revision not in [{initial_revision!r}, {initial_revision + 2!r}]:
+    raise RuntimeError("open legacy admission has an unexpected revision")
+policy.refresh_from_db()
+token_count = LegacyWorkerAdmissionToken.objects.filter(singleton_key=1).count()
+terminal_queryset = queryset.filter(state=TaskState.FAILED)
+deleted, _ = terminal_queryset.delete()
+print(json.dumps({{
+    "matched": matched,
+    "terminalized": terminalized,
+    "deleted": deleted,
+    "protocols": protocols,
+    "states": states,
+    "row_absent": not queryset.exists(),
+    "schema_version": policy.schema_version,
+    "active_write_protocol_version": policy.active_write_protocol_version,
+    "legacy_worker_admission_enabled": policy.legacy_worker_admission_enabled,
+    "revision": policy.revision,
+    "token_count": token_count,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        result = self._sensitive_django_shell(
+            script,
+            field_name="protocol-v2 fixture and policy cleanup",
+        )
+        matched = result.get("matched")
+        deleted = result.get("deleted")
+        terminalized = result.get("terminalized")
+        observed_protocols = result.get("protocols")
+        observed_states = result.get("states")
+        if seed_confirmed:
+            row_cleanup_exact = (
+                type(matched) is int
+                and matched == 1
+                and type(deleted) is int
+                and deleted == 1
+                and observed_protocols == [2]
+                and observed_states in (["FAILED"], ["QUEUED"])
+                and type(terminalized) is int
+                and terminalized == (1 if observed_states == ["QUEUED"] else 0)
+            )
+        else:
+            row_cleanup_exact = (
+                type(matched) is int
+                and matched in {0, 1}
+                and type(deleted) is int
+                and deleted == matched
+                and observed_protocols in ([], [2])
+                and observed_states in ([], ["FAILED"], ["QUEUED"])
+                and type(terminalized) is int
+                and terminalized == (1 if observed_states == ["QUEUED"] else 0)
+            )
+        acceptable_revisions = {initial_revision, initial_revision + 2}
+        schema_version = result.get("schema_version")
+        active_write_protocol = result.get("active_write_protocol_version")
+        revision = result.get("revision")
+        token_count = result.get("token_count")
+        if (
+            not row_cleanup_exact
+            or result.get("row_absent") is not True
+            or type(schema_version) is not int
+            or schema_version != 1
+            or type(active_write_protocol) is not int
+            or active_write_protocol != 1
+            or result.get("legacy_worker_admission_enabled") is not True
+            or type(revision) is not int
+            or revision not in acceptable_revisions
+            or (seed_confirmed and revision != initial_revision + 2)
+            or type(token_count) is not int
+            or token_count != 1
+        ):
+            raise ValueError("protocol-v2 fixture or admission policy was not restored exactly")
+        self._protocol_v2_fixture = None
+        return result
+
+    def _verify_protocol_handoff_certification(self) -> None:
+        """Certify released-v1 handoff and current-build protocol fencing live."""
+
+        failure: BaseException | None = None
+        cleanup_errors: list[tuple[str, object]] = []
+        initial_revision: int | None = None
+        baseline_metrics: Mapping[tuple[str, str], int] | None = None
+        handoff_completed = False
+        released_deployment_absent = False
+        released_lease_absent = False
+        released_manager_phase = False
+        startup_recovery_complete = False
+        policy_fixture_restored = False
+        restored_policy_revision: int | None = None
+        manager_restored = False
+
+        try:
+            self._recover_protocol_handoff_residue()
+            startup_recovery_complete = True
+            released_deployment_absent = True
+            released_lease_absent = True
+            initial = self._observe_protocol_cohorts()
+            initial_report = _mapping(
+                initial.get("report"),
+                field_name="initial protocol status report",
+            )
+            initial_policy = _mapping(
+                initial_report.get("policy"),
+                field_name="initial protocol policy",
+            )
+            initial_revision_value = initial_policy.get("revision")
+            initial_legacy_worker_count = initial.get("legacy_worker_count")
+            initial_schema_version = initial_policy.get("schema_version")
+            initial_active_write = initial_policy.get("active_write_protocol_version")
+            if (
+                type(initial_schema_version) is not int
+                or initial_schema_version != 1
+                or type(initial_active_write) is not int
+                or initial_active_write != 1
+                or initial_policy.get("legacy_worker_admission_enabled") is not True
+                or initial_policy.get("legacy_admission_token_present") is not True
+                or type(initial_revision_value) is not int
+                or initial_revision_value < 1
+                or type(initial_legacy_worker_count) is not int
+                or initial_legacy_worker_count != 0
+            ):
+                raise ValueError("protocol handoff did not begin from the exact open-v1 policy")
+            initial_revision = initial_revision_value
+            self._protocol_handoff_initial_revision = initial_revision
+            released_lease_absent = True
+
+            released_manager_phase = True
+            released_deployment_absent = False
+            released_lease_absent = False
+            self._apply_released_v040_manager()
+            self._wait_for_protocol_cohorts()
+            if self._released_v040_worker_id is None:
+                raise ValueError("released v0.4.0 manager did not advertise a legacy lease")
+
+            self._scale_ray_job_manager(0)
+            task_id = self._enqueue_released_v040_handoff_task()
+            released = self._wait_for_protocol_handoff_task(
+                task_id,
+                accepted_states=frozenset({"RUNNING"}),
+                durable_state="RUNNING",
+            )
+            released_worker = released.get("worker_id")
+            generation = released.get("execution_generation")
+            job_id = released.get("job_id")
+            released_attempt = released.get("attempt_number")
+            released_submission_count = released.get("submission_count")
+            if (
+                released_worker != self._released_v040_worker_id
+                or type(released_attempt) is not int
+                or released_attempt != 1
+                or type(generation) is not int
+                or generation < 0
+                or not isinstance(job_id, str)
+                or re.fullmatch(r"raysubmit_django_ray_v1_[0-9a-f]{64}", job_id) is None
+                or released.get("released_carrier") is not True
+                or released.get("request_reference_absent") is not True
+                or type(released_submission_count) is not int
+                or released_submission_count != 1
+            ):
+                raise ValueError("released v0.4.0 manager lost the exact v1 submission contract")
+            self._register_ray_job_gate_value(job_id)
+            queued_fixture = self._enqueue_protocol_v1_survival_task()
+            self._require_protocol_v1_survival_unchanged(queued_fixture)
+
+            self._delete_released_v040_manager()
+            released_deployment_absent = True
+            self._delete_released_v040_worker_lease()
+            released_lease_absent = True
+            self._scale_ray_job_manager(1)
+
+            adopted = self._wait_for_protocol_handoff_task(
+                task_id,
+                accepted_states=frozenset({"RUNNING"}),
+                different_worker=str(released_worker),
+                durable_state="RUNNING",
+            )
+            adopted_attempt = adopted.get("attempt_number")
+            adopted_submission_count = adopted.get("submission_count")
+            if (
+                adopted.get("job_id") != job_id
+                or type(adopted_attempt) is not int
+                or adopted_attempt != 1
+                or adopted.get("execution_generation") != generation
+                or adopted.get("released_carrier") is not True
+                or adopted.get("request_reference_absent") is not True
+                or type(adopted_submission_count) is not int
+                or adopted_submission_count != 1
+            ):
+                raise ValueError("current manager did not adopt the released v1 Ray Job exactly")
+            self.evidence.protocol_v1_handoff_same_job = True
+            self.evidence.protocol_v1_handoff_no_resubmit = True
+            self._require_protocol_v1_survival_unchanged(queued_fixture)
+            self._release_protocol_v1_survival_task(queued_fixture)
+
+            terminal = self._wait_for_protocol_handoff_task(
+                task_id,
+                accepted_states=frozenset({"SUCCEEDED"}),
+                durable_state="SUCCEEDED",
+            )
+            terminal_attempt = terminal.get("attempt_number")
+            terminal_submission_count = terminal.get("submission_count")
+            if (
+                terminal.get("job_id") != job_id
+                or type(terminal_attempt) is not int
+                or terminal_attempt != 1
+                or terminal.get("execution_generation") != generation
+                or terminal.get("released_carrier") is not True
+                or terminal.get("request_reference_absent") is not True
+                or type(terminal_submission_count) is not int
+                or terminal_submission_count != 1
+            ):
+                raise ValueError("released v1 handoff did not finish on the exact adopted job")
+
+            queued_terminal = self._wait_for_ray_job_gate_task(
+                str(queued_fixture["task_id"]),
+                accepted_states=frozenset({"SUCCEEDED"}),
+                durable_state="SUCCEEDED",
+            )
+            queued_job_id = queued_terminal.get("job_id")
+            queued_generation = queued_terminal.get("execution_generation")
+            queued_attempt = queued_terminal.get("attempt_number")
+            queued_submission_count = queued_terminal.get("submission_count")
+            queued_row = self._observe_protocol_v1_survival_task(queued_fixture)
+            if (
+                not isinstance(queued_job_id, str)
+                or re.fullmatch(r"raysubmit_django_ray_rq2_[0-9a-f]{64}", queued_job_id) is None
+                or type(queued_attempt) is not int
+                or queued_attempt != 1
+                or type(queued_generation) is not int
+                or queued_generation < 1
+                or type(queued_submission_count) is not int
+                or queued_submission_count != 1
+                or queued_terminal.get("carrier_ok") is not True
+                or queued_terminal.get("binding_ok") is not True
+                or queued_terminal.get("request_ok") is not True
+                or queued_terminal.get("info_clear") is not True
+                or queued_terminal.get("logs_clear") is not True
+                or queued_row.get("pk") != queued_fixture.get("pk")
+                or queued_row.get("task_id") != queued_fixture.get("task_id")
+                or queued_row.get("state") != "SUCCEEDED"
+                or queued_row.get("attempt_number") != 1
+                or queued_row.get("execution_generation") != queued_generation
+                or queued_row.get("ray_job_id") != queued_job_id
+                or queued_row.get("ray_job_request_reference") is None
+            ):
+                raise ValueError("survived protocol-v1 row did not complete exactly once via rq2")
+            self._register_ray_job_gate_value(queued_job_id)
+            self.evidence.protocol_v1_queued_survived_handoff = True
+            self._protocol_v1_survival_fixture = None
+            handoff_completed = True
+
+            baseline_metrics = self._protocol_metric_counts()
+            fixture = self._seed_protocol_v2_fixture()
+            self._verify_protocol_v2_visibility(
+                fixture,
+                baseline_metrics=baseline_metrics,
+            )
+            self._verify_protocol_v2_rejection(fixture)
+        except BaseException as error:
+            failure = error
+        finally:
+            if released_manager_phase and self._released_v040_worker_id is None:
+                try:
+                    cleanup_cohorts = self._observe_protocol_cohorts()
+                    cleanup_worker_ids = cleanup_cohorts.get("legacy_worker_ids")
+                    cleanup_worker_count = cleanup_cohorts.get("legacy_worker_count")
+                    if (
+                        type(cleanup_worker_count) is int
+                        and cleanup_worker_count == 0
+                        and cleanup_worker_ids == []
+                    ):
+                        released_lease_absent = self._released_v040_hostname is None
+                    elif not (
+                        type(cleanup_worker_count) is int
+                        and cleanup_worker_count == 1
+                        and isinstance(cleanup_worker_ids, list)
+                        and len(cleanup_worker_ids) == 1
+                    ):
+                        raise ValueError(
+                            "gate-owned live legacy lease could not be identified exactly"
+                        )
+                    else:
+                        cleanup_worker_id = self._canonical_uuid4(
+                            cleanup_worker_ids[0],
+                            field_name="released v0.4.0 cleanup worker id",
+                        )
+                        self._released_v040_worker_id = cleanup_worker_id
+                        self._register_ray_job_gate_value(cleanup_worker_id)
+                except BaseException as error:
+                    cleanup_errors.append(("released lease identity recovery", error))
+            if (
+                released_manager_phase
+                or startup_recovery_complete
+                or self._released_v040_hostname is not None
+            ):
+                try:
+                    self._delete_released_v040_manager()
+                    released_deployment_absent = True
+                except BaseException as error:
+                    cleanup_errors.append(("released manager cleanup", error))
+
+            if (
+                (released_manager_phase or self._released_v040_hostname is not None)
+                and released_deployment_absent
+                and not released_lease_absent
+            ):
+                try:
+                    self._delete_released_v040_worker_lease()
+                    released_lease_absent = True
+                    self._released_v040_worker_id = None
+                    self._released_v040_hostname = None
+                except BaseException as error:
+                    cleanup_errors.append(("released lease cleanup", error))
+
+            queued_fixture = self._protocol_v1_survival_fixture
+            if queued_fixture is not None:
+                try:
+                    self._cleanup_protocol_v1_survival_task(queued_fixture)
+                except BaseException as error:
+                    cleanup_errors.append(("protocol-v1 survival fixture cleanup", error))
+
+            try:
+                self._scale_ray_job_manager(1)
+                manager_restored = True
+            except BaseException as error:
+                cleanup_errors.append(("current manager replica restoration", error))
+
+            fixture = self._protocol_v2_fixture
+            if fixture is not None:
+                try:
+                    cleanup_result = self._cleanup_protocol_v2_fixture(fixture)
+                    cleanup_revision = cleanup_result.get("revision")
+                    if type(cleanup_revision) is not int:
+                        raise ValueError("protocol cleanup returned an invalid revision")
+                    restored_policy_revision = cleanup_revision
+                    policy_fixture_restored = True
+                except BaseException as error:
+                    cleanup_errors.append(("protocol-v2 fixture and policy cleanup", error))
+            else:
+                policy_fixture_restored = True
+                restored_policy_revision = initial_revision
+
+            if manager_restored:
+                try:
+                    self._wait_for_application_topology()
+                    manager = self._ray_job_manager_replica_observation()
+                    if manager != {"replicas": 1, "ready_replicas": 1}:
+                        raise ValueError(
+                            "current Ray Job manager replica restoration was not exact"
+                        )
+                except BaseException as error:
+                    manager_restored = False
+                    cleanup_errors.append(("current manager topology verification", error))
+
+            try:
+                final = self._observe_protocol_cohorts()
+                final_report = _mapping(
+                    final.get("report"),
+                    field_name="restored protocol status report",
+                )
+                final_policy = _mapping(
+                    final_report.get("policy"),
+                    field_name="restored protocol policy",
+                )
+                expected_revision = restored_policy_revision
+                final_legacy_worker_count = final.get("legacy_worker_count")
+                final_schema_version = final_policy.get("schema_version")
+                final_active_write = final_policy.get("active_write_protocol_version")
+                final_revision = final_policy.get("revision")
+                if initial_revision is not None and (
+                    type(final_schema_version) is not int
+                    or final_schema_version != 1
+                    or type(final_active_write) is not int
+                    or final_active_write != 1
+                    or final_policy.get("legacy_worker_admission_enabled") is not True
+                    or final_policy.get("legacy_admission_token_present") is not True
+                    or type(final_revision) is not int
+                    or final_revision != expected_revision
+                    or type(final_legacy_worker_count) is not int
+                    or final_legacy_worker_count != 0
+                ):
+                    raise ValueError("execution-protocol policy was not restored exactly")
+            except BaseException as error:
+                policy_fixture_restored = False
+                cleanup_errors.append(("protocol policy restoration verification", error))
+
+            if (
+                released_deployment_absent
+                and released_lease_absent
+                and manager_restored
+                and policy_fixture_restored
+                and not cleanup_errors
+            ):
+                self.evidence.protocol_handoff_cleanup_restored = True
+
+        if failure is not None:
+            if cleanup_errors:
+                failure.add_note(
+                    _gate_error_detail(
+                        "protocol handoff cleanup also failed",
+                        redactor=self.redactor,
+                        contexts=tuple(cleanup_errors),
+                    )
+                )
+            raise failure.with_traceback(failure.__traceback__)
+        if cleanup_errors:
+            raise ValueError(
+                _gate_error_detail(
+                    "protocol handoff cleanup failed",
+                    redactor=self.redactor,
+                    contexts=tuple(cleanup_errors),
+                )
+            )
+        if not handoff_completed:
+            raise ValueError("protocol-v1 handoff certification did not complete")
 
     def _submit_missing_ray_job_request_reference(self, marker: str) -> Mapping[str, Any]:
         script = f"""
@@ -8307,10 +10937,37 @@ print(json.dumps({{
         """Verify immutable source and routing immediately before evidence is emitted."""
 
         self._verify_source_identity()
+        self._verify_released_v040_source_identity()
         self._verify_kubeconfig_snapshot()
         self._verify_ray_identity()
         self._verify_deployed_images()
         self._verify_preserved_secret()
+        released_image_id = parse_docker_image_inspect(
+            self._docker(
+                "image",
+                "inspect",
+                self.evidence.released_v040_image_tag,
+            ).stdout,
+            expected_tag=self.evidence.released_v040_image_tag,
+            commit=RELEASED_V040_COMMIT,
+            source_tree=RELEASED_V040_SOURCE_TREE,
+        )
+        if released_image_id != self.evidence.released_v040_image_id:
+            raise ValueError("released v0.4.0 image identity changed after certification")
+        protocol_evidence = (
+            self.evidence.protocol_legacy_cohort_visible,
+            self.evidence.protocol_explicit_cohort_visible,
+            self.evidence.protocol_v1_handoff_same_job,
+            self.evidence.protocol_v1_handoff_no_resubmit,
+            self.evidence.protocol_v1_queued_survived_handoff,
+            self.evidence.protocol_v2_queued_unchanged,
+            self.evidence.protocol_v2_unsupported_visible,
+            self.evidence.protocol_v2_preinvocation_rejected,
+            self.evidence.protocol_v2_application_marker_absent,
+            self.evidence.protocol_handoff_cleanup_restored,
+        )
+        if not all(value is True for value in protocol_evidence):
+            raise ValueError("protocol handoff certification evidence is incomplete")
 
     def _verify_prometheus(self) -> None:
         self._verify_ray_identity()
@@ -8373,6 +11030,8 @@ print(json.dumps({{
             ("app_image_id", self.evidence.app_image_id),
             ("legacy_worker_image_tag", self.evidence.worker_tag),
             ("legacy_worker_image_id", self.evidence.worker_image_id),
+            ("released_v040_image_tag", self.evidence.released_v040_image_tag),
+            ("released_v040_image_id", self.evidence.released_v040_image_id),
             ("legacy_worker_built", "true"),
             ("kuberay_uses_generic_ray", "true"),
             ("setup", "passed"),
@@ -8463,6 +11122,46 @@ print(json.dumps({{
             (
                 "ray_job_missing_reference_no_retry",
                 self.evidence.ray_job_missing_reference_no_retry,
+            ),
+            (
+                "protocol_legacy_cohort_visible",
+                self.evidence.protocol_legacy_cohort_visible,
+            ),
+            (
+                "protocol_explicit_cohort_visible",
+                self.evidence.protocol_explicit_cohort_visible,
+            ),
+            (
+                "protocol_v1_handoff_same_job",
+                self.evidence.protocol_v1_handoff_same_job,
+            ),
+            (
+                "protocol_v1_handoff_no_resubmit",
+                self.evidence.protocol_v1_handoff_no_resubmit,
+            ),
+            (
+                "protocol_v1_queued_survived_handoff",
+                self.evidence.protocol_v1_queued_survived_handoff,
+            ),
+            (
+                "protocol_v2_queued_unchanged",
+                self.evidence.protocol_v2_queued_unchanged,
+            ),
+            (
+                "protocol_v2_unsupported_visible",
+                self.evidence.protocol_v2_unsupported_visible,
+            ),
+            (
+                "protocol_v2_preinvocation_rejected",
+                self.evidence.protocol_v2_preinvocation_rejected,
+            ),
+            (
+                "protocol_v2_application_marker_absent",
+                self.evidence.protocol_v2_application_marker_absent,
+            ),
+            (
+                "protocol_handoff_cleanup_restored",
+                self.evidence.protocol_handoff_cleanup_restored,
             ),
             ("workflow_task_id", self.evidence.workflow_task_id),
             ("workflow_task_state", self.evidence.workflow_task_state),
@@ -8769,7 +11468,9 @@ print(json.dumps({{
                 "workloads",
                 "ray",
                 "runtime-env",
+                "protocol-handoff-recovery",
                 "ray-job-request-reference",
+                "protocol-handoff",
                 "runtime-env-encryption",
                 "rollouts",
             }
@@ -8791,9 +11492,11 @@ print(json.dumps({{
                 "rollouts",
                 "app-convergence",
                 "image-identity",
+                "protocol-handoff-recovery",
                 "probes",
                 "api-smoke",
                 "ray-job-request-reference",
+                "protocol-handoff",
                 "runtime-env-encryption",
                 "workflow-progress",
                 "workflow-admin",
