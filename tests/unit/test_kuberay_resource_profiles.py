@@ -410,3 +410,35 @@ def test_local_kong_uninstall_targets_the_documented_release_and_routes() -> Non
     ):
         assert ingress in recipe
     assert "namespace/kong" not in recipe
+
+
+def test_local_url_targets_use_posix_safe_echo_syntax() -> None:
+    makefile = (ROOT / "mk/k8s.mk").read_text(encoding="utf-8")
+    direct_recipe = _make_target_block(makefile, "k8s-urls")
+    kong_recipe = _make_target_block(makefile, "k8s-urls-kong")
+
+    assert 'echo "=== Project URLs ==="' in direct_recipe
+    assert 'echo "=== Project URLs (Kong) ==="' in kong_recipe
+    for recipe in (direct_recipe, kong_recipe):
+        assert "echo." not in recipe
+        assert 'echo ""' in recipe
+
+
+@pytest.mark.parametrize(
+    ("caller", "url_target"),
+    [
+        ("k8s-deploy", "k8s-urls"),
+        ("k8s-deploy-local", "k8s-urls"),
+        ("k8s-deploy-tls", "k8s-urls"),
+        ("k8s-deploy-kuberay-kind", "k8s-urls"),
+        ("k8s-deploy-kong-local", "k8s-urls-kong"),
+    ],
+)
+def test_deploy_callers_delegate_to_posix_safe_url_targets(
+    caller: str,
+    url_target: str,
+) -> None:
+    makefile = (ROOT / "mk/k8s.mk").read_text(encoding="utf-8")
+    recipe = _make_target_block(makefile, caller)
+
+    assert f"$(MAKE) --no-print-directory {url_target}" in recipe

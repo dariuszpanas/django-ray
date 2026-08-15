@@ -91,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The local KubeRay gate now validates its pinned v0.4.0 commit and tree even when tags were not
+  fetched, while still rejecting a drifted tag when present, and Kubernetes URL helper targets now
+  use POSIX-safe shell output syntax.
 - Graceful-shutdown signals now wake adaptive worker polling within a bounded 100 ms slice, so a
   long idle backoff cannot postpone Ray cancellation handoff or lease cleanup.
 - Malformed workflow plan-selection rows now fail with the bounded validation error used by
