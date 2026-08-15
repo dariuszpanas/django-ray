@@ -220,9 +220,12 @@ The gate performs these bounded layers:
 1. Repeats preflight and derives a unique tag containing the first 12 characters of the immutable
    Git tree, a UTC timestamp, and a random suffix.
 2. Builds `django-ray:<source-tag>` and `django-ray-worker:<source-tag>` from the same preflight
-   archive used to render Kubernetes. It also verifies the pinned `v0.4.0` release commit, creates a
-   separate immutable archive of that released tree, and builds the ephemeral legacy task-manager
-   image from it. Deny-by-default Dockerfile context rules admit
+   archive used to render Kubernetes. It verifies the pinned `v0.4.0` release commit and reviewed
+   source tree directly, then also requires a local `refs/tags/v0.4.0` to be annotated and peel to
+   that commit when the optional tag ref is present. A checkout fetched without tags remains valid
+   when it contains the pinned commit and tree. The gate creates a separate immutable archive of
+   that released tree and builds the ephemeral legacy task-manager image from it. Deny-by-default
+   Dockerfile context rules admit
    only reviewed image inputs; the gate rejects a missing or altered Dockerfile-specific policy
    instead of falling back to the broader root context. Current images carry the commit-at-run and
    stable source-tree OCI labels, the release image carries its pinned release provenance, and named

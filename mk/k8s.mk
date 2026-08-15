@@ -238,28 +238,28 @@ k8s-final-gate: k8s-evaluation-warning
 
 # Print local service URLs. Override K8S_URL_HOST, K8S_URL_SCHEME, or ports for non-local clusters.
 k8s-urls:
-	@echo === Project URLs ===
+	@echo "=== Project URLs ==="
 	@echo Django Web:       $(K8S_WEB_URL)
 	@echo API Docs:         $(K8S_API_DOCS_URL)
 	@echo Django Admin:     $(K8S_ADMIN_URL)
 	@echo Ray Dashboard:    $(K8S_RAY_DASHBOARD_URL)
 	@echo Grafana:          $(K8S_GRAFANA_URL)
 	@echo Prometheus:       $(K8S_PROMETHEUS_URL)
-	@echo.
+	@echo ""
 	@echo Override examples:
 	@echo   make k8s-urls K8S_URL_HOST=my-load-balancer.example.com K8S_WEB_PORT=80 K8S_GRAFANA_PORT=3000 K8S_PROMETHEUS_PORT=9090
 	@echo   make k8s-urls K8S_WEB_URL=https://app.example.com K8S_RAY_DASHBOARD_URL=https://ray.example.com K8S_GRAFANA_URL=https://grafana.example.com K8S_PROMETHEUS_URL=https://prometheus.example.com
 
 # Print Kong host-based local URLs. Override K8S_KONG_* variables for custom ingress hosts.
 k8s-urls-kong:
-	@echo === Project URLs (Kong) ===
+	@echo "=== Project URLs (Kong) ==="
 	@echo Django Web:       $(K8S_KONG_WEB_URL)
 	@echo API Docs:         $(K8S_KONG_API_DOCS_URL)
 	@echo Django Admin:     $(K8S_KONG_ADMIN_URL)
 	@echo Grafana:          $(K8S_KONG_GRAFANA_URL)
 	@echo Prometheus:       $(K8S_KONG_PROMETHEUS_URL)
 	@echo Ray Dashboard:    $(K8S_KONG_RAY_DASHBOARD_URL)
-	@echo.
+	@echo ""
 	@echo Override examples:
 	@echo   make k8s-urls-kong K8S_KONG_WEB_HOST=app.example.com K8S_KONG_GRAFANA_HOST=grafana.example.com K8S_KONG_PROMETHEUS_HOST=prometheus.example.com K8S_KONG_RAY_HOST=ray.example.com K8S_KONG_PORT=443 K8S_URL_SCHEME=https
 	@echo   make k8s-urls-kong K8S_KONG_WEB_URL=https://app.example.com K8S_KONG_RAY_DASHBOARD_URL=https://ray.example.com K8S_KONG_GRAFANA_URL=https://grafana.example.com K8S_KONG_PROMETHEUS_URL=https://prometheus.example.com

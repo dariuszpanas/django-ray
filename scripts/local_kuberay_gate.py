@@ -3181,20 +3181,14 @@ class LocalKubeRayGate:
             raise ValueError("the checkout changed after the gate captured its immutable source")
 
     def _verify_released_v040_source_identity(self) -> None:
-        """Pin the annotated v0.4.0 release tag to its reviewed commit and tree."""
+        """Pin v0.4.0 to its reviewed commit/tree and verify an optional local tag."""
 
-        tag_ref = f"refs/tags/{RELEASED_V040_TAG}"
-        object_type = self.runner.run(
-            ["git", "cat-file", "-t", tag_ref], cwd=self.config.root
-        ).stdout.strip()
-        if object_type != "tag":
-            raise ValueError(f"{RELEASED_V040_TAG} must resolve through an annotated tag object")
         commit = self.runner.run(
-            ["git", "rev-parse", "--verify", f"{tag_ref}^{{commit}}"],
+            ["git", "rev-parse", "--verify", f"{RELEASED_V040_COMMIT}^{{commit}}"],
             cwd=self.config.root,
         ).stdout.strip()
         if commit != RELEASED_V040_COMMIT:
-            raise ValueError(f"{RELEASED_V040_TAG} no longer resolves to the pinned release commit")
+            raise ValueError("the pinned v0.4.0 release commit no longer resolves exactly")
         source_tree = self.runner.run(
             ["git", "rev-parse", "--verify", f"{commit}^{{tree}}"],
             cwd=self.config.root,
@@ -3203,6 +3197,28 @@ class LocalKubeRayGate:
             raise ValueError(
                 "the pinned v0.4.0 commit no longer resolves to its reviewed source tree"
             )
+
+        tag_ref = f"refs/tags/{RELEASED_V040_TAG}"
+        tag_presence = self.runner.run(
+            ["git", "show-ref", "--verify", "--quiet", tag_ref],
+            cwd=self.config.root,
+            check=False,
+        )
+        if tag_presence.returncode == 1:
+            return
+        if tag_presence.returncode != 0:
+            raise ValueError(f"could not verify the optional local {RELEASED_V040_TAG} tag ref")
+        object_type = self.runner.run(
+            ["git", "cat-file", "-t", tag_ref], cwd=self.config.root
+        ).stdout.strip()
+        if object_type != "tag":
+            raise ValueError(f"{RELEASED_V040_TAG} must resolve through an annotated tag object")
+        tag_commit = self.runner.run(
+            ["git", "rev-parse", "--verify", f"{tag_ref}^{{commit}}"],
+            cwd=self.config.root,
+        ).stdout.strip()
+        if tag_commit != RELEASED_V040_COMMIT:
+            raise ValueError(f"{RELEASED_V040_TAG} no longer resolves to the pinned release commit")
 
     def run(self) -> None:
         """Run preflight and, unless requested otherwise, every integration layer."""

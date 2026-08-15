@@ -1745,16 +1745,31 @@ def test_released_v040_handoff_pin_is_immutable() -> None:
 @pytest.mark.parametrize(
     ("responses", "message"),
     [
+        (("f" * 40,), "release commit"),
+        ((gate_module.RELEASED_V040_COMMIT, "f" * 40), "reviewed source tree"),
         (
-            ("commit", gate_module.RELEASED_V040_COMMIT, gate_module.RELEASED_V040_SOURCE_TREE),
+            (
+                gate_module.RELEASED_V040_COMMIT,
+                gate_module.RELEASED_V040_SOURCE_TREE,
+                "",
+                "commit",
+            ),
             "annotated tag",
         ),
-        (("tag", "f" * 40, gate_module.RELEASED_V040_SOURCE_TREE), "pinned release commit"),
-        (("tag", gate_module.RELEASED_V040_COMMIT, "f" * 40), "reviewed source tree"),
+        (
+            (
+                gate_module.RELEASED_V040_COMMIT,
+                gate_module.RELEASED_V040_SOURCE_TREE,
+                "",
+                "tag",
+                "f" * 40,
+            ),
+            "pinned release commit",
+        ),
     ],
 )
-def test_released_v040_source_identity_fails_closed_on_tag_drift(
-    responses: tuple[str, str, str],
+def test_released_v040_source_identity_fails_closed_on_pin_or_present_tag_drift(
+    responses: tuple[str, ...],
     message: str,
 ) -> None:
     class ReleaseIdentityRunner:
@@ -1775,28 +1790,87 @@ def test_released_v040_source_identity_fails_closed_on_tag_drift(
 
     assert runner.calls[0] == (
         "git",
-        "cat-file",
-        "-t",
-        f"refs/tags/{gate_module.RELEASED_V040_TAG}",
+        "rev-parse",
+        "--verify",
+        f"{gate_module.RELEASED_V040_COMMIT}^{{commit}}",
     )
 
 
-def test_released_v040_source_identity_verifies_exact_tag_commit_and_tree() -> None:
+@pytest.mark.parametrize(
+    ("tag_returncode", "error"),
+    [(1, None), (2, "could not verify the optional local")],
+)
+def test_released_v040_source_identity_handles_optional_tag_lookup(
+    tag_returncode: int,
+    error: str | None,
+) -> None:
     class ReleaseIdentityRunner:
         def __init__(self) -> None:
             self.redactor = Redactor()
-            self.calls: list[tuple[str, ...]] = []
+            self.calls: list[tuple[tuple[str, ...], bool]] = []
             self.responses = iter(
                 (
-                    "tag",
-                    gate_module.RELEASED_V040_COMMIT,
-                    gate_module.RELEASED_V040_SOURCE_TREE,
+                    CommandResult(gate_module.RELEASED_V040_COMMIT, "", 0),
+                    CommandResult(gate_module.RELEASED_V040_SOURCE_TREE, "", 0),
+                    CommandResult("", "", tag_returncode),
                 )
             )
 
-        def run(self, args: list[str], **_kwargs: object) -> CommandResult:
-            self.calls.append(tuple(args))
-            return CommandResult(next(self.responses), "", 0)
+        def run(self, args: list[str], *, check: bool = True, **_kwargs: object) -> CommandResult:
+            self.calls.append((tuple(args), check))
+            return next(self.responses)
+
+    runner = ReleaseIdentityRunner()
+    gate = LocalKubeRayGate(_config(), runner=runner)  # type: ignore[arg-type]
+
+    if error is None:
+        gate._verify_released_v040_source_identity()
+    else:
+        with pytest.raises(ValueError, match=error):
+            gate._verify_released_v040_source_identity()
+
+    tag_ref = f"refs/tags/{gate_module.RELEASED_V040_TAG}"
+    assert runner.calls == [
+        (
+            (
+                "git",
+                "rev-parse",
+                "--verify",
+                f"{gate_module.RELEASED_V040_COMMIT}^{{commit}}",
+            ),
+            True,
+        ),
+        (
+            (
+                "git",
+                "rev-parse",
+                "--verify",
+                f"{gate_module.RELEASED_V040_COMMIT}^{{tree}}",
+            ),
+            True,
+        ),
+        (("git", "show-ref", "--verify", "--quiet", tag_ref), False),
+    ]
+
+
+def test_released_v040_source_identity_verifies_present_annotated_tag() -> None:
+    class ReleaseIdentityRunner:
+        def __init__(self) -> None:
+            self.redactor = Redactor()
+            self.calls: list[tuple[tuple[str, ...], bool]] = []
+            self.responses = iter(
+                (
+                    CommandResult(gate_module.RELEASED_V040_COMMIT, "", 0),
+                    CommandResult(gate_module.RELEASED_V040_SOURCE_TREE, "", 0),
+                    CommandResult("", "", 0),
+                    CommandResult("tag", "", 0),
+                    CommandResult(gate_module.RELEASED_V040_COMMIT, "", 0),
+                )
+            )
+
+        def run(self, args: list[str], *, check: bool = True, **_kwargs: object) -> CommandResult:
+            self.calls.append((tuple(args), check))
+            return next(self.responses)
 
     runner = ReleaseIdentityRunner()
     gate = LocalKubeRayGate(_config(), runner=runner)  # type: ignore[arg-type]
@@ -1805,14 +1879,27 @@ def test_released_v040_source_identity_verifies_exact_tag_commit_and_tree() -> N
 
     tag_ref = f"refs/tags/{gate_module.RELEASED_V040_TAG}"
     assert runner.calls == [
-        ("git", "cat-file", "-t", tag_ref),
-        ("git", "rev-parse", "--verify", f"{tag_ref}^{{commit}}"),
         (
-            "git",
-            "rev-parse",
-            "--verify",
-            f"{gate_module.RELEASED_V040_COMMIT}^{{tree}}",
+            (
+                "git",
+                "rev-parse",
+                "--verify",
+                f"{gate_module.RELEASED_V040_COMMIT}^{{commit}}",
+            ),
+            True,
         ),
+        (
+            (
+                "git",
+                "rev-parse",
+                "--verify",
+                f"{gate_module.RELEASED_V040_COMMIT}^{{tree}}",
+            ),
+            True,
+        ),
+        (("git", "show-ref", "--verify", "--quiet", tag_ref), False),
+        (("git", "cat-file", "-t", tag_ref), True),
+        (("git", "rev-parse", "--verify", f"{tag_ref}^{{commit}}"), True),
     ]
 
 
@@ -6640,18 +6727,20 @@ def test_preflight_registers_secret_before_any_mutation_or_diagnostics(
                 return CommandResult("", "", 0)
             if command == (
                 "git",
-                "cat-file",
-                "-t",
-                f"refs/tags/{gate_module.RELEASED_V040_TAG}",
-            ):
-                return CommandResult("tag", "", 0)
-            if command == (
-                "git",
                 "rev-parse",
                 "--verify",
-                f"refs/tags/{gate_module.RELEASED_V040_TAG}^{{commit}}",
+                f"{gate_module.RELEASED_V040_COMMIT}^{{commit}}",
             ):
                 return CommandResult(gate_module.RELEASED_V040_COMMIT, "", 0)
+            if command == (
+                "git",
+                "show-ref",
+                "--verify",
+                "--quiet",
+                f"refs/tags/{gate_module.RELEASED_V040_TAG}",
+            ):
+                assert check is False
+                return CommandResult("", "", 1)
             if command == (
                 "git",
                 "rev-parse",
@@ -9532,6 +9621,8 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
     assert "Do not automate token retrieval into browser logs" in guide
     assert "private, flattened kubeconfig snapshot" in guide
     assert "same one-time archive" in guide
+    assert "checkout fetched without tags remains valid" in normalized
+    assert "when the optional tag ref is present" in normalized
     assert "32-512 characters from the Bearer" in guide
     assert "`token68` alphabet" in guide
     assert "exact desired, updated, ready, and available replicas" in guide
