@@ -130,6 +130,74 @@ def _submit_live_sleep_task(ray_module, sleep_seconds: int):
 class TestLiveFailureInjection:
     """Live cluster fault-injection scenarios."""
 
+    def test_target_attestation_probes_every_package_free_ray_client_node(
+        self,
+        live_ray_cluster,
+    ):
+        """The dormant probe observes the exact two-node Ray Client target."""
+        import platform
+        import sys
+
+        from django_ray.ray_target_probe import probe_ray_target
+        from django_ray.target_attestation import (
+            RayRunnerFamily,
+            RayRuntimeVersion,
+            RayTargetExpectation,
+            compare_ray_target_attestation,
+            decode_ray_cluster_attestation,
+            encode_ray_cluster_attestation,
+        )
+
+        context = live_ray_cluster.get_runtime_context()
+        expectation = RayTargetExpectation(
+            target_key="ci-ray-client",
+            runner_family=RayRunnerFamily.RAY_CORE,
+            cluster_session=context.get_session_name(),
+            policy_revision=1,
+            runtime=RayRuntimeVersion(
+                ray_major=2,
+                ray_minor=56,
+                ray_patch=0,
+                python_implementation=platform.python_implementation().lower(),
+                python_major=sys.version_info.major,
+                python_minor=sys.version_info.minor,
+                python_patch=sys.version_info.micro,
+            ),
+        )
+
+        attestation = probe_ray_target(
+            expectation,
+            ttl_seconds=60,
+            timeout_seconds=60,
+            max_nodes=16,
+        )
+
+        assert live_ray_cluster.is_initialized() is True
+        assert (
+            decode_ray_cluster_attestation(encode_ray_cluster_attestation(attestation))
+            == attestation
+        )
+        assert (
+            compare_ray_target_attestation(
+                expectation,
+                attestation,
+                now=attestation.observed_at,
+            )
+            is None
+        )
+        observed_node_ids = tuple(node.node_id for node in attestation.nodes)
+        alive_node_ids = tuple(
+            sorted(node["NodeID"] for node in live_ray_cluster.nodes() if node.get("Alive"))
+        )
+        assert len(observed_node_ids) >= LIVE_MIN_NODES
+        assert observed_node_ids == alive_node_ids
+        assert observed_node_ids == tuple(
+            item.node_id for item in attestation.boundary.node_state_versions_before
+        )
+        assert observed_node_ids == tuple(
+            item.node_id for item in attestation.boundary.node_state_versions_after
+        )
+
     @pytest.mark.skipif(
         not LIVE_WORKING_DIR_URI,
         reason="DJANGO_RAY_LIVE_WORKING_DIR_URI is required for the submission smoke test",

@@ -984,6 +984,25 @@ identity and membership of a target cluster. Those target-readiness and blue/gre
 drain guarantees require their separate compatibility boundary before a future status
 surface can report end-to-end capacity.
 
+The first target-attestation slice is deliberately Django-free and dormant. Its
+canonical contract binds an operator target key and policy revision to the runner
+family, one Ray cluster session, and an exact Ray/Python runtime tuple. A bounded Ray
+2.56.0 adapter takes resource-state snapshots before and after one hard-affinity probe
+on every live schedulable node. The cluster session and exact sorted node set must stay
+unchanged across that interval, every node must report the expected tuple and its own
+identity, and the resource-state and per-node counters must not regress. Those counters
+advance on ordinary heartbeats, so the contract records both ends of the observation
+boundary; it does not misrepresent them as a stable membership epoch.
+
+This interval can detect a node set change visible at either snapshot, but cannot prove
+that no transient join and leave happened wholly between them or after the final
+snapshot. A later activation therefore still needs TTL renewal and expiry enforcement,
+fresh per-invocation validation, persisted target policy, and capability withdrawal. This
+slice adds none of those database, enqueue, claim, adoption, routing, or drain effects.
+It supports Ray Core and Ray Client observation only. Ray Job needs a separate
+authenticated pre-Django response channel; logs, process exit, rq2 metadata, and a
+Ray-writable shared payload object are not authoritative attestation results.
+
 The read-only protocol-status service exposes only the database facts this boundary can
 support. One versioned immutable report aggregates policy/token consistency, active and
 heartbeat-stale task-manager leases, explicit or policy-controlled protocol ranges, and

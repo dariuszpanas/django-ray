@@ -360,11 +360,31 @@ jobs:
           version: "latest"
           enable-cache: "false"
 
+      - name: Pin exact cluster Python
+        run: |
+          head_python="$(docker exec ray-head python -c 'import platform; print(platform.python_version())')"
+          worker_python="$(docker exec ray-worker python -c 'import platform; print(platform.python_version())')"
+          if [[ ! "$head_python" =~ ^3\.12\.[0-9]+$ ]]; then
+            echo "::error title=Unexpected Ray Python::head reported a non-3.12 stable runtime."
+            exit 1
+          fi
+          if [[ "$head_python" != "$worker_python" ]]; then
+            echo "::error title=Mixed Ray Python::head and worker patch versions differ."
+            exit 1
+          fi
+          echo "DJANGO_RAY_LIVE_PYTHON=$head_python" >> "$GITHUB_ENV"
+
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install "$DJANGO_RAY_LIVE_PYTHON"
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: |
+          uv sync --frozen --python "$DJANGO_RAY_LIVE_PYTHON"
+          client_python="$(.venv/bin/python -c 'import platform; print(platform.python_version())')"
+          if [[ "$client_python" != "$DJANGO_RAY_LIVE_PYTHON" ]]; then
+            echo "::error title=Ray Client Python drift::installed client runtime differs from the cluster."
+            exit 1
+          fi
 
       - name: Verify Ray Client readiness
         timeout-minutes: 3
@@ -443,6 +463,7 @@ jobs:
       - name: Run isolated live cluster fault scenarios
         run: |
           live_cluster_scenarios=(
+            "tests/integration/test_live_failure_injection.py::TestLiveFailureInjection::test_target_attestation_probes_every_package_free_ray_client_node"
             "tests/integration/test_live_failure_injection.py::TestLiveFailureInjection::test_ray_core_runner_submits_project_code_to_generic_cluster"
             "tests/integration/test_live_failure_injection.py::TestLiveFailureInjection::test_disconnect_retries_pending_ray_core_task"
             "tests/integration/test_live_failure_injection.py::TestLiveFailureInjection::test_cancellation_finalizes_live_pending_task"

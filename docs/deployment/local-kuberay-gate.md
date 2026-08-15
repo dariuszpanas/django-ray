@@ -27,14 +27,16 @@ Named-pipe Docker endpoints must use the local `//./pipe/` authority.
 
 ## Trigger matrix
 
-Use the strongest row that applies to a change. When uncertain about a cross-component boundary,
-run the gate and choose the cold Ray restart.
+Use the narrow dormant-attestation exception when all of its conditions apply. Otherwise use the
+strongest row that applies to a change. When uncertain about a cross-component boundary, run the
+gate and choose the cold Ray restart.
 
 | Change class | Gate | `K8S_RAY_RESTART` | Why |
 |---|---|---|---|
 | Isolated Compiled Graph pilot files under `k8s/pilots/compiled-graph/`, `scripts/kuberay_compiled_graph_pilot.py`, its focused tests, or its retained investigation evidence for #102 | Not applicable | N/A | The pinned pilot has its own isolated namespace, manifests, resource profile, teardown checks, and evidence contract. It must not mutate or validate the supported local application stack. |
+| A Django-free target-attestation codec or version-pinned feasibility probe that remains unreachable from settings, enqueue, worker, runner, transport, persistence, and deployment paths | KubeRay not applicable; mandatory serial local-Ray plus package-free two-node Ray Client evidence | N/A | This narrow exception proves the canonical boundary, by-value generic-node bootstrap, exact every-node observation, and Core/Client behavior without implying claim capacity or blue/green activation. Once a production path consumes the proof, the affected worker or transport rows below require the cold gate, and final target routing requires its two-cluster handoff extension. |
 | Testproject dashboard, templates, JavaScript, static collection, web image, entrypoint, or web dependencies | Required | `skip`, unless the RuntimeEnv or Ray boundary also changed | Proves the exact asset and image reached the live web pod and protected actions still work. |
-| `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
+| `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior other than the narrow dormant-attestation exception above | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
 | RuntimeEnv snapshot storage, encryption settings or dependencies, storage/retry validation, the fixed deployment canary, or KubeRay encryption selectors | Required | `required` | Proves a cold generic Ray generation receives the decrypted marker while the database retains only the authenticated envelope, and proves corrupt or unknown-key rows fail before Ray. |
 | Ray Job request encoding, request-reference storage, Jobs API metadata, entrypoint transport, manager reconciliation, or pre-Django request loading | Required | `required` | Proves rq2 uses only a bounded request-reference carrier, survives a manager replacement without resubmission, and rejects a missing request before application effects or retry. |
 | Execution-protocol schema, worker capability leases, protocol filtering, rolling task-manager handoff, or unsupported-protocol visibility/rejection | Required | `required` | Proves a real released 0.4 schema-`0` manager can hand one protocol-`1` Ray Job to the exact current schema-`1`, `1..1` cohort without resubmission while a separate compatible queued row survives and later completes once. A synthetic queued protocol-`2` fixture must remain unclaimed and visible, and its direct strict Ray Core executor request must reject before application invocation; the gate never advertises a live `1..2` capability or activates protocol `2`. |
@@ -54,6 +56,10 @@ preservation outcomes. For a **Recommended** row, record either the same passing
 specific reason it was not run. The detailed evidence still binds the run to the immutable Git tree
 rather than relying on a commit SHA that changes when only the commit message is amended. Never copy
 a token, Secret payload, unbounded log, or browser credential into history.
+
+For the dormant-attestation exception, retain the exact serial local-Ray result, the package-free
+two-node Ray Client result, and the explicit guarded-KubeRay-not-applicable decision. Do not report
+that evidence as claim capacity, target activation, or blue/green handoff validation.
 
 ## Guarded local capacity
 
