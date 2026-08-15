@@ -94,17 +94,17 @@ printf '\n'
 ```
 
 These commands intentionally print the credential, so run them only in a trusted terminal. The
-dashboard clears the password field after submission and writes a token to this tab's
-`sessionStorage` only after the statistics API verifies it. The token survives reloads; select
-**Forget token** or end the tab session to clear it. A current credential rejected with 401 is also
-removed. The token is never put in rendered HTML, `localStorage`, cookies, or URLs. Missing
-tokens produce a prompt, and unverified replacements are discarded rather than persisted.
+dashboard clears the password field after submission and retains the token only in the loaded
+page's memory after the statistics API verifies it. Reloading starts a new page without the token;
+selecting **Forget token** or receiving a 401 for the current credential clears it immediately. The
+token is never put in rendered HTML, browser storage, cookies, or URLs. Missing tokens produce a
+prompt, and unverified replacements are discarded.
 
-This flow is intended for trusted local demos. `sessionStorage` is plaintext convenience storage
-readable by same-origin JavaScript; browser tab duplication/session recovery, extensions, developer
-tools, or a compromised page can expose or restore it. Do not pass bearer tokens in query strings,
-and do not expose the sample dashboard over an untrusted network or plaintext HTTP. Production front
-ends should use an appropriate identity and session model instead of distributing one operator token.
+This flow is intended for trusted local demos. While the page is loaded, same-origin JavaScript,
+extensions, developer tools, or a compromised page can access its in-memory token. Do not pass
+bearer tokens in query strings, and do not expose the sample dashboard over an untrusted network or
+plaintext HTTP. Production front ends should use an appropriate identity and session model instead
+of distributing one operator token.
 
 `k8s/base` is a shared Kustomize render reference, not the starting point for a production
 deployment. It keeps `DJANGO_DEPLOYMENT_MODE=production` so maintainers exercise the sample

@@ -83,8 +83,9 @@ docker compose logs migrate
 ## Authenticate in the browser
 
 Open the [sample landing page](http://127.0.0.1:8000/) and paste the current token value into
-**Browser API access**. The page retains a verified token only in the current tab's
-`sessionStorage`; it does not place the token in rendered HTML, a cookie, `localStorage`, or a URL.
+**Browser API access**. The page retains a verified token only in the loaded page's memory; it does
+not place the token in rendered HTML, browser storage, a cookie, or a URL. Reloading starts a new
+page without the token, so paste it again after a reload.
 
 Open [Swagger](http://127.0.0.1:8000/api/docs), select **Authorize**, and paste the token value.
 Swagger adds the `Bearer` scheme automatically, so the dialog should receive the value without the
@@ -104,10 +105,10 @@ printf '%s\n' "$DJANGO_API_TOKEN"
 $env:DJANGO_API_TOKEN
 ```
 
-Do not put bearer tokens in query strings. Browser extensions, developer tools, same-origin
-JavaScript, and browser session recovery can expose `sessionStorage`; this operator-token flow is
-only for a trusted local demo. A remotely accessible deployment requires HTTPS and an appropriate
-user identity/session design.
+Do not put bearer tokens in query strings. While the page is loaded, browser extensions, developer
+tools, same-origin JavaScript, or a compromised page can access its in-memory token; this
+operator-token flow is only for a trusted local demo. A remotely accessible deployment requires
+HTTPS and an appropriate user identity/session design.
 
 ## Make direct API requests
 

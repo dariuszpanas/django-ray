@@ -91,6 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The sample browser dashboard now keeps its verified bearer token only in loaded-page memory;
+  reload starts unauthenticated and no token is written to browser storage, cookies, or URLs.
 - Dockerfile-specific build contexts now re-exclude nested environment and SQLite database files
   after broad source inclusions, and direct KubeRay deployment no longer removes a potentially
   unrelated local Kong release or its routes.
