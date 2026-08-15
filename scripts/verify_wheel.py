@@ -47,6 +47,7 @@ EXPECTED_FILES = {
     "django_ray/migrations/0020_legacy_open_rollback_fence.py",
     "django_ray/migrations/0021_ray_job_request_reference.py",
     "django_ray/migrations/0022_ray_target_persistence.py",
+    "django_ray/migrations/0023_ray_task_target_binding.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
     "django_ray/runner/ray_job.py",
@@ -54,7 +55,7 @@ EXPECTED_FILES = {
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0022_ray_target_persistence",
+    "0023_ray_task_target_binding",
 )
 
 

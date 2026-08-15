@@ -94,6 +94,12 @@
         "rationale": "Legacy queue-deadline snapshotting, 500-row batch flushing, opt-out handling, and reverse migration behavior are deterministic data-migration contracts suited to exact migration tests."
       }
     },
+    "src/django_ray/migrations/0023_ray_task_target_binding.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Create-once binding bounds, parent protection, maintenance deletion, and stopped-writer reverse refusal are deterministic SQLite and PostgreSQL migration contracts suited to exact schema and race tests."
+      }
+    },
     "src/django_ray/migrations/__init__.py": {
       "default": {
         "category": "dead-or-non-behavioral-code",

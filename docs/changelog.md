@@ -49,6 +49,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberate maintenance deletion leaves the destructive reversal path available.
   Applying the migration does not assign a target to work, advertise worker capacity,
   or activate routing.
+- Migration `0023` adds an unseeded, create-once relationship from an execution to one
+  immutable target-policy revision. A future target-aware consumer must treat absence as
+  unbound and fail closed; current workers remain target-unaware and do not consult the
+  table. The row's creation time is not proof of enqueue-time selection. Current code has
+  no binding writer, reader, Admin, enqueue, claim, adoption, lifecycle, routing, or
+  backfill consumer, and published 0.4.0 code ignores the table. Legacy binding remains
+  forbidden until #381 supplies exact mapping lineage. Both foreign keys use `PROTECT`,
+  so a retained binding blocks deletion of its execution and policy revision. Activation
+  remains blocked until every task and policy retention or cleanup path defines and tests
+  explicit ordering; deleting a binding first is never an implicit cascade or ordinary
+  task-cleanup step. Reverse `0023` only in a stopped-writer maintenance window after
+  exporting or auditing and deliberately deleting every retained binding.
 
 ### Fixed
 
@@ -82,6 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outcomes never become fabricated negative history. The `retired` transition remains
   reserved for #368, and this slice adds no task, lease, claim, routing, status, renewal,
   or activation behavior.
+- A dormant task-target binding schema can retain one create-once execution-to-policy
+  selection relationship for a later enqueue writer. It is initially empty, has no
+  production consumer, and never turns a historical policy state into target capacity or
+  claim authorization. Its protected parent relationships require an explicit tested
+  audit and retention order before any writer or cleanup integration can activate it.
 
 - The guarded local KubeRay final gate now certifies the supported task-manager rolling
   boundary with a manager built from the pinned released `v0.4.0` tree and the exact current

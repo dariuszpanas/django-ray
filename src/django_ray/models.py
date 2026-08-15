@@ -67,6 +67,7 @@ _WORKFLOW_DETAIL_DECODED_BYTES_LIMIT = 16 * 1024 * 1024
 _WORKFLOW_DETAIL_RECORD_BYTES_LIMIT = 16 * 1024
 _WORKFLOW_RUN_NAMESPACE_MAX = (1 << 63) - 1
 _WORKFLOW_RUN_SEQUENCE_MAX = (1 << 59) - 1
+RAY_TASK_TARGET_BINDING_SCHEMA_VERSION = 1
 
 
 class TaskState(models.TextChoices):
@@ -1655,3 +1656,51 @@ class RayTargetAttestationRevision(models.Model):
 
     def __str__(self) -> str:
         return f"policy {self.policy_id} attestation revision {self.revision}"
+
+
+class RayTaskTargetBinding(models.Model):
+    """Dormant immutable target expectation selected for one task.
+
+    No released producer creates these rows.  A later activation must write the
+    task and binding under one durable selection boundary before target-aware
+    workers are allowed to claim the task.
+    """
+
+    execution = models.OneToOneField(
+        RayTaskExecution,
+        on_delete=models.PROTECT,
+        related_name="ray_target_binding",
+        primary_key=True,
+        editable=False,
+    )
+    target_policy = models.ForeignKey(
+        RayTargetPolicyRevision,
+        on_delete=models.PROTECT,
+        related_name="task_target_bindings",
+        editable=False,
+        help_text="Immutable Ray target policy revision selected for this task",
+    )
+    schema_version = models.PositiveSmallIntegerField(
+        default=RAY_TASK_TARGET_BINDING_SCHEMA_VERSION,
+        db_default=RAY_TASK_TARGET_BINDING_SCHEMA_VERSION,
+        editable=False,
+        validators=[
+            MinValueValidator(RAY_TASK_TARGET_BINDING_SCHEMA_VERSION),
+            MaxValueValidator(RAY_TASK_TARGET_BINDING_SCHEMA_VERSION),
+        ],
+        help_text="Schema version for this dormant task target binding",
+    )
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(schema_version=RAY_TASK_TARGET_BINDING_SCHEMA_VERSION),
+                name="ray_tbinding_schema_valid",
+            )
+        ]
+        verbose_name = "Ray Task Target Binding"
+        verbose_name_plural = "Ray Task Target Bindings"
+
+    def __str__(self) -> str:
+        return f"execution {self.execution_id} target policy {self.target_policy_id}"

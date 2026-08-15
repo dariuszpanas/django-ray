@@ -228,8 +228,8 @@ def test_dormant_target_persistence_has_a_database_only_gate_boundary() -> None:
     assert "coordinator-enforced append history" in row
     assert "database immutable-update/insert-bound guards" in row
     assert (
-        "unreachable from task/attempt target fields, worker leases, enqueue, claim, adoption, "
-        "lifecycle, routing, status, operator, and deployment paths"
+        "no production task/attempt, worker-lease, enqueue, claim, adoption, lifecycle, routing, "
+        "status, operator, or deployment path consumes those records"
     ) in row
     assert "creates no target capacity, work placement, cluster mutation" in row
     assert "final target routing requires the two-cluster handoff extension" in row
@@ -240,3 +240,49 @@ def test_dormant_target_persistence_has_a_database_only_gate_boundary() -> None:
         "decision"
     ) in normalized_guide
     assert "Do not report this database evidence as a live attestation" in normalized_guide
+
+
+def test_dormant_task_target_binding_has_a_database_only_gate_boundary() -> None:
+    guide = _read(Path("docs/deployment/local-kuberay-gate.md"))
+    normalized_guide = " ".join(guide.split())
+    row = next(
+        line
+        for line in guide.splitlines()
+        if "An additive, unseeded, create-once execution-to-immutable-target-policy" in line
+    )
+
+    assert "KubeRay not applicable" in row
+    assert "mandatory SQLite and PostgreSQL binding-migration evidence" in row
+    assert "no binding writer, reader, Admin surface, enqueue hook" in row
+    assert "claim/adoption predicate, lifecycle or routing path, backfill" in row
+    assert "Current workers are target-unaware" in row
+    assert "future target-aware consumer must treat absence as unbound and fail closed" in row
+    assert "Both parents are deletion-protected" in row
+    assert "activation must first adapt and test every execution and policy retention" in row
+    assert "binding deletion requires explicit audit and retention ordering" in row
+    assert "`created_at` is not enqueue provenance" in row
+    assert "historical policy state is not capacity or claim authorization" in row
+    assert "Legacy adoption remains forbidden until #381 supplies exact mapping lineage" in row
+    assert "final target routing requires the two-cluster handoff extension" in row
+
+    assert (
+        "For the dormant task-target-binding exception, retain the exact SQLite and PostgreSQL "
+        "binding migration results plus the explicit guarded-KubeRay-not-applicable decision"
+    ) in normalized_guide
+    assert "Do not report this database evidence as enqueue provenance" in normalized_guide
+    assert "both parents are protected" in normalized_guide
+    assert "tested task and policy cleanup ordering" in normalized_guide
+
+
+def test_dormant_task_target_binding_has_no_production_consumer() -> None:
+    production_root = ROOT / "src" / "django_ray"
+    references = {
+        path.relative_to(ROOT).as_posix()
+        for path in production_root.rglob("*.py")
+        if "RayTaskTargetBinding" in path.read_text(encoding="utf-8")
+    }
+
+    assert references == {
+        "src/django_ray/migrations/0023_ray_task_target_binding.py",
+        "src/django_ray/models.py",
+    }

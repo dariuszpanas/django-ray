@@ -19,7 +19,7 @@ from django_ray.workflow_progress import (
 
 MIGRATE_FROM = [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
 MIGRATE_TO = [("django_ray", "0018_workflow_run_allocation")]
-LATEST = [("django_ray", "0022_ray_target_persistence")]
+LATEST = [("django_ray", "0023_ray_task_target_binding")]
 
 
 def _assert_workflow_run_allocation_migration_round_trip() -> None:

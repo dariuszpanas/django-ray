@@ -40,18 +40,34 @@ unreachable, identity-drift, malformed, and expired probe outcomes are not fabri
 as observation rows. The private coordinator registers Ray Core targets in `draining`,
 allows only revision-checked `active`/`draining` policy transitions, reserves `retired`
 for #368, and rejects Ray Job persistence until its authenticated response channel
-exists. It has no task, attempt, worker-lease, claim, routing, or activation consumer.
-Until those later boundaries land, upgrade task managers and every cluster node together
-and treat any Ray or Python patch difference as unsupported.
+exists. Migration `0023` adds a deliberately unseeded, create-once relationship from an
+execution to one immutable target-policy revision. A future target-aware consumer must
+treat absence as unbound and fail closed; current workers remain target-unaware and do
+not consult the table. `created_at` records only when the relationship was written, not
+proof of enqueue-time selection. No writer, reader, Admin surface, enqueue, claim,
+adoption, lifecycle, routing, or backfill consumer exists. Legacy binding remains
+forbidden until #381 supplies exact mapping lineage. Until those later boundaries land,
+upgrade task managers and every cluster node together and treat any Ray or Python patch
+difference as unsupported.
 
-Migration `0022_ray_target_persistence` is dormant and additive for a schema-first
-upgrade from 0.4.0. Exact 0.4.0 code ignores its new tables, so a code-only rollback
-retains the migration and its verified history. Schema reversal is a separate
-stopped-writer operation and refuses while any target history remains. Export or audit
-that history and deliberately delete it before a destructive reversal; database guards
-reject material updates and invalid identity, digest, or byte-bound inserts but
-intentionally leave exact no-op updates and that maintenance-delete path. Schema reversal
-is not part of an ordinary binary rollback.
+Both binding foreign keys use `PROTECT`: once a binding exists, deleting its execution or
+target-policy revision is rejected by the ORM and database. Current cleanup paths remain
+unchanged only because the table is unseeded. Activation therefore requires every task-
+and policy-retention or cleanup path to define and test explicit ordering. A binding may
+be deleted first only under that audit and retention policy, never through an implicit
+cascade or ordinary task cleanup.
+
+Migrations `0022_ray_target_persistence` and `0023_ray_task_target_binding` are dormant
+and additive for a schema-first upgrade from 0.4.0. Exact 0.4.0 code ignores their new
+tables, so a code-only rollback retains the migrations and their history. Schema reversal
+is a separate stopped-writer operation. Reverse `0023` only after exporting or auditing
+and deliberately deleting every binding; reverse `0022` only after doing the same for
+all target history. Database guards reject material updates and invalid bounded inserts
+but intentionally leave the exact no-op and maintenance-delete rollback paths. A binding
+records historical selection intent, not current capacity: the referenced policy's old
+`active` state never authorizes a claim after a later draining or retirement revision.
+The maintenance-delete path follows the same explicit parent-retention ordering. Schema
+reversal is not part of an ordinary binary rollback.
 
 The general version range and base `ray[default]` dependency do not install or promise
 every optional Ray component. See the
