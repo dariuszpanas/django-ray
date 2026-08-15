@@ -8,3 +8,9 @@
 !src/**
 !testproject/
 !testproject/**
+
+# Dockerfile-specific policies replace the root .dockerignore. Keep local
+# environment and database files excluded after broad directory negations.
+**/.env
+**/.env.*
+**/*.sqlite3

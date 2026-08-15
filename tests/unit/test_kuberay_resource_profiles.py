@@ -354,14 +354,16 @@ def test_kong_deploy_does_not_apply_the_lean_profile_first() -> None:
     assert "rollout status deployment/django-ray-worker-ray-job" in recipe
 
 
-def test_direct_deploy_cold_replaces_ray_and_removes_kong_routes() -> None:
+def test_direct_deploy_cold_replaces_ray_without_uninstalling_kong() -> None:
     makefile = (ROOT / "mk/k8s.mk").read_text(encoding="utf-8")
     recipe = _make_target_block(makefile, "k8s-deploy-kuberay-kind")
 
-    uninstall_index = recipe.index("k8s-uninstall-kong-local")
     delete_index = recipe.index("k8s-delete-local-raycluster")
     apply_index = recipe.index("kubectl apply -k k8s/overlays/kuberay-kind")
-    assert uninstall_index < delete_index < apply_index
+    assert delete_index < apply_index
+    assert "k8s-uninstall-kong-local" not in recipe
+    assert "helm uninstall" not in recipe
+    assert "kubectl delete ingress/" not in recipe
     assert "kubectl apply -k k8s/overlays/kong-local" not in recipe
     assert "status.desiredWorkerReplicas}'=2" in recipe
     assert "status.readyWorkerReplicas}'=2" in recipe
@@ -392,7 +394,7 @@ def test_local_raycluster_delete_is_foreground_and_removes_generated_service() -
     assert "kubectl delete service/ray-head-svc -n django-ray" in recipe
 
 
-def test_local_kong_uninstall_removes_only_repo_owned_release_and_routes() -> None:
+def test_local_kong_uninstall_targets_the_documented_release_and_routes() -> None:
     makefile = (ROOT / "mk/k8s.mk").read_text(encoding="utf-8")
     recipe = _make_target_block(makefile, "k8s-uninstall-kong-local")
 

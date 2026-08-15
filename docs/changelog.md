@@ -91,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Dockerfile-specific build contexts now re-exclude nested environment and SQLite database files
+  after broad source inclusions, and direct KubeRay deployment no longer removes a potentially
+  unrelated local Kong release or its routes.
 - Commit-message validation now bounds mixed validation-evidence suffix scans, parses Markdown
   tables in one pass, rejects oversized generated counts and duplicate metadata markers without
   unbounded conversion or collection, and preserves leading blank headers for rejection.

@@ -240,6 +240,10 @@ operator, the Kong controller/gateway, and Kubernetes/Docker overhead:
 make k8s-deploy-kuberay-kind
 ```
 
+The direct target leaves any existing Kong release and ingress routes untouched. It does not invoke
+the Kong uninstall target because a release named `kong` in the `kong` namespace may belong to a
+different local workload.
+
 If you also want the host-based Kong routes used by the Docker Desktop managed kind setup,
 install Kong and apply the local ingress overlay:
 
@@ -255,6 +259,10 @@ helm upgrade --install kong kong/ingress \
 
 kubectl apply -k k8s/overlays/kong-local
 ```
+
+`make k8s-uninstall-kong-local` is an explicit, destructive cleanup for the conventional `kong`
+release and the three sample ingress routes. Run it only after verifying that those resources were
+installed for this project; switching to the direct profile never runs it automatically.
 
 ### 2. Check Status
 
