@@ -199,6 +199,14 @@ def test_plan_selection_v1_reporting_policy_is_inferred_for_rolling_rows(
     assert effective_plan_selection_reporting_policy(legacy) == expected_policy
 
 
+@pytest.mark.parametrize("manifest", [{}, {"unexpected": "field"}])
+def test_plan_selection_reader_rejects_malformed_schema_with_domain_error(
+    manifest: dict[str, object],
+) -> None:
+    with pytest.raises(WorkflowPlanValidationError, match="unsupported schema"):
+        validate_plan_selection_manifest(manifest)
+
+
 BASE_IMAGE_DIGEST = "sha256:" + "a" * 64
 BASE_RUNTIME = CompiledGraphRuntimeIdentity(
     ray_version="2.56.1",

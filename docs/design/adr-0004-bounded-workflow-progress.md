@@ -353,8 +353,9 @@ all of the following:
 
 - cursor schema version;
 - a non-reversible binding over the complete four-field run identity;
-- the public run identity and originating summary revision needed to describe an
-  expired page without exposing the internal task primary key;
+- the public run identity and originating summary revision, which expires the cursor
+  when the current summary advances and describes that expired page without exposing
+  the internal task primary key;
 - the applicable publication epochs: topology version for topology reads and both
   topology version and detail revision for state-data reads;
 - collection kind;
@@ -364,16 +365,17 @@ all of the following:
 - the cumulative number of records already returned for completeness checks.
 
 A cursor is not an authorization token or a storage reference. The service repeats
-object-level authorization on every request. It validates the requested run-level
-publication epoch against the current task summary before querying normalized rows; a
-single statement or consistent database snapshot prevents the epoch check and row
-read from straddling a publication. Rows may have an older last-updated epoch and
-remain current. A different run, topology version, detail revision, collection,
-filter, or order rejects the cursor. A cursor for a retired revision returns
-`EXPIRED` with the cursor's original public run and applicable publication metadata;
-it never advances into the current revision. On the final normalized-detail page,
-the cumulative cursor count must match the retained run counter. Fewer child rows are
-`MISSING`; extra rows or conflicting counters are `CORRUPT`.
+object-level authorization on every request. It validates the requested summary revision
+and run-level publication epoch against the current task summary before querying
+normalized rows; a single statement or consistent database snapshot prevents the epoch
+check and row read from straddling a publication. Rows may have an older last-updated
+epoch and remain current. A different run, summary revision, topology version, or detail
+revision retires the cursor. A different collection, filter, order, or applied limit
+rejects it as a mismatch. A cursor for a retired revision returns `EXPIRED` with the
+cursor's original public run and applicable publication metadata; it never advances into
+the current revision. On the final normalized-detail page, the cumulative cursor count
+must match the retained run counter. Fewer child rows are `MISSING`; extra rows or
+conflicting counters are `CORRUPT`.
 
 The default page size is 100 and the hard maximum is 256. Page construction stops
 before either the item or encoded-response byte limit. Because every stored record is

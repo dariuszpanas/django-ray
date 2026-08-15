@@ -238,13 +238,13 @@ def validate_plan_selection_manifest(value: Any) -> dict[str, Any]:
         raise WorkflowPlanValidationError("Workflow plan selection has an unsupported schema")
     version = normalized.get("plan_selection_format_version")
     if type(version) is not int:
-        expected_fields = set()
+        raise WorkflowPlanValidationError("Workflow plan selection has an unsupported schema")
     elif version == PLAN_SELECTION_LEGACY_FORMAT_VERSION:
         expected_fields = common_fields
     elif version == PLAN_SELECTION_FORMAT_VERSION:
         expected_fields = common_fields | {"reporting_policy"}
     else:
-        expected_fields = set()
+        raise WorkflowPlanValidationError("Workflow plan selection has an unsupported schema")
     if set(normalized) != expected_fields:
         raise WorkflowPlanValidationError("Workflow plan selection has an unsupported schema")
     if normalized["plan_selection_format"] != PLAN_SELECTION_FORMAT:

@@ -436,7 +436,7 @@ def test_cursor_tampering_and_request_mismatch_fail_explicitly() -> None:
     assert wrong_filter.value.code is WorkflowProgressReadErrorCode.CURSOR_MISMATCH
 
 
-def test_detail_cursor_expires_but_topology_cursor_survives_detail_only_update() -> None:
+def test_summary_update_expires_detail_and_topology_cursors() -> None:
     published = publish_initial_workflow(151, case_id=127_004)
     topology_first = list_workflow_topology_nodes(
         published.execution,
@@ -479,8 +479,10 @@ def test_detail_cursor_expires_but_topology_cursor_survives_detail_only_update()
         limit=100,
     )
 
-    assert topology_next["availability"] == "AVAILABLE"
-    assert topology_next["items"][0]["node_id"] == workflow_node_id(100)
+    assert topology_next["availability"] == "EXPIRED"
+    assert topology_next["publication"]["summary_revision"] == 1
+    assert topology_next["items"] == []
+    assert topology_next["next_cursor"] is None
     assert detail_next["availability"] == "EXPIRED"
     assert detail_next["items"] == []
     assert detail_next["next_cursor"] is None

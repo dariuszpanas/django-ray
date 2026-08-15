@@ -164,7 +164,7 @@ def test_versioned_task_summary_omits_sensitive_payloads(db, settings) -> None:
     assert get_task_summary(execution)["workflow_revision"] is None
 
 
-@pytest.mark.parametrize("selection", ["{", "[]"])
+@pytest.mark.parametrize("selection", ["{", "[]", "{}"])
 def test_task_summary_omits_invalid_plan_selection(db, selection: str) -> None:
     execution = RayTaskExecution.objects.create(
         task_id=f"task-invalid-selection-{len(selection)}",
