@@ -13,6 +13,7 @@ from packaging.version import Version
 
 PROJECT_ROOT = Path(__file__).parents[2]
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+DOCS_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "docs.yml"
 RELEASE_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
 WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
 MAKEFILE = PROJECT_ROOT / "Makefile"
@@ -107,14 +108,31 @@ def test_manual_release_is_bound_to_full_fetched_main_sha_before_build() -> None
     assert input_validation["if"] == "github.event_name == 'workflow_dispatch'"
     assert input_validation["env"] == {
         "CANDIDATE_SHA": "${{ inputs.candidate_sha }}",
+        "DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
+        "EVENT_REF": "${{ github.ref }}",
         "EVENT_SHA": "${{ github.sha }}",
     }
     assert "^[0-9a-f]{40}$" in input_validation["run"]
+    assert '"$EVENT_REF" != "refs/heads/$DEFAULT_BRANCH"' in input_validation["run"]
     assert '"$CANDIDATE_SHA" != "$EVENT_SHA"' in input_validation["run"]
 
     checkout = by_name["Check out manual candidate"]
     assert checkout["if"] == "github.event_name == 'workflow_dispatch'"
-    assert checkout["with"]["ref"] == "${{ inputs.candidate_sha }}"
+    assert checkout["with"] == {
+        "fetch-depth": "0",
+        "persist-credentials": "false",
+        "ref": "${{ github.event.repository.default_branch }}",
+    }
+
+    checked_out = by_name["Confirm checked out manual candidate"]
+    assert checked_out["if"] == "github.event_name == 'workflow_dispatch'"
+    assert checked_out["env"] == {
+        "CANDIDATE_SHA": "${{ inputs.candidate_sha }}",
+        "EVENT_SHA": "${{ github.sha }}",
+    }
+    assert 'checked_out_sha="$(git rev-parse HEAD)"' in checked_out["run"]
+    assert '"$checked_out_sha" != "$CANDIDATE_SHA"' in checked_out["run"]
+    assert '"$checked_out_sha" != "$EVENT_SHA"' in checked_out["run"]
 
     refresh = by_name["Refresh release refs"]
     assert "git fetch --force --prune --tags origin" in refresh["run"]
@@ -136,7 +154,12 @@ def test_manual_release_is_bound_to_full_fetched_main_sha_before_build() -> None
     assert step_names.index("Validate manual candidate input") < step_names.index(
         "Check out manual candidate"
     )
-    assert step_names.index("Check out manual candidate") < step_names.index("Refresh release refs")
+    assert step_names.index("Check out manual candidate") < step_names.index(
+        "Confirm checked out manual candidate"
+    )
+    assert step_names.index("Confirm checked out manual candidate") < step_names.index(
+        "Refresh release refs"
+    )
     assert step_names.index("Refresh release refs") < step_names.index(
         "Verify manual candidate source"
     )
@@ -181,6 +204,50 @@ def _needs(job: dict[str, Any]) -> set[str]:
     assert isinstance(needs, list)
     assert all(isinstance(job_id, str) for job_id in needs)
     return set(cast(list[str], needs))
+
+
+def test_workflows_declare_least_privilege_token_permissions() -> None:
+    for path in _workflow_paths():
+        permissions = _workflow(path).get("permissions")
+        assert isinstance(permissions, dict), path
+
+    for path in (CI_WORKFLOW, DOCS_WORKFLOW, RELEASE_WORKFLOW):
+        assert _workflow(path)["permissions"] == {"contents": "read"}
+
+    release_jobs = _jobs(RELEASE_WORKFLOW)
+    assert release_jobs["publish-testpypi"]["permissions"] == {"id-token": "write"}
+    assert release_jobs["publish-pypi"]["permissions"] == {"id-token": "write"}
+    assert release_jobs["github-release"]["permissions"] == {"contents": "write"}
+
+
+def test_release_never_checks_out_dispatch_input_or_persists_credentials() -> None:
+    jobs = _jobs(RELEASE_WORKFLOW)
+    checkout_steps = [
+        step
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if isinstance(step, dict) and str(step.get("uses", "")).startswith("actions/checkout@")
+    ]
+
+    assert checkout_steps
+    for checkout in checkout_steps:
+        checkout_with = checkout.get("with", {})
+        assert checkout_with.get("persist-credentials") == "false"
+        checkout_ref = str(checkout_with.get("ref", ""))
+        assert "inputs." not in checkout_ref
+        assert "github.event.inputs" not in checkout_ref
+
+    for job_id in ("source-preflight", "build"):
+        steps = jobs[job_id]["steps"]
+        by_name = {
+            str(step["name"]): step for step in steps if isinstance(step, dict) and "name" in step
+        }
+        manual_checkout = by_name["Check out manual candidate"]
+        assert manual_checkout["with"]["ref"] == ("${{ github.event.repository.default_branch }}")
+        order = [str(step.get("name", step.get("uses", ""))) for step in steps]
+        assert order.index("Confirm checked out manual candidate") < order.index(
+            "Verify manual candidate source"
+        )
 
 
 def _gate_job() -> dict[str, Any]:
@@ -405,6 +472,12 @@ def test_release_source_preflight_runs_before_any_dependency_installation() -> N
     assert "scripts/verify_release_source.py" in commands
     assert step_names.index("Validate manual candidate input") < step_names.index(
         "Check out manual candidate"
+    )
+    assert step_names.index("Check out manual candidate") < step_names.index(
+        "Confirm checked out manual candidate"
+    )
+    assert step_names.index("Confirm checked out manual candidate") < step_names.index(
+        "Refresh release refs"
     )
     assert step_names.index("Refresh release refs") < step_names.index(
         "Verify manual candidate source"

@@ -155,6 +155,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   base change. Superseded workflow reruns and connector signals followed by later pull-request
   activity fail closed, preventing an older same-head review from being reused for a later event
   candidate.
+- GitHub workflows now declare least-privilege token permissions, and manual TestPyPI rehearsals
+  check out only the trusted default branch before proving its exact authorized candidate identity.
 
 ### Added
 
