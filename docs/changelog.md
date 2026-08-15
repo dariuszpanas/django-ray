@@ -88,6 +88,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authenticated target evidence. KubeRay is not applicable to this dormant database-only
   slice because no production producer can create a capability row; SQLite and PostgreSQL
   migration and coordination evidence remain mandatory.
+- Migration `0026` adds unseeded, immutable per-generation target execution evidence and an
+  optional immutable outcome. One claim binds the exact protocol-`2` execution generation and
+  required route selection to its target, current same-target policy, claim attestation,
+  capability, lease-incarnation, runtime, and canonical digests. Its one-to-one outcome can
+  retain authenticated completion evidence, a proven compatibility rejection, or a future
+  manager's durable `UNCERTAIN` disposition with null invocation state and no claimed observed
+  proof. Its insert fence requires the exact `RUNNING` task, owner, attempt, generation, and route
+  selection, while complete outcomes require `claimed_at <= observed_at <= recorded_at`.
+  Transport, pre-claim or future-clock observations, and malformed uncertainty are never
+  fabricated as remote compatibility rejection. No production writer or reader creates or
+  consumes either table. Exact 0.4.0 ignores
+  them during a code-only rollback; reverse `0026` only in a stopped-writer maintenance window
+  after deliberately deleting every outcome and generation claim.
+- A Django-free canonical evidence codec now covers every immutable per-generation claim snapshot
+  with a domain-separated digest. The positive database evidence ID remains a separate control;
+  protocol `2` binds the ID and digest together in both its request and observed proof. This
+  package-private codec does not persist claims or authorize execution.
 
 ### Fixed
 
@@ -116,6 +133,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   marker as well as redacting their values. Admin, API, structured logging, workflow
   previews, and Ray observability therefore no longer retain sensitive key text, and
   marker or normalized-key collisions remain fail-closed regardless of mapping order.
+- The guarded local KubeRay gate now requires one exact shared rendered Ray head/worker image,
+  discovers its canonical Python `3.12.X` patch by running that image's interpreter during the
+  mutable images layer, and passes the exact `PYTHON_VERSION` to current and released-`v0.4.0`
+  application image builds but not to `Dockerfile.ray`. This corrects the protocol-`2` probe
+  precondition/runtime mismatch while the root `Dockerfile` and ordinary Compose path remain
+  patch-flexible on `3.12`. Supported `py312` Ray image patch refreshes automatically rediscover
+  the local image patch, while final live attestation remains authoritative over the actual pods
+  and retains the exact Ray/Python tuple check before cold proof can pass.
 - A mismatched Ray Jobs API submission return is now treated only as fixed,
   acceptance-uncertain evidence. Arbitrary, oversized, unhashable, or merely
   well-formed alternate values are neither retained nor logged and never become a stop
@@ -128,6 +153,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale duplicate literals.
 
 ### Added
+
+- A disjoint protocol-`2` Ray Core target-execution codec now binds each canonical request to a
+  positive target-execution-evidence ID and digest, the canonical claim time, the selected
+  target-expectation digest, and the exact claim-attestation digest. The package-private submit
+  seam recomputes those controls from the complete canonical claim, verifies the exact running
+  task/owner/route/generation/start and manager-runtime lineage, and requires the recorded
+  attestation to bracket the claim before crossing Ray. The remote boundary compares the canonical
+  expectation and full-node claim attestation, then takes a fresh bounded resource-state snapshot.
+  Exact current schedulable
+  node-ID-set equality plus the executing node's current session/runtime are required before
+  Django setup, input loading, or application import. The result proof must echo the request-bound
+  claim time. Exact proof returns a `completion`; only a fully observed mismatch may return
+  `compatibility_rejection` with `application_invoked=false`. Missing observation, malformed
+  result, transport failure, and an observation outside the canonical claim-to-manager-receipt
+  interval remain runner uncertainty for future durable `UNCERTAIN` handling. Production remains
+  on active write protocol `1` with `1..1` package support and
+  worker leases: no backend enqueues protocol `2`, no worker claims it, no capability producer
+  creates its generation evidence, and Ray Job remains unsupported.
 
 - A Django-free, versioned target-attestation contract now defines bounded canonical
   target expectations, exact Ray/Python runtime tuples, per-node observations, and a
@@ -169,6 +212,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to remain unchanged and visible as unsupported before a direct strict Ray Core executor
   request rejects it prior to application invocation with its unique marker absent. Active
   write protocol remains `1`; no protocol-`2` writer or live `1..2` capability is activated.
+  The same cold cluster separately proves the package-private protocol-`2` target boundary:
+  exact target evidence completes, while a fully observed mismatch produces an authenticated
+  compatibility rejection without invoking the marker callable.
   Passing evidence waits for exact fixture cleanup, legacy admission reopened with a
   consistent token at its next revision, removal of the ephemeral release Deployment, and
   restoration of the rendered current-manager replica count. A later run may reclaim only

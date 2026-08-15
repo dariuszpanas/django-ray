@@ -593,7 +593,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0025_ray_worker_target_capabilities` before starting upgraded workers:
+`0026_ray_task_target_execution_evidence` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -605,9 +605,10 @@ migration `0023` adds only an unseeded execution-to-target-policy relationship; 
 migration `0024` adds backend-alias route history plus a separate, unseeded binding-to-route
 selection record. Migration `0025` adds an unseeded current worker/target capability row and
 private compare-and-set coordinator. No production path creates, renews, reads, or treats a
-capability row as capacity. Existing exact-lease deletion may only fail-closed cascade-withdraw
-an otherwise unreachable row; none of these migrations alone authorizes claims or activates
-routing.
+capability row as capacity. Migration `0026` adds unseeded, immutable per-generation claim evidence
+and an optional create-once outcome without a production writer or reader. Existing exact-lease
+deletion may only fail-closed cascade-withdraw an otherwise unreachable capability row; none of
+these migrations alone authorizes claims, activates routing, or enables protocol-2 writes.
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:
@@ -900,6 +901,47 @@ fixed non-retryable enriched completion without inspecting its application input
 invoking the callable. Released positional Ray Core calls remain a protocol-v1 legacy
 adapter for managers that already shipped their older bootstrap by value.
 
+Protocol `2` uses disjoint target-execution request and result schemas rather than changing
+the versioned-v1 bytes in place. The request binds the exact task, attempt, and execution
+generation to a positive target-execution-evidence ID and its canonical digest, the claim's
+canonical `claimed_at`, the selected target-expectation digest, and the exact claim-attestation
+digest. The package-private Ray Core submission seam accepts the complete canonical claim,
+target expectation, claim attestation, and the attestation's database-recorded time rather than
+trusting separately supplied digests or timestamps. Before crossing Ray it recomputes the
+digests, requires the exact `RUNNING` task, owner, route selection, generation, start-time, and
+manager-runtime lineage, and enforces
+`attestation.observed_at <= recorded_at <= claimed_at < expires_at`. The
+remote bootstrap validates the same canonical controls, then takes a fresh bounded resource-state
+snapshot and requires its complete current schedulable node-ID set, plus the executing node's
+current session and runtime, to match the still-valid full-node claim attestation before any
+Django setup, input hydration, or application import. The authenticated result and observed-proof
+preimage echo the request-bound `claimed_at`; a different canonical timestamp is uncertainty and
+cannot retire the Ray handle.
+
+The result has exactly two authenticated kinds. `completion` includes complete observed
+target evidence and permits application execution. `compatibility_rejection` also includes
+complete observed evidence, proves `application_invoked=false`, and is available only when
+the fresh current node-set and executor session/runtime proof establishes a target mismatch. A
+malformed result, transport failure, or
+missing observation is runner uncertainty; it cannot be promoted to a compatibility
+rejection or automatic retry merely because the application marker is absent. A future
+authoritative manager must instead preserve it as a durable `UNCERTAIN` outcome with null
+application-invocation state and no claimed observed proof so drain remains blocked. Ray Job
+remains unsupported because its current driver channel cannot authenticate this pre-Django
+evidence.
+
+Manager-side semantic validation also requires the authenticated observation time to fall
+between the canonical generation claim time and the manager's local receipt time. An observation
+before the claim, a not-yet-valid or backwards-clock result, or an observation dated after receipt
+is uncertainty rather than a proven compatibility rejection; its exact Ray handle remains
+available for reconciliation.
+
+This is a real by-value remote trust boundary, but it is not a production protocol-`2`
+activation. `EXECUTION_PROTOCOL_VERSION`, the package-supported range, the seeded active
+write policy, and every production lease remain protocol `1`/`1..1`. No backend writes the
+new request, no worker claims protocol `2`, no target-capability producer supplies a generation
+claim, and no production path calls the package-private submission seam.
+
 If Ray returns no executor completion for a strict handle, the manager records a fixed
 non-retryable transport failure without remote exception text or executor provenance.
 The missing envelope cannot prove application quiescence or safe replay, so ordinary
@@ -976,16 +1018,20 @@ and closes legacy admission and moves that exact row to `QUEUED`; active write p
 remains `1`. The row must remain unchanged and visible as unsupported to protocol status,
 authenticated API projections, and fixed-label metrics, while a direct strict Ray Core
 executor request rejects it before application invocation and leaves its unique marker
-absent. Ray Core retains the specific unsupported-protocol classification without creating
-a gate-only Ray Job transport. No production writer or live lease advertises protocol `2`
-or `1..2`. Cleanup returns the exact fixture to a terminal state before reopening legacy
-admission, deletes it after a consistent token exists at the next monotonic revision, and
-restores current-manager scaling before passing evidence is emitted. The terminal staging
-row and reserved release-manager hostname also let a later gate run identify and recover
-only its exact interrupted residue; missing ownership, foreign residue, an orphan live lease,
-or ambiguity fails closed. That recovery runs after the current application image identity is
-pinned but before any live task submission, and repeats immediately before the handoff
-certification.
+absent. The same cold cluster separately exercises the package-private target-execution
+boundary with an explicit protocol-`2` support seam: one exact target observation returns a
+`completion`, while a fully observed mismatch returns a `compatibility_rejection` with
+`application_invoked=false` and the application marker absent. The production-default
+unsupported result and the authenticated target mismatch remain distinct evidence. No
+production writer, worker, or live lease advertises protocol `2` or `1..2`, and the gate does
+not create a Ray Job protocol-`2` transport. Cleanup returns the exact fixture to a terminal
+state before reopening legacy admission, deletes it after a consistent token exists at the
+next monotonic revision, and restores current-manager scaling before passing evidence is
+emitted. The terminal staging row and reserved release-manager hostname also let a later gate
+run identify and recover only its exact interrupted residue; missing ownership, foreign
+residue, an orphan live lease, or ambiguity fails closed. That recovery runs after the current
+application image identity is pinned but before any live task submission, and repeats
+immediately before the handoff certification.
 
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
 capability. Likewise, an execution-protocol-capable lease proves only task-manager
@@ -1112,13 +1158,49 @@ and authenticated observed tuple at the execution generation or attempt boundary
 using this replaceable row as historical evidence. Capability withdrawal removes the current row;
 missing, stale, replaced, expired, or mismatched state remains fail-closed.
 
-Exact 0.4.0 code ignores the `0022` through `0025` tables, so a code-only rollback retains the
-durable policy, attestation, binding, and route history while no old process consumes capability
-rows. Schema reversal is a separate stopped-writer operation: delete every current capability
-before reversing `0025`; `0024` then refuses to reverse while any route, route revision, or
-selection remains; `0023` refuses while any binding remains; and `0022` finally refuses while
-target history remains. The deliberate maintenance-delete path follows the same protected-parent
-ordering and is not part of an ordinary binary rollback.
+Migration `0026_ray_task_target_execution_evidence` adds that archive shape without activating its
+producer. `RayTaskTargetExecutionEvidence` uses a positive BigAuto evidence ID and a unique
+execution, positive attempt number, and positive execution generation as its durable identity. It
+requires the exact route selection and snapshots the target, current same-target policy, claim
+attestation, capability ID/schema/revision/advertisement time, lease incarnation, runner and manager
+runtime tuples, and the target-execution, target-expectation, and claim-attestation digests reviewed
+for that generation. The route selection retains enqueue-time policy and route provenance; the claim
+policy may be a later latest `active` or `draining` revision for the same target, so already-pinned
+work does not depend on a stale policy revision remaining current. At insert, database guards
+require protocol `2`, the exact `RUNNING` execution task, owner, attempt and generation, the matching
+route-selection lineage, exact snapshot consistency, and create-once immutability. The retained
+evidence remains valid after a later lifecycle transition changes the execution's mutable current
+state, owner, attempt, or generation.
+
+`target_execution_evidence.py` defines the Django-free canonical claim representation and its
+domain-separated digest over every immutable lineage and claim snapshot above. The database's
+positive evidence ID is deliberately outside that digest and travels as a separate control; the
+protocol-`2` request and observed-proof digest bind the ID and claim digest together. This lets a
+future authoritative writer construct and verify the same bytes before persistence and before Ray
+submission without turning the staged codec into a producer.
+
+`RayTaskTargetExecutionOutcome` is an optional immutable one-to-one child of that claim. It retains
+the normalized status, nullable `application_invoked`, fixed compatibility reason, echoed
+target-execution, target-expectation, and claim-attestation digests, and an all-or-none observed
+session, node, membership, runtime, proof, and observation time.
+A proven `compatibility_rejection` requires complete observed evidence and
+`application_invoked=false`. A future authoritative manager may instead archive runner transport
+failure, malformed data, or a missing authenticated observation as `UNCERTAIN`, with
+`application_invoked=NULL` and every observed-proof field null; it must not fabricate a remote
+compatibility rejection. Every complete observed outcome additionally requires
+`claimed_at <= observed_at <= recorded_at`; pre-claim and future-clock observations remain
+uncertain. Both tables are initially empty. No enqueue, claim, capability, worker,
+runner, lifecycle, status, or Admin path writes or reads them in production, and Ray Job is
+unsupported.
+
+Exact 0.4.0 code ignores the `0022` through `0026` tables, so a code-only rollback retains the
+durable policy, attestation, binding, route, generation-claim, and outcome history while no old
+process consumes capability rows. Schema reversal is a separate stopped-writer operation: delete
+every outcome and generation claim before reversing `0026`; delete every current capability before
+reversing `0025`; `0024` then refuses to reverse while any route, route revision, or selection
+remains; `0023` refuses while any binding remains; and `0022` finally refuses while target history
+remains. The deliberate maintenance-delete path follows the same protected-parent ordering and is
+not part of an ordinary binary rollback.
 
 The read-only protocol-status service exposes only the database facts this boundary can
 support. One versioned immutable report aggregates policy/token consistency, active and

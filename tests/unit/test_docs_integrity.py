@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from django_ray.conf.defaults import DEFAULTS
+from scripts.verify_wheel import EXPECTED_MIGRATION_LEAF
 
 ROOT = Path(__file__).parents[2]
 DOCS = ROOT / "docs"
@@ -156,6 +157,21 @@ def test_docs_use_one_rich_homepage_source() -> None:
     assert "## What is django-ray?" in homepage_text
     assert "assets/images/testproject-landing.png" in homepage_text
     assert "# Documentation source" not in homepage_text
+
+
+def test_rolling_upgrade_guide_names_the_current_migration_leaf() -> None:
+    architecture = (DOCS / "architecture.md").read_text(encoding="utf-8")
+    rolling_upgrades = architecture.split("### Rolling upgrades", maxsplit=1)[1].split(
+        "Migrations `0007` and `0008`", maxsplit=1
+    )[0]
+    migration_app, migration_name = EXPECTED_MIGRATION_LEAF
+
+    assert migration_app == "django_ray"
+    assert f"`{migration_name}` before starting upgraded workers" in rolling_upgrades
+    assert "Migration `0026` adds unseeded, immutable per-generation claim evidence" in (
+        rolling_upgrades
+    )
+    assert "enables protocol-2 writes" in rolling_upgrades
 
 
 def test_safe_first_production_path_is_discoverable_and_explicit() -> None:

@@ -22,11 +22,18 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Never
 
 if TYPE_CHECKING:
     from django_ray.target_attestation import RayClusterAttestation, RayTargetExpectation
+    from django_ray.target_execution_codec import (
+        TargetExecutionCompatibilityReason,
+        TargetExecutionObservedEvidence,
+        TargetExecutionRequest,
+        TargetExecutionResult,
+    )
 
 RAY_TARGET_PROBE_RAY_VERSION = "2.56.0"
 RAY_TARGET_PROBE_DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -77,6 +84,30 @@ class RayTargetProbeError(RuntimeError):
     def __init__(self, classification: RayTargetProbeFailure) -> None:
         self.classification = classification
         super().__init__(f"Ray target probe failed: {classification.value}")
+
+
+class RayTargetExecutionCompatibilityError(RuntimeError):
+    """Carry one fully observed mismatch safe for a typed remote rejection."""
+
+    def __init__(
+        self,
+        reason: TargetExecutionCompatibilityReason,
+        observed_target: TargetExecutionObservedEvidence,
+    ) -> None:
+        from django_ray.target_execution_codec import TargetExecutionCompatibilityReason
+
+        if type(reason) is not TargetExecutionCompatibilityReason:
+            raise TypeError("invalid target execution compatibility reason")
+        self.reason = reason
+        self.observed_target = observed_target
+        super().__init__(f"Ray target execution rejected: {reason.value}")
+
+
+class RayTargetExecutionResultValidationError(ValueError):
+    """Reject a result whose claimed disposition contradicts its proof."""
+
+    def __init__(self) -> None:
+        super().__init__("Ray target execution result semantics are invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +418,99 @@ def _current_caller_observation(ray_module: Any) -> _RuntimeObservation:
         raise
     except Exception:
         _reject(RayTargetProbeFailure.PUBLIC_RUNTIME_UNAVAILABLE)
+
+
+def _current_resource_state_snapshot(
+    ray_module: Any,
+    *,
+    timeout_seconds: float,
+    max_nodes: int,
+) -> _ResourceStateSnapshot:
+    """Read one bounded schedulable-node set through the pinned Ray 2.56 API."""
+    timeout_seconds, max_nodes = _validate_probe_limits(
+        timeout_seconds=timeout_seconds,
+        max_nodes=max_nodes,
+    )
+    if getattr(ray_module, "__version__", None) != RAY_TARGET_PROBE_RAY_VERSION:
+        _reject(RayTargetProbeFailure.UNSUPPORTED_RAY_VERSION)
+    try:
+        from ray._private.worker import global_worker
+        from ray.core.generated import autoscaler_pb2
+
+        reply_type = autoscaler_pb2.GetClusterResourceStateReply
+        node_status = autoscaler_pb2.NodeStatus
+        expected_statuses = {
+            "UNSPECIFIED": 0,
+            "RUNNING": 1,
+            "DEAD": 2,
+            "IDLE": 3,
+            "DRAINING": 4,
+        }
+        if any(node_status.Value(name) != value for name, value in expected_statuses.items()):
+            _reject(RayTargetProbeFailure.PRIVATE_API_UNAVAILABLE)
+        client = global_worker.gcs_client
+    except RayTargetProbeError:
+        raise
+    except Exception:
+        _reject(RayTargetProbeFailure.PRIVATE_API_UNAVAILABLE)
+    try:
+        encoded = client.get_cluster_resource_state(timeout_s=max(1, math.ceil(timeout_seconds)))
+    except Exception:
+        _reject(RayTargetProbeFailure.SNAPSHOT_UNAVAILABLE)
+    if type(encoded) is not bytes:
+        _reject(RayTargetProbeFailure.INVALID_SNAPSHOT)
+    if len(encoded) > RAY_TARGET_PROBE_MAX_RESOURCE_STATE_BYTES:
+        _reject(RayTargetProbeFailure.RESOURCE_LIMIT)
+    try:
+        reply = reply_type()
+        reply.ParseFromString(encoded)
+        state = reply.cluster_resource_state
+        raw_nodes = state.node_states
+        if len(raw_nodes) > max_nodes:
+            _reject(RayTargetProbeFailure.RESOURCE_LIMIT)
+        session_name = state.cluster_session_name
+        revision = state.cluster_resource_state_version
+    except RayTargetProbeError:
+        raise
+    except Exception:
+        _reject(RayTargetProbeFailure.INVALID_SNAPSHOT)
+    versions: list[list[object]] = []
+    seen: set[str] = set()
+    for node in raw_nodes:
+        try:
+            raw_node_id = node.node_id
+            status = node.status
+            node_version = node.node_state_version
+        except Exception:
+            _reject(RayTargetProbeFailure.INVALID_SNAPSHOT)
+        if type(raw_node_id) is not bytes:
+            _reject(RayTargetProbeFailure.INVALID_SNAPSHOT)
+        node_id = raw_node_id.hex()
+        if (
+            not _valid_bounded_string(node_id, maximum=_NODE_ID_CHARS, pattern=_NODE_ID)
+            or node_id in seen
+            or type(status) is not int
+            or type(node_version) is not int
+            or not 0 <= node_version <= _MAX_COUNTER
+        ):
+            _reject(RayTargetProbeFailure.INVALID_SNAPSHOT)
+        seen.add(node_id)
+        if status in (2, 4):
+            continue
+        if status not in (1, 3):
+            _reject(RayTargetProbeFailure.INVALID_SNAPSHOT)
+        versions.append([node_id, node_version])
+    if not versions:
+        _reject(RayTargetProbeFailure.EMPTY_CLUSTER)
+    versions.sort()
+    return _decode_snapshot(
+        {
+            "session_name": session_name,
+            "cluster_resource_state_version": revision,
+            "node_state_versions": versions,
+        },
+        max_nodes=max_nodes,
+    )
 
 
 def _make_cluster_probe_coordinator() -> Callable[[float, int, int], dict[str, object]]:
@@ -745,6 +869,285 @@ def _collect_raw_cluster_observation(
     return _RawClusterObservation(caller=caller, interval=interval)
 
 
+def _classify_ray_target_execution_compatibility(
+    *,
+    expectation: RayTargetExpectation,
+    attestation: RayClusterAttestation,
+    observed_target: TargetExecutionObservedEvidence,
+) -> TargetExecutionCompatibilityReason | None:
+    """Return the one disposition implied by immutable claim and observed proof."""
+    from django_ray.target_attestation import (
+        RayTargetAttestationError,
+        RayTargetAttestationRejection,
+        compare_ray_target_attestation,
+    )
+    from django_ray.target_execution_codec import TargetExecutionCompatibilityReason
+
+    reason_by_rejection = {
+        RayTargetAttestationRejection.EXPIRED: TargetExecutionCompatibilityReason.EXPIRED,
+    }
+    reason: TargetExecutionCompatibilityReason | None = None
+    try:
+        compare_ray_target_attestation(
+            expectation,
+            attestation,
+            now=observed_target.observed_at,
+        )
+    except RayTargetAttestationError as error:
+        reason = reason_by_rejection.get(error.classification)
+        if reason is None:
+            raise RayTargetExecutionResultValidationError from None
+
+    expected_runtime = expectation.runtime
+    if reason is None and (observed_target.observed_cluster_session != expectation.cluster_session):
+        reason = TargetExecutionCompatibilityReason.CLUSTER_SESSION_MISMATCH
+    if reason is None and (
+        observed_target.observed_runtime.ray_major,
+        observed_target.observed_runtime.ray_minor,
+        observed_target.observed_runtime.ray_patch,
+    ) != (
+        expected_runtime.ray_major,
+        expected_runtime.ray_minor,
+        expected_runtime.ray_patch,
+    ):
+        reason = TargetExecutionCompatibilityReason.RAY_VERSION_MISMATCH
+    if (
+        reason is None
+        and observed_target.observed_runtime.python_implementation
+        != expected_runtime.python_implementation
+    ):
+        reason = TargetExecutionCompatibilityReason.PYTHON_IMPLEMENTATION_MISMATCH
+    if reason is None and (
+        observed_target.observed_runtime.python_major,
+        observed_target.observed_runtime.python_minor,
+        observed_target.observed_runtime.python_patch,
+    ) != (
+        expected_runtime.python_major,
+        expected_runtime.python_minor,
+        expected_runtime.python_patch,
+    ):
+        reason = TargetExecutionCompatibilityReason.PYTHON_VERSION_MISMATCH
+    attested_node_ids = tuple(
+        item.node_id for item in attestation.boundary.node_state_versions_before
+    )
+    if reason is None and observed_target.observed_node_id not in attested_node_ids:
+        reason = TargetExecutionCompatibilityReason.CURRENT_NODE_NOT_ATTESTED
+    if (
+        reason is None
+        and observed_target.observed_membership_digest != attestation.membership_digest
+    ):
+        reason = TargetExecutionCompatibilityReason.MEMBERSHIP_MISMATCH
+    return reason
+
+
+def validate_ray_target_execution_result_semantics(
+    result: TargetExecutionResult,
+    *,
+    target_expectation: RayTargetExpectation,
+    claim_attestation: RayClusterAttestation,
+    validation_now: datetime | None = None,
+) -> None:
+    """Require a decoded result kind and reason to agree with its submitted claim."""
+    from django_ray.target_attestation import (
+        ray_cluster_attestation_digest,
+        ray_target_expectation_digest,
+    )
+    from django_ray.target_execution_codec import (
+        TargetExecutionCompatibilityRejection,
+        TargetExecutionCompletion,
+        target_execution_observed_proof_digest,
+    )
+
+    if type(result) not in (
+        TargetExecutionCompletion,
+        TargetExecutionCompatibilityRejection,
+    ):
+        raise RayTargetExecutionResultValidationError from None
+    try:
+        receipt_time = datetime.now(UTC) if validation_now is None else validation_now
+        if (
+            type(receipt_time) is not datetime
+            or receipt_time.tzinfo is None
+            or receipt_time.utcoffset() != timedelta(0)
+        ):
+            raise RayTargetExecutionResultValidationError
+        receipt_time = receipt_time.astimezone(UTC)
+        claim_time = result.target_execution_claimed_at
+        if (
+            type(claim_time) is not datetime
+            or claim_time.tzinfo is None
+            or claim_time.utcoffset() != timedelta(0)
+        ):
+            raise RayTargetExecutionResultValidationError
+        claim_time = claim_time.astimezone(UTC)
+        if (
+            ray_target_expectation_digest(target_expectation) != result.target_expectation_digest
+            or ray_cluster_attestation_digest(claim_attestation) != result.claim_attestation_digest
+            or claim_attestation.expectation != target_expectation
+            or claim_time < claim_attestation.observed_at
+            or claim_time >= claim_attestation.expires_at
+        ):
+            raise RayTargetExecutionResultValidationError
+        observed_target = result.observed_target
+        expected_proof_digest = target_execution_observed_proof_digest(
+            identity=result.identity,
+            target_execution_evidence_id=result.target_execution_evidence_id,
+            target_execution_evidence_digest=result.target_execution_evidence_digest,
+            target_execution_claimed_at=claim_time,
+            target_expectation_digest=result.target_expectation_digest,
+            claim_attestation_digest=result.claim_attestation_digest,
+            observed_node_id=observed_target.observed_node_id,
+            observed_cluster_session=observed_target.observed_cluster_session,
+            observed_runtime=observed_target.observed_runtime,
+            observed_membership_digest=observed_target.observed_membership_digest,
+            observed_at=observed_target.observed_at,
+        )
+        if expected_proof_digest != observed_target.observed_proof_digest:
+            raise RayTargetExecutionResultValidationError
+        observed_time = observed_target.observed_at
+        if observed_time > receipt_time or observed_time < claim_time or receipt_time < claim_time:
+            raise RayTargetExecutionResultValidationError
+        reason = _classify_ray_target_execution_compatibility(
+            expectation=target_expectation,
+            attestation=claim_attestation,
+            observed_target=observed_target,
+        )
+    except RayTargetExecutionResultValidationError:
+        raise
+    except Exception:
+        raise RayTargetExecutionResultValidationError from None
+
+    if type(result) is TargetExecutionCompletion:
+        if reason is not None:
+            raise RayTargetExecutionResultValidationError from None
+    elif result.compatibility_reason is not reason:
+        raise RayTargetExecutionResultValidationError from None
+
+
+def verify_ray_target_execution(
+    request: TargetExecutionRequest,
+    *,
+    timeout_seconds: float = 5.0,
+    max_nodes: int = RAY_TARGET_PROBE_DEFAULT_MAX_NODES,
+) -> TargetExecutionObservedEvidence:
+    """Verify one protocol-2 request against the executing Ray worker and cluster.
+
+    The full claim attestation is revalidated, then one current resource-state
+    snapshot proves exact schedulable membership without launching a per-node
+    probe for every invocation.  Only mismatches backed by a complete observed
+    proof raise :class:`RayTargetExecutionCompatibilityError`; inability to
+    observe the target remains an operational probe error and therefore an
+    uncertain remote effect.
+    """
+    from django_ray.target_attestation import (
+        RayNodeStateVersion,
+        RayRuntimeVersion,
+        build_ray_observation_boundary,
+        decode_ray_cluster_attestation,
+        decode_ray_target_expectation,
+        encode_ray_cluster_attestation,
+        encode_ray_target_expectation,
+        ray_membership_digest,
+    )
+    from django_ray.target_execution_codec import (
+        TargetExecutionRequest,
+        build_target_execution_observed_evidence,
+    )
+
+    if type(request) is not TargetExecutionRequest:
+        _reject(RayTargetProbeFailure.INVALID_EXPECTATION)
+    try:
+        expectation = decode_ray_target_expectation(
+            encode_ray_target_expectation(request.target_expectation)
+        )
+        attestation = decode_ray_cluster_attestation(
+            encode_ray_cluster_attestation(request.claim_attestation)
+        )
+    except Exception:
+        # Without canonical claim evidence there is no trustworthy basis for a
+        # compatibility assertion, even when the local Ray runtime is readable.
+        _reject(RayTargetProbeFailure.INVALID_EXPECTATION)
+
+    try:
+        import ray
+    except ImportError:
+        _reject(RayTargetProbeFailure.PUBLIC_RUNTIME_UNAVAILABLE)
+    if ray.__version__ != RAY_TARGET_PROBE_RAY_VERSION:
+        _reject(RayTargetProbeFailure.UNSUPPORTED_RAY_VERSION)
+    try:
+        initialized = ray.is_initialized()
+    except Exception:
+        _reject(RayTargetProbeFailure.PUBLIC_RUNTIME_UNAVAILABLE)
+    if initialized is not True:
+        _reject(RayTargetProbeFailure.RAY_NOT_INITIALIZED)
+
+    caller = _current_caller_observation(ray)
+    snapshot = _current_resource_state_snapshot(
+        ray,
+        timeout_seconds=timeout_seconds,
+        max_nodes=max_nodes,
+    )
+    if caller.session_name != snapshot.session_name:
+        # A proof cannot bind one local runtime to membership from a different
+        # cluster session. Treat the race as uncertainty, not compatibility.
+        _reject(RayTargetProbeFailure.SESSION_MISMATCH)
+    observed_runtime = RayRuntimeVersion(
+        ray_major=2,
+        ray_minor=56,
+        ray_patch=0,
+        python_implementation=caller.python_implementation,
+        python_major=caller.python_version[0],
+        python_minor=caller.python_version[1],
+        python_patch=caller.python_version[2],
+    )
+    try:
+        current_boundary = build_ray_observation_boundary(
+            resource_state_version_before=snapshot.cluster_resource_state_version,
+            resource_state_version_after=snapshot.cluster_resource_state_version,
+            node_state_versions_before=tuple(
+                RayNodeStateVersion(node_id=node_id, node_state_version=version)
+                for node_id, version in snapshot.node_state_versions
+            ),
+            node_state_versions_after=tuple(
+                RayNodeStateVersion(node_id=node_id, node_state_version=version)
+                for node_id, version in snapshot.node_state_versions
+            ),
+        )
+        observed_at = datetime.now(UTC)
+        if observed_at < request.target_execution_claimed_at:
+            # A backwards remote clock cannot prove this claim existed before
+            # observation. Preserve uncertainty and do not import application
+            # code through the remote executor.
+            _reject(RayTargetProbeFailure.ATTESTATION_BUILD_FAILED)
+        observed_target = build_target_execution_observed_evidence(
+            identity=request.identity,
+            target_execution_evidence_id=request.target_execution_evidence_id,
+            target_execution_evidence_digest=request.target_execution_evidence_digest,
+            target_execution_claimed_at=request.target_execution_claimed_at,
+            target_expectation_digest=request.target_expectation_digest,
+            claim_attestation_digest=request.claim_attestation_digest,
+            observed_node_id=caller.node_id,
+            observed_cluster_session=caller.session_name,
+            observed_runtime=observed_runtime,
+            observed_membership_digest=ray_membership_digest(current_boundary),
+            observed_at=observed_at,
+        )
+    except Exception:
+        _reject(RayTargetProbeFailure.ATTESTATION_BUILD_FAILED)
+
+    try:
+        reason = _classify_ray_target_execution_compatibility(
+            expectation=expectation,
+            attestation=attestation,
+            observed_target=observed_target,
+        )
+    except RayTargetExecutionResultValidationError:
+        _reject(RayTargetProbeFailure.ATTESTATION_BUILD_FAILED)
+    if reason is not None:
+        raise RayTargetExecutionCompatibilityError(reason, observed_target) from None
+    return observed_target
+
+
 def probe_ray_target(
     expectation: RayTargetExpectation,
     *,
@@ -754,8 +1157,6 @@ def probe_ray_target(
 ) -> RayClusterAttestation:
     """Return a canonical attestation for one exact Ray Core expectation."""
     try:
-        from datetime import UTC, datetime, timedelta
-
         from django_ray.target_attestation import (
             RAY_TARGET_ATTESTATION_MAX_TTL_SECONDS,
             RayNodeStateVersion,
@@ -842,7 +1243,11 @@ __all__ = [
     "RAY_TARGET_PROBE_MAX_RESOURCE_STATE_BYTES",
     "RAY_TARGET_PROBE_MAX_TIMEOUT_SECONDS",
     "RAY_TARGET_PROBE_RAY_VERSION",
+    "RayTargetExecutionCompatibilityError",
+    "RayTargetExecutionResultValidationError",
     "RayTargetProbeError",
     "RayTargetProbeFailure",
     "probe_ray_target",
+    "validate_ray_target_execution_result_semantics",
+    "verify_ray_target_execution",
 ]

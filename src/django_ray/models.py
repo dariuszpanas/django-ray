@@ -52,6 +52,10 @@ _RAY_CLUSTER_SESSION_VALIDATOR = RegexValidator(
     regex=r"\Asession_[A-Za-z0-9][A-Za-z0-9_.-]{0,247}\Z",
     message="Value must be a canonical Ray cluster session name.",
 )
+_RAY_NODE_ID_VALIDATOR = RegexValidator(
+    regex=r"\A[0-9a-f]{56}\Z",
+    message="Value must be a canonical Ray node identifier.",
+)
 _PYTHON_IMPLEMENTATION_VALIDATOR = RegexValidator(
     regex=r"\A[a-z][a-z0-9_.-]{0,63}\Z",
     message="Value must be a normalized Python implementation identifier.",
@@ -71,8 +75,10 @@ _WORKFLOW_DETAIL_DECODED_BYTES_LIMIT = 16 * 1024 * 1024
 _WORKFLOW_DETAIL_RECORD_BYTES_LIMIT = 16 * 1024
 _WORKFLOW_RUN_NAMESPACE_MAX = (1 << 63) - 1
 _WORKFLOW_RUN_SEQUENCE_MAX = (1 << 59) - 1
+_POSITIVE_INTEGER_MAX = (1 << 31) - 1
 RAY_TASK_TARGET_BINDING_SCHEMA_VERSION = 1
 RAY_TASK_TARGET_ROUTE_SELECTION_SCHEMA_VERSION = 1
+RAY_TASK_TARGET_EXECUTION_EVIDENCE_SCHEMA_VERSION = 1
 RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION = 1
 RAY_JOB_WORKER_TARGET_CAPABILITY_LIMIT = 64
 
@@ -148,6 +154,29 @@ class RayTargetDesiredState(models.TextChoices):
     ACTIVE = "active", "Active"
     DRAINING = "draining", "Draining"
     RETIRED = "retired", "Retired"
+
+
+class RayTaskTargetExecutionOutcomeStatus(models.TextChoices):
+    """Verifier result for one immutable target execution generation."""
+
+    VERIFIED = "VERIFIED", "Verified"
+    COMPATIBILITY_REJECTED = "COMPATIBILITY_REJECTED", "Compatibility rejected"
+    UNCERTAIN = "UNCERTAIN", "Uncertain"
+
+
+class RayTaskTargetCompatibilityReason(models.TextChoices):
+    """Fixed, redaction-safe reasons for rejecting target compatibility."""
+
+    EXPIRED = "expired", "Expired"
+    CLUSTER_SESSION_MISMATCH = "cluster_session_mismatch", "Cluster session mismatch"
+    RAY_VERSION_MISMATCH = "ray_version_mismatch", "Ray version mismatch"
+    PYTHON_IMPLEMENTATION_MISMATCH = (
+        "python_implementation_mismatch",
+        "Python implementation mismatch",
+    )
+    PYTHON_VERSION_MISMATCH = "python_version_mismatch", "Python version mismatch"
+    CURRENT_NODE_NOT_ATTESTED = "current_node_not_attested", "Current node not attested"
+    MEMBERSHIP_MISMATCH = "membership_mismatch", "Membership mismatch"
 
 
 class RayTaskExecution(models.Model):
@@ -1996,3 +2025,445 @@ class RayTaskTargetRouteSelection(models.Model):
 
     def __str__(self) -> str:
         return f"binding {self.binding_id} route revision {self.route_revision_id}"
+
+
+class RayTaskTargetExecutionEvidence(models.Model):
+    """Create-once claim provenance for one protocol-2 execution generation.
+
+    Stable foreign keys retain the route, target, policy, and attestation
+    lineage. Worker capability and lease identity are snapshots by design so
+    this evidence survives ordinary capability and lease cleanup. Production
+    claim and transport paths remain dormant until protocol-2 activation.
+    """
+
+    target_execution_evidence_id = models.BigAutoField(
+        primary_key=True,
+        editable=False,
+    )
+    execution = models.ForeignKey(
+        RayTaskExecution,
+        on_delete=models.PROTECT,
+        related_name="ray_target_execution_evidence",
+        editable=False,
+    )
+    task_id = models.CharField(
+        max_length=255,
+        editable=False,
+        help_text="Immutable task identity snapshot covered by the claim digest",
+    )
+    route_selection = models.ForeignKey(
+        RayTaskTargetRouteSelection,
+        on_delete=models.PROTECT,
+        related_name="execution_evidence",
+        editable=False,
+    )
+    attempt_number = models.PositiveIntegerField(
+        editable=False,
+        validators=[MinValueValidator(1), MaxValueValidator(_POSITIVE_INTEGER_MAX)],
+    )
+    execution_generation = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    target = models.ForeignKey(
+        RayTarget,
+        on_delete=models.PROTECT,
+        related_name="execution_evidence",
+        editable=False,
+    )
+    target_policy = models.ForeignKey(
+        RayTargetPolicyRevision,
+        on_delete=models.PROTECT,
+        related_name="execution_evidence",
+        editable=False,
+        help_text="Exact latest target policy accepted at claim time",
+    )
+    claim_attestation = models.ForeignKey(
+        RayTargetAttestationRevision,
+        on_delete=models.PROTECT,
+        related_name="execution_evidence",
+        editable=False,
+        help_text="Exact latest target attestation accepted at claim time",
+    )
+    worker_target_capability_id = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MinValueValidator(1)],
+        help_text="Snapshot only; deliberately not a capability foreign key",
+    )
+    worker_target_capability_schema_version = models.PositiveSmallIntegerField(
+        editable=False,
+        validators=[MinValueValidator(1)],
+    )
+    worker_target_capability_revision = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    worker_target_capability_advertised_at = models.DateTimeField(editable=False)
+    worker_lease_id = models.CharField(max_length=255, editable=False)
+    worker_lease_hostname = models.CharField(max_length=255, editable=False)
+    worker_lease_pid = models.PositiveIntegerField(
+        editable=False,
+        validators=[MinValueValidator(1), MaxValueValidator(_POSITIVE_INTEGER_MAX)],
+    )
+    worker_lease_started_at = models.DateTimeField(editable=False)
+    runner_family = models.CharField(
+        max_length=16,
+        choices=[(family.value, family.value) for family in RayRunnerFamily],
+        editable=False,
+    )
+    manager_ray_major = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    manager_ray_minor = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    manager_ray_patch = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    manager_python_implementation = models.CharField(
+        max_length=64,
+        editable=False,
+        validators=[_PYTHON_IMPLEMENTATION_VALIDATOR],
+    )
+    manager_python_major = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    manager_python_minor = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    manager_python_patch = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    target_execution_evidence_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    target_expectation_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    claim_attestation_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    schema_version = models.PositiveSmallIntegerField(
+        default=RAY_TASK_TARGET_EXECUTION_EVIDENCE_SCHEMA_VERSION,
+        db_default=RAY_TASK_TARGET_EXECUTION_EVIDENCE_SCHEMA_VERSION,
+        editable=False,
+        validators=[
+            MinValueValidator(RAY_TASK_TARGET_EXECUTION_EVIDENCE_SCHEMA_VERSION),
+            MaxValueValidator(RAY_TASK_TARGET_EXECUTION_EVIDENCE_SCHEMA_VERSION),
+        ],
+    )
+    claimed_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(target_execution_evidence_id__gte=1),
+                name="ray_tevid_id_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    attempt_number__gte=1,
+                    attempt_number__lte=_POSITIVE_INTEGER_MAX,
+                    execution_generation__gte=1,
+                ),
+                name="ray_tevid_generation_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    worker_target_capability_id__gte=1,
+                    worker_target_capability_schema_version=RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION,
+                    worker_target_capability_revision__gte=1,
+                ),
+                name="ray_tevid_capability_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    worker_lease_pid__gte=1,
+                    worker_lease_pid__lte=_POSITIVE_INTEGER_MAX,
+                ),
+                name="ray_tevid_lease_pid_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(runner_family=RayRunnerFamily.RAY_CORE.value),
+                name="ray_tevid_runner_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    manager_ray_major__gte=1,
+                    manager_ray_major__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_ray_minor__gte=0,
+                    manager_ray_minor__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_ray_patch__gte=0,
+                    manager_ray_patch__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_python_major__gte=1,
+                    manager_python_major__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_python_minor__gte=0,
+                    manager_python_minor__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_python_patch__gte=0,
+                    manager_python_patch__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                ),
+                name="ray_tevid_runtime_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    schema_version=RAY_TASK_TARGET_EXECUTION_EVIDENCE_SCHEMA_VERSION
+                ),
+                name="ray_tevid_schema_valid",
+            ),
+            models.UniqueConstraint(
+                fields=("execution", "attempt_number", "execution_generation"),
+                name="ray_tevid_generation_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("target", "-claimed_at"),
+                name="ray_tevid_target_claim_idx",
+            )
+        ]
+        verbose_name = "Ray Task Target Execution Evidence"
+        verbose_name_plural = "Ray Task Target Execution Evidence"
+
+    def __str__(self) -> str:
+        return (
+            f"execution {self.execution_id} attempt {self.attempt_number} "
+            f"generation {self.execution_generation}"
+        )
+
+
+class RayTaskTargetExecutionOutcome(models.Model):
+    """At-most-one immutable verifier outcome for target execution evidence.
+
+    Maintenance retention must delete this child before its evidence parent.
+    An absent row means no terminal verifier observation has been archived.
+    """
+
+    evidence = models.OneToOneField(
+        RayTaskTargetExecutionEvidence,
+        on_delete=models.PROTECT,
+        related_name="outcome",
+        primary_key=True,
+        editable=False,
+    )
+    status = models.CharField(
+        max_length=24,
+        choices=RayTaskTargetExecutionOutcomeStatus.choices,
+        editable=False,
+    )
+    application_invoked = models.BooleanField(
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="True only after verified invocation; null when invocation is uncertain",
+    )
+    compatibility_reason = models.CharField(
+        max_length=32,
+        choices=RayTaskTargetCompatibilityReason.choices,
+        null=True,
+        blank=True,
+        editable=False,
+    )
+    target_execution_evidence_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    target_expectation_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    claim_attestation_digest = models.CharField(
+        max_length=71,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    observed_cluster_session = models.CharField(
+        max_length=256,
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[_RAY_CLUSTER_SESSION_VALIDATOR],
+    )
+    observed_node_id = models.CharField(
+        max_length=56,
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[_RAY_NODE_ID_VALIDATOR],
+    )
+    observed_membership_digest = models.CharField(
+        max_length=71,
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    observed_ray_major = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    observed_ray_minor = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    observed_ray_patch = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    observed_python_implementation = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[_PYTHON_IMPLEMENTATION_VALIDATOR],
+    )
+    observed_python_major = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    observed_python_minor = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    observed_python_patch = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    observed_proof_digest = models.CharField(
+        max_length=71,
+        null=True,
+        blank=True,
+        editable=False,
+        validators=[_TAGGED_SHA256_HEX_VALIDATOR],
+    )
+    observed_at = models.DateTimeField(null=True, blank=True, editable=False)
+    recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(status__in=RayTaskTargetExecutionOutcomeStatus.values),
+                name="ray_teout_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(compatibility_reason__isnull=True)
+                    | models.Q(compatibility_reason__in=RayTaskTargetCompatibilityReason.values)
+                ),
+                name="ray_teout_reason_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        status=RayTaskTargetExecutionOutcomeStatus.VERIFIED,
+                        application_invoked=True,
+                        compatibility_reason__isnull=True,
+                    )
+                    | models.Q(
+                        status=RayTaskTargetExecutionOutcomeStatus.COMPATIBILITY_REJECTED,
+                        application_invoked=False,
+                        compatibility_reason__isnull=False,
+                    )
+                    | models.Q(
+                        status=RayTaskTargetExecutionOutcomeStatus.UNCERTAIN,
+                        application_invoked__isnull=True,
+                        compatibility_reason__isnull=True,
+                    )
+                ),
+                name="ray_teout_verdict_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        observed_cluster_session__isnull=True,
+                        observed_node_id__isnull=True,
+                        observed_membership_digest__isnull=True,
+                        observed_ray_major__isnull=True,
+                        observed_ray_minor__isnull=True,
+                        observed_ray_patch__isnull=True,
+                        observed_python_implementation__isnull=True,
+                        observed_python_major__isnull=True,
+                        observed_python_minor__isnull=True,
+                        observed_python_patch__isnull=True,
+                        observed_proof_digest__isnull=True,
+                        observed_at__isnull=True,
+                    )
+                    | models.Q(
+                        observed_cluster_session__isnull=False,
+                        observed_node_id__isnull=False,
+                        observed_membership_digest__isnull=False,
+                        observed_ray_major__isnull=False,
+                        observed_ray_minor__isnull=False,
+                        observed_ray_patch__isnull=False,
+                        observed_python_implementation__isnull=False,
+                        observed_python_major__isnull=False,
+                        observed_python_minor__isnull=False,
+                        observed_python_patch__isnull=False,
+                        observed_proof_digest__isnull=False,
+                        observed_at__isnull=False,
+                    )
+                ),
+                name="ray_teout_observation_group",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        status=RayTaskTargetExecutionOutcomeStatus.UNCERTAIN,
+                        observed_at__isnull=True,
+                    )
+                    | (
+                        ~models.Q(status=RayTaskTargetExecutionOutcomeStatus.UNCERTAIN)
+                        & models.Q(observed_at__isnull=False)
+                    )
+                ),
+                name="ray_teout_proof_required",
+            ),
+        ]
+        verbose_name = "Ray Task Target Execution Outcome"
+        verbose_name_plural = "Ray Task Target Execution Outcomes"
+
+    def __str__(self) -> str:
+        return f"evidence {self.evidence_id} {self.status}"

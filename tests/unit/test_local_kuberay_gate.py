@@ -70,9 +70,11 @@ from scripts.local_kuberay_gate import (
     normalize_ray_topology,
     normalize_runtime_image_id,
     parse_docker_image_inspect,
+    parse_ray_image_python_version,
     parse_runtime_archive_probe,
     parse_task_result,
     pod_image_contract,
+    ray_runtime_image_reference,
     register_kubeconfig_secrets,
     secret_data_sha256,
     source_bound_tag,
@@ -85,6 +87,7 @@ from scripts.local_kuberay_gate import (
     validate_local_http_url,
     validate_namespace,
     validate_protocol_v2_rejection,
+    validate_protocol_v2_target_execution,
     validate_runtime_env_encryption_envelope,
     validate_task_status_payload,
     validate_terminal_diagnostic_text,
@@ -185,6 +188,21 @@ def _protocol_v2_rejection_payload() -> dict[str, object]:
         "transport_version": 1,
         "input_reference_absent": True,
         "application_marker_present": False,
+    }
+
+
+def _protocol_v2_target_execution_payload() -> dict[str, object]:
+    return {
+        "exact_result_kind": "completion",
+        "exact_application_invoked": True,
+        "exact_application_success": True,
+        "exact_application_result": 5,
+        "exact_observed_proof_bound": True,
+        "mismatch_result_kind": "compatibility_rejection",
+        "mismatch_reason": "python_version_mismatch",
+        "mismatch_application_invoked": False,
+        "mismatch_marker_present": False,
+        "mismatch_observed_proof_bound": True,
     }
 
 
@@ -369,6 +387,44 @@ def test_protocol_v2_rejection_gate_rejects_unbounded_extra_fields() -> None:
 
     with pytest.raises(ValueError, match="fixed pre-invocation rejection"):
         validate_protocol_v2_rejection(payload)
+
+
+def test_protocol_v2_target_execution_gate_requires_both_authenticated_results() -> None:
+    validate_protocol_v2_target_execution(_protocol_v2_target_execution_payload())
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("exact_result_kind", "compatibility_rejection"),
+        ("exact_application_invoked", False),
+        ("exact_application_success", False),
+        ("exact_application_result", 4),
+        ("exact_observed_proof_bound", False),
+        ("mismatch_result_kind", "completion"),
+        ("mismatch_reason", "membership_mismatch"),
+        ("mismatch_application_invoked", True),
+        ("mismatch_marker_present", True),
+        ("mismatch_observed_proof_bound", False),
+    ],
+)
+def test_protocol_v2_target_execution_gate_rejects_incomplete_or_unsafe_evidence(
+    field: str,
+    replacement: object,
+) -> None:
+    payload = _protocol_v2_target_execution_payload()
+    payload[field] = replacement
+
+    with pytest.raises(ValueError, match="proof was incomplete or unsafe"):
+        validate_protocol_v2_target_execution(payload)
+
+
+def test_protocol_v2_target_execution_gate_rejects_extra_identity() -> None:
+    payload = _protocol_v2_target_execution_payload()
+    payload["target_key"] = "must-not-be-emitted"
+
+    with pytest.raises(ValueError, match="proof was incomplete or unsafe"):
+        validate_protocol_v2_target_execution(payload)
 
 
 @pytest.mark.parametrize(
@@ -1608,6 +1664,77 @@ def test_private_json_parsers_drop_raw_payload_from_exception_graph(
         assert error.__context__ is None
 
 
+def test_sensitive_django_shell_accepts_one_json_object_among_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    observed: dict[str, str] = {}
+
+    class FakeUUID:
+        hex = "a" * 32
+
+    monkeypatch.setattr(gate_module, "uuid4", lambda: FakeUUID())
+
+    def kubectl(*args: str, **kwargs: object) -> CommandResult:
+        observed["script"] = args[-1]
+        return CommandResult(
+            "SIGTERM handler is not set because this is not the main thread.\n"
+            '{"complete":true}\n'
+            f"django_ray_private_json_complete_v1_{'a' * 32}\n"
+            "Ray Client connection closed.\n",
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+
+    assert gate._sensitive_django_shell("print('private')", field_name="private shell") == {
+        "complete": True
+    }
+    assert observed["script"].endswith(f"print('django_ray_private_json_complete_v1_{'a' * 32}')\n")
+
+
+def test_sensitive_django_shell_rejects_ambiguous_json_object_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+
+    class FakeUUID:
+        hex = "b" * 32
+
+    monkeypatch.setattr(gate_module, "uuid4", lambda: FakeUUID())
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **kwargs: CommandResult(
+            '{"diagnostic":true}\n{"complete":true}\n'
+            f"django_ray_private_json_complete_v1_{'b' * 32}\n",
+            "",
+            0,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="valid private JSON") as captured:
+        gate._sensitive_django_shell("print('private')", field_name="private shell")
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+
+
+def test_sensitive_django_shell_requires_controlled_completion_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    monkeypatch.setattr(
+        gate,
+        "_kubectl",
+        lambda *args, **kwargs: CommandResult('{"complete":true}\n', "", 0),
+    )
+
+    with pytest.raises(ValueError, match="valid private JSON"):
+        gate._sensitive_django_shell("print('private')", field_name="private shell")
+
+
 def test_private_kubeconfig_json_failures_drop_raw_payload_from_exception_graph(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2188,6 +2315,80 @@ def test_real_kuberay_overlay_pins_exact_lean_ray_topology(tmp_path: Path) -> No
     ray_cluster["spec"]["workerGroupSpecs"][0]["minReplicas"] = 3
     with pytest.raises(ValueError, match="must pin minReplicas"):
         expected_ray_topology(ray_cluster)
+
+
+def test_parse_ray_image_python_version_accepts_one_canonical_python_312_line() -> None:
+    assert parse_ray_image_python_version("3.12.12\n") == "3.12.12"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    (
+        "",
+        "3.12\n",
+        "3.12.012\n",
+        "3.12.12rc1\n",
+        "3.13.0\n",
+        "warning: stale image\n3.12.12\n",
+        "3.12.12\nwarning: stale image\n",
+        " 3.12.12\n",
+    ),
+)
+def test_parse_ray_image_python_version_rejects_noise_wrong_minor_and_noncanonical_output(
+    stdout: str,
+) -> None:
+    with pytest.raises(ValueError):
+        parse_ray_image_python_version(stdout)
+
+
+def test_ray_runtime_image_reference_requires_one_shared_named_ray_image() -> None:
+    rendered = cast(dict[str, Any], _ray_cluster())
+    topology = normalize_ray_topology(rendered)
+
+    assert ray_runtime_image_reference(topology) == "rayproject/ray:2.56.0-py312"
+
+    rendered["spec"]["workerGroupSpecs"][0]["template"]["spec"]["containers"][0]["image"] = (
+        "rayproject/ray:2.56.0-py312-drift"
+    )
+    with pytest.raises(ValueError):
+        ray_runtime_image_reference(normalize_ray_topology(rendered))
+
+
+@pytest.mark.parametrize(
+    "image",
+    (
+        "rayproject/ray:latest",
+        "rayproject/ray",
+        " rayproject/ray:2.56.0-py312",
+        "-rayproject/ray:2.56.0-py312",
+        "rayproject/ray:2.56.0-py312-\N{SNOWMAN}",
+        "r" * (gate_module.MAX_RAY_IMAGE_REFERENCE_CHARACTERS + 1) + ":tag",
+    ),
+)
+def test_ray_runtime_image_reference_rejects_unbounded_or_unpinned_references(
+    image: str,
+) -> None:
+    rendered = cast(dict[str, Any], _ray_cluster())
+    rendered["spec"]["headGroupSpec"]["template"]["spec"]["containers"][0]["image"] = image
+    rendered["spec"]["workerGroupSpecs"][0]["template"]["spec"]["containers"][0]["image"] = image
+
+    with pytest.raises(ValueError):
+        ray_runtime_image_reference(normalize_ray_topology(rendered))
+
+
+@pytest.mark.parametrize("component", ("head", "worker"))
+def test_ray_runtime_image_reference_rejects_a_missing_named_ray_container(
+    component: str,
+) -> None:
+    rendered = cast(dict[str, Any], _ray_cluster())
+    if component == "head":
+        container = rendered["spec"]["headGroupSpec"]["template"]["spec"]["containers"][0]
+    else:
+        container = rendered["spec"]["workerGroupSpecs"][0]["template"]["spec"]["containers"][0]
+    container["name"] = f"not-the-ray-{component}"
+
+    with pytest.raises(ValueError):
+        ray_runtime_image_reference(normalize_ray_topology(rendered))
 
 
 def test_ray_topology_normalization_rejects_equal_count_structural_drift() -> None:
@@ -3748,6 +3949,93 @@ def test_protocol_v2_direct_probe_rejects_any_durable_row_change(
     assert gate.evidence.protocol_v2_application_marker_absent is False
 
 
+def test_protocol_v2_private_target_probe_proves_exact_and_mismatch_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "poison": PROTOCOL_V2_POISON,
+        "row_sha256": "d" * 64,
+    }
+    observed: dict[str, str] = {}
+
+    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+        compile(script, "<protocol-v2-private-target-execution>", "exec")
+        observed["script"] = script
+        observed["field_name"] = field_name
+        return _protocol_v2_target_execution_payload()
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_v2_fixture",
+        lambda _fixture: {"row_sha256": fixture["row_sha256"]},
+    )
+
+    assert (
+        gate._verify_protocol_v2_target_execution(fixture)
+        == _protocol_v2_target_execution_payload()
+    )
+    assert observed["field_name"] == "protocol-v2 private target execution"
+    assert "runner._submit_target_execution(" in observed["script"]
+    assert "runner._poll_target_execution_results(" in observed["script"]
+    assert "probe_ray_target(" in observed["script"]
+    assert "build_ray_cluster_attestation(" in observed["script"]
+    assert "RayTaskTargetExecutionEvidenceClaim(" in observed["script"]
+    assert "ray_task_target_execution_evidence_digest(" in observed["script"]
+    assert "target_execution_evidence_claim=exact_evidence_claim" in observed["script"]
+    assert "claim_attestation_recorded_at=claim_attestation.observed_at" in observed["script"]
+    assert "target_execution_evidence_digest=" not in observed["script"]
+    assert "target_execution_claimed_at=" not in observed["script"]
+    assert "manager_python_patch=expected.runtime.python_patch" in observed["script"]
+    assert "route_selection_id=41" in observed["script"]
+    assert 'execution.state = "RUNNING"' in observed["script"]
+    assert (
+        'execution.claimed_by_worker = "local-kuberay-private-p2-core-lease"' in observed["script"]
+    )
+    assert "execution.started_at = exact_claimed_at" in observed["script"]
+    assert "execution.finished_at = None" in observed["script"]
+    assert "python_patch=runtime.python_patch + 1" in observed["script"]
+    assert 'execution.callable_path = "testproject.tasks.echo_task"' in observed["script"]
+    assert "RayCoreTargetExecutionTransportState.COMPATIBILITY_REJECTION" in observed["script"]
+    assert "mismatch_marker_present" in observed["script"]
+    assert "from testproject" not in observed["script"]
+    assert gate.evidence.protocol_v2_target_exact_completed is True
+    assert gate.evidence.protocol_v2_target_mismatch_rejected is True
+    assert gate.evidence.protocol_v2_target_mismatch_marker_absent is True
+
+
+def test_protocol_v2_private_target_probe_rejects_any_durable_row_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    fixture = {
+        "pk": 41,
+        "task_id": TASK_ID,
+        "poison": PROTOCOL_V2_POISON,
+        "row_sha256": "d" * 64,
+    }
+    monkeypatch.setattr(
+        gate,
+        "_sensitive_django_shell",
+        lambda _script, *, field_name: _protocol_v2_target_execution_payload(),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_observe_protocol_v2_fixture",
+        lambda _fixture: {"row_sha256": "e" * 64},
+    )
+
+    with pytest.raises(ValueError, match="changed during private target execution"):
+        gate._verify_protocol_v2_target_execution(fixture)
+
+    assert gate.evidence.protocol_v2_target_exact_completed is False
+    assert gate.evidence.protocol_v2_target_mismatch_rejected is False
+    assert gate.evidence.protocol_v2_target_mismatch_marker_absent is False
+
+
 def test_protocol_v2_cleanup_deletes_only_the_fixture_and_reopens_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4098,6 +4386,19 @@ def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fix
 
     monkeypatch.setattr(gate, "_verify_protocol_v2_rejection", verify_rejection)
 
+    def verify_target_execution(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
+        events.append("verify-protocol-v2-target-execution")
+        gate.evidence.protocol_v2_target_exact_completed = True
+        gate.evidence.protocol_v2_target_mismatch_rejected = True
+        gate.evidence.protocol_v2_target_mismatch_marker_absent = True
+        return _protocol_v2_target_execution_payload()
+
+    monkeypatch.setattr(
+        gate,
+        "_verify_protocol_v2_target_execution",
+        verify_target_execution,
+    )
+
     def cleanup_fixture(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
         events.append("cleanup-protocol-v2")
         gate._protocol_v2_fixture = None
@@ -4121,6 +4422,9 @@ def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fix
     assert gate.evidence.protocol_v2_unsupported_visible is True
     assert gate.evidence.protocol_v2_preinvocation_rejected is True
     assert gate.evidence.protocol_v2_application_marker_absent is True
+    assert gate.evidence.protocol_v2_target_exact_completed is True
+    assert gate.evidence.protocol_v2_target_mismatch_rejected is True
+    assert gate.evidence.protocol_v2_target_mismatch_marker_absent is True
     assert gate.evidence.protocol_handoff_cleanup_restored is True
     assert events == [
         "recover-released-startup",
@@ -4141,6 +4445,7 @@ def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fix
         "seed-protocol-v2",
         "verify-protocol-v2-visibility",
         "verify-protocol-v2-rejection",
+        "verify-protocol-v2-target-execution",
         "delete-released-manager",
         "scale-current:1",
         "cleanup-protocol-v2",
@@ -6128,11 +6433,14 @@ def test_released_v040_image_build_uses_only_the_pinned_archive_and_labels(
     dockerfile.write_text("FROM scratch\n", encoding="utf-8")
     gate.released_v040_source_context = released_context
     gate.evidence.released_v040_image_tag = "django-ray-released-v040:test-source"
+    gate._ray_image_python_version = "3.12.12"
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(gate, "_verify_released_v040_source_identity", lambda: None)
 
     def docker(*args: str, **_kwargs: object) -> CommandResult:
         calls.append(args)
+        if args[0] == "run":
+            return CommandResult("3.12.12\n", "", 0)
         if args[:2] != ("image", "inspect"):
             return CommandResult("", "", 0)
         return CommandResult(
@@ -6162,22 +6470,150 @@ def test_released_v040_image_build_uses_only_the_pinned_archive_and_labels(
 
     gate._build_released_v040_image()
 
-    assert calls == [
-        (
-            "build",
-            "--tag",
-            gate.evidence.released_v040_image_tag,
-            "--label",
-            f"org.opencontainers.image.revision={gate_module.RELEASED_V040_COMMIT}",
-            "--label",
-            f"org.opencontainers.image.source-tree={gate_module.RELEASED_V040_SOURCE_TREE}",
-            "--file",
-            str(dockerfile),
-            str(released_context),
-        ),
-        ("image", "inspect", gate.evidence.released_v040_image_tag),
-    ]
+    build_call, inspect_call, verify_call = calls
+    build_arg_index = build_call.index("--build-arg")
+    assert build_call[build_arg_index + 1] == "PYTHON_VERSION=3.12.12"
+    assert build_call[:build_arg_index] + build_call[build_arg_index + 2 :] == (
+        "build",
+        "--tag",
+        gate.evidence.released_v040_image_tag,
+        "--label",
+        f"org.opencontainers.image.revision={gate_module.RELEASED_V040_COMMIT}",
+        "--label",
+        f"org.opencontainers.image.source-tree={gate_module.RELEASED_V040_SOURCE_TREE}",
+        "--file",
+        str(dockerfile),
+        str(released_context),
+    )
+    assert inspect_call == ("image", "inspect", gate.evidence.released_v040_image_tag)
+    assert verify_call == (
+        "run",
+        "--rm",
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--entrypoint",
+        "python",
+        "--",
+        gate.evidence.released_v040_image_tag,
+        "-I",
+        "-S",
+        "-B",
+        "-c",
+        'import sys; print(".".join(map(str, sys.version_info[:3])))',
+    )
     assert gate.evidence.released_v040_image_id == IMAGE_ID
+
+
+def test_image_builds_discover_one_ray_python_and_align_only_application_images(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    current_context = tmp_path / "current-source"
+    released_context = tmp_path / "released-v040-source"
+    current_context.mkdir()
+    released_context.mkdir()
+    gate.source_context = current_context
+    gate.released_v040_source_context = released_context
+    gate.rendered_ray_topology = normalize_ray_topology(cast(dict[str, Any], _ray_cluster()))
+    gate.evidence.commit = COMMIT
+    gate.evidence.source_tree = SOURCE_TREE
+    gate.evidence.app_tag = APP_TAG
+    gate.evidence.worker_tag = f"django-ray-worker:{TAG}"
+    gate.evidence.released_v040_image_tag = f"django-ray-released-v040:{TAG}"
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(gate, "_verify_source_identity", lambda: None)
+    monkeypatch.setattr(gate, "_verify_released_v040_source_identity", lambda: None)
+
+    def docker(*args: str, **_kwargs: object) -> CommandResult:
+        calls.append(args)
+        if args[0] == "run":
+            return CommandResult("3.12.12\n", "", 0)
+        if args[:2] != ("image", "inspect"):
+            return CommandResult("", "", 0)
+        tag = args[2]
+        if tag == gate.evidence.released_v040_image_tag:
+            commit = gate_module.RELEASED_V040_COMMIT
+            source_tree = gate_module.RELEASED_V040_SOURCE_TREE
+        else:
+            commit = COMMIT
+            source_tree = SOURCE_TREE
+        return CommandResult(
+            json.dumps(
+                [
+                    {
+                        "Id": IMAGE_ID,
+                        "RepoTags": [tag],
+                        "Config": {
+                            "Labels": {
+                                "org.opencontainers.image.revision": commit,
+                                "org.opencontainers.image.source-tree": source_tree,
+                            }
+                        },
+                    }
+                ]
+            ),
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(gate, "_docker", docker)
+
+    gate._build_images()
+
+    discovery = (
+        "run",
+        "--rm",
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--entrypoint",
+        "python",
+        "--",
+        "rayproject/ray:2.56.0-py312",
+        "-I",
+        "-S",
+        "-B",
+        "-c",
+        'import sys; print(".".join(map(str, sys.version_info[:3])))',
+    )
+    assert calls.count(discovery) == 1
+    assert calls.index(discovery) < next(
+        index for index, call in enumerate(calls) if call[0] == "build"
+    )
+    assert gate._ray_image_python_version == "3.12.12"
+
+    python_probes = [call for call in calls if call[0] == "run"]
+    assert len(python_probes) == 3
+    assert {call[call.index("--") + 1] for call in python_probes} == {
+        "rayproject/ray:2.56.0-py312",
+        gate.evidence.app_tag,
+        gate.evidence.released_v040_image_tag,
+    }
+
+    builds = [call for call in calls if call[0] == "build"]
+    assert len(builds) == 3
+    application_builds = [
+        call for call in builds if Path(call[call.index("--file") + 1]).name == "Dockerfile"
+    ]
+    assert len(application_builds) == 2
+    assert {Path(call[call.index("--file") + 1]) for call in application_builds} == {
+        current_context / "Dockerfile",
+        released_context / "Dockerfile",
+    }
+    for call in application_builds:
+        assert call.count("--build-arg") == 1
+        build_arg_index = call.index("--build-arg")
+        assert call[build_arg_index + 1] == "PYTHON_VERSION=3.12.12"
+
+    worker_build = next(
+        call for call in builds if Path(call[call.index("--file") + 1]).name == "Dockerfile.ray"
+    )
+    assert "--build-arg" not in worker_build
+    assert all(not value.startswith("PYTHON_VERSION=") for value in worker_build)
 
 
 def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
@@ -6206,6 +6642,7 @@ def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
     gate.evidence.app_tag = APP_TAG
     gate.evidence.worker_tag = f"django-ray-worker:{TAG}"
     gate.evidence.released_v040_image_tag = f"django-ray-released-v040:{TAG}"
+    gate.rendered_ray_topology = normalize_ray_topology(cast(dict[str, Any], _ray_cluster()))
     gate.resources = [
         {
             "apiVersion": "v1",
@@ -6220,6 +6657,8 @@ def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
         monkeypatch.setenv(key, f"hostile-{key.lower()}")
 
     def docker(*args: str, **kwargs: object) -> CommandResult:
+        if args[0] == "run":
+            return CommandResult("3.12.12\n", "", 0)
         if args[:2] != ("image", "inspect"):
             return CommandResult("", "", 0)
         tag = args[2]
@@ -6407,6 +6846,9 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.protocol_v2_unsupported_visible = cast(Any, token)
     evidence.protocol_v2_preinvocation_rejected = cast(Any, token)
     evidence.protocol_v2_application_marker_absent = cast(Any, token)
+    evidence.protocol_v2_target_exact_completed = cast(Any, token)
+    evidence.protocol_v2_target_mismatch_rejected = cast(Any, token)
+    evidence.protocol_v2_target_mismatch_marker_absent = cast(Any, token)
     evidence.protocol_handoff_cleanup_restored = cast(Any, token)
     evidence.workflow_schema_version = cast(Any, token)
     evidence.workflow_attempt_number = cast(Any, token)
@@ -7150,6 +7592,11 @@ def test_private_runtime_env_envelope_inspection_registers_every_raw_value(
 
     def kubectl(*args: str, **kwargs: object) -> CommandResult:
         calls.append((args, kwargs))
+        marker_match = re.search(
+            r"print\('(django_ray_private_json_complete_v1_[0-9a-f]{32})'\)\n\Z",
+            args[-1],
+        )
+        assert marker_match is not None
         return CommandResult(
             json.dumps(
                 {
@@ -7157,7 +7604,8 @@ def test_private_runtime_env_envelope_inspection_registers_every_raw_value(
                     "profile": "thin",
                     "runtime_env_hash": digest,
                 }
-            ),
+            )
+            + f"\n{marker_match.group(1)}\n",
             "",
             0,
         )
@@ -7197,6 +7645,11 @@ def test_failure_fixture_creation_is_one_sensitive_atomic_storage_seam_command(
 
     def kubectl(*args: str, **kwargs: object) -> CommandResult:
         calls.append((args, kwargs))
+        marker_match = re.search(
+            r"print\('(django_ray_private_json_complete_v1_[0-9a-f]{32})'\)\n\Z",
+            args[-1],
+        )
+        assert marker_match is not None
         return CommandResult(
             json.dumps(
                 {
@@ -7215,7 +7668,8 @@ def test_failure_fixture_creation_is_one_sensitive_atomic_storage_seam_command(
                         "ciphertext": ciphertext,
                     },
                 }
-            ),
+            )
+            + f"\n{marker_match.group(1)}\n",
             "",
             0,
         )
@@ -7232,7 +7686,12 @@ def test_failure_fixture_creation_is_one_sensitive_atomic_storage_seam_command(
     assert kwargs["sensitive_output"] is True
     no_imports = args.index("--no-imports")
     assert args[no_imports + 1] == "-c"
-    script = args[-1]
+    marker_match = re.search(
+        r"\nprint\('django_ray_private_json_complete_v1_[0-9a-f]{32}'\)\n\Z",
+        args[-1],
+    )
+    assert marker_match is not None
+    script = args[-1][: marker_match.start()]
     assert script == RUNTIME_ENV_FAILURE_FIXTURE_SCRIPT
     assert script.count("with transaction.atomic():") == 1
     assert "runtime_env_for_storage(resolved, task_id=task_id)" in script
@@ -9331,6 +9790,9 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.protocol_v2_unsupported_visible = True
     gate.evidence.protocol_v2_preinvocation_rejected = True
     gate.evidence.protocol_v2_application_marker_absent = True
+    gate.evidence.protocol_v2_target_exact_completed = True
+    gate.evidence.protocol_v2_target_mismatch_rejected = True
+    gate.evidence.protocol_v2_target_mismatch_marker_absent = True
     gate.evidence.protocol_handoff_cleanup_restored = True
     gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
     gate.evidence.workflow_task_state = "SUCCEEDED"
@@ -9432,6 +9894,9 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.protocol_v2_unsupported_visible = True
     gate.evidence.protocol_v2_preinvocation_rejected = True
     gate.evidence.protocol_v2_application_marker_absent = True
+    gate.evidence.protocol_v2_target_exact_completed = True
+    gate.evidence.protocol_v2_target_mismatch_rejected = True
+    gate.evidence.protocol_v2_target_mismatch_marker_absent = True
     gate.evidence.protocol_handoff_cleanup_restored = True
     gate.evidence.workflow_task_id = WORKFLOW_TASK_ID
     gate.evidence.workflow_task_state = "SUCCEEDED"
@@ -9522,6 +9987,9 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("protocol_v2_unsupported_visible") == "True"
     assert reconstructed("protocol_v2_preinvocation_rejected") == "True"
     assert reconstructed("protocol_v2_application_marker_absent") == "True"
+    assert reconstructed("protocol_v2_target_exact_completed") == "True"
+    assert reconstructed("protocol_v2_target_mismatch_rejected") == "True"
+    assert reconstructed("protocol_v2_target_mismatch_marker_absent") == "True"
     assert reconstructed("protocol_handoff_cleanup_restored") == "True"
     assert reconstructed("workflow_task_id") == WORKFLOW_TASK_ID
     assert reconstructed("workflow_availability") == "AVAILABLE"

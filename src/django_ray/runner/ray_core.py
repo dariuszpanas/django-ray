@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from threading import BoundedSemaphore, Event, Thread
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,9 @@ from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHan
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
     from django_ray.runner.cancellation import CancellationOutcome
+    from django_ray.target_attestation import RayClusterAttestation, RayTargetExpectation
+    from django_ray.target_execution_codec import TargetExecutionResult
+    from django_ray.target_execution_evidence import RayTaskTargetExecutionEvidenceClaim
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,14 @@ class RayCoreHandle:
     attempt_number: int = field(kw_only=True)
     execution_generation: int = field(kw_only=True)
     strict_request: bool = field(default=False, kw_only=True)
+    durable_task_id: str = field(default="", kw_only=True)
+    target_execution_evidence_id: int | None = field(default=None, kw_only=True)
+    target_execution_evidence_digest: str | None = field(default=None, kw_only=True)
+    target_expectation_digest: str | None = field(default=None, kw_only=True)
+    claim_attestation_digest: str | None = field(default=None, kw_only=True)
+    target_expectation: RayTargetExpectation | None = field(default=None, kw_only=True)
+    claim_attestation: RayClusterAttestation | None = field(default=None, kw_only=True)
+    target_execution_claimed_at: datetime | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -42,11 +54,59 @@ class RayCoreCompletion:
     result_json: str
 
 
+class RayCoreTargetExecutionTransportState(StrEnum):
+    """Trusted protocol-2 runner disposition."""
+
+    COMPLETION = "completion"
+    COMPATIBILITY_REJECTION = "compatibility_rejection"
+    UNCERTAIN = "uncertain"
+
+
+class RayCoreTargetExecutionUncertainty(StrEnum):
+    """Fixed reasons why no trusted protocol-2 result exists."""
+
+    RAY_TRANSPORT_ERROR = "ray_transport_error"
+    INVALID_RESULT = "invalid_result"
+    UNSUPPORTED_SCHEMA = "unsupported_schema"
+    UNSUPPORTED_PROTOCOL = "unsupported_protocol"
+    IDENTITY_MISMATCH = "identity_mismatch"
+    EVIDENCE_MISMATCH = "evidence_mismatch"
+    PROOF_MISMATCH = "proof_mismatch"
+    RESOURCE_LIMIT = "resource_limit"
+
+
+@dataclass(frozen=True, slots=True)
+class RayCoreTargetExecutionRunnerResult:
+    """Decoded target result or an explicit uncertain remote effect."""
+
+    task_pk: int
+    attempt_number: int
+    execution_generation: int
+    target_execution_evidence_id: int
+    target_execution_evidence_digest: str
+    transport_state: RayCoreTargetExecutionTransportState
+    result: TargetExecutionResult | None
+    uncertainty: RayCoreTargetExecutionUncertainty | None
+
+
 @dataclass
 class _RayCoreSubmissionHandle(SubmissionHandle):
     """Submission handle carrying an in-memory capability for one exact task."""
 
     pending_handle: RayCoreHandle
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetExecutionSubmissionEvidence:
+    """Canonical p2 claim controls admitted by the private submission seam."""
+
+    evidence_id: int
+    evidence_claim: RayTaskTargetExecutionEvidenceClaim
+    evidence_digest: str
+    target_expectation: RayTargetExpectation
+    target_expectation_digest: str
+    claim_attestation: RayClusterAttestation
+    claim_attestation_digest: str
 
 
 # Global remote function cache to prevent Ray GCS memory leaks.
@@ -60,6 +120,119 @@ _execute_django_task_remote_cached = None
 # control-request budget used by the other execution backend.
 _RAY_CORE_CANCEL_TIMEOUT_SECONDS = 5.0
 _RAY_CORE_CANCEL_SLOT = BoundedSemaphore(value=1)
+
+
+def _target_execution_utc_time(value: object) -> datetime:
+    """Normalize one immutable UTC timestamp without exposing callbacks."""
+    try:
+        if type(value) is not datetime or value.tzinfo is None or value.utcoffset() != timedelta(0):
+            raise ValueError
+        return value.astimezone(UTC)
+    except Exception:
+        raise ValueError("target execution evidence claim is invalid") from None
+
+
+def _canonical_target_execution_submission_evidence(
+    task_execution: RayTaskExecution,
+    *,
+    target_execution_evidence_id: int,
+    target_execution_evidence_claim: RayTaskTargetExecutionEvidenceClaim,
+    target_expectation: RayTargetExpectation,
+    claim_attestation: RayClusterAttestation,
+    claim_attestation_recorded_at: datetime,
+) -> _TargetExecutionSubmissionEvidence:
+    """Validate one complete persisted-claim snapshot before any Ray crossing."""
+    try:
+        from django_ray.execution_protocol import TARGET_EXECUTION_PROTOCOL_VERSION
+        from django_ray.target_attestation import (
+            RayRunnerFamily,
+            decode_ray_cluster_attestation,
+            decode_ray_target_expectation,
+            encode_ray_cluster_attestation,
+            encode_ray_target_expectation,
+            ray_cluster_attestation_digest,
+            ray_target_expectation_digest,
+        )
+        from django_ray.target_execution_evidence import (
+            decode_ray_task_target_execution_evidence,
+            encode_ray_task_target_execution_evidence,
+            ray_task_target_execution_evidence_digest,
+        )
+
+        if (
+            type(target_execution_evidence_id) is not int
+            or not 1 <= target_execution_evidence_id <= (1 << 63) - 1
+        ):
+            raise ValueError
+        canonical_claim = decode_ray_task_target_execution_evidence(
+            encode_ray_task_target_execution_evidence(target_execution_evidence_claim)
+        )
+        canonical_expectation = decode_ray_target_expectation(
+            encode_ray_target_expectation(target_expectation)
+        )
+        canonical_attestation = decode_ray_cluster_attestation(
+            encode_ray_cluster_attestation(claim_attestation)
+        )
+        attestation_recorded_at = _target_execution_utc_time(claim_attestation_recorded_at)
+        evidence_digest = ray_task_target_execution_evidence_digest(canonical_claim)
+        expectation_digest = ray_target_expectation_digest(canonical_expectation)
+        attestation_digest = ray_cluster_attestation_digest(canonical_attestation)
+        runtime = canonical_expectation.runtime
+        task_started_at = _target_execution_utc_time(task_execution.started_at)
+        if (
+            canonical_claim.execution_protocol_version != TARGET_EXECUTION_PROTOCOL_VERSION
+            or int(task_execution.execution_protocol_version) != TARGET_EXECUTION_PROTOCOL_VERSION
+            or canonical_claim.execution_id != int(task_execution.pk)
+            or canonical_claim.task_id != str(task_execution.task_id)
+            or canonical_claim.attempt_number != int(task_execution.attempt_number)
+            or canonical_claim.execution_generation != int(task_execution.execution_generation)
+            or canonical_claim.route_selection_id != int(task_execution.pk)
+            or canonical_claim.target_id != canonical_expectation.target_key
+            or canonical_claim.runner_family != RayRunnerFamily.RAY_CORE.value
+            or canonical_expectation.runner_family is not RayRunnerFamily.RAY_CORE
+            or canonical_claim.target_expectation_digest != expectation_digest
+            or canonical_claim.claim_attestation_digest != attestation_digest
+            or canonical_attestation.expectation != canonical_expectation
+            or canonical_attestation.expectation_digest != expectation_digest
+            or canonical_attestation.attestation_digest != attestation_digest
+            or task_execution.state != "RUNNING"
+            or task_execution.claimed_by_worker != canonical_claim.worker_lease_id
+            or task_started_at > canonical_claim.claimed_at
+            or task_execution.finished_at is not None
+            or (
+                canonical_claim.manager_ray_major,
+                canonical_claim.manager_ray_minor,
+                canonical_claim.manager_ray_patch,
+                canonical_claim.manager_python_implementation,
+                canonical_claim.manager_python_major,
+                canonical_claim.manager_python_minor,
+                canonical_claim.manager_python_patch,
+            )
+            != (
+                runtime.ray_major,
+                runtime.ray_minor,
+                runtime.ray_patch,
+                runtime.python_implementation,
+                runtime.python_major,
+                runtime.python_minor,
+                runtime.python_patch,
+            )
+            or canonical_attestation.observed_at > attestation_recorded_at
+            or attestation_recorded_at > canonical_claim.claimed_at
+            or canonical_claim.claimed_at >= canonical_attestation.expires_at
+        ):
+            raise ValueError
+        return _TargetExecutionSubmissionEvidence(
+            evidence_id=target_execution_evidence_id,
+            evidence_claim=canonical_claim,
+            evidence_digest=evidence_digest,
+            target_expectation=canonical_expectation,
+            target_expectation_digest=expectation_digest,
+            claim_attestation=canonical_attestation,
+            claim_attestation_digest=attestation_digest,
+        )
+    except Exception:
+        raise ValueError("target execution evidence claim is invalid") from None
 
 
 def _ray_id_to_string(ray_id: Any) -> str:
@@ -187,6 +360,34 @@ class RayCoreRunner(BaseRunner):
             input_reference=getattr(task_execution, "input_reference", None),
         )
 
+    def _submit_target_execution(
+        self,
+        task_execution: RayTaskExecution,
+        *,
+        target_execution_evidence_id: int,
+        target_execution_evidence_claim: RayTaskTargetExecutionEvidenceClaim,
+        target_expectation: RayTargetExpectation,
+        claim_attestation: RayClusterAttestation,
+        claim_attestation_recorded_at: datetime,
+    ) -> SubmissionHandle:
+        """Submit one dormant target-bound request through the private p2 seam."""
+        evidence = _canonical_target_execution_submission_evidence(
+            task_execution,
+            target_execution_evidence_id=target_execution_evidence_id,
+            target_execution_evidence_claim=target_execution_evidence_claim,
+            target_expectation=target_expectation,
+            claim_attestation=claim_attestation,
+            claim_attestation_recorded_at=claim_attestation_recorded_at,
+        )
+        return self._submit_serialized_request(
+            task_execution=task_execution,
+            callable_path=task_execution.callable_path,
+            args_json=task_execution.args_json,
+            kwargs_json=task_execution.kwargs_json,
+            input_reference=getattr(task_execution, "input_reference", None),
+            target_execution_evidence=evidence,
+        )
+
     def _submit_serialized_request(
         self,
         *,
@@ -195,6 +396,7 @@ class RayCoreRunner(BaseRunner):
         args_json: str,
         kwargs_json: str,
         input_reference: str | None,
+        target_execution_evidence: _TargetExecutionSubmissionEvidence | None = None,
     ) -> SubmissionHandle:
         """Submit one strict request without hydrating its application input."""
         existing_handle = self._pending_tasks.get(task_execution.pk)
@@ -275,11 +477,7 @@ class RayCoreRunner(BaseRunner):
         submitted_attempt_number = int(task_execution.attempt_number)
         submitted_execution_generation = int(task_execution.execution_generation)
         submitted_execution_protocol_version = int(task_execution.execution_protocol_version)
-        from django_ray.execution_codec import (
-            ExecutionIdentity,
-            ExecutionRequest,
-            encode_execution_request,
-        )
+        from django_ray.execution_codec import ExecutionIdentity
 
         request_identity = ExecutionIdentity(
             task_execution_pk=int(task_execution.pk),
@@ -288,21 +486,112 @@ class RayCoreRunner(BaseRunner):
             execution_generation=submitted_execution_generation,
         )
         compiled_graph_submission_transport = _compiled_graph_submission_transport(ray)
-        execution_request = encode_execution_request(
-            ExecutionRequest(
-                identity=request_identity,
-                execution_protocol_version=submitted_execution_protocol_version,
-                callable_path=callable_path,
-                transport_version=2 if input_reference else 1,
-                serialized_args=args_json,
-                serialized_kwargs=kwargs_json,
-                input_reference=input_reference,
-                runtime_env_profile=runtime_env.profile,
-                runtime_env_hash=runtime_env.digest,
-                runtime_env_plan_identity=snapshot_runtime_env_identity.as_transport_dict(),
-                compiled_graph_submission_transport=compiled_graph_submission_transport,
+        remote_expected_target: dict[str, object] = {}
+        submitted_target_expectation: RayTargetExpectation | None = None
+        submitted_claim_attestation: RayClusterAttestation | None = None
+        submitted_target_execution_claimed_at: datetime | None = None
+        if target_execution_evidence is None:
+            from django_ray.execution_codec import (
+                ExecutionRequest,
+                encode_execution_request,
             )
-        )
+
+            execution_request = encode_execution_request(
+                ExecutionRequest(
+                    identity=request_identity,
+                    execution_protocol_version=submitted_execution_protocol_version,
+                    callable_path=callable_path,
+                    transport_version=2 if input_reference else 1,
+                    serialized_args=args_json,
+                    serialized_kwargs=kwargs_json,
+                    input_reference=input_reference,
+                    runtime_env_profile=runtime_env.profile,
+                    runtime_env_hash=runtime_env.digest,
+                    runtime_env_plan_identity=snapshot_runtime_env_identity.as_transport_dict(),
+                    compiled_graph_submission_transport=compiled_graph_submission_transport,
+                )
+            )
+            target_execution_evidence_id = None
+            target_execution_evidence_digest = None
+            target_expectation_digest = None
+            claim_attestation_digest = None
+        else:
+            target_execution_evidence_id = target_execution_evidence.evidence_id
+            target_execution_evidence_digest = target_execution_evidence.evidence_digest
+            target_expectation = target_execution_evidence.target_expectation
+            target_expectation_digest = target_execution_evidence.target_expectation_digest
+            claim_attestation = target_execution_evidence.claim_attestation
+            claim_attestation_digest = target_execution_evidence.claim_attestation_digest
+            from django_ray.target_execution_codec import (
+                TargetExecutionRequest,
+                decode_target_execution_request,
+                encode_target_execution_request,
+            )
+
+            execution_request = encode_target_execution_request(
+                TargetExecutionRequest(
+                    identity=request_identity,
+                    execution_protocol_version=submitted_execution_protocol_version,
+                    target_execution_evidence_id=target_execution_evidence_id,
+                    target_execution_evidence_digest=target_execution_evidence_digest,
+                    target_execution_claimed_at=(
+                        target_execution_evidence.evidence_claim.claimed_at
+                    ),
+                    target_expectation=target_expectation,
+                    target_expectation_digest=target_expectation_digest,
+                    claim_attestation=claim_attestation,
+                    claim_attestation_digest=claim_attestation_digest,
+                    callable_path=callable_path,
+                    transport_version=2 if input_reference else 1,
+                    serialized_args=args_json,
+                    serialized_kwargs=kwargs_json,
+                    input_reference=input_reference,
+                    runtime_env_profile=runtime_env.profile,
+                    runtime_env_hash=runtime_env.digest,
+                    runtime_env_plan_identity=snapshot_runtime_env_identity.as_transport_dict(),
+                    compiled_graph_submission_transport=compiled_graph_submission_transport,
+                )
+            )
+            decoded_target_request = decode_target_execution_request(
+                execution_request,
+                expected_identity=request_identity,
+                expected_target_execution_evidence_id=target_execution_evidence_id,
+                expected_target_execution_evidence_digest=(target_execution_evidence_digest),
+                expected_target_execution_claimed_at=(
+                    target_execution_evidence.evidence_claim.claimed_at
+                ),
+                expected_target_expectation_digest=target_expectation_digest,
+                expected_claim_attestation_digest=claim_attestation_digest,
+            )
+            submitted_target_expectation = decoded_target_request.target_expectation
+            submitted_claim_attestation = decoded_target_request.claim_attestation
+            submitted_target_execution_claimed_at = (
+                decoded_target_request.target_execution_claimed_at
+            )
+            target_execution_evidence_id = decoded_target_request.target_execution_evidence_id
+            target_execution_evidence_digest = (
+                decoded_target_request.target_execution_evidence_digest
+            )
+            target_expectation_digest = decoded_target_request.target_expectation_digest
+            claim_attestation_digest = decoded_target_request.claim_attestation_digest
+            remote_expected_target = {
+                "_target_execution_transport": True,
+                "expected_target_execution_evidence_id": (
+                    decoded_target_request.target_execution_evidence_id
+                ),
+                "expected_target_execution_evidence_digest": (
+                    decoded_target_request.target_execution_evidence_digest
+                ),
+                "expected_target_execution_claimed_at": (
+                    decoded_target_request.target_execution_claimed_at
+                ),
+                "expected_target_expectation_digest": (
+                    decoded_target_request.target_expectation_digest
+                ),
+                "expected_claim_attestation_digest": (
+                    decoded_target_request.claim_attestation_digest
+                ),
+            }
         try:
             object_ref = execute_django_task.remote(
                 execution_request,
@@ -311,6 +600,7 @@ class RayCoreRunner(BaseRunner):
                 expected_attempt_number=request_identity.attempt_number,
                 expected_execution_generation=request_identity.execution_generation,
                 expected_execution_protocol_version=submitted_execution_protocol_version,
+                **remote_expected_target,
             )
         except Exception:
             # Ray Client leaves a failed ClientRemoteFunc in an in-progress
@@ -342,6 +632,14 @@ class RayCoreRunner(BaseRunner):
             attempt_number=submitted_attempt_number,
             execution_generation=submitted_execution_generation,
             strict_request=True,
+            durable_task_id=request_identity.task_id,
+            target_execution_evidence_id=target_execution_evidence_id,
+            target_execution_evidence_digest=target_execution_evidence_digest,
+            target_expectation_digest=target_expectation_digest,
+            claim_attestation_digest=claim_attestation_digest,
+            target_expectation=submitted_target_expectation,
+            claim_attestation=submitted_claim_attestation,
+            target_execution_claimed_at=submitted_target_execution_claimed_at,
             ray_job_id=ray_job_id,
             ray_task_id=ray_task_id,
         )
@@ -448,6 +746,23 @@ class RayCoreRunner(BaseRunner):
                     message="Legacy handle lacks exact submission identity",
                 )
             core_handle = self._pending_tasks[task_pk]
+
+        if core_handle.target_execution_evidence_id is not None:
+            try:
+                ready, _ = ray.wait([core_handle.object_ref], timeout=0)
+            except Exception:
+                return JobInfo(
+                    job_id=handle.ray_job_id,
+                    status=JobStatus.UNKNOWN,
+                    message="Target-bound Ray Core execution status is uncertain",
+                )
+            if not ready:
+                return JobInfo(job_id=handle.ray_job_id, status=JobStatus.RUNNING)
+            return JobInfo(
+                job_id=handle.ray_job_id,
+                status=JobStatus.UNKNOWN,
+                message="Target-bound result requires authenticated protocol-2 polling",
+            )
 
         # Check if task is ready (non-blocking)
         ready, _ = ray.wait([core_handle.object_ref], timeout=0)
@@ -665,12 +980,17 @@ class RayCoreRunner(BaseRunner):
         import ray
 
         if handles is None:
-            selected_handles = tuple(self._pending_tasks.values())
+            selected_handles = tuple(
+                handle
+                for handle in self._pending_tasks.values()
+                if handle.target_execution_evidence_id is None
+            )
         else:
             selected_by_task = {
                 handle.task_pk: handle
                 for handle in handles
                 if self._pending_tasks.get(handle.task_pk) is handle
+                and handle.target_execution_evidence_id is None
             }
             selected_handles = tuple(selected_by_task.values())
 
@@ -738,6 +1058,163 @@ class RayCoreRunner(BaseRunner):
             # Remove from pending
             self.retire_pending_handle(handle)
 
+        return completed
+
+    def _poll_target_execution_results(
+        self,
+        handles: tuple[RayCoreHandle, ...] | None = None,
+        *,
+        validation_now: datetime | None = None,
+    ) -> list[RayCoreTargetExecutionRunnerResult]:
+        """Poll dormant p2 handles without converting uncertainty to failure."""
+        import ray
+
+        candidates = self._pending_tasks.values() if handles is None else handles
+        selected_by_task = {
+            handle.task_pk: handle
+            for handle in candidates
+            if self._pending_tasks.get(handle.task_pk) is handle
+            and handle.target_execution_evidence_id is not None
+            and handle.target_execution_evidence_digest is not None
+            and handle.target_expectation_digest is not None
+            and handle.claim_attestation_digest is not None
+            and handle.target_execution_claimed_at is not None
+        }
+        selected_handles = tuple(selected_by_task.values())
+        if not selected_handles:
+            return []
+        refs = [handle.object_ref for handle in selected_handles]
+        handle_by_ref = {handle.object_ref: handle for handle in selected_handles}
+        try:
+            ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
+        except Exception:
+            uncertain_results = []
+            for handle in selected_handles:
+                evidence_id = handle.target_execution_evidence_id
+                evidence_digest = handle.target_execution_evidence_digest
+                assert evidence_id is not None
+                assert evidence_digest is not None
+                uncertain_results.append(
+                    RayCoreTargetExecutionRunnerResult(
+                        task_pk=handle.task_pk,
+                        attempt_number=handle.attempt_number,
+                        execution_generation=handle.execution_generation,
+                        target_execution_evidence_id=evidence_id,
+                        target_execution_evidence_digest=evidence_digest,
+                        transport_state=RayCoreTargetExecutionTransportState.UNCERTAIN,
+                        result=None,
+                        uncertainty=(RayCoreTargetExecutionUncertainty.RAY_TRANSPORT_ERROR),
+                    )
+                )
+            return uncertain_results
+
+        from django_ray.execution_codec import ExecutionIdentity
+        from django_ray.ray_target_probe import (
+            RayTargetExecutionResultValidationError,
+            validate_ray_target_execution_result_semantics,
+        )
+        from django_ray.target_execution_codec import (
+            TargetExecutionCompatibilityRejection,
+            TargetExecutionResultDecodeError,
+            TargetExecutionResultRejection,
+            decode_target_execution_result,
+        )
+
+        uncertainty_by_rejection = {
+            TargetExecutionResultRejection.INVALID: (
+                RayCoreTargetExecutionUncertainty.INVALID_RESULT
+            ),
+            TargetExecutionResultRejection.UNSUPPORTED_SCHEMA: (
+                RayCoreTargetExecutionUncertainty.UNSUPPORTED_SCHEMA
+            ),
+            TargetExecutionResultRejection.UNSUPPORTED_PROTOCOL: (
+                RayCoreTargetExecutionUncertainty.UNSUPPORTED_PROTOCOL
+            ),
+            TargetExecutionResultRejection.IDENTITY_MISMATCH: (
+                RayCoreTargetExecutionUncertainty.IDENTITY_MISMATCH
+            ),
+            TargetExecutionResultRejection.EVIDENCE_MISMATCH: (
+                RayCoreTargetExecutionUncertainty.EVIDENCE_MISMATCH
+            ),
+            TargetExecutionResultRejection.PROOF_MISMATCH: (
+                RayCoreTargetExecutionUncertainty.PROOF_MISMATCH
+            ),
+            TargetExecutionResultRejection.RESOURCE_LIMIT: (
+                RayCoreTargetExecutionUncertainty.RESOURCE_LIMIT
+            ),
+        }
+        completed: list[RayCoreTargetExecutionRunnerResult] = []
+        for ref in ready:
+            handle = handle_by_ref[ref]
+            evidence_id = handle.target_execution_evidence_id
+            evidence_digest = handle.target_execution_evidence_digest
+            expectation_digest = handle.target_expectation_digest
+            attestation_digest = handle.claim_attestation_digest
+            target_expectation = handle.target_expectation
+            claim_attestation = handle.claim_attestation
+            target_execution_claimed_at = handle.target_execution_claimed_at
+            assert evidence_id is not None
+            assert evidence_digest is not None
+            assert expectation_digest is not None
+            assert attestation_digest is not None
+            assert target_execution_claimed_at is not None
+            result = None
+            uncertainty = None
+            try:
+                serialized = ray.get(ref)
+                result = decode_target_execution_result(
+                    serialized,
+                    expected_identity=ExecutionIdentity(
+                        task_execution_pk=handle.task_pk,
+                        task_id=handle.durable_task_id,
+                        attempt_number=handle.attempt_number,
+                        execution_generation=handle.execution_generation,
+                    ),
+                    expected_target_execution_evidence_id=evidence_id,
+                    expected_target_execution_evidence_digest=evidence_digest,
+                    expected_target_execution_claimed_at=target_execution_claimed_at,
+                    expected_target_expectation_digest=expectation_digest,
+                    expected_claim_attestation_digest=attestation_digest,
+                )
+                if target_expectation is None or claim_attestation is None:
+                    raise RayTargetExecutionResultValidationError
+                validate_ray_target_execution_result_semantics(
+                    result,
+                    target_expectation=target_expectation,
+                    claim_attestation=claim_attestation,
+                    validation_now=validation_now,
+                )
+                transport_state = (
+                    RayCoreTargetExecutionTransportState.COMPATIBILITY_REJECTION
+                    if isinstance(result, TargetExecutionCompatibilityRejection)
+                    else RayCoreTargetExecutionTransportState.COMPLETION
+                )
+            except TargetExecutionResultDecodeError as error:
+                transport_state = RayCoreTargetExecutionTransportState.UNCERTAIN
+                result = None
+                uncertainty = uncertainty_by_rejection[error.classification]
+            except RayTargetExecutionResultValidationError:
+                transport_state = RayCoreTargetExecutionTransportState.UNCERTAIN
+                result = None
+                uncertainty = RayCoreTargetExecutionUncertainty.PROOF_MISMATCH
+            except Exception:
+                transport_state = RayCoreTargetExecutionTransportState.UNCERTAIN
+                result = None
+                uncertainty = RayCoreTargetExecutionUncertainty.RAY_TRANSPORT_ERROR
+            completed.append(
+                RayCoreTargetExecutionRunnerResult(
+                    task_pk=handle.task_pk,
+                    attempt_number=handle.attempt_number,
+                    execution_generation=handle.execution_generation,
+                    target_execution_evidence_id=evidence_id,
+                    target_execution_evidence_digest=evidence_digest,
+                    transport_state=transport_state,
+                    result=result,
+                    uncertainty=uncertainty,
+                )
+            )
+            if transport_state is not RayCoreTargetExecutionTransportState.UNCERTAIN:
+                self.retire_pending_handle(handle)
         return completed
 
     @property
