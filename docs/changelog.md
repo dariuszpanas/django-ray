@@ -91,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Commit-message validation now bounds mixed validation-evidence suffix scans, parses Markdown
+  tables in one pass, rejects oversized generated counts and duplicate metadata markers without
+  unbounded conversion or collection, and preserves leading blank headers for rejection.
 - Coverage-debt tracker discovery now considers only maintainer-owned issues and the expected
   Actions bot's report comments, so public marker text cannot redirect or block the privileged
   monthly update while duplicate trusted markers still fail closed.
