@@ -61,6 +61,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit ordering; deleting a binding first is never an implicit cascade or ordinary
   task-cleanup step. Reverse `0023` only in a stopped-writer maintenance window after
   exporting or auditing and deliberately deleting every retained binding.
+- Migration `0024` adds bounded backend-alias route history and a separate, initially
+  empty binding-to-route-revision selection table. The private coordinator may register
+  or compare-and-set append route intent for an exact latest active Ray Core policy, but
+  it does not probe Ray, write or read a task binding or route selection, or activate any
+  enqueue, worker, claim, adoption, lifecycle, or runtime path. Route intent is not live
+  attestation, capacity, claim authorization, or work placement; an absent selection is
+  unproved provenance, not a default route. Legacy 0.4 mapping remains distinct and
+  deferred to #381. Both selection parents are protected, so cleanup must delete the
+  selection before its binding or route revision and must delete every revision before
+  its route. Reverse `0024`, then `0023`, then `0022` only through their stopped-writer,
+  empty-table maintenance paths.
 
 ### Fixed
 
@@ -99,6 +110,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   production consumer, and never turns a historical policy state into target capacity or
   claim authorization. Its protected parent relationships require an explicit tested
   audit and retention order before any writer or cleanup integration can activate it.
+- A dormant backend-alias route substrate retains immutable append-only route revisions
+  selected through revision-checked database coordination. A separate create-once
+  route-selection schema can preserve the exact route revision for an existing task
+  binding while enforcing target-policy equality. No package path writes or reads that
+  task provenance, and the route coordinator supplies intent only, not attestation,
+  capacity, a worker capability, or runtime routing activation.
 
 - The guarded local KubeRay final gate now certifies the supported task-manager rolling
   boundary with a manager built from the pinned released `v0.4.0` tree and the exact current

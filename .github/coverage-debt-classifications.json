@@ -100,6 +100,12 @@
         "rationale": "Create-once binding bounds, parent protection, maintenance deletion, and stopped-writer reverse refusal are deterministic SQLite and PostgreSQL migration contracts suited to exact schema and race tests."
       }
     },
+    "src/django_ray/migrations/0024_ray_target_routes.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Backend-alias bounds, immutable route history, exact binding-policy provenance, protected parents, maintenance deletion, and stopped-writer reverse refusal are deterministic SQLite and PostgreSQL migration contracts suited to exact schema and race tests."
+      }
+    },
     "src/django_ray/migrations/__init__.py": {
       "default": {
         "category": "dead-or-non-behavioral-code",
@@ -255,6 +261,12 @@
       "default": {
         "category": "testable-behavior",
         "rationale": "Target registration, revision-checked desired-state transitions, verified-only attestation history, and SQLite/PostgreSQL serialization are deterministic persistence contracts suited to exact database and race tests."
+      }
+    },
+    "src/django_ray/target_routing.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Route registration, revision-checked transitions, active-policy validation, stable route locking, fixed refusals, and SQLite/PostgreSQL serialization are deterministic persistence contracts suited to exact database and race tests."
       }
     },
     "src/django_ray/workflow_output_previews.py": {

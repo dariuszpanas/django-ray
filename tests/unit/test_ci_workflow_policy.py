@@ -516,6 +516,8 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     assert makefile_paths == set(postgresql_lane["selection"]["paths"])
     assert "tests/integration/test_execution_protocol_schema_migration.py" in makefile_paths
     assert "tests/integration/test_protocol_coordination.py" in makefile_paths
+    assert "tests/integration/test_ray_target_route_migration.py" in makefile_paths
+    assert "tests/integration/test_ray_target_routing_coordination.py" in makefile_paths
     assert "tests/integration/test_workflow_run_allocation_migration.py" in makefile_paths
 
     schema_migrations = next(
@@ -531,12 +533,20 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
         "tests/integration/test_workflow_run_allocation_migration.py"
         in schema_migrations["selection"]["paths"]
     )
+    assert (
+        "tests/integration/test_ray_target_route_migration.py"
+        in schema_migrations["selection"]["paths"]
+    )
     coordination = next(
         domain
         for domain in taxonomy["domains"]
         if domain["id"] == "coordination-polling-and-recovery"
     )
     assert "tests/integration/test_protocol_coordination.py" in coordination["selection"]["paths"]
+    assert (
+        "tests/integration/test_ray_target_routing_coordination.py"
+        in coordination["selection"]["paths"]
+    )
     repository_policy = next(
         domain for domain in taxonomy["domains"] if domain["id"] == "repository-policy-and-release"
     )
