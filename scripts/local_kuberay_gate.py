@@ -487,6 +487,37 @@ DOCKER_CONTEXT_ALLOWLISTS = {
         "!src/**",
         "!testproject/",
         "!testproject/**",
+        "**/.env",
+        "**/.env.*",
+        "**/*.sqlite3",
+    ),
+    "Dockerfile.ray.dockerignore": (
+        "**",
+        "!Dockerfile.ray",
+        "!pyproject.toml",
+        "!uv.lock",
+        "!README.md",
+        "!src/",
+        "!src/**",
+        "!testproject/",
+        "!testproject/**",
+        "**/.env",
+        "**/.env.*",
+        "**/*.sqlite3",
+    ),
+}
+RELEASED_V040_DOCKER_CONTEXT_ALLOWLISTS = {
+    "Dockerfile.dockerignore": (
+        "**",
+        "!Dockerfile",
+        "!pyproject.toml",
+        "!uv.lock",
+        "!README.md",
+        "!docker-entrypoint.sh",
+        "!src/",
+        "!src/**",
+        "!testproject/",
+        "!testproject/**",
     ),
     "Dockerfile.ray.dockerignore": (
         "**",
@@ -2318,9 +2349,13 @@ def build_local_http_opener() -> OpenerDirector:
     return build_opener(ProxyHandler({}), RejectRedirects())
 
 
-def inspect_docker_context_allowlists(context: Path) -> None:
+def inspect_docker_context_allowlists(
+    context: Path,
+    *,
+    expected_allowlists: Mapping[str, tuple[str, ...]] = DOCKER_CONTEXT_ALLOWLISTS,
+) -> None:
     """Require exact Dockerfile-specific deny-by-default context policies."""
-    for name, expected in DOCKER_CONTEXT_ALLOWLISTS.items():
+    for name, expected in expected_allowlists.items():
         path = context / name
         if not path.is_file():
             raise ValueError(f"source archive is missing required Docker context policy {name}")
@@ -2333,6 +2368,17 @@ def inspect_docker_context_allowlists(context: Path) -> None:
             raise ValueError(
                 f"{name} must be the reviewed deny-by-default allowlist; found {effective}"
             )
+
+
+def _docker_context_allowlists_for_source(
+    *, commit: str, source_tree: str
+) -> Mapping[str, tuple[str, ...]]:
+    """Select the exact policy bound to a reviewed source identity."""
+    if commit == RELEASED_V040_COMMIT:
+        if source_tree != RELEASED_V040_SOURCE_TREE:
+            raise ValueError("the pinned v0.4.0 commit has an unexpected source tree")
+        return RELEASED_V040_DOCKER_CONTEXT_ALLOWLISTS
+    return DOCKER_CONTEXT_ALLOWLISTS
 
 
 def create_source_build_context(
@@ -2371,7 +2417,13 @@ def create_source_build_context(
         raise ValueError(f"source archive is missing Docker build inputs: {missing}")
     if (context / ".git").exists():
         raise ValueError("source archive unexpectedly contains Git metadata")
-    inspect_docker_context_allowlists(context)
+    inspect_docker_context_allowlists(
+        context,
+        expected_allowlists=_docker_context_allowlists_for_source(
+            commit=commit,
+            source_tree=source_tree,
+        ),
+    )
     return context
 
 

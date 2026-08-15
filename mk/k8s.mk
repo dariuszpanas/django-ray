@@ -118,9 +118,9 @@ k8s-delete-local-raycluster: k8s-evaluation-warning
 	kubectl delete raycluster/ray -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=240s
 	kubectl delete service/ray-head-svc -n django-ray --ignore-not-found --wait=true
 
-# Deploy using KubeRay operator on kind
+# Deploy using KubeRay operator on kind. Leave any existing Kong release and
+# routes untouched because this target cannot prove that it owns them.
 k8s-deploy-kuberay-kind: k8s-evaluation-warning k8s-prepare-kuberay-kind
-	$(MAKE) --no-print-directory k8s-uninstall-kong-local
 	$(MAKE) --no-print-directory k8s-delete-local-raycluster
 	kubectl apply -k k8s/overlays/kuberay-kind
 	@echo "Waiting for deployments and Ray pods..."
@@ -152,7 +152,8 @@ k8s-install-kong-local: k8s-evaluation-warning
 	kubectl rollout status deployment/kong-controller -n kong --timeout=180s
 	kubectl rollout status deployment/kong-gateway -n kong --timeout=180s
 
-# Remove only the package-owned local Kong release and its application routes.
+# Explicit cleanup for the conventional local Kong release and sample routes.
+# Verify ownership before invoking it; direct deployment never calls this target.
 k8s-uninstall-kong-local: k8s-evaluation-warning
 	helm uninstall kong --namespace kong --ignore-not-found --wait --timeout 180s
 	kubectl delete ingress/grafana-ingress ingress/prometheus-ingress ingress/ray-dashboard-ingress -n django-ray --ignore-not-found --wait=true

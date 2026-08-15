@@ -1828,9 +1828,56 @@ def test_docker_context_policies_fail_closed_without_exact_specific_allowlists(
     with pytest.raises(ValueError, match="missing required Docker context policy"):
         inspect_docker_context_allowlists(tmp_path)
 
-    (tmp_path / "Dockerfile.dockerignore").write_text("!src/**\n", encoding="utf-8")
+    for omitted_pattern in ("**/.env", "**/.env.*", "**/*.sqlite3"):
+        unsafe_patterns = tuple(
+            pattern
+            for pattern in DOCKER_CONTEXT_ALLOWLISTS["Dockerfile.dockerignore"]
+            if pattern != omitted_pattern
+        )
+        (tmp_path / "Dockerfile.dockerignore").write_text(
+            "\n".join(unsafe_patterns) + "\n", encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="reviewed deny-by-default allowlist"):
+            inspect_docker_context_allowlists(tmp_path)
+
+
+def test_historical_docker_context_policy_is_bound_to_exact_released_source(
+    tmp_path: Path,
+) -> None:
+    historical = gate_module.RELEASED_V040_DOCKER_CONTEXT_ALLOWLISTS
+    for name, patterns in historical.items():
+        (tmp_path / name).write_text("\n".join(patterns) + "\n", encoding="utf-8")
+
+    inspect_docker_context_allowlists(tmp_path, expected_allowlists=historical)
+    assert (
+        gate_module._docker_context_allowlists_for_source(
+            commit=gate_module.RELEASED_V040_COMMIT,
+            source_tree=gate_module.RELEASED_V040_SOURCE_TREE,
+        )
+        is historical
+    )
+    assert (
+        gate_module._docker_context_allowlists_for_source(
+            commit="f" * 40,
+            source_tree=gate_module.RELEASED_V040_SOURCE_TREE,
+        )
+        is DOCKER_CONTEXT_ALLOWLISTS
+    )
+    with pytest.raises(ValueError, match="unexpected source tree"):
+        gate_module._docker_context_allowlists_for_source(
+            commit=gate_module.RELEASED_V040_COMMIT,
+            source_tree="f" * 40,
+        )
     with pytest.raises(ValueError, match="reviewed deny-by-default allowlist"):
         inspect_docker_context_allowlists(tmp_path)
+
+    historical_path = tmp_path / "Dockerfile.dockerignore"
+    historical_path.write_text(
+        historical_path.read_text(encoding="utf-8") + "**/unexpected\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="reviewed deny-by-default allowlist"):
+        inspect_docker_context_allowlists(tmp_path, expected_allowlists=historical)
 
 
 def test_source_bound_tag_contains_tree_time_and_uniqueness() -> None:
@@ -9117,12 +9164,24 @@ def test_local_memory_and_rendered_docs_are_outside_docker_build_context() -> No
     assert "site/" in dockerignore
     assert ".env" in dockerignore
     assert ".env.*" in dockerignore
-    for name in ("Dockerfile.dockerignore", "Dockerfile.ray.dockerignore"):
-        patterns = (ROOT / name).read_text(encoding="utf-8").splitlines()
-        assert "**" in patterns
-        assert not any(".env" in pattern for pattern in patterns)
-        assert "!pyproject.toml" in patterns
-        assert "!src/**" in patterns
+    assert "*.sqlite3" in dockerignore
+
+
+def test_dockerfile_specific_context_policies_reexclude_local_sensitive_files() -> None:
+    inspect_docker_context_allowlists(ROOT)
+
+    for name, expected in DOCKER_CONTEXT_ALLOWLISTS.items():
+        effective = tuple(
+            line.strip()
+            for line in (ROOT / name).read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        assert effective == expected
+        last_reinclude = max(
+            index for index, pattern in enumerate(effective) if pattern.startswith("!")
+        )
+        for sensitive_pattern in ("**/.env", "**/.env.*", "**/*.sqlite3"):
+            assert effective.index(sensitive_pattern) > last_reinclude
 
 
 def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -> None:
