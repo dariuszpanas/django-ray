@@ -1,6 +1,18 @@
 (() => {
   "use strict";
 
+  const legacySessionCredentialKey = "django-ray.testproject.api-token.v1";
+
+  function purgeLegacySessionCredential() {
+    try {
+      window.sessionStorage.removeItem(legacySessionCredentialKey);
+    } catch {
+      // Storage may be disabled or inaccessible. Current credentials remain page-memory only.
+    }
+  }
+
+  purgeLegacySessionCredential();
+
   const tokenInput = document.querySelector("#api-token");
   const useToken = document.querySelector("#use-token");
   const credentialStatus = document.querySelector("#credential-status");
@@ -56,6 +68,7 @@
 
   function clearCredential(message, state = "") {
     replaceCredential();
+    purgeLegacySessionCredential();
     tokenInput.value = "";
     clearProtectedResponse();
     setCredentialStatus(message, state);

@@ -242,6 +242,10 @@ class TestLandingPage:
         assert 'let apiToken = "";' in script
         assert "let credentialGeneration = 0;" in script
         assert "restoreCredential" not in script
+        assert 'const legacySessionCredentialKey = "django-ray.testproject.api-token.v1";' in script
+        assert "window.sessionStorage.removeItem(legacySessionCredentialKey)" in script
+        assert "window.sessionStorage.getItem" not in script
+        assert "window.sessionStorage.setItem" not in script
         for endpoint in (
             "/api/executions/stats",
             "/api/enqueue/add/2/3",
@@ -250,7 +254,6 @@ class TestLandingPage:
         ):
             assert endpoint in script
         for leak_path in (
-            "sessionStorage",
             "localStorage",
             "indexedDB",
             "document.cookie",

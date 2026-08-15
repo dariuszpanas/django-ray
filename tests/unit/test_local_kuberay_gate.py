@@ -10099,7 +10099,7 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
     assert "1cef8e6042ed0fe811cc9ee99b8332a75c887c75" in guide
     assert "PostgreSQL" in guide and "PVC" in guide
     assert "source_tree" in guide and "git rev-parse HEAD^{tree}" in guide
-    assert "Do not automate token retrieval into browser logs" in guide
+    assert "Do not automate token retrieval into browser logs" in normalized
     assert "private, flattened kubeconfig snapshot" in guide
     assert "same one-time archive" in guide
     assert "checkout fetched without tags remains valid" in normalized

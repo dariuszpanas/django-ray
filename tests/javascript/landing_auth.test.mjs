@@ -10,6 +10,7 @@ const dashboardScript = fs.readFileSync(
   ),
   "utf8",
 );
+const legacySessionCredentialKey = "django-ray.testproject.api-token.v1";
 const elementIds = [
   "api-token",
   "use-token",
@@ -90,6 +91,32 @@ class FakeHeaders {
   }
 }
 
+class FakeSessionStorage {
+  constructor(initial = {}) {
+    this.values = new Map(Object.entries(initial));
+    this.getCount = 0;
+    this.setCount = 0;
+    this.removedKeys = [];
+    this.throwOnRemove = false;
+  }
+
+  getItem(key) {
+    this.getCount += 1;
+    return this.values.get(key) ?? null;
+  }
+
+  setItem(key, value) {
+    this.setCount += 1;
+    this.values.set(key, String(value));
+  }
+
+  removeItem(key) {
+    this.removedKeys.push(key);
+    if (this.throwOnRemove) throw new Error("session storage remove failed");
+    this.values.delete(key);
+  }
+}
+
 function response(status, payload) {
   return {
     ok: status >= 200 && status < 300,
@@ -111,7 +138,11 @@ function deferred() {
   return { promise, resolve };
 }
 
-function loadDashboard({ authorizationHeaderFailure = false } = {}) {
+function loadDashboard({
+  authorizationHeaderFailure = false,
+  sessionStorage = new FakeSessionStorage(),
+  sessionStorageAccessFailure = false,
+} = {}) {
   const elements = new Map(elementIds.map((id) => [id, new FakeElement()]));
   elements.get("credential-status").textContent =
     "Not authenticated. Protected actions will ask for a token.";
@@ -134,7 +165,7 @@ function loadDashboard({ authorizationHeaderFailure = false } = {}) {
       super.set(name, value);
     }
   };
-  globalThis.window = {
+  const windowObject = {
     async fetch(url, options) {
       fetchCalls.push({ url, options });
       assert.notEqual(fetchResponses.length, 0, `unexpected fetch for ${url}`);
@@ -144,6 +175,16 @@ function loadDashboard({ authorizationHeaderFailure = false } = {}) {
       scheduled.push(callback);
     },
   };
+  if (sessionStorageAccessFailure) {
+    Object.defineProperty(windowObject, "sessionStorage", {
+      get() {
+        throw new Error("session storage property unavailable");
+      },
+    });
+  } else {
+    windowObject.sessionStorage = sessionStorage;
+  }
+  globalThis.window = windowObject;
   vm.runInThisContext(dashboardScript, { filename: "landing.js" });
 
   return {
@@ -151,6 +192,7 @@ function loadDashboard({ authorizationHeaderFailure = false } = {}) {
     fetchCalls,
     fetchResponses,
     scheduled,
+    sessionStorage,
     async click(id) {
       return elements.get(id).listeners.get("click")({});
     },
@@ -171,6 +213,53 @@ const stats = {
   succeeded: 1,
   failed: 0,
 };
+
+test("initial load purges only the legacy session credential without reading it", () => {
+  const legacyToken = "legacy-session-token-that-must-not-be-reused";
+  const sessionStorage = new FakeSessionStorage({
+    [legacySessionCredentialKey]: legacyToken,
+    "unrelated.preference": "keep-me",
+  });
+
+  const dashboard = loadDashboard({ sessionStorage });
+
+  assert.equal(sessionStorage.values.has(legacySessionCredentialKey), false);
+  assert.equal(sessionStorage.values.get("unrelated.preference"), "keep-me");
+  assert.deepEqual(sessionStorage.removedKeys, [legacySessionCredentialKey]);
+  assert.equal(sessionStorage.getCount, 0);
+  assert.equal(sessionStorage.setCount, 0);
+  assert.equal(dashboard.fetchCalls.length, 0);
+  assertCredentialNotRendered(dashboard, legacyToken);
+});
+
+test("unavailable session storage cannot block page-memory authentication", async () => {
+  const sessionStorage = new FakeSessionStorage({
+    [legacySessionCredentialKey]: "inaccessible-legacy-token",
+  });
+  sessionStorage.throwOnRemove = true;
+  const dashboard = loadDashboard({ sessionStorage });
+  dashboard.fetchResponses.push(response(200, stats));
+  dashboard.elements.get("api-token").value = "page-memory-token";
+
+  await dashboard.click("use-token");
+
+  assert.equal(sessionStorage.getCount, 0);
+  assert.equal(sessionStorage.setCount, 0);
+  assert.equal(
+    dashboard.fetchCalls[0].options.headers.get("Authorization"),
+    "Bearer page-memory-token",
+  );
+});
+
+test("an unavailable session storage property cannot block initial load", () => {
+  const dashboard = loadDashboard({ sessionStorageAccessFailure: true });
+
+  assert.equal(dashboard.fetchCalls.length, 0);
+  assert.equal(
+    dashboard.elements.get("credential-status").textContent,
+    "Not authenticated. Protected actions will ask for a token.",
+  );
+});
 
 test("statistics and enqueue use the shared bearer request path", async () => {
   const dashboard = loadDashboard();
@@ -266,6 +355,10 @@ test("forgetting a credential wins over an in-flight successful check", async ()
   dashboard.elements.get("api-token").value = "soon-forgotten-token";
 
   const attempt = dashboard.click("use-token");
+  dashboard.sessionStorage.values.set(
+    legacySessionCredentialKey,
+    "legacy-token-reintroduced-before-forget",
+  );
   await dashboard.click("forget-token");
   pendingResponse.resolve(response(200, stats));
   await attempt;
@@ -278,6 +371,10 @@ test("forgetting a credential wins over an in-flight successful check", async ()
     dashboard.elements.get("credential-status").classList.contains("authenticated"),
     false,
   );
+  assert.equal(dashboard.sessionStorage.values.has(legacySessionCredentialKey), false);
+  assert.equal(dashboard.sessionStorage.removedKeys.at(-1), legacySessionCredentialKey);
+  assert.equal(dashboard.sessionStorage.getCount, 0);
+  assert.equal(dashboard.sessionStorage.setCount, 0);
   const fetchCount = dashboard.fetchCalls.length;
   await dashboard.click("trigger");
   assert.equal(dashboard.fetchCalls.length, fetchCount);
@@ -373,6 +470,10 @@ test("a current 401 clears the credential and protected response", async () => {
   await dashboard.click("view-metrics");
   assert.equal(dashboard.elements.get("protected-response").hidden, false);
 
+  dashboard.sessionStorage.values.set(
+    legacySessionCredentialKey,
+    "legacy-token-reintroduced-before-401",
+  );
   dashboard.fetchResponses.push(response(401, { detail: "Unauthorized" }));
   await dashboard.click("trigger");
 
@@ -383,6 +484,10 @@ test("a current 401 clears the credential and protected response", async () => {
   assert.equal(dashboard.elements.get("protected-response").hidden, true);
   assert.equal(dashboard.elements.get("protected-response-title").textContent, "");
   assert.equal(dashboard.elements.get("protected-response-body").textContent, "");
+  assert.equal(dashboard.sessionStorage.values.has(legacySessionCredentialKey), false);
+  assert.equal(dashboard.sessionStorage.removedKeys.at(-1), legacySessionCredentialKey);
+  assert.equal(dashboard.sessionStorage.getCount, 0);
+  assert.equal(dashboard.sessionStorage.setCount, 0);
   const fetchCount = dashboard.fetchCalls.length;
   await dashboard.click("trigger");
   assert.equal(dashboard.fetchCalls.length, fetchCount);
@@ -411,7 +516,6 @@ test("a protected action denied with 403 retains the verified credential", async
 
 test("the dashboard never persists or routes bearer credentials", () => {
   for (const persistenceOrRoute of [
-    "sessionStorage",
     "localStorage",
     "indexedDB",
     "document.cookie",
@@ -423,6 +527,14 @@ test("the dashboard never persists or routes bearer credentials", () => {
   }
   assert.equal(dashboardScript.includes('let apiToken = "";'), true);
   assert.equal(dashboardScript.includes("restoreCredential"), false);
+  assert.equal(
+    dashboardScript.includes(
+      "window.sessionStorage.removeItem(legacySessionCredentialKey)",
+    ),
+    true,
+  );
+  assert.equal(dashboardScript.includes("window.sessionStorage.getItem"), false);
+  assert.equal(dashboardScript.includes("window.sessionStorage.setItem"), false);
 });
 
 test("header construction failures never render the bearer token", async () => {
