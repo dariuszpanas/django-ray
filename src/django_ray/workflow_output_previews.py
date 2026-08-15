@@ -206,6 +206,8 @@ def prepare_workflow_output_preview(value: Any) -> dict[str, Any]:
         bounded = _normalize_bounded_value(value)
         normalized = _normalize_bounded_value(_normalize_terminal_value(bounded))
         redacted = _normalize_bounded_value(redact_value(bounded))
+        if _contains_sensitive_key(bounded):
+            return _preview(WorkflowOutputPreviewAvailability.REDACTED.value, REDACTED)
     except _PreviewLimitError:
         return _preview(WorkflowOutputPreviewAvailability.TOO_LARGE.value)
     except _PreviewUnsupportedError:
@@ -246,6 +248,17 @@ def _contains_redaction(value: Any) -> bool:
         return any(_contains_redaction(item) for item in value)
     if type(value) is dict:
         return any(_contains_redaction(item) for item in value.values())
+    return False
+
+
+def _contains_sensitive_key(value: Any) -> bool:
+    if type(value) is list:
+        return any(_contains_sensitive_key(item) for item in value)
+    if type(value) is dict:
+        return any(
+            redact_value(key) == REDACTED or _contains_sensitive_key(item)
+            for key, item in value.items()
+        )
     return False
 
 
@@ -301,6 +314,10 @@ def _validate_workflow_output_preview(
             "available workflow output preview contains a redaction marker"
         )
     if enforce_current_redaction:
+        if _contains_sensitive_key(bounded):
+            raise WorkflowOutputPreviewError(
+                "workflow output preview contains a sensitive-looking key"
+            )
         redacted = _normalize_bounded_value(redact_value(bounded))
         if redacted != normalized:
             raise WorkflowOutputPreviewError(
@@ -333,6 +350,8 @@ def read_workflow_output_preview(value: Any) -> dict[str, Any]:
         bounded = _normalize_bounded_value(value["value"])
         normalized = _normalize_bounded_value(_normalize_terminal_value(bounded))
         redacted = _normalize_bounded_value(redact_value(bounded))
+        if _contains_sensitive_key(bounded):
+            return _preview(WorkflowOutputPreviewAvailability.REDACTED.value, REDACTED)
     except Exception:
         return _preview(WorkflowOutputPreviewAvailability.REDACTED.value, REDACTED)
     if redacted != normalized or (

@@ -86,7 +86,6 @@ def test_configured_redaction_is_applied_before_preview_publication() -> None:
     preview = prepare_workflow_output_preview(
         {
             "order_id": "order-1",
-            "api_token": "never-persist-this",
             "message": "password=never-persist-this-either",
         }
     )
@@ -95,12 +94,25 @@ def test_configured_redaction_is_applied_before_preview_publication() -> None:
         "schema_version": 1,
         "availability": "REDACTED",
         "value": {
-            "api_token": REDACTED,
             "message": REDACTED,
             "order_id": "order-1",
         },
     }
     assert "never-persist" not in str(preview)
+    assert validate_workflow_output_preview(preview) == preview
+
+
+def test_sensitive_mapping_key_collapses_the_entire_preview() -> None:
+    preview = prepare_workflow_output_preview(
+        {"api_token=example-value": "ignored", "order_id": "order-1"}
+    )
+
+    assert preview == {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": REDACTED,
+    }
+    assert "example-value" not in str(preview)
     assert validate_workflow_output_preview(preview) == preview
 
 
@@ -265,6 +277,17 @@ def test_untrusted_preview_envelopes_are_revalidated_exactly(value: Any) -> None
         validate_workflow_output_preview(value)
 
 
+def test_untrusted_preview_cannot_preserve_a_sensitive_mapping_key() -> None:
+    with pytest.raises(WorkflowOutputPreviewError, match="sensitive-looking key"):
+        validate_workflow_output_preview(
+            {
+                "schema_version": 1,
+                "availability": "REDACTED",
+                "value": {"api_token=example-value": REDACTED},
+            }
+        )
+
+
 def test_unavailable_builder_never_accepts_a_value_bearing_status() -> None:
     assert unavailable_workflow_output_preview(
         WorkflowOutputPreviewAvailability.OMITTED_BY_POLICY
@@ -300,6 +323,23 @@ def test_read_policy_drift_replaces_only_the_historical_value(settings) -> None:
         "order_id": "order-1",
         "region": "newly-sensitive",
     }
+
+
+def test_read_collapses_a_stored_sensitive_mapping_key() -> None:
+    stored = {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": {"api_token=example-value": REDACTED},
+    }
+
+    preview = read_workflow_output_preview(stored)
+
+    assert preview == {
+        "schema_version": 1,
+        "availability": "REDACTED",
+        "value": REDACTED,
+    }
+    assert "example-value" not in str(preview)
 
 
 def test_read_policy_drift_redacts_against_the_raw_terminal_formatted_value(settings) -> None:
