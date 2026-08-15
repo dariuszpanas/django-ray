@@ -384,6 +384,28 @@ def test_real_ray_ownership_contention_becomes_bounded_usage_error(
         conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
 
 
+def test_unsafe_real_ray_ownership_path_becomes_bounded_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _UnsafePathOwnership:
+        def acquire(self, owner: dict[str, object]) -> None:
+            del owner
+            raise conftest.RealRayOwnershipPathError(tmp_path / "owner.lock")
+
+        def release(self) -> None:
+            raise AssertionError("an unacquired lock must not be released")
+
+    monkeypatch.setattr(conftest, "RealRayOwnershipLock", _UnsafePathOwnership)
+    session = _Session(
+        config=_Config(rootpath=tmp_path),
+        items=[_CollectedItem(markers={"real_ray"})],
+    )
+
+    with pytest.raises(pytest.UsageError, match="refusing unsafe lock path"):
+        conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
+
+
 def test_compiled_graph_opt_in_requires_real_ray_marker() -> None:
     item = _CollectedItem(markers={"compiled_graph_opt_in"})
 
