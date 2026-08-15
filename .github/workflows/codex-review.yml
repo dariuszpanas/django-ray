@@ -5,6 +5,7 @@ on:
     types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
 
 permissions:
+  actions: read
   contents: read
   pull-requests: read
 
@@ -29,18 +30,13 @@ jobs:
           ACTION: ${{ github.event.action }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BASE_CHANGED: ${{ github.event.changes.base != null }}
           BASELINE_TIME: ${{ github.event.pull_request.updated_at }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          base_change_args=()
-          if [ "$ACTION" = "edited" ]; then
-            base_change_args=(--base-changed "$BASE_CHANGED")
-          fi
-
           python scripts/check_pr_review_policy.py \
             --mode codex \
             --repository "$GITHUB_REPOSITORY" \
@@ -49,8 +45,8 @@ jobs:
             --expected-base-sha "$BASE_SHA" \
             --expected-head "$HEAD_SHA" \
             --action "$ACTION" \
-            "${base_change_args[@]}" \
             --baseline-time "$BASELINE_TIME" \
+            --workflow-run-id "$RUN_ID" \
             --run-attempt "$RUN_ATTEMPT" \
             --poll-timeout 900 \
             --poll-interval 60
