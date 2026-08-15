@@ -58,6 +58,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The guarded local KubeRay final gate now certifies the supported task-manager rolling
+  boundary with a manager built from the pinned released `v0.4.0` tree and the exact current
+  candidate. A released capability-schema-`0` manager submits one slow protocol-`1` Ray
+  Job; the current explicit schema-`1`, `1..1` manager must adopt the same persisted job,
+  attempt, and generation without resubmission. A second deferred protocol-`1` row must
+  remain byte-for-byte queued across that replacement and then complete through one current
+  request-reference submission. A separate protocol-`2` fixture is terminal-staged while
+  admission remains open, moved to `QUEUED` only after a revision-checked close, and required
+  to remain unchanged and visible as unsupported before a direct strict Ray Core executor
+  request rejects it prior to application invocation with its unique marker absent. Active
+  write protocol remains `1`; no protocol-`2` writer or live `1..2` capability is activated.
+  Passing evidence waits for exact fixture cleanup, legacy admission reopened with a
+  consistent token at its next revision, removal of the ephemeral release Deployment, and
+  restoration of the rendered current-manager replica count. A later run may reclaim only
+  exact reserved, unambiguous interrupted gate residue. Missing ownership, foreign residue,
+  an orphan live lease, or ambiguity fails closed. Recovery runs before any live task layer
+  and repeats immediately before handoff certification.
 - External payload retention now distinguishes durable task-input envelopes from Ray
   Job execution requests, follows the kind's exact execution-reference column, and
   retains unknown, wrong-kind, or dual-column ambiguity. Explicit retry and fresh claim

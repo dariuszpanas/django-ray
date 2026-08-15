@@ -5,7 +5,8 @@ GitHub Actions matrix. It exercises the Docker Desktop or Kind deployment bounda
 disposable CI clusters cannot reproduce: locally built images, Kustomize, the setup Job, the shared
 RuntimeEnv archive, generic Ray nodes, application task managers, protected HTTP APIs, kubelet
 probes, encrypted durable RuntimeEnv storage, full and terminal-only schema-v3 workflow progress,
-multi-attempt recovery, authenticated admin presentation, and live Prometheus discovery.
+multi-attempt recovery, the released-to-current execution-protocol handoff, authenticated admin
+presentation, and live Prometheus discovery.
 
 This is a maintainer integration-validation gate for the checked-in local profile. A passing run
 is not deployment certification, a threat-model review, or evidence that the sample manifests form
@@ -36,6 +37,7 @@ run the gate and choose the cold Ray restart.
 | `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
 | RuntimeEnv snapshot storage, encryption settings or dependencies, storage/retry validation, the fixed deployment canary, or KubeRay encryption selectors | Required | `required` | Proves a cold generic Ray generation receives the decrypted marker while the database retains only the authenticated envelope, and proves corrupt or unknown-key rows fail before Ray. |
 | Ray Job request encoding, request-reference storage, Jobs API metadata, entrypoint transport, manager reconciliation, or pre-Django request loading | Required | `required` | Proves rq2 uses only a bounded request-reference carrier, survives a manager replacement without resubmission, and rejects a missing request before application effects or retry. |
+| Execution-protocol schema, worker capability leases, protocol filtering, rolling task-manager handoff, or unsupported-protocol visibility/rejection | Required | `required` | Proves a real released 0.4 schema-`0` manager can hand one protocol-`1` Ray Job to the exact current schema-`1`, `1..1` cohort without resubmission while a separate compatible queued row survives and later completes once. A synthetic queued protocol-`2` fixture must remain unclaimed and visible, and its direct strict Ray Core executor request must reject before application invocation; the gate never advertises a live `1..2` capability or activates protocol `2`. |
 | Ray Client submission, reconnect, cancellation, retry, task context, result persistence, or cross-component task lifecycle | Required | `required` | Exercises a fresh Ray session plus fresh task managers and a durable result. |
 | Workflow execution, progress capture/publication, schema-v3 bounded readers, failure diagnostics, retry identity, or the admin graph fed by workflow progress | Required | `required` | Proves a cold Ray generation can execute the same tiny nested workflow with default-full and explicit terminal-only reporting in both success and deterministic first-attempt failure modes, then preserve one recovery showcase across early-failed, mid-failed, and successful attempts. Full reporting must expose complete bounded detail; terminal-only must expose exactly one summary and no detail storage or actions. New and archived protected fields must retain the original external diagnostic evidence, every ordinary Admin/API projection must be terminal-inert and pattern-redacted, and Admin must present escaped tracebacks with preserved line separation and safe wrapping. |
 | KubeRay `RayCluster`, Ray services, Ray pod volumes/environment, or Ray metrics configuration | Required | `required` | The tested Ray pods must be cold replacements of the prior pods. |
@@ -62,6 +64,13 @@ Ray head, and two fixed Ray workers. The rendered steady state is 11 running
 workload pods with 3.3 CPU and 5,056 MiB requested and 9.8 CPU and 12,160 MiB
 limited. These totals exclude the completed setup Job, the cluster-wide
 KubeRay operator, and Docker Desktop/Kubernetes overhead.
+
+The execution-protocol handoff layer adds one ephemeral task-manager Deployment built from the
+exact released `v0.4.0` source. It is not part of the rendered steady-state topology or a sample
+rollout manifest. The layer temporarily scales the current Ray Job manager only as required to
+establish unambiguous ownership, then removes the release cohort and restores the rendered replica
+count even when validation fails. Final convergence and evidence reject any surviving ephemeral
+Deployment, fixture, replica drift, or inconsistent legacy-admission token state.
 
 Preflight derives the application replica contracts and complete static Ray
 topology from that source-bound render. The full gate then requires the live
@@ -168,10 +177,13 @@ The gate performs these bounded layers:
 1. Repeats preflight and derives a unique tag containing the first 12 characters of the immutable
    Git tree, a UTC timestamp, and a random suffix.
 2. Builds `django-ray:<source-tag>` and `django-ray-worker:<source-tag>` from the same preflight
-   archive used to render Kubernetes. Deny-by-default Dockerfile context rules admit
+   archive used to render Kubernetes. It also verifies the pinned `v0.4.0` release commit, creates a
+   separate immutable archive of that released tree, and builds the ephemeral legacy task-manager
+   image from it. Deny-by-default Dockerfile context rules admit
    only reviewed image inputs; the gate rejects a missing or altered Dockerfile-specific policy
-   instead of falling back to the broader root context. Both images carry the commit-at-run and
-   stable source-tree OCI labels, and named Kind clusters receive those exact tags through
+   instead of falling back to the broader root context. Current images carry the commit-at-run and
+   stable source-tree OCI labels, the release image carries its pinned release provenance, and named
+   Kind clusters receive all three exact tags through
    `kind load docker-image`.
 3. Renders a temporary copy of `k8s/overlays/kuberay-kind`, rejects floating application tags or any
    resource outside `django-ray`, and preserves the existing live API Secret. It requires encrypted
@@ -214,9 +226,15 @@ The gate performs these bounded layers:
    remaining pod and are not themselves terminating. Hidden, unowned, substituted, malformed, or
    unexpected-container resources remain immediate failures rather than retryable rollout state.
 7. Strictly rechecks that converged application topology without polling and verifies the full named
-   init/regular container image and runtime image-ID set. This prevents a terminating or old-image
-   pod from being omitted from final evidence. It also proves every generic Ray interpreter lacks an
-   installed `django_ray` and sees the same RuntimeEnv archive, SHA-256, and remote-bootstrap member.
+    init/regular container image and runtime image-ID set. This prevents a terminating or old-image
+    pod from being omitted from final evidence. Before any probe, authenticated task, or rq2
+    submission, a separate `protocol-handoff-recovery` layer removes only an exact interrupted
+    released-manager Deployment/lease or reserved protocol fixture, restores the current Ray Job
+    manager replica, and rejects missing ownership, foreign residue, an orphan live lease, or
+    ambiguity. The later
+    `protocol-handoff` layer repeats that recovery immediately before certification to close the
+    intervening race. The gate also proves every generic Ray interpreter lacks an installed
+    `django_ray` and sees the same RuntimeEnv archive, SHA-256, and remote-bootstrap member.
 8. Verifies live readiness/liveness paths and `Host: django-ray.localhost`, a Ready web pod, and its
    restart count.
 9. Requires unauthenticated enqueue/stats/metrics/executions requests to return `401`; requires the
@@ -248,7 +266,38 @@ The gate performs these bounded layers:
     disposable row past the completion-envelope grace period and requires one
     fixed attempt-1 failure, one archived attempt, no result or completion, no
     scheduled retry, and exactly one Ray submission.
-11. Enqueues the lightweight `thin` RuntimeEnv probe, keeps every poll within the gate's 65,536-byte
+11. Certifies the supported task-manager rolling boundary with two real code cohorts. While the
+    rendered current Ray Job manager remains ready, the gate dynamically starts one ephemeral
+    manager built from the exact released `v0.4.0` tree and requires the read-only protocol report
+    to observe both its active capability-schema-`0` legacy lease and the current active explicit
+    schema-`1`, `1..1` lease. It then scales the current manager to zero, and the release manager
+    must submit one deliberately slow protocol-`1` Ray Job through the released marker-free
+    transport. While that manager is occupied, a separately deferred protocol-`1` task must remain
+    byte-for-byte `QUEUED`. The gate deletes the release Deployment and its exact schema-`0` lease,
+    restores the current task-manager Deployment, and requires that explicit lease to adopt the same
+    durable job ID, attempt, and generation without a second submission. The deferred row must still
+    be unchanged after adoption, then complete from the same durable identity through exactly one
+    current request-reference submission.
+
+    After the handoff succeeds, the layer creates one bounded, test-only terminal protocol-`2`
+    staging row outside every production producer. It then revision-checks and closes legacy
+    admission before moving that exact row to `QUEUED`. This ordering leaves a durable,
+    gate-identifiable marker through every closed-policy interval while satisfying the migration
+    `0020` rollback fence without changing active write protocol `1`. The live current cohort must
+    leave the queued row unchanged while the read-only protocol report, authenticated API
+    projections, and fixed-label metrics expose the unsupported work and no compatible worker. A
+    direct strict Ray Core executor request bound to that fixture must reject the protocol before
+    application invocation, and a unique invocation marker must remain absent.
+
+    This is negative validation, not a protocol-`2` write or activation path: every production lease
+    stays `1..1`, and no synthetic live `1..2` worker is created. Cleanup returns the exact
+    protocol-`2` row to a terminal state, revision-checks and reopens legacy admission at its next
+    revision, recreates the consistent admission token, deletes the exact row, and restores the
+    rendered current manager replica count on success or failure before any passing evidence can
+    be emitted. A later run recovers only one exact reserved, unambiguous interrupted Deployment,
+    lease, or protocol staging row. Foreign residue, an orphan live lease without its exact
+    Deployment, or ambiguity fails closed. The monotonic policy revision is never rolled backward.
+12. Enqueues the lightweight `thin` RuntimeEnv probe, keeps every poll within the gate's 65,536-byte
     HTTP read, and requires each response to advertise the 16,384-byte diagnostic guard, 65,536-byte
     response ceiling, fixed result/error omission vocabulary, and consistent value/omission pairs.
     Its sanitized result must report `storage_encryption_verified=true`. A
@@ -262,7 +311,7 @@ The gate performs these bounded layers:
     an authenticated retry of one must return `409` without changing the row or archived attempt.
     Sanitized API bodies plus bounded current API/admin and task-manager logs must contain none of the
     protected values. The layer retains only booleans and creates three bounded disposable rows.
-12. Enqueues the same tiny nested workflow with the unchanged default-full behavior once for success
+13. Enqueues the same tiny nested workflow with the unchanged default-full behavior once for success
     and once with the deterministic slow-branch failure fixture. Each response must retain the exact
     typed enqueue arguments, and each execution must remain on durable attempt 1. The successful
     result must report all three leaves. The failed execution must retain the normalized fixture
@@ -272,14 +321,14 @@ The gate performs these bounded layers:
     with matching run identity, publication revisions, graph membership, states, and counts. Each
     task poll must remain within the gate's 65,536-byte HTTP read and advertise the same 16,384-byte
     diagnostic guard, response ceiling, fixed omission vocabulary, and value/omission consistency.
-13. Repeats the success and deterministic failure through the explicit
+14. Repeats the success and deterministic failure through the explicit
     `reporting_policy=terminal_only` testproject option. Each run must remain on attempt 1 and expose
     one revision-1 schema-v3 summary with `reporting_policy="terminal_only"` and
     `detail.availability="OMITTED_BY_POLICY"`. Declared plan counts must match each run's persisted
     materialized plan and remain consistent across the equivalent success and failure fixtures,
     while discovered, retained, and node-state counts remain zero. Topology and detail revisions
     are null, and all three bounded collection readers return empty omitted-by-policy envelopes.
-14. Enqueues one fixed full-reporting order-fulfillment recovery showcase. The same durable task ID
+15. Enqueues one fixed full-reporting order-fulfillment recovery showcase. The same durable task ID
     must archive exactly three outcomes in order: attempt 1 fails at the workflow entry, attempt 2
     replays from the entry and fails at the mid-workflow join after seven upstream nodes succeed,
     and attempt 3 replays the complete workflow and succeeds. The gate requires distinct run IDs,
@@ -294,7 +343,7 @@ The gate performs these bounded layers:
     attempt explicitly through the schema-v3 summary, topology, and node-detail APIs. The one-item
     fixture must retain 2 nodes and 1 edge on the early failure, 15 nodes and 20 edges on the middle
     failure, and the complete 21-node, 28-edge graph on success.
-15. Enters the exact converged `django-web` container through a sensitive-output-suppressed command
+16. Enters the exact converged `django-web` container through a sensitive-output-suppressed command
     path and creates a disposable authenticated admin session. For the default-full runs it verifies
     the change view, diagnostics, all three bounded readers, and the sanitized graph route. The
     successful graph must be fully succeeded. The failed graph must retain one failure origin, at
@@ -309,7 +358,7 @@ The gate performs these bounded layers:
     summary, no run storage, manifest, page, link, or node-detail row, zero advertised admin actions,
     and a bounded `UNAVAILABLE` graph response. The disposable sessions and users are removed before
     each child smoke returns scalar evidence.
-16. Reuses the checked-in Prometheus checker through the same proxy-disabled, redirect-rejecting
+17. Reuses the checked-in Prometheus checker through the same proxy-disabled, redirect-rejecting
     local HTTP opener. It requires exactly one `django-ray`, one `ray-head`, and one target for every
     converged Ray worker, plus the absence of the removed `django-ray-worker` pool. The exact
     RayCluster UID/topology is rechecked before and after Prometheus and again before evidence.
@@ -355,7 +404,7 @@ The runtime block records:
 
 - commit at run time, stable source tree, context, namespace, private kubeconfig digest, local API
   server, and pinned Docker endpoint;
-- both unique tags and local image IDs;
+- all three unique tags and local image IDs, including the pinned released 0.4 task-manager image;
 - byte sizes and SHA-256 identities for the source and recovery RuntimeEnv archives;
 - whether Ray was cold-restarted, the pinned RayCluster UID, converged head/worker counts, and the
   retained Ray pod UID/container/image identity-set SHA-256;
@@ -373,6 +422,12 @@ The runtime block records:
   marker and no-retry invariants. The block emits no rq2 task ID, job ID,
   request reference, request hash, locator, application marker, or request
   bytes;
+- scalar booleans for the released `v0.4.0` schema-`0` and current schema-`1` cohort observations,
+  the protocol-`1` same-job handoff without resubmission, a distinct compatible queued row surviving
+  that replacement and completing through one current submission, synthetic protocol-`2`
+  queued-row preservation and unsupported visibility, strict pre-invocation rejection, marker
+  absence, and revision-checked legacy-admission/token plus replica restoration. No fixture task or
+  Ray object identity, marker, or request bytes are emitted;
 - the successful workflow's first-attempt state, schema-v3 availability, topology/detail counts,
   exact three-leaf enqueue/result agreement, authenticated admin-reader count, and clean current
   publication storage;
@@ -405,7 +460,10 @@ After a full pass, retain a concise semantic summary in the material commit and 
   authenticated API status, smoke-task state and result, first-attempt schema-v3 workflow success
   and deterministic failure, the three-attempt replay-to-success recovery sequence, authenticated
   sanitized Admin graphs for current and archived attempts, probes, Prometheus targets, preserved
-  Ray topology, Secret, PostgreSQL data, or PVCs.
+  Ray topology, Secret, PostgreSQL data, or PVCs. For an execution-protocol change, also record the
+  released-0.4-to-current protocol-`1` same-job handoff, unchanged unsupported protocol-`2` fixture,
+  pre-invocation rejection, absence of any live `1..2` capability, reopened legacy admission with a
+  consistent token, and restored steady-state topology.
 
 For example, portable commit validation can say:
 
@@ -426,6 +484,15 @@ For example, portable commit validation can say:
   the rq2 Ray Job used only its request-reference carrier, survived a
   task-manager replacement without resubmission, and rejected a missing
   request before the marker callable without an automatic retry,
+  the released 0.4 schema-0 manager handed one protocol-1 Ray Job to
+  the current explicit schema-1 manager without resubmission, the
+  same replacement preserved and then processed a separate queued
+  protocol-1 row exactly once, the current 1..1 cohort left synthetic
+  protocol-2 work queued and visible before its strict Ray Core executor
+  rejected prior to callable invocation, no live 1..2 capability was
+  advertised, and all
+  protocol fixtures and temporary topology were removed, legacy
+  admission was reopened with a consistent token at its next revision,
   the full application Secret remained unchanged, and the
   authenticated admin graph retained the incoming
   full-reporting failure path, all Ray pods were cold-replaced, and
@@ -444,9 +511,9 @@ final-gate evidence.
 ## Failure diagnostics and recovery
 
 Failures are labeled by layer: `preflight`, `images`, `apply`, `setup`, `workloads`, `ray`, `rollouts`,
-`app-convergence`, `image-identity`, `runtime-env`, `probes`, `api-smoke`,
-`ray-job-request-reference`, `runtime-env-encryption`, `workflow-progress`,
-`workflow-admin`, `prometheus`, or
+`app-convergence`, `image-identity`, `protocol-handoff-recovery`, `runtime-env`, `probes`,
+`api-smoke`, `ray-job-request-reference`, `protocol-handoff`, `runtime-env-encryption`,
+`workflow-progress`, `workflow-admin`, `prometheus`, or
 `final-identity`. After a Kubernetes mutation,
 the command prints only bounded status plus the relevant tail of setup, Ray, application, or
 Prometheus logs. Every line uses the same redacting emitter; sensitive kubeconfig and Secret command
@@ -472,7 +539,12 @@ local images. The gate itself never performs those actions. It only:
 - restarts the four named task-manager Deployments; and
 - temporarily scales only `django-ray-worker-ray-job` to zero, deletes only the
   disposable request object created for the missing-reference fixture, and
-  restores that Deployment to its rendered single replica before continuing.
+  restores that Deployment to its rendered single replica before continuing; and
+- dynamically creates and deletes only the exact released-0.4 handoff Deployment, removes only the
+  schema-`0` lease and protocol fixtures that the layer created, revision-checks and closes legacy
+  admission only for the bounded protocol-`2` negative check, then reopens it with a consistent
+  token at the next monotonic revision and unconditionally restores the current Ray Job manager to
+  its rendered replica count.
 
 If a manifest change would require destructive data migration or cluster-wide mutation, stop and
 review that change separately. It is outside this local final gate.
