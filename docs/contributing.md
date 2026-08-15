@@ -126,6 +126,35 @@ The check enforces meaningful body context, validation evidence or a specific no
 wrappable commit-prose line limit without prescribing section headings. It reports the offending
 commit or line.
 
+The two required review checks apply conditional policy without forcing the repository owner to
+self-approve. `Maintainer Approval` passes a pull request authored by `dariuszpanas`; every other
+author needs an `APPROVED` review from `dariuszpanas` on the current head commit. Both gates validate
+the live pull request against the trusted event base ref, base SHA, and head SHA before passing. A
+push or base change requires a new Codex outcome. A title- or body-only edit
+preserves only an existing exact-head connector review. A prior pull-request root clean reaction is
+deliberately not reusable;
+while no exact-head connector review exists, the edit requires a new `+1` on a SHA-bound maintainer
+request comment. `Codex Review` otherwise waits up to 15 minutes for a fresh exact-head connector
+review or a clean reaction bound to the new candidate. After every push or base change, post a fresh
+`@codex review` request with the current full head SHA marker and wait for the resulting check:
+
+```text
+@codex review
+
+<!-- django-ray:codex-review-head=<full current head SHA> -->
+```
+
+After a push, only a fresh exact-head Codex review or the connector's `+1` on that SHA-bound
+maintainer request comment counts; a pull-request root reaction never counts. Requests and reviews
+from an older base and head do not count, and draft pull requests fail both review checks. GitHub's
+native required review-conversation resolution remains a separate merge condition, so resolve every
+actionable review thread as well.
+
+Only the first automatic opened or ready run may accept a fresh pull-request root clean reaction.
+Every rerun ignores pull-request root reactions and requires either an exact-head review or the
+connector's `+1` on the SHA-bound maintainer request comment. If the bounded Codex poll times out on
+an unchanged candidate, post that request and rerun the failed `Codex Review` check.
+
 For example, `fix(worker): preserve task ownership` is a valid header, but its commit still needs
 enough body context to explain the retained change. Invalid titles or commit headers fail with the
 exact offending value and expected format.
@@ -534,14 +563,15 @@ gh pr merge --auto --rebase <PR-number>
 The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and ordinary PR
 commit messages, and reports a required status check without needing secrets from the PR. Its
 title-only Dependabot path is limited by trusted event metadata to the bot's same-repository branch
-namespace. The separate
-required `CI Gate` runs after every blocking job and passes only when lint, docs, typing, all supported
-Python tests, PostgreSQL coordination, live-cluster faults, testproject, the tracked Docker Compose
-smoke, minimum/latest dependencies, and package build all report `success`. Its `always()` condition
+namespace. The separate required `CI Gate` runs after every blocking job and passes only when lint,
+docs, typing, all supported Python tests, PostgreSQL coordination, live-cluster faults,
+testproject, the tracked Docker Compose smoke, minimum/latest dependencies, and package build all
+report `success`. Its `always()` condition
 makes a failed, cancelled, timed-out, or skipped dependency visible as a failed gate instead of a
-successful skip. This repository is
-private, so use rebase auto-merge rather than merge queue: auto-merge waits for both protected checks
-and then applies the rebase method.
+successful skip. `Maintainer Approval` and `Codex Review` use read-only permissions and check out only
+the default branch, never pull-request code. This repository uses rebase auto-merge rather than a
+merge queue: auto-merge waits for all four required checks and native required review-conversation
+resolution, then applies the rebase method.
 
 Native Compiled Graph evidence is produced only by the guarded local KubeRay pilot, not a public
 hosted workflow. Coverage-debt review and benchmark workflows are evidence producers, not merge
@@ -571,10 +601,20 @@ focused commits with their own descriptive bodies. Validate the final PR title t
 range before enabling auto-merge.
 
 If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
-conflicts, run `uv run make ci`, and push. Auto-merge will recalculate the required checks. The
-`main` ruleset requires `Commit Messages` and `CI Gate` from GitHub Actions, allows rebase merges only,
-and does not require approval in the sole-developer workflow. The owner's bypass is limited to pull requests,
-so routine merges remain gated and emergency use requires the explicit
+conflicts, run `uv run make ci`, and push. Post a fresh `@codex review` request after the push;
+auto-merge will recalculate the required checks. The merge policy's steady state requires
+`Commit Messages`, `CI Gate`, `Maintainer Approval`, and `Codex Review` from GitHub Actions, requires
+native review conversation resolution, and allows rebase merges only. Activate a new required
+context only after its workflow is merged and a ready canary pull request reports that exact context
+successfully; GitHub does not retroactively create a newly required check. Staged ruleset activation
+must also enable strict required-status freshness so a changed base cannot reuse results from an
+older candidate. An owner-authored canary proves the contexts but does not exercise the
+review-submission trigger. Treat rollout as incomplete until an external or bot-authored canary is
+available and proves the current-head maintainer approval path. The native approval count remains
+zero so the owner does not need self-approval; `Maintainer Approval` requires the owner's
+current-head approval for every other author. The current owner `pull_request` bypass remains
+explicit break-glass recovery, not absolute enforcement against an intentional owner bypass. Routine
+merges remain gated, and emergency use requires the explicit
 `gh pr merge --admin --rebase <PR-number>` command.
 
 The bypass is a break-glass path for a GitHub infrastructure failure, not a way to retain an invalid
