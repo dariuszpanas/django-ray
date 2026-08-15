@@ -91,6 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The test-only real-Ray ownership lock now opens its shared path without following symlinks or
+  Windows reparse points and verifies a stable, owned regular file before writing diagnostics.
 - The local KubeRay gate now validates its pinned v0.4.0 commit and tree even when tags were not
   fetched, while still rejecting a drifted tag when present, and Kubernetes URL helper targets now
   use POSIX-safe shell output syntax.

@@ -13,6 +13,7 @@ from django.conf import settings
 
 from tests.real_ray_ownership import (
     RealRayOwnershipLock,
+    RealRayOwnershipPathError,
     RealRayOwnershipUnavailableError,
     build_owner_metadata,
 )
@@ -77,7 +78,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     )
     try:
         ownership.acquire(owner)
-    except RealRayOwnershipUnavailableError as error:
+    except (RealRayOwnershipPathError, RealRayOwnershipUnavailableError) as error:
         raise pytest.UsageError(str(error)) from error
     try:
         session.config.stash[_REAL_RAY_OWNERSHIP_KEY] = ownership

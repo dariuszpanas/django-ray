@@ -12,10 +12,12 @@ from pathlib import Path
 
 import pytest
 
+import tests.real_ray_ownership as real_ray_ownership
 from tests.real_ray_ownership import (
     MAX_OWNER_METADATA_BYTES,
     OWNER_METADATA_OFFSET,
     RealRayOwnershipLock,
+    RealRayOwnershipPathError,
     RealRayOwnershipUnavailableError,
 )
 
@@ -169,3 +171,91 @@ def test_unlocked_stale_file_never_blocks_a_new_owner(tmp_path: Path) -> None:
 
     assert ownership.acquired is True
     ownership.release()
+
+
+def test_symlink_lock_path_is_refused_without_modifying_synthetic_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "synthetic-target"
+    original = b"synthetic target must remain unchanged"
+    target.write_bytes(original)
+    lock_path = tmp_path / "real-ray-owner.lock"
+    try:
+        lock_path.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"symbolic links are unavailable on this platform: {error}")
+
+    ownership = RealRayOwnershipLock(lock_path)
+    with pytest.raises(RealRayOwnershipPathError, match="stable, regular lock file"):
+        ownership.acquire({"pid": os.getpid()})
+
+    assert ownership.acquired is False
+    assert lock_path.is_symlink()
+    assert target.read_bytes() == original
+
+
+def test_nonregular_lock_path_is_refused(tmp_path: Path) -> None:
+    lock_path = tmp_path / "real-ray-owner.lock"
+    lock_path.mkdir()
+    ownership = RealRayOwnershipLock(lock_path)
+
+    with pytest.raises(RealRayOwnershipPathError, match="stable, regular lock file"):
+        ownership.acquire({"pid": os.getpid()})
+
+    assert ownership.acquired is False
+    assert lock_path.is_dir()
+
+
+def test_hard_link_lock_path_is_refused_without_modifying_synthetic_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "synthetic-target"
+    original = b"synthetic hard-link target must remain unchanged"
+    target.write_bytes(original)
+    lock_path = tmp_path / "real-ray-owner.lock"
+    os.link(target, lock_path)
+    ownership = RealRayOwnershipLock(lock_path)
+
+    with pytest.raises(RealRayOwnershipPathError, match="stable, regular lock file"):
+        ownership.acquire({"pid": os.getpid()})
+
+    assert ownership.acquired is False
+    assert lock_path.stat().st_nlink == 2
+    assert target.read_bytes() == original
+
+
+def test_path_identity_change_after_lock_is_refused_before_metadata_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / "real-ray-owner.lock"
+    original = b"\0synthetic stale metadata"
+    lock_path.write_bytes(original)
+    ownership = RealRayOwnershipLock(lock_path)
+    original_stat = real_ray_ownership.os.stat
+    lock_path_stat_calls = 0
+
+    def raced_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal lock_path_stat_calls
+        value = original_stat(path, *args, **kwargs)
+        if Path(path) == lock_path and kwargs.get("follow_symlinks") is False:
+            lock_path_stat_calls += 1
+            if lock_path_stat_calls == 2:
+                fields = list(value)
+                fields[1] = value.st_ino + 1
+                return os.stat_result(fields)
+        return value
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(real_ray_ownership.os, "stat", raced_stat)
+        with pytest.raises(RealRayOwnershipPathError, match="stable, regular lock file"):
+            ownership.acquire({"pid": os.getpid()})
+
+    assert lock_path_stat_calls == 2
+    assert ownership.acquired is False
+    assert lock_path.read_bytes() == original
+
+    replacement = RealRayOwnershipLock(lock_path)
+    replacement.acquire({"pid": os.getpid(), "hostname": "replacement"})
+    assert replacement.acquired is True
+    replacement.release()

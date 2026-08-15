@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import stat
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -18,6 +19,17 @@ _MAX_METADATA_TEXT_JSON_BYTES = 512
 _TEXT_METADATA_FIELDS = ("hostname", "acquired_at", "rootpath")
 
 DEFAULT_REAL_RAY_LOCK_PATH = Path(tempfile.gettempdir()) / "django-ray-pytest-real-ray-owner.lock"
+
+
+class RealRayOwnershipPathError(RuntimeError):
+    """Raised when the shared ownership path cannot be opened without redirection."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(
+            "real_ray ownership requires a stable, regular lock file; "
+            f"refusing unsafe lock path {path}"
+        )
 
 
 def _bounded_text(value: object) -> str | None:
@@ -125,6 +137,169 @@ def _release_advisory_lock(handle: BinaryIO) -> None:
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _open_windows_lock_descriptor(path: Path) -> int:
+    """Open the final Windows path without traversing a reparse point."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    get_file_information = kernel32.GetFileInformationByHandle
+    get_file_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    ]
+    get_file_information.restype = wintypes.BOOL
+    get_file_type = kernel32.GetFileType
+    get_file_type.argtypes = [wintypes.HANDLE]
+    get_file_type.restype = wintypes.DWORD
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    generic_read = 0x80000000
+    generic_write = 0x40000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    open_always = 4
+    file_attribute_normal = 0x00000080
+    file_attribute_directory = 0x00000010
+    file_attribute_reparse_point = 0x00000400
+    file_flag_open_reparse_point = 0x00200000
+    file_type_disk = 0x0001
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    handle = create_file(
+        str(path),
+        generic_read | generic_write,
+        file_share_read | file_share_write,
+        None,
+        open_always,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if handle == invalid_handle_value:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, "Windows lock path open failed")
+
+    descriptor: int | None = None
+    try:
+        information = _ByHandleFileInformation()
+        if not get_file_information(handle, ctypes.byref(information)):
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "Windows lock path inspection failed")
+        unsafe_attributes = file_attribute_directory | file_attribute_reparse_point
+        if (
+            information.dwFileAttributes & unsafe_attributes
+            or get_file_type(handle) != file_type_disk
+            or information.nNumberOfLinks != 1
+        ):
+            raise RealRayOwnershipPathError(path)
+
+        descriptor_flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+        descriptor = msvcrt.open_osfhandle(handle, descriptor_flags)
+    finally:
+        if descriptor is None:
+            close_handle(handle)
+    if descriptor is None:  # pragma: no cover - open_osfhandle either returns or raises
+        raise RealRayOwnershipPathError(path)
+    return descriptor
+
+
+def _open_posix_lock_descriptor(path: Path) -> int:
+    """Open the final POSIX path without following a symbolic link."""
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:  # pragma: no cover - supported POSIX platforms provide O_NOFOLLOW
+        raise RealRayOwnershipPathError(path)
+    flags = os.O_CREAT | os.O_RDWR | no_follow
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    return os.open(path, flags, 0o600)
+
+
+def _validate_lock_descriptor(path: Path, descriptor: int) -> None:
+    """Require one regular, stable path identity before any metadata write."""
+    try:
+        descriptor_stat = os.fstat(descriptor)
+        path_stat = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise RealRayOwnershipPathError(path) from error
+    if (
+        not stat.S_ISREG(descriptor_stat.st_mode)
+        or not stat.S_ISREG(path_stat.st_mode)
+        or descriptor_stat.st_nlink != 1
+        or path_stat.st_nlink != 1
+        or not os.path.samestat(descriptor_stat, path_stat)
+        or (os.name == "posix" and descriptor_stat.st_uid != os.geteuid())
+    ):
+        raise RealRayOwnershipPathError(path)
+
+
+def _validate_lock_parent(path: Path) -> None:
+    """Require a real parent that prevents foreign path replacement."""
+    try:
+        parent_stat = os.stat(path.parent, follow_symlinks=False)
+    except OSError as error:
+        raise RealRayOwnershipPathError(path) from error
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise RealRayOwnershipPathError(path)
+    if os.name == "nt":
+        if getattr(parent_stat, "st_file_attributes", 0) & 0x00000400:
+            raise RealRayOwnershipPathError(path)
+        return
+
+    permissions = stat.S_IMODE(parent_stat.st_mode)
+    trusted_owner = parent_stat.st_uid in {0, os.geteuid()}
+    foreign_writable = bool(permissions & 0o022)
+    sticky = bool(parent_stat.st_mode & stat.S_ISVTX)
+    if not trusted_owner or (foreign_writable and not sticky):
+        raise RealRayOwnershipPathError(path)
+
+
+def _open_lock_descriptor(path: Path) -> int:
+    try:
+        descriptor = (
+            _open_windows_lock_descriptor(path)
+            if os.name == "nt"
+            else _open_posix_lock_descriptor(path)
+        )
+    except RealRayOwnershipPathError:
+        raise
+    except OSError as error:
+        raise RealRayOwnershipPathError(path) from error
+
+    try:
+        _validate_lock_descriptor(path, descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 class RealRayOwnershipUnavailableError(RuntimeError):
     """Raised when another process owns the local-Ray pytest boundary."""
 
@@ -157,7 +332,8 @@ class RealRayOwnershipLock:
         if self._handle is not None:
             raise RuntimeError("real_ray ownership lock is already acquired")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        _validate_lock_parent(self.path)
+        descriptor = _open_lock_descriptor(self.path)
         handle = os.fdopen(descriptor, "r+b", buffering=0)
         try:
             try:
@@ -166,6 +342,8 @@ class RealRayOwnershipLock:
                 current_owner = _read_owner_metadata(handle)
                 raise RealRayOwnershipUnavailableError(self.path, current_owner) from error
 
+            _validate_lock_parent(self.path)
+            _validate_lock_descriptor(self.path, descriptor)
             if os.fstat(descriptor).st_size < OWNER_METADATA_OFFSET:
                 handle.seek(LOCK_BYTE_OFFSET)
                 handle.write(b"\0")
