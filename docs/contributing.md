@@ -869,10 +869,12 @@ gh workflow run release.yml \
   -f candidate_sha=<authorized-full-sha>
 ```
 
-The workflow rejects a non-canonical SHA before checkout. It then freshly fetches
-`origin/main` and refuses to build unless the input SHA, dispatch SHA, checked-out
-HEAD, and fetched `origin/main` are identical. Any tracked change creates a different
-candidate and requires fresh validation and authorization.
+The workflow rejects a dispatch outside the default branch or a non-canonical SHA before checkout.
+It checks out the trusted default branch without persisting credentials and immediately refuses to
+continue unless the input SHA, dispatch SHA, and checked-out HEAD are identical. It then freshly
+fetches `origin/main` and requires that ref to have the same identity before running repository code
+or building. Any concurrent tracked change creates a different candidate and requires a fresh
+dispatch, validation, and authorization.
 
 ### Publish an authorized candidate
 
