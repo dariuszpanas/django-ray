@@ -593,7 +593,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0024_ray_target_routes` before starting upgraded workers:
+`0025_ray_worker_target_capabilities` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -603,8 +603,11 @@ This command applies every unapplied `django_ray` migration through the current 
 Migration `0022` adds only dormant target intent and verified-attestation history;
 migration `0023` adds only an unseeded execution-to-target-policy relationship; and
 migration `0024` adds backend-alias route history plus a separate, unseeded binding-to-route
-selection record. Current workers do not write or read the task binding or route selection,
-and none of these migrations advertises capacity, authorizes claims, or activates routing.
+selection record. Migration `0025` adds an unseeded current worker/target capability row and
+private compare-and-set coordinator. No production path creates, renews, reads, or treats a
+capability row as capacity. Existing exact-lease deletion may only fail-closed cascade-withdraw
+an otherwise unreachable row; none of these migrations alone authorizes claims or activates
+routing.
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:
@@ -1083,12 +1086,39 @@ revision, delete all route revisions before their route, and preserve every bind
 revision before deleting a target-policy revision. No task-selection writer can activate
 until those retention paths and both parent orders are audited and tested.
 
-Exact 0.4.0 code ignores the `0022`, `0023`, and `0024` tables, so a code-only rollback
-retains them and their audit history. Schema reversal is a separate stopped-writer operation:
-`0024` refuses to reverse while any route, route revision, or selection remains; `0023` then
-refuses while any binding remains; and `0022` finally refuses while target history remains.
-The deliberate maintenance-delete path is available only after export or audit, follows the
-same protected-parent ordering, and is not part of an ordinary binary rollback.
+Migration `0025` adds one normalized, ephemeral current-capability row per exact task-manager
+lease incarnation and Ray target. The row snapshots the lease identity and manager's exact
+Ray/Python tuple, points to one exact target policy and verified attestation, and advances one
+bounded compare-and-set revision on renewal. The lease parent uses Django's ORM `CASCADE`, so
+deleting that exact lease through current code withdraws its current capability and a later lease
+that reuses the worker ID starts without capacity; raw parent deletion remains foreign-key
+restricted. Target policy and attestation revisions remain the immutable audit history;
+the current-capability row deliberately is not a second append-only event log.
+
+The private coordinator can advertise or renew only an exact Ray Core capability backed by a
+fresh lease, canonical proof, and latest `active` or `draining` policy. `draining` support is
+needed so already-pinned work can retain compatible capacity; it never makes that target eligible
+for a new route or enqueue. Ray Job capability APIs remain unsupported pending their authenticated
+pre-Django proof channel. No production lease creation, heartbeat, reconnect, enqueue, claim,
+adoption, reconciliation, cancellation, status, runner, or transport path creates, renews, reads,
+or treats a capability row as capacity. Existing exact-lease deletion, including supported Admin
+inactive-lease cleanup, may only fail-closed cascade-withdraw an otherwise unreachable row; it
+does not advertise or consume capacity.
+
+Row presence is never claim authority. A future consumer must lock and revalidate the exact
+heartbeat-live lease incarnation, current policy state, same latest verified attestation, and
+proof expiry before every claim or lifecycle mutation. It must also archive the selected target
+and authenticated observed tuple at the execution generation or attempt boundary rather than
+using this replaceable row as historical evidence. Capability withdrawal removes the current row;
+missing, stale, replaced, expired, or mismatched state remains fail-closed.
+
+Exact 0.4.0 code ignores the `0022` through `0025` tables, so a code-only rollback retains the
+durable policy, attestation, binding, and route history while no old process consumes capability
+rows. Schema reversal is a separate stopped-writer operation: delete every current capability
+before reversing `0025`; `0024` then refuses to reverse while any route, route revision, or
+selection remains; `0023` refuses while any binding remains; and `0022` finally refuses while
+target history remains. The deliberate maintenance-delete path follows the same protected-parent
+ordering and is not part of an ordinary binary rollback.
 
 The read-only protocol-status service exposes only the database facts this boundary can
 support. One versioned immutable report aggregates policy/token consistency, active and

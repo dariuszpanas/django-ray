@@ -518,6 +518,8 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     assert "tests/integration/test_protocol_coordination.py" in makefile_paths
     assert "tests/integration/test_ray_target_route_migration.py" in makefile_paths
     assert "tests/integration/test_ray_target_routing_coordination.py" in makefile_paths
+    assert "tests/integration/test_ray_worker_target_capabilities.py" in makefile_paths
+    assert "tests/integration/test_ray_worker_target_capability_migration.py" in makefile_paths
     assert "tests/integration/test_workflow_run_allocation_migration.py" in makefile_paths
 
     schema_migrations = next(
@@ -537,6 +539,10 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
         "tests/integration/test_ray_target_route_migration.py"
         in schema_migrations["selection"]["paths"]
     )
+    assert (
+        "tests/integration/test_ray_worker_target_capability_migration.py"
+        in schema_migrations["selection"]["paths"]
+    )
     coordination = next(
         domain
         for domain in taxonomy["domains"]
@@ -545,6 +551,10 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     assert "tests/integration/test_protocol_coordination.py" in coordination["selection"]["paths"]
     assert (
         "tests/integration/test_ray_target_routing_coordination.py"
+        in coordination["selection"]["paths"]
+    )
+    assert (
+        "tests/integration/test_ray_worker_target_capabilities.py"
         in coordination["selection"]["paths"]
     )
     repository_policy = next(

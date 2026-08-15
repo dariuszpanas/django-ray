@@ -72,6 +72,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selection before its binding or route revision and must delete every revision before
   its route. Reverse `0024`, then `0023`, then `0022` only through their stopped-writer,
   empty-table maintenance paths.
+- Migration `0025` adds one unseeded, ephemeral current-capability row per exact
+  task-manager lease incarnation and Ray target. It snapshots the lease identity and
+  manager Ray/Python tuple, references one exact target policy and verified attestation,
+  and uses a bounded compare-and-set revision for renewal. Current Django ORM lease deletion
+  cascades to the capability while raw parent deletion remains foreign-key restricted, so
+  worker-ID reuse starts without inherited capacity. The private
+  coordinator supports exact Ray Core capability for a fresh `active` or `draining`
+  policy and proof; draining preserves only already-pinned work and never enables a new
+  route or enqueue. Ray Job remains unsupported. No production path creates, renews,
+  reads, or treats the row as capacity. Existing exact-lease deletion, including supported
+  Admin inactive-lease cleanup, may only fail-closed cascade-withdraw an otherwise
+  unreachable row. Presence alone is never authority. Policy and attestation revisions
+  remain the audit history; future execution generations must archive their own
+  authenticated target evidence. KubeRay is not applicable to this dormant database-only
+  slice because no production producer can create a capability row; SQLite and PostgreSQL
+  migration and coordination evidence remain mandatory.
 
 ### Fixed
 

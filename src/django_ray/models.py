@@ -73,6 +73,8 @@ _WORKFLOW_RUN_NAMESPACE_MAX = (1 << 63) - 1
 _WORKFLOW_RUN_SEQUENCE_MAX = (1 << 59) - 1
 RAY_TASK_TARGET_BINDING_SCHEMA_VERSION = 1
 RAY_TASK_TARGET_ROUTE_SELECTION_SCHEMA_VERSION = 1
+RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION = 1
+RAY_JOB_WORKER_TARGET_CAPABILITY_LIMIT = 64
 
 
 class TaskState(models.TextChoices):
@@ -1661,6 +1663,172 @@ class RayTargetAttestationRevision(models.Model):
 
     def __str__(self) -> str:
         return f"policy {self.policy_id} attestation revision {self.revision}"
+
+
+class RayWorkerTargetCapability(models.Model):
+    """One current target advertisement for an exact worker-lease incarnation.
+
+    Rows are deliberately ephemeral and CAS-revisioned.  They retain the
+    immutable lease and manager-runtime snapshot while a renewal may advance
+    only the exact target policy, attestation, revision, and advertisement
+    time.  A later target-aware consumer must still revalidate lease freshness,
+    current target policy, and attestation expiry before treating a row as
+    capacity.
+    """
+
+    lease = models.ForeignKey(
+        TaskWorkerLease,
+        on_delete=models.CASCADE,
+        related_name="ray_target_capabilities",
+        editable=False,
+    )
+    lease_hostname = models.CharField(max_length=255, editable=False)
+    lease_pid = models.PositiveIntegerField(
+        editable=False,
+        validators=[MinValueValidator(1)],
+    )
+    lease_started_at = models.DateTimeField(editable=False)
+    target = models.ForeignKey(
+        RayTarget,
+        on_delete=models.PROTECT,
+        related_name="worker_capabilities",
+        editable=False,
+    )
+    target_policy = models.ForeignKey(
+        RayTargetPolicyRevision,
+        on_delete=models.PROTECT,
+        related_name="worker_capabilities",
+        editable=False,
+    )
+    attestation = models.ForeignKey(
+        RayTargetAttestationRevision,
+        on_delete=models.PROTECT,
+        related_name="worker_capabilities",
+        editable=False,
+    )
+    runner_family = models.CharField(
+        max_length=16,
+        choices=[(family.value, family.value) for family in RayRunnerFamily],
+        editable=False,
+    )
+    manager_ray_major = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    manager_ray_minor = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    manager_ray_patch = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    manager_python_implementation = models.CharField(
+        max_length=64,
+        editable=False,
+        validators=[_PYTHON_IMPLEMENTATION_VALIDATOR],
+    )
+    manager_python_major = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    manager_python_minor = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    manager_python_patch = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER)],
+    )
+    schema_version = models.PositiveSmallIntegerField(
+        default=RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION,
+        db_default=RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION,
+        editable=False,
+        validators=[
+            MinValueValidator(RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION),
+            MaxValueValidator(RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION),
+        ],
+    )
+    revision = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+    advertised_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(id__gte=1),
+                name="ray_wtcap_id_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(lease_pid__gte=1),
+                name="ray_wtcap_lease_pid_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    runner_family__in=tuple(family.value for family in RayRunnerFamily)
+                ),
+                name="ray_wtcap_runner_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    manager_ray_major__gte=1,
+                    manager_ray_major__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_ray_minor__gte=0,
+                    manager_ray_minor__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_ray_patch__gte=0,
+                    manager_ray_patch__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_python_major__gte=1,
+                    manager_python_major__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_python_minor__gte=0,
+                    manager_python_minor__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                    manager_python_patch__gte=0,
+                    manager_python_patch__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                ),
+                name="ray_wtcap_runtime_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(schema_version=RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION),
+                name="ray_wtcap_schema_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    revision__gte=1,
+                    revision__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                ),
+                name="ray_wtcap_revision_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(advertised_at__gte=models.F("created_at")),
+                name="ray_wtcap_time_valid",
+            ),
+            models.UniqueConstraint(
+                fields=("lease", "target"),
+                name="ray_wtcap_lease_target_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("target", "lease"),
+                name="ray_wtcap_target_lease_idx",
+            )
+        ]
+        verbose_name = "Ray Worker Target Capability"
+        verbose_name_plural = "Ray Worker Target Capabilities"
+
+    def __str__(self) -> str:
+        return f"lease {self.lease_id} target {self.target_id} revision {self.revision}"
 
 
 class RayTaskTargetBinding(models.Model):

@@ -74,17 +74,39 @@ route revision, delete all route revisions before their route, and preserve ever
 or route-revision reference before deleting a target-policy revision. Those orders require
 an explicit audit and retention policy before any task-selection writer can activate.
 
+Migration `0025` adds a normalized, unseeded current-capability row per exact task-manager
+lease incarnation and Ray target. It snapshots the lease identity and manager's exact
+Ray/Python tuple and points to one exact target-policy and verified-attestation revision.
+Renewal changes that one ephemeral row under a bounded compare-and-set revision; it does not
+append another audit history. Current Django ORM lease deletion cascades to the capability while
+raw parent deletion remains foreign-key restricted, so worker-ID reuse cannot inherit capacity.
+The immutable policy and attestation revisions remain the
+audit record, and a future execution path must separately archive authenticated target evidence
+per generation or attempt.
+
+The private capability coordinator currently accepts Ray Core only. A fresh exact lease and
+latest unexpired proof may support an `active` policy or preserve capacity for already-pinned
+work while its policy is `draining`; draining never permits a new route or enqueue. Ray Job
+capability APIs remain unsupported until an authenticated pre-Django proof channel exists.
+No production lease creation, heartbeat, reconnect, enqueue, claim, adoption, lifecycle,
+status, runner, or transport path creates, renews, reads, or treats a capability row as
+capacity. Existing exact-lease deletion, including supported Admin inactive-lease cleanup,
+may only fail-closed cascade-withdraw an otherwise unreachable row. Row presence alone is
+never authority: every future consumer must revalidate the exact live lease, current policy,
+same latest verified attestation, and proof expiry under its ownership locks.
+
 Migrations `0022_ray_target_persistence`, `0023_ray_task_target_binding`, and
-`0024_ray_target_routes` are dormant and additive for a schema-first upgrade from 0.4.0.
-Exact 0.4.0 code ignores their new tables, so a code-only rollback retains the migrations
-and their history. Schema reversal is a separate stopped-writer operation. Reverse `0024`
-only after exporting or auditing and deliberately deleting every selection, route revision,
-and route; reverse `0023` only after every binding is deleted; reverse `0022` only after all
-target history is deleted. Database guards reject material updates and invalid bounded
-inserts but intentionally leave the exact no-op and maintenance-delete rollback paths. A
-binding or route revision records historical selection intent, not current capacity: a
-referenced policy's old `active` state never authorizes a claim after a later draining or
-retirement revision. Schema reversal is not part of an ordinary binary rollback.
+`0024_ray_target_routes`, and `0025_ray_worker_target_capabilities` are dormant and additive
+for a schema-first upgrade from 0.4.0. Exact 0.4.0 code ignores their new tables, so a code-only
+rollback retains the durable history while no old process consumes a capability row. Schema
+reversal is a separate stopped-writer operation. Delete every current capability before
+reversing `0025`; reverse `0024` only after exporting or auditing and deliberately deleting
+every selection, route revision, and route; reverse `0023` only after every binding is deleted;
+reverse `0022` only after all target history is deleted. Database guards reject invalid bounded
+inserts and unsafe capability transitions while leaving explicit withdrawal and maintenance
+deletion paths. A binding, route revision, or capability row records neither self-sufficient
+claim authority nor permission to ignore a later policy or proof change. Schema reversal is
+not part of an ordinary binary rollback.
 
 The general version range and base `ray[default]` dependency do not install or promise
 every optional Ray component. See the
