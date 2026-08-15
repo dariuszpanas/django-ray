@@ -270,9 +270,11 @@ Scheduled runs use the current default branch; manual dispatch is available afte
 runtime, workflow, or release changes. It uploads reports plus bounded phase diagnostics, appends
 the phase summary and completed Markdown report to the job summary, and updates one bot-owned
 comment on the issue containing
-`<!-- django-ray:coverage-debt-tracker -->`. The updater scans all issues and fails before writing if
-the tracker marker or latest-report comment is duplicated. Its first run seeds current, previous, and
-high-water measurements; later runs move current to previous and retain the exact best ratio.
+`<!-- django-ray:coverage-debt-tracker -->`. Only issues owned by the repository owner, a member, or
+a collaborator participate in tracker discovery, and only the expected Actions bot's comments
+participate in report discovery; matching text from untrusted authors is ignored. The updater still
+fails before writing if either trusted marker is duplicated. Its first run seeds current, previous,
+and high-water measurements; later runs move current to previous and retain the exact best ratio.
 Repeated identical runs replace the same comment rather than creating another issue or comment.
 
 The current metric is **line coverage only**. Enabling branch coverage changes both the evidence and
