@@ -44,6 +44,10 @@ _RAY_TARGET_KEY_VALIDATOR = RegexValidator(
     regex=r"\A[a-z0-9][a-z0-9_.-]{0,127}\Z",
     message="Value must be a canonical Ray target key.",
 )
+_RAY_BACKEND_ALIAS_VALIDATOR = RegexValidator(
+    regex=r"\A[a-z0-9][a-z0-9_.-]{0,127}\Z",
+    message="Value must be a canonical Ray backend alias.",
+)
 _RAY_CLUSTER_SESSION_VALIDATOR = RegexValidator(
     regex=r"\Asession_[A-Za-z0-9][A-Za-z0-9_.-]{0,247}\Z",
     message="Value must be a canonical Ray cluster session name.",
@@ -68,6 +72,7 @@ _WORKFLOW_DETAIL_RECORD_BYTES_LIMIT = 16 * 1024
 _WORKFLOW_RUN_NAMESPACE_MAX = (1 << 63) - 1
 _WORKFLOW_RUN_SEQUENCE_MAX = (1 << 59) - 1
 RAY_TASK_TARGET_BINDING_SCHEMA_VERSION = 1
+RAY_TASK_TARGET_ROUTE_SELECTION_SCHEMA_VERSION = 1
 
 
 class TaskState(models.TextChoices):
@@ -1704,3 +1709,122 @@ class RayTaskTargetBinding(models.Model):
 
     def __str__(self) -> str:
         return f"execution {self.execution_id} target policy {self.target_policy_id}"
+
+
+class RayTargetRoute(models.Model):
+    """Immutable dormant routing namespace for one backend alias."""
+
+    backend_alias = models.CharField(
+        primary_key=True,
+        max_length=128,
+        editable=False,
+        validators=[_RAY_BACKEND_ALIAS_VALIDATOR],
+        help_text="Stable Django task backend alias for dormant Ray target routing",
+    )
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        verbose_name = "Ray Target Route"
+        verbose_name_plural = "Ray Target Routes"
+
+    def __str__(self) -> str:
+        return str(self.backend_alias)
+
+
+class RayTargetRouteRevision(models.Model):
+    """One immutable target-policy revision for a dormant backend route."""
+
+    route = models.ForeignKey(
+        RayTargetRoute,
+        on_delete=models.PROTECT,
+        related_name="revisions",
+        editable=False,
+    )
+    revision = models.PositiveBigIntegerField(
+        editable=False,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(RAY_TARGET_ATTESTATION_MAX_COUNTER),
+        ],
+    )
+    target_policy = models.ForeignKey(
+        RayTargetPolicyRevision,
+        on_delete=models.PROTECT,
+        related_name="route_revisions",
+        editable=False,
+        help_text="Exact immutable target policy selected by this route revision",
+    )
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(id__gte=1),
+                name="ray_troute_id_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    revision__gte=1,
+                    revision__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                ),
+                name="ray_troute_revision_valid",
+            ),
+            models.UniqueConstraint(
+                fields=("route", "revision"),
+                name="ray_troute_route_rev_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("route", "-revision"),
+                name="ray_troute_latest_idx",
+            )
+        ]
+        verbose_name = "Ray Target Route Revision"
+        verbose_name_plural = "Ray Target Route Revisions"
+
+    def __str__(self) -> str:
+        return f"{self.route_id} route revision {self.revision}"
+
+
+class RayTaskTargetRouteSelection(models.Model):
+    """Create-once dormant route provenance for one task target binding."""
+
+    binding = models.OneToOneField(
+        RayTaskTargetBinding,
+        on_delete=models.PROTECT,
+        related_name="route_selection",
+        primary_key=True,
+        editable=False,
+    )
+    route_revision = models.ForeignKey(
+        RayTargetRouteRevision,
+        on_delete=models.PROTECT,
+        related_name="task_selections",
+        editable=False,
+        help_text="Exact immutable backend-route revision selected for this binding",
+    )
+    schema_version = models.PositiveSmallIntegerField(
+        default=RAY_TASK_TARGET_ROUTE_SELECTION_SCHEMA_VERSION,
+        db_default=RAY_TASK_TARGET_ROUTE_SELECTION_SCHEMA_VERSION,
+        editable=False,
+        validators=[
+            MinValueValidator(RAY_TASK_TARGET_ROUTE_SELECTION_SCHEMA_VERSION),
+            MaxValueValidator(RAY_TASK_TARGET_ROUTE_SELECTION_SCHEMA_VERSION),
+        ],
+        help_text="Schema version for this dormant task target route selection",
+    )
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(schema_version=RAY_TASK_TARGET_ROUTE_SELECTION_SCHEMA_VERSION),
+                name="ray_trsel_schema_valid",
+            )
+        ]
+        verbose_name = "Ray Task Target Route Selection"
+        verbose_name_plural = "Ray Task Target Route Selections"
+
+    def __str__(self) -> str:
+        return f"binding {self.binding_id} route revision {self.route_revision_id}"

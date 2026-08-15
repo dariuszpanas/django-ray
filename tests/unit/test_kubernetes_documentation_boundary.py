@@ -284,5 +284,48 @@ def test_dormant_task_target_binding_has_no_production_consumer() -> None:
 
     assert references == {
         "src/django_ray/migrations/0023_ray_task_target_binding.py",
+        "src/django_ray/migrations/0024_ray_target_routes.py",
+        "src/django_ray/models.py",
+    }
+
+
+def test_dormant_target_routing_has_a_database_only_gate_boundary() -> None:
+    guide = _read(Path("docs/deployment/local-kuberay-gate.md"))
+    normalized_guide = " ".join(guide.split())
+    row = next(line for line in guide.splitlines() if "Bounded backend-alias route history" in line)
+
+    assert "KubeRay not applicable" in row
+    assert "mandatory SQLite and PostgreSQL routing migration/coordination evidence" in row
+    assert "append-only backend-alias route history" in row
+    assert "separate, unseeded, create-once binding-to-route-revision selection table" in row
+    assert "no task or binding writer, reader, Admin surface, enqueue hook" in row
+    assert "claim/adoption predicate, lifecycle path, lease, or runtime consumer" in row
+    assert "Route intent is not a live attestation, target capacity" in row
+    assert "An absent selection is unproved provenance" in row
+    assert "Legacy mapping is distinct and deferred to #381" in row
+    assert "Cleanup must delete a selection before either its binding or route revision" in row
+    assert "every revision before its route" in row
+    assert "final target routing requires the two-cluster handoff extension" in row
+
+    assert (
+        "For the dormant target-routing exception, retain the exact SQLite and PostgreSQL "
+        "routing migration and coordination results plus the explicit guarded-KubeRay-not-"
+        "applicable decision"
+    ) in normalized_guide
+    assert "Do not report this database evidence as task or binding provenance" in normalized_guide
+    assert "absent route-selection provenance is unproved" in normalized_guide
+    assert "both selection parents are protected" in normalized_guide
+
+
+def test_dormant_task_target_route_selection_has_no_production_consumer() -> None:
+    production_root = ROOT / "src" / "django_ray"
+    references = {
+        path.relative_to(ROOT).as_posix()
+        for path in production_root.rglob("*.py")
+        if "RayTaskTargetRouteSelection" in path.read_text(encoding="utf-8")
+    }
+
+    assert references == {
+        "src/django_ray/migrations/0024_ray_target_routes.py",
         "src/django_ray/models.py",
     }

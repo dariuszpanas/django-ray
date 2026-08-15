@@ -57,17 +57,34 @@ and policy-retention or cleanup path to define and test explicit ordering. A bin
 be deleted first only under that audit and retention policy, never through an implicit
 cascade or ordinary task cleanup.
 
-Migrations `0022_ray_target_persistence` and `0023_ray_task_target_binding` are dormant
-and additive for a schema-first upgrade from 0.4.0. Exact 0.4.0 code ignores their new
-tables, so a code-only rollback retains the migrations and their history. Schema reversal
-is a separate stopped-writer operation. Reverse `0023` only after exporting or auditing
-and deliberately deleting every binding; reverse `0022` only after doing the same for
-all target history. Database guards reject material updates and invalid bounded inserts
-but intentionally leave the exact no-op and maintenance-delete rollback paths. A binding
-records historical selection intent, not current capacity: the referenced policy's old
-`active` state never authorizes a claim after a later draining or retirement revision.
-The maintenance-delete path follows the same explicit parent-retention ordering. Schema
-reversal is not part of an ordinary binary rollback.
+Migration `0024` adds a bounded backend-alias namespace and immutable append-only route
+revisions that select exact target-policy revisions. Its private coordinator registers a
+route or compare-and-set appends its next revision only for the latest active Ray Core
+policy. That route intent is not a live attestation, current capacity, claim authorization,
+or work placement. A separate, initially empty route-selection table can preserve which
+exact route revision explains an existing task binding, but no package task or binding
+writer, reader, enqueue path, worker, lifecycle path, or runtime consumer creates or reads
+that provenance. Absence is unproved provenance, never permission to infer a default route.
+Legacy 0.4 mapping is a distinct boundary deferred to #381; neither route history nor an
+absent selection supplies its lineage.
+
+Both route-selection parents use `PROTECT`, and route revisions in turn protect their route
+and target-policy parents. Cleanup must delete a selection before either its binding or
+route revision, delete all route revisions before their route, and preserve every binding
+or route-revision reference before deleting a target-policy revision. Those orders require
+an explicit audit and retention policy before any task-selection writer can activate.
+
+Migrations `0022_ray_target_persistence`, `0023_ray_task_target_binding`, and
+`0024_ray_target_routes` are dormant and additive for a schema-first upgrade from 0.4.0.
+Exact 0.4.0 code ignores their new tables, so a code-only rollback retains the migrations
+and their history. Schema reversal is a separate stopped-writer operation. Reverse `0024`
+only after exporting or auditing and deliberately deleting every selection, route revision,
+and route; reverse `0023` only after every binding is deleted; reverse `0022` only after all
+target history is deleted. Database guards reject material updates and invalid bounded
+inserts but intentionally leave the exact no-op and maintenance-delete rollback paths. A
+binding or route revision records historical selection intent, not current capacity: a
+referenced policy's old `active` state never authorizes a claim after a later draining or
+retirement revision. Schema reversal is not part of an ordinary binary rollback.
 
 The general version range and base `ray[default]` dependency do not install or promise
 every optional Ray component. See the

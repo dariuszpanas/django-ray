@@ -69,4 +69,4 @@ def test_existing_inline_execution_round_trips_through_input_payload_migration()
         assert reverted.args_json == "[1, 2]"
         assert reverted.kwargs_json == '{"scale": 3}'
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0023_ray_task_target_binding")])
+        MigrationExecutor(connection).migrate([("django_ray", "0024_ray_target_routes")])

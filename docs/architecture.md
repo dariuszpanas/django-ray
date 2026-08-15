@@ -593,7 +593,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0023_ray_task_target_binding` before starting upgraded workers:
+`0024_ray_target_routes` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -601,9 +601,10 @@ python manage.py migrate django_ray
 
 This command applies every unapplied `django_ray` migration through the current leaf.
 Migration `0022` adds only dormant target intent and verified-attestation history;
-migration `0023` adds only an unseeded execution-to-target-policy relationship. Current
-workers do not write or read that relationship or consume either migration for capacity,
-claims, or routing.
+migration `0023` adds only an unseeded execution-to-target-policy relationship; and
+migration `0024` adds backend-alias route history plus a separate, unseeded binding-to-route
+selection record. Current workers do not write or read the task binding or route selection,
+and none of these migrations advertises capacity, authorizes claims, or activates routing.
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:
@@ -1037,11 +1038,11 @@ execution to an immutable target-policy revision. The table is deliberately unse
 future target-aware consumers must treat an absent row as unbound and fail closed rather
 than selecting a default target. Current workers remain target-unaware and do not consult
 the table. Its `created_at` records when the relationship row was written; it is not
-evidence that the target was selected when the execution was enqueued. No package writer, reader,
-Admin or operator surface, enqueue hook, claim or adoption predicate, lifecycle path,
-routing path, reconciliation/cancellation/retry fence, backfill, renewal loop, worker
-target capability, or lease relationship consumes the binding. Legacy adoption remains
-forbidden until #381 supplies exact mapping lineage from the retained 0.4 data.
+evidence that the target was selected when the execution was enqueued. No package writer,
+reader, Admin or operator surface, enqueue hook, claim or adoption predicate, lifecycle
+path, routing path, reconciliation/cancellation/retry fence, backfill, renewal loop,
+worker target capability, or lease relationship consumes the binding. Legacy adoption
+remains forbidden until #381 supplies exact mapping lineage from the retained 0.4 data.
 
 Both binding foreign keys use `PROTECT`, so a retained binding blocks deletion of its
 execution and target-policy revision at both the ORM and database boundaries. Existing
@@ -1055,12 +1056,39 @@ policy revision's historical `active` state never advertises current capacity or
 authorizes a claim after a later draining or retirement revision. A future consumer must
 separately fence the current policy, a fresh matching attestation, and worker capability.
 Applying `0023` alone cannot advertise capacity, place or move work, or activate
-blue/green routing. Exact 0.4.0 code ignores the `0022` and `0023` tables, so a code-only
-rollback retains them and their audit history. Schema reversal is a separate
-stopped-writer operation: `0023` refuses to reverse while any binding remains, and
-`0022` then refuses while target history remains. The deliberate maintenance-delete path
-is available only after export or audit, follows the same parent-retention ordering, and
-is not part of an ordinary binary rollback.
+blue/green routing.
+
+Migration `0024` adds a stable, bounded backend-alias route namespace and immutable,
+append-only route revisions that select exact target-policy revisions. The private route
+coordinator registers revision `1` or compare-and-set appends a new revision after locking
+the stable route row and the candidate target in that order. It accepts only the latest
+active Ray Core policy and returns a fixed, bounded result; it does not probe Ray or create
+a task binding or route selection. Consequently a route records reviewed placement intent,
+not a live attestation, current capacity, claim authorization, or evidence that any task was
+placed there.
+
+The migration separately adds one create-once route-selection record from an existing task
+binding to the exact route revision that explains it. The database requires the binding and
+route revision to select the same target-policy revision. The table is deliberately unseeded:
+no task or binding writer, reader, enqueue path, Admin or operator surface, claim/adoption or
+lifecycle path, worker, lease, reconciliation path, or runtime consumer creates or reads a
+selection. Absence therefore means the provenance is unproved and must never infer a default
+backend alias. The `created_at` value records only when provenance was stored, not when a task
+was enqueued. Legacy 0.4 mapping is distinct and remains deferred to #381's exact lineage
+rehearsal; neither route history nor missing provenance supplies that mapping.
+
+Both route-selection parents use `PROTECT`; each route revision also protects its route and
+target-policy parents. Cleanup must delete a selection before either its binding or route
+revision, delete all route revisions before their route, and preserve every binding or route
+revision before deleting a target-policy revision. No task-selection writer can activate
+until those retention paths and both parent orders are audited and tested.
+
+Exact 0.4.0 code ignores the `0022`, `0023`, and `0024` tables, so a code-only rollback
+retains them and their audit history. Schema reversal is a separate stopped-writer operation:
+`0024` refuses to reverse while any route, route revision, or selection remains; `0023` then
+refuses while any binding remains; and `0022` finally refuses while target history remains.
+The deliberate maintenance-delete path is available only after export or audit, follows the
+same protected-parent ordering, and is not part of an ordinary binary rollback.
 
 The read-only protocol-status service exposes only the database facts this boundary can
 support. One versioned immutable report aggregates policy/token consistency, active and

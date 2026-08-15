@@ -41,7 +41,7 @@ from django_ray.target_attestation import (
 
 MIGRATE_FROM = [("django_ray", "0022_ray_target_persistence")]
 MIGRATE_TO = [("django_ray", "0023_ray_task_target_binding")]
-LATEST = MIGRATE_TO
+LATEST = [("django_ray", "0024_ray_target_routes")]
 
 _DIGEST = f"sha256:{'a' * 64}"
 _POSTGRESQL_TRIGGER = "ray_tbinding_guard_0023"
@@ -541,10 +541,10 @@ def _assert_migration_round_trip_and_reverse_guard() -> None:
         reverted_execution = reverted_apps.get_model("django_ray", "RayTaskExecution")
         assert reverted_execution.objects.filter(pk__in=(existing.pk, rolling.pk)).count() == 2
     finally:
+        MigrationExecutor(connection).migrate(LATEST)
         table_names = set(connection.introspection.table_names())
         if RayTaskTargetBinding._meta.db_table in table_names:
             RayTaskTargetBinding.objects.all().delete()
-        MigrationExecutor(connection).migrate(LATEST)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -629,8 +629,8 @@ def test_sqlite_active_binding_writer_cannot_partially_reverse_schema() -> None:
         assert _SQLITE_TRIGGERS <= _database_trigger_names()
     finally:
         release_writer.set()
-        _clear_binding_tables()
         MigrationExecutor(connection).migrate(LATEST)
+        _clear_binding_tables()
 
 
 def _postgresql_backend_pid() -> int:
@@ -709,5 +709,5 @@ def test_postgresql_binding_writer_serializes_before_reverse_guard() -> None:
         assert {_POSTGRESQL_TRIGGER} <= _database_trigger_names()
     finally:
         release_writer.set()
-        _clear_binding_tables()
         MigrationExecutor(connection).migrate(LATEST)
+        _clear_binding_tables()
