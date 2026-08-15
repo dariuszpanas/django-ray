@@ -928,6 +928,7 @@ def _decode_cursor(
     if context.identity is None or context.summary is None:
         return value, True
     expired = not _matches_tag(value["run"], _run_tags(context.identity))
+    expired = expired or value["summary_revision"] != context.summary["summary_revision"]
     expired = expired or value["topology_version"] != context.summary["topology_version"]
     if collection == "node_details":
         expired = expired or value["detail_revision"] != context.summary["detail_revision"]

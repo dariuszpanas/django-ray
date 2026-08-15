@@ -141,13 +141,14 @@ node = get_workflow_node_detail(execution, "namespace/apply", authorize=can_view
 
 Collection responses default to 100 records and never exceed 256 records, 512 KiB of
 encoded response data, or 1 MiB of decoded records. Their opaque cursors are bound to
-the complete run and applicable publication epochs, collection, filters, ordering,
-applied limit, and cumulative returned count. A retired publication reports `EXPIRED`
-with the cursor's original public identity and epoch metadata; it never advances the old
-cursor into new rows. Final pages reconcile the cumulative count with bounded run-level
-retention counters so missing child rows are not mistaken for complete results. Indexed
-node lookup validates the current publication, reconciles bounded run counters and
-truncation reasons, and looks up the stable node key without decoding the complete graph.
+the complete run, summary revision, applicable publication epochs, collection, filters,
+ordering, applied limit, and cumulative returned count. A newer summary revision reports
+the old cursor as `EXPIRED` with its original public identity and epoch metadata; it never
+advances the old cursor into new rows. Final pages reconcile the cumulative count with
+bounded run-level retention counters so missing child rows are not mistaken for complete
+results. Indexed node lookup validates the current publication, reconciles bounded run
+counters and truncation reasons, and looks up the stable node key without decoding the
+complete graph.
 An absent key is `found: false`; distinguishing an unknown ID from an out-of-protocol
 deletion requires paginated traversal or the periodic whole-run audit rather than making
 the indexed endpoint scan retained detail.
