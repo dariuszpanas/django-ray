@@ -27,7 +27,7 @@ Named-pipe Docker endpoints must use the local `//./pipe/` authority.
 
 ## Trigger matrix
 
-Use the narrow dormant-attestation exception when all of its conditions apply. Otherwise use the
+Use a narrow dormant-target exception only when all of its conditions apply. Otherwise use the
 strongest row that applies to a change. When uncertain about a cross-component boundary, run the
 gate and choose the cold Ray restart.
 
@@ -35,6 +35,7 @@ gate and choose the cold Ray restart.
 |---|---|---|---|
 | Isolated Compiled Graph pilot files under `k8s/pilots/compiled-graph/`, `scripts/kuberay_compiled_graph_pilot.py`, its focused tests, or its retained investigation evidence for #102 | Not applicable | N/A | The pinned pilot has its own isolated namespace, manifests, resource profile, teardown checks, and evidence contract. It must not mutate or validate the supported local application stack. |
 | A Django-free target-attestation codec or version-pinned feasibility probe that remains unreachable from settings, enqueue, worker, runner, transport, persistence, and deployment paths | KubeRay not applicable; mandatory serial local-Ray plus package-free two-node Ray Client evidence | N/A | This narrow exception proves the canonical boundary, by-value generic-node bootstrap, exact every-node observation, and Core/Client behavior without implying claim capacity or blue/green activation. Once a production path consumes the proof, the affected worker or transport rows below require the cold gate, and final target routing requires its two-cluster handoff extension. |
+| Additive Ray-target persistence tables, coordinator-enforced append history, database immutable-update/insert-bound guards, or a private coordination service that records only target intent and verified attestations while remaining unreachable from task/attempt target fields, worker leases, enqueue, claim, adoption, lifecycle, routing, status, operator, and deployment paths | KubeRay not applicable; mandatory SQLite and PostgreSQL migration/coordination evidence | N/A | This narrow dormant-database exception proves revision, immutability, verified-only history, derived expiry, maintenance-delete rollback, and schema-reversal refusal with retained history at the owning database boundary. It creates no target capacity, work placement, cluster mutation, or blue/green activation; `retired` remains reserved for #368. Any production consumer uses the affected rows below, and final target routing requires the two-cluster handoff extension. |
 | Testproject dashboard, templates, JavaScript, static collection, web image, entrypoint, or web dependencies | Required | `skip`, unless the RuntimeEnv or Ray boundary also changed | Proves the exact asset and image reached the live web pod and protected actions still work. |
 | `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior other than the narrow dormant-attestation exception above | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
 | RuntimeEnv snapshot storage, encryption settings or dependencies, storage/retry validation, the fixed deployment canary, or KubeRay encryption selectors | Required | `required` | Proves a cold generic Ray generation receives the decrypted marker while the database retains only the authenticated envelope, and proves corrupt or unknown-key rows fail before Ray. |
@@ -60,6 +61,11 @@ a token, Secret payload, unbounded log, or browser credential into history.
 For the dormant-attestation exception, retain the exact serial local-Ray result, the package-free
 two-node Ray Client result, and the explicit guarded-KubeRay-not-applicable decision. Do not report
 that evidence as claim capacity, target activation, or blue/green handoff validation.
+
+For the dormant target-persistence exception, retain the exact SQLite and PostgreSQL migration and
+coordination results plus the explicit guarded-KubeRay-not-applicable decision. Do not report this
+database evidence as a live attestation, target capacity, work placement, retirement, or blue/green
+handoff validation.
 
 ## Guarded local capacity
 

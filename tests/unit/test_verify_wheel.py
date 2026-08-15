@@ -28,12 +28,14 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/runner/ray_job.py" in EXPECTED_FILES
     assert "django_ray/runtime/entrypoint.py" in EXPECTED_FILES
     assert "django_ray/target_attestation.py" in EXPECTED_FILES
+    assert "django_ray/target_coordination.py" in EXPECTED_FILES
     assert "django_ray/migrations/0019_execution_protocol_schema.py" in EXPECTED_FILES
     assert "django_ray/migrations/0020_legacy_open_rollback_fence.py" in EXPECTED_FILES
     assert "django_ray/migrations/0021_ray_job_request_reference.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0022_ray_target_persistence.py" in EXPECTED_FILES
     assert EXPECTED_MIGRATION_LEAF == (
         "django_ray",
-        "0021_ray_job_request_reference",
+        "0022_ray_target_persistence",
     )
 
 

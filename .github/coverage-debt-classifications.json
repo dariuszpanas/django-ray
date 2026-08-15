@@ -245,6 +245,12 @@
         "rationale": "Canonical target expectations, exact runtime tuples, observation boundaries, digest verification, validity windows, and mismatch classifications are deterministic trust-boundary contracts suited to exhaustive codec tests."
       }
     },
+    "src/django_ray/target_coordination.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Target registration, revision-checked desired-state transitions, verified-only attestation history, and SQLite/PostgreSQL serialization are deterministic persistence contracts suited to exact database and race tests."
+      }
+    },
     "src/django_ray/workflow_output_previews.py": {
       "default": {
         "category": "testable-behavior",

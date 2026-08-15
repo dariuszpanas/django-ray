@@ -24,6 +24,7 @@ EXPECTED_FILES = {
     "django_ray/protocol_coordination.py",
     "django_ray/protocol_status.py",
     "django_ray/target_attestation.py",
+    "django_ray/target_coordination.py",
     "django_ray/models.py",
     "django_ray/runtime/runtime_env_encryption.py",
     "django_ray/static/django_ray/admin/diagnostics.css",
@@ -45,6 +46,7 @@ EXPECTED_FILES = {
     "django_ray/migrations/0019_execution_protocol_schema.py",
     "django_ray/migrations/0020_legacy_open_rollback_fence.py",
     "django_ray/migrations/0021_ray_job_request_reference.py",
+    "django_ray/migrations/0022_ray_target_persistence.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
     "django_ray/runner/ray_job.py",
@@ -52,7 +54,7 @@ EXPECTED_FILES = {
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0021_ray_job_request_reference",
+    "0022_ray_target_persistence",
 )
 
 

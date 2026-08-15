@@ -214,3 +214,29 @@ def test_dormant_target_attestation_has_an_explicit_gate_boundary() -> None:
         "For the dormant-attestation exception, retain the exact serial local-Ray result" in guide
     )
     assert "explicit guarded-KubeRay-not-applicable decision" in guide
+
+
+def test_dormant_target_persistence_has_a_database_only_gate_boundary() -> None:
+    guide = _read(Path("docs/deployment/local-kuberay-gate.md"))
+    normalized_guide = " ".join(guide.split())
+    row = next(
+        line for line in guide.splitlines() if "Additive Ray-target persistence tables" in line
+    )
+
+    assert "KubeRay not applicable" in row
+    assert "mandatory SQLite and PostgreSQL migration/coordination evidence" in row
+    assert "coordinator-enforced append history" in row
+    assert "database immutable-update/insert-bound guards" in row
+    assert (
+        "unreachable from task/attempt target fields, worker leases, enqueue, claim, adoption, "
+        "lifecycle, routing, status, operator, and deployment paths"
+    ) in row
+    assert "creates no target capacity, work placement, cluster mutation" in row
+    assert "final target routing requires the two-cluster handoff extension" in row
+
+    assert (
+        "For the dormant target-persistence exception, retain the exact SQLite and PostgreSQL "
+        "migration and coordination results plus the explicit guarded-KubeRay-not-applicable "
+        "decision"
+    ) in normalized_guide
+    assert "Do not report this database evidence as a live attestation" in normalized_guide

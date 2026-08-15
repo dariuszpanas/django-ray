@@ -32,9 +32,26 @@ version and the Python implementation plus `major.minor.patch` exactly across th
 manager and every live schedulable cluster node. Ray's connection-time warning or
 `RAY_IGNORE_VERSION_MISMATCH` does not weaken that django-ray rule. The initial bounded
 attestation codec and Ray 2.56.0 probe are dormant infrastructure: current workers do
-not yet advertise target capacity or fence claims with their output. Until that later
-activation lands, upgrade task managers and every cluster node together and treat any
-Ray or Python patch difference as unsupported.
+not yet advertise target capacity or fence claims with their output. The additive
+target-persistence schema likewise records only immutable target intent, append-only
+policy revisions, and verified canonical observation history. Verified versus expired
+is derived from the latest matching proof and its bounded expiry; mismatch,
+unreachable, identity-drift, malformed, and expired probe outcomes are not fabricated
+as observation rows. The private coordinator registers Ray Core targets in `draining`,
+allows only revision-checked `active`/`draining` policy transitions, reserves `retired`
+for #368, and rejects Ray Job persistence until its authenticated response channel
+exists. It has no task, attempt, worker-lease, claim, routing, or activation consumer.
+Until those later boundaries land, upgrade task managers and every cluster node together
+and treat any Ray or Python patch difference as unsupported.
+
+Migration `0022_ray_target_persistence` is dormant and additive for a schema-first
+upgrade from 0.4.0. Exact 0.4.0 code ignores its new tables, so a code-only rollback
+retains the migration and its verified history. Schema reversal is a separate
+stopped-writer operation and refuses while any target history remains. Export or audit
+that history and deliberately delete it before a destructive reversal; database guards
+reject material updates and invalid identity, digest, or byte-bound inserts but
+intentionally leave exact no-op updates and that maintenance-delete path. Schema reversal
+is not part of an ordinary binary rollback.
 
 The general version range and base `ray[default]` dependency do not install or promise
 every optional Ray component. See the

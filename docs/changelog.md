@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   managers, and close legacy admission through its reviewed revision/producer-retirement
   fence. Already submitted legacy/rq1 protocol-`1` jobs remain drainable; rq2 does not
   activate protocol `2`.
+- Migration `0022` adds only dormant Ray-target identity, immutable policy revisions,
+  and verified attestation history. Published 0.4.0 code ignores the new tables, so a
+  code-only rollback retains `0022`; schema reversal is a separate stopped-writer
+  operation that refuses while retained target history exists. After export or audit,
+  deliberate maintenance deletion leaves the destructive reversal path available.
+  Applying the migration does not assign a target to work, advertise worker capacity,
+  or activate routing.
 
 ### Fixed
 
@@ -67,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advance them; they are not claimed as a membership epoch. This slice does not add
   persistence, worker capability, claim or routing changes, and it does not claim a
   Ray Job response channel or activate blue/green handoff.
+- A private dormant persistence coordinator now registers immutable exact Ray Core
+  targets in `draining`, appends revision-checked `active`/`draining` policy intent, and
+  records only canonical attestations that verify against the exact current policy. Ray
+  Job persistence remains unsupported. Expiry status is derived from the immutable
+  observation window; mismatch, unreachable, identity-drift, malformed, and expired
+  outcomes never become fabricated negative history. The `retired` transition remains
+  reserved for #368, and this slice adds no task, lease, claim, routing, status, renewal,
+  or activation behavior.
 
 - The guarded local KubeRay final gate now certifies the supported task-manager rolling
   boundary with a manager built from the pinned released `v0.4.0` tree and the exact current
