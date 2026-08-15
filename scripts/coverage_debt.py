@@ -26,6 +26,7 @@ TRACKER_MARKER = "<!-- django-ray:coverage-debt-tracker -->"
 REPORT_COMMENT_MARKER = "<!-- django-ray:coverage-debt-latest-report -->"
 STATE_START_MARKER = "<!-- django-ray:coverage-debt-state\n"
 STATE_END_MARKER = "\n--><!-- /django-ray:coverage-debt-state -->"
+TRUSTED_TRACKER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 MAX_COMMENT_BYTES = 64_000
 MAX_PHASE_LOG_BYTES = 256 * 1024
 MAX_PHASE_TIMING_BYTES = 16 * 1024 * 1024
@@ -1603,6 +1604,8 @@ def _find_tracker_issue(api: TrackerApi, repository: str) -> dict[str, Any]:
     matches: list[dict[str, Any]] = []
     occurrences = 0
     for issue in issues:
+        if issue.get("author_association") not in TRUSTED_TRACKER_ASSOCIATIONS:
+            continue
         body = issue.get("body")
         count = body.count(TRACKER_MARKER) if isinstance(body, str) else 0
         occurrences += count
@@ -1637,6 +1640,9 @@ def update_tracker(
     matching_comments: list[dict[str, Any]] = []
     occurrences = 0
     for comment in comments:
+        author = comment.get("user")
+        if not isinstance(author, dict) or author.get("login") != expected_comment_author:
+            continue
         body = comment.get("body")
         count = body.count(REPORT_COMMENT_MARKER) if isinstance(body, str) else 0
         occurrences += count
@@ -1651,11 +1657,6 @@ def update_tracker(
     if existing is None:
         state = {"current": current, "previous": current, "best": current}
     else:
-        author = _mapping(existing.get("user"), "coverage-debt comment author").get("login")
-        if author != expected_comment_author:
-            raise CoverageDebtError(
-                "coverage-debt latest-report comment is not owned by the expected bot"
-            )
         existing_body = existing.get("body")
         if not isinstance(existing_body, str):
             raise CoverageDebtError("coverage-debt latest-report comment has no body")

@@ -91,7 +91,13 @@ class FakeTrackerApi:
         issues: list[dict[str, Any]] | None = None,
         comments: list[dict[str, Any]] | None = None,
     ) -> None:
-        self.issues = issues or [{"number": 122, "body": TRACKER_MARKER}]
+        self.issues = issues or [
+            {
+                "number": 122,
+                "body": TRACKER_MARKER,
+                "author_association": "OWNER",
+            }
+        ]
         self.comments = comments or []
         self.requests: list[tuple[str, str, dict[str, object] | None]] = []
 
@@ -792,8 +798,8 @@ def test_tracker_moves_current_to_previous_and_retains_exact_high_water() -> Non
 def test_tracker_refuses_duplicate_issue_markers_before_any_write() -> None:
     api = FakeTrackerApi(
         issues=[
-            {"number": 122, "body": TRACKER_MARKER},
-            {"number": 123, "body": TRACKER_MARKER},
+            {"number": 122, "body": TRACKER_MARKER, "author_association": "OWNER"},
+            {"number": 123, "body": TRACKER_MARKER, "author_association": "MEMBER"},
         ]
     )
 
@@ -803,7 +809,20 @@ def test_tracker_refuses_duplicate_issue_markers_before_any_write() -> None:
     assert api.requests == []
 
 
-def test_tracker_refuses_duplicate_or_non_bot_report_comments() -> None:
+def test_untrusted_issue_markers_cannot_hide_the_maintainer_tracker() -> None:
+    api = FakeTrackerApi(
+        issues=[
+            {"number": 120, "body": TRACKER_MARKER, "author_association": "NONE"},
+            {"number": 121, "body": TRACKER_MARKER * 2, "author_association": "CONTRIBUTOR"},
+            {"number": 122, "body": TRACKER_MARKER, "author_association": "OWNER"},
+        ]
+    )
+
+    assert update_tracker(api, "dariuszpanas/django-ray", _report()) == "created"
+    assert api.requests[0][1].endswith("/issues/122/comments")
+
+
+def test_tracker_refuses_duplicate_bot_comments_but_ignores_untrusted_markers() -> None:
     duplicate_api = FakeTrackerApi(
         comments=[
             {"id": 501, "body": REPORT_COMMENT_MARKER, "user": {"login": "github-actions[bot]"}},
@@ -814,12 +833,16 @@ def test_tracker_refuses_duplicate_or_non_bot_report_comments() -> None:
         update_tracker(duplicate_api, "dariuszpanas/django-ray", _report())
     assert duplicate_api.requests == []
 
-    human_api = FakeTrackerApi(
-        comments=[{"id": 501, "body": REPORT_COMMENT_MARKER, "user": {"login": "maintainer"}}]
+    seeded_api = FakeTrackerApi()
+    update_tracker(seeded_api, "dariuszpanas/django-ray", _report())
+    mixed_api = FakeTrackerApi(
+        comments=[
+            {"id": 700, "body": REPORT_COMMENT_MARKER * 2, "user": {"login": "attacker"}},
+            seeded_api.comments[0],
+        ]
     )
-    with pytest.raises(CoverageDebtError, match="not owned by the expected bot"):
-        update_tracker(human_api, "dariuszpanas/django-ray", _report())
-    assert human_api.requests == []
+    assert update_tracker(mixed_api, "dariuszpanas/django-ray", _report()) == "updated"
+    assert [request[0] for request in mixed_api.requests] == ["PATCH"]
 
 
 def test_monthly_workflow_and_make_target_preserve_coverage_policy() -> None:

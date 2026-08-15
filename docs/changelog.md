@@ -91,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Coverage-debt tracker discovery now considers only maintainer-owned issues and the expected
+  Actions bot's report comments, so public marker text cannot redirect or block the privileged
+  monthly update while duplicate trusted markers still fail closed.
 - Operational redaction now replaces sensitive-looking mapping keys with one fixed
   marker as well as redacting their values. Admin, API, structured logging, workflow
   previews, and Ray observability therefore no longer retain sensitive key text, and
