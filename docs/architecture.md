@@ -593,7 +593,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0022_ray_target_persistence` before starting upgraded workers:
+`0023_ray_task_target_binding` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -601,7 +601,9 @@ python manage.py migrate django_ray
 
 This command applies every unapplied `django_ray` migration through the current leaf.
 Migration `0022` adds only dormant target intent and verified-attestation history;
-current workers do not consume it for capacity, claims, or routing.
+migration `0023` adds only an unseeded execution-to-target-policy relationship. Current
+workers do not write or read that relationship or consume either migration for capacity,
+claims, or routing.
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:
@@ -1030,15 +1032,35 @@ coordinator owns that append discipline; database guards reject material updates
 invalid identity, digest, or byte-bound inserts. Exact no-op updates and deliberate
 maintenance deletion remain possible.
 
-This persistence slice still has no task or attempt target field, worker target
-capability, lease relationship, enqueue selection, claim or adoption predicate,
-reconciliation/cancellation/retry fence, routing change, status/Admin/operator surface,
-renewal loop, or blue/green activation. In particular, applying `0022` alone cannot
-advertise capacity or move work. Released code ignores the new tables, so a code-only
-rollback retains `0022` and its audit history; reversing the schema is a separate
-stopped-writer operation. The reverse migration refuses while retained target history
-exists, so an operator must export or audit it and deliberately delete it before retrying
-the destructive reversal.
+Migration `0023` adds one normalized, create-once relationship from an exact task
+execution to an immutable target-policy revision. The table is deliberately unseeded:
+future target-aware consumers must treat an absent row as unbound and fail closed rather
+than selecting a default target. Current workers remain target-unaware and do not consult
+the table. Its `created_at` records when the relationship row was written; it is not
+evidence that the target was selected when the execution was enqueued. No package writer, reader,
+Admin or operator surface, enqueue hook, claim or adoption predicate, lifecycle path,
+routing path, reconciliation/cancellation/retry fence, backfill, renewal loop, worker
+target capability, or lease relationship consumes the binding. Legacy adoption remains
+forbidden until #381 supplies exact mapping lineage from the retained 0.4 data.
+
+Both binding foreign keys use `PROTECT`, so a retained binding blocks deletion of its
+execution and target-policy revision at both the ORM and database boundaries. Existing
+cleanup remains unchanged only while the table is unseeded. Activation is blocked until
+every execution- and policy-retention or cleanup path defines and tests the required
+ordering. Deleting a binding first is permitted only through that explicit audit and
+retention policy; it is never an implicit cascade or ordinary task-cleanup step.
+
+A binding records historical selection intent only. In particular, the referenced
+policy revision's historical `active` state never advertises current capacity or
+authorizes a claim after a later draining or retirement revision. A future consumer must
+separately fence the current policy, a fresh matching attestation, and worker capability.
+Applying `0023` alone cannot advertise capacity, place or move work, or activate
+blue/green routing. Exact 0.4.0 code ignores the `0022` and `0023` tables, so a code-only
+rollback retains them and their audit history. Schema reversal is a separate
+stopped-writer operation: `0023` refuses to reverse while any binding remains, and
+`0022` then refuses while target history remains. The deliberate maintenance-delete path
+is available only after export or audit, follows the same parent-retention ordering, and
+is not part of an ordinary binary rollback.
 
 The read-only protocol-status service exposes only the database facts this boundary can
 support. One versioned immutable report aggregates policy/token consistency, active and
